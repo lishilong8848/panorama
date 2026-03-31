@@ -5,6 +5,8 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Request
 
+from app.config.config_adapter import normalize_role_mode
+
 router = APIRouter(prefix="/api/network", tags=["network"])
 
 
@@ -18,13 +20,8 @@ def _network_cfg(container) -> Dict[str, Any]:
 def _deployment_role_mode(container) -> str:
     snapshot = container.deployment_snapshot() if hasattr(container, "deployment_snapshot") else {}
     if not isinstance(snapshot, dict):
-        snapshot = {}
-    text = str(snapshot.get("role_mode", "") or "").strip().lower()
-    if text == "hybrid":
-        return "switching"
-    if text in {"switching", "internal", "external"}:
-        return text
-    return "switching"
+        return ""
+    return normalize_role_mode(snapshot.get("role_mode"))
 
 
 def _build_payload(container) -> dict:
@@ -35,7 +32,7 @@ def _build_payload(container) -> dict:
             "current_ssid": None,
             "interface_name": "",
             "visible_targets": {"internal": False, "external": False},
-            "switch_strategy": "single_machine_switching" if _deployment_role_mode(container) == "switching" else "role_fixed_network",
+            "switch_strategy": "role_fixed_network",
             "role_mode": _deployment_role_mode(container),
             "hard_recovery_enabled": bool(network_cfg.get("hard_recovery_enabled", True)),
             "is_admin": False,
@@ -46,7 +43,7 @@ def _build_payload(container) -> dict:
         "current_ssid": service.current_ssid(),
         "interface_name": service.current_interface_name(),
         "visible_targets": service.visible_targets(),
-        "switch_strategy": "single_machine_switching" if _deployment_role_mode(container) == "switching" else "role_fixed_network",
+        "switch_strategy": "role_fixed_network",
         "role_mode": _deployment_role_mode(container),
         "hard_recovery_enabled": bool(network_cfg.get("hard_recovery_enabled", True)),
         "is_admin": service.is_admin(),
@@ -70,16 +67,12 @@ def network_current(request: Request) -> dict:
 def set_auto_switch(payload: dict, request: Request) -> dict:
     container = request.app.state.container
     role_mode = _deployment_role_mode(container)
-    message = (
-        "单机切网端固定按切网流程执行，已不再提供自动切网开关。"
-        if role_mode == "switching"
-        else "当前角色为内网端/外网端，不使用单机切网开关。"
-    )
+    message = "当前仅保留内网端/外网端双角色，不再提供自动切网开关。"
     container.add_system_log(f"[网络配置] 自动切网开关接口已退役: 角色={role_mode}")
 
     return {
         "ok": True,
-        "enabled": role_mode == "switching",
+        "enabled": False,
         "retired": True,
         "message": message,
         "network": _build_payload(container),

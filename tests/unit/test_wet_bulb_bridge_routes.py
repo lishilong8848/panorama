@@ -63,6 +63,14 @@ class _FakeBridgeService:
             "can_proceed": True,
         }
 
+    def create_wet_bulb_collection_task(self, **kwargs):  # noqa: ANN003
+        self.calls.append(("create_wet_bulb_collection_task", dict(kwargs)))
+        return {
+            "task_id": "bridge-wet-bulb-1",
+            "feature": "wet_bulb_collection",
+            "status": "queued_for_internal",
+        }
+
 
 class _FakeJobService:
     def __init__(self) -> None:
@@ -99,12 +107,10 @@ def _fake_request(*, ready: bool, base_dir: Path | None = None):
 def test_wet_bulb_route_waits_for_latest_cache_when_missing() -> None:
     request = _fake_request(ready=False)
 
-    try:
-        routes.job_wet_bulb_collection_run(request)
-        raise AssertionError("expected HTTPException")
-    except Exception as exc:  # noqa: BLE001
-        assert getattr(exc, "status_code", 0) == 409
-        assert "等待缺失楼栋共享文件补齐" in str(getattr(exc, "detail", ""))
+    response = routes.job_wet_bulb_collection_run(request)
+
+    assert response["accepted"] is True
+    assert response["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
 
 
 def test_wet_bulb_route_starts_from_latest_cache_on_external_role() -> None:
@@ -169,12 +175,10 @@ def test_wet_bulb_route_waits_when_fallback_is_stale() -> None:
         "can_proceed": False,
     }
 
-    try:
-        routes.job_wet_bulb_collection_run(request)
-        raise AssertionError("expected HTTPException")
-    except Exception as exc:  # noqa: BLE001
-        assert getattr(exc, "status_code", 0) == 409
-        assert "等待过旧楼栋共享文件更新" in str(getattr(exc, "detail", ""))
+    response = routes.job_wet_bulb_collection_run(request)
+
+    assert response["accepted"] is True
+    assert response["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
 
 
 def test_wet_bulb_route_waits_when_best_bucket_is_older_than_three_hours() -> None:
@@ -196,9 +200,7 @@ def test_wet_bulb_route_waits_when_best_bucket_is_older_than_three_hours() -> No
         "can_proceed": False,
     }
 
-    try:
-        routes.job_wet_bulb_collection_run(request)
-        raise AssertionError("expected HTTPException")
-    except Exception as exc:  # noqa: BLE001
-        assert getattr(exc, "status_code", 0) == 409
-        assert "等待最新共享文件更新" in str(getattr(exc, "detail", ""))
+    response = routes.job_wet_bulb_collection_run(request)
+
+    assert response["accepted"] is True
+    assert response["bridge_task"]["task_id"] == "bridge-wet-bulb-1"

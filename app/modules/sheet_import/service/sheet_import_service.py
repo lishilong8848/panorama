@@ -2,6 +2,7 @@
 
 from typing import Any, Callable, Dict
 
+from app.config.config_adapter import normalize_role_mode
 from app.modules.feishu.service.attachment_upload_service import AttachmentUploadService
 from app.modules.network.service.wifi_switch_service import WifiSwitchService
 
@@ -15,13 +16,8 @@ class SheetImportService:
     def _deployment_role_mode(self) -> str:
         deployment_cfg = self.config.get("deployment", {})
         if not isinstance(deployment_cfg, dict):
-            return "switching"
-        text = str(deployment_cfg.get("role_mode", "") or "").strip().lower()
-        if text == "hybrid":
-            return "switching"
-        if text in {"switching", "internal", "external"}:
-            return text
-        return "switching"
+            return ""
+        return normalize_role_mode(deployment_cfg.get("role_mode"))
 
     def run(
         self,
@@ -29,11 +25,10 @@ class SheetImportService:
         legacy_switch_external_before_upload: bool,
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
-        _ = bool(legacy_switch_external_before_upload)
         if not bool(self.config.get("feishu_sheet_import", {}).get("enabled", False)):
             raise RuntimeError("feishu_sheet_import.enabled=false，5Sheet导表已禁用")
 
-        should_switch_external = self._deployment_role_mode() == "switching"
+        should_switch_external = bool(legacy_switch_external_before_upload)
         if should_switch_external:
             external_ssid = str(self.config.get("network", {}).get("external_ssid", "")).strip()
             if external_ssid:

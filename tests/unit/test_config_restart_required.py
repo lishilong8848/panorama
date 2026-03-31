@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from types import SimpleNamespace
 
@@ -7,7 +7,7 @@ from app.modules.report_pipeline.api import routes
 
 def _make_config(
     *,
-    role_mode: str = "switching",
+    role_mode: str = "",
     bridge_enabled: bool = False,
     bridge_root_dir: str = "",
     bridge_internal_root_dir: str = "",
@@ -66,7 +66,7 @@ def _make_container(current_config):
 
 
 def test_put_config_marks_restart_required_when_role_mode_changes(monkeypatch) -> None:
-    current = _make_config(role_mode="switching", bridge_enabled=False, bridge_root_dir="")
+    current = _make_config(role_mode="", bridge_enabled=False, bridge_root_dir="")
     incoming = _make_config(role_mode="external", bridge_enabled=True, bridge_root_dir="D:/QJPT_Shared")
     container = _make_container(current)
 
@@ -106,8 +106,8 @@ def test_put_config_marks_restart_required_when_shared_bridge_changes(monkeypatc
 
 
 def test_put_config_keeps_restart_required_false_when_role_signature_unchanged(monkeypatch) -> None:
-    current = _make_config(role_mode="switching", bridge_enabled=False, bridge_root_dir="")
-    incoming = _make_config(role_mode="switching", bridge_enabled=False, bridge_root_dir="")
+    current = _make_config(role_mode="", bridge_enabled=False, bridge_root_dir="")
+    incoming = _make_config(role_mode="", bridge_enabled=False, bridge_root_dir="")
     container = _make_container(current)
 
     monkeypatch.setattr(

@@ -40,8 +40,6 @@ export function createDashboardWetBulbCollectionActions(ctx) {
     fetchBridgeTasks,
     fetchBridgeTaskDetail,
     runSingleFlight,
-    scheduleExternalLatestRetry,
-    clearExternalLatestRetry,
   } = ctx;
 
   function isInternalRole() {
@@ -82,17 +80,6 @@ export function createDashboardWetBulbCollectionActions(ctx) {
       return `${actionLabel}失败: 当前进程仍是更新前的旧版本，湿球温度接口尚未注册，请重启程序后再试。`;
     }
     return `${actionLabel}失败: ${text}`;
-  }
-
-  function isRetryableLatestWaitError(err) {
-    const status = Number.parseInt(String(err?.httpStatus || 0), 10) || 0;
-    const text = String(err?.responseText || err?.message || err || "").trim();
-    return status === 409 && (
-      text.includes("等待共享文件就绪")
-      || text.includes("等待最新共享文件更新")
-      || text.includes("等待缺失楼栋共享文件补齐")
-      || text.includes("等待过旧楼栋共享文件更新")
-    );
   }
 
   async function runWetBulbCollection() {
@@ -152,21 +139,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
           if (typeof fetchJobs === "function") {
             await fetchJobs({ silentMessage: true });
           }
-          if (typeof clearExternalLatestRetry === "function") {
-            clearExternalLatestRetry("wet_bulb_collection");
-          }
         } catch (err) {
-          if (isRetryableLatestWaitError(err)) {
-            if (typeof scheduleExternalLatestRetry === "function") {
-              scheduleExternalLatestRetry(
-                "wet_bulb_collection",
-                String(err?.responseText || err?.message || err || "").trim(),
-                { familyKey: "handover_log_family" },
-              );
-            }
-            message.value = `湿球温度定时采集暂未启动：${String(err?.responseText || err?.message || err || "").trim()}。共享文件满足条件后会自动重试。`;
-            return;
-          }
           message.value = formatWetBulbCollectionError(err, "湿球温度定时采集提交");
         }
       },

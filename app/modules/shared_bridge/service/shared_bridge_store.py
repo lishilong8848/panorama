@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
+_TERMINAL_TASK_STATUSES = {"success", "failed", "partial_failed", "cancelled", "stale"}
+
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -267,6 +269,27 @@ class SharedBridgeStore:
         payload["artifacts"] = [self._row_to_artifact_dict(row) for row in artifact_rows]
         payload["events"] = [self._row_to_event_dict(row) for row in event_rows]
         return payload
+
+    def find_active_task_by_dedupe_key(self, dedupe_key: str) -> Dict[str, Any] | None:
+        dedupe_text = str(dedupe_key or "").strip()
+        if not dedupe_text:
+            return None
+        placeholders = ", ".join("?" for _ in _TERMINAL_TASK_STATUSES)
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT task_id
+                FROM bridge_tasks
+                WHERE dedupe_key=?
+                  AND status NOT IN ({placeholders})
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (dedupe_text, *_TERMINAL_TASK_STATUSES),
+            ).fetchone()
+        if not row:
+            return None
+        return self.get_task(str(row["task_id"] or "").strip())
 
     def cancel_task(self, task_id: str) -> bool:
         task_text = str(task_id or "").strip()

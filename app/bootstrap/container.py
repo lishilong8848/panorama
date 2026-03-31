@@ -356,8 +356,8 @@ class AppContainer:
             return "已在运行"
         if text == "disabled":
             return "未启用"
-        if text == "disabled_or_switching":
-            return "当前未启用共享桥接或处于单机切网端"
+        if text in {"disabled_or_switching", "disabled_or_unselected"}:
+            return "当前未启用共享桥接"
         if text == "started":
             return "已启动"
         if text == "partial_started":

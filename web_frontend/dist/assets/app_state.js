@@ -207,7 +207,7 @@ function formatSharedBridgeRuntimeError(raw) {
   const normalized = text.toLowerCase();
   if (normalized === "shared_bridge_disabled") return "共享桥接未启用";
   if (normalized === "shared_bridge_service_unavailable") return "共享桥接服务不可用";
-  if (normalized === "disabled_or_switching") return "当前未启用共享桥接";
+  if (normalized === "disabled_or_switching" || normalized === "disabled_or_unselected") return "当前未启用共享桥接";
   if (normalized === "misconfigured") return "共享桥接目录未配置";
   if (normalized === "database is locked") return "共享桥接数据库正忙，请稍后重试";
   if (normalized === "unable to open database file") return "无法打开共享桥接数据库文件";
@@ -389,8 +389,8 @@ function resolveInitialDashboardModule() {
   }
   try {
     const value = String(window.localStorage.getItem(DASHBOARD_MODULE_STORAGE_KEY) || "").trim();
-    const switchingModules = buildRoleDashboardState("external").modules;
-    if (value && switchingModules.some((item) => item.id === value)) {
+    const externalModules = buildRoleDashboardState("external").modules;
+    if (value && externalModules.some((item) => item.id === value)) {
       return value;
     }
   } catch (_) {
@@ -972,8 +972,21 @@ export function createAppState(vueApi) {
     return Boolean(health.shared_bridge?.enabled) && (roleMode === "internal" || roleMode === "external");
   });
   const isInternalRole = computed(() => resolveDeploymentRoleMode(health.deployment?.role_mode || "") === "internal");
+  const BRIDGE_HISTORY_DISPLAY_LIMIT = 30;
   const activeBridgeTasks = computed(() =>
     bridgeTasks.value.filter((item) => !isBridgeTerminalStatus(item?.status)),
+  );
+  const totalBridgeHistoryCount = computed(() =>
+    bridgeTasks.value.filter((item) => isBridgeTerminalStatus(item?.status)).length,
+  );
+  const displayedBridgeTasks = computed(() => {
+    const historyTasks = bridgeTasks.value
+      .filter((item) => isBridgeTerminalStatus(item?.status))
+      .slice(0, BRIDGE_HISTORY_DISPLAY_LIMIT);
+    return [...activeBridgeTasks.value, ...historyTasks];
+  });
+  const hiddenBridgeHistoryCount = computed(() =>
+    Math.max(0, totalBridgeHistoryCount.value - BRIDGE_HISTORY_DISPLAY_LIMIT),
   );
   const recentFinishedBridgeTasks = computed(() =>
     bridgeTasks.value.filter((item) => isBridgeTerminalStatus(item?.status)).slice(0, 8),
@@ -2351,6 +2364,10 @@ export function createAppState(vueApi) {
     bridgeTasksEnabled,
     isInternalRole,
     activeBridgeTasks,
+    displayedBridgeTasks,
+    totalBridgeHistoryCount,
+    hiddenBridgeHistoryCount,
+    bridgeTaskHistoryDisplayLimit: BRIDGE_HISTORY_DISPLAY_LIMIT,
     recentFinishedBridgeTasks,
     currentBridgeTask,
     handoverDutyAutoLabel,

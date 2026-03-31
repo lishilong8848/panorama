@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, Tuple
 
 from pipeline_utils import get_app_dir
 
-from app.config.config_adapter import resolve_shared_bridge_paths
+from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.modules.updater.core.versioning import (
     compare_versions,
     load_local_build_meta,
@@ -28,19 +28,11 @@ from app.modules.updater.service.manifest_client import (
 from app.modules.updater.service.runtime_dependency_sync_service import RuntimeDependencySyncService
 from app.modules.updater.service.update_applier import UpdateApplier
 
-
-def _normalize_role_mode(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    if text == "hybrid":
-        return "switching"
-    if text in {"switching", "internal", "external"}:
-        return text
-    return "switching"
-
-
 def _default_node_id(role_mode: Any) -> str:
-    role = _normalize_role_mode(role_mode)
+    role = normalize_role_mode(role_mode)
     machine_id = f"{uuid.getnode():012x}"
+    if role not in {"internal", "external"}:
+        role = "unselected"
     return f"{role}-{machine_id}"
 
 
@@ -92,7 +84,7 @@ class UpdaterService:
         self.emit_log = emit_log
         self.restart_callback = restart_callback
         self.is_busy = is_busy or (lambda: False)
-        self.role_mode = _normalize_role_mode(deployment_cfg.get("role_mode"))
+        self.role_mode = normalize_role_mode(deployment_cfg.get("role_mode"))
         self.node_id = str(deployment_cfg.get("node_id", "") or "").strip() or _default_node_id(self.role_mode)
         resolved_shared_bridge = resolve_shared_bridge_paths(shared_bridge_cfg, deployment_cfg.get("role_mode"))
         self.shared_bridge_enabled = bool(resolved_shared_bridge.get("enabled", False))

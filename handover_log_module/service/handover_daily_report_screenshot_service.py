@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -208,10 +209,36 @@ class HandoverDailyReportScreenshotService:
         return False
 
     @staticmethod
-    def _playwright_context():
-        from playwright.sync_api import sync_playwright
+    def _async_playwright_context():
+        from playwright.async_api import async_playwright
 
-        return sync_playwright()
+        return async_playwright()
+
+    @staticmethod
+    def _run_async_fn(async_fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        def _invoke() -> Any:
+            return asyncio.run(async_fn(*args, **kwargs))
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return _invoke()
+
+        result: Dict[str, Any] = {}
+        error: Dict[str, BaseException] = {}
+
+        def _worker() -> None:
+            try:
+                result["value"] = _invoke()
+            except BaseException as exc:  # noqa: BLE001
+                error["value"] = exc
+
+        thread = threading.Thread(target=_worker, name="handover-daily-report-async-runner", daemon=True)
+        thread.start()
+        thread.join()
+        if "value" in error:
+            raise error["value"]
+        return result.get("value")
 
     def _start_system_browser(self, *, url: str, emit_log: Callable[[str], None]) -> tuple[bool, str]:
         browser_meta = self._resolve_system_browser(prefer_running_debug=False)
@@ -286,6 +313,22 @@ class HandoverDailyReportScreenshotService:
                 raise RuntimeError(error)
         return playwright.chromium.connect_over_cdp(self._debug_base_url(), timeout=10000)
 
+    async def _connect_browser_async(
+        self,
+        playwright,
+        *,
+        ensure_started: bool,
+        open_url: str,
+        emit_log: Callable[[str], None],
+    ):
+        if self._probe_debug_endpoint() is None:
+            if not ensure_started:
+                raise RuntimeError("browser_debug_port_unavailable")
+            ok, error = await asyncio.to_thread(self._start_system_browser, url=open_url, emit_log=emit_log)
+            if not ok:
+                raise RuntimeError(error)
+        return await playwright.chromium.connect_over_cdp(self._debug_base_url(), timeout=10000)
+
     @staticmethod
     def _iter_browser_contexts(browser) -> List[Any]:
         contexts = list(getattr(browser, "contexts", []) or [])
@@ -328,6 +371,19 @@ class HandoverDailyReportScreenshotService:
             return True
         try:
             text = str(page.locator("body").inner_text(timeout=1500) or "")
+        except Exception:  # noqa: BLE001
+            return False
+        lowered = text.lower()
+        return any(token in lowered for token in ("扫码", "登录", "sign in", "qr code"))
+
+
+    @staticmethod
+    async def _looks_like_login_page_async(page) -> bool:
+        url = str(page.url or "").strip().lower()
+        if any(token in url for token in ("passport", "login", "signin", "accounts")):
+            return True
+        try:
+            text = str(await page.locator("body").inner_text(timeout=1500) or "")
         except Exception:  # noqa: BLE001
             return False
         lowered = text.lower()
@@ -505,6 +561,29 @@ class HandoverDailyReportScreenshotService:
             return {"status": "missing_login", "error": "feishu_page_not_open"}
         return {"status": "missing_login", "error": "browser_started_without_pages"}
 
+    async def _auth_state_from_existing_pages_async(self, browser) -> Dict[str, str]:
+        saw_any_page = False
+        saw_feishu_page = False
+        for context in reversed(self._iter_browser_contexts(browser)):
+            pages = self._iter_open_pages(context)
+            if pages:
+                saw_any_page = True
+            for page in reversed(pages):
+                url = str(getattr(page, "url", "") or "").strip().lower()
+                if not url:
+                    continue
+                if "feishu.cn" not in url and "larksuite.com" not in url:
+                    continue
+                saw_feishu_page = True
+                if await self._looks_like_login_page_async(page):
+                    continue
+                return {"status": "ready", "error": ""}
+        if saw_feishu_page:
+            return {"status": "missing_login", "error": "login_required"}
+        if saw_any_page:
+            return {"status": "missing_login", "error": "feishu_page_not_open"}
+        return {"status": "missing_login", "error": "browser_started_without_pages"}
+
     @staticmethod
     def _normalize_url_for_match(url: str) -> str:
         text = str(url or "").strip()
@@ -608,6 +687,40 @@ class HandoverDailyReportScreenshotService:
         )
         return page, "opened_missing_target"
 
+    async def _resolve_browser_context_async(self, browser):
+        contexts = self._iter_browser_contexts(browser)
+        if not contexts:
+            try:
+                return await browser.new_context()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("browser_context_missing") from exc
+        for context in contexts:
+            if self._iter_open_pages(context):
+                return context
+        return contexts[0]
+
+    async def ensure_target_page_async(
+        self,
+        browser,
+        *,
+        target_url: str,
+        emit_log: Callable[[str], None],
+        open_if_missing: bool = True,
+    ):
+        page = self._find_matching_page(browser, target_url=target_url)
+        if page is not None:
+            return page, "reused"
+        if not open_if_missing:
+            return None, ""
+        context = await self._resolve_browser_context_async(browser)
+        page = await context.new_page()
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        emit_log(
+            "[交接班][日报截图登录] 目标页缺失，已自动补开 "
+            f"url={str(target_url or '').strip() or '-'}"
+        )
+        return page, "opened_missing_target"
+
     @staticmethod
     def _wait_for_page_stable(page, *, timeout_ms: int = 8000, stable_rounds: int = 1, interval_ms: int = 500) -> None:
         deadline = time.time() + max(1.0, timeout_ms / 1000.0)
@@ -661,7 +774,75 @@ class HandoverDailyReportScreenshotService:
         except Exception:  # noqa: BLE001
             pass
 
+    @staticmethod
+    async def _wait_for_page_stable_async(page, *, timeout_ms: int = 8000, stable_rounds: int = 1, interval_ms: int = 500) -> None:
+        deadline = time.time() + max(1.0, timeout_ms / 1000.0)
+        dom_timeout = max(1500, min(timeout_ms, 5000))
+        idle_timeout = max(1200, min(timeout_ms // 2, 3000))
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=dom_timeout)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await page.wait_for_load_state("networkidle", timeout=idle_timeout)
+        except Exception:  # noqa: BLE001
+            pass
+        last_signature = None
+        stable_count = 0
+        while time.time() < deadline:
+            try:
+                signature = await page.evaluate(
+                    """
+() => ({
+  readyState: document.readyState || "",
+  scrollHeight: Math.max(
+    document.documentElement ? document.documentElement.scrollHeight || 0 : 0,
+    document.body ? document.body.scrollHeight || 0 : 0
+  ),
+  scrollWidth: Math.max(
+    document.documentElement ? document.documentElement.scrollWidth || 0 : 0,
+    document.body ? document.body.scrollWidth || 0 : 0
+  ),
+  title: document.title || "",
+  bodyTextLength: (document.body && document.body.innerText ? document.body.innerText.trim().length : 0)
+})
+"""
+                )
+            except Exception:  # noqa: BLE001
+                await asyncio.sleep(interval_ms / 1000.0)
+                continue
+            ready_state = str(signature.get("readyState", "") or "").strip().lower()
+            body_text_length = int(signature.get("bodyTextLength", 0) or 0)
+            content_visible = body_text_length >= 80
+            if signature == last_signature and (ready_state in {"interactive", "complete"} or content_visible):
+                stable_count += 1
+                if stable_count >= stable_rounds:
+                    break
+            else:
+                stable_count = 0
+                last_signature = signature
+            await asyncio.sleep(interval_ms / 1000.0)
+        try:
+            await page.wait_for_timeout(500)
+        except Exception:  # noqa: BLE001
+            pass
+
     def check_auth_status(
+        self,
+        emit_log: Callable[[str], None] = print,
+        *,
+        ensure_browser_running: bool = False,
+        startup_url: str = "",
+    ) -> Dict[str, Any]:
+        return self._run_async_fn(
+            self.check_auth_status_async,
+            emit_log=emit_log,
+            ensure_browser_running=ensure_browser_running,
+            startup_url=startup_url,
+        )
+
+
+    async def check_auth_status_async(
         self,
         emit_log: Callable[[str], None] = print,
         *,
@@ -677,16 +858,6 @@ class HandoverDailyReportScreenshotService:
                     browser_meta=None,
                 )
             )
-        try:
-            playwright_context = self._playwright_context()
-        except Exception as exc:  # noqa: BLE001
-            return self._state_service.update_screenshot_auth_state(
-                self._auth_state_payload(
-                    status="browser_unavailable",
-                    error=str(exc),
-                    browser_meta=browser_meta,
-                )
-            )
 
         if self._probe_debug_endpoint() is None and not ensure_browser_running:
             return self._state_service.update_screenshot_auth_state(
@@ -700,21 +871,22 @@ class HandoverDailyReportScreenshotService:
         browser = None
         try:
             if ensure_browser_running:
-                ok, error, _matched_mode = self.ensure_browser_debug_ready(
+                ok, error, _matched_mode = await asyncio.to_thread(
+                    self.ensure_browser_debug_ready,
                     startup_url=str(startup_url or self._probe_url()).strip() or self._probe_url(),
                     emit_log=emit_log,
                 )
                 if not ok:
                     raise RuntimeError(error)
-            with playwright_context as playwright:
-                browser = self._connect_browser(
+            async with self._async_playwright_context() as playwright:
+                browser = await self._connect_browser_async(
                     playwright,
                     ensure_started=False,
                     open_url=str(startup_url or self._probe_url()).strip() or self._probe_url(),
                     emit_log=emit_log,
                 )
                 browser_meta = self._browser_meta_from_debug_payload(self._probe_debug_endpoint()) or browser_meta
-                existing_state = self._auth_state_from_existing_pages(browser)
+                existing_state = await self._auth_state_from_existing_pages_async(browser)
                 return self._state_service.update_screenshot_auth_state(
                     self._auth_state_payload(
                         status=existing_state["status"],
@@ -741,23 +913,17 @@ class HandoverDailyReportScreenshotService:
             browser = None
 
     def open_login_browser(self, emit_log: Callable[[str], None] = print) -> Dict[str, Any]:
+        return self._run_async_fn(self.open_login_browser_async, emit_log=emit_log)
+
+
+    async def open_login_browser_async(self, emit_log: Callable[[str], None] = print) -> Dict[str, Any]:
         browser_meta = self._resolve_system_browser(prefer_running_debug=True)
         profile_dir = str((browser_meta or {}).get("profile_dir", "") or "")
         global _LOGIN_BROWSER_THREAD
         with _LOGIN_BROWSER_GUARD:
-            browser = None
             try:
-                playwright_context = self._playwright_context()
-            except Exception as exc:  # noqa: BLE001
-                return {
-                    "ok": False,
-                    "status": "failed",
-                    "message": str(exc),
-                    "profile_dir": profile_dir,
-                    **self._browser_state_fields(browser_meta),
-                }
-            try:
-                ok, error, browser_mode = self.ensure_browser_debug_ready(
+                ok, error, browser_mode = await asyncio.to_thread(
+                    self.ensure_browser_debug_ready,
                     startup_url=self._probe_url(),
                     emit_log=emit_log,
                 )
@@ -765,34 +931,33 @@ class HandoverDailyReportScreenshotService:
                     raise RuntimeError(error)
                 browser_meta = self._browser_meta_from_debug_payload(self._probe_debug_endpoint()) or browser_meta
                 profile_dir = str((browser_meta or {}).get("profile_dir", "") or "") or str(self._profile_dir(browser_meta))
-                with playwright_context as playwright:
-                    browser = self._connect_browser(
+                async with self._async_playwright_context() as playwright:
+                    browser = await self._connect_browser_async(
                         playwright,
                         ensure_started=False,
                         open_url=self._probe_url(),
                         emit_log=emit_log,
                     )
-                    page, matched_mode = self.ensure_target_page(
-                        browser,
-                        target_url=self._probe_url(),
-                        emit_log=lambda *_args, **_kwargs: None,
-                        open_if_missing=True,
-                    )
+                    page = self._find_matching_page(browser, target_url=self._probe_url())
+                    matched_mode = "reused"
+                    if page is None:
+                        context = await self._resolve_browser_context_async(browser)
+                        page = await context.new_page()
+                        await page.goto(self._probe_url(), wait_until="domcontentloaded", timeout=30000)
+                        matched_mode = "opened_missing_target"
                     if page is not None:
                         try:
-                            page.bring_to_front()
+                            await page.bring_to_front()
                         except Exception:  # noqa: BLE001
                             pass
                     effective_mode = matched_mode or browser_mode or "reused"
                     if effective_mode == "opened_missing_target":
                         emit_log(
-                            f"[交接班][日报截图登录] 登录页缺失，已自动补开 "
-                            f"browser={self._browser_label(browser_meta)}, profile={profile_dir}"
+                            f"[交接班][日报截图登录] 登录页缺失，已自动补开 browser={self._browser_label(browser_meta)}, profile={profile_dir}"
                         )
                     else:
                         emit_log(
-                            f"[交接班][日报截图登录] 已复用系统浏览器登录页 "
-                            f"browser={self._browser_label(browser_meta)}, profile={profile_dir}, matched={effective_mode}"
+                            f"[交接班][日报截图登录] 已复用系统浏览器登录页 browser={self._browser_label(browser_meta)}, profile={profile_dir}, matched={effective_mode}"
                         )
             except Exception as exc:  # noqa: BLE001
                 error = str(exc)
@@ -811,6 +976,7 @@ class HandoverDailyReportScreenshotService:
                     **self._browser_state_fields(browser_meta),
                 }
             if _LOGIN_BROWSER_THREAD is None or not _LOGIN_BROWSER_THREAD.is_alive():
+
                 def _worker() -> None:
                     last_status = ""
                     last_error = ""
@@ -827,8 +993,7 @@ class HandoverDailyReportScreenshotService:
                             }:
                                 browser_label = self._browser_label(state)
                                 emit_log(
-                                    f"[交接班][日报截图登录] {browser_label} 登录页已关闭或未打开，"
-                                    "请重新点击“初始化飞书截图登录态”"
+                                    f"[交接班][日报截图登录] {browser_label} 登录页已关闭或未打开，请重新点击“初始化飞书截图登录态”"
                                 )
                             last_status = status
                             last_error = error
@@ -847,7 +1012,7 @@ class HandoverDailyReportScreenshotService:
             **self._browser_state_fields(browser_meta),
         }
 
-    def capture_summary_sheet(
+    async def capture_summary_sheet_async(
         self,
         *,
         duty_date: str,
@@ -861,7 +1026,7 @@ class HandoverDailyReportScreenshotService:
             f"[交接班][日报截图] 开始 batch={duty_date}|{duty_shift}, "
             f"target=summary_sheet, label=今日航图截图, url={url}"
         )
-        result = self._capture_sheet_like_page(
+        result = await self._capture_sheet_like_page_async(
             url=url,
             sheet_name="",
             duty_date=duty_date,
@@ -881,7 +1046,7 @@ class HandoverDailyReportScreenshotService:
         )
         return result
 
-    def capture_external_page(
+    async def capture_external_page_async(
         self,
         *,
         duty_date: str,
@@ -895,7 +1060,7 @@ class HandoverDailyReportScreenshotService:
             f"[交接班][日报截图] 开始 batch={duty_date}|{duty_shift}, "
             f"target=external_page, label=排班截图, url={url}"
         )
-        result = self._capture_sheet_like_page(
+        result = await self._capture_sheet_like_page_async(
             url=url,
             sheet_name="",
             duty_date=duty_date,
@@ -915,7 +1080,69 @@ class HandoverDailyReportScreenshotService:
         )
         return result
 
+    def capture_summary_sheet(
+        self,
+        *,
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None] = print,
+        prefer_existing_page: bool = True,
+        allow_open_fallback: bool = True,
+    ) -> Dict[str, Any]:
+        return self._run_async_fn(
+            self.capture_summary_sheet_async,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=emit_log,
+            prefer_existing_page=prefer_existing_page,
+            allow_open_fallback=allow_open_fallback,
+        )
+
+    def capture_external_page(
+        self,
+        *,
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None] = print,
+        prefer_existing_page: bool = True,
+        allow_open_fallback: bool = True,
+    ) -> Dict[str, Any]:
+        return self._run_async_fn(
+            self.capture_external_page_async,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=emit_log,
+            prefer_existing_page=prefer_existing_page,
+            allow_open_fallback=allow_open_fallback,
+        )
+
     def _capture_sheet_like_page(
+        self,
+        *,
+        url: str,
+        sheet_name: str,
+        duty_date: str,
+        duty_shift: str,
+        target: str,
+        output_path: Path,
+        prefer_existing_page: bool = True,
+        allow_open_fallback: bool = True,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        return self._run_async_fn(
+            self._capture_sheet_like_page_async,
+            url=url,
+            sheet_name=sheet_name,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            target=target,
+            output_path=output_path,
+            prefer_existing_page=prefer_existing_page,
+            allow_open_fallback=allow_open_fallback,
+            emit_log=emit_log,
+        )
+
+    async def _capture_sheet_like_page_async(
         self,
         *,
         url: str,
@@ -936,7 +1163,7 @@ class HandoverDailyReportScreenshotService:
             target=target,
             stage=stage,
         )
-        profile_state = self.check_auth_status(
+        profile_state = await self.check_auth_status_async(
             emit_log=lambda *_args, **_kwargs: None,
             ensure_browser_running=True,
             startup_url=url,
@@ -950,21 +1177,11 @@ class HandoverDailyReportScreenshotService:
                 error_detail=str(profile_state.get("error", "") or "login_required"),
                 error_message=self._capture_error_message("login_required", browser_label=browser_label),
             )
-        try:
-            playwright_context = self._playwright_context()
-        except Exception as exc:  # noqa: BLE001
-            return self._capture_failure_result(
-                stage="connect_browser",
-                error="browser_unavailable",
-                error_detail=str(exc),
-                error_message=self._capture_error_message("browser_unavailable", fallback=str(exc), browser_label=browser_label),
-            )
 
         page = None
-        browser = None
         matched_mode = ""
         try:
-            with playwright_context as playwright:
+            async with self._async_playwright_context() as playwright:
                 stage = "connect_browser"
                 self._emit_capture_stage_log(
                     emit_log,
@@ -973,7 +1190,7 @@ class HandoverDailyReportScreenshotService:
                     target=target,
                     stage=stage,
                 )
-                browser = self._connect_browser(
+                browser = await self._connect_browser_async(
                     playwright,
                     ensure_started=True,
                     open_url=url,
@@ -990,7 +1207,7 @@ class HandoverDailyReportScreenshotService:
                 open_if_missing = allow_open_fallback
                 if not prefer_existing_page and not allow_open_fallback:
                     open_if_missing = False
-                page, matched_mode = self.ensure_target_page(
+                page, matched_mode = await self.ensure_target_page_async(
                     browser,
                     target_url=url,
                     emit_log=lambda *_args, **_kwargs: None,
@@ -1028,7 +1245,7 @@ class HandoverDailyReportScreenshotService:
                         matched_mode=page_meta["matched_mode"],
                     )
                 try:
-                    page.bring_to_front()
+                    await page.bring_to_front()
                 except Exception:  # noqa: BLE001
                     pass
                 stage = "wait_page_stable"
@@ -1039,8 +1256,8 @@ class HandoverDailyReportScreenshotService:
                     target=target,
                     stage=stage,
                 )
-                self._wait_for_page_stable(page)
-                if self._looks_like_login_page(page):
+                await self._wait_for_page_stable_async(page)
+                if await self._looks_like_login_page_async(page):
                     running_browser_meta = self._browser_meta_from_debug_payload(self._probe_debug_endpoint()) or profile_state
                     self._state_service.update_screenshot_auth_state(
                         self._auth_state_payload(
@@ -1083,8 +1300,8 @@ class HandoverDailyReportScreenshotService:
                         stage=stage,
                     )
                     try:
-                        page.get_by_text(sheet_name, exact=True).first.click(timeout=8000)
-                        self._wait_for_page_stable(page, timeout_ms=8000, stable_rounds=1, interval_ms=500)
+                        await page.get_by_text(sheet_name, exact=True).first.click(timeout=8000)
+                        await self._wait_for_page_stable_async(page, timeout_ms=8000, stable_rounds=1, interval_ms=500)
                     except Exception as exc:  # noqa: BLE001
                         return self._capture_failure_result(
                             stage=stage,
@@ -1103,7 +1320,7 @@ class HandoverDailyReportScreenshotService:
                     target=target,
                     stage=stage,
                 )
-                content = self._capture_page_with_fallback(
+                content = await self._capture_page_with_fallback_async(
                     page,
                     prefer_document_full_page=(str(target or "").strip().lower() in {"summary_sheet", "external_page"}),
                 )
@@ -1132,12 +1349,30 @@ class HandoverDailyReportScreenshotService:
                 error_message=self._capture_error_message(error_code, fallback=str(exc), browser_label=browser_label),
                 matched_mode=matched_mode,
             )
-        finally:
-            browser = None
 
     @staticmethod
     def _read_document_capture_metrics(page) -> Dict[str, int]:
         return page.evaluate(
+            """
+() => {
+  const doc = document.documentElement || {};
+  const body = document.body || {};
+  const viewportHeight = window.innerHeight || doc.clientHeight || body.clientHeight || 0;
+  const viewportWidth = window.innerWidth || doc.clientWidth || body.clientWidth || 0;
+  return {
+    scrollHeight: Math.max(doc.scrollHeight || 0, body.scrollHeight || 0, doc.clientHeight || 0, body.clientHeight || 0),
+    scrollWidth: Math.max(doc.scrollWidth || 0, body.scrollWidth || 0, doc.clientWidth || 0, body.clientWidth || 0),
+    viewportHeight,
+    viewportWidth,
+    bodyTextLength: body && body.innerText ? body.innerText.trim().length : 0,
+  };
+}
+"""
+        )
+
+    @staticmethod
+    async def _read_document_capture_metrics_async(page) -> Dict[str, int]:
+        return await page.evaluate(
             """
 () => {
   const doc = document.documentElement || {};
@@ -1197,6 +1432,46 @@ class HandoverDailyReportScreenshotService:
             pass
         return page.screenshot(full_page=False, type="png")
 
+    async def _capture_page_with_fallback_async(self, page, *, prefer_document_full_page: bool = False) -> bytes:
+        if prefer_document_full_page:
+            try:
+                metrics = await self._read_document_capture_metrics_async(page)
+                scroll_height = int(metrics.get("scrollHeight", 0) or 0)
+                viewport_height = int(metrics.get("viewportHeight", 0) or 0)
+                body_text_length = int(metrics.get("bodyTextLength", 0) or 0)
+                if scroll_height > max(1200, viewport_height + 300) and body_text_length >= 80:
+                    await page.evaluate("() => { window.scrollTo(0, 0); }")
+                    await page.wait_for_timeout(200)
+                    image = await page.screenshot(full_page=True, type="png")
+                    if image:
+                        return image
+            except Exception:  # noqa: BLE001
+                pass
+        locator = await self._mark_primary_scrollable_locator_async(page)
+        if locator is not None:
+            try:
+                await locator.evaluate("(el) => { el.scrollTop = 0; el.scrollLeft = 0; }")
+                try:
+                    await page.evaluate("() => { window.scrollTo(0, 0); }")
+                except Exception:  # noqa: BLE001
+                    pass
+                await asyncio.sleep(0.2)
+                return await self._capture_scrollable_locator_async(locator)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            try:
+                await page.evaluate("() => { window.scrollTo(0, 0); }")
+                await page.wait_for_timeout(200)
+            except Exception:  # noqa: BLE001
+                pass
+            image = await page.screenshot(full_page=True, type="png")
+            if image:
+                return image
+        except Exception:  # noqa: BLE001
+            pass
+        return await page.screenshot(full_page=False, type="png")
+
     @staticmethod
     def _mark_primary_scrollable_locator(page):
         script = """
@@ -1235,6 +1510,43 @@ class HandoverDailyReportScreenshotService:
         return page.locator('[data-qjpt-scroll-capture="1"]').first
 
     @staticmethod
+    async def _mark_primary_scrollable_locator_async(page):
+        script = """
+() => {
+  const marker = 'data-qjpt-scroll-capture';
+  document.querySelectorAll('[' + marker + ']').forEach((el) => el.removeAttribute(marker));
+  const isVisible = (el) => {
+    const style = window.getComputedStyle(el);
+    if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width >= 400 && rect.height >= 300;
+  };
+  let best = null;
+  let bestScore = 0;
+  for (const el of Array.from(document.querySelectorAll('*'))) {
+    if (!isVisible(el)) continue;
+    const scrollHeight = el.scrollHeight || 0;
+    const scrollWidth = el.scrollWidth || 0;
+    const clientHeight = el.clientHeight || 0;
+    const clientWidth = el.clientWidth || 0;
+    if (scrollHeight <= clientHeight + 80 && scrollWidth <= clientWidth + 80) continue;
+    const score = Math.max(scrollHeight, clientHeight) * Math.max(scrollWidth, clientWidth);
+    if (score > bestScore) {
+      best = el;
+      bestScore = score;
+    }
+  }
+  if (!best) return false;
+  best.setAttribute(marker, '1');
+  return true;
+}
+"""
+        marked = await page.evaluate(script)
+        if not marked:
+            return None
+        return page.locator('[data-qjpt-scroll-capture="1"]').first
+
+    @staticmethod
     def _capture_scrollable_locator(locator) -> bytes:
         from PIL import Image
         from io import BytesIO
@@ -1260,6 +1572,50 @@ class HandoverDailyReportScreenshotService:
             locator.evaluate("(el, pos) => { el.scrollTop = pos.y; }", {"y": y})
             time.sleep(0.2)
             shot = locator.screenshot(type="png")
+            image = Image.open(BytesIO(shot)).convert("RGBA")
+            if not tiles:
+                scale_y = image.height / float(client_height)
+            tiles.append((y, image))
+
+        canvas = Image.new(
+            "RGBA",
+            (max(1, image.width if tiles else client_width), max(1, int(round(scroll_height * scale_y)))),
+            (255, 255, 255, 255),
+        )
+        for y, image in tiles:
+            crop_height = int(round(min(client_height, scroll_height - y) * scale_y))
+            tile = image.crop((0, 0, image.width, max(1, crop_height)))
+            canvas.paste(tile, (0, int(round(y * scale_y))))
+        buffer = BytesIO()
+        canvas.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    @staticmethod
+    async def _capture_scrollable_locator_async(locator) -> bytes:
+        from PIL import Image
+        from io import BytesIO
+
+        metrics = await locator.evaluate(
+            """
+(el) => ({
+  scrollWidth: Math.max(el.scrollWidth || 0, el.clientWidth || 0),
+  scrollHeight: Math.max(el.scrollHeight || 0, el.clientHeight || 0),
+  clientWidth: Math.max(el.clientWidth || 0, 1),
+  clientHeight: Math.max(el.clientHeight || 0, 1)
+})
+"""
+        )
+        scroll_height = int(metrics.get("scrollHeight", 0) or 0)
+        client_width = int(metrics.get("clientWidth", 0) or 1)
+        client_height = int(metrics.get("clientHeight", 0) or 1)
+        y_positions = list(range(0, max(scroll_height, 1), client_height)) or [0]
+
+        tiles: List[tuple[int, Image.Image]] = []
+        scale_y = 1.0
+        for y in y_positions:
+            await locator.evaluate("(el, pos) => { el.scrollTop = pos.y; }", {"y": y})
+            await asyncio.sleep(0.2)
+            shot = await locator.screenshot(type="png")
             image = Image.open(BytesIO(shot)).convert("RGBA")
             if not tiles:
                 scale_y = image.height / float(client_height)

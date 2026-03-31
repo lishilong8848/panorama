@@ -96,6 +96,14 @@ class _FakeBridgeService:
             "status": "queued_for_internal",
         }
 
+    def create_monthly_auto_once_task(self, **kwargs):  # noqa: ANN003
+        self.calls.append(("create_monthly_auto_once_task", dict(kwargs)))
+        return {
+            "task_id": "bridge-monthly-auto-once-1",
+            "feature": "monthly_report_pipeline",
+            "status": "queued_for_internal",
+        }
+
     def create_monthly_resume_upload_task(self, **kwargs):  # noqa: ANN003
         self.calls.append(("resume_upload", dict(kwargs)))
         return {
@@ -183,11 +191,11 @@ def test_auto_once_route_waits_when_indexed_file_is_missing() -> None:
         "can_proceed": True,
     }
 
-    with pytest.raises(HTTPException) as excinfo:
-        routes.job_auto_once(request)
+    response = routes.job_auto_once(request)
 
-    assert excinfo.value.status_code == 409
-    assert "等待共享文件就绪" in str(excinfo.value.detail)
+    assert response["accepted"] is True
+    assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
+    assert response["job"]["kind"] == "bridge"
 
 
 def test_auto_once_route_waits_when_indexed_file_is_inaccessible(monkeypatch) -> None:
@@ -213,11 +221,10 @@ def test_auto_once_route_waits_when_indexed_file_is_inaccessible(monkeypatch) ->
     }
     monkeypatch.setattr(routes, "is_accessible_cached_file_path", lambda _path: False)
 
-    with pytest.raises(HTTPException) as excinfo:
-        routes.job_auto_once(request)
+    response = routes.job_auto_once(request)
 
-    assert excinfo.value.status_code == 409
-    assert "等待共享文件就绪" in str(excinfo.value.detail)
+    assert response["accepted"] is True
+    assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
 
 
 def test_auto_once_route_uses_cached_file_path_verbatim_on_external_role(monkeypatch) -> None:
@@ -305,11 +312,10 @@ def test_auto_once_route_waits_when_fallback_is_stale() -> None:
         "can_proceed": False,
     }
 
-    with pytest.raises(HTTPException) as excinfo:
-        routes.job_auto_once(request)
+    response = routes.job_auto_once(request)
 
-    assert excinfo.value.status_code == 409
-    assert "等待过旧楼栋共享文件更新" in str(excinfo.value.detail)
+    assert response["accepted"] is True
+    assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
 
 
 def test_auto_once_route_waits_when_best_bucket_is_older_than_three_hours() -> None:
@@ -331,12 +337,10 @@ def test_auto_once_route_waits_when_best_bucket_is_older_than_three_hours() -> N
         "can_proceed": False,
     }
 
-    with pytest.raises(HTTPException) as excinfo:
-        routes.job_auto_once(request)
+    response = routes.job_auto_once(request)
 
-    assert excinfo.value.status_code == 409
-    assert "等待最新共享文件更新" in str(excinfo.value.detail)
-    assert "超过 3 小时" in str(excinfo.value.detail)
+    assert response["accepted"] is True
+    assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
 
 
 def test_multi_date_route_creates_cache_fill_task_when_missing() -> None:

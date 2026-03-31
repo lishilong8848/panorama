@@ -4,6 +4,7 @@ import copy
 from pathlib import Path
 from typing import Any, Callable, Dict
 
+from app.config.config_adapter import normalize_role_mode
 from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from pipeline_utils import load_calc_module
 
@@ -16,13 +17,8 @@ class CalculationService:
     def _deployment_role_mode(self) -> str:
         deployment_cfg = self.config.get("deployment", {})
         if not isinstance(deployment_cfg, dict):
-            return "switching"
-        text = str(deployment_cfg.get("role_mode", "") or "").strip().lower()
-        if text == "hybrid":
-            return "switching"
-        if text in {"switching", "internal", "external"}:
-            return text
-        return "switching"
+            return ""
+        return normalize_role_mode(deployment_cfg.get("role_mode"))
 
     def run_manual_upload(
         self,
@@ -32,10 +28,9 @@ class CalculationService:
         legacy_switch_external_before_upload: bool,
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
-        _ = bool(legacy_switch_external_before_upload)
         calc_module = load_calc_module()
 
-        should_switch_external = self._deployment_role_mode() == "switching"
+        should_switch_external = bool(legacy_switch_external_before_upload)
         if should_switch_external:
             external_ssid = str(self.config.get("network", {}).get("external_ssid", "")).strip()
             if external_ssid:

@@ -272,6 +272,31 @@ def _bridge_proxy_job(task: Dict[str, Any], *, name: str, feature: str) -> Dict[
     }
 
 
+def _accepted_bridge_task_response(task: Dict[str, Any], *, name: str, feature: str) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "accepted": True,
+        "bridge_task": task,
+        "job": _bridge_proxy_job(task, name=name, feature=feature),
+    }
+
+
+def _get_or_create_bridge_task(
+    bridge_service,
+    *,
+    get_or_create_name: str,
+    create_name: str,
+    **kwargs,
+) -> Dict[str, Any]:
+    get_or_create = getattr(bridge_service, get_or_create_name, None)
+    if callable(get_or_create):
+        return get_or_create(**kwargs)
+    create = getattr(bridge_service, create_name, None)
+    if callable(create):
+        return create(**kwargs)
+    raise AttributeError(f"共享桥接服务缺少方法: {get_or_create_name}/{create_name}")
+
+
 def _role_restart_signature(cfg: Dict[str, Any]) -> str:
     common = cfg.get("common", {}) if isinstance(cfg, dict) else {}
     deployment = common.get("deployment", {}) if isinstance(common, dict) else {}
@@ -1553,7 +1578,7 @@ def job_auto_once(request: Request) -> Dict[str, Any]:
     role_mode = _deployment_role_mode(container)
 
     if role_mode == "internal":
-            raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起月报共享桥接任务")
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起月报共享桥接任务")
     if role_mode == "external":
         bridge_service = _shared_bridge_service_or_raise(container)
         target_buildings = bridge_service.get_source_cache_buildings()
@@ -1563,11 +1588,22 @@ def job_auto_once(request: Request) -> Dict[str, Any]:
         ))
         cached_entries = selection["selected_entries"]
         if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
-            raise _cache_wait_detail(
-                _build_latest_cache_wait_detail(
-                    feature_name="全景平台月报",
-                    selection=selection,
-                )
+            task = _get_or_create_bridge_task(
+                bridge_service,
+                get_or_create_name="get_or_create_monthly_auto_once_task",
+                create_name="create_monthly_auto_once_task",
+                requested_by="manual",
+                source="manual",
+            )
+            container.add_system_log(
+                "[共享桥接] 已受理月报自动流程共享桥接任务 "
+                f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
+                f"reason={_build_latest_cache_wait_detail(feature_name='全景平台月报', selection=selection)}"
+            )
+            return _accepted_bridge_task_response(
+                task,
+                name="月报自动流程-共享桥接补采",
+                feature="monthly_report_pipeline",
             )
 
         def _run_from_cache(emit_log):
@@ -1642,7 +1678,7 @@ def job_wet_bulb_collection_run(request: Request) -> Dict[str, Any]:
     role_mode = _deployment_role_mode(container)
 
     if role_mode == "internal":
-            raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起湿球温度共享桥接任务")
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起湿球温度共享桥接任务")
     if role_mode == "external":
         bridge_service = _shared_bridge_service_or_raise(container)
         target_buildings = bridge_service.get_source_cache_buildings()
@@ -1652,11 +1688,22 @@ def job_wet_bulb_collection_run(request: Request) -> Dict[str, Any]:
         ))
         cached_entries = selection["selected_entries"]
         if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
-            raise _cache_wait_detail(
-                _build_latest_cache_wait_detail(
-                    feature_name="交接班日志",
-                    selection=selection,
-                )
+            task = _get_or_create_bridge_task(
+                bridge_service,
+                get_or_create_name="get_or_create_wet_bulb_collection_task",
+                create_name="create_wet_bulb_collection_task",
+                buildings=target_buildings,
+                requested_by="manual",
+            )
+            container.add_system_log(
+                "[共享桥接] 已受理湿球温度共享桥接任务 "
+                f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
+                f"reason={_build_latest_cache_wait_detail(feature_name='交接班日志', selection=selection)}"
+            )
+            return _accepted_bridge_task_response(
+                task,
+                name="湿球温度定时采集-共享桥接补采",
+                feature="wet_bulb_collection",
             )
 
         def _run_from_cache(emit_log):
@@ -1963,7 +2010,7 @@ async def job_manual_upload(
     container = request.app.state.container
     role_mode = _deployment_role_mode(container)
     _ensure_not_internal_role(container, "当前为内网端角色，请在外网端执行手动补传")
-    _ = bool(legacy_switch_external_before_upload)
+    switch_external_before_upload = bool(legacy_switch_external_before_upload)
     config = _runtime_config(container)
     suffix = Path(file.filename or "upload.xlsx").suffix or ".xlsx"
     temp_dir = create_runtime_temp_dir(
@@ -1983,7 +2030,7 @@ async def job_manual_upload(
                 building=building,
                 file_path=str(temp_path),
                 upload_date=upload_date,
-                switch_external_before_upload=False,
+                switch_external_before_upload=switch_external_before_upload,
                 emit_log=emit_log,
             )
         except Exception as exc:  # noqa: BLE001
@@ -2002,7 +2049,7 @@ async def job_manual_upload(
                 "building": building,
                 "file_path": str(temp_path),
                 "upload_date": upload_date,
-                "switch_external_before_upload": False,
+                "switch_external_before_upload": switch_external_before_upload,
                 "cleanup_dir": str(temp_dir),
             },
             resource_keys=_job_resource_keys("network:external"),
@@ -2285,11 +2332,25 @@ def job_handover_from_download(payload: Dict[str, Any], request: Request) -> Dic
             ))
             cached_entries = selection["selected_entries"]
             if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
-                raise _cache_wait_detail(
-                    _build_latest_cache_wait_detail(
-                        feature_name="交接班日志",
-                        selection=selection,
-                    )
+                task = _get_or_create_bridge_task(
+                    bridge_service,
+                    get_or_create_name="get_or_create_handover_from_download_task",
+                    create_name="create_handover_from_download_task",
+                    buildings=target_buildings,
+                    end_time=end_time_text,
+                    duty_date=None,
+                    duty_shift=None,
+                    requested_by="manual",
+                )
+                container.add_system_log(
+                    "[共享桥接] 已受理交接班 latest 共享桥接任务 "
+                    f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
+                    f"reason={_build_latest_cache_wait_detail(feature_name='交接班日志', selection=selection)}"
+                )
+                return _accepted_bridge_task_response(
+                    task,
+                    name="交接班日志-共享桥接补采",
+                    feature="handover_from_download",
                 )
             building_files = [(str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip()) for item in cached_entries]
 

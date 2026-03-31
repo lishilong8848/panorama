@@ -4,9 +4,8 @@ const DASHBOARD_MODULE_STORAGE_KEY = "dashboard_active_module";
 
 function normalizeLocalRoleMode(value) {
   const text = String(value || "").trim().toLowerCase();
-  if (text === "hybrid" || text === "dual" || text === "dual_reachable") return "switching";
-  if (["switching", "internal", "external"].includes(text)) return text;
-  return "switching";
+  if (["internal", "external"].includes(text)) return text;
+  return "";
 }
 
 function setBodyScrollLock(locked) {
@@ -34,7 +33,7 @@ export function createUiLocalActions(ctx) {
   } = ctx;
 
   function openDashboardPage() {
-    const roleMode = normalizeLocalRoleMode(config.value?.deployment?.role_mode || "switching");
+    const roleMode = normalizeLocalRoleMode(config.value?.deployment?.role_mode || "");
     currentView.value = roleMode === "internal" ? "status" : "dashboard";
     closeDashboardMenuDrawer();
   }
@@ -51,10 +50,10 @@ export function createUiLocalActions(ctx) {
 
   function switchConfigTab(tabKey) {
     const nextTab = String(tabKey || "").trim() || "common_paths";
-    const roleMode = normalizeLocalRoleMode(config.value?.deployment?.role_mode || "switching");
+    const roleMode = normalizeLocalRoleMode(config.value?.deployment?.role_mode || "");
     const hiddenCommonTabs = roleMode === "internal"
       ? new Set(["common_network", "common_scheduler", "common_notify", "common_feishu_auth", "common_alarm_db"])
-      : new Set(roleMode !== "switching" ? ["common_network"] : []);
+      : new Set(roleMode ? ["common_network"] : []);
     const hiddenFeatureTabs = new Set(["feature_alarm"]);
     if (roleMode === "internal") {
       hiddenFeatureTabs.add("feature_monthly");

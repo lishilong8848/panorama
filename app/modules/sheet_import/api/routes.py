@@ -1,9 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
+from app.config.config_adapter import normalize_role_mode
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
 from app.modules.sheet_import.service.sheet_import_service import SheetImportService
 from app.shared.utils.runtime_temp_workspace import cleanup_runtime_temp_dir, create_runtime_temp_dir
@@ -16,13 +17,8 @@ router = APIRouter(tags=["sheet-import"])
 def _deployment_role_mode(container) -> str:
     snapshot = container.deployment_snapshot() if hasattr(container, "deployment_snapshot") else {}
     if not isinstance(snapshot, dict):
-        return "switching"
-    text = str(snapshot.get("role_mode", "") or "").strip().lower()
-    if text == "hybrid":
-        return "switching"
-    if text in {"switching", "internal", "external"}:
-        return text
-    return "switching"
+        return ""
+    return normalize_role_mode(snapshot.get("role_mode"))
 
 
 def _save_upload_file(upload: UploadFile, prefix: str, runtime_config: dict) -> Path:
@@ -78,7 +74,7 @@ async def run_sheet_import(
     file: UploadFile = File(...),
 ) -> dict:
     if not file.filename:
-        raise HTTPException(status_code=400, detail="请上传 xlsx 文件")
+        raise HTTPException(status_code=400, detail="请上传 .xlsx 文件")
 
     container = request.app.state.container
     role_mode = _deployment_role_mode(container)
@@ -87,12 +83,13 @@ async def run_sheet_import(
 
     runtime_config = container.runtime_config
     temp_path = _save_upload_file(file, "sheet_import", runtime_config)
+    switch_external_before_upload = bool(legacy_switch_external_before_upload)
 
     def _run(emit_log):
         service = SheetImportService(runtime_config)
         notify = WebhookNotifyService(runtime_config)
         try:
-            result = service.run(str(temp_path), role_mode == "switching", emit_log)
+            result = service.run(str(temp_path), switch_external_before_upload, emit_log)
             if int(result.get("failed_count", 0)) > 0:
                 notify.send_failure(stage="5Sheet导表", detail="存在失败 Sheet，请查看日志详情", emit_log=emit_log)
             return result
@@ -110,16 +107,16 @@ async def run_sheet_import(
             worker_handler="sheet_import",
             worker_payload={
                 "xlsx_path": str(temp_path),
-                "switch_external_before_upload": role_mode == "switching",
+                "switch_external_before_upload": switch_external_before_upload,
                 "cleanup_dir": str(temp_path.parent),
-                "legacy_switch_external_before_upload": bool(legacy_switch_external_before_upload),
+                "legacy_switch_external_before_upload": switch_external_before_upload,
             },
             resource_keys=["network:external"],
             priority="manual",
             feature="sheet_import",
             submitted_by="manual",
         )
-        container.add_system_log(f"[任务] 已提交: 5Sheet导表 ({job.job_id})")
+        container.add_system_log(f"[任务] 已提交 5Sheet导表 ({job.job_id})")
         return job.to_dict()
     except Exception as exc:  # noqa: BLE001
         cleanup_runtime_temp_dir(temp_path.parent, runtime_config=runtime_config, app_dir=get_app_dir())

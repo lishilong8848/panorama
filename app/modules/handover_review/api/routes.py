@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import asyncio
+import inspect
 from pathlib import Path
 from typing import Any, Dict
 
@@ -237,6 +239,50 @@ def _build_daily_report_context_payload(
             emit_log=lambda *_args, **_kwargs: None,
             ensure_browser_running=False,
         )
+    except Exception:
+        screenshot_auth = state_service.get_screenshot_auth_state()
+    capture_assets = asset_service.get_capture_assets_context(
+        duty_date=duty_date,
+        duty_shift=duty_shift,
+    )
+    return state_service.get_context(
+        duty_date=duty_date,
+        duty_shift=duty_shift,
+        screenshot_auth=screenshot_auth,
+        capture_assets=capture_assets,
+        spreadsheet_url=spreadsheet_url,
+    )
+
+
+
+async def _build_daily_report_context_payload_async(
+    *,
+    review_service: ReviewSessionService,
+    state_service: HandoverDailyReportStateService,
+    asset_service: HandoverDailyReportAssetService,
+    screenshot_service: HandoverDailyReportScreenshotService,
+    duty_date: str,
+    duty_shift: str,
+) -> Dict[str, Any]:
+    spreadsheet_url = _load_daily_report_spreadsheet_url(
+        review_service,
+        state_service,
+        duty_date=duty_date,
+        duty_shift=duty_shift,
+    )
+    try:
+        if hasattr(screenshot_service, 'check_auth_status_async'):
+            screenshot_auth = await screenshot_service.check_auth_status_async(
+                emit_log=lambda *_args, **_kwargs: None,
+                ensure_browser_running=False,
+            )
+        else:
+            screenshot_auth = screenshot_service.check_auth_status(
+                emit_log=lambda *_args, **_kwargs: None,
+                ensure_browser_running=False,
+            )
+            if inspect.isawaitable(screenshot_auth):
+                screenshot_auth = await screenshot_auth
     except Exception:
         screenshot_auth = state_service.get_screenshot_auth_state()
     capture_assets = asset_service.get_capture_assets_context(
@@ -913,7 +959,7 @@ async def handover_daily_report_upload_asset(
         duty_date=duty_date_text,
         duty_shift=duty_shift_text,
     )
-    context = _build_daily_report_context_payload(
+    context = await _build_daily_report_context_payload_async(
         review_service=review_service,
         state_service=state_service,
         asset_service=asset_service,

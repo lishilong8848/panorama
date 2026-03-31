@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 from app.config.config_adapter import (
     adapt_runtime_config,
     ensure_v3_config,
+    normalize_role_mode,
     resolve_shared_bridge_paths,
     sync_runtime_back_to_v3,
 )
@@ -137,9 +138,7 @@ def _validate_deployment_and_shared_bridge(cfg: Dict[str, Any]) -> None:
     deployment = common.get("deployment", {})
     if not isinstance(deployment, dict):
         raise ValueError("配置错误: common.deployment 缺失或格式错误")
-    role_mode = str(deployment.get("role_mode", "") or "").strip().lower()
-    if role_mode in {"hybrid", "switching", "dual", "dual_reachable"}:
-        role_mode = ""
+    role_mode = normalize_role_mode(deployment.get("role_mode"))
     if role_mode not in {"", "internal", "external"}:
         raise ValueError("配置错误: common.deployment.role_mode 必须是 internal / external，或留空等待启动确认")
     shared_bridge = common.get("shared_bridge", {})
@@ -184,9 +183,7 @@ def _validate_updater(cfg: Dict[str, Any]) -> None:
         raise ValueError("配置错误: common.updater 缺失或格式错误")
 
     deployment = cfg.get("common", {}).get("deployment", {})
-    role_mode = str(deployment.get("role_mode", "") or "").strip().lower()
-    if role_mode == "hybrid":
-        role_mode = "switching"
+    role_mode = normalize_role_mode(deployment.get("role_mode"))
 
     required_text = ["state_file", "download_dir", "backup_dir"]
     if role_mode != "internal":

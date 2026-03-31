@@ -1,6 +1,5 @@
 from pathlib import Path
 import sys
-from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -33,6 +32,7 @@ class _FakeContainer:
         self.alert_log_uploader = None
         self.shared_bridge_service = None
         self.version = "web-3.0.0"
+        self._role_mode = "external"
 
     def add_system_log(self, *_args, **_kwargs):
         return None
@@ -67,6 +67,9 @@ class _FakeContainer:
     def is_wet_bulb_collection_scheduler_executor_bound(self):
         return False
 
+    def deployment_snapshot(self) -> dict:
+        return {"role_mode": self._role_mode}
+
 
 def _build_app(monkeypatch, tmp_path: Path, *, frontend_mode: str):
     frontend_root = tmp_path / "frontend"
@@ -95,8 +98,8 @@ def test_source_mode_root_and_assets_are_no_cache(monkeypatch, tmp_path):
 
     root_resp = client.get("/")
     asset_prefix = app.state.source_frontend_asset_prefix
-    assert f'{asset_prefix}/app.js' in root_resp.text
-    assert f'{asset_prefix}/style.css' in root_resp.text
+    assert f"{asset_prefix}/app.js" in root_resp.text
+    assert f"{asset_prefix}/style.css" in root_resp.text
     asset_resp = client.get(f"{asset_prefix}/config_helpers.js")
 
     expected = "no-store, no-cache, must-revalidate, max-age=0"
@@ -130,7 +133,7 @@ def test_source_mode_handover_review_page_uses_same_versioned_asset_prefix(monke
 
     expected = "no-store, no-cache, must-revalidate, max-age=0"
     assert review_resp.headers["cache-control"] == expected
-    assert f'{app.state.source_frontend_asset_prefix}/app.js' in review_resp.text
+    assert f"{app.state.source_frontend_asset_prefix}/app.js" in review_resp.text
 
 
 def test_assets_src_prefix_is_whitelisted_for_external_review_access():

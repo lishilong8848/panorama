@@ -1,9 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import copy
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Query, Request
+
+from app.config.config_adapter import normalize_role_mode
 
 
 router = APIRouter(tags=["shared-bridge"])
@@ -34,7 +36,8 @@ _BRIDGE_ERROR_TEXTS = {
     "await_external": "等待外网继续处理",
     "shared_bridge_disabled": "共享桥接未启用",
     "shared_bridge_service_unavailable": "共享桥接服务不可用",
-    "disabled_or_switching": "当前未启用共享桥接或处于单机切网端",
+    "disabled_or_switching": "当前未启用共享桥接",
+    "disabled_or_unselected": "当前未启用共享桥接",
     "misconfigured": "共享桥接目录未配置",
     "database is locked": "共享桥接数据库正忙，请稍后重试",
     "unable to open database file": "无法打开共享桥接数据库文件",
@@ -47,13 +50,8 @@ def _deployment_role_mode(request: Request) -> str:
     container = request.app.state.container
     snapshot = container.deployment_snapshot() if hasattr(container, "deployment_snapshot") else {}
     if not isinstance(snapshot, dict):
-        return "switching"
-    text = str(snapshot.get("role_mode", "") or "").strip().lower()
-    if text in {"hybrid", "dual", "dual_reachable"}:
-        return "switching"
-    if text in {"switching", "internal", "external"}:
-        return text
-    return "switching"
+        return ""
+    return normalize_role_mode(snapshot.get("role_mode"))
 
 
 def _ensure_bridge_write_allowed(request: Request) -> None:
@@ -82,13 +80,11 @@ def _bridge_feature_label(feature: Any) -> str:
 
 
 def _bridge_role_label(role: Any) -> str:
-    normalized = str(role or "").strip().lower()
+    normalized = normalize_role_mode(role)
     if normalized == "internal":
         return "内网端"
     if normalized == "external":
         return "外网端"
-    if normalized == "switching":
-        return "单机切网端"
     return str(role or "").strip() or "-"
 
 
@@ -189,23 +185,18 @@ def _bridge_infer_current_stage(task: Dict[str, Any]) -> Dict[str, Any]:
     mode = task.get("mode", "")
     status = str(task.get("status", "") or "").strip().lower()
     if status in {"queued_for_internal", "internal_claimed", "internal_running"}:
-        if str(feature or "").strip().lower() in {"handover_cache_fill", "monthly_cache_fill"}:
-            stage_id = "internal_fill"
-        else:
-            stage_id = "internal_download"
+        stage_id = "internal_fill" if str(feature or "").strip().lower() in {"handover_cache_fill", "monthly_cache_fill"} else "internal_download"
         role_target = "internal"
     elif status in {"ready_for_external", "external_claimed", "external_running"}:
-        if str(feature or "").strip().lower() == "handover_from_download":
+        feature_text = str(feature or "").strip().lower()
+        if feature_text == "handover_from_download":
             stage_id = "external_generate_review_output"
-        elif str(feature or "").strip().lower() == "wet_bulb_collection":
+        elif feature_text == "wet_bulb_collection":
             stage_id = "external_extract_and_upload"
-        elif str(feature or "").strip().lower() in {"handover_cache_fill", "monthly_cache_fill"}:
+        elif feature_text in {"handover_cache_fill", "monthly_cache_fill"}:
             stage_id = "external_continue"
         else:
-            if str(feature or "").strip().lower() == "monthly_report_pipeline":
-                stage_id = "external_resume"
-            else:
-                stage_id = "external_upload"
+            stage_id = "external_resume" if feature_text == "monthly_report_pipeline" else "external_upload"
         role_target = "external"
     else:
         stage_id = ""

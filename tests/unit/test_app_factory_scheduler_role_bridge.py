@@ -94,6 +94,18 @@ class _FakeBridgeService:
             "can_proceed": True,
         }
 
+    def create_monthly_auto_once_task(self, **kwargs):  # noqa: ANN003
+        self.calls.append(("create_monthly_auto_once_task", dict(kwargs)))
+        return {"task_id": "bridge-monthly-auto-once-1", "feature": "monthly_report_pipeline", "status": "queued_for_internal"}
+
+    def create_handover_from_download_task(self, **kwargs):  # noqa: ANN003
+        self.calls.append(("create_handover_from_download_task", dict(kwargs)))
+        return {"task_id": "bridge-handover-latest-1", "feature": "handover_from_download", "status": "queued_for_internal"}
+
+    def create_wet_bulb_collection_task(self, **kwargs):  # noqa: ANN003
+        self.calls.append(("create_wet_bulb_collection_task", dict(kwargs)))
+        return {"task_id": "bridge-wet-bulb-1", "feature": "wet_bulb_collection", "status": "queued_for_internal"}
+
 
 class _FakeJob:
     def __init__(self, job_id: str = "job-cache-1") -> None:
@@ -238,8 +250,9 @@ def test_scheduler_callback_external_waits_when_latest_selection_has_missing_bui
 
     ok, message = container.scheduler_callback("自动流程调度")
 
-    assert ok is False
+    assert ok is True
     assert "等待缺失楼栋共享文件补齐" in message
+    assert "已受理共享桥接任务" in message
     assert container.job_service.started_jobs == []
 
 
@@ -258,8 +271,9 @@ def test_handover_scheduler_external_waits_when_latest_selection_is_stale(
 
     ok, message = container.handover_scheduler_callback("morning", "交接班调度")
 
-    assert ok is False
+    assert ok is True
     assert "等待过旧楼栋共享文件更新" in message
+    assert "已受理共享桥接任务" in message
     assert container.job_service.started_jobs == []
 
 
@@ -304,9 +318,10 @@ def test_scheduler_callback_external_waits_when_best_bucket_is_older_than_three_
 
     ok, message = container.scheduler_callback("自动流程调度")
 
-    assert ok is False
+    assert ok is True
     assert "等待最新共享文件更新" in message
     assert "超过 3 小时" in message
+    assert "已受理共享桥接任务" in message
     assert container.job_service.started_jobs == []
 
 

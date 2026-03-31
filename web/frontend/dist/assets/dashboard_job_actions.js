@@ -61,8 +61,6 @@ export function createDashboardJobActions(ctx) {
     fetchBridgeTaskDetail,
     syncHandoverDutyFromNow,
     runSingleFlight,
-    scheduleExternalLatestRetry,
-    clearExternalLatestRetry,
   } = ctx;
 
   function isInternalRole() {
@@ -76,24 +74,7 @@ export function createDashboardJobActions(ctx) {
     return taskFn();
   }
 
-  function isRetryableLatestWaitError(err) {
-    const status = Number.parseInt(String(err?.httpStatus || 0), 10) || 0;
-    const text = String(err?.responseText || err?.message || err || "").trim();
-    return status === 409 && (
-      text.includes("等待共享文件就绪")
-      || text.includes("等待最新共享文件更新")
-      || text.includes("等待缺失楼栋共享文件补齐")
-      || text.includes("等待过旧楼栋共享文件更新")
-    );
-  }
-
-  async function startJobByJson(url, body, title, actionKey, options = {}) {
-    const latestRetryKind = String(options?.latestRetryKind || "").trim();
-    const latestRetryFamilyKey = String(options?.latestRetryFamilyKey || "").trim();
-    const latestRetryPayload =
-      options?.latestRetryPayload && typeof options.latestRetryPayload === "object"
-        ? { ...options.latestRetryPayload }
-        : null;
+  async function startJobByJson(url, body, title, actionKey) {
     if (isInternalRole()) {
       message.value = "当前为内网端，本地管理页不提供该业务入口，请在外网端发起。";
       return;
@@ -105,25 +86,8 @@ export function createDashboardJobActions(ctx) {
         try {
           message.value = `${title} 已提交`;
           const response = await startJsonJobApi(url, body || {});
-          if (latestRetryKind && typeof clearExternalLatestRetry === "function") {
-            clearExternalLatestRetry(latestRetryKind);
-          }
           await applyAcceptedExecutionResponse(response, title);
         } catch (err) {
-          if (latestRetryKind && isRetryableLatestWaitError(err)) {
-            if (typeof scheduleExternalLatestRetry === "function") {
-              scheduleExternalLatestRetry(
-                latestRetryKind,
-                String(err?.responseText || err?.message || err || "").trim(),
-                {
-                  familyKey: latestRetryFamilyKey,
-                  payload: latestRetryPayload,
-                },
-              );
-            }
-            message.value = `${title} 暂未启动：${String(err?.responseText || err?.message || err || "").trim()}。共享文件满足条件后会自动重试。`;
-            return;
-          }
           message.value = `${title} 提交失败: ${err}`;
         }
       },
@@ -132,10 +96,7 @@ export function createDashboardJobActions(ctx) {
   }
 
   async function runAutoOnce() {
-    await startJobByJson("/api/jobs/auto-once", {}, "立即执行自动流程", ACTION_KEYS.autoOnce, {
-      latestRetryKind: "auto_once",
-      latestRetryFamilyKey: "monthly_report_family",
-    });
+    await startJobByJson("/api/jobs/auto-once", {}, "立即执行自动流程", ACTION_KEYS.autoOnce);
   }
 
   async function runMultiDate() {
@@ -225,11 +186,13 @@ export function createDashboardJobActions(ctx) {
   }
 
   async function fetchJob(jobId) {
+    const targetJobId = String(jobId || "").trim();
+    if (!targetJobId) return;
     try {
-      const data = await getJobApi(jobId);
+      const data = await getJobApi(targetJobId);
       currentJob.value = data;
       if (selectedJobId) {
-        selectedJobId.value = String(data?.job_id || jobId || "").trim();
+        selectedJobId.value = String(data?.job_id || targetJobId || "").trim();
       }
       const status = String(data?.status || "").trim().toLowerCase();
       if (status === "success") {
@@ -451,13 +414,6 @@ export function createDashboardJobActions(ctx) {
       payload,
       "交接班日志使用共享文件生成",
       ACTION_KEYS.handoverFromDownload,
-      usingLatestMode
-        ? {
-            latestRetryKind: "handover_latest",
-            latestRetryFamilyKey: "handover_log_family",
-            latestRetryPayload: payload,
-          }
-        : {},
     );
   }
 

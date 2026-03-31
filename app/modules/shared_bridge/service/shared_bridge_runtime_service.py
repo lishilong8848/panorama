@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from app.config.config_adapter import resolve_shared_bridge_paths
+from app.config.config_adapter import normalize_role_mode as normalize_deployment_role_mode, resolve_shared_bridge_paths
 from app.modules.report_pipeline.service.monthly_bridge_service import (
     delete_bridge_resume_run,
     list_bridge_pending_resume_runs,
@@ -51,12 +51,7 @@ RETIRED_SHARED_BRIDGE_FEATURES: Dict[str, str] = {
 
 
 def normalize_role_mode(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    if text == "hybrid":
-        return "switching"
-    if text in {"switching", "internal", "external"}:
-        return text
-    return "switching"
+    return normalize_deployment_role_mode(value)
 
 
 def _now_text() -> str:
@@ -64,21 +59,19 @@ def _now_text() -> str:
 
 
 def _role_label(value: Any) -> str:
-    text = str(value or "").strip().lower()
+    text = normalize_role_mode(value)
     if text == "internal":
         return "内网端"
     if text == "external":
         return "外网端"
-    if text == "switching":
-        return "单机切网端"
     return str(value or "").strip() or "-"
 
 
 def _default_node_id(role_mode: Any) -> str:
     role = normalize_role_mode(role_mode)
     machine_id = f"{uuid.getnode():012x}"
-    if role not in {"internal", "external", "switching"}:
-        role = "switching"
+    if role not in {"internal", "external"}:
+        role = "unselected"
     return f"{role}-{machine_id}"
 
 
@@ -173,7 +166,7 @@ class SharedBridgeRuntimeService:
                     clear_internal_download_browser_pool(self._internal_download_pool)
                     self._internal_download_pool.stop()
                     self._internal_download_pool = None
-                return {"started": False, "running": False, "reason": "disabled_or_switching"}
+                return {"started": False, "running": False, "reason": "disabled_or_unselected"}
             self._db_status = "starting"
             if self.role_mode == "internal":
                 if self._internal_download_pool is None:
@@ -341,6 +334,42 @@ class SharedBridgeRuntimeService:
             requested_by=requested_by,
         )
 
+    def get_or_create_handover_from_download_task(
+        self,
+        *,
+        buildings: List[str] | None,
+        end_time: str | None,
+        duty_date: str | None,
+        duty_shift: str | None,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        normalized_buildings = [
+            str(item or "").strip()
+            for item in (buildings or [])
+            if str(item or "").strip()
+        ]
+        dedupe_key = "|".join(
+            [
+                "handover_from_download",
+                str(duty_date or "").strip() or "-",
+                str(duty_shift or "").strip().lower() or "-",
+                ",".join(normalized_buildings) or "all_enabled",
+            ]
+        )
+        existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
+        if existing:
+            return existing
+        return self.create_handover_from_download_task(
+            buildings=normalized_buildings,
+            end_time=end_time,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            requested_by=requested_by,
+        )
+
     def create_day_metric_from_download_task(
         self,
         *,
@@ -377,6 +406,35 @@ class SharedBridgeRuntimeService:
             requested_by=requested_by,
         )
 
+    def get_or_create_wet_bulb_collection_task(
+        self,
+        *,
+        buildings: List[str] | None,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        normalized_buildings = [
+            str(item or "").strip()
+            for item in (buildings or [])
+            if str(item or "").strip()
+        ]
+        dedupe_key = "|".join(
+            [
+                "wet_bulb_collection",
+                _now_text()[:10],
+                ",".join(normalized_buildings) or "all_enabled",
+            ]
+        )
+        existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
+        if existing:
+            return existing
+        return self.create_wet_bulb_collection_task(
+            buildings=normalized_buildings,
+            requested_by=requested_by,
+        )
+
     def create_monthly_auto_once_task(
         self,
         *,
@@ -389,6 +447,24 @@ class SharedBridgeRuntimeService:
         return self._store.create_monthly_auto_once_task(
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
+            requested_by=requested_by,
+            source=source,
+        )
+
+    def get_or_create_monthly_auto_once_task(
+        self,
+        *,
+        requested_by: str = "manual",
+        source: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        dedupe_key = "|".join(["monthly_report_pipeline", "auto_once", _now_text()[:10] or "-"])
+        existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
+        if existing:
+            return existing
+        return self.create_monthly_auto_once_task(
             requested_by=requested_by,
             source=source,
         )
@@ -1757,7 +1833,7 @@ class SharedBridgeRuntimeService:
                     raise RuntimeError("月报共享桥接多日期任务缺少日期列表")
                 emit_log(
                     "[共享桥接][月报][内网] 开始多日期下载阶段, "
-                    f"鏃ユ湡={','.join(selected_dates)}"
+                    f"日期={','.join(selected_dates)}"
                 )
                 internal_result = run_bridge_download_only_multi_date(
                     self.runtime_config,

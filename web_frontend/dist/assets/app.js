@@ -11,13 +11,6 @@ import { clone, expandDateRange, todayText } from "./config_helpers.js";
 
 const { createApp, onMounted, onBeforeUnmount, computed, watch, ref } = Vue;
 const HANDOVER_DUTY_CONTEXT_STORAGE_KEY = "handover_duty_context";
-const EXTERNAL_LATEST_RETRY_STORAGE_KEY = "external_latest_retry_intents";
-const EXTERNAL_LATEST_RETRY_ALLOWED_KINDS = Object.freeze(["auto_once", "wet_bulb_collection", "handover_latest"]);
-const EXTERNAL_LATEST_RETRY_FAMILY_KEYS = Object.freeze({
-  auto_once: "monthly_report_family",
-  wet_bulb_collection: "handover_log_family",
-  handover_latest: "handover_log_family",
-});
 const APP_BOOT_OVERLAY_ID = "app-boot-overlay";
 function normalizeDeploymentRoleMode(value) {
   const text = String(value || "").trim().toLowerCase();
@@ -30,6 +23,15 @@ function formatDeploymentRoleLabel(value) {
   if (role === "internal") return "内网端";
   if (role === "external") return "外网端";
   return "待选择角色";
+}
+
+function formatDateTimeFromEpoch(value) {
+  const timestamp = Number.parseInt(String(value || 0), 10);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (num) => String(num).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 const STARTUP_BRIDGE_DEFAULTS = Object.freeze({
@@ -193,56 +195,6 @@ function persistHandoverDutyContext(dutyDate, dutyShift) {
   }
 }
 
-function loadExternalLatestRetryState() {
-  if (typeof window === "undefined" || !window.sessionStorage) {
-    return { startupToken: "", intents: {} };
-  }
-  try {
-    const raw = window.sessionStorage.getItem(EXTERNAL_LATEST_RETRY_STORAGE_KEY);
-    if (!raw) return { startupToken: "", intents: {} };
-    const payload = JSON.parse(raw);
-    const startupToken = String(payload?.startupToken || "").trim();
-    const rawIntents = payload?.intents && typeof payload.intents === "object" ? payload.intents : {};
-    const intents = {};
-    for (const [key, value] of Object.entries(rawIntents)) {
-      const kind = String(key || value?.kind || "").trim();
-      if (!EXTERNAL_LATEST_RETRY_ALLOWED_KINDS.includes(kind) || !value || typeof value !== "object") continue;
-      intents[kind] = {
-        kind,
-        familyKey: String(value.familyKey || EXTERNAL_LATEST_RETRY_FAMILY_KEYS[kind] || "").trim(),
-        waitText: String(value.waitText || "").trim(),
-        waitSignature: String(value.waitSignature || "").trim(),
-        payload: value.payload && typeof value.payload === "object" ? { ...value.payload } : null,
-        requestedAt: Number.parseInt(String(value.requestedAt || 0), 10) || 0,
-      };
-    }
-    return { startupToken, intents };
-  } catch (_) {
-    return { startupToken: "", intents: {} };
-  }
-}
-
-function persistExternalLatestRetryState(startupToken, intents) {
-  if (typeof window === "undefined" || !window.sessionStorage) return;
-  try {
-    const normalizedToken = String(startupToken || "").trim();
-    const normalizedIntents = intents && typeof intents === "object" ? intents : {};
-    if (!normalizedToken || !Object.keys(normalizedIntents).length) {
-      window.sessionStorage.removeItem(EXTERNAL_LATEST_RETRY_STORAGE_KEY);
-      return;
-    }
-    window.sessionStorage.setItem(
-      EXTERNAL_LATEST_RETRY_STORAGE_KEY,
-      JSON.stringify({
-        startupToken: normalizedToken,
-        intents: normalizedIntents,
-      }),
-    );
-  } catch (_) {
-    // ignore sessionStorage errors
-  }
-}
-
 if (isHandoverReviewPath(window.location.pathname)) {
   mountHandoverReviewApp(Vue);
   finishAppBoot();
@@ -340,10 +292,14 @@ createApp({
       dayMetricRetryAllMode,
       handoverGenerationBusy,
       runningJobs,
-      waitingResourceJobs,
+      waitingResourceJobs: baseWaitingResourceJobs,
       recentFinishedJobs,
       bridgeTasksEnabled,
       activeBridgeTasks,
+      displayedBridgeTasks,
+      totalBridgeHistoryCount,
+      hiddenBridgeHistoryCount,
+      bridgeTaskHistoryDisplayLimit,
       recentFinishedBridgeTasks,
       currentBridgeTask,
       resourceSnapshot,
@@ -408,9 +364,6 @@ createApp({
     const startupRoleAutoActivationKey = ref("");
     const startupRoleBridgeDraft = ref(buildStartupBridgeDraft({}));
     const startupRoleAdvancedVisible = ref(false);
-    const initialExternalLatestRetryState = loadExternalLatestRetryState();
-    const externalLatestRetryIntents = ref(initialExternalLatestRetryState.intents || {});
-    const externalLatestRetryRunningKinds = ref({});
     const startupRoleOptions = Object.freeze([
       {
         value: "internal",
@@ -1167,13 +1120,11 @@ createApp({
 
     function normalizeLegacyNetworkSide(side) {
       const normalized = String(side || "").trim().toLowerCase();
-      if (normalized === "dual") return "";
       return normalized;
     }
 
     function normalizeLegacyNetworkMode(mode) {
       const normalized = String(mode || "").trim().toLowerCase();
-      if (normalized === "dual_reachable") return "";
       return normalized;
     }
 
@@ -1461,7 +1412,7 @@ createApp({
       if (lowered === "await_external") return "等待外网继续处理";
       if (lowered === "shared_bridge_disabled") return "共享桥接未启用";
       if (lowered === "shared_bridge_service_unavailable") return "共享桥接服务不可用";
-      if (lowered === "disabled_or_switching") return "当前未启用共享桥接";
+      if (lowered === "disabled_or_switching" || lowered === "disabled_or_unselected") return "当前未启用共享桥接";
       if (lowered === "misconfigured") return "共享桥接目录未配置";
       if (lowered === "database is locked") return "共享桥接数据库正忙，请稍后重试";
       if (lowered === "unable to open database file") return "无法打开共享桥接数据库文件";
@@ -1493,43 +1444,76 @@ createApp({
       return !["success", "failed", "partial_failed", "cancelled", "stale"].includes(status);
     }
 
-    function scheduleExternalLatestRetry(kind, waitText = "", options = {}) {
-      const normalizedKind = String(kind || "").trim();
-      if (!normalizedKind) return;
-      const familyKey = String(
-        options?.familyKey || EXTERNAL_LATEST_RETRY_FAMILY_KEYS[normalizedKind] || "",
-      ).trim();
-      const familyRetrySignatures = sharedSourceCacheReadinessOverview.value?.familyRetrySignatures || {};
-      const waitSignature = familyKey
-        ? String(familyRetrySignatures?.[familyKey] || "").trim()
-        : String(sharedSourceCacheReadinessOverview.value?.autoRetrySignature || "").trim();
-      const payload =
-        options?.payload && typeof options.payload === "object"
-          ? { ...options.payload }
-          : null;
-      externalLatestRetryIntents.value = {
-        ...(externalLatestRetryIntents.value || {}),
-        [normalizedKind]: {
-        kind: normalizedKind,
-        familyKey,
-        waitText: String(waitText || "").trim(),
-        waitSignature,
-        payload,
-        requestedAt: Date.now(),
-        },
-      };
+    function isBridgeTerminalStatusLocal(status) {
+      const normalized = String(status || "").trim().toLowerCase();
+      return ["success", "failed", "partial_failed", "cancelled", "stale"].includes(normalized);
     }
 
-    function clearExternalLatestRetry(kind = "") {
-      const normalizedKind = String(kind || "").trim();
-      if (!normalizedKind) {
-        externalLatestRetryIntents.value = {};
+    function isBridgeWaitingResourceTask(task) {
+      if (!task || typeof task !== "object") return false;
+      if (isBridgeTerminalStatusLocal(task?.status)) return false;
+      const combined = `${formatBridgeTaskError(task)} ${formatBridgeStageSummary(task)}`.trim();
+      return (
+        combined.includes("等待最新共享文件更新")
+        || combined.includes("等待缺失楼栋共享文件补齐")
+        || combined.includes("等待过旧楼栋共享文件更新")
+        || combined.includes("等待共享文件")
+      );
+    }
+
+    const waitingResourceJobs = computed(() => {
+      const localJobs = Array.isArray(baseWaitingResourceJobs.value)
+        ? baseWaitingResourceJobs.value.map((item) => ({
+            __waiting_kind: "job",
+            __waiting_id: `job:${String(item?.job_id || "").trim()}`,
+            ...item,
+          }))
+        : [];
+      const bridgeWaits = Array.isArray(bridgeTasks.value)
+        ? bridgeTasks.value
+            .filter((item) => isBridgeWaitingResourceTask(item))
+            .map((item) => ({
+              __waiting_kind: "bridge",
+              __waiting_id: `bridge:${String(item?.task_id || "").trim()}`,
+              ...item,
+            }))
+        : [];
+      return [...bridgeWaits, ...localJobs];
+    });
+
+    function isWaitingResourceItemSelected(item) {
+      const kind = String(item?.__waiting_kind || "job").trim().toLowerCase();
+      if (kind === "bridge") {
+        return String(selectedBridgeTaskId.value || "").trim() === String(item?.task_id || "").trim();
+      }
+      return String(selectedJobId.value || "").trim() === String(item?.job_id || "").trim();
+    }
+
+    async function focusWaitingResourceItem(item) {
+      const kind = String(item?.__waiting_kind || "job").trim().toLowerCase();
+      if (kind === "bridge") {
+        await focusBridgeTask(item);
         return;
       }
-      if (!externalLatestRetryIntents.value || !externalLatestRetryIntents.value[normalizedKind]) return;
-      const next = { ...externalLatestRetryIntents.value };
-      delete next[normalizedKind];
-      externalLatestRetryIntents.value = next;
+      await focusJob(item);
+    }
+
+    function formatWaitingResourceItemTitle(item) {
+      const kind = String(item?.__waiting_kind || "job").trim().toLowerCase();
+      if (kind === "bridge") {
+        return item?.feature_label || formatBridgeFeature(item?.feature) || item?.task_id || "-";
+      }
+      return item?.name || item?.feature || item?.job_id || "-";
+    }
+
+    function formatWaitingResourceItemMeta(item) {
+      const kind = String(item?.__waiting_kind || "job").trim().toLowerCase();
+      if (kind === "bridge") {
+        const reason = formatBridgeTaskError(item);
+        const summary = reason !== "-" ? reason : formatBridgeStageSummary(item);
+        return `共享桥接 | #${String(item?.task_id || "").trim() || "-"} | ${summary || "-"}`;
+      }
+      return `${formatJobKind(item)} | #${String(item?.job_id || "").trim() || "-"} | ${formatJobWaitReason(item)}`;
     }
 
     function formatBridgeStageSummary(task) {
@@ -1795,29 +1779,6 @@ createApp({
       { immediate: false },
     );
 
-    watch(
-      () => [startupRoleCurrentToken.value, externalLatestRetryIntents.value],
-      () => {
-        const startupToken = String(startupRoleCurrentToken.value || "").trim();
-        if (!startupToken) return;
-        persistExternalLatestRetryState(startupToken, externalLatestRetryIntents.value);
-      },
-      { immediate: true, deep: true },
-    );
-
-    watch(
-      () => startupRoleCurrentToken.value,
-      (startupToken) => {
-        const normalizedToken = String(startupToken || "").trim();
-        const persistedToken = String(initialExternalLatestRetryState.startupToken || "").trim();
-        if (!normalizedToken || !persistedToken || normalizedToken === persistedToken) return;
-        if (Object.keys(externalLatestRetryIntents.value || {}).length) {
-          externalLatestRetryIntents.value = {};
-        }
-      },
-      { immediate: true },
-    );
-
     const shouldPollHandoverDailyReportContext = computed(() => {
       if (shouldPauseRuntimeRequests.value) return false;
       if (deploymentRoleMode.value === "internal") return false;
@@ -1961,8 +1922,6 @@ createApp({
       fetchBridgeTaskDetail,
       syncHandoverDutyFromNow,
       runSingleFlight,
-      scheduleExternalLatestRetry,
-      clearExternalLatestRetry,
     });
 
     const {
@@ -1993,67 +1952,6 @@ createApp({
       getJobRetryActionKey,
       stopScheduler,
     } = dashboardActions;
-
-    watch(
-      () => ({
-        roleMode: deploymentRoleMode.value,
-        paused: shouldPauseRuntimeRequests.value,
-        familyCanProceed: sharedSourceCacheReadinessOverview.value?.familyCanProceed || {},
-        familyRetrySignatures: sharedSourceCacheReadinessOverview.value?.familyRetrySignatures || {},
-        intents: externalLatestRetryIntents.value || {},
-      }),
-      (state) => {
-        if (state.roleMode !== "external" || state.paused) return;
-        const intents = Object.values(state.intents || {}).filter((item) => item && typeof item === "object");
-        const nextIntent = intents.find((intent) => {
-          const kind = String(intent?.kind || "").trim();
-          const familyKey = String(intent?.familyKey || "").trim();
-          const waitSignature = String(intent?.waitSignature || "").trim();
-          const currentSignature = String(state.familyRetrySignatures?.[familyKey] || "").trim();
-          if (!kind || !familyKey) return false;
-          if (Boolean(externalLatestRetryRunningKinds.value?.[kind])) return false;
-          if (!Boolean(state.familyCanProceed?.[familyKey])) return false;
-          if (!currentSignature || currentSignature === waitSignature) return false;
-          return true;
-        });
-        if (!nextIntent) return;
-        const retryKind = String(nextIntent.kind || "").trim();
-        externalLatestRetryRunningKinds.value = {
-          ...(externalLatestRetryRunningKinds.value || {}),
-          [retryKind]: true,
-        };
-        message.value = "共享文件已满足条件，正在自动重试刚才的操作。";
-        void (async () => {
-          try {
-            if (retryKind === "auto_once") {
-              await runAutoOnce();
-            } else if (retryKind === "wet_bulb_collection") {
-              await runWetBulbCollection();
-            } else if (retryKind === "handover_latest") {
-              await runHandoverFromDownload(
-                nextIntent.payload && typeof nextIntent.payload === "object" ? nextIntent.payload : null,
-              );
-            }
-          } finally {
-            externalLatestRetryRunningKinds.value = {
-              ...(externalLatestRetryRunningKinds.value || {}),
-              [retryKind]: false,
-            };
-          }
-        })();
-      },
-      { immediate: true, deep: true },
-    );
-
-    watch(
-      () => deploymentRoleMode.value,
-      (roleMode) => {
-        if (roleMode === "internal") {
-          clearExternalLatestRetry();
-        }
-      },
-      { immediate: true },
-    );
 
     const realStreamController = createLogStreamController({
       appendLog,
@@ -2162,6 +2060,10 @@ createApp({
       recentFinishedJobs,
       bridgeTasksEnabled,
       activeBridgeTasks,
+      displayedBridgeTasks,
+      totalBridgeHistoryCount,
+      hiddenBridgeHistoryCount,
+      bridgeTaskHistoryDisplayLimit,
       recentFinishedBridgeTasks,
       currentBridgeTask,
       resourceSnapshot,
@@ -2421,6 +2323,10 @@ createApp({
       formatBridgeArtifactSummary,
       formatBridgeTaskError,
       canCancelBridgeTask,
+      isWaitingResourceItemSelected,
+      focusWaitingResourceItem,
+      formatWaitingResourceItemTitle,
+      formatWaitingResourceItemMeta,
       formatBridgeEventLevel,
       formatBridgeEventText,
       focusJob,

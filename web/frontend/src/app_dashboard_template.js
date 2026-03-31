@@ -78,14 +78,14 @@
               <div class="ops-job-list" v-if="waitingResourceJobs.length">
                 <button
                   v-for="job in waitingResourceJobs"
-                  :key="'waiting-' + job.job_id"
+                  :key="'waiting-' + (job.__waiting_id || job.job_id || job.task_id)"
                   class="btn btn-ghost ops-job-list-item"
-                  :class="{ 'is-selected': selectedJobId === job.job_id }"
-                  @click="focusJob(job)"
+                  :class="{ 'is-selected': isWaitingResourceItemSelected(job) }"
+                  @click="focusWaitingResourceItem(job)"
                 >
-                  <span class="ops-job-list-title">{{ job.name || job.feature || job.job_id }}</span>
+                  <span class="ops-job-list-title">{{ formatWaitingResourceItemTitle(job) }}</span>
                   <span class="ops-job-list-meta">
-                    {{ formatJobKind(job) }} | #{{ job.job_id }} | {{ formatJobWaitReason(job) }}
+                    {{ formatWaitingResourceItemMeta(job) }}
                   </span>
                 </button>
               </div>
@@ -153,13 +153,16 @@
                 <h4 class="card-title">共享协同任务</h4>
               </div>
               <span class="status-badge status-badge-soft" :class="activeBridgeTasks.length ? 'tone-warning' : 'tone-neutral'">
-                处理中 {{ activeBridgeTasks.length }} / 历史 {{ bridgeTasks.length }}
+                处理中 {{ activeBridgeTasks.length }} / 历史 {{ totalBridgeHistoryCount }}
               </span>
             </div>
             <div class="hint">仅内网端 / 外网端角色显示。外网发起后，内网执行前段，完成后再回到外网继续后段。</div>
-            <div class="ops-job-list" v-if="bridgeTasks.length">
+            <div class="hint" v-if="hiddenBridgeHistoryCount > 0">
+              历史任务仅显示最近 {{ bridgeTaskHistoryDisplayLimit }} 条，另有 {{ hiddenBridgeHistoryCount }} 条已折叠。
+            </div>
+            <div class="ops-job-list" v-if="displayedBridgeTasks.length">
               <div
-                v-for="task in bridgeTasks"
+                v-for="task in displayedBridgeTasks"
                 :key="'bridge-' + task.task_id"
                 class="ops-job-list-item ops-job-list-row"
                 :class="{ 'is-selected': selectedBridgeTaskId === task.task_id }"
@@ -207,48 +210,6 @@
                   {{ task.feature_label || formatBridgeFeature(task.feature) }} / {{ formatBridgeTaskStatus(task.status) }}
                 </button>
               </div>
-            </div>
-          </article>
-          <article class="task-block task-block-compact ops-job-detail" v-if="bridgeTasksEnabled && currentBridgeTask">
-            <div class="task-block-head">
-              <div>
-                <div class="task-block-kicker">共享详情</div>
-                <h4 class="card-title">当前选中共享任务</h4>
-              </div>
-              <span
-                class="status-badge status-badge-soft"
-                :class="'tone-' + formatBridgeTaskTone(currentBridgeTask.status)"
-              >
-                {{ formatBridgeTaskStatus(currentBridgeTask.status) }}
-              </span>
-            </div>
-            <div class="ops-resource-grid">
-              <div class="readonly-inline-card">任务：{{ currentBridgeTask.feature_label || formatBridgeFeature(currentBridgeTask.feature) }}</div>
-              <div class="readonly-inline-card">编号：{{ currentBridgeTask.task_id || '-' }}</div>
-              <div class="readonly-inline-card">当前阶段：{{ formatBridgeStageSummary(currentBridgeTask) }}</div>
-              <div class="readonly-inline-card">更新时间：{{ currentBridgeTask.updated_at || '-' }}</div>
-            </div>
-            <div
-              class="hint"
-              v-if="(String(currentBridgeTask.current_stage_error || '').trim() || formatBridgeTaskError(currentBridgeTask)) && formatBridgeTaskError(currentBridgeTask) !== '-'"
-            >
-              最近错误：{{ String(currentBridgeTask.current_stage_error || '').trim() || formatBridgeTaskError(currentBridgeTask) }}
-            </div>
-            <div class="btn-line" style="margin:8px 0 4px;">
-              <button
-                class="btn btn-secondary"
-                :disabled="!currentBridgeTask || !canCancelBridgeTask(currentBridgeTask) || isActionLocked(getBridgeTaskCancelActionKey(currentBridgeTask.task_id))"
-                @click="cancelBridgeTask(currentBridgeTask.task_id)"
-              >
-                {{ isActionLocked(getBridgeTaskCancelActionKey(currentBridgeTask?.task_id)) ? '取消提交中...' : '取消共享任务' }}
-              </button>
-              <button
-                class="btn btn-secondary"
-                :disabled="!currentBridgeTask || !['failed', 'partial_failed', 'cancelled', 'stale'].includes(String(currentBridgeTask.status || '').trim().toLowerCase()) || isActionLocked(getBridgeTaskRetryActionKey(currentBridgeTask.task_id))"
-                @click="retryBridgeTask(currentBridgeTask.task_id)"
-              >
-                {{ isActionLocked(getBridgeTaskRetryActionKey(currentBridgeTask?.task_id)) ? '重试提交中...' : '重试共享任务' }}
-              </button>
             </div>
           </article>
           <article class="task-block task-block-compact ops-job-detail" v-if="currentJob">
@@ -339,8 +300,7 @@
 
         <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'auto_flow'">
           <h3 class="card-title">立即执行自动流程</h3>
-          <div class="form-row hint" v-if="deploymentRoleMode === 'switching'">按当前配置时间窗执行：固定先切到内网下载，再切到外网计算并上传飞书。</div>
-          <div class="form-row hint" v-else>{{ bridgeExecutionHint }}</div>
+          <div class="form-row hint">{{ bridgeExecutionHint }}</div>
           <button class="btn btn-primary" :disabled="isInternalDeploymentRole || !canRun || isActionLocked(actionKeyAutoOnce)" @click="runAutoOnce">
             {{ isActionLocked(actionKeyAutoOnce) ? '执行中...' : '立即执行自动流程' }}
           </button>
@@ -1038,12 +998,10 @@
                     <span class="status-badge status-badge-soft tone-info">固定白班</span>
                     <span
                       class="status-badge status-badge-soft"
-                      :class="deploymentRoleMode === 'switching' ? 'tone-success' : 'tone-neutral'"
+                      :class="deploymentRoleMode === 'external' ? 'tone-success' : 'tone-neutral'"
                     >
                       {{
-                        deploymentRoleMode === 'switching'
-                          ? '单机切网端'
-                          : (deploymentRoleMode === 'internal' ? '内网端' : '外网端')
+                        deploymentRoleMode === 'internal' ? '内网端' : '外网端'
                       }}
                     </span>
                   </div>
@@ -1052,11 +1010,9 @@
                 <div class="hint">该模块只上传 12 项，不生成交接班日志，不进入审核流程。</div>
                 <div class="hint">
                   {{
-                    deploymentRoleMode === 'switching'
-                      ? '当前为单机切网端，固定按切网流程执行。'
-                      : (deploymentRoleMode === 'internal'
-                        ? '当前为内网端，请在外网端发起；内网端只负责准备共享文件。'
-                        : '当前为外网端，默认优先读取共享文件；缺失时再等待内网端补采。')
+                    deploymentRoleMode === 'internal'
+                      ? '当前为内网端，请在外网端发起；内网端只负责准备共享文件。'
+                      : '当前为外网端，默认优先读取共享文件；缺失时再等待内网端补采。'
                   }}
                 </div>
                 <div class="hint" v-if="!dayMetricUploadEnabled">当前配置已禁用 12 项独立上传，可在配置中心开启。</div>

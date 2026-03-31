@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Callable, Dict
 
+from app.config.config_adapter import normalize_role_mode
 from app.modules.report_pipeline.service.runtime_config_defaults import (
     ensure_performance_config,
     ensure_resume_config,
@@ -58,9 +59,10 @@ def normalize_runtime_config(config: Dict[str, Any], *, extract_site_host: Calla
     deployment_cfg = config.get("deployment", {})
     if not isinstance(deployment_cfg, dict):
         deployment_cfg = {}
-    role_mode = str(deployment_cfg.get("role_mode", "") or "").strip().lower()
+    role_mode = normalize_role_mode(deployment_cfg.get("role_mode"))
     network_cfg.pop("enable_auto_switch_wifi", None)
-    network_cfg["enable_auto_switch_wifi"] = role_mode == "switching"
+    network_cfg["enable_auto_switch_wifi"] = False
+    network_cfg["role_mode"] = role_mode
     network_cfg.setdefault("fail_fast_on_netsh_error", True)
     network_cfg.setdefault("scan_before_connect", True)
     network_cfg.setdefault("scan_attempts", 3)

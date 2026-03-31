@@ -145,7 +145,7 @@ def _initialize_handover_daily_report_auth(container) -> None:
         screenshot_service = HandoverDailyReportScreenshotService(handover_cfg)
         result = screenshot_service.open_login_browser(emit_log=container.add_system_log)
         message = str(result.get("message", "") or "").strip() or "已触发自动初始化"
-        container.add_system_log(f"[交接班][日报截图登录] 启动自动初始化：{message}")
+        container.add_system_log(f"[交接班][日报截图登录] 启动自动初始化: {message}")
     except Exception as exc:  # noqa: BLE001
         container.add_system_log(f"[交接班][日报截图登录] 启动自动初始化失败：{exc}")
 
@@ -318,6 +318,15 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     def _current_hour_bucket() -> str:
         return datetime.now().strftime("%Y-%m-%d %H")
 
+    def _get_or_create_bridge_task(bridge_service, *, get_or_create_name: str, create_name: str, **kwargs):
+        get_or_create = getattr(bridge_service, get_or_create_name, None)
+        if callable(get_or_create):
+            return get_or_create(**kwargs)
+        create = getattr(bridge_service, create_name, None)
+        if callable(create):
+            return create(**kwargs)
+        raise AttributeError(f"共享桥接服务缺少方法: {get_or_create_name}/{create_name}")
+
     @app.post("/api/runtime/activate-startup", response_model=None)
     async def activate_startup_runtime(request: Request) -> JSONResponse:
         payload: Dict[str, Any] = {}
@@ -330,7 +339,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
         source = str(payload.get("source", "") or "").strip() or "启动角色确认"
         try:
-            return JSONResponse(content=_activate_runtime_services(source=source))
+            result = await asyncio.to_thread(_activate_runtime_services, source)
+            return JSONResponse(content=result)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse(
                 content={
@@ -425,9 +435,19 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 )
                 cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
                 if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                    bridge_task = _get_or_create_bridge_task(
+                        bridge_service,
+                        get_or_create_name="get_or_create_monthly_auto_once_task",
+                        create_name="create_monthly_auto_once_task",
+                        requested_by="scheduler",
+                        source=source,
+                    )
                     detail = _build_latest_cache_wait_text("月报", selection if isinstance(selection, dict) else {})
-                    container.add_system_log(f"[调度] {detail}")
-                    return False, detail
+                    accepted_detail = (
+                        f"{detail} 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'}"
+                    )
+                    container.add_system_log(f"[调度] {accepted_detail}")
+                    return True, accepted_detail
 
                 def _run_from_cache(emit_log):
                     file_items = [
@@ -528,9 +548,22 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 )
                 cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
                 if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                    bridge_task = _get_or_create_bridge_task(
+                        bridge_service,
+                        get_or_create_name="get_or_create_handover_from_download_task",
+                        create_name="create_handover_from_download_task",
+                        buildings=target_buildings,
+                        end_time=None,
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        requested_by="scheduler",
+                    )
                     detail = _build_latest_cache_wait_text("交接班", selection if isinstance(selection, dict) else {})
-                    container.add_system_log(f"[交接班调度] {detail}")
-                    return False, detail
+                    accepted_detail = (
+                        f"{detail} 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'}"
+                    )
+                    container.add_system_log(f"[交接班调度] {accepted_detail}")
+                    return True, accepted_detail
 
                 def _run_from_cache(emit_log):
                     orchestrator = OrchestratorService(runtime_config)
@@ -640,15 +673,25 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 )
                 cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
                 if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                    bridge_task = _get_or_create_bridge_task(
+                        bridge_service,
+                        get_or_create_name="get_or_create_wet_bulb_collection_task",
+                        create_name="create_wet_bulb_collection_task",
+                        buildings=target_buildings,
+                        requested_by="scheduler",
+                    )
                     detail = _build_latest_cache_wait_text("湿球温度", selection if isinstance(selection, dict) else {})
-                    container.add_system_log(f"[湿球温度定时采集调度] {detail}")
+                    accepted_detail = (
+                        f"{detail} 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'}"
+                    )
+                    container.add_system_log(f"[湿球温度定时采集调度] {accepted_detail}")
                     container.record_wet_bulb_collection_external_run(
-                        status="failed",
+                        status="accepted",
                         source="scheduler",
-                        detail=detail,
+                        detail=accepted_detail,
                         duration_ms=0,
                     )
-                    return False, detail
+                    return True, accepted_detail
 
                 def _run_from_cache(emit_log):
                     service = WetBulbCollectionService(runtime_config)

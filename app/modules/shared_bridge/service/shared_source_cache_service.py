@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from app.config.config_adapter import resolve_shared_bridge_paths
+from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.shared.utils.atomic_file import atomic_copy_file, validate_excel_workbook_file
 from handover_log_module.api.facade import load_handover_config
@@ -122,12 +122,7 @@ class SharedSourceCacheService:
         resolved_bridge = resolve_shared_bridge_paths(shared_bridge, deployment.get("role_mode"))
         if isinstance(self.runtime_config, dict):
             self.runtime_config["shared_bridge"] = copy.deepcopy(resolved_bridge)
-        role_mode = str(deployment.get("role_mode", "") or "").strip().lower()
-        if role_mode == "hybrid":
-            role_mode = "switching"
-        if role_mode not in {"switching", "internal", "external"}:
-            role_mode = "switching"
-        self.role_mode = role_mode
+        self.role_mode = normalize_role_mode(deployment.get("role_mode"))
         self.shared_root = Path(str(resolved_bridge.get("root_dir", "") or "").strip()) if str(resolved_bridge.get("root_dir", "") or "").strip() else None
         self.enabled = bool(source_cache.get("enabled", True)) and bool(resolved_bridge.get("enabled", False)) and self.shared_root is not None
         self.run_on_startup = bool(source_cache.get("run_on_startup", True))

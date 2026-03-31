@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from app.bootstrap.container import AppContainer
 
@@ -13,5 +13,5 @@ def test_runtime_action_reason_text_maps_common_codes_to_chinese() -> None:
 
 
 def test_shared_bridge_reason_text_reuses_runtime_mapping() -> None:
-    assert AppContainer._shared_bridge_reason_text("disabled_or_switching") == "当前未启用共享桥接或处于单机切网端"
+    assert AppContainer._shared_bridge_reason_text("disabled_or_unselected") == "当前未启用共享桥接"
     assert AppContainer._shared_bridge_reason_text("not_running") == "当前未运行"

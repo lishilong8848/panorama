@@ -61,9 +61,24 @@ export async function apiJson(url, options = {}) {
       });
       if (!resp.ok) {
         const txt = await resp.text();
-        const httpError = new Error(txt || `HTTP ${resp.status}`);
+        let responseJson = null;
+        let normalizedText = String(txt || "").trim();
+        if (normalizedText) {
+          try {
+            responseJson = JSON.parse(normalizedText);
+            const detail = responseJson?.detail;
+            if (typeof detail === "string" && detail.trim()) {
+              normalizedText = detail.trim();
+            }
+          } catch {
+            responseJson = null;
+          }
+        }
+        const httpError = new Error(normalizedText || `HTTP ${resp.status}`);
         httpError.httpStatus = resp.status;
-        httpError.responseText = txt || "";
+        httpError.responseText = normalizedText || "";
+        httpError.responseRawText = txt || "";
+        httpError.responseJson = responseJson;
         httpError.requestUrl = String(url || "");
         throw httpError;
       }
