@@ -1,0 +1,106 @@
+﻿from __future__ import annotations
+
+import contextlib
+from types import SimpleNamespace
+
+from app.modules.updater.api import routes
+
+
+class _FakeJobService:
+    def __init__(self):
+        self.guards = []
+
+    @contextlib.contextmanager
+    def resource_guard(self, *, name, resource_keys=None, timeout_sec=None):  # noqa: ANN001
+        self.guards.append({"name": name, "resource_keys": list(resource_keys or []), "timeout_sec": timeout_sec})
+        yield
+
+
+class _FakeUpdaterService:
+    def check_now(self):
+        return {"last_result": "checked"}
+
+    def apply_now(self, *, mode="normal", queue_if_busy=False):  # noqa: ANN001
+        return {"last_result": "updated", "queue_status": "none", "mode": mode, "queued": queue_if_busy}
+
+    def restart_now(self):
+        return {"last_result": "updated_restart_scheduled"}
+
+
+class _FakeContainer:
+    def __init__(self):
+        self.job_service = _FakeJobService()
+        self.runtime_config = {"updater": {"enabled": True}}
+        self._updater = _FakeUpdaterService()
+        self.logs = []
+
+    def ensure_updater_service(self):
+        return self._updater
+
+    def updater_snapshot(self):
+        return {
+            "running": False,
+            "last_check_at": "",
+            "last_result": "",
+            "last_error": "",
+            "local_version": "",
+            "remote_version": "",
+            "source_kind": "shared_mirror",
+            "source_label": "共享目录更新源",
+            "local_release_revision": 0,
+            "remote_release_revision": 0,
+            "update_available": False,
+            "force_apply_available": False,
+            "restart_required": False,
+            "dependency_sync_status": "idle",
+            "dependency_sync_error": "",
+            "dependency_sync_at": "",
+            "queued_apply": {},
+            "state_path": "",
+            "mirror_ready": True,
+            "mirror_version": "V3.61.20260328",
+            "mirror_manifest_path": r"D:\QJPT_Shared\updater\approved\latest_patch.json",
+            "last_publish_at": "2026-03-28 12:00:00",
+            "last_publish_error": "",
+        }
+
+    def add_system_log(self, text):
+        self.logs.append(text)
+
+
+def _fake_request():
+    container = _FakeContainer()
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
+
+
+def test_updater_apply_route_uses_global_guard() -> None:
+    request = _fake_request()
+
+    payload = routes.updater_apply(request, {"mode": "normal", "queue_if_busy": True})
+
+    assert payload["ok"] is True
+    guard = request.app.state.container.job_service.guards[0]
+    assert guard["resource_keys"] == ["updater:global"]
+
+
+def test_updater_check_route_uses_global_guard() -> None:
+    request = _fake_request()
+
+    payload = routes.updater_check(request)
+
+    assert payload["ok"] is True
+    guard = request.app.state.container.job_service.guards[0]
+    assert guard["resource_keys"] == ["updater:global"]
+
+
+def test_updater_status_exposes_source_and_mirror_fields() -> None:
+    request = _fake_request()
+
+    payload = routes.updater_status(request)
+
+    assert payload["ok"] is True
+    runtime = payload["runtime"]
+    assert runtime["source_kind"] == "shared_mirror"
+    assert runtime["source_label"] == "共享目录更新源"
+    assert runtime["mirror_ready"] is True
+    assert runtime["mirror_version"] == "V3.61.20260328"

@@ -1,0 +1,841 @@
+﻿from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+import os
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timedelta
+from ipaddress import ip_address
+from typing import Any, Dict
+
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+
+from app.bootstrap.container import build_container
+from app.modules.handover_review.api.routes import router as handover_review_router
+from app.modules.feishu.api.routes import router as feishu_router
+from app.modules.notify.api.routes import router as notify_router
+from app.modules.ocr.api.routes import router as ocr_router
+from app.modules.report_pipeline.api.routes import (
+    router as pipeline_router,
+    schedule_handover_review_access_startup_probe,
+)
+from app.modules.shared_bridge.api.routes import router as shared_bridge_router
+from app.modules.scheduler.api.handover_routes import router as handover_scheduler_router
+from app.modules.scheduler.api.routes import router as scheduler_router
+from app.modules.scheduler.api.wet_bulb_collection_routes import router as wet_bulb_collection_scheduler_router
+from app.modules.sheet_import.api.routes import router as sheet_import_router
+from app.modules.updater.api.routes import router as updater_router
+from app.modules.user.api.routes import router as user_router
+from app.modules.websocket.api.log_stream_routes import router as logs_router
+from app.shared.utils.frontend_cache import (
+    render_frontend_index_html,
+    resolve_source_frontend_asset_path,
+    source_frontend_no_cache_headers,
+)
+from handover_log_module.api.facade import load_handover_config
+from handover_log_module.service.handover_daily_report_screenshot_service import (
+    HandoverDailyReportScreenshotService,
+)
+from pipeline_utils import get_app_dir
+
+
+_EXTERNAL_REVIEW_ALLOWED_PREFIXES = (
+    "/handover/review/",
+    "/api/handover/review/",
+    "/assets/",
+    "/assets-src/",
+)
+_EXTERNAL_REVIEW_ALLOWED_EXACT = {
+    "/favicon.ico",
+}
+
+
+class _SourceNoCacheStaticFiles(StaticFiles):
+    def __init__(self, *args, frontend_mode: str = "", **kwargs):
+        super().__init__(*args, **kwargs)
+        self._frontend_mode = str(frontend_mode or "").strip().lower()
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):  # noqa: ANN001
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        for key, value in source_frontend_no_cache_headers(self._frontend_mode).items():
+            response.headers[key] = value
+        return response
+
+
+def _is_loopback_client(host: str) -> bool:
+    raw = str(host or "").strip()
+    if not raw:
+        return False
+    lowered = raw.lower()
+    if lowered in {"127.0.0.1", "::1", "localhost"}:
+        return True
+    try:
+        return ip_address(raw).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_externally_allowed_path(path: str) -> bool:
+    text = str(path or "").strip() or "/"
+    if text in _EXTERNAL_REVIEW_ALLOWED_EXACT:
+        return True
+    return any(text.startswith(prefix) for prefix in _EXTERNAL_REVIEW_ALLOWED_PREFIXES)
+
+
+def _install_windows_asyncio_exception_filter(container) -> None:
+    if os.name != "nt":
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    previous_handler = loop.get_exception_handler()
+
+    def _handler(loop_obj, context):  # noqa: ANN001
+        exception = context.get("exception")
+        handle_text = str(context.get("handle", "") or "")
+        if (
+            isinstance(exception, ConnectionResetError)
+            and getattr(exception, "winerror", None) == 10054
+            and "_ProactorBasePipeTransport._call_connection_lost" in handle_text
+        ):
+            return
+        if previous_handler is not None:
+            previous_handler(loop_obj, context)
+            return
+        loop_obj.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+    container.add_system_log("[启动] 已启用 Windows asyncio 断连噪音过滤")
+
+
+def _register_common_routes(app: FastAPI) -> None:
+    app.include_router(pipeline_router)
+    app.include_router(logs_router)
+    app.include_router(updater_router)
+    app.include_router(shared_bridge_router)
+    app.include_router(user_router)
+
+
+def _register_external_role_routes(app: FastAPI) -> None:
+    app.include_router(sheet_import_router)
+    app.include_router(handover_review_router)
+    app.include_router(scheduler_router)
+    app.include_router(handover_scheduler_router)
+    app.include_router(wet_bulb_collection_scheduler_router)
+    app.include_router(feishu_router)
+    app.include_router(notify_router)
+    app.include_router(ocr_router)
+
+def _initialize_handover_daily_report_auth(container) -> None:
+    try:
+        handover_cfg = load_handover_config(container.runtime_config)
+        export_cfg = handover_cfg.get("daily_report_bitable_export", {})
+        if not isinstance(export_cfg, dict):
+            export_cfg = {}
+        if not bool(export_cfg.get("enabled", True)):
+            container.add_system_log("[交接班][日报截图登录] 启动自动初始化已跳过：日报多维导出已禁用")
+            return
+        screenshot_service = HandoverDailyReportScreenshotService(handover_cfg)
+        result = screenshot_service.open_login_browser(emit_log=container.add_system_log)
+        message = str(result.get("message", "") or "").strip() or "已触发自动初始化"
+        container.add_system_log(f"[交接班][日报截图登录] 启动自动初始化：{message}")
+    except Exception as exc:  # noqa: BLE001
+        container.add_system_log(f"[交接班][日报截图登录] 启动自动初始化失败：{exc}")
+
+
+def create_app(*, enable_lifespan: bool = True) -> FastAPI:
+    container = build_container()
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        _install_windows_asyncio_exception_filter(container)
+        _app.state.runtime_services_activated = False
+        _app.state.runtime_activation_phase = "idle"
+        _app.state.runtime_activation_error = ""
+        _app.state.startup_role_confirmed = False
+        container.add_system_log("[启动] 等待启动角色确认完成后再激活后台运行时")
+
+        try:
+            yield
+        finally:
+            if container.scheduler:
+                container.stop_scheduler(source="关闭自动")
+            if container.handover_scheduler_manager:
+                container.stop_handover_scheduler(source="关闭自动")
+            if container.wet_bulb_collection_scheduler:
+                container.stop_wet_bulb_collection_scheduler(source="关闭自动")
+            if container.updater_service:
+                container.stop_updater(source="关闭自动")
+            if container.alert_log_uploader:
+                container.stop_alert_log_uploader(source="关闭自动")
+            if container.shared_bridge_service:
+                container.stop_shared_bridge(source="关闭自动")
+            container.add_system_log("Web控制台已关闭")
+
+    app = FastAPI(
+        title="全景平台月报 Web 控制台",
+        version="3.0.0",
+        lifespan=_lifespan if enable_lifespan else None,
+    )
+    app.state.container = container
+    app.state.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    app.state.source_frontend_asset_version = datetime.now().strftime("%Y%m%d%H%M%S")
+    app.state.source_frontend_asset_prefix = f"/assets-src/{app.state.source_frontend_asset_version}"
+    app.state.runtime_services_activated = False
+    app.state.runtime_activation_phase = "idle"
+    app.state.runtime_activation_error = ""
+    app.state.startup_role_confirmed = False
+
+    @app.middleware("http")
+    async def restrict_external_access(request: Request, call_next):
+        client_host = request.client.host if request.client else ""
+        if _is_loopback_client(client_host) or _is_externally_allowed_path(request.url.path):
+            return await call_next(request)
+        return Response(status_code=404)
+
+    _INTERNAL_BLOCKED_PREFIXES = (
+        "/api/jobs/",
+        "/api/handover/",
+        "/handover/review/",
+        "/api/scheduler/",
+        "/api/handover-scheduler/",
+        "/api/wet-bulb-collection-scheduler/",
+    )
+
+    @app.middleware("http")
+    async def guard_internal_role_routes(request: Request, call_next):
+        role_mode = _deployment_role_mode()
+        path = str(request.url.path or "").strip() or "/"
+        if role_mode == "internal" and any(path.startswith(prefix) for prefix in _INTERNAL_BLOCKED_PREFIXES):
+            return JSONResponse(
+                content={"detail": "当前为内网端，本地管理页不提供该业务入口，请在外网端发起。"},
+                status_code=409,
+            )
+        return await call_next(request)
+
+    def _deployment_role_mode() -> str:
+        snapshot = container.deployment_snapshot() if hasattr(container, "deployment_snapshot") else {}
+        if not isinstance(snapshot, dict):
+            return ""
+        text = str(snapshot.get("role_mode", "") or "").strip().lower()
+        if text in {"internal", "external"}:
+            return text
+        return ""
+
+    def _activate_runtime_services(source: str = "启动角色确认") -> Dict[str, Any]:
+        role_mode = _deployment_role_mode()
+        if role_mode not in {"internal", "external"}:
+            app.state.runtime_activation_phase = "failed"
+            app.state.runtime_activation_error = "请先选择有效角色后再启动后台运行时"
+            app.state.startup_role_confirmed = False
+            return {
+                "ok": False,
+                "activated": False,
+                "already_active": False,
+                "role_mode": role_mode,
+                "error": app.state.runtime_activation_error,
+            }
+        if bool(getattr(app.state, "runtime_services_activated", False)):
+            app.state.startup_role_confirmed = True
+            return {
+                "ok": True,
+                "activated": True,
+                "already_active": True,
+                "role_mode": role_mode,
+            }
+
+        app.state.runtime_activation_phase = "activating"
+        app.state.runtime_activation_error = ""
+        try:
+            result = container.start_role_runtime_services(source=source)
+            container.add_system_log(
+                f"[调度] 执行器绑定完成: {container.scheduler_executor_name()}, "
+                f"executor_bound={container.is_scheduler_executor_bound()}"
+            )
+            container.add_system_log(
+                f"[交接班调度] 执行器绑定完成: {container.handover_scheduler_executor_name()}, "
+                f"executor_bound={container.is_handover_scheduler_executor_bound()}"
+            )
+            container.add_system_log(
+                f"[湿球温度定时采集调度] 执行器绑定完成: {container.wet_bulb_collection_scheduler_executor_name()}, "
+                f"executor_bound={container.is_wet_bulb_collection_scheduler_executor_bound()}"
+            )
+            container.add_system_log(
+                "[访问控制] 已启用局域网页面隔离：仅对外开放 /handover/review/*、/api/handover/review/* 与 /assets/*"
+            )
+            if role_mode != "internal":
+                _initialize_handover_daily_report_auth(container)
+                schedule_handover_review_access_startup_probe(container)
+            app.state.runtime_services_activated = True
+            app.state.runtime_activation_phase = "activated"
+            app.state.runtime_activation_error = ""
+            app.state.startup_role_confirmed = True
+            return {
+                "ok": True,
+                "activated": True,
+                "already_active": False,
+                "role_mode": role_mode,
+                **(result if isinstance(result, dict) else {}),
+            }
+        except Exception as exc:  # noqa: BLE001
+            app.state.runtime_activation_phase = "failed"
+            app.state.runtime_activation_error = str(exc)
+            app.state.startup_role_confirmed = False
+            return {
+                "ok": False,
+                "activated": False,
+                "already_active": False,
+                "role_mode": role_mode,
+                "error": str(exc),
+            }
+
+    def _resolve_bridge_runtime():
+        bridge_snapshot = container.shared_bridge_snapshot() if hasattr(container, "shared_bridge_snapshot") else {}
+        bridge_enabled = isinstance(bridge_snapshot, dict) and bool(bridge_snapshot.get("enabled", False))
+        bridge_root = str(bridge_snapshot.get("root_dir", "") or "").strip() if isinstance(bridge_snapshot, dict) else ""
+        bridge_service = getattr(container, "shared_bridge_service", None)
+        if not bridge_enabled or not bridge_root:
+            return None, "shared_bridge_disabled"
+        if bridge_service is None:
+            return None, "shared_bridge_service_unavailable"
+        return bridge_service, ""
+
+    def _bridge_runtime_error_text(error_code: str) -> str:
+        text = str(error_code or "").strip().lower()
+        if text == "shared_bridge_disabled":
+            return "共享桥接未启用或共享目录未配置"
+        if text == "shared_bridge_service_unavailable":
+            return "共享桥接服务不可用"
+        return str(error_code or "").strip() or "-"
+
+    def _current_hour_bucket() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H")
+
+    @app.post("/api/runtime/activate-startup", response_model=None)
+    async def activate_startup_runtime(request: Request) -> JSONResponse:
+        payload: Dict[str, Any] = {}
+        try:
+            incoming = await request.json()
+            if isinstance(incoming, dict):
+                payload = incoming
+        except Exception:
+            payload = {}
+
+        source = str(payload.get("source", "") or "").strip() or "启动角色确认"
+        try:
+            return JSONResponse(content=_activate_runtime_services(source=source))
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                content={
+                    "ok": False,
+                    "activated": False,
+                    "error": str(exc),
+                    "role_mode": _deployment_role_mode(),
+                }
+            )
+
+    def _format_bucket_age_hours_text(value: Any) -> str:
+        try:
+            age_hours = float(value)
+        except (TypeError, ValueError):
+            return ""
+        if age_hours <= 0:
+            return "0 小时"
+        rounded = round(age_hours, 1)
+        if rounded.is_integer():
+            return f"{int(rounded)} 小时"
+        return f"{rounded:.1f} 小时"
+
+    def _source_cache_wait_text(feature_name: str) -> str:
+        return f"等待最新共享文件更新：{feature_name}源文件尚未登记或尚未完成下载"
+
+    def _build_latest_cache_wait_text(feature_name: str, selection: Dict[str, Any]) -> str:
+        best_bucket_key = str(selection.get("best_bucket_key", "") or "").strip() if isinstance(selection, dict) else ""
+        best_bucket_age_hours = selection.get("best_bucket_age_hours") if isinstance(selection, dict) else None
+        is_best_bucket_too_old = bool(selection.get("is_best_bucket_too_old", False)) if isinstance(selection, dict) else False
+        missing_buildings = [
+            str(item or "").strip()
+            for item in (selection.get("missing_buildings", []) if isinstance(selection, dict) else [])
+            if str(item or "").strip()
+        ]
+        stale_buildings = [
+            str(item or "").strip()
+            for item in (selection.get("stale_buildings", []) if isinstance(selection, dict) else [])
+            if str(item or "").strip()
+        ]
+        if is_best_bucket_too_old:
+            age_text = _format_bucket_age_hours_text(best_bucket_age_hours)
+            bucket_text = best_bucket_key or "未知时间桶"
+            if age_text:
+                return f"等待最新共享文件更新：{feature_name}源文件当前最新时间桶 {bucket_text} 距现在约 {age_text}，已超过 3 小时。"
+            return f"等待最新共享文件更新：{feature_name}源文件当前最新时间桶 {bucket_text} 已超过 3 小时。"
+        if stale_buildings:
+            return (
+                f"等待过旧楼栋共享文件更新：{feature_name}源文件已有回退版本，但以下楼栋较最新时间桶落后超过 3 桶："
+                + " / ".join(stale_buildings)
+            )
+        if missing_buildings:
+            return (
+                f"等待缺失楼栋共享文件补齐：{feature_name}源文件尚未登记或文件不可访问，缺失楼栋："
+                + " / ".join(missing_buildings)
+            )
+        return _source_cache_wait_text(feature_name)
+
+    def _start_external_cache_job(*, name: str, feature: str, resource_key: str, run_func):
+        return container.job_service.start_job(
+            name=name,
+            run_func=run_func,
+            resource_keys=[resource_key],
+            priority="scheduler",
+            feature=feature,
+            submitted_by="scheduler",
+        )
+
+    def scheduler_callback(source: str) -> tuple[bool, str]:
+        from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
+        from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
+        from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
+
+        runtime_config = container.runtime_config
+        notify = WebhookNotifyService(runtime_config)
+        role_mode = _deployment_role_mode()
+
+        if role_mode == "internal":
+            container.add_system_log("[调度] 当前为内网端，自动流程调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+
+        if role_mode == "external":
+            bridge_service, bridge_error = _resolve_bridge_runtime()
+            if bridge_service is None:
+                detail = f"共享桥接未就绪，外网端无法执行自动流程调度：{_bridge_runtime_error_text(bridge_error)}"
+                container.add_system_log(f"[调度] {detail}")
+                return False, detail
+            try:
+                target_buildings = bridge_service.get_source_cache_buildings()
+                selection = bridge_service.get_latest_source_cache_selection(
+                    source_family="monthly_report_family",
+                    buildings=target_buildings,
+                )
+                cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
+                if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                    detail = _build_latest_cache_wait_text("月报", selection if isinstance(selection, dict) else {})
+                    container.add_system_log(f"[调度] {detail}")
+                    return False, detail
+
+                def _run_from_cache(emit_log):
+                    file_items = [
+                        {
+                            "building": str(item.get("building", "") or "").strip(),
+                            "file_path": str(item.get("file_path", "") or "").strip(),
+                            "upload_date": str(
+                                item.get("metadata", {}).get("upload_date", "")
+                                or item.get("duty_date", "")
+                                or _current_hour_bucket()[:10]
+                            ).strip(),
+                        }
+                        for item in cached_entries
+                    ]
+                    return run_monthly_from_file_items(
+                        runtime_config,
+                        file_items=file_items,
+                        emit_log=emit_log,
+                        source_label="月报共享文件",
+                    )
+
+                job = _start_external_cache_job(
+                    name="自动流程调度-月报共享文件",
+                    feature="monthly_cache_latest",
+                    resource_key="shared_bridge:monthly_report",
+                    run_func=_run_from_cache,
+                )
+                detail = f"已提交月报共享文件继续处理任务 job_id={job.job_id}"
+                container.add_system_log(f"[调度] {detail}")
+                return True, detail
+            except Exception as exc:  # noqa: BLE001
+                notify.send_failure(stage=source, detail=str(exc), emit_log=container.add_system_log)
+                return False, str(exc)
+
+        orchestrator = OrchestratorService(runtime_config)
+
+        def _run(emit_log):
+            try:
+                auto_result = orchestrator.run_auto_once(emit_log, source=source)
+                return {
+                    "auto_result": auto_result,
+                }
+            except Exception as exc:  # noqa: BLE001
+                notify.send_failure(stage=source, detail=str(exc), emit_log=emit_log)
+                raise
+
+        try:
+            job = container.job_service.start_job(
+                name=source,
+                run_func=_run,
+                resource_keys=["network:pipeline"],
+                priority="scheduler",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        done = container.job_service.wait_job(job.job_id)
+        if done.status == "success":
+            return True, "ok"
+        return False, done.error or done.summary or "任务失败"
+
+    def handover_scheduler_callback(slot: str, source: str) -> tuple[bool, str]:
+        from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
+        from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
+
+        runtime_config = container.runtime_config
+        notify = WebhookNotifyService(runtime_config)
+        role_mode = _deployment_role_mode()
+
+        now = datetime.now()
+        if slot == "morning":
+            duty_date = (now.date() - timedelta(days=1)).strftime("%Y-%m-%d")
+            duty_shift = "night"
+            slot_name = "上午"
+        elif slot == "afternoon":
+            duty_date = now.date().strftime("%Y-%m-%d")
+            duty_shift = "day"
+            slot_name = "下午"
+        else:
+            return False, f"未知交接班调度时段: {slot}"
+
+        job_name = f"{source}-交接班定时（{slot_name}）"
+
+        if role_mode == "internal":
+            container.add_system_log("[交接班调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+
+        if role_mode == "external":
+            bridge_service, bridge_error = _resolve_bridge_runtime()
+            if bridge_service is None:
+                detail = f"共享桥接未就绪，外网端无法执行交接班调度：{_bridge_runtime_error_text(bridge_error)}"
+                container.add_system_log(f"[交接班调度] {detail}")
+                return False, detail
+            try:
+                target_buildings = bridge_service.get_source_cache_buildings()
+                selection = bridge_service.get_latest_source_cache_selection(
+                    source_family="handover_log_family",
+                    buildings=target_buildings,
+                )
+                cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
+                if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                    detail = _build_latest_cache_wait_text("交接班", selection if isinstance(selection, dict) else {})
+                    container.add_system_log(f"[交接班调度] {detail}")
+                    return False, detail
+
+                def _run_from_cache(emit_log):
+                    orchestrator = OrchestratorService(runtime_config)
+                    building_files = [
+                        (
+                            str(item.get("building", "") or "").strip(),
+                            str(item.get("file_path", "") or "").strip(),
+                        )
+                        for item in cached_entries
+                    ]
+                    return orchestrator.run_handover_from_files(
+                        building_files=building_files,
+                        end_time=None,
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        emit_log=emit_log,
+                    )
+
+                job = _start_external_cache_job(
+                    name=f"{job_name}-共享文件",
+                    feature="handover_cache_latest",
+                    resource_key="shared_bridge:handover",
+                    run_func=_run_from_cache,
+                )
+                detail = (
+                    "已提交交接班共享文件继续处理任务 "
+                    f"job_id={job.job_id}, duty_date={duty_date}, duty_shift={duty_shift}"
+                )
+                container.add_system_log(f"[交接班调度] {detail}")
+                return True, detail
+            except Exception as exc:  # noqa: BLE001
+                notify.send_failure(stage=f"{source}-交接班日志", detail=str(exc), emit_log=container.add_system_log)
+                return False, str(exc)
+
+        orchestrator = OrchestratorService(runtime_config)
+
+        def _run(emit_log):
+            try:
+                result = orchestrator.run_handover_from_download(
+                    buildings=None,
+                    end_time=None,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    emit_log=emit_log,
+                )
+                failure_summary = orchestrator.build_handover_download_failure_summary(result)
+                if failure_summary:
+                    emit_log(
+                        "[交接班调度] 失败汇总告警: "
+                        f"buildings={str(failure_summary.get('building', '') or '-').strip() or '-'}, "
+                        f"detail={str(failure_summary.get('detail', '') or '-').strip() or '-'}"
+                    )
+                    notify.send_failure(
+                        stage=f"{source}-交接班日志",
+                        detail=str(failure_summary.get('detail', '') or '').strip() or "交接班内网下载存在失败楼栋",
+                        building=str(failure_summary.get('building', '') or '').strip() or None,
+                        emit_log=emit_log,
+                    )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                notify.send_failure(stage=f"{source}-交接班日志", detail=str(exc), emit_log=emit_log)
+                raise
+
+        try:
+            job = container.job_service.start_job(
+                name=job_name,
+                run_func=_run,
+                resource_keys=["network:pipeline"],
+                priority="scheduler",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        done = container.job_service.wait_job(job.job_id)
+        if done.status == "success":
+            return True, "ok"
+        return False, done.error or done.summary or "任务失败"
+
+    def wet_bulb_collection_scheduler_callback(source: str) -> tuple[bool, str]:
+        from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
+        from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
+        from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
+
+        runtime_config = container.runtime_config
+        role_mode = _deployment_role_mode()
+
+        if role_mode == "internal":
+            container.add_system_log("[湿球温度定时采集调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+
+        if role_mode == "external":
+            bridge_service, bridge_error = _resolve_bridge_runtime()
+            if bridge_service is None:
+                detail = f"共享桥接未就绪，外网端无法执行湿球温度调度：{_bridge_runtime_error_text(bridge_error)}"
+                container.add_system_log(f"[湿球温度定时采集调度] {detail}")
+                container.record_wet_bulb_collection_external_run(
+                    status="failed",
+                    source="scheduler",
+                    detail=detail,
+                    duration_ms=0,
+                )
+                return False, detail
+            try:
+                target_buildings = bridge_service.get_source_cache_buildings()
+                selection = bridge_service.get_latest_source_cache_selection(
+                    source_family="handover_log_family",
+                    buildings=target_buildings,
+                )
+                cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
+                if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                    detail = _build_latest_cache_wait_text("湿球温度", selection if isinstance(selection, dict) else {})
+                    container.add_system_log(f"[湿球温度定时采集调度] {detail}")
+                    container.record_wet_bulb_collection_external_run(
+                        status="failed",
+                        source="scheduler",
+                        detail=detail,
+                        duration_ms=0,
+                    )
+                    return False, detail
+
+                def _run_from_cache(emit_log):
+                    service = WetBulbCollectionService(runtime_config)
+                    source_units = [
+                        {
+                            "building": str(item.get("building", "") or "").strip(),
+                            "file_path": str(item.get("file_path", "") or "").strip(),
+                        }
+                        for item in cached_entries
+                    ]
+                    return service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
+
+                job = _start_external_cache_job(
+                    name="湿球温度定时采集-共享文件",
+                    feature="wet_bulb_cache_latest",
+                    resource_key="shared_bridge:wet_bulb",
+                    run_func=_run_from_cache,
+                )
+                detail = f"已提交湿球温度共享文件继续处理任务 job_id={job.job_id}"
+                container.add_system_log(f"[湿球温度定时采集调度] {detail}")
+                container.record_wet_bulb_collection_external_run(
+                    status="success",
+                    source="scheduler",
+                    detail=detail,
+                    duration_ms=0,
+                )
+                return True, detail
+            except Exception as exc:  # noqa: BLE001
+                error_text = str(exc)
+                container.add_system_log(f"[湿球温度定时采集调度] 共享文件继续处理任务提交失败：{error_text}")
+                container.record_wet_bulb_collection_external_run(
+                    status="failed",
+                    source="scheduler",
+                    detail=error_text,
+                    duration_ms=0,
+                )
+                return False, error_text
+
+        orchestrator = OrchestratorService(runtime_config)
+        notify = WebhookNotifyService(runtime_config)
+
+        def _run(emit_log):
+            started_at = datetime.now()
+            try:
+                result = orchestrator.run_wet_bulb_collection(emit_log, source=source)
+                duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+                container.record_wet_bulb_collection_external_run(
+                    status=str(result.get("status", "ok")),
+                    source="scheduler",
+                    detail=str(result.get("summary", "") or ""),
+                    duration_ms=duration_ms,
+                )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+                container.record_wet_bulb_collection_external_run(
+                    status="failed",
+                    source="scheduler",
+                    detail=str(exc),
+                    duration_ms=duration_ms,
+                )
+                notify.send_failure(stage=source, detail=str(exc), emit_log=emit_log)
+                raise
+
+        try:
+            job = container.job_service.start_job(
+                name=source,
+                run_func=_run,
+                resource_keys=["network:pipeline"],
+                priority="scheduler",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        done = container.job_service.wait_job(job.job_id)
+        if done.status == "success":
+            return True, "ok"
+        return False, done.error or done.summary or "任务失败"
+
+    def updater_restart_callback(context: dict) -> tuple[bool, str]:
+        try:
+            restart_exit_code = str(os.environ.get("QJPT_RESTART_EXIT_CODE", "") or "").strip()
+            if restart_exit_code:
+                try:
+                    exit_code = int(restart_exit_code)
+                except Exception as exc:  # noqa: BLE001
+                    return False, f"无效的重启退出码: {exc}"
+
+                container.add_system_log("[更新] 已安排在当前窗口内重启")
+
+                def _exit_later() -> None:
+                    time.sleep(1)
+                    os._exit(exit_code)
+
+                threading.Thread(target=_exit_later, daemon=True, name="updater-restart").start()
+                return True, "same_console_restart_scheduled"
+
+            app_dir = get_app_dir()
+            launcher_bat = app_dir / "启动程序.bat"
+            if sys.platform.startswith("win") and launcher_bat.exists():
+                cmd = ["cmd.exe", "/c", str(launcher_bat)]
+                popen_kwargs = {"cwd": str(app_dir)}
+            elif getattr(sys, "frozen", False):
+                cmd = [sys.executable]
+                popen_kwargs = {"cwd": str(app_dir)}
+            else:
+                cmd = [sys.executable, str(app_dir / "main.py")]
+                popen_kwargs = {"cwd": str(app_dir)}
+
+            child_env = dict(os.environ)
+            child_env["QJPT_DISABLE_BROWSER_AUTO_OPEN"] = "1"
+            popen_kwargs["env"] = child_env
+
+            subprocess.Popen(cmd, **popen_kwargs)
+            container.add_system_log(f"[更新] 已安排当前控制台重启: {' '.join(cmd)}")
+
+            def _exit_later() -> None:
+                time.sleep(1)
+                os._exit(0)
+
+            threading.Thread(target=_exit_later, daemon=True, name="updater-restart").start()
+            return True, "restart_scheduled"
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+    container.set_scheduler_callback(scheduler_callback)
+    container.set_handover_scheduler_callback(handover_scheduler_callback)
+    container.set_wet_bulb_collection_scheduler_callback(wet_bulb_collection_scheduler_callback)
+    container.set_updater_restart_callback(updater_restart_callback)
+    @app.get("/", response_class=HTMLResponse)
+    @app.get("/index.html", response_class=HTMLResponse)
+    def index() -> Response:
+        if str(container.frontend_mode or "").strip().lower() == "source":
+            return HTMLResponse(
+                render_frontend_index_html(
+                    container.frontend_root,
+                    frontend_mode=container.frontend_mode,
+                    asset_base_path=app.state.source_frontend_asset_prefix,
+                ),
+                headers=source_frontend_no_cache_headers(container.frontend_mode),
+            )
+        return FileResponse(
+            container.frontend_root / "index.html",
+            headers=source_frontend_no_cache_headers(container.frontend_mode),
+        )
+
+    @app.get("/favicon.ico")
+    def favicon() -> Response:
+        candidates = [
+            container.frontend_root / "favicon.ico",
+            container.frontend_assets_dir / "favicon.ico",
+        ]
+        for path in candidates:
+            if path.exists():
+                return FileResponse(path)
+        return Response(status_code=204)
+
+    if container.frontend_assets_dir.exists():
+        @app.get("/assets-src/{asset_version}/{asset_path:path}")
+        def source_frontend_asset(asset_version: str, asset_path: str) -> Response:
+            if str(container.frontend_mode or "").strip().lower() != "source":
+                return Response(status_code=404)
+            if str(asset_version or "").strip() != str(app.state.source_frontend_asset_version or "").strip():
+                return Response(status_code=404)
+            path = resolve_source_frontend_asset_path(container.frontend_assets_dir, asset_path)
+            if path is None:
+                return Response(status_code=404)
+            return FileResponse(
+                path,
+                headers=source_frontend_no_cache_headers(container.frontend_mode),
+            )
+
+        app.mount(
+            "/assets",
+            _SourceNoCacheStaticFiles(
+                directory=container.frontend_assets_dir,
+                frontend_mode=container.frontend_mode,
+            ),
+            name="assets",
+        )
+
+    role_mode = _deployment_role_mode()
+
+    _register_common_routes(app)
+
+    if role_mode == "external":
+        _register_external_role_routes(app)
+
+    return app
+
+
+

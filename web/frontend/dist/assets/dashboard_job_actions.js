@@ -1,0 +1,667 @@
+﻿import {
+  cancelJobApi,
+  getJobApi,
+  postHandoverFromFilesJob,
+  postManualUploadJob,
+  postSheetImportJob,
+  retryJobApi,
+  startJsonJobApi,
+  submitDayMetricFromDownloadJob,
+  submitDayMetricFromFileJob,
+  submitHandoverFollowupContinueJob,
+  submitDayMetricRetryFailedJob,
+  submitDayMetricRetryUnitJob,
+} from "./api_client.js";
+import { parseDateText } from "./config_helpers.js";
+
+const ACTION_KEYS = {
+  autoOnce: "job:auto_once",
+  multiDate: "job:multi_date",
+  manualUpload: "job:manual_upload",
+  sheetImport: "job:sheet_import",
+  handoverFromFile: "job:handover_from_file",
+  handoverFromDownload: "job:handover_from_download",
+  dayMetricFromDownload: "job:day_metric_from_download",
+  dayMetricFromFile: "job:day_metric_from_file",
+  dayMetricRetryUnit: "job:day_metric_retry_unit",
+  dayMetricRetryFailed: "job:day_metric_retry_failed",
+  handoverFollowupContinue: "job:handover_followup_continue",
+};
+
+export function createDashboardJobActions(ctx) {
+  const {
+    canRun,
+    message,
+    currentJob,
+    selectedJobId,
+    selectedBridgeTaskId,
+    bridgeTaskDetail,
+    config,
+    selectedDates,
+    manualBuilding,
+    manualFile,
+    manualUploadDate,
+    sheetFile,
+    handoverFilesByBuilding,
+    handoverConfiguredBuildings,
+    handoverDutyDate,
+    handoverDutyShift,
+    handoverDownloadScope,
+    handoverDutyAutoFollow,
+    dayMetricUploadScope,
+    dayMetricUploadBuilding,
+    dayMetricSelectedDates,
+    dayMetricLocalBuilding,
+    dayMetricLocalDate,
+    dayMetricLocalFile,
+    streamController,
+    fetchHealth,
+    fetchJobs,
+    fetchBridgeTasks,
+    fetchBridgeTaskDetail,
+    syncHandoverDutyFromNow,
+    runSingleFlight,
+    scheduleExternalLatestRetry,
+    clearExternalLatestRetry,
+  } = ctx;
+
+  function isInternalRole() {
+    return String(config?.value?.deployment?.role_mode || "").trim().toLowerCase() === "internal";
+  }
+
+  async function guardedRun(actionKey, taskFn, options = {}) {
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(actionKey, taskFn, options);
+    }
+    return taskFn();
+  }
+
+  function isRetryableLatestWaitError(err) {
+    const status = Number.parseInt(String(err?.httpStatus || 0), 10) || 0;
+    const text = String(err?.responseText || err?.message || err || "").trim();
+    return status === 409 && (
+      text.includes("等待共享文件就绪")
+      || text.includes("等待最新共享文件更新")
+      || text.includes("等待缺失楼栋共享文件补齐")
+      || text.includes("等待过旧楼栋共享文件更新")
+    );
+  }
+
+  async function startJobByJson(url, body, title, actionKey, options = {}) {
+    const latestRetryKind = String(options?.latestRetryKind || "").trim();
+    const latestRetryFamilyKey = String(options?.latestRetryFamilyKey || "").trim();
+    const latestRetryPayload =
+      options?.latestRetryPayload && typeof options.latestRetryPayload === "object"
+        ? { ...options.latestRetryPayload }
+        : null;
+    if (isInternalRole()) {
+      message.value = "当前为内网端，本地管理页不提供该业务入口，请在外网端发起。";
+      return;
+    }
+    if (!canRun.value) return;
+    return guardedRun(
+      actionKey || `job:${url}`,
+      async () => {
+        try {
+          message.value = `${title} 已提交`;
+          const response = await startJsonJobApi(url, body || {});
+          if (latestRetryKind && typeof clearExternalLatestRetry === "function") {
+            clearExternalLatestRetry(latestRetryKind);
+          }
+          await applyAcceptedExecutionResponse(response, title);
+        } catch (err) {
+          if (latestRetryKind && isRetryableLatestWaitError(err)) {
+            if (typeof scheduleExternalLatestRetry === "function") {
+              scheduleExternalLatestRetry(
+                latestRetryKind,
+                String(err?.responseText || err?.message || err || "").trim(),
+                {
+                  familyKey: latestRetryFamilyKey,
+                  payload: latestRetryPayload,
+                },
+              );
+            }
+            message.value = `${title} 暂未启动：${String(err?.responseText || err?.message || err || "").trim()}。共享文件满足条件后会自动重试。`;
+            return;
+          }
+          message.value = `${title} 提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  async function runAutoOnce() {
+    await startJobByJson("/api/jobs/auto-once", {}, "立即执行自动流程", ACTION_KEYS.autoOnce, {
+      latestRetryKind: "auto_once",
+      latestRetryFamilyKey: "monthly_report_family",
+    });
+  }
+
+  async function runMultiDate() {
+    if (!selectedDates.value.length) {
+      message.value = "请先选择至少一个日期";
+      return;
+    }
+    await startJobByJson(
+      "/api/jobs/multi-date",
+      { dates: selectedDates.value },
+      "多日期自动流程",
+      ACTION_KEYS.multiDate,
+    );
+  }
+
+  async function runManualUpload() {
+    if (!manualBuilding.value) {
+      message.value = "请选择楼栋";
+      return;
+    }
+    if (!manualFile.value) {
+      message.value = "请选择月报表格文件（xlsx）";
+      return;
+    }
+    const uploadDate = String(manualUploadDate.value || "").trim();
+    if (!parseDateText(uploadDate)) {
+      message.value = "上传日期格式错误，请使用 YYYY-MM-DD";
+      return;
+    }
+    if (!canRun.value) return;
+
+    const form = new FormData();
+    form.append("building", manualBuilding.value);
+    form.append("upload_date", uploadDate);
+    form.append("file", manualFile.value);
+
+    return guardedRun(
+      ACTION_KEYS.manualUpload,
+      async () => {
+        try {
+          const job = await postManualUploadJob(form);
+          currentJob.value = job;
+          if (selectedJobId) {
+            selectedJobId.value = String(job?.job_id || "").trim();
+          }
+          streamController.attachJobStream(job.job_id);
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+        } catch (err) {
+          message.value = `手动补传提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  async function runSheetImport() {
+    if (!sheetFile.value) {
+      message.value = "请选择表格文件";
+      return;
+    }
+    if (!canRun.value) return;
+
+    const form = new FormData();
+    form.append("file", sheetFile.value);
+
+    return guardedRun(
+      ACTION_KEYS.sheetImport,
+      async () => {
+        try {
+          const job = await postSheetImportJob(form);
+          currentJob.value = job;
+          if (selectedJobId) {
+            selectedJobId.value = String(job?.job_id || "").trim();
+          }
+          streamController.attachJobStream(job.job_id);
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+        } catch (err) {
+          message.value = `5Sheet 导表提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  async function fetchJob(jobId) {
+    try {
+      const data = await getJobApi(jobId);
+      currentJob.value = data;
+      if (selectedJobId) {
+        selectedJobId.value = String(data?.job_id || jobId || "").trim();
+      }
+      const status = String(data?.status || "").trim().toLowerCase();
+      if (status === "success") {
+        message.value = "任务执行成功";
+      } else if (status === "failed") {
+        message.value = `任务失败: ${data.error || data.summary}`;
+      } else if (status === "cancelled") {
+        message.value = "任务已取消";
+      } else if (status === "interrupted") {
+        message.value = `任务已中断: ${data.error || data.summary || "请重试"}`;
+      } else if (status === "partial_failed") {
+        message.value = `任务部分失败: ${data.error || data.summary || "请查看日志"}`;
+      }
+    } catch (err) {
+      message.value = `任务状态读取失败: ${err}`;
+    }
+  }
+
+  function getJobCancelActionKey(jobId) {
+    return `job:cancel:${String(jobId || "").trim()}`;
+  }
+
+  function getJobRetryActionKey(jobId) {
+    return `job:retry:${String(jobId || "").trim()}`;
+  }
+
+  async function cancelCurrentJob() {
+    const jobId = String(currentJob.value?.job_id || selectedJobId?.value || "").trim();
+    if (!jobId) {
+      message.value = "当前没有可取消的任务";
+      return;
+    }
+    return guardedRun(
+      getJobCancelActionKey(jobId),
+      async () => {
+        try {
+          await cancelJobApi(jobId);
+          await fetchJob(jobId);
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+          if (typeof fetchHealth === "function") {
+            await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+          }
+          message.value = "任务取消请求已提交";
+        } catch (err) {
+          message.value = `任务取消失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  async function applyAcceptedExecutionResponse(response, title) {
+    const wrappedJob =
+      response
+      && typeof response === "object"
+      && response.accepted
+      && response.job
+      && typeof response.job === "object"
+        ? response.job
+        : response;
+    const isBridgeJob = String(wrappedJob?.kind || "").trim().toLowerCase() === "bridge";
+    const bridgeTaskId = String(response?.bridge_task?.task_id || "").trim();
+    if (isBridgeJob) {
+      currentJob.value = null;
+      if (selectedJobId) {
+        selectedJobId.value = "";
+      }
+      if (selectedBridgeTaskId) {
+        selectedBridgeTaskId.value = bridgeTaskId;
+      }
+      if (bridgeTaskDetail) {
+        bridgeTaskDetail.value = response?.bridge_task && typeof response.bridge_task === "object" ? { ...response.bridge_task } : null;
+      }
+      if (typeof fetchBridgeTasks === "function") {
+        await fetchBridgeTasks({ silentMessage: true });
+      }
+      if (bridgeTaskId && typeof fetchBridgeTaskDetail === "function") {
+        await fetchBridgeTaskDetail(bridgeTaskId, { silentMessage: true });
+      }
+      message.value = bridgeTaskId
+        ? `${title} 已提交到共享桥接，任务号 ${bridgeTaskId}`
+        : `${title} 已提交到共享桥接`;
+      return;
+    }
+
+    const job = wrappedJob;
+    currentJob.value = job;
+    if (selectedJobId) {
+      selectedJobId.value = String(job?.job_id || "").trim();
+    }
+    if (job?.job_id) {
+      streamController.attachJobStream(job.job_id);
+    }
+    if (typeof fetchJobs === "function") {
+      await fetchJobs({ silentMessage: true });
+    }
+  }
+
+  async function retryCurrentJob() {
+    const jobId = String(currentJob.value?.job_id || selectedJobId?.value || "").trim();
+    if (!jobId) {
+      message.value = "当前没有可重试的任务";
+      return;
+    }
+    return guardedRun(
+      getJobRetryActionKey(jobId),
+      async () => {
+        try {
+          message.value = "任务重试已提交";
+          const job = await retryJobApi(jobId);
+          currentJob.value = job;
+          if (selectedJobId) {
+            selectedJobId.value = String(job?.job_id || "").trim();
+          }
+          streamController.attachJobStream(job.job_id);
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+        } catch (err) {
+          message.value = `任务重试失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  async function runHandoverFromFile() {
+    const selectedEntries = (handoverConfiguredBuildings.value || [])
+      .map((building) => [building, handoverFilesByBuilding[building]])
+      .filter(([building, file]) => String(building || "").trim() && file);
+    if (!selectedEntries.length) {
+      message.value = "请先为至少一个楼选择已有数据表文件";
+      return;
+    }
+    if (!canRun.value) return;
+    if (handoverDutyAutoFollow.value) {
+      syncHandoverDutyFromNow(true);
+    }
+
+    const dutyDate = String(handoverDutyDate.value || "").trim();
+    const dutyShift = String(handoverDutyShift.value || "").trim().toLowerCase();
+    if (!parseDateText(dutyDate)) {
+      message.value = "交接班日期格式错误，请使用 YYYY-MM-DD";
+      return;
+    }
+    if (!["day", "night"].includes(dutyShift)) {
+      message.value = "班次仅支持白班/夜班";
+      return;
+    }
+
+    const form = new FormData();
+    form.append("duty_date", dutyDate);
+    form.append("duty_shift", dutyShift);
+    for (const [building, file] of selectedEntries) {
+      form.append("buildings", String(building || "").trim());
+      form.append("files", file);
+    }
+
+    return guardedRun(
+      ACTION_KEYS.handoverFromFile,
+      async () => {
+        try {
+          const job = await postHandoverFromFilesJob(form);
+          currentJob.value = job;
+          if (selectedJobId) {
+            selectedJobId.value = String(job?.job_id || "").trim();
+          }
+          streamController.attachJobStream(job.job_id);
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+        } catch (err) {
+          message.value = `交接班任务提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  async function runHandoverFromDownload(overridePayload = null) {
+    if (!canRun.value) return;
+    if (handoverDutyAutoFollow.value && !overridePayload) {
+      syncHandoverDutyFromNow(true);
+    }
+
+    const scope = String(handoverDownloadScope.value || "single").trim();
+    const usingLatestMode = !overridePayload && Boolean(handoverDutyAutoFollow.value);
+    const payload =
+      overridePayload && typeof overridePayload === "object"
+        ? { ...overridePayload }
+        : {};
+    if (!Array.isArray(payload.buildings) || !payload.buildings.length) {
+      if (scope === "single") {
+        if (!manualBuilding.value) {
+          message.value = "请选择楼栋";
+          return;
+        }
+        payload.buildings = [manualBuilding.value];
+      }
+    }
+    if (!usingLatestMode) {
+      const dutyDate = String(handoverDutyDate.value || "").trim();
+      const dutyShift = String(handoverDutyShift.value || "").trim().toLowerCase();
+      if (!parseDateText(dutyDate)) {
+        message.value = "交接班日期格式错误，请使用 YYYY-MM-DD";
+        return;
+      }
+      if (!["day", "night"].includes(dutyShift)) {
+        message.value = "班次仅支持白班/夜班";
+        return;
+      }
+      payload.duty_date = dutyDate;
+      payload.duty_shift = dutyShift;
+    }
+    await startJobByJson(
+      "/api/jobs/handover/from-download",
+      payload,
+      "交接班日志使用共享文件生成",
+      ACTION_KEYS.handoverFromDownload,
+      usingLatestMode
+        ? {
+            latestRetryKind: "handover_latest",
+            latestRetryFamilyKey: "handover_log_family",
+            latestRetryPayload: payload,
+          }
+        : {},
+    );
+  }
+
+  async function runDayMetricFromDownload() {
+    const dates = Array.isArray(dayMetricSelectedDates.value)
+      ? dayMetricSelectedDates.value.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    if (!dates.length) {
+      message.value = "请先选择至少一个日期";
+      return;
+    }
+    const buildingScope = String(dayMetricUploadScope.value || "single").trim();
+    if (!["single", "all_enabled"].includes(buildingScope)) {
+      message.value = "楼栋范围仅支持单楼或全部启用楼栋";
+      return;
+    }
+
+    const payload = {
+      dates,
+      building_scope: buildingScope,
+    };
+    if (buildingScope === "single") {
+      const building = String(dayMetricUploadBuilding.value || "").trim();
+      if (!building) {
+        message.value = "请选择楼栋";
+        return;
+      }
+      payload.building = building;
+    }
+
+    if (!canRun.value) return;
+    return guardedRun(
+      ACTION_KEYS.dayMetricFromDownload,
+      async () => {
+        try {
+          message.value = "12项使用共享文件上传任务已提交";
+          const response = await submitDayMetricFromDownloadJob(payload);
+          await applyAcceptedExecutionResponse(response, "12项独立上传");
+        } catch (err) {
+          message.value = `12项使用共享文件上传提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  async function runDayMetricFromFile() {
+    const building = String(dayMetricLocalBuilding.value || "").trim();
+    const dutyDate = String(dayMetricLocalDate.value || "").trim();
+    if (!building) {
+      message.value = "请选择补录楼栋";
+      return;
+    }
+    if (!parseDateText(dutyDate)) {
+      message.value = "补录日期格式错误，请使用 YYYY-MM-DD";
+      return;
+    }
+    if (!dayMetricLocalFile.value) {
+      message.value = "请选择补录 Excel 文件";
+      return;
+    }
+    if (!canRun.value) return;
+
+    const form = new FormData();
+    form.append("building", building);
+    form.append("duty_date", dutyDate);
+    form.append("file", dayMetricLocalFile.value);
+
+    return guardedRun(
+      ACTION_KEYS.dayMetricFromFile,
+      async () => {
+        try {
+          message.value = "12项补录任务已提交";
+          const job = await submitDayMetricFromFileJob(form);
+          currentJob.value = job;
+          if (selectedJobId) {
+            selectedJobId.value = String(job?.job_id || "").trim();
+          }
+          streamController.attachJobStream(job.job_id);
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+        } catch (err) {
+          message.value = `12项补录提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  async function retryDayMetricUnit(row) {
+    const item = row && typeof row === "object" ? row : {};
+    const dutyDate = String(item.duty_date || "").trim();
+    const building = String(item.building || "").trim();
+    const mode = String(item.mode || "from_download").trim().toLowerCase();
+    if (!dutyDate || !building) {
+      message.value = "失败单元缺少日期或楼栋，无法重试";
+      return;
+    }
+    if (item.retryable === false) {
+      message.value = String(item.retry_hint || item.error || "当前失败单元暂不支持重试").trim();
+      return;
+    }
+    if (!canRun.value) return;
+    const payload = {
+      mode,
+      duty_date: dutyDate,
+      building,
+      stage: String(item.stage_key || "").trim().toLowerCase(),
+      source_file: String(item.source_file || "").trim(),
+    };
+    return guardedRun(
+      `${ACTION_KEYS.dayMetricRetryUnit}:${mode}:${dutyDate}:${building}`,
+      async () => {
+        try {
+          message.value = `12项失败单元重试已提交：${dutyDate} / ${building}`;
+          const job = await submitDayMetricRetryUnitJob(payload);
+          currentJob.value = job;
+          if (selectedJobId) {
+            selectedJobId.value = String(job?.job_id || "").trim();
+          }
+          streamController.attachJobStream(job.job_id);
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+        } catch (err) {
+          message.value = `12项失败单元重试提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  async function retryFailedDayMetricUnits(mode = "from_download") {
+    const normalizedMode = String(mode || "from_download").trim().toLowerCase() || "from_download";
+    if (!canRun.value) return;
+    return guardedRun(
+      `${ACTION_KEYS.dayMetricRetryFailed}:${normalizedMode}`,
+      async () => {
+        try {
+          message.value = "12项失败单元批量重试已提交";
+          const job = await submitDayMetricRetryFailedJob({ mode: normalizedMode });
+          currentJob.value = job;
+          if (selectedJobId) {
+            selectedJobId.value = String(job?.job_id || "").trim();
+          }
+          streamController.attachJobStream(job.job_id);
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+        } catch (err) {
+          message.value = `12项失败单元批量重试提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  async function continueHandoverFollowupUpload(batchKey) {
+    const targetBatchKey = String(batchKey || "").trim();
+    if (!targetBatchKey) {
+      message.value = "当前没有可继续执行的交接班批次";
+      return;
+    }
+    if (!canRun.value) return;
+    return guardedRun(
+      ACTION_KEYS.handoverFollowupContinue,
+      async () => {
+        try {
+          message.value = "继续后续上传任务已提交";
+          const job = await submitHandoverFollowupContinueJob({ batch_key: targetBatchKey });
+          currentJob.value = job;
+          if (selectedJobId) {
+            selectedJobId.value = String(job?.job_id || "").trim();
+          }
+          streamController.attachJobStream(job.job_id);
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+        } catch (err) {
+          message.value = `继续后续上传提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  return {
+    startJobByJson,
+    runAutoOnce,
+    runMultiDate,
+    runManualUpload,
+    runSheetImport,
+    fetchJob,
+    runHandoverFromFile,
+    runHandoverFromDownload,
+    runDayMetricFromDownload,
+    runDayMetricFromFile,
+    retryDayMetricUnit,
+    retryFailedDayMetricUnits,
+    continueHandoverFollowupUpload,
+    cancelCurrentJob,
+    retryCurrentJob,
+    getJobCancelActionKey,
+    getJobRetryActionKey,
+  };
+}
