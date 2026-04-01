@@ -73,6 +73,53 @@ def test_monthly_internal_stage_moves_task_to_ready_for_external(monkeypatch) ->
     assert any(str(item.get('artifact_kind', '')).strip() == 'resume_state' for item in updated['artifacts'])
 
 
+def test_get_or_create_monthly_auto_once_task_reuses_same_bucket() -> None:
+    shared_root = _make_temp_dir('monthly-dedupe-')
+    service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(shared_root, 'external'),
+        app_version='test',
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    service.current_source_cache_bucket = lambda: '2026-03-31 21'  # type: ignore[method-assign]
+
+    first = service.get_or_create_monthly_auto_once_task(requested_by='manual', source='manual')
+    second = service.get_or_create_monthly_auto_once_task(requested_by='manual', source='manual')
+
+    assert first['task_id'] == second['task_id']
+
+
+def test_get_or_create_handover_cache_fill_task_reuses_same_request() -> None:
+    shared_root = _make_temp_dir('handover-cache-fill-dedupe-')
+    service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(shared_root, 'external'),
+        app_version='test',
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    first = service.get_or_create_handover_cache_fill_task(
+        continuation_kind='handover',
+        buildings=['A楼'],
+        duty_date='2026-03-30',
+        duty_shift='day',
+        selected_dates=None,
+        building_scope=None,
+        building=None,
+        requested_by='manual',
+    )
+    second = service.get_or_create_handover_cache_fill_task(
+        continuation_kind='handover',
+        buildings=['A楼'],
+        duty_date='2026-03-30',
+        duty_shift='day',
+        selected_dates=None,
+        building_scope=None,
+        building=None,
+        requested_by='manual',
+    )
+
+    assert first['task_id'] == second['task_id']
+
+
 
 def test_monthly_external_resume_stage_completes_success(monkeypatch) -> None:
     shared_root = _make_temp_dir('monthly-external-success-')

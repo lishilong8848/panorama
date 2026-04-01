@@ -164,6 +164,9 @@ def test_auto_once_route_starts_from_latest_cache_on_external_role() -> None:
     assert response["job_id"] == "job-1"
     assert request.app.state.container.job_service.worker_calls == []
     assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "monthly_cache_latest"
+    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("monthly_cache_latest:")
+    assert '"bucket_key":"2026-03-29 10"' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
+    assert '"buildings":["A楼","B楼"]' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
     assert request.app.state.container.shared_bridge_service.calls[:2] == [
         ("get_source_cache_buildings", {}),
         ("get_latest_source_cache_selection", {"source_family": "monthly_report_family", "buildings": ["A楼", "B楼"]}),
@@ -353,6 +356,19 @@ def test_multi_date_route_creates_cache_fill_task_when_missing() -> None:
     assert response["bridge_task"]["task_id"] == "bridge-monthly-cache-fill-1"
     assert response["job"]["kind"] == "bridge"
     assert ("create_monthly_cache_fill_task", {"selected_dates": ["2026-03-20", "2026-03-21"], "requested_by": "manual"}) in request.app.state.container.shared_bridge_service.calls
+
+
+def test_multi_date_route_starts_from_shared_cache_when_ready() -> None:
+    request = _fake_request(role_mode="external", bridge_enabled=True)
+    request.app.state.container.shared_bridge_service.by_date_ready = True
+
+    response = routes.job_multi_date({"dates": ["2026-03-20", "2026-03-21"]}, request)
+
+    assert response["job_id"] == "job-1"
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "monthly_cache_by_date"
+    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("monthly_cache_by_date:")
+    assert '"selected_dates":["2026-03-20","2026-03-21"]' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
+    assert '"buildings":["A楼","B楼"]' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
 
 
 def test_resume_routes_use_bridge_on_external_role() -> None:

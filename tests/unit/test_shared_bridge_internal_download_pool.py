@@ -165,7 +165,7 @@ def test_run_building_job_reestablishes_login_after_page_rebuild() -> None:
 
 
 
-def test_run_building_job_failure_recovers_page_and_login_state() -> None:
+def test_run_building_job_failure_marks_current_building_failed_without_relogin() -> None:
     pool = InternalDownloadBrowserPool(runtime_config={})
     pool._locks = {'A楼': asyncio.Lock()}
     first_page = object()
@@ -189,7 +189,7 @@ def test_run_building_job_failure_recovers_page_and_login_state() -> None:
     with pytest.raises(RuntimeError, match='下载失败'):
         asyncio.run(pool._run_building_job('A楼', _runner))
 
-    assert login_calls == [('A楼', first_page), ('A楼', rebuilt_page)]
+    assert login_calls == [('A楼', first_page)]
     slot = _find_slot(pool.get_health_snapshot(), 'A楼')
     assert slot['last_result'] == 'failed'
     assert slot['last_error'] == '下载失败'
@@ -300,3 +300,106 @@ def test_ensure_logged_in_without_site_clears_stale_error_state() -> None:
     assert slot['login_state'] == 'waiting'
     assert slot['login_error'] == ''
     assert slot['last_error'] == ''
+
+
+def test_run_building_job_fails_fast_when_login_state_failed() -> None:
+    pool = InternalDownloadBrowserPool(runtime_config={})
+    pool._locks = {'A楼': asyncio.Lock()}
+    page = object()
+    pool._update_slot(
+        'A楼',
+        login_state='failed',
+        login_error='页面无响应，请检查楼栋页面服务或网络',
+        last_error='页面无响应，请检查楼栋页面服务或网络',
+    )
+
+    async def _fake_ensure_page(_building: str):
+        return page
+
+    async def _fake_probe_existing_login_state(_page):  # noqa: ANN001
+        return 'login_required'
+
+    async def _fake_ensure_logged_in(_building: str, _page):  # noqa: ANN001
+        raise AssertionError('登录失败快断后不应再继续尝试登录')
+
+    async def _runner(_page):  # noqa: ANN001
+        raise AssertionError('登录失败快断后不应执行下载逻辑')
+
+    pool._ensure_page = _fake_ensure_page  # type: ignore[method-assign]
+    pool._probe_existing_login_state = _fake_probe_existing_login_state  # type: ignore[method-assign]
+    pool._ensure_logged_in = _fake_ensure_logged_in  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match='A楼 登录失败|A楼 登录态未就绪'):
+        asyncio.run(pool._run_building_job('A楼', _runner))
+
+    slot = _find_slot(pool.get_health_snapshot(), 'A楼')
+    assert slot['last_result'] == 'failed'
+    assert 'A楼' in slot['last_error']
+
+
+def test_attempt_building_recovery_suspends_after_three_failed_attempts() -> None:
+    pool = InternalDownloadBrowserPool(runtime_config={})
+
+    async def _fake_ensure_page(_building: str):
+        return object()
+
+    async def _fail_refresh(_building: str, _page):  # noqa: ANN001
+        return False, '页面无响应，请检查楼栋页面服务或网络'
+
+    async def _fail_reopen(_building: str, _page):  # noqa: ANN001
+        return False, '页面无响应，请检查楼栋页面服务或网络'
+
+    async def _fail_rebuild(_building: str):
+        return False, '页面无响应，请检查楼栋页面服务或网络'
+
+    pool._ensure_page = _fake_ensure_page  # type: ignore[method-assign]
+    pool._try_recovery_refresh = _fail_refresh  # type: ignore[method-assign]
+    pool._try_recovery_reopen = _fail_reopen  # type: ignore[method-assign]
+    pool._try_recovery_rebuild = _fail_rebuild  # type: ignore[method-assign]
+
+    recovered = asyncio.run(
+        pool._attempt_building_recovery(
+            'A楼',
+            base_reason='页面无响应，请检查楼栋页面服务或网络',
+            failure_kind='page_unreachable',
+            from_probe=False,
+        )
+    )
+
+    slot = _find_slot(pool.get_health_snapshot(), 'A楼')
+    assert recovered is False
+    assert slot['suspended'] is True
+    assert slot['failure_kind'] == 'page_unreachable'
+    assert slot['recovery_attempts'] == 3
+    assert slot['login_state'] == 'failed'
+    assert slot['next_probe_at']
+
+
+def test_run_building_job_fails_fast_when_building_suspended() -> None:
+    pool = InternalDownloadBrowserPool(runtime_config={})
+    pool._locks = {'A楼': asyncio.Lock()}
+    pool._update_slot(
+        'A楼',
+        suspended=True,
+        suspend_reason='A楼 页面无响应: 页面无响应，请检查楼栋页面服务或网络',
+        failure_kind='page_unreachable',
+        next_probe_at='2026-03-31 23:00:00',
+    )
+
+    async def _fake_ensure_page(_building: str):
+        return object()
+
+    async def _probe(_page):  # noqa: ANN001
+        return 'unknown'
+
+    async def _runner(_page):  # noqa: ANN001
+        raise AssertionError('挂起楼栋不应继续执行下载')
+
+    pool._ensure_page = _fake_ensure_page  # type: ignore[method-assign]
+    pool._probe_existing_login_state = _probe  # type: ignore[method-assign]
+
+    with pytest.raises(Exception, match='A楼 页面无响应'):
+        asyncio.run(pool._run_building_job('A楼', _runner))
+
+    slot = _find_slot(pool.get_health_snapshot(), 'A楼')
+    assert slot['suspended'] is True

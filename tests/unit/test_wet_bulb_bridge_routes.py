@@ -120,6 +120,9 @@ def test_wet_bulb_route_starts_from_latest_cache_on_external_role() -> None:
 
     assert response["job_id"] == "job-1"
     assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "wet_bulb_cache_latest"
+    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("wet_bulb_cache_latest:")
+    assert '"bucket_key":"2026-03-29 10"' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
+    assert '"buildings":["A楼","B楼"]' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
     assert request.app.state.container.job_service.worker_calls == []
 
 

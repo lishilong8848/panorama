@@ -319,6 +319,8 @@ createApp({
       isInternalRole,
       internalDownloadPoolOverview,
       internalSourceCacheOverview,
+      internalRealtimeSourceFamilies,
+      externalInternalAlertOverview,
       currentHourRefreshOverview,
       internalSourceCacheHistoryOverview,
       sharedSourceCacheReadinessOverview,
@@ -1285,6 +1287,7 @@ createApp({
       if (normalized === "day_metric_from_download") return "12项使用共享文件上传";
       if (normalized === "wet_bulb_collection") return "湿球温度采集";
       if (normalized === "monthly_report_pipeline") return "月报主流程";
+      if (normalized === "internal_browser_alert") return "内网环境告警";
       return String(feature || "").trim() || "-";
     }
 
@@ -1366,6 +1369,10 @@ createApp({
         if (featureText === "monthly_report_pipeline" && modeText === "resume_upload") return "外网断点续传月报";
         if (featureText === "monthly_report_pipeline") return "使用共享文件上传月报";
         return "外网继续处理";
+      }
+      if (stageId === "external_notify") {
+        if (featureText === "internal_browser_alert") return "外网发送告警";
+        return "外网通知";
       }
       return String(stage?.stage_id || stage?.handler || "").trim() || "-";
     }
@@ -1729,6 +1736,14 @@ createApp({
       const view = String(currentView.value || "").trim().toLowerCase();
       return view === "dashboard";
     });
+    const healthPollIntervalMs = computed(() => {
+      if (shouldPauseRuntimeRequests.value) return 5000;
+      const view = String(currentView.value || "").trim().toLowerCase();
+      if (deploymentRoleMode.value === "internal" && view === "status") {
+        return 2000;
+      }
+      return 5000;
+    });
     const shouldPollBridgeTasks = computed(() => {
       if (shouldPauseRuntimeRequests.value) return false;
       if (!bridgeTasksEnabled.value) return false;
@@ -2009,6 +2024,7 @@ createApp({
         streamController,
         timers,
         bootstrapReady,
+        getHealthPollIntervalMs: () => healthPollIntervalMs.value,
       },
     );
 
@@ -2120,6 +2136,8 @@ createApp({
       isInternalRole,
       internalDownloadPoolOverview,
       internalSourceCacheOverview,
+      internalRealtimeSourceFamilies,
+      externalInternalAlertOverview,
       currentHourRefreshOverview,
       internalSourceCacheHistoryOverview,
       sharedSourceCacheReadinessOverview,

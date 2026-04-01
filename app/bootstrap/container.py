@@ -590,7 +590,7 @@ class AppContainer:
             return self._configured_deployment_snapshot()
         return self.shared_bridge_service.get_deployment_snapshot()
 
-    def shared_bridge_snapshot(self) -> Dict[str, Any]:
+    def shared_bridge_snapshot(self, *, mode: str = "external_full") -> Dict[str, Any]:
         if not self.shared_bridge_service:
             deployment = self.deployment_snapshot()
             runtime_shared_bridge = {}
@@ -619,9 +619,14 @@ class AppContainer:
                 "agent_status": "stopped" if bridge_active else "disabled",
                 "heartbeat_interval_sec": 5,
                 "poll_interval_sec": 2,
+                "internal_alert_status": {
+                    "buildings": [],
+                    "active_count": 0,
+                    "last_notified_at": "",
+                },
             }
         else:
-            snapshot = self.shared_bridge_service.get_health_snapshot()
+            snapshot = self.shared_bridge_service.get_health_snapshot(mode=mode)
         role_mode = str(snapshot.get("role_mode", "") or self.deployment_snapshot().get("role_mode", "")).strip().lower()
         if role_mode != "internal":
             snapshot = dict(snapshot)

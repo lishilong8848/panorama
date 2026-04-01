@@ -21,6 +21,7 @@ from app.modules.report_pipeline.service.monthly_bridge_service import (
     run_bridge_resume_upload,
 )
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
+from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
 from app.modules.shared_bridge.service.internal_download_browser_pool import (
     InternalDownloadBrowserPool,
@@ -75,7 +76,14 @@ def _default_node_id(role_mode: Any) -> str:
     return f"{role}-{machine_id}"
 
 
+_INTERNAL_ALERT_BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
+
+
 class SharedBridgeRuntimeService:
+    INTERNAL_BROWSER_ALERT_FEATURE = "internal_browser_alert"
+    INTERNAL_BROWSER_ALERT_QUIET_SEC = 600
+    INTERNAL_BROWSER_ALERT_DEDUPE_SEC = 3600
+
     def __init__(
         self,
         *,
@@ -233,7 +241,8 @@ class SharedBridgeRuntimeService:
         thread = self._thread
         return bool(thread and thread.is_alive())
 
-    def get_health_snapshot(self) -> Dict[str, Any]:
+    def get_health_snapshot(self, *, mode: str = "external_full") -> Dict[str, Any]:
+        normalized_mode = str(mode or "external_full").strip().lower() or "external_full"
         internal_download_pool = (
             self._internal_download_pool.get_health_snapshot()
             if self._internal_download_pool is not None
@@ -246,7 +255,7 @@ class SharedBridgeRuntimeService:
             }
         )
         internal_source_cache = (
-            self._source_cache_service.get_health_snapshot()
+            self._source_cache_service.get_health_snapshot(mode=normalized_mode)
             if self._source_cache_service is not None
             else {
                 "enabled": False,
@@ -268,6 +277,11 @@ class SharedBridgeRuntimeService:
                 "monthly_report_family": {},
             }
         )
+        internal_alert_status = (
+            self._build_external_internal_alert_status(self._store.list_external_alert_projections())
+            if self._store is not None
+            else self._empty_internal_alert_status()
+        )
         return {
             "enabled": self.shared_bridge_enabled,
             "role_mode": self.role_mode,
@@ -286,6 +300,7 @@ class SharedBridgeRuntimeService:
             "poll_interval_sec": self.poll_interval_sec,
             "internal_download_pool": internal_download_pool,
             "internal_source_cache": internal_source_cache,
+            "internal_alert_status": internal_alert_status,
         }
 
     def list_tasks(self, *, limit: int = 100) -> list[Dict[str, Any]]:
@@ -312,6 +327,338 @@ class SharedBridgeRuntimeService:
         self._store.ensure_ready()
         return self._store.retry_task(task_id)
 
+    @staticmethod
+    def _normalize_issue_summary(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "页面异常，等待内网恢复"
+        if ":" in text:
+            _prefix, _sep, suffix = text.partition(":")
+            suffix = suffix.strip()
+            if suffix:
+                return suffix
+        return text
+
+    @staticmethod
+    def _internal_alert_status_key(*, failure_kind: Any, suspended: bool = False) -> str:
+        normalized = str(failure_kind or "").strip().lower()
+        if normalized in {"login_failed", "login_expired"}:
+            return normalized
+        if normalized in {
+            "page_unreachable",
+            "page_connection_refused",
+            "page_timeout",
+            "page_address_invalid",
+            "browser_closed",
+            "page_closed",
+        }:
+            return "page_error"
+        if normalized == "network_disconnected":
+            return "network_error"
+        if suspended:
+            return "suspended"
+        return "browser_issue"
+
+    @classmethod
+    def _empty_internal_alert_status(cls) -> Dict[str, Any]:
+        return {
+            "buildings": [
+                {
+                    "building": building,
+                    "status": "normal",
+                    "status_text": "正常",
+                    "summary": "未收到异常告警",
+                    "detail": "",
+                    "last_problem_at": "",
+                    "last_recovered_at": "",
+                    "active_count": 0,
+                }
+                for building in _INTERNAL_ALERT_BUILDINGS
+            ],
+            "active_count": 0,
+            "last_notified_at": "",
+        }
+
+    @classmethod
+    def _build_external_internal_alert_status(cls, projections: List[Dict[str, Any]]) -> Dict[str, Any]:
+        latest_notified_at = ""
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for item in projections if isinstance(projections, list) else []:
+            if not isinstance(item, dict):
+                continue
+            building = str(item.get("building", "") or "").strip()
+            if not building:
+                continue
+            grouped.setdefault(building, []).append(item)
+            last_notified_at = str(item.get("last_notified_at", "") or "").strip()
+            if last_notified_at and last_notified_at > latest_notified_at:
+                latest_notified_at = last_notified_at
+        buildings: List[Dict[str, Any]] = []
+        active_count = 0
+        for building in _INTERNAL_ALERT_BUILDINGS:
+            items = grouped.get(building, [])
+            active_items = [item for item in items if bool(item.get("still_unresolved", False))]
+            if active_items:
+                active_count += 1
+                buildings.append(
+                    {
+                        "building": building,
+                        "status": "problem",
+                        "status_text": "异常",
+                        "summary": "；".join(
+                            str(item.get("summary", "") or "").strip()
+                            for item in active_items
+                            if str(item.get("summary", "") or "").strip()
+                        ) or "存在内网异常告警",
+                        "detail": "；".join(
+                            str(item.get("latest_detail", "") or "").strip()
+                            for item in active_items
+                            if str(item.get("latest_detail", "") or "").strip()
+                        ),
+                        "last_problem_at": max(
+                            (str(item.get("last_seen_at", "") or "").strip() for item in active_items),
+                            default="",
+                        ),
+                        "last_recovered_at": "",
+                        "active_count": len(active_items),
+                    }
+                )
+                continue
+            recovered_at = max((str(item.get("resolved_at", "") or "").strip() for item in items), default="")
+            buildings.append(
+                {
+                    "building": building,
+                    "status": "normal",
+                    "status_text": "正常",
+                    "summary": "正常" if recovered_at else "未收到异常告警",
+                    "detail": "",
+                    "last_problem_at": max((str(item.get("last_seen_at", "") or "").strip() for item in items), default=""),
+                    "last_recovered_at": recovered_at,
+                    "active_count": 0,
+                }
+            )
+        return {
+            "buildings": buildings,
+            "active_count": active_count,
+            "last_notified_at": latest_notified_at,
+        }
+
+    def _build_internal_browser_alert_request(self, slot: Dict[str, Any]) -> Dict[str, Any]:
+        building = str(slot.get("building", "") or "").strip() or "-"
+        failure_kind = str(slot.get("failure_kind", "") or "browser_issue").strip().lower() or "browser_issue"
+        status_key = self._internal_alert_status_key(
+            failure_kind=failure_kind,
+            suspended=bool(slot.get("suspended", False)),
+        )
+        summary = str(
+            slot.get("pending_issue_summary", "")
+            or slot.get("suspend_reason", "")
+            or slot.get("login_error", "")
+            or slot.get("last_error", "")
+            or ""
+        ).strip()
+        latest_detail = str(slot.get("last_error", "") or slot.get("login_error", "") or summary).strip() or summary
+        return {
+            "building": building,
+            "failure_kind": failure_kind,
+            "alert_state": "problem",
+            "status_key": status_key,
+            "summary": summary or f"{building} 页面异常，等待内网恢复",
+            "latest_detail": latest_detail or summary or f"{building} 页面异常，等待内网恢复",
+            "first_seen_at": str(slot.get("last_failure_at", "") or _now_text()).strip() or _now_text(),
+            "last_seen_at": _now_text(),
+            "resolved_at": "",
+            "occurrence_count": 1,
+            "still_unresolved": True,
+        }
+
+    def _process_internal_browser_alerts(self) -> None:
+        if not self._store or self.role_mode != "internal" or self._internal_download_pool is None:
+            return
+        self._store.ensure_ready()
+        snapshot = self._internal_download_pool.get_health_snapshot()
+        page_slots = snapshot.get("page_slots", []) if isinstance(snapshot, dict) else []
+        active_keys: set[str] = set()
+        for raw_slot in page_slots if isinstance(page_slots, list) else []:
+            if not isinstance(raw_slot, dict):
+                continue
+            if not bool(raw_slot.get("suspended", False)):
+                continue
+            request_payload = self._build_internal_browser_alert_request(raw_slot)
+            alert_key = f"{request_payload['building']}|{request_payload['failure_kind']}"
+            active_keys.add(alert_key)
+            self._store.upsert_internal_issue_alert(
+                building=request_payload["building"],
+                failure_kind=request_payload["failure_kind"],
+                status_key=request_payload["status_key"],
+                summary=request_payload["summary"],
+                latest_detail=request_payload["latest_detail"],
+                observed_at=request_payload["last_seen_at"],
+                active=True,
+            )
+        for alert in self._store.list_active_internal_issue_alerts():
+            alert_key = str(alert.get("alert_key", "") or "").strip()
+            if not alert_key or alert_key in active_keys:
+                continue
+            self._store.clear_internal_issue_alert(
+                str(alert.get("building", "") or "").strip(),
+                str(alert.get("failure_kind", "") or "").strip(),
+            )
+        for alert in self._store.list_due_internal_issue_alerts(
+            quiet_window_sec=self.INTERNAL_BROWSER_ALERT_QUIET_SEC,
+            dedupe_window_sec=self.INTERNAL_BROWSER_ALERT_DEDUPE_SEC,
+        ):
+            building = str(alert.get("building", "") or "").strip()
+            failure_kind = str(alert.get("failure_kind", "") or "").strip().lower() or "browser_issue"
+            dedupe_key = "|".join([self.INTERNAL_BROWSER_ALERT_FEATURE, "problem", building or "-", failure_kind or "-"])
+            task = self._store.find_active_task_by_dedupe_key(dedupe_key)
+            if task is None:
+                task = self._store.create_internal_browser_alert_task(
+                    building=building,
+                    failure_kind=failure_kind,
+                    alert_state="problem",
+                    status_key=str(alert.get("status_key", "") or "").strip() or "suspended",
+                    summary=str(alert.get("summary", "") or "").strip(),
+                    latest_detail=str(alert.get("latest_detail", "") or "").strip(),
+                    first_seen_at=str(alert.get("first_seen_at", "") or "").strip(),
+                    last_seen_at=str(alert.get("last_seen_at", "") or "").strip(),
+                    resolved_at="",
+                    occurrence_count=int(alert.get("occurrence_count", 0) or 0),
+                    still_unresolved=bool(alert.get("active", False)),
+                    created_by_role=self.role_mode,
+                    created_by_node_id=self.node_id,
+                    requested_by="internal_monitor",
+                )
+            task_id = str(task.get("task_id", "") or "").strip() if isinstance(task, dict) else ""
+            self._store.mark_internal_issue_alert_pushed(
+                str(alert.get("alert_key", "") or "").strip(),
+                task_id=task_id,
+            )
+            if task_id:
+                self._emit_system_log(
+                    f"[共享桥接] 已受理内网环境告警 task_id={task_id}, 楼栋={building}, 类型={failure_kind}"
+                )
+        for alert in self._store.list_due_internal_issue_recoveries():
+            building = str(alert.get("building", "") or "").strip()
+            failure_kind = str(alert.get("failure_kind", "") or "").strip().lower() or "browser_issue"
+            task = self._store.create_internal_browser_alert_task(
+                building=building,
+                failure_kind=failure_kind,
+                alert_state="recovered",
+                status_key="healthy",
+                summary=f"{building} 已恢复正常" if building else "楼栋已恢复正常",
+                latest_detail=str(alert.get("latest_detail", "") or "").strip(),
+                first_seen_at=str(alert.get("first_seen_at", "") or "").strip(),
+                last_seen_at=str(alert.get("last_seen_at", "") or "").strip(),
+                resolved_at=str(alert.get("resolved_at", "") or "").strip(),
+                occurrence_count=int(alert.get("occurrence_count", 0) or 0),
+                still_unresolved=False,
+                created_by_role=self.role_mode,
+                created_by_node_id=self.node_id,
+                requested_by="internal_monitor",
+            )
+            task_id = str(task.get("task_id", "") or "").strip() if isinstance(task, dict) else ""
+            self._store.mark_internal_issue_alert_recovery_pushed(
+                str(alert.get("alert_key", "") or "").strip(),
+                task_id=task_id,
+            )
+            if task_id:
+                self._emit_system_log(
+                    f"[共享桥接] 已受理内网环境恢复告警 task_id={task_id}, 楼栋={building}, 类型={failure_kind}"
+                )
+
+    def _run_internal_browser_alert_external(self, task: Dict[str, Any]) -> None:
+        if not self._store:
+            return
+        task_id = str(task.get("task_id", "") or "").strip()
+        stage_id = "external_notify"
+        claim_token = self._stage_claim_token(task, stage_id)
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
+        building = str(request.get("building", "") or "").strip()
+        alert_state = str(request.get("alert_state", "") or "problem").strip().lower() or "problem"
+        status_key = str(request.get("status_key", "") or "").strip().lower() or ("healthy" if alert_state == "recovered" else "suspended")
+        summary = self._normalize_issue_summary(request.get("summary"))
+        latest_detail = self._normalize_issue_summary(request.get("latest_detail"))
+        failure_kind = str(request.get("failure_kind", "") or "").strip() or "browser_issue"
+        first_seen_at = str(request.get("first_seen_at", "") or "").strip()
+        last_seen_at = str(request.get("last_seen_at", "") or "").strip()
+        resolved_at = str(request.get("resolved_at", "") or "").strip()
+        occurrence_count = int(request.get("occurrence_count", 0) or 0)
+        still_unresolved = bool(request.get("still_unresolved", True))
+        detail_lines = [
+            f"楼栋：{building or '-'}",
+            f"问题类型：{failure_kind}",
+            f"最近摘要：{summary or latest_detail or '-'}",
+        ]
+        if first_seen_at:
+            detail_lines.append(f"首次发现：{first_seen_at}")
+        if last_seen_at:
+            detail_lines.append(f"最近发现：{last_seen_at}")
+        if resolved_at:
+            detail_lines.append(f"恢复时间：{resolved_at}")
+        if occurrence_count > 0:
+            detail_lines.append(f"聚合次数：{occurrence_count}")
+        detail_lines.append(f"当前状态：{'仍未恢复' if still_unresolved else '已恢复'}")
+        if latest_detail and latest_detail != summary:
+            detail_lines.append(f"最近原因：{latest_detail}")
+        detail_text = "\n".join(detail_lines)
+        try:
+            notify = WebhookNotifyService(self.runtime_config)
+            notify.send_failure(
+                stage="内网环境告警",
+                detail=detail_text,
+                building=building or None,
+                emit_log=emit_log,
+                category="download",
+            )
+            stage_result = {
+                "status": "success",
+                "building": building,
+                "failure_kind": failure_kind,
+                "alert_state": alert_state,
+                "status_key": status_key,
+                "notified_at": _now_text(),
+                "still_unresolved": still_unresolved,
+            }
+            self._store.upsert_external_alert_projection(
+                building=building,
+                failure_kind=failure_kind,
+                alert_state=alert_state,
+                status_key=status_key,
+                summary=summary,
+                latest_detail=latest_detail,
+                first_seen_at=first_seen_at,
+                last_seen_at=last_seen_at,
+                resolved_at=resolved_at,
+                occurrence_count=occurrence_count,
+                still_unresolved=still_unresolved,
+                last_notified_at=str(stage_result["notified_at"]),
+            )
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="external",
+                stage_result=stage_result,
+                next_task_status="success",
+                task_result={"status": "success", "external": stage_result},
+            )
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="external",
+                stage_result={"status": "failed", "error": error_text},
+                stage_error=error_text,
+                next_task_status="failed",
+                task_error=error_text,
+                stage_status="failed",
+                task_result={"status": "failed", "error": error_text},
+            )
+
     def create_handover_from_download_task(
         self,
         *,
@@ -319,6 +666,7 @@ class SharedBridgeRuntimeService:
         end_time: str | None,
         duty_date: str | None,
         duty_shift: str | None,
+        target_bucket_key: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -329,6 +677,7 @@ class SharedBridgeRuntimeService:
             end_time=end_time,
             duty_date=duty_date,
             duty_shift=duty_shift,
+            target_bucket_key=target_bucket_key,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -341,6 +690,7 @@ class SharedBridgeRuntimeService:
         end_time: str | None,
         duty_date: str | None,
         duty_shift: str | None,
+        target_bucket_key: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -351,14 +701,31 @@ class SharedBridgeRuntimeService:
             for item in (buildings or [])
             if str(item or "").strip()
         ]
-        dedupe_key = "|".join(
-            [
-                "handover_from_download",
-                str(duty_date or "").strip() or "-",
-                str(duty_shift or "").strip().lower() or "-",
-                ",".join(normalized_buildings) or "all_enabled",
-            ]
-        )
+        resolved_bucket_key = str(target_bucket_key or "").strip() or self.current_source_cache_bucket()
+        duty_date_text = str(duty_date or "").strip()
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        end_time_text = str(end_time or "").strip()
+        if duty_date_text and duty_shift_text:
+            dedupe_key = "|".join(
+                [
+                    "handover_from_download",
+                    "date",
+                    duty_date_text,
+                    duty_shift_text,
+                    ",".join(normalized_buildings) or "all_enabled",
+                    end_time_text or "-",
+                ]
+            )
+        else:
+            dedupe_key = "|".join(
+                [
+                    "handover_from_download",
+                    "latest",
+                    resolved_bucket_key or "-",
+                    ",".join(normalized_buildings) or "all_enabled",
+                    end_time_text or "-",
+                ]
+            )
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
             return existing
@@ -367,6 +734,7 @@ class SharedBridgeRuntimeService:
             end_time=end_time,
             duty_date=duty_date,
             duty_shift=duty_shift,
+            target_bucket_key=resolved_bucket_key if not (duty_date_text and duty_shift_text) else "",
             requested_by=requested_by,
         )
 
@@ -394,6 +762,7 @@ class SharedBridgeRuntimeService:
         self,
         *,
         buildings: List[str] | None,
+        target_bucket_key: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -401,6 +770,7 @@ class SharedBridgeRuntimeService:
         self._store.ensure_ready()
         return self._store.create_wet_bulb_collection_task(
             buildings=buildings,
+            target_bucket_key=target_bucket_key,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -410,6 +780,7 @@ class SharedBridgeRuntimeService:
         self,
         *,
         buildings: List[str] | None,
+        target_bucket_key: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -420,10 +791,11 @@ class SharedBridgeRuntimeService:
             for item in (buildings or [])
             if str(item or "").strip()
         ]
+        resolved_bucket_key = str(target_bucket_key or "").strip() or self.current_source_cache_bucket()
         dedupe_key = "|".join(
             [
                 "wet_bulb_collection",
-                _now_text()[:10],
+                resolved_bucket_key or _now_text()[:10],
                 ",".join(normalized_buildings) or "all_enabled",
             ]
         )
@@ -432,12 +804,14 @@ class SharedBridgeRuntimeService:
             return existing
         return self.create_wet_bulb_collection_task(
             buildings=normalized_buildings,
+            target_bucket_key=resolved_bucket_key,
             requested_by=requested_by,
         )
 
     def create_monthly_auto_once_task(
         self,
         *,
+        target_bucket_key: str | None = None,
         requested_by: str = "manual",
         source: str = "manual",
     ) -> Dict[str, Any]:
@@ -445,6 +819,7 @@ class SharedBridgeRuntimeService:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
         return self._store.create_monthly_auto_once_task(
+            target_bucket_key=target_bucket_key,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -454,17 +829,20 @@ class SharedBridgeRuntimeService:
     def get_or_create_monthly_auto_once_task(
         self,
         *,
+        target_bucket_key: str | None = None,
         requested_by: str = "manual",
         source: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        dedupe_key = "|".join(["monthly_report_pipeline", "auto_once", _now_text()[:10] or "-"])
+        resolved_bucket_key = str(target_bucket_key or "").strip() or self.current_source_cache_bucket()
+        dedupe_key = "|".join(["monthly_report_pipeline", "auto_once", resolved_bucket_key or _now_text()[:10] or "-"])
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
             return existing
         return self.create_monthly_auto_once_task(
+            target_bucket_key=resolved_bucket_key,
             requested_by=requested_by,
             source=source,
         )
@@ -531,6 +909,46 @@ class SharedBridgeRuntimeService:
             requested_by=requested_by,
         )
 
+    def get_or_create_handover_cache_fill_task(
+        self,
+        *,
+        continuation_kind: str,
+        buildings: List[str] | None,
+        duty_date: str | None,
+        duty_shift: str | None,
+        selected_dates: List[str] | None,
+        building_scope: str | None,
+        building: str | None,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        normalized_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        normalized_dates = [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]
+        dedupe_key = "|".join(
+            [
+                "handover_cache_fill",
+                str(continuation_kind or "").strip().lower() or "-",
+                str(duty_date or "").strip() or ",".join(normalized_dates) or "-",
+                str(duty_shift or "").strip().lower() or "-",
+                str(building or "").strip() or ",".join(normalized_buildings) or str(building_scope or "").strip() or "all_enabled",
+            ]
+        )
+        existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
+        if existing:
+            return existing
+        return self.create_handover_cache_fill_task(
+            continuation_kind=continuation_kind,
+            buildings=normalized_buildings,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            selected_dates=normalized_dates,
+            building_scope=building_scope,
+            building=building,
+            requested_by=requested_by,
+        )
+
     def create_monthly_cache_fill_task(
         self,
         *,
@@ -546,6 +964,33 @@ class SharedBridgeRuntimeService:
             created_by_node_id=self.node_id,
             requested_by=requested_by,
         )
+
+    def get_or_create_monthly_cache_fill_task(
+        self,
+        *,
+        selected_dates: List[str] | None,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        normalized_dates = [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]
+        dedupe_key = "|".join(["monthly_cache_fill", ",".join(normalized_dates) or "-"])
+        existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
+        if existing:
+            return existing
+        return self.create_monthly_cache_fill_task(
+            selected_dates=normalized_dates,
+            requested_by=requested_by,
+        )
+
+    def current_source_cache_bucket(self) -> str:
+        if self._source_cache_service is not None:
+            try:
+                return str(self._source_cache_service.current_hour_bucket() or "").strip()
+            except Exception:
+                pass
+        return _now_text()[:13]
 
     def get_latest_source_cache_entries(self, *, source_family: str, buildings: List[str] | None = None) -> List[Dict[str, Any]]:
         if self._source_cache_service is None:
@@ -2037,6 +2482,10 @@ class SharedBridgeRuntimeService:
             if self.role_mode == "external":
                 self._run_monthly_external_resume(task)
                 return
+        if feature == self.INTERNAL_BROWSER_ALERT_FEATURE:
+            if self.role_mode == "external":
+                self._run_internal_browser_alert_external(task)
+                return
         error_text = f"共享桥接未识别或不支持的任务类型: 功能={feature}, 角色={_role_label(self.role_mode)}"
         self._fail_claimed_task(task, error_text=error_text, event_type="unsupported_feature", level="error")
         self._emit_system_log(f"[共享桥接] {error_text}")
@@ -2054,6 +2503,8 @@ class SharedBridgeRuntimeService:
                     if now_monotonic >= next_heartbeat:
                         self._touch_node()
                         next_heartbeat = now_monotonic + self.heartbeat_interval_sec
+                    if self.role_mode == "internal":
+                        self._process_internal_browser_alerts()
                     self._process_one_task_if_needed()
                     self._counts = self._store.get_task_counts()
                     self._db_status = "ok"

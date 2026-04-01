@@ -24,6 +24,7 @@
     streamController,
     timers,
     bootstrapReady,
+    getHealthPollIntervalMs,
   } = ctx;
 
   onMounted(() => {
@@ -56,11 +57,16 @@
         ? Boolean(shouldPauseRuntimeRequests())
         : false;
 
+    const resolveHealthPollIntervalMs = () =>
+      typeof getHealthPollIntervalMs === "function"
+        ? Math.max(1000, Number.parseInt(String(getHealthPollIntervalMs() || 5000), 10) || 5000)
+        : 5000;
+
     const scheduleHealthPoll = (delayMs = 5000) => {
       if (timers.healthTimer) clearTimeout(timers.healthTimer);
       timers.healthTimer = window.setTimeout(async () => {
         if (isRuntimeTrafficPaused()) {
-          scheduleHealthPoll(5000);
+          scheduleHealthPoll(resolveHealthPollIntervalMs());
           return;
         }
         if (canFetchHealth()) {
@@ -70,7 +76,7 @@
             await tryAutoResume();
           }
         }
-        scheduleHealthPoll(5000);
+        scheduleHealthPoll(resolveHealthPollIntervalMs());
       }, delayMs);
     };
     const scheduleJobPanelPoll = (delayMs = 5000) => {
@@ -142,7 +148,7 @@
     if (!isRuntimeTrafficPaused() && canLoadEngineerDirectory() && typeof scheduleEngineerDirectoryPrefetch === "function") {
       scheduleEngineerDirectoryPrefetch(3000);
     }
-    scheduleHealthPoll(5000);
+    scheduleHealthPoll(resolveHealthPollIntervalMs());
     scheduleJobPanelPoll(5000);
     scheduleBridgeTasksPoll(5000);
     scheduleDailyReportContextPoll(30000);

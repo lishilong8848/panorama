@@ -191,6 +191,9 @@ def test_handover_from_download_route_starts_from_latest_cache_on_external_role(
 
     assert response["job_id"] == "job-cache-1"
     assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "handover_cache_continue"
+    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("handover_cache_continue:")
+    assert '"mode":"latest"' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
+    assert '"bucket_key":"2026-03-29 10"' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
     assert request.app.state.container.job_service.worker_calls == []
 
 

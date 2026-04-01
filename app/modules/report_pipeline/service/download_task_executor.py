@@ -8,6 +8,18 @@ from playwright.async_api import async_playwright
 from app.shared.runtime.internal_download_browser_pool_runtime import (
     get_internal_download_browser_pool,
 )
+from app.modules.report_pipeline.service.download_site_worker import DownloadOutcome
+
+
+def _resolve_used_url(site: Any) -> str:
+    if not isinstance(site, dict):
+        return ""
+    raw = str(site.get("url", "") or site.get("host", "") or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith(("http://", "https://")):
+        return raw
+    return f"http://{raw}"
 
 
 async def run_download_tasks_by_building(
@@ -61,9 +73,30 @@ async def run_download_tasks_by_building(
                     building_pairs.append((task, outcome))
                 return building_pairs
 
-            building_pairs = await asyncio.wrap_future(
-                browser_pool.submit_building_job(building, _runner)
-            )
+            try:
+                building_pairs = await asyncio.wrap_future(
+                    browser_pool.submit_building_job(building, _runner)
+                )
+            except Exception as exc:
+                error_text = str(exc)
+                for task in task_items:
+                    outcome = DownloadOutcome(
+                        building=building,
+                        success=False,
+                        file_path="",
+                        used_url=_resolve_used_url(getattr(task, "site", {})),
+                        error=error_text,
+                    )
+                    pairs.append((task, outcome))
+                    log_file_failure(
+                        feature=feature,
+                        stage=failure_stage,
+                        building=building,
+                        file_path="-",
+                        upload_date=str(getattr(task, "date_text", "") or "-"),
+                        error=error_text,
+                    )
+                return
             for task, outcome in building_pairs:
                 pairs.append((task, outcome))
                 if bool(getattr(outcome, "success", False)):

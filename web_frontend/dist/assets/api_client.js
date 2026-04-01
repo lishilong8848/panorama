@@ -36,7 +36,7 @@ async function apiJsonWithTimeout(url, options = {}, timeoutMs = 0) {
 }
 
 export async function getHealthApi(params = {}) {
-  return apiJsonWithTimeout(appendQuery("/api/health", params), {}, 8000);
+  return apiJsonWithTimeout(appendQuery("/api/health", params), {}, 15000);
 }
 
 export async function getBootstrapHealthApi() {

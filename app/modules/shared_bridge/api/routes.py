@@ -17,6 +17,7 @@ _BRIDGE_FEATURE_LABELS = {
     "monthly_report_pipeline": "月报主流程",
     "handover_cache_fill": "交接班历史共享文件补采",
     "monthly_cache_fill": "月报历史共享文件补采",
+    "internal_browser_alert": "内网环境告警",
 }
 
 _BRIDGE_EVENT_TYPE_LABELS = {
@@ -128,6 +129,10 @@ def _bridge_stage_label(*, feature: Any, mode: Any, stage_id: Any, handler: Any 
         if feature_text == "monthly_report_pipeline":
             return "使用共享文件上传月报"
         return "外网继续处理"
+    if key == "external_notify":
+        if feature_text == "internal_browser_alert":
+            return "外网发送告警"
+        return "外网通知"
     if key == "external_continue":
         if feature_text == "monthly_cache_fill":
             return "使用共享文件继续处理月报"

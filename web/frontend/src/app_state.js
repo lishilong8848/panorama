@@ -49,6 +49,7 @@ function buildRoleDashboardState(roleMode, preferredId = "") {
 }
 
 const DASHBOARD_MODULE_STORAGE_KEY = "dashboard_active_module";
+const INTERNAL_BUILDINGS = Object.freeze(["A楼", "B楼", "C楼", "D楼", "E楼"]);
 
 function basenameFromPath(input) {
   const text = String(input || "").trim();
@@ -221,6 +222,40 @@ function formatSharedBridgeRuntimeError(raw) {
     return "共享桥接数据库结构未初始化";
   }
   return text;
+}
+
+function formatInternalDownloadPoolError(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  const normalized = text.toLowerCase();
+  if (normalized.includes("net::err_empty_response")) {
+    return "页面无响应，请检查楼栋页面服务或网络";
+  }
+  if (normalized.includes("net::err_connection_refused")) {
+    return "页面拒绝连接，请检查楼栋页面服务是否启动";
+  }
+  if (normalized.includes("net::err_connection_timed_out") || normalized.includes("net::err_timed_out")) {
+    return "页面访问超时，请检查楼栋网络或站点状态";
+  }
+  if (normalized.includes("net::err_name_not_resolved")) {
+    return "页面地址无法解析，请检查楼栋地址配置";
+  }
+  if (normalized.includes("net::err_internet_disconnected")) {
+    return "网络未连接，请检查当前网络";
+  }
+  if (normalized.includes("browser_context_missing")) {
+    return "浏览器上下文不可用，系统会自动重建";
+  }
+  if (normalized.includes("browser_unavailable")) {
+    return "浏览器不可用，请检查系统浏览器和 Playwright";
+  }
+  if (normalized.includes("login_required")) {
+    return "登录态已失效，任务开始前会自动重登";
+  }
+  if (normalized.includes("page.goto:")) {
+    return "页面访问失败，请检查楼栋页面是否可达";
+  }
+  return formatSharedBridgeRuntimeError(text);
 }
 
 function mapDailyReportScreenshotTestVm(raw, options = {}) {
@@ -572,6 +607,11 @@ export function createAppState(vueApi) {
           current_bucket: "",
           buildings: [],
         },
+      },
+      internal_alert_status: {
+        buildings: [],
+        active_count: 0,
+        last_notified_at: "",
       },
     },
     network: { current_ssid: "-" },
@@ -1035,24 +1075,35 @@ export function createAppState(vueApi) {
     if (lastPublishError) return "共享目录发布失败";
     return "尚未发布到共享目录";
   }
-  function normalizeInternalDownloadPoolSlot(slot) {
-    const building = String(slot?.building || "").trim() || "-";
-    const pageReady = Boolean(slot?.page_ready);
-    const inUse = Boolean(slot?.in_use);
-    const lastUsedAt = String(slot?.last_used_at || "").trim();
-    const lastLoginAt = String(slot?.last_login_at || "").trim();
-    const lastResult = String(slot?.last_result || "").trim().toLowerCase();
-    const lastError = String(slot?.last_error || "").trim();
-    const loginError = String(slot?.login_error || "").trim();
-    const loginState = String(slot?.login_state || "").trim().toLowerCase();
-    let tone = "neutral";
-    let stateText = "未建页";
-    let loginTone = "warning";
-    let loginText = "待登录";
-    if (pageReady) {
-      tone = "success";
-      stateText = "待命";
-    }
+function normalizeInternalDownloadPoolSlot(slot) {
+  const building = String(slot?.building || "").trim() || "-";
+  const pageReady = Boolean(slot?.page_ready);
+  const inUse = Boolean(slot?.in_use);
+  const suspended = Boolean(slot?.suspended);
+  const suspendReason = formatInternalDownloadPoolError(slot?.suspend_reason || slot?.pending_issue_summary);
+  const failureKind = String(slot?.failure_kind || "").trim().toLowerCase();
+  const recoveryAttempts = Number.parseInt(String(slot?.recovery_attempts || 0), 10) || 0;
+  const nextProbeAt = String(slot?.next_probe_at || "").trim();
+  const lastUsedAt = String(slot?.last_used_at || "").trim();
+  const lastLoginAt = String(slot?.last_login_at || "").trim();
+  const lastResult = String(slot?.last_result || "").trim().toLowerCase();
+  const lastError = formatInternalDownloadPoolError(slot?.last_error);
+  const loginError = formatInternalDownloadPoolError(slot?.login_error);
+  const loginState = String(slot?.login_state || "").trim().toLowerCase();
+  let tone = "neutral";
+  let stateText = "未建页";
+  let loginTone = "warning";
+  let loginText = "待登录";
+  let detailText = pageReady ? "页签已就绪，等待下载任务" : "页签尚未初始化";
+  if (pageReady) {
+    tone = "success";
+    stateText = "待命";
+  }
+  if (suspended) {
+    tone = "danger";
+    stateText = "已暂停等待恢复";
+  }
+  if (!suspended) {
     if (inUse) {
       tone = "warning";
       stateText = "使用中";
@@ -1069,7 +1120,11 @@ export function createAppState(vueApi) {
       tone = "success";
       stateText = "待命";
     }
-    if (loginState === "ready") {
+  }
+    if (suspended) {
+      loginTone = "danger";
+      loginText = failureKind === "login_failed" || failureKind === "login_expired" ? "登录失败" : "页面异常";
+    } else if (loginState === "ready") {
       loginTone = "success";
       loginText = "已登录";
     } else if (loginState === "logging_in") {
@@ -1081,25 +1136,46 @@ export function createAppState(vueApi) {
     } else if (loginState === "failed") {
       loginTone = "danger";
       loginText = "登录失败";
-    } else if (!pageReady) {
-      loginTone = "neutral";
-      loginText = "待初始化";
+  } else if (!pageReady) {
+    loginTone = "neutral";
+    loginText = "待初始化";
+  }
+  if (suspended) {
+    detailText = suspendReason || "该楼已暂停等待恢复";
+    if (nextProbeAt) {
+      detailText += ` / 下次自动检测：${nextProbeAt}`;
     }
-    return {
-      building,
-      pageReady,
+  } else if (loginState === "failed") {
+    detailText = loginError || lastError || "登录失败，请检查楼栋地址、网络和登录页状态";
+  } else if (loginState === "expired") {
+    detailText = "登录态已失效，任务开始前会自动重登";
+  } else if (loginState === "logging_in") {
+    detailText = "正在检查登录态并准备进入目标页面";
+  } else if (lastError) {
+    detailText = lastError;
+  } else if (lastUsedAt) {
+    detailText = `最近使用：${lastUsedAt}`;
+  }
+  return {
+    building,
+    pageReady,
       inUse,
       lastUsedAt,
       lastLoginAt,
       lastResult,
       lastError,
+      suspended,
+      suspendReason,
+      failureKind,
+      recoveryAttempts,
+      nextProbeAt,
       loginState,
       loginTone,
       loginText,
       loginError,
       tone,
       stateText,
-      detailText: loginError || lastError || lastLoginAt || lastUsedAt || (pageReady ? "页签已就绪，等待下载任务" : "页签尚未初始化"),
+      detailText,
     };
   }
   function normalizeSourceCacheBuildingStatus(raw, fallbackBucket) {
@@ -1107,6 +1183,9 @@ export function createAppState(vueApi) {
     const bucketKey = String(raw?.bucket_key || "").trim() || String(fallbackBucket || "").trim() || "-";
     const downloadedAt = String(raw?.downloaded_at || "").trim();
     const lastError = formatSharedBridgeRuntimeError(raw?.last_error);
+    const blocked = Boolean(raw?.blocked);
+    const blockedReason = formatInternalDownloadPoolError(raw?.blocked_reason || raw?.last_error);
+    const nextProbeAt = String(raw?.next_probe_at || "").trim();
     const relativePath = String(raw?.relative_path || "").trim();
     const resolvedFilePath = String(raw?.resolved_file_path || "").trim();
     const rawStatus = String(raw?.status || "").trim().toLowerCase();
@@ -1123,7 +1202,13 @@ export function createAppState(vueApi) {
     } else if (statusKey === "failed") {
       tone = "danger";
       stateText = "失败";
+    } else if (blocked) {
+      tone = "warning";
+      stateText = "等待内网恢复";
     }
+    const detailText = blocked
+      ? `${blockedReason || "楼栋页面异常，等待内网恢复"}${nextProbeAt ? ` / 下次自动检测：${nextProbeAt}` : ""}`
+      : (lastError || downloadedAt || (resolvedFilePath ? resolvedFilePath : "等待共享文件就绪"));
     return {
       building,
       bucketKey,
@@ -1131,11 +1216,14 @@ export function createAppState(vueApi) {
       ready,
       downloadedAt,
       lastError,
+      blocked,
+      blockedReason,
+      nextProbeAt,
       relativePath,
       resolvedFilePath,
       tone,
       stateText,
-      detailText: lastError || downloadedAt || (resolvedFilePath ? resolvedFilePath : "等待共享文件就绪"),
+      detailText,
     };
   }
   function normalizeSourceCacheFamilyOverview({ key, title, payload, fallbackBucket }) {
@@ -1144,9 +1232,18 @@ export function createAppState(vueApi) {
     const failedBuildings = Array.isArray(familyPayload.failed_buildings)
       ? familyPayload.failed_buildings.map((item) => String(item || "").trim()).filter(Boolean)
       : [];
-    const buildings = Array.isArray(familyPayload.buildings)
+    const blockedBuildings = Array.isArray(familyPayload.blocked_buildings)
+      ? familyPayload.blocked_buildings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const normalizedBuildings = Array.isArray(familyPayload.buildings)
       ? familyPayload.buildings.map((item) => normalizeSourceCacheBuildingStatus(item, fallbackBucket))
       : [];
+    const buildingMap = new Map(
+      normalizedBuildings.map((item) => [String(item?.building || "").trim(), item]),
+    );
+    const buildings = INTERNAL_BUILDINGS.map(
+      (building) => buildingMap.get(building) || normalizeSourceCacheBuildingStatus({ building }, fallbackBucket),
+    );
     const currentBucket = String(familyPayload.current_bucket || "").trim() || String(fallbackBucket || "").trim();
     const lastSuccessAt = String(familyPayload.last_success_at || "").trim();
     const hasFailures = buildings.length
@@ -1155,9 +1252,14 @@ export function createAppState(vueApi) {
     const allReady = buildings.length
       ? buildings.every((item) => item.statusKey === "ready")
       : readyCount > 0 && !hasFailures;
+    const hasBlocked = buildings.length
+      ? buildings.some((item) => item.blocked)
+      : blockedBuildings.length > 0;
     const tone = hasFailures ? "danger" : allReady ? "success" : "warning";
     const statusText = hasFailures
       ? "本小时存在失败楼栋"
+      : hasBlocked
+        ? "本小时存在等待恢复楼栋"
       : allReady
         ? "本小时全部就绪"
         : "本小时仍有楼栋等待中";
@@ -1166,10 +1268,12 @@ export function createAppState(vueApi) {
       title,
       readyCount,
       failedBuildings,
+      blockedBuildings,
       lastSuccessAt,
       currentBucket,
       buildings,
       hasFailures,
+      hasBlocked,
       allReady,
       tone,
       statusText,
@@ -1289,17 +1393,6 @@ export function createAppState(vueApi) {
   }
   const internalDownloadPoolOverview = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    const rawPool = health.shared_bridge?.internal_download_pool || {};
-    const enabled = Boolean(rawPool.enabled);
-    const browserReady = Boolean(rawPool.browser_ready);
-    const lastError = formatSharedBridgeRuntimeError(rawPool.last_error);
-    const activeBuildings = Array.isArray(rawPool.active_buildings)
-      ? rawPool.active_buildings.map((item) => String(item || "").trim()).filter(Boolean)
-      : [];
-    const slots = Array.isArray(rawPool.page_slots)
-      ? rawPool.page_slots.map((slot) => normalizeInternalDownloadPoolSlot(slot))
-      : [];
-    const readyLoginCount = slots.filter((slot) => slot.loginState === "ready").length;
     if (roleMode !== "internal") {
       return {
         tone: "neutral",
@@ -1313,6 +1406,21 @@ export function createAppState(vueApi) {
         slots: [],
       };
     }
+    const rawPool = health.shared_bridge?.internal_download_pool || {};
+    const enabled = Boolean(rawPool.enabled);
+    const browserReady = Boolean(rawPool.browser_ready);
+    const lastError = formatInternalDownloadPoolError(rawPool.last_error);
+    const activeBuildings = Array.isArray(rawPool.active_buildings)
+      ? rawPool.active_buildings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const normalizedSlots = Array.isArray(rawPool.page_slots)
+      ? rawPool.page_slots.map((slot) => normalizeInternalDownloadPoolSlot(slot))
+      : [];
+    const slotMap = new Map(
+      normalizedSlots.map((slot) => [String(slot?.building || "").trim(), slot]),
+    );
+    const slots = INTERNAL_BUILDINGS.map((building) => slotMap.get(building) || normalizeInternalDownloadPoolSlot({ building }));
+    const readyLoginCount = slots.filter((slot) => slot.loginState === "ready").length;
     let tone = "warning";
     let statusText = "启动中";
     let summaryText = "内网下载页池正在准备浏览器和固定楼栋页签。";
@@ -1330,8 +1438,8 @@ export function createAppState(vueApi) {
       summaryText = activeBuildings.length
         ? `当前占用楼栋：${activeBuildings.join(" / ")}`
         : readyLoginCount === slots.length && slots.length
-          ? "5 个固定楼栋浏览器已打开并登录成功，下载前会先刷新，只有登录失效时才重新登录。"
-          : `5 个固定楼栋浏览器已打开，已登录 ${readyLoginCount}/${slots.length || 5}。`;
+          ? "5个楼状态实时展示，下载前会先刷新，只有登录失效时才重新登录。"
+          : `5个楼状态实时展示中，已登录 ${readyLoginCount}/${slots.length || 5}，页面每5秒自动刷新。`;
     } else if (lastError) {
       tone = "danger";
       statusText = "页池异常";
@@ -1364,6 +1472,20 @@ export function createAppState(vueApi) {
   });
   const internalSourceCacheOverview = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
+    if (roleMode !== "internal") {
+      return {
+        tone: "neutral",
+        statusText: "仅内网端启用",
+        summaryText: "小时预下载缓存仓只在内网端运行，外网端默认只消费共享目录中的最新有效文件。",
+        currentHourBucket: "-",
+        lastRunAt: "",
+        lastSuccessAt: "",
+        errorText: "",
+        cacheRoot: "",
+        items: [],
+        families: [],
+      };
+    }
     const rawCache = health.shared_bridge?.internal_source_cache || {};
     const enabled = Boolean(rawCache.enabled);
     const running = Boolean(rawCache.scheduler_running);
@@ -1396,20 +1518,6 @@ export function createAppState(vueApi) {
         fallbackBucket: currentHourBucket,
       }),
     ];
-    if (roleMode !== "internal") {
-      return {
-        tone: "neutral",
-        statusText: "仅内网端启用",
-        summaryText: "小时预下载缓存仓只在内网端运行，外网端默认只消费共享目录中的最新有效文件。",
-        currentHourBucket: currentHourBucket || "-",
-        lastRunAt: lastRunAt || "",
-        lastSuccessAt: lastSuccessAt || "",
-        errorText: "",
-        cacheRoot,
-        items: [],
-        families: [],
-      };
-    }
     let tone = "warning";
     let statusText = "准备中";
     let summaryText = "内网端会按自然小时为每个楼预下载两类源文件：交接班日志源文件和全景平台月报源文件。";
@@ -1457,6 +1565,95 @@ export function createAppState(vueApi) {
         },
       ],
       families,
+    };
+  });
+  const internalRealtimeSourceFamilies = computed(() => {
+    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
+    if (roleMode !== "internal") {
+      return [];
+    }
+    const families = Array.isArray(internalSourceCacheOverview.value?.families)
+      ? internalSourceCacheOverview.value.families
+      : [];
+    return families.map((family) => ({
+      key: family.key,
+      title: family.title,
+      tone: family.tone,
+      statusText: family.statusText,
+      currentBucket: family.currentBucket || internalSourceCacheOverview.value?.currentHourBucket || "-",
+      lastSuccessAt: family.lastSuccessAt || "",
+      buildings: Array.isArray(family.buildings) ? family.buildings : [],
+    }));
+  });
+  function normalizeExternalInternalAlertBuilding(raw, fallbackBuilding) {
+    const building = String(raw?.building || fallbackBuilding || "").trim() || "-";
+    const status = String(raw?.status || "").trim().toLowerCase();
+    const lastProblemAt = String(raw?.last_problem_at || "").trim();
+    const lastRecoveredAt = String(raw?.last_recovered_at || "").trim();
+    const activeCount = Number.parseInt(String(raw?.active_count || 0), 10) || 0;
+    if (status === "problem") {
+      return {
+        building,
+        tone: "danger",
+        statusText: "异常",
+        summaryText: String(raw?.summary || "").trim() || "存在内网异常告警",
+        detailText: String(raw?.detail || "").trim(),
+        timeText: lastProblemAt ? `最近告警：${lastProblemAt}` : "",
+        activeCount,
+      };
+    }
+    return {
+      building,
+      tone: "success",
+      statusText: "正常",
+      summaryText: lastRecoveredAt ? "已恢复正常" : "正常",
+      detailText: "",
+      timeText: lastRecoveredAt ? `最近恢复：${lastRecoveredAt}` : "",
+      activeCount: 0,
+    };
+  }
+  const externalInternalAlertOverview = computed(() => {
+    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
+    if (roleMode !== "external") {
+      return {
+        tone: "neutral",
+        statusText: "仅外网端展示",
+        summaryText: "外网端通过已消费的内网环境告警任务展示 5 楼状态。",
+        items: [],
+        buildings: [],
+      };
+    }
+    const rawStatus = health.shared_bridge?.internal_alert_status || {};
+    const rawBuildings = Array.isArray(rawStatus.buildings) ? rawStatus.buildings : [];
+    const buildingMap = new Map(
+      rawBuildings
+        .filter((item) => item && typeof item === "object")
+        .map((item) => [String(item.building || "").trim(), item]),
+    );
+    const buildings = INTERNAL_BUILDINGS.map((building) =>
+      normalizeExternalInternalAlertBuilding(buildingMap.get(building), building),
+    );
+    const activeCount = Number.parseInt(String(rawStatus.active_count || 0), 10) || 0;
+    const lastNotifiedAt = String(rawStatus.last_notified_at || "").trim();
+    return {
+      tone: activeCount > 0 ? "danger" : "success",
+      statusText: activeCount > 0 ? "存在异常楼栋" : "5楼均正常",
+      summaryText: activeCount > 0
+        ? `当前有 ${activeCount} 个楼栋存在未恢复的内网告警。`
+        : "当前未收到内网异常告警，5 个楼均显示正常。",
+      items: [
+        {
+          label: "异常楼栋",
+          value: `${activeCount}/5`,
+          tone: activeCount > 0 ? "danger" : "success",
+        },
+        {
+          label: "最近告警同步",
+          value: lastNotifiedAt || "-",
+          tone: lastNotifiedAt ? "info" : "neutral",
+        },
+      ],
+      buildings,
     };
   });
   const currentHourRefreshOverview = computed(() => {
@@ -2384,6 +2581,8 @@ export function createAppState(vueApi) {
     dashboardSystemStatusItems,
     internalDownloadPoolOverview,
     internalSourceCacheOverview,
+    internalRealtimeSourceFamilies,
+    externalInternalAlertOverview,
     currentHourRefreshOverview,
     internalSourceCacheHistoryOverview,
     sharedSourceCacheReadinessOverview,

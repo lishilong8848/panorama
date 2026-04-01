@@ -41,6 +41,7 @@ class JobState:
     job_id: str
     name: str
     feature: str = ""
+    dedupe_key: str = ""
     submitted_by: str = "manual"
     status: str = "queued"
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -68,6 +69,7 @@ class JobState:
             "job_id": self.job_id,
             "name": self.name,
             "feature": self.feature,
+            "dedupe_key": self.dedupe_key,
             "submitted_by": self.submitted_by,
             "status": self.status,
             "created_at": self.created_at,
@@ -338,6 +340,33 @@ class JobService:
             if text and text not in normalized:
                 normalized.append(text)
         return normalized
+
+    @staticmethod
+    def _normalize_dedupe_key(dedupe_key: str | None) -> str:
+        return str(dedupe_key or "").strip()
+
+    def _find_active_job_by_dedupe_key_locked(self, dedupe_key: str) -> JobState | None:
+        normalized = self._normalize_dedupe_key(dedupe_key)
+        if not normalized:
+            return None
+        candidates = [
+            job for job in self._ordered_jobs()
+            if str(job.dedupe_key or "").strip() == normalized
+            and str(job.status or "").strip().lower() in _INCOMPLETE_JOB_STATUSES
+        ]
+        return candidates[-1] if candidates else None
+
+    def find_active_job_by_dedupe_key(self, dedupe_key: str) -> Dict[str, Any] | None:
+        normalized = self._normalize_dedupe_key(dedupe_key)
+        if not normalized:
+            return None
+        with self._lock:
+            existing = self._find_active_job_by_dedupe_key_locked(normalized)
+            if existing is not None:
+                return existing.to_dict()
+        if self._task_engine_db:
+            return self._task_engine_db.find_active_job_by_dedupe_key(normalized, statuses=sorted(_INCOMPLETE_JOB_STATUSES))
+        return None
 
     @staticmethod
     def _resource_capacity(resource_key: str) -> int:
@@ -626,6 +655,7 @@ class JobService:
             job_id=str(snapshot.get("job_id", "") or "").strip(),
             name=str(snapshot.get("name", "") or "").strip(),
             feature=str(snapshot.get("feature", "") or "").strip(),
+            dedupe_key=str(snapshot.get("dedupe_key", "") or "").strip(),
             submitted_by=str(snapshot.get("submitted_by", "manual") or "manual").strip() or "manual",
             status=str(snapshot.get("status", "queued") or "queued").strip() or "queued",
             created_at=str(snapshot.get("created_at", "") or "").strip(),
@@ -1631,17 +1661,30 @@ class JobService:
         resource_keys: List[str] | tuple[str, ...] | None = None,
         priority: str = "manual",
         feature: str = "",
+        dedupe_key: str = "",
         submitted_by: str = "",
     ) -> JobState:
         normalized_resources = self._normalize_resource_keys(resource_keys)
         normalized_priority = str(priority or "manual").strip().lower() or "manual"
         normalized_submitted_by = str(submitted_by or normalized_priority).strip().lower() or "manual"
+        normalized_dedupe_key = self._normalize_dedupe_key(dedupe_key)
+        if normalized_dedupe_key and self._task_engine_db:
+            snapshot = self._task_engine_db.find_active_job_by_dedupe_key(
+                normalized_dedupe_key,
+                statuses=sorted(_INCOMPLETE_JOB_STATUSES),
+            )
+            if isinstance(snapshot, dict):
+                return self._job_from_snapshot(snapshot)
         with self._lock:
+            existing = self._find_active_job_by_dedupe_key_locked(normalized_dedupe_key)
+            if existing is not None:
+                return existing
             job_id = uuid.uuid4().hex
             job = JobState(
                 job_id=job_id,
                 name=name,
                 feature=str(feature or name or "").strip(),
+                dedupe_key=normalized_dedupe_key,
                 submitted_by=normalized_submitted_by,
                 priority=normalized_priority,
                 resource_keys=normalized_resources,
@@ -1829,6 +1872,7 @@ class JobService:
         resource_keys: List[str] | tuple[str, ...] | None = None,
         priority: str = "manual",
         feature: str = "",
+        dedupe_key: str = "",
         submitted_by: str = "",
         resume_policy: str = "manual_resume",
     ) -> JobState:
@@ -1837,15 +1881,27 @@ class JobService:
         normalized_resources = self._normalize_resource_keys(resource_keys)
         normalized_priority = str(priority or "manual").strip().lower() or "manual"
         normalized_submitted_by = str(submitted_by or normalized_priority).strip().lower() or "manual"
+        normalized_dedupe_key = self._normalize_dedupe_key(dedupe_key)
         normalized_handler = str(worker_handler or "").strip()
         if not normalized_handler:
             raise ValueError("worker_handler is required")
+        if normalized_dedupe_key and self._task_engine_db:
+            snapshot = self._task_engine_db.find_active_job_by_dedupe_key(
+                normalized_dedupe_key,
+                statuses=sorted(_INCOMPLETE_JOB_STATUSES),
+            )
+            if isinstance(snapshot, dict):
+                return self._job_from_snapshot(snapshot)
         with self._lock:
+            existing = self._find_active_job_by_dedupe_key_locked(normalized_dedupe_key)
+            if existing is not None:
+                return existing
             job_id = uuid.uuid4().hex
             job = JobState(
                 job_id=job_id,
                 name=name,
                 feature=str(feature or name or "").strip(),
+                dedupe_key=normalized_dedupe_key,
                 submitted_by=normalized_submitted_by,
                 priority=normalized_priority,
                 resource_keys=normalized_resources,

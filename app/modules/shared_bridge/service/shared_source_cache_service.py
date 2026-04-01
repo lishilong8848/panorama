@@ -4,7 +4,7 @@ import copy
 import hashlib
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -79,6 +79,13 @@ def _parse_hour_bucket(bucket_key: str) -> datetime | None:
     return None
 
 
+def _normalize_nullable_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"none", "null", "undefined"}:
+        return ""
+    return text
+
+
 class SharedSourceCacheService:
     def __init__(
         self,
@@ -102,8 +109,8 @@ class SharedSourceCacheService:
         self._current_hour_bucket = ""
         self._active_latest_downloads: Dict[tuple[str, str, str], str] = {}
         self._family_status: Dict[str, Dict[str, Any]] = {
-            FAMILY_HANDOVER_LOG: {"ready_count": 0, "failed_buildings": [], "last_success_at": ""},
-            FAMILY_MONTHLY_REPORT: {"ready_count": 0, "failed_buildings": [], "last_success_at": ""},
+            FAMILY_HANDOVER_LOG: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+            FAMILY_MONTHLY_REPORT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
         }
         self._current_hour_refresh: Dict[str, Any] = {
             "running": False,
@@ -111,8 +118,10 @@ class SharedSourceCacheService:
             "last_success_at": "",
             "last_error": "",
             "failed_buildings": [],
+            "blocked_buildings": [],
             "scope_text": "当前小时",
         }
+        self._last_scheduler_log_signature = ""
         self._refresh_config()
 
     def _refresh_config(self) -> None:
@@ -228,7 +237,9 @@ class SharedSourceCacheService:
         thread = self._thread
         return bool(thread and thread.is_alive())
 
-    def get_health_snapshot(self) -> Dict[str, Any]:
+    def get_health_snapshot(self, *, mode: str = "external_full") -> Dict[str, Any]:
+        normalized_mode = str(mode or "external_full").strip().lower() or "external_full"
+        include_latest_selection = normalized_mode != "internal_light"
         with self._lock:
             current_bucket = self._current_hour_bucket or self.current_hour_bucket()
             families = copy.deepcopy(self._family_status)
@@ -238,12 +249,20 @@ class SharedSourceCacheService:
             last_error = self._last_error
         snapshot_error = ""
         try:
-            handover_family = self._build_family_health_snapshot(source_family=FAMILY_HANDOVER_LOG, current_bucket=current_bucket)
+            handover_family = self._build_family_health_snapshot(
+                source_family=FAMILY_HANDOVER_LOG,
+                current_bucket=current_bucket,
+                include_latest_selection=include_latest_selection,
+            )
         except Exception as exc:  # noqa: BLE001
             handover_family = {"current_bucket": current_bucket, "buildings": []}
             snapshot_error = str(exc)
         try:
-            monthly_family = self._build_family_health_snapshot(source_family=FAMILY_MONTHLY_REPORT, current_bucket=current_bucket)
+            monthly_family = self._build_family_health_snapshot(
+                source_family=FAMILY_MONTHLY_REPORT,
+                current_bucket=current_bucket,
+                include_latest_selection=include_latest_selection,
+            )
         except Exception as exc:  # noqa: BLE001
             monthly_family = {"current_bucket": current_bucket, "buildings": []}
             snapshot_error = snapshot_error or str(exc)
@@ -287,6 +306,11 @@ class SharedSourceCacheService:
         return None
 
     def _build_building_cache_status(self, *, source_family: str, building: str, bucket_key: str) -> Dict[str, Any]:
+        pause_info = (
+            self.download_browser_pool.get_building_pause_info(building)
+            if self.download_browser_pool is not None and hasattr(self.download_browser_pool, "get_building_pause_info")
+            else {}
+        )
         active_key = (self._normalize_source_family(source_family), building, bucket_key)
         with self._lock:
             active_started_at = self._active_latest_downloads.get(active_key, "")
@@ -301,6 +325,9 @@ class SharedSourceCacheService:
                 "relative_path": "",
                 "resolved_file_path": "",
                 "started_at": active_started_at,
+                "blocked": False,
+                "blocked_reason": "",
+                "next_probe_at": "",
             }
         ready_entry = self._get_source_cache_entry(
             source_family=source_family,
@@ -321,7 +348,25 @@ class SharedSourceCacheService:
                     "last_error": "",
                     "relative_path": str(ready_entry.get("relative_path", "") or "").strip(),
                     "resolved_file_path": str(file_path),
+                    "blocked": False,
+                    "blocked_reason": "",
+                    "next_probe_at": "",
                 }
+        if bool(pause_info.get("suspended", False)):
+            blocked_reason = str(pause_info.get("suspend_reason", "") or pause_info.get("pending_issue_summary", "") or "").strip()
+            return {
+                "building": building,
+                "bucket_key": bucket_key,
+                "status": "waiting",
+                "ready": False,
+                "downloaded_at": "",
+                "last_error": blocked_reason,
+                "relative_path": "",
+                "resolved_file_path": "",
+                "blocked": True,
+                "blocked_reason": blocked_reason,
+                "next_probe_at": str(pause_info.get("next_probe_at", "") or "").strip(),
+            }
         failed_entry = self._get_source_cache_entry(
             source_family=source_family,
             building=building,
@@ -343,6 +388,9 @@ class SharedSourceCacheService:
                 "last_error": str(metadata.get("error", "") or "").strip(),
                 "relative_path": str(failed_entry.get("relative_path", "") or "").strip(),
                 "resolved_file_path": str(failed_file_path) if failed_file_path is not None else "",
+                "blocked": False,
+                "blocked_reason": "",
+                "next_probe_at": "",
             }
         return {
             "building": building,
@@ -353,9 +401,18 @@ class SharedSourceCacheService:
             "last_error": "",
             "relative_path": "",
             "resolved_file_path": "",
+            "blocked": False,
+            "blocked_reason": "",
+            "next_probe_at": "",
         }
 
-    def _build_family_health_snapshot(self, *, source_family: str, current_bucket: str) -> Dict[str, Any]:
+    def _build_family_health_snapshot(
+        self,
+        *,
+        source_family: str,
+        current_bucket: str,
+        include_latest_selection: bool,
+    ) -> Dict[str, Any]:
         buildings = self.get_enabled_buildings()
         building_rows = [
             self._build_building_cache_status(
@@ -371,22 +428,33 @@ class SharedSourceCacheService:
             for item in building_rows
             if str(item.get("status", "") or "").strip().lower() == "failed"
         ]
+        blocked_buildings = [
+            str(item.get("building", "") or "").strip()
+            for item in building_rows
+            if bool(item.get("blocked", False))
+        ]
         last_success_candidates = [
             str(item.get("downloaded_at", "") or "").strip()
             for item in building_rows
             if str(item.get("downloaded_at", "") or "").strip()
         ]
         last_success_at = max(last_success_candidates) if last_success_candidates else ""
+        latest_selection = (
+            self.get_latest_ready_selection(
+                source_family=source_family,
+                buildings=buildings,
+            )
+            if include_latest_selection
+            else {}
+        )
         return {
             "ready_count": ready_count,
             "failed_buildings": failed_buildings,
+            "blocked_buildings": blocked_buildings,
             "last_success_at": last_success_at,
             "current_bucket": current_bucket,
             "buildings": building_rows,
-            "latest_selection": self.get_latest_ready_selection(
-                source_family=source_family,
-                buildings=buildings,
-            ),
+            "latest_selection": latest_selection,
         }
 
     def _ensure_dirs(self) -> None:
@@ -624,6 +692,102 @@ class SharedSourceCacheService:
                 return entry
         return None
 
+    def _get_latest_ready_handover_entry_for_date_shift(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+    ) -> Dict[str, Any] | None:
+        if self.store is None:
+            return None
+        candidates: List[Dict[str, Any]] = []
+        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                status="ready",
+                limit=20,
+            )
+            candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in candidates:
+            if self._resolve_entry_file_path(entry) is not None:
+                return entry
+        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                bucket_kind="latest",
+                status="ready",
+                limit=50,
+            )
+            candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in candidates:
+            file_path = self._resolve_entry_file_path(entry)
+            if file_path is None:
+                continue
+            effective_context = self._resolve_handover_entry_duty_context(entry)
+            if (
+                effective_context["duty_date"] == duty_date
+                and effective_context["duty_shift"] == duty_shift
+            ):
+                normalized_entry = dict(entry)
+                normalized_entry["duty_date"] = effective_context["duty_date"]
+                normalized_entry["duty_shift"] = effective_context["duty_shift"]
+                return normalized_entry
+        return None
+
+    def _handover_shift_boundaries(self) -> tuple[dt_time, dt_time]:
+        try:
+            cfg = load_handover_config(self.runtime_config)
+        except Exception:  # noqa: BLE001
+            cfg = {}
+        download_cfg = cfg.get("download", {}) if isinstance(cfg.get("download", {}), dict) else {}
+        shift_windows = download_cfg.get("shift_windows", {}) if isinstance(download_cfg.get("shift_windows", {}), dict) else {}
+        day_cfg = shift_windows.get("day", {}) if isinstance(shift_windows.get("day", {}), dict) else {}
+        night_cfg = shift_windows.get("night", {}) if isinstance(shift_windows.get("night", {}), dict) else {}
+
+        def _parse_hms(raw: Any, default_text: str) -> dt_time:
+            text = str(raw or default_text).strip() or default_text
+            try:
+                parsed = datetime.strptime(text, "%H:%M:%S")
+            except ValueError:
+                parsed = datetime.strptime(default_text, "%H:%M:%S")
+            return parsed.time()
+
+        day_start = _parse_hms(day_cfg.get("start"), "08:00:00")
+        night_start = _parse_hms(night_cfg.get("start"), "17:00:00")
+        return day_start, night_start
+
+    def _infer_handover_duty_context_from_bucket_key(self, bucket_key: str) -> Dict[str, str]:
+        bucket_dt = _parse_hour_bucket(bucket_key)
+        if bucket_dt is None:
+            return {"duty_date": "", "duty_shift": ""}
+        day_start, night_start = self._handover_shift_boundaries()
+        bucket_time = bucket_dt.time()
+        if day_start <= bucket_time < night_start:
+            return {
+                "duty_date": bucket_dt.strftime("%Y-%m-%d"),
+                "duty_shift": "day",
+            }
+        if bucket_time >= night_start:
+            duty_day = bucket_dt
+        else:
+            duty_day = bucket_dt - timedelta(days=1)
+        return {
+            "duty_date": duty_day.strftime("%Y-%m-%d"),
+            "duty_shift": "night",
+        }
+
+    def _resolve_handover_entry_duty_context(self, entry: Dict[str, Any]) -> Dict[str, str]:
+        duty_date = _normalize_nullable_text(entry.get("duty_date"))
+        duty_shift = _normalize_nullable_text(entry.get("duty_shift")).lower()
+        if duty_date and duty_shift in {"day", "night"}:
+            return {"duty_date": duty_date, "duty_shift": duty_shift}
+        return self._infer_handover_duty_context_from_bucket_key(str(entry.get("bucket_key", "") or "").strip())
+
     def get_latest_ready_selection(
         self,
         *,
@@ -669,6 +833,7 @@ class SharedSourceCacheService:
         fallback_buildings: List[str] = []
         missing_buildings: List[str] = []
         stale_buildings: List[str] = []
+        blocked_buildings: List[Dict[str, Any]] = []
         building_rows: List[Dict[str, Any]] = []
         best_bucket_age_hours: float | None = None
         is_best_bucket_too_old = False
@@ -681,7 +846,26 @@ class SharedSourceCacheService:
         for building in target_buildings:
             candidate = building_candidates.get(building)
             if candidate is None or latest_bucket_dt is None:
+                pause_info = (
+                    self.download_browser_pool.get_building_pause_info(building)
+                    if self.download_browser_pool is not None and hasattr(self.download_browser_pool, "get_building_pause_info")
+                    else {}
+                )
+                blocked_reason = (
+                    str(pause_info.get("suspend_reason", "") or pause_info.get("pending_issue_summary", "") or "").strip()
+                    if bool(pause_info.get("suspended", False))
+                    else ""
+                )
                 missing_buildings.append(building)
+                if blocked_reason:
+                    blocked_buildings.append(
+                        {
+                            "building": building,
+                            "reason": blocked_reason,
+                            "failure_kind": str(pause_info.get("failure_kind", "") or "").strip(),
+                            "next_probe_at": str(pause_info.get("next_probe_at", "") or "").strip(),
+                        }
+                    )
                 building_rows.append(
                     {
                         "building": building,
@@ -690,9 +874,12 @@ class SharedSourceCacheService:
                         "using_fallback": False,
                         "version_gap": None,
                         "downloaded_at": "",
-                        "last_error": "",
+                        "last_error": blocked_reason,
                         "relative_path": "",
                         "resolved_file_path": "",
+                        "blocked": bool(blocked_reason),
+                        "blocked_reason": blocked_reason,
+                        "next_probe_at": str(pause_info.get("next_probe_at", "") or "").strip(),
                     }
                 )
                 continue
@@ -711,6 +898,9 @@ class SharedSourceCacheService:
                 "last_error": "",
                 "relative_path": str(candidate.get("relative_path", "") or "").strip(),
                 "resolved_file_path": str(candidate.get("file_path", "") or "").strip(),
+                "blocked": False,
+                "blocked_reason": "",
+                "next_probe_at": "",
             }
             if version_gap > max_version_gap:
                 row["status"] = "stale"
@@ -735,6 +925,7 @@ class SharedSourceCacheService:
             "fallback_buildings": fallback_buildings,
             "missing_buildings": missing_buildings,
             "stale_buildings": stale_buildings,
+            "blocked_buildings": blocked_buildings,
             "buildings": building_rows,
             "can_proceed": bool(target_buildings)
             and not missing_buildings
@@ -773,11 +964,8 @@ class SharedSourceCacheService:
         requested = [str(item or "").strip() for item in (buildings or self.get_enabled_buildings()) if str(item or "").strip()]
         output: List[Dict[str, Any]] = []
         for building in requested:
-            entry = self._get_ready_entry(
-                source_family=FAMILY_HANDOVER_LOG,
+            entry = self._get_latest_ready_handover_entry_for_date_shift(
                 building=building,
-                bucket_kind="date",
-                bucket_key=duty_date,
                 duty_date=duty_date,
                 duty_shift=duty_shift,
             )
@@ -892,16 +1080,28 @@ class SharedSourceCacheService:
         source_path = Path(str(item.get("file_path", "") or "").strip())
         if not source_path.exists():
             raise FileNotFoundError(f"下载完成后的源文件不存在: {source_path}")
+        normalized_result_context = self._resolve_handover_entry_duty_context(
+            {
+                "bucket_key": bucket_key,
+                "duty_date": result.get("duty_date"),
+                "duty_shift": result.get("duty_shift"),
+            }
+        )
         return self._store_entry(
             source_family=FAMILY_HANDOVER_LOG,
             building=building,
             bucket_kind="latest",
             bucket_key=bucket_key,
-            duty_date=str(result.get("duty_date", "") or "").strip(),
-            duty_shift=str(result.get("duty_shift", "") or "").strip().lower(),
+            duty_date=normalized_result_context["duty_date"],
+            duty_shift=normalized_result_context["duty_shift"],
             source_path=source_path,
             status="ready",
-            metadata={"family": FAMILY_HANDOVER_LOG, "building": building},
+            metadata={
+                "family": FAMILY_HANDOVER_LOG,
+                "building": building,
+                "duty_date": normalized_result_context["duty_date"],
+                "duty_shift": normalized_result_context["duty_shift"],
+            },
         )
 
     def fill_handover_history(self, *, buildings: List[str], duty_date: str, duty_shift: str, emit_log: Callable[[str], None]) -> List[Dict[str, Any]]:
@@ -1054,6 +1254,7 @@ class SharedSourceCacheService:
         buildings = self.get_enabled_buildings()
         ready_count = 0
         failed_buildings: List[str] = []
+        blocked_buildings: List[str] = []
         for building in buildings:
             entry_exists = self._entry_exists_for_bucket(
                 source_family=source_family,
@@ -1069,6 +1270,14 @@ class SharedSourceCacheService:
             )
             if ready_entry:
                 ready_count += 1
+                continue
+            pause_info = (
+                self.download_browser_pool.get_building_pause_info(building)
+                if self.download_browser_pool is not None and hasattr(self.download_browser_pool, "get_building_pause_info")
+                else {}
+            )
+            if bool(pause_info.get("suspended", False)):
+                blocked_buildings.append(building)
                 continue
             if entry_exists and not force_retry_failed:
                 failed_buildings.append(building)
@@ -1102,6 +1311,7 @@ class SharedSourceCacheService:
             family_status = self._family_status.setdefault(source_family, {})
             family_status["ready_count"] = ready_count
             family_status["failed_buildings"] = failed_buildings
+            family_status["blocked_buildings"] = blocked_buildings
             family_status["last_success_at"] = self._last_success_at if ready_count > 0 else family_status.get("last_success_at", "")
             family_status["current_bucket"] = bucket_key
 
@@ -1127,12 +1337,14 @@ class SharedSourceCacheService:
         self._ensure_dirs()
         bucket_key = self.current_hour_bucket()
         failed_units: List[str] = []
+        blocked_units: List[str] = []
         self._mark_current_hour_refresh(
             running=True,
             last_run_at=_now_text(),
             last_success_at="",
             last_error="",
             failed_buildings=[],
+            blocked_buildings=[],
         )
         self._emit(f"[共享缓存] 开始立即补下当前小时全部文件 bucket={bucket_key}")
         self._refresh_family_bucket(
@@ -1151,20 +1363,25 @@ class SharedSourceCacheService:
             family_status = self._family_status.get(family_key, {})
             for building in family_status.get("failed_buildings", []) or []:
                 failed_units.append(f"{building}/{family_key}")
+            for building in family_status.get("blocked_buildings", []) or []:
+                blocked_units.append(f"{building}/{family_key}")
         success_at = _now_text() if not failed_units else ""
-        last_error = self._last_error if failed_units else ""
+        last_error = self._last_error if (failed_units or blocked_units) else ""
         with self._lock:
             self._last_run_at = _now_text()
-            if not failed_units:
+            if not failed_units and not blocked_units:
                 self._last_error = ""
         self._mark_current_hour_refresh(
             running=False,
             last_success_at=success_at,
             last_error=last_error,
             failed_buildings=failed_units,
+            blocked_buildings=blocked_units,
         )
         if failed_units:
             self._emit(f"[共享缓存] 当前小时立即补下结束：存在失败项 {', '.join(failed_units)}")
+        elif blocked_units:
+            self._emit(f"[共享缓存] 当前小时立即补下结束：存在等待恢复楼栋 {', '.join(blocked_units)}")
         else:
             self._emit("[共享缓存] 当前小时立即补下完成")
 
@@ -1215,8 +1432,24 @@ class SharedSourceCacheService:
                     bucket = self.current_hour_bucket()
                     if bucket != self._current_hour_bucket:
                         self._run_current_bucket_once()
-                if startup_done and not self._last_error:
-                    self._emit(f"[共享缓存] 小时预下载调度运行中: bucket={self._current_hour_bucket}")
+                if startup_done:
+                    handover_status = self._family_status.get(FAMILY_HANDOVER_LOG, {})
+                    monthly_status = self._family_status.get(FAMILY_MONTHLY_REPORT, {})
+                    signature = "|".join(
+                        [
+                            self._current_hour_bucket,
+                            ",".join(str(item) for item in handover_status.get("blocked_buildings", []) or []),
+                            ",".join(str(item) for item in monthly_status.get("blocked_buildings", []) or []),
+                            str(bool(self._last_error)),
+                        ]
+                    )
+                    if signature != self._last_scheduler_log_signature:
+                        self._last_scheduler_log_signature = signature
+                        if handover_status.get("blocked_buildings") or monthly_status.get("blocked_buildings"):
+                            blocked = list(handover_status.get("blocked_buildings", []) or []) + list(monthly_status.get("blocked_buildings", []) or [])
+                            self._emit(f"[共享缓存] 小时预下载调度等待楼栋恢复: bucket={self._current_hour_bucket}, 楼栋={' / '.join(blocked)}")
+                        elif not self._last_error:
+                            self._emit(f"[共享缓存] 小时预下载调度运行中: bucket={self._current_hour_bucket}")
             except Exception as exc:  # noqa: BLE001
                 self._last_error = str(exc)
                 self._last_run_at = _now_text()

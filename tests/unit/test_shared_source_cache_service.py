@@ -4,6 +4,7 @@ import shutil
 import uuid
 from pathlib import Path
 
+import openpyxl
 import pytest
 
 import app.modules.shared_bridge.service.shared_source_cache_service as cache_module
@@ -143,6 +144,28 @@ def test_health_snapshot_does_not_mark_missing_ready_file_as_ready(work_dir: Pat
     assert snapshot[FAMILY_MONTHLY_REPORT]['ready_count'] == 0
 
 
+def test_internal_light_health_snapshot_skips_latest_selection(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='internal', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    service._current_hour_bucket = '2026-04-01 10'
+
+    def _explode(*_args, **_kwargs):
+        raise AssertionError('internal_light snapshot should not compute latest selection')
+
+    monkeypatch.setattr(service, 'get_latest_ready_selection', _explode)
+
+    snapshot = service.get_health_snapshot(mode='internal_light')
+
+    assert snapshot[FAMILY_HANDOVER_LOG]['latest_selection'] == {}
+    assert snapshot[FAMILY_MONTHLY_REPORT]['latest_selection'] == {}
+
+
 def test_refresh_family_bucket_calls_fill_with_keyword_arguments(work_dir: Path) -> None:
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)
@@ -229,6 +252,131 @@ def test_get_monthly_by_date_entries_ignores_missing_indexed_files(work_dir: Pat
     entries = service.get_monthly_by_date_entries(selected_dates=['2026-03-29'], buildings=['A楼'])
 
     assert entries == []
+
+
+def test_get_handover_by_date_entries_reuses_latest_matching_date_shift_entry(work_dir: Path) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    latest_file = shared_root / '交接班日志源文件' / '202603' / '20260331--21' / '20260331--21--交接班日志源文件--A楼.xlsx'
+    latest_file.parent.mkdir(parents=True, exist_ok=True)
+    latest_file.write_bytes(b'handover-a')
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-03-31 21',
+        duty_date='2026-03-30',
+        duty_shift='day',
+        downloaded_at='2026-03-31 21:05:00',
+        relative_path=latest_file.relative_to(shared_root).as_posix(),
+        status='ready',
+        file_hash='hash-handover-a',
+        size_bytes=10,
+    )
+
+    entries = service.get_handover_by_date_entries(duty_date='2026-03-30', duty_shift='day', buildings=['A楼'])
+
+    assert len(entries) == 1
+    assert entries[0]['building'] == 'A楼'
+    assert entries[0]['bucket_kind'] == 'latest'
+    assert entries[0]['file_path'] == str(latest_file)
+
+
+def test_get_handover_by_date_entries_reuses_latest_entry_with_legacy_none_duty_context(work_dir: Path) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    latest_file = shared_root / '交接班日志源文件' / '202604' / '20260401--09' / '20260401--09--交接班日志源文件--A楼.xlsx'
+    latest_file.parent.mkdir(parents=True, exist_ok=True)
+    latest_file.write_bytes(b'handover-legacy-none')
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 09',
+        duty_date='None',
+        duty_shift='none',
+        downloaded_at='2026-04-01 09:25:00',
+        relative_path=latest_file.relative_to(shared_root).as_posix(),
+        status='ready',
+        file_hash='hash-legacy-none',
+        size_bytes=len(b'handover-legacy-none'),
+    )
+
+    entries = service.get_handover_by_date_entries(duty_date='2026-04-01', duty_shift='day', buildings=['A楼'])
+
+    assert len(entries) == 1
+    assert entries[0]['building'] == 'A楼'
+    assert entries[0]['bucket_kind'] == 'latest'
+    assert entries[0]['duty_date'] == '2026-04-01'
+    assert entries[0]['duty_shift'] == 'day'
+    assert entries[0]['file_path'] == str(latest_file)
+
+
+def test_fill_handover_latest_infers_duty_context_when_downloader_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='internal', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    downloaded_file = work_dir / 'downloaded' / 'A楼.xlsx'
+    downloaded_file.parent.mkdir(parents=True, exist_ok=True)
+    workbook = openpyxl.Workbook()
+    workbook.active['A1'] = 'handover-latest'
+    workbook.save(downloaded_file)
+
+    class _FakeDownloadService:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run(self, **_kwargs):
+            return {
+                'duty_date': None,
+                'duty_shift': None,
+                'success_files': [
+                    {
+                        'building': 'A楼',
+                        'file_path': str(downloaded_file),
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(cache_module, 'HandoverDownloadService', _FakeDownloadService)
+
+    entry = service.fill_handover_latest(building='A楼', bucket_key='2026-04-01 09', emit_log=lambda *_args, **_kwargs: None)
+
+    assert entry['duty_date'] == '2026-04-01'
+    assert entry['duty_shift'] == 'day'
+    rows = store.list_source_cache_entries(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 09',
+        status='ready',
+        limit=1,
+    )
+    assert len(rows) == 1
+    assert rows[0]['duty_date'] == '2026-04-01'
+    assert rows[0]['duty_shift'] == 'day'
 
 
 def test_get_monthly_by_date_entries_ignores_inaccessible_indexed_files(
@@ -531,3 +679,97 @@ def test_get_latest_ready_selection_blocks_best_bucket_older_than_three_hours(
     assert selection['can_proceed'] is False
     assert selection['stale_buildings'] == []
     assert selection['missing_buildings'] == []
+
+
+def test_health_snapshot_marks_suspended_building_as_blocked(work_dir: Path) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+
+    class _FakePool:
+        @staticmethod
+        def get_building_pause_info(building: str) -> dict:
+            if building == 'A楼':
+                return {
+                    'building': 'A楼',
+                    'suspended': True,
+                    'suspend_reason': 'A楼 登录失败: 页面无响应，请检查楼栋页面服务或网络',
+                    'failure_kind': 'login_failed',
+                    'recovery_attempts': 3,
+                    'last_failure_at': '2026-03-31 22:10:00',
+                    'next_probe_at': '2026-03-31 22:11:00',
+                    'pending_issue_summary': 'A楼 登录失败: 页面无响应，请检查楼栋页面服务或网络',
+                    'login_state': 'failed',
+                }
+            return {'building': building, 'suspended': False}
+
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='internal', shared_root=shared_root),
+        store=store,
+        download_browser_pool=_FakePool(),
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    service._current_hour_bucket = '2026-03-31 22'
+
+    snapshot = service.get_health_snapshot()
+    building = next(item for item in snapshot[FAMILY_HANDOVER_LOG]['buildings'] if item['building'] == 'A楼')
+
+    assert building['status'] == 'waiting'
+    assert building['blocked'] is True
+    assert 'A楼 登录失败' in building['blocked_reason']
+    assert building['next_probe_at'] == '2026-03-31 22:11:00'
+    assert snapshot[FAMILY_HANDOVER_LOG]['blocked_buildings'] == ['A楼']
+
+
+def test_refresh_family_bucket_skips_suspended_building_without_failed_entry(work_dir: Path) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+
+    class _FakePool:
+        @staticmethod
+        def get_building_pause_info(building: str) -> dict:
+            if building == 'A楼':
+                return {
+                    'building': 'A楼',
+                    'suspended': True,
+                    'suspend_reason': 'A楼 页面无响应: 页面无响应，请检查楼栋页面服务或网络',
+                    'failure_kind': 'page_unreachable',
+                    'recovery_attempts': 3,
+                    'last_failure_at': '2026-03-31 22:10:00',
+                    'next_probe_at': '2026-03-31 22:11:00',
+                    'pending_issue_summary': 'A楼 页面无响应: 页面无响应，请检查楼栋页面服务或网络',
+                    'login_state': 'failed',
+                }
+            return {'building': building, 'suspended': False}
+
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='internal', shared_root=shared_root),
+        store=store,
+        download_browser_pool=_FakePool(),
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    calls: list[str] = []
+
+    def _fake_fill(*, building: str, bucket_key: str, emit_log):  # noqa: ANN001, ARG001
+        calls.append(f'{building}:{bucket_key}')
+
+    service.get_enabled_buildings = lambda: ['A楼']  # type: ignore[method-assign]
+    service._refresh_family_bucket(
+        source_family=FAMILY_HANDOVER_LOG,
+        bucket_key='2026-03-31 22',
+        fill_func=_fake_fill,
+    )
+
+    rows = store.list_source_cache_entries(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-03-31 22',
+        limit=10,
+    )
+
+    assert calls == []
+    assert rows == []
+    assert service._family_status[FAMILY_HANDOVER_LOG]['blocked_buildings'] == ['A楼']

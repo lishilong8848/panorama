@@ -129,6 +129,9 @@ def test_day_metric_from_download_route_starts_from_shared_cache_when_ready() ->
 
     assert response["job_id"] == "job-1"
     assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "day_metric_cache_by_date"
+    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("day_metric_cache_by_date:")
+    assert '"selected_dates":["2026-03-20"]' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
+    assert '"building":"A楼"' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
     assert request.app.state.container.job_service.worker_calls == []
 
 

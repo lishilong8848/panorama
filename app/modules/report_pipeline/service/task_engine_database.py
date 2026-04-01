@@ -48,6 +48,7 @@ class TaskEngineDatabase:
                     job_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     feature TEXT NOT NULL DEFAULT '',
+                    dedupe_key TEXT NOT NULL DEFAULT '',
                     submitted_by TEXT NOT NULL DEFAULT 'manual',
                     priority TEXT NOT NULL DEFAULT 'manual',
                     resource_keys_json TEXT NOT NULL DEFAULT '[]',
@@ -148,10 +149,16 @@ class TaskEngineDatabase:
                 """
             )
             columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            if "dedupe_key" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''")
             if "resource_keys_json" not in columns:
                 conn.execute("ALTER TABLE jobs ADD COLUMN resource_keys_json TEXT NOT NULL DEFAULT '[]'")
             if "wait_reason" not in columns:
                 conn.execute("ALTER TABLE jobs ADD COLUMN wait_reason TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_dedupe_key_status_created_at "
+                "ON jobs(dedupe_key, status, created_at DESC, job_id DESC)"
+            )
             network_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(network_window)").fetchall()}
             for statement, column_name in (
                 ("ALTER TABLE network_window ADD COLUMN auto_switch_enabled INTEGER NOT NULL DEFAULT 1", "auto_switch_enabled"),
@@ -213,13 +220,14 @@ class TaskEngineDatabase:
             conn.execute(
                 """
                 INSERT INTO jobs (
-                    job_id, name, feature, submitted_by, priority, resource_keys_json, wait_reason, status,
+                    job_id, name, feature, dedupe_key, submitted_by, priority, resource_keys_json, wait_reason, status,
                     created_at, started_at, finished_at, summary, error,
                     result_json, config_snapshot_json, cancel_requested, revision
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(job_id) DO UPDATE SET
                     name=excluded.name,
                     feature=excluded.feature,
+                    dedupe_key=excluded.dedupe_key,
                     submitted_by=excluded.submitted_by,
                     priority=excluded.priority,
                     resource_keys_json=excluded.resource_keys_json,
@@ -242,6 +250,7 @@ class TaskEngineDatabase:
                     str(payload.get("job_id", "") or "").strip(),
                     str(payload.get("name", "") or "").strip(),
                     str(payload.get("feature", "") or "").strip(),
+                    str(payload.get("dedupe_key", "") or "").strip(),
                     str(payload.get("submitted_by", "manual") or "manual").strip(),
                     str(payload.get("priority", "manual") or "manual").strip(),
                     json.dumps(payload.get("resource_keys") or [], ensure_ascii=False, default=str),
@@ -447,6 +456,7 @@ class TaskEngineDatabase:
             "job_id": str(row["job_id"] or ""),
             "name": str(row["name"] or ""),
             "feature": str(row["feature"] or ""),
+            "dedupe_key": str(row["dedupe_key"] or ""),
             "submitted_by": str(row["submitted_by"] or "manual"),
             "status": str(row["status"] or "queued"),
             "created_at": str(row["created_at"] or ""),
@@ -530,6 +540,31 @@ class TaskEngineDatabase:
             if payload:
                 items.append(payload)
         return items
+
+    def find_active_job_by_dedupe_key(
+        self,
+        dedupe_key: str,
+        *,
+        statuses: Iterable[str] | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_key = str(dedupe_key or "").strip()
+        if not normalized_key:
+            return None
+        normalized_statuses = [str(item or "").strip().lower() for item in (statuses or []) if str(item or "").strip()]
+        conn = self._connect()
+        try:
+            sql = "SELECT job_id FROM jobs WHERE dedupe_key = ?"
+            params: list[Any] = [normalized_key]
+            if normalized_statuses:
+                placeholders = ", ".join("?" for _ in normalized_statuses)
+                sql += f" AND lower(status) IN ({placeholders})"
+                params.extend(normalized_statuses)
+            sql += " ORDER BY created_at DESC, rowid DESC LIMIT 1"
+            row = conn.execute(sql, params).fetchone()
+            job_id = str((row[0] if row else "") or "").strip()
+        finally:
+            conn.close()
+        return self.get_job(job_id) if job_id else None
 
     def job_counts(self) -> dict[str, int]:
         conn = self._connect()

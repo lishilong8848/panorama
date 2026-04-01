@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import sqlite3
@@ -125,7 +125,65 @@ class SharedBridgeStore:
                     ON source_cache_entries(source_family, bucket_kind, bucket_key, building, status, downloaded_at);
                 CREATE INDEX IF NOT EXISTS idx_source_cache_family_date
                     ON source_cache_entries(source_family, duty_date, duty_shift, building, status, downloaded_at);
+                CREATE TABLE IF NOT EXISTS bridge_internal_issue_alerts (
+                    alert_key TEXT PRIMARY KEY,
+                    building TEXT NOT NULL DEFAULT '',
+                    failure_kind TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    latest_detail TEXT NOT NULL DEFAULT '',
+                    first_seen_at TEXT NOT NULL DEFAULT '',
+                    last_seen_at TEXT NOT NULL DEFAULT '',
+                    last_pushed_at TEXT NOT NULL DEFAULT '',
+                    occurrence_count INTEGER NOT NULL DEFAULT 0,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    last_task_id TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_bridge_internal_issue_alerts_due
+                    ON bridge_internal_issue_alerts(active, last_seen_at, last_pushed_at, updated_at);
+                CREATE TABLE IF NOT EXISTS bridge_external_alert_projection (
+                    projection_key TEXT PRIMARY KEY,
+                    building TEXT NOT NULL DEFAULT '',
+                    failure_kind TEXT NOT NULL DEFAULT '',
+                    alert_state TEXT NOT NULL DEFAULT '',
+                    status_key TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    latest_detail TEXT NOT NULL DEFAULT '',
+                    first_seen_at TEXT NOT NULL DEFAULT '',
+                    last_seen_at TEXT NOT NULL DEFAULT '',
+                    resolved_at TEXT NOT NULL DEFAULT '',
+                    occurrence_count INTEGER NOT NULL DEFAULT 0,
+                    still_unresolved INTEGER NOT NULL DEFAULT 1,
+                    last_notified_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_bridge_external_alert_projection_building
+                    ON bridge_external_alert_projection(building, still_unresolved, updated_at);
                 """
+            )
+            self._ensure_column(
+                conn,
+                table_name="bridge_internal_issue_alerts",
+                column_name="status_key",
+                ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN status_key TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                table_name="bridge_internal_issue_alerts",
+                column_name="resolved_at",
+                ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN resolved_at TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                table_name="bridge_internal_issue_alerts",
+                column_name="last_recovery_task_id",
+                ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN last_recovery_task_id TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                table_name="bridge_internal_issue_alerts",
+                column_name="last_recovery_pushed_at",
+                ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN last_recovery_pushed_at TEXT NOT NULL DEFAULT ''",
             )
             row = conn.execute("SELECT COUNT(1) AS cnt FROM bridge_settings").fetchone()
             if not row or int(row["cnt"] or 0) <= 0:
@@ -133,12 +191,21 @@ class SharedBridgeStore:
                 conn.execute(
                     """
                     INSERT INTO bridge_settings(id, shared_schema_version, created_at, updated_at)
-                    VALUES(1, 1, ?, ?)
+                    VALUES(1, 2, ?, ?)
                     """,
                     (now_text, now_text),
                 )
             else:
-                conn.execute("UPDATE bridge_settings SET updated_at=? WHERE id=1", (_now_text(),))
+                conn.execute("UPDATE bridge_settings SET shared_schema_version=2, updated_at=? WHERE id=1", (_now_text(),))
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, *, table_name: str, column_name: str, ddl: str) -> None:
+        columns = {
+            str(row["name"] or "").strip()
+            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if str(column_name or "").strip() not in columns:
+            conn.execute(ddl)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -291,6 +358,346 @@ class SharedBridgeStore:
             return None
         return self.get_task(str(row["task_id"] or "").strip())
 
+    def upsert_internal_issue_alert(
+        self,
+        *,
+        building: str,
+        failure_kind: str,
+        status_key: str,
+        summary: str,
+        latest_detail: str,
+        observed_at: str = "",
+        active: bool = True,
+    ) -> Dict[str, Any]:
+        building_text = str(building or "").strip()
+        failure_kind_text = str(failure_kind or "").strip().lower() or "browser_issue"
+        status_key_text = str(status_key or "").strip().lower() or ("healthy" if not active else "suspended")
+        if not building_text:
+            raise ValueError("bridge_internal_issue_alerts 缺少楼栋")
+        alert_key = f"{building_text}|{failure_kind_text}"
+        observed_at_text = str(observed_at or "").strip() or _now_text()
+        summary_text = str(summary or "").strip()
+        detail_text = str(latest_detail or "").strip() or summary_text
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT alert_key, building, failure_kind, summary, latest_detail,
+                       first_seen_at, last_seen_at, last_pushed_at, occurrence_count,
+                       active, last_task_id, updated_at, status_key, resolved_at,
+                       last_recovery_task_id, last_recovery_pushed_at
+                FROM bridge_internal_issue_alerts
+                WHERE alert_key=?
+                """,
+                (alert_key,),
+            ).fetchone()
+            if row:
+                previous_summary = str(row["summary"] or "").strip()
+                previous_detail = str(row["latest_detail"] or "").strip()
+                previous_status_key = str(row["status_key"] or "").strip().lower()
+                previous_active = bool(int(row["active"] or 0))
+                previous_last_seen_at = str(row["last_seen_at"] or "").strip() or observed_at_text
+                occurrence_count = int(row["occurrence_count"] or 0)
+                changed = (
+                    summary_text != previous_summary
+                    or detail_text != previous_detail
+                    or status_key_text != previous_status_key
+                    or active != previous_active
+                )
+                next_last_seen_at = observed_at_text if changed or not previous_active else previous_last_seen_at
+                if active and changed:
+                    occurrence_count += 1
+                conn.execute(
+                    """
+                    UPDATE bridge_internal_issue_alerts
+                    SET summary=?,
+                        latest_detail=?,
+                        status_key=?,
+                        last_seen_at=?,
+                        occurrence_count=?,
+                        active=?,
+                        resolved_at=?,
+                        last_recovery_task_id=?,
+                        last_recovery_pushed_at=?,
+                        updated_at=?
+                    WHERE alert_key=?
+                    """,
+                    (
+                        summary_text,
+                        detail_text,
+                        status_key_text,
+                        next_last_seen_at,
+                        occurrence_count,
+                        1 if active else 0,
+                        "" if active else str(row["resolved_at"] or "").strip(),
+                        "" if active else str(row["last_recovery_task_id"] or "").strip(),
+                        "" if active else str(row["last_recovery_pushed_at"] or "").strip(),
+                        observed_at_text,
+                        alert_key,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO bridge_internal_issue_alerts(
+                        alert_key, building, failure_kind, summary, latest_detail,
+                        first_seen_at, last_seen_at, last_pushed_at, occurrence_count,
+                        active, last_task_id, updated_at, status_key, resolved_at,
+                        last_recovery_task_id, last_recovery_pushed_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, '', ?, ?, '', ?, ?, '', '', '')
+                    """,
+                    (
+                        alert_key,
+                        building_text,
+                        failure_kind_text,
+                        summary_text,
+                        detail_text,
+                        observed_at_text,
+                        observed_at_text,
+                        1 if active else 0,
+                        1 if active else 0,
+                        observed_at_text,
+                        status_key_text,
+                    ),
+                )
+        payload = self.get_internal_issue_alert(alert_key)
+        if not payload:
+            raise RuntimeError(f"重新加载内网问题告警失败 {alert_key}")
+        return payload
+
+    def clear_internal_issue_alert(self, building: str, failure_kind: str, *, observed_at: str = "") -> None:
+        building_text = str(building or "").strip()
+        failure_kind_text = str(failure_kind or "").strip().lower() or "browser_issue"
+        if not building_text:
+            return
+        alert_key = f"{building_text}|{failure_kind_text}"
+        observed_at_text = str(observed_at or "").strip() or _now_text()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE bridge_internal_issue_alerts
+                SET active=0,
+                    status_key='healthy',
+                    last_seen_at=?,
+                    resolved_at=?,
+                    updated_at=?
+                WHERE alert_key=?
+                """,
+                (observed_at_text, observed_at_text, observed_at_text, alert_key),
+            )
+
+    def get_internal_issue_alert(self, alert_key: str) -> Dict[str, Any] | None:
+        alert_key_text = str(alert_key or "").strip()
+        if not alert_key_text:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT alert_key, building, failure_kind, summary, latest_detail,
+                       first_seen_at, last_seen_at, last_pushed_at, occurrence_count,
+                       active, last_task_id, updated_at, status_key, resolved_at,
+                       last_recovery_task_id, last_recovery_pushed_at
+                FROM bridge_internal_issue_alerts
+                WHERE alert_key=?
+                """,
+                (alert_key_text,),
+            ).fetchone()
+        if not row:
+            return None
+        return self._row_to_internal_issue_alert_dict(row)
+
+    def list_due_internal_issue_alerts(
+        self,
+        *,
+        quiet_window_sec: int = 600,
+        dedupe_window_sec: int = 3600,
+    ) -> List[Dict[str, Any]]:
+        now_dt = datetime.now()
+        quiet_before = (now_dt - timedelta(seconds=max(60, int(quiet_window_sec or 600)))).strftime("%Y-%m-%d %H:%M:%S")
+        dedupe_before = (now_dt - timedelta(seconds=max(60, int(dedupe_window_sec or 3600)))).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT alert_key, building, failure_kind, summary, latest_detail,
+                       first_seen_at, last_seen_at, last_pushed_at, occurrence_count,
+                       active, last_task_id, updated_at, status_key, resolved_at,
+                       last_recovery_task_id, last_recovery_pushed_at
+                FROM bridge_internal_issue_alerts
+                WHERE active=1
+                  AND last_seen_at <= ?
+                  AND (last_pushed_at='' OR last_pushed_at <= ?)
+                ORDER BY last_seen_at ASC, alert_key ASC
+                """,
+                (quiet_before, dedupe_before),
+            ).fetchall()
+        return [self._row_to_internal_issue_alert_dict(row) for row in rows]
+
+    def list_active_internal_issue_alerts(self) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT alert_key, building, failure_kind, summary, latest_detail,
+                       first_seen_at, last_seen_at, last_pushed_at, occurrence_count,
+                       active, last_task_id, updated_at, status_key, resolved_at,
+                       last_recovery_task_id, last_recovery_pushed_at
+                FROM bridge_internal_issue_alerts
+                WHERE active=1
+                ORDER BY updated_at DESC, alert_key ASC
+                """
+            ).fetchall()
+        return [self._row_to_internal_issue_alert_dict(row) for row in rows]
+
+    def list_due_internal_issue_recoveries(self) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT alert_key, building, failure_kind, summary, latest_detail,
+                       first_seen_at, last_seen_at, last_pushed_at, occurrence_count,
+                       active, last_task_id, updated_at, status_key, resolved_at,
+                       last_recovery_task_id, last_recovery_pushed_at
+                FROM bridge_internal_issue_alerts
+                WHERE active=0
+                  AND last_pushed_at<>''
+                  AND resolved_at<>''
+                  AND last_recovery_pushed_at=''
+                ORDER BY resolved_at ASC, alert_key ASC
+                """
+            ).fetchall()
+        return [self._row_to_internal_issue_alert_dict(row) for row in rows]
+
+    def mark_internal_issue_alert_pushed(self, alert_key: str, *, task_id: str = "", pushed_at: str = "") -> None:
+        alert_key_text = str(alert_key or "").strip()
+        if not alert_key_text:
+            return
+        pushed_at_text = str(pushed_at or "").strip() or _now_text()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE bridge_internal_issue_alerts
+                SET last_pushed_at=?,
+                    last_task_id=COALESCE(NULLIF(?, ''), last_task_id),
+                    updated_at=?
+                WHERE alert_key=?
+                """,
+                (pushed_at_text, str(task_id or "").strip(), pushed_at_text, alert_key_text),
+            )
+
+    def mark_internal_issue_alert_recovery_pushed(
+        self,
+        alert_key: str,
+        *,
+        task_id: str = "",
+        pushed_at: str = "",
+    ) -> None:
+        alert_key_text = str(alert_key or "").strip()
+        if not alert_key_text:
+            return
+        pushed_at_text = str(pushed_at or "").strip() or _now_text()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE bridge_internal_issue_alerts
+                SET last_recovery_task_id=COALESCE(NULLIF(?, ''), last_recovery_task_id),
+                    last_recovery_pushed_at=?,
+                    updated_at=?
+                WHERE alert_key=?
+                """,
+                (str(task_id or "").strip(), pushed_at_text, pushed_at_text, alert_key_text),
+            )
+
+    def upsert_external_alert_projection(
+        self,
+        *,
+        building: str,
+        failure_kind: str,
+        alert_state: str,
+        status_key: str,
+        summary: str,
+        latest_detail: str,
+        first_seen_at: str,
+        last_seen_at: str,
+        resolved_at: str = "",
+        occurrence_count: int = 0,
+        still_unresolved: bool = True,
+        last_notified_at: str = "",
+    ) -> Dict[str, Any]:
+        building_text = str(building or "").strip()
+        failure_kind_text = str(failure_kind or "").strip().lower() or "browser_issue"
+        if not building_text:
+            raise ValueError("bridge_external_alert_projection 缺少楼栋")
+        projection_key = f"{building_text}|{failure_kind_text}"
+        alert_state_text = str(alert_state or "").strip().lower() or "problem"
+        status_key_text = str(status_key or "").strip().lower() or ("healthy" if alert_state_text == "recovered" else "suspended")
+        notified_at_text = str(last_notified_at or "").strip() or _now_text()
+        updated_at_text = _now_text()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO bridge_external_alert_projection(
+                    projection_key, building, failure_kind, alert_state, status_key, summary, latest_detail,
+                    first_seen_at, last_seen_at, resolved_at, occurrence_count, still_unresolved,
+                    last_notified_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(projection_key) DO UPDATE SET
+                    alert_state=excluded.alert_state,
+                    status_key=excluded.status_key,
+                    summary=excluded.summary,
+                    latest_detail=excluded.latest_detail,
+                    first_seen_at=excluded.first_seen_at,
+                    last_seen_at=excluded.last_seen_at,
+                    resolved_at=excluded.resolved_at,
+                    occurrence_count=excluded.occurrence_count,
+                    still_unresolved=excluded.still_unresolved,
+                    last_notified_at=excluded.last_notified_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    projection_key,
+                    building_text,
+                    failure_kind_text,
+                    alert_state_text,
+                    status_key_text,
+                    str(summary or "").strip(),
+                    str(latest_detail or "").strip(),
+                    str(first_seen_at or "").strip(),
+                    str(last_seen_at or "").strip(),
+                    str(resolved_at or "").strip(),
+                    max(0, int(occurrence_count or 0)),
+                    1 if still_unresolved else 0,
+                    notified_at_text,
+                    updated_at_text,
+                ),
+            )
+        return {
+            "projection_key": projection_key,
+            "building": building_text,
+            "failure_kind": failure_kind_text,
+            "alert_state": alert_state_text,
+            "status_key": status_key_text,
+            "summary": str(summary or "").strip(),
+            "latest_detail": str(latest_detail or "").strip(),
+            "first_seen_at": str(first_seen_at or "").strip(),
+            "last_seen_at": str(last_seen_at or "").strip(),
+            "resolved_at": str(resolved_at or "").strip(),
+            "occurrence_count": max(0, int(occurrence_count or 0)),
+            "still_unresolved": bool(still_unresolved),
+            "last_notified_at": notified_at_text,
+            "updated_at": updated_at_text,
+        }
+
+    def list_external_alert_projections(self) -> List[Dict[str, Any]]:
+        self.ensure_ready()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT projection_key, building, failure_kind, alert_state, status_key, summary, latest_detail,
+                       first_seen_at, last_seen_at, resolved_at, occurrence_count, still_unresolved,
+                       last_notified_at, updated_at
+                FROM bridge_external_alert_projection
+                ORDER BY updated_at DESC, projection_key ASC
+                """
+            ).fetchall()
+        return [self._row_to_external_alert_projection_dict(row) for row in rows]
+
     def cancel_task(self, task_id: str) -> bool:
         task_text = str(task_id or "").strip()
         if not task_text:
@@ -411,6 +818,7 @@ class SharedBridgeStore:
         end_time: str | None,
         duty_date: str | None,
         duty_shift: str | None,
+        target_bucket_key: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
         requested_by: str = "manual",
@@ -427,15 +835,29 @@ class SharedBridgeStore:
             "end_time": str(end_time or "").strip(),
             "duty_date": str(duty_date or "").strip(),
             "duty_shift": str(duty_shift or "").strip().lower(),
+            "target_bucket_key": str(target_bucket_key or "").strip(),
         }
-        dedupe_key = "|".join(
-            [
-                "handover_from_download",
-                request_payload["duty_date"] or "-",
-                request_payload["duty_shift"] or "-",
-                ",".join(normalized_buildings) or "all_enabled",
-            ]
-        )
+        if request_payload["duty_date"] and request_payload["duty_shift"]:
+            dedupe_key = "|".join(
+                [
+                    "handover_from_download",
+                    "date",
+                    request_payload["duty_date"],
+                    request_payload["duty_shift"],
+                    ",".join(normalized_buildings) or "all_enabled",
+                    request_payload["end_time"] or "-",
+                ]
+            )
+        else:
+            dedupe_key = "|".join(
+                [
+                    "handover_from_download",
+                    "latest",
+                    request_payload["target_bucket_key"] or "-",
+                    ",".join(normalized_buildings) or "all_enabled",
+                    request_payload["end_time"] or "-",
+                ]
+            )
         with self.connect() as conn:
             conn.execute(
                 """
@@ -502,7 +924,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
+            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
         return payload
 
     def create_day_metric_from_download_task(
@@ -601,13 +1023,14 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
+            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
         return payload
 
     def create_wet_bulb_collection_task(
         self,
         *,
         buildings: List[str] | None,
+        target_bucket_key: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
         requested_by: str = "manual",
@@ -619,11 +1042,14 @@ class SharedBridgeStore:
             for item in (buildings or [])
             if str(item or "").strip()
         ]
-        request_payload = {"buildings": normalized_buildings}
+        request_payload = {
+            "buildings": normalized_buildings,
+            "target_bucket_key": str(target_bucket_key or "").strip(),
+        }
         dedupe_key = "|".join(
             [
                 "wet_bulb_collection",
-                now_text[:10],
+                request_payload["target_bucket_key"] or now_text[:10],
                 ",".join(normalized_buildings) or "all_enabled",
             ]
         )
@@ -693,12 +1119,13 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
+            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
         return payload
 
     def create_monthly_auto_once_task(
         self,
         *,
+        target_bucket_key: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
         requested_by: str = "manual",
@@ -706,8 +1133,17 @@ class SharedBridgeStore:
     ) -> Dict[str, Any]:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
-        request_payload = {"source": str(source or "").strip() or "manual"}
-        dedupe_key = "|".join(["monthly_report_pipeline", "auto_once", now_text[:10] or "-"])
+        request_payload = {
+            "source": str(source or "").strip() or "manual",
+            "target_bucket_key": str(target_bucket_key or "").strip(),
+        }
+        dedupe_key = "|".join(
+            [
+                "monthly_report_pipeline",
+                "auto_once",
+                request_payload["target_bucket_key"] or now_text[:10] or "-",
+            ]
+        )
         with self.connect() as conn:
             conn.execute(
                 """
@@ -775,7 +1211,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
+            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
         return payload
 
     def create_monthly_multi_date_task(
@@ -862,7 +1298,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
+            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
         return payload
 
     def create_monthly_resume_upload_task(
@@ -938,7 +1374,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
+            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
         return payload
 
     def create_handover_cache_fill_task(
@@ -1043,7 +1479,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
+            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
         return payload
 
     def create_monthly_cache_fill_task(
@@ -1125,7 +1561,104 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
+            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
+        return payload
+
+    def create_internal_browser_alert_task(
+        self,
+        *,
+        building: str,
+        failure_kind: str,
+        alert_state: str,
+        status_key: str,
+        summary: str,
+        latest_detail: str,
+        first_seen_at: str,
+        last_seen_at: str,
+        resolved_at: str,
+        occurrence_count: int,
+        still_unresolved: bool,
+        created_by_role: str,
+        created_by_node_id: str,
+        requested_by: str = "internal_monitor",
+    ) -> Dict[str, Any]:
+        task_id = uuid.uuid4().hex
+        now_text = _now_text()
+        building_text = str(building or "").strip()
+        failure_kind_text = str(failure_kind or "").strip().lower() or "browser_issue"
+        alert_state_text = str(alert_state or "").strip().lower() or "problem"
+        status_key_text = str(status_key or "").strip().lower() or ("healthy" if alert_state_text == "recovered" else "suspended")
+        request_payload = {
+            "building": building_text,
+            "failure_kind": failure_kind_text,
+            "alert_state": alert_state_text,
+            "status_key": status_key_text,
+            "summary": str(summary or "").strip(),
+            "latest_detail": str(latest_detail or "").strip(),
+            "first_seen_at": str(first_seen_at or "").strip(),
+            "last_seen_at": str(last_seen_at or "").strip(),
+            "resolved_at": str(resolved_at or "").strip(),
+            "occurrence_count": max(1, int(occurrence_count or 0)),
+            "still_unresolved": bool(still_unresolved),
+        }
+        dedupe_key = "|".join(["internal_browser_alert", alert_state_text or "-", building_text or "-", failure_kind_text or "-"])
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO bridge_tasks(
+                    task_id, feature, mode, created_by_role, created_by_node_id, requested_by,
+                    status, dedupe_key, request_json, result_json, error, created_at, updated_at, revision
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    task_id,
+                    "internal_browser_alert",
+                    "aggregate",
+                    str(created_by_role or "").strip(),
+                    str(created_by_node_id or "").strip(),
+                    str(requested_by or "").strip() or "internal_monitor",
+                    "ready_for_external",
+                    dedupe_key,
+                    json.dumps(request_payload, ensure_ascii=False),
+                    "{}",
+                    "",
+                    now_text,
+                    now_text,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO bridge_stages(
+                    task_id, stage_id, role_target, handler, status, input_json, result_json,
+                    claimed_by_node_id, claim_token, lease_expires_at, started_at, finished_at, error, revision
+                ) VALUES(?, ?, ?, ?, ?, ?, '{}', '', '', '', '', '', '', 0)
+                """,
+                (
+                    task_id,
+                    "external_notify",
+                    "external",
+                    "internal_browser_alert_external",
+                    "pending",
+                    json.dumps(request_payload, ensure_ascii=False),
+                ),
+            )
+            self._insert_event(
+                conn,
+                task_id=task_id,
+                stage_id="",
+                side=str(created_by_role or "").strip(),
+                level="warning",
+                event_type="created",
+                payload={
+                    "message": "已创建内网环境告警共享任务",
+                    "feature": "internal_browser_alert",
+                    "dedupe_key": dedupe_key,
+                    "request": request_payload,
+                },
+            )
+        payload = self.get_task(task_id)
+        if not payload:
+            raise RuntimeError(f"重新加载内网环境告警任务失败 {task_id}")
         return payload
 
     def claim_next_task(self, *, role_target: str, node_id: str, lease_sec: int = 30) -> Dict[str, Any] | None:
@@ -1647,6 +2180,44 @@ class SharedBridgeStore:
             "event_type": str(row["event_type"] or ""),
             "payload": self._loads(row["payload_json"]),
             "created_at": str(row["created_at"] or ""),
+        }
+
+    def _row_to_internal_issue_alert_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "alert_key": str(row["alert_key"] or ""),
+            "building": str(row["building"] or ""),
+            "failure_kind": str(row["failure_kind"] or ""),
+            "summary": str(row["summary"] or ""),
+            "latest_detail": str(row["latest_detail"] or ""),
+            "first_seen_at": str(row["first_seen_at"] or ""),
+            "last_seen_at": str(row["last_seen_at"] or ""),
+            "last_pushed_at": str(row["last_pushed_at"] or ""),
+            "occurrence_count": int(row["occurrence_count"] or 0),
+            "active": bool(int(row["active"] or 0)),
+            "last_task_id": str(row["last_task_id"] or ""),
+            "status_key": str(row["status_key"] or ""),
+            "resolved_at": str(row["resolved_at"] or ""),
+            "last_recovery_task_id": str(row["last_recovery_task_id"] or ""),
+            "last_recovery_pushed_at": str(row["last_recovery_pushed_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+
+    def _row_to_external_alert_projection_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "projection_key": str(row["projection_key"] or ""),
+            "building": str(row["building"] or ""),
+            "failure_kind": str(row["failure_kind"] or ""),
+            "alert_state": str(row["alert_state"] or ""),
+            "status_key": str(row["status_key"] or ""),
+            "summary": str(row["summary"] or ""),
+            "latest_detail": str(row["latest_detail"] or ""),
+            "first_seen_at": str(row["first_seen_at"] or ""),
+            "last_seen_at": str(row["last_seen_at"] or ""),
+            "resolved_at": str(row["resolved_at"] or ""),
+            "occurrence_count": int(row["occurrence_count"] or 0),
+            "still_unresolved": bool(int(row["still_unresolved"] or 0)),
+            "last_notified_at": str(row["last_notified_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
         }
 
     def _row_to_source_cache_entry_dict(self, row: sqlite3.Row) -> Dict[str, Any]:

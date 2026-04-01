@@ -380,6 +380,14 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             for item in (selection.get("stale_buildings", []) if isinstance(selection, dict) else [])
             if str(item or "").strip()
         ]
+        blocked_buildings = [
+            {
+                "building": str(item.get("building", "") or "").strip(),
+                "reason": str(item.get("reason", "") or "").strip(),
+            }
+            for item in (selection.get("blocked_buildings", []) if isinstance(selection, dict) else [])
+            if isinstance(item, dict) and str(item.get("building", "") or "").strip()
+        ]
         if is_best_bucket_too_old:
             age_text = _format_bucket_age_hours_text(best_bucket_age_hours)
             bucket_text = best_bucket_key or "未知时间桶"
@@ -391,6 +399,13 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 f"等待过旧楼栋共享文件更新：{feature_name}源文件已有回退版本，但以下楼栋较最新时间桶落后超过 3 桶："
                 + " / ".join(stale_buildings)
             )
+        if blocked_buildings:
+            blocked_text = " / ".join(
+                f"{item['building']} {item['reason']}".strip()
+                for item in blocked_buildings
+            ).strip()
+            if blocked_text:
+                return f"等待内网恢复：{blocked_text}"
         if missing_buildings:
             return (
                 f"等待缺失楼栋共享文件补齐：{feature_name}源文件尚未登记或文件不可访问，缺失楼栋："

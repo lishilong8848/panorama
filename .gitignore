@@ -55,3 +55,4 @@ __pycache__/
 # Existing local-only project artifacts
 /docs/
 /全景平台月报自动定时上传.spec
+tests/

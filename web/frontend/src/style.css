@@ -1091,6 +1091,16 @@ a {
   color: var(--text-1);
 }
 
+.status-subsection-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  margin-bottom: 8px;
+}
+
 .status-card-head {
   display: flex;
   align-items: flex-start;

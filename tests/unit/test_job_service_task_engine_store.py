@@ -89,3 +89,38 @@ def test_job_service_persists_resource_snapshot_to_sqlite(tmp_path: Path) -> Non
     final_snapshot = service.get_resource_snapshot()
     assert final_snapshot["controlled_browser"]["holder_job_id"] == ""
     assert final_snapshot["controlled_browser"]["queue_length"] == 0
+
+
+def test_job_service_reuses_active_job_by_dedupe_key_from_sqlite(tmp_path: Path) -> None:
+    service = JobService()
+    service.configure_task_engine(
+        runtime_config={"paths": {}},
+        app_dir=tmp_path,
+        config_snapshot_getter=lambda: {"paths": {}},
+    )
+    release = threading.Event()
+    started = threading.Event()
+
+    def _first(_emit_log):  # noqa: ANN001
+        started.set()
+        release.wait(timeout=3)
+        return {"status": "ok-first"}
+
+    first = service.start_job(
+        "first",
+        _first,
+        feature="handover_cache_continue",
+        dedupe_key="handover_cache_continue:{\"mode\":\"latest\"}",
+    )
+    started.wait(timeout=1)
+
+    second = service.start_job(
+        "second",
+        lambda _emit_log: {"status": "ok-second"},
+        feature="handover_cache_continue",
+        dedupe_key="handover_cache_continue:{\"mode\":\"latest\"}",
+    )
+
+    assert second.job_id == first.job_id
+    release.set()
+    service.wait_job(first.job_id, timeout_sec=3)

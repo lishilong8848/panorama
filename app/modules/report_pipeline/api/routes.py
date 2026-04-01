@@ -90,6 +90,8 @@ _DEFAULT_REVIEW_BUILDINGS = [
     {"code": "e", "name": "E楼"},
 ]
 _REVIEW_BASE_STARTUP_PROBE_DELAY_SEC = 8.0
+_INTERNAL_HEALTH_SHARED_BRIDGE_SLOW_THRESHOLD_SEC = 1.0
+_INTERNAL_HEALTH_SHARED_BRIDGE_SLOW_LOG_INTERVAL_SEC = 60.0
 
 
 def _runtime_config(container) -> Dict[str, Any]:
@@ -124,6 +126,49 @@ def _shared_bridge_is_available(container) -> bool:
     if not isinstance(snapshot, dict):
         return False
     return bool(snapshot.get("enabled", False)) and bool(str(snapshot.get("root_dir", "") or "").strip())
+
+
+def _blank_internal_download_pool_snapshot() -> Dict[str, Any]:
+    return {
+        "enabled": False,
+        "browser_ready": False,
+        "page_slots": [],
+        "active_buildings": [],
+        "last_error": "",
+    }
+
+
+def _sanitize_shared_bridge_snapshot_for_role(snapshot: Any, *, role_mode: str) -> Dict[str, Any]:
+    payload = dict(snapshot) if isinstance(snapshot, dict) else {}
+    if normalize_role_mode(role_mode) != "internal":
+        payload["internal_download_pool"] = _blank_internal_download_pool_snapshot()
+    return payload
+
+
+def _shared_bridge_health_snapshot(container, request: Request, *, role_mode: str) -> Dict[str, Any]:
+    snapshot_mode = "internal_light" if str(role_mode or "").strip().lower() == "internal" else "external_full"
+    started_at = time.perf_counter()
+    snapshot: Dict[str, Any] = {}
+    if hasattr(container, "shared_bridge_snapshot"):
+        try:
+            snapshot = container.shared_bridge_snapshot(mode=snapshot_mode)
+        except TypeError:
+            snapshot = container.shared_bridge_snapshot()
+    elapsed = time.perf_counter() - started_at
+    if snapshot_mode == "internal_light" and elapsed >= _INTERNAL_HEALTH_SHARED_BRIDGE_SLOW_THRESHOLD_SEC:
+        now_monotonic = time.monotonic()
+        last_logged_at = float(
+            getattr(request.app.state, "_internal_health_shared_bridge_slow_logged_at", 0.0) or 0.0
+        )
+        if (now_monotonic - last_logged_at) >= _INTERNAL_HEALTH_SHARED_BRIDGE_SLOW_LOG_INTERVAL_SEC:
+            setattr(request.app.state, "_internal_health_shared_bridge_slow_logged_at", now_monotonic)
+            add_system_log = getattr(container, "add_system_log", None)
+            if callable(add_system_log):
+                add_system_log(
+                    f"[health] shared_bridge snapshot took {elapsed * 1000:.0f}ms (mode={snapshot_mode})",
+                    source="system",
+                )
+    return _sanitize_shared_bridge_snapshot_for_role(snapshot, role_mode=role_mode)
 
 
 def _shared_bridge_service_or_raise(container):
@@ -199,6 +244,16 @@ def _normalize_latest_cache_selection(selection: Any) -> Dict[str, Any]:
             for item in payload.get("stale_buildings", [])
             if str(item or "").strip()
         ] if isinstance(payload.get("stale_buildings", []), list) else [],
+        "blocked_buildings": [
+            {
+                "building": str(item.get("building", "") or "").strip(),
+                "reason": str(item.get("reason", "") or "").strip(),
+                "failure_kind": str(item.get("failure_kind", "") or "").strip(),
+                "next_probe_at": str(item.get("next_probe_at", "") or "").strip(),
+            }
+            for item in payload.get("blocked_buildings", [])
+            if isinstance(item, dict) and str(item.get("building", "") or "").strip()
+        ] if isinstance(payload.get("blocked_buildings", []), list) else [],
         "buildings": payload.get("buildings", []) if isinstance(payload.get("buildings", []), list) else [],
         "can_proceed": bool(payload.get("can_proceed", False)) and not is_best_bucket_too_old,
     }
@@ -211,6 +266,7 @@ def _build_latest_cache_wait_detail(*, feature_name: str, selection: Dict[str, A
     missing_buildings = selection.get("missing_buildings", []) if isinstance(selection, dict) else []
     stale_buildings = selection.get("stale_buildings", []) if isinstance(selection, dict) else []
     fallback_buildings = selection.get("fallback_buildings", []) if isinstance(selection, dict) else []
+    blocked_buildings = selection.get("blocked_buildings", []) if isinstance(selection, dict) else []
     if is_best_bucket_too_old:
         age_text = _format_bucket_age_hours_text(best_bucket_age_hours)
         bucket_text = best_bucket_key or "未知时间桶"
@@ -224,6 +280,14 @@ def _build_latest_cache_wait_detail(*, feature_name: str, selection: Dict[str, A
             f"等待过旧楼栋共享文件更新：{feature_name}源文件已有回退版本，但以下楼栋较最新时间桶落后超过 3 桶："
             + " / ".join(str(item) for item in stale_buildings)
         )
+    if blocked_buildings:
+        blocked_text = " / ".join(
+            f"{str(item.get('building', '') or '').strip()} {str(item.get('reason', '') or '').strip()}".strip()
+            for item in blocked_buildings
+            if isinstance(item, dict)
+        ).strip()
+        if blocked_text:
+            return f"等待内网恢复：{blocked_text}"
     if missing_buildings:
         return (
             f"等待缺失楼栋共享文件补齐：{feature_name}源文件尚未登记或文件不可访问，缺失楼栋："
@@ -331,6 +395,39 @@ def _empty_followup_progress() -> Dict[str, Any]:
     }
 
 
+def _empty_handover_review_status() -> Dict[str, Any]:
+    return {
+        "batch_key": "",
+        "duty_date": "",
+        "duty_shift": "",
+        "has_any_session": False,
+        "confirmed_count": 0,
+        "required_count": 5,
+        "all_confirmed": False,
+        "ready_for_followup_upload": False,
+        "buildings": [],
+        "followup_progress": _empty_followup_progress(),
+    }
+
+
+def _empty_handover_review_access() -> Dict[str, Any]:
+    return {
+        "review_links": [],
+        "review_base_url": "",
+        "review_base_url_effective": "",
+        "review_base_url_effective_source": "",
+        "review_base_url_candidates": [],
+        "review_base_url_status": "",
+        "review_base_url_error": "",
+        "review_base_url_validated_candidates": [],
+        "review_base_url_candidate_results": [],
+        "review_base_url_manual_available": True,
+        "configured": False,
+        "review_base_url_configured_at": "",
+        "review_base_url_last_probe_at": "",
+    }
+
+
 def _job_resource_keys(*resource_keys: str, batch_key: str = "") -> list[str]:
     keys: list[str] = []
     for item in resource_keys:
@@ -345,6 +442,35 @@ def _job_resource_keys(*resource_keys: str, batch_key: str = "") -> list[str]:
     return keys
 
 
+def _normalize_dedupe_scalar(value: Any, *, lower: bool = False) -> str:
+    text = str(value or "").strip()
+    return text.lower() if lower else text
+
+
+def _normalize_dedupe_list(values: list[Any] | tuple[Any, ...] | None, *, lower: bool = False) -> list[str]:
+    normalized: list[str] = []
+    for item in values or []:
+        text = _normalize_dedupe_scalar(item, lower=lower)
+        if text and text not in normalized:
+            normalized.append(text)
+    return sorted(normalized)
+
+
+def _job_dedupe_key(kind: str, **payload: Any) -> str:
+    normalized_payload: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, (list, tuple)):
+            items = _normalize_dedupe_list(list(value))
+            if items:
+                normalized_payload[key] = items
+            continue
+        text = _normalize_dedupe_scalar(value)
+        if text:
+            normalized_payload[key] = text
+    payload_text = json.dumps(normalized_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"{str(kind or '').strip()}:{payload_text}"
+
+
 def _start_background_job(
     container,
     *,
@@ -353,28 +479,31 @@ def _start_background_job(
     resource_keys: list[str] | tuple[str, ...] | None = None,
     priority: str = "manual",
     feature: str = "",
+    dedupe_key: str = "",
     submitted_by: str = "manual",
     worker_handler: str = "",
     worker_payload: Dict[str, Any] | None = None,
 ):
     job_service = container.job_service
+    job_kwargs = {
+        "resource_keys": resource_keys,
+        "priority": priority,
+        "feature": feature,
+        "submitted_by": submitted_by,
+    }
+    if str(dedupe_key or "").strip():
+        job_kwargs["dedupe_key"] = str(dedupe_key or "").strip()
     if worker_handler and hasattr(job_service, "start_worker_job"):
         return job_service.start_worker_job(
             name=name,
             worker_handler=worker_handler,
             worker_payload=worker_payload or {},
-            resource_keys=resource_keys,
-            priority=priority,
-            feature=feature,
-            submitted_by=submitted_by,
+            **job_kwargs,
         )
     return job_service.start_job(
         name=name,
         run_func=run_func,
-        resource_keys=resource_keys,
-        priority=priority,
-        feature=feature,
-        submitted_by=submitted_by,
+        **job_kwargs,
     )
 
 
@@ -1128,6 +1257,8 @@ def health(
 ) -> Dict[str, Any]:
     container = request.app.state.container
     runtime_cfg = container.runtime_config
+    role_mode = _deployment_role_mode(container)
+    include_handover_runtime_context = role_mode != "internal"
 
     wifi_name = None
     interface_name = ""
@@ -1138,9 +1269,10 @@ def health(
     last_wifi_error = ""
     try:
         if container.wifi_service:
-            wifi_name = container.wifi_service.current_ssid()
-            interface_name = container.wifi_service.current_interface_name()
-            visible_targets = container.wifi_service.visible_targets()
+            if include_handover_runtime_context:
+                wifi_name = container.wifi_service.current_ssid()
+                interface_name = container.wifi_service.current_interface_name()
+                visible_targets = container.wifi_service.visible_targets()
             last_switch_report = container.wifi_service.get_last_switch_report()
             last_wifi_result = str(last_switch_report.get("result", "") or "")
             last_wifi_error_type = str(last_switch_report.get("error_type", "") or "")
@@ -1217,73 +1349,55 @@ def health(
     handover_event_cache_name = str(
         handover_event_cache.get("state_file", "") or "handover_shared_cache.json"
     ).strip() or "handover_shared_cache.json"
-    event_cache_store = EventFollowupCacheStore(
-        cache_state_file=handover_event_cache_name,
-        global_paths={"runtime_state_root": runtime_state_root_text},
-    )
-    handover_event_cache_path = event_cache_store.state_path
+    handover_event_cache_path = runtime_state_root_path / handover_event_cache_name
     handover_event_pending_count = 0
-    try:
-        cache_state = event_cache_store.load_state()
-        pending_map = cache_state.get("pending_by_id", {})
-        if isinstance(pending_map, dict):
-            handover_event_pending_count = len(pending_map)
-    except Exception:  # noqa: BLE001
-        handover_event_pending_count = 0
+    if include_handover_runtime_context:
+        event_cache_store = EventFollowupCacheStore(
+            cache_state_file=handover_event_cache_name,
+            global_paths={"runtime_state_root": runtime_state_root_text},
+        )
+        handover_event_cache_path = event_cache_store.state_path
+        try:
+            cache_state = event_cache_store.load_state()
+            pending_map = cache_state.get("pending_by_id", {})
+            if isinstance(pending_map, dict):
+                handover_event_pending_count = len(pending_map)
+        except Exception:  # noqa: BLE001
+            handover_event_pending_count = 0
 
     selected_duty_date, selected_duty_shift = _normalize_handover_duty_filters(
         handover_duty_date,
         handover_duty_shift,
     )
 
-    handover_review_status: Dict[str, Any] = {
-        "batch_key": "",
-        "duty_date": "",
-        "duty_shift": "",
-        "has_any_session": False,
-        "confirmed_count": 0,
-        "required_count": 5,
-        "all_confirmed": False,
-        "ready_for_followup_upload": False,
-        "buildings": [],
-        "followup_progress": _empty_followup_progress(),
-    }
-    try:
-        handover_loaded_cfg = load_handover_config(runtime_cfg)
-        review_service = ReviewSessionService(handover_loaded_cfg)
-        followup_service = ReviewFollowupTriggerService(handover_loaded_cfg)
-        if selected_duty_date and selected_duty_shift:
-            handover_review_status = review_service.get_batch_status_for_duty(
-                selected_duty_date,
-                selected_duty_shift,
+    handover_review_status: Dict[str, Any] = _empty_handover_review_status()
+    handover_review_access = _empty_handover_review_access()
+    if include_handover_runtime_context:
+        try:
+            handover_loaded_cfg = load_handover_config(runtime_cfg)
+            review_service = ReviewSessionService(handover_loaded_cfg)
+            followup_service = ReviewFollowupTriggerService(handover_loaded_cfg)
+            if selected_duty_date and selected_duty_shift:
+                handover_review_status = review_service.get_batch_status_for_duty(
+                    selected_duty_date,
+                    selected_duty_shift,
+                )
+            else:
+                handover_review_status = review_service.get_latest_batch_status()
+            target_batch_key = str(handover_review_status.get("batch_key", "")).strip()
+            handover_review_status["followup_progress"] = (
+                followup_service.get_followup_progress(target_batch_key)
+                if target_batch_key
+                else _empty_followup_progress()
             )
-        else:
-            handover_review_status = review_service.get_latest_batch_status()
-        target_batch_key = str(handover_review_status.get("batch_key", "")).strip()
-        handover_review_status["followup_progress"] = (
-            followup_service.get_followup_progress(target_batch_key)
-            if target_batch_key
-            else _empty_followup_progress()
+        except Exception:  # noqa: BLE001
+            handover_review_status = _empty_handover_review_status()
+        handover_review_access = _build_handover_review_access(
+            container,
+            request,
+            duty_date=str(handover_review_status.get("duty_date", "")).strip(),
+            duty_shift=str(handover_review_status.get("duty_shift", "")).strip().lower(),
         )
-    except Exception:  # noqa: BLE001
-        handover_review_status = {
-            "batch_key": "",
-            "duty_date": "",
-            "duty_shift": "",
-            "has_any_session": False,
-            "confirmed_count": 0,
-            "required_count": 5,
-            "all_confirmed": False,
-            "ready_for_followup_upload": False,
-            "buildings": [],
-            "followup_progress": _empty_followup_progress(),
-        }
-    handover_review_access = _build_handover_review_access(
-        container,
-        request,
-        duty_date=str(handover_review_status.get("duty_date", "")).strip(),
-        duty_shift=str(handover_review_status.get("duty_shift", "")).strip().lower(),
-    )
     system_logs = list(getattr(container, "system_logs", []))[-200:]
     get_log_entries = getattr(container, "get_system_log_entries", None)
     system_log_entries = get_log_entries(limit=200) if callable(get_log_entries) else []
@@ -1294,6 +1408,7 @@ def health(
     )
     get_next_offset = getattr(container, "system_log_next_offset", None)
     system_log_next_offset = int(get_next_offset() or 0) if callable(get_next_offset) else len(system_logs)
+    shared_bridge_snapshot = _shared_bridge_health_snapshot(container, request, role_mode=role_mode)
 
     return {
         "ok": True,
@@ -1424,7 +1539,7 @@ def health(
             "assets_dir": str(getattr(container, "frontend_assets_dir", "")),
         },
         "deployment": container.deployment_snapshot(),
-        "shared_bridge": container.shared_bridge_snapshot(),
+        "shared_bridge": shared_bridge_snapshot,
         "network": {
             "current_ssid": wifi_name,
             "interface_name": interface_name,
@@ -1621,6 +1736,11 @@ def job_auto_once(request: Request) -> Dict[str, Any]:
                 emit_log=emit_log,
                 source_label="月报共享文件",
             )
+        dedupe_key = _job_dedupe_key(
+            "monthly_cache_latest",
+            bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
+            buildings=[str(item.get("building", "") or "").strip() for item in cached_entries],
+        )
 
         try:
             job = _start_background_job(
@@ -1632,6 +1752,7 @@ def job_auto_once(request: Request) -> Dict[str, Any]:
                 resource_keys=_job_resource_keys("shared_bridge:monthly_report"),
                 priority="manual",
                 feature="monthly_cache_latest",
+                dedupe_key=dedupe_key,
                 submitted_by="manual",
             )
             container.add_system_log(f"[任务] 已提交: 月报自动流程-读取共享文件 ({job.job_id})")
@@ -1716,6 +1837,11 @@ def job_wet_bulb_collection_run(request: Request) -> Dict[str, Any]:
             ]
             service = WetBulbCollectionService(config)
             return service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
+        dedupe_key = _job_dedupe_key(
+            "wet_bulb_cache_latest",
+            bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
+            buildings=[str(item.get("building", "") or "").strip() for item in cached_entries],
+        )
 
         try:
             job = _start_background_job(
@@ -1727,6 +1853,7 @@ def job_wet_bulb_collection_run(request: Request) -> Dict[str, Any]:
                 resource_keys=_job_resource_keys("shared_bridge:wet_bulb"),
                 priority="manual",
                 feature="wet_bulb_cache_latest",
+                dedupe_key=dedupe_key,
                 submitted_by="manual",
             )
             container.add_system_log(f"[任务] 已提交: 湿球温度定时采集-读取共享文件 ({job.job_id})")
@@ -1791,7 +1918,10 @@ def job_multi_date(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
         ))
         expected_count = len(selected_dates) * len(target_buildings)
         if len(cached_entries) < expected_count:
-            task = bridge_service.create_monthly_cache_fill_task(
+            task = _get_or_create_bridge_task(
+                bridge_service,
+                get_or_create_name="get_or_create_monthly_cache_fill_task",
+                create_name="create_monthly_cache_fill_task",
                 selected_dates=selected_dates,
                 requested_by="manual",
             )
@@ -1825,6 +1955,11 @@ def job_multi_date(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
                 emit_log=emit_log,
                 source_label="月报历史共享文件",
             )
+        dedupe_key = _job_dedupe_key(
+            "monthly_cache_by_date",
+            selected_dates=selected_dates,
+            buildings=target_buildings,
+        )
 
         try:
             job = _start_background_job(
@@ -1836,6 +1971,7 @@ def job_multi_date(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
                 resource_keys=_job_resource_keys("shared_bridge:monthly_report"),
                 priority="manual",
                 feature="monthly_cache_by_date",
+                dedupe_key=dedupe_key,
                 submitted_by="manual",
             )
             container.add_system_log(f"[任务] 已提交: 月报多日期-读取共享文件 ({job.job_id})")
@@ -2299,7 +2435,10 @@ def job_handover_from_download(payload: Dict[str, Any], request: Request) -> Dic
                 buildings=target_buildings,
             ))
             if len(cached_entries) < len(target_buildings):
-                task = bridge_service.create_handover_cache_fill_task(
+                task = _get_or_create_bridge_task(
+                    bridge_service,
+                    get_or_create_name="get_or_create_handover_cache_fill_task",
+                    create_name="create_handover_cache_fill_task",
                     continuation_kind="handover",
                     buildings=target_buildings,
                     duty_date=duty_date_text,
@@ -2363,6 +2502,15 @@ def job_handover_from_download(payload: Dict[str, Any], request: Request) -> Dic
                 duty_shift=duty_shift_text,
                 emit_log=emit_log,
             )
+        dedupe_key = _job_dedupe_key(
+            "handover_cache_continue",
+            mode="by_date" if (duty_date_text and duty_shift_text) else "latest",
+            bucket_key=str(selection.get("best_bucket_key", "") or "").strip() if not (duty_date_text and duty_shift_text) else "",
+            buildings=[item[0] for item in building_files],
+            duty_date=duty_date_text or "",
+            duty_shift=duty_shift_text or "",
+            end_time=end_time_text or "",
+        )
 
         try:
             job = _start_background_job(
@@ -2374,6 +2522,7 @@ def job_handover_from_download(payload: Dict[str, Any], request: Request) -> Dic
                 resource_keys=_job_resource_keys("shared_bridge:handover"),
                 priority="manual",
                 feature="handover_cache_continue",
+                dedupe_key=dedupe_key,
                 submitted_by="manual",
             )
             container.add_system_log(f"[任务] 已提交: 交接班日志-使用共享文件生成 ({job.job_id})")
@@ -2476,7 +2625,10 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
         ))
         expected_count = len(selected_dates) * len(target_buildings)
         if len(cached_entries) < expected_count:
-            task = bridge_service.create_handover_cache_fill_task(
+            task = _get_or_create_bridge_task(
+                bridge_service,
+                get_or_create_name="get_or_create_handover_cache_fill_task",
+                create_name="create_handover_cache_fill_task",
                 continuation_kind="day_metric",
                 buildings=None,
                 duty_date=None,
@@ -2520,6 +2672,13 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
                 building=building or None,
                 emit_log=emit_log,
             )
+        dedupe_key = _job_dedupe_key(
+            "day_metric_cache_by_date",
+            selected_dates=selected_dates,
+            building_scope=building_scope,
+            building=building or "",
+            buildings=target_buildings,
+        )
 
         try:
             job = _start_background_job(
@@ -2531,6 +2690,7 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
                 resource_keys=_job_resource_keys("shared_bridge:day_metric"),
                 priority="manual",
                 feature="day_metric_cache_by_date",
+                dedupe_key=dedupe_key,
                 submitted_by="manual",
             )
             container.add_system_log(f"[任务] 已提交: 12项独立上传-使用共享文件 ({job.job_id})")

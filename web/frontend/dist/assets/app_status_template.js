@@ -98,14 +98,15 @@
         <article v-if="isInternalDeploymentRole" class="status-card status-card-wide">
           <div class="status-card-head">
             <div>
-              <span class="status-panel-kicker">内网下载页池</span>
-              <h2 class="status-panel-title">5 个楼栋页签常驻复用</h2>
+              <span class="status-panel-kicker">内网楼栋状态</span>
+              <h2 class="status-panel-title">5个楼实时状态</h2>
             </div>
             <span class="status-badge status-badge-solid" :class="'tone-' + internalDownloadPoolOverview.tone">
               {{ internalDownloadPoolOverview.statusText }}
             </span>
           </div>
           <div class="hint">{{ internalDownloadPoolOverview.summaryText }}</div>
+          <div class="hint">每 2 秒自动刷新一次，实时显示 A楼 / B楼 / C楼 / D楼 / E楼 的页面、占用和登录状态。</div>
           <div class="status-list">
             <div
               class="status-list-row"
@@ -119,10 +120,7 @@
           <div class="hint" v-if="internalDownloadPoolOverview.errorText">
             最近异常：{{ internalDownloadPoolOverview.errorText }}
           </div>
-          <div
-            v-if="internalDownloadPoolOverview.slots && internalDownloadPoolOverview.slots.length"
-            class="internal-download-pool-grid"
-          >
+          <div class="internal-download-pool-grid">
             <div
               class="internal-download-slot"
               v-for="slot in internalDownloadPoolOverview.slots"
@@ -139,6 +137,79 @@
               </div>
               <div class="hint" v-if="slot.lastLoginAt">最近登录：{{ slot.lastLoginAt }}</div>
               <div class="hint">{{ slot.detailText }}</div>
+            </div>
+          </div>
+          <div class="status-subsection-head">
+            <span class="status-panel-kicker">最新共享文件状态</span>
+            <span class="status-inline-note">交接班源文件与月报源文件实时同步显示</span>
+          </div>
+          <div class="source-cache-family-grid" v-if="internalRealtimeSourceFamilies && internalRealtimeSourceFamilies.length">
+            <div
+              class="internal-download-slot"
+              v-for="family in internalRealtimeSourceFamilies"
+              :key="'status-internal-realtime-source-family-' + family.key"
+            >
+              <div class="internal-download-slot-head">
+                <span class="internal-download-slot-title">{{ family.title }}</span>
+                <span class="status-badge status-badge-soft" :class="'tone-' + family.tone">{{ family.statusText }}</span>
+              </div>
+              <div class="internal-download-slot-meta">
+                <span class="status-inline-note">当前桶：{{ family.currentBucket }}</span>
+                <span class="status-inline-note">最近成功：{{ family.lastSuccessAt || "-" }}</span>
+              </div>
+              <div class="source-cache-building-grid">
+                <div
+                  class="internal-download-slot"
+                  v-for="building in family.buildings"
+                  :key="'status-internal-realtime-source-building-' + family.key + '-' + building.building"
+                >
+                  <div class="internal-download-slot-head">
+                    <span class="internal-download-slot-title">{{ building.building }}</span>
+                    <span class="status-badge status-badge-soft" :class="'tone-' + building.tone">{{ building.stateText }}</span>
+                  </div>
+                  <div class="hint">时间桶：{{ building.bucketKey || family.currentBucket }}</div>
+                  <div class="hint">{{ building.detailText }}</div>
+                  <div class="hint" v-if="building.relativePath">缓存文件：{{ building.relativePath }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article v-if="isExternalDeploymentRole" class="status-card status-card-wide">
+          <div class="status-card-head">
+            <div>
+              <span class="status-panel-kicker">内网环境告警</span>
+              <h2 class="status-panel-title">5个楼浏览器状态</h2>
+            </div>
+            <span class="status-badge status-badge-solid" :class="'tone-' + externalInternalAlertOverview.tone">
+              {{ externalInternalAlertOverview.statusText }}
+            </span>
+          </div>
+          <div class="hint">{{ externalInternalAlertOverview.summaryText }}</div>
+          <div class="status-list">
+            <div
+              class="status-list-row"
+              v-for="item in externalInternalAlertOverview.items"
+              :key="'status-external-alert-overview-' + item.label"
+            >
+              <span class="status-list-label">{{ item.label }}</span>
+              <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
+            </div>
+          </div>
+          <div class="internal-download-pool-grid">
+            <div
+              class="internal-download-slot"
+              v-for="slot in externalInternalAlertOverview.buildings"
+              :key="'status-external-internal-alert-' + slot.building"
+            >
+              <div class="internal-download-slot-head">
+                <span class="internal-download-slot-title">{{ slot.building }}</span>
+                <span class="status-badge status-badge-soft" :class="'tone-' + slot.tone">{{ slot.statusText }}</span>
+              </div>
+              <div class="hint">{{ slot.summaryText }}</div>
+              <div class="hint" v-if="slot.detailText">{{ slot.detailText }}</div>
+              <div class="hint" v-if="slot.timeText">{{ slot.timeText }}</div>
             </div>
           </div>
         </article>
