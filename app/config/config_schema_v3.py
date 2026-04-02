@@ -1161,6 +1161,18 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "local_import_scope": "single_date_single_building",
             },
         },
+        "alarm_export": {
+            "feishu": {
+                "app_token": "",
+                "table_id": "",
+                "page_size": 500,
+                "delete_batch_size": 500,
+                "create_batch_size": 200,
+            },
+            "shared_source_upload": {
+                "replace_existing_on_full": True,
+            },
+        },
         "manual_upload_gui": {
             "enabled": True,
         },

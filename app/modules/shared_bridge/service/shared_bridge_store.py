@@ -1986,6 +1986,72 @@ class SharedBridgeStore:
             ).fetchall()
         return [self._row_to_source_cache_entry_dict(row) for row in rows]
 
+    def update_source_cache_entry_status(
+        self,
+        entry_id: str,
+        *,
+        status: str,
+        metadata_update: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        entry_text = str(entry_id or "").strip()
+        status_text = str(status or "").strip()
+        if not entry_text or not status_text:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,
+                       downloaded_at, relative_path, status, file_hash, size_bytes, metadata_json, created_at, updated_at
+                FROM source_cache_entries
+                WHERE entry_id=?
+                """,
+                (entry_text,),
+            ).fetchone()
+            if not row:
+                return None
+            metadata = self._loads(row["metadata_json"])
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if isinstance(metadata_update, dict):
+                metadata.update(metadata_update)
+            updated_at = _now_text()
+            conn.execute(
+                """
+                UPDATE source_cache_entries
+                SET status=?,
+                    metadata_json=?,
+                    updated_at=?
+                WHERE entry_id=?
+                """,
+                (
+                    status_text,
+                    json.dumps(metadata, ensure_ascii=False),
+                    updated_at,
+                    entry_text,
+                ),
+            )
+            updated_row = conn.execute(
+                """
+                SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,
+                       downloaded_at, relative_path, status, file_hash, size_bytes, metadata_json, created_at, updated_at
+                FROM source_cache_entries
+                WHERE entry_id=?
+                """,
+                (entry_text,),
+            ).fetchone()
+        return self._row_to_source_cache_entry_dict(updated_row) if updated_row else None
+
+    def delete_source_cache_entry(self, entry_id: str) -> bool:
+        entry_text = str(entry_id or "").strip()
+        if not entry_text:
+            return False
+        with self.connect() as conn:
+            deleted = conn.execute(
+                "DELETE FROM source_cache_entries WHERE entry_id=?",
+                (entry_text,),
+            )
+        return bool(int(deleted.rowcount or 0) > 0)
+
     def complete_stage(
         self,
         *,

@@ -109,6 +109,12 @@ class HandoverOrchestrator:
         self._source_file_cache_service = HandoverSourceFileCacheService(config)
         self._review_session_service = ReviewSessionService(config)
 
+    def _deployment_role_mode(self) -> str:
+        text = str(self.config.get("_deployment_role_mode", "") or "").strip().lower()
+        if text in {"internal", "external"}:
+            return text
+        return ""
+
     def _managed_source_cache_service(self) -> HandoverSourceFileCacheService:
         service = getattr(self, "_source_file_cache_service", None)
         if isinstance(service, HandoverSourceFileCacheService):
@@ -383,22 +389,28 @@ class HandoverOrchestrator:
         total_text = fallback["total"]
         unrecovered_text = fallback["unrecovered"]
         accept_desc_text = fallback["accept_desc"]
-        try:
-            alarm_summary = self._alarm_repo.query_alarm_summary(
-                building=building,
-                start_time=start_time,
-                end_time=end_time,
-                emit_log=emit_log,
-            )
-            total_text = str(alarm_summary.total_count)
-            unrecovered_text = str(alarm_summary.unrecovered_count)
-            accept_desc_text = str(alarm_summary.accept_description or "").strip() or fallback["accept_desc"]
+        if self._deployment_role_mode() == "external":
             emit_log(
-                f"[交接班][告警查询] building={building}, total={total_text}, "
-                f"unrecovered={unrecovered_text}, accept_desc={accept_desc_text}"
+                f"[交接班][告警填充] building={building} 当前为外网端，"
+                "已跳过告警数据库查询，按默认值填充"
             )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][告警查询] building={building} 查询失败，按兜底填充: {exc}")
+        else:
+            try:
+                alarm_summary = self._alarm_repo.query_alarm_summary(
+                    building=building,
+                    start_time=start_time,
+                    end_time=end_time,
+                    emit_log=emit_log,
+                )
+                total_text = str(alarm_summary.total_count)
+                unrecovered_text = str(alarm_summary.unrecovered_count)
+                accept_desc_text = str(alarm_summary.accept_description or "").strip() or fallback["accept_desc"]
+                emit_log(
+                    f"[交接班][告警查询] building={building}, total={total_text}, "
+                    f"unrecovered={unrecovered_text}, accept_desc={accept_desc_text}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][告警查询] building={building} 查询失败，按兜底填充: {exc}")
 
         fixed_cell_values = self._build_fixed_cell_values(
             duty_date=duty_date,

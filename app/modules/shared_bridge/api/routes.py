@@ -321,6 +321,149 @@ def bridge_source_cache_refresh_current_hour(request: Request) -> Dict[str, Any]
     }
 
 
+@router.post("/api/bridge/source-cache/refresh-alarm-manual")
+def bridge_source_cache_refresh_alarm_manual(request: Request) -> Dict[str, Any]:
+    if _deployment_role_mode(request) != "internal":
+        raise HTTPException(status_code=409, detail="当前仅内网端允许手动拉取告警信息文件")
+    container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    result = service.start_manual_alarm_source_cache_refresh()
+    if not bool(result.get("accepted")) and str(result.get("reason", "")).strip() == "already_running":
+        return {
+            "ok": True,
+            "accepted": False,
+            "running": True,
+            "scope": "alarm_manual",
+            "message": "手动拉取告警信息文件已在执行中",
+            **result,
+        }
+    if not bool(result.get("accepted")):
+        raise HTTPException(status_code=409, detail="当前未启用内网告警信息文件拉取")
+    container.add_system_log("[共享缓存] 已手动触发告警信息文件拉取")
+    return {
+        "ok": True,
+        "accepted": True,
+        "running": True,
+        "scope": "alarm_manual",
+        "message": "已开始手动拉取告警信息文件",
+        **result,
+    }
+
+
+@router.post("/api/bridge/source-cache/delete-manual-alarm-files")
+def bridge_source_cache_delete_manual_alarm_files(request: Request) -> Dict[str, Any]:
+    if _deployment_role_mode(request) != "internal":
+        raise HTTPException(status_code=409, detail="当前仅内网端允许删除手动拉取的告警信息文件")
+    container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    result = service.delete_manual_alarm_source_cache_files()
+    if not bool(result.get("accepted")):
+        raise HTTPException(status_code=409, detail="当前未启用内网告警信息文件管理")
+    deleted_count = int(result.get("deleted_count", 0) or 0)
+    container.add_system_log(f"[共享缓存] 已删除手动拉取的告警信息文件 {deleted_count} 份")
+    return {
+        "ok": True,
+        "accepted": True,
+        "deleted_count": deleted_count,
+        "message": "已删除手动拉取的告警信息文件，只保留 08 点和 16 点定时文件",
+        **result,
+    }
+
+
+@router.post("/api/bridge/source-cache/alarm/upload-full")
+def bridge_source_cache_alarm_upload_full(request: Request) -> Dict[str, Any]:
+    if _deployment_role_mode(request) != "external":
+        raise HTTPException(status_code=409, detail="当前仅外网端允许上传告警信息文件到多维表")
+    container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    result = service.upload_alarm_event_source_cache_full_to_bitable()
+    if not bool(result.get("accepted")) and str(result.get("reason", "")).strip() == "already_running":
+        return {
+            "ok": True,
+            "accepted": False,
+            "running": True,
+            "message": "告警信息文件上传已在执行中",
+            **result,
+        }
+    if not bool(result.get("accepted")):
+        error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
+        raise HTTPException(status_code=409, detail=error_text)
+    uploaded_count = int(result.get("uploaded_record_count", 0) or 0)
+    consumed_count = int(result.get("consumed_count", 0) or 0)
+    container.add_system_log(
+        f"[共享缓存] 外网告警文件全量上传完成: records={uploaded_count}, consumed_files={consumed_count}"
+    )
+    return {
+        "ok": True,
+        "accepted": True,
+        "message": "已完成告警信息文件全量上传（60天内）",
+        **result,
+    }
+
+
+@router.post("/api/bridge/source-cache/alarm/upload-building")
+def bridge_source_cache_alarm_upload_building(
+    request: Request,
+    building: str = Query(..., description="楼栋，如 A楼"),
+) -> Dict[str, Any]:
+    if _deployment_role_mode(request) != "external":
+        raise HTTPException(status_code=409, detail="当前仅外网端允许上传告警信息文件到多维表")
+    container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    result = service.upload_alarm_event_source_cache_single_building_to_bitable(building=building)
+    if not bool(result.get("accepted")) and str(result.get("reason", "")).strip() == "already_running":
+        building_text = str(building or "").strip()
+        return {
+            "ok": True,
+            "accepted": False,
+            "running": True,
+            "message": f"告警信息文件上传已在执行中：{building_text or '当前楼栋'} 请求已复用现有上传",
+            **result,
+        }
+    if not bool(result.get("accepted")):
+        error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
+        raise HTTPException(status_code=409, detail=error_text)
+    building_text = str(building or "").strip()
+    uploaded_count = int(result.get("uploaded_record_count", 0) or 0)
+    consumed_count = int(result.get("consumed_count", 0) or 0)
+    container.add_system_log(
+        f"[共享缓存] 外网告警文件单楼上传完成: building={building_text}, records={uploaded_count}, consumed_files={consumed_count}"
+    )
+    return {
+        "ok": True,
+        "accepted": True,
+        "message": f"已完成 {building_text} 告警信息文件追加上传（60天内）",
+        **result,
+    }
+
+
+@router.post("/api/bridge/source-cache/debug-alarm-page-actions")
+def bridge_source_cache_debug_alarm_page_actions(
+    request: Request,
+    building: str = Query(..., description="楼栋，如 A楼"),
+) -> Dict[str, Any]:
+    if _deployment_role_mode(request) != "internal":
+        raise HTTPException(status_code=409, detail="当前仅内网端允许调试告警页面操作")
+    container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    try:
+        result = service.debug_alarm_page_actions(building=building)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    container.add_system_log(f"[共享缓存] 已执行告警页面调试操作 building={str(building or '').strip()}")
+    return result
+
+
 @router.post("/api/bridge/source-cache/refresh-today")
 def bridge_source_cache_refresh_today(request: Request) -> Dict[str, Any]:
     raise HTTPException(status_code=410, detail="“当天全量下载”已停用，请改用“立即下载当前小时全部文件”")

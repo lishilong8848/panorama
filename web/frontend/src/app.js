@@ -404,6 +404,10 @@ createApp({
     const actionKeyUpdaterApply = "updater:apply";
     const actionKeyUpdaterRestart = "updater:restart";
     const actionKeySourceCacheRefreshCurrentHour = "bridge:source_cache_refresh_current_hour";
+    const actionKeySourceCacheRefreshAlarmManual = "bridge:source_cache_refresh_alarm_manual";
+    const actionKeySourceCacheDeleteAlarmManual = "bridge:source_cache_delete_alarm_manual";
+    const actionKeySourceCacheUploadAlarmFull = "bridge:source_cache_upload_alarm_full";
+    const actionKeySourceCacheUploadAlarmBuildingPrefix = "bridge:source_cache_upload_alarm_building:";
     const actionKeyHandoverConfirmAll = "handover_review:confirm_all";
     const actionKeyHandoverCloudRetryAll = "handover_review:cloud_retry_all";
     const actionKeyHandoverFollowupContinue = "job:handover_followup_continue";
@@ -417,9 +421,88 @@ createApp({
         isActionLocked(actionKeyUpdaterRestart),
     );
     const isSourceCacheRefreshCurrentHourLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshCurrentHour));
+    const isSourceCacheRefreshAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshAlarmManual));
+    const isSourceCacheDeleteAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheDeleteAlarmManual));
+    const externalAlarmUploadBuilding = ref("A楼");
+    const isAlarmSourceCacheUploadRunning = computed(() => Boolean(externalAlarmReadinessFamily.value?.uploadRunning));
+    const isSourceCacheUploadAlarmFullLocked = computed(() =>
+      isAlarmSourceCacheUploadRunning.value || isActionLocked(actionKeySourceCacheUploadAlarmFull),
+    );
+    const isSourceCacheUploadAlarmBuildingLocked = computed(() =>
+      isAlarmSourceCacheUploadRunning.value ||
+      isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${String(externalAlarmUploadBuilding.value || "").trim()}`),
+    );
     const currentHourRefreshButtonText = computed(() =>
       isSourceCacheRefreshCurrentHourLocked.value ? "下载中..." : "立即下载当前小时全部文件",
     );
+    const manualAlarmRefreshButtonText = computed(() =>
+      isSourceCacheRefreshAlarmManualLocked.value ? "拉取中..." : "一键拉取告警文件",
+    );
+    const manualAlarmDeleteButtonText = computed(() =>
+      isSourceCacheDeleteAlarmManualLocked.value ? "删除中..." : "删除手动告警文件",
+    );
+    const externalAlarmUploadFullButtonText = computed(() => {
+      if (isAlarmSourceCacheUploadRunning.value) return "上传进行中...";
+      return isActionLocked(actionKeySourceCacheUploadAlarmFull) ? "上传中..." : "告警全量上传（60天）";
+    });
+    const externalAlarmUploadBuildingButtonText = computed(() => {
+      if (isAlarmSourceCacheUploadRunning.value) return "上传进行中...";
+      return isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${String(externalAlarmUploadBuilding.value || "").trim()}`)
+        ? "追加中..."
+        : "单楼追加上传";
+    });
+    const externalAlarmReadinessFamily = computed(() => {
+      const families = Array.isArray(sharedSourceCacheReadinessOverview.value?.families)
+        ? sharedSourceCacheReadinessOverview.value.families
+        : [];
+      return (
+        families.find((item) => String(item?.key || "").trim() === "alarm_event_family") || {
+          key: "alarm_event_family",
+          title: "告警信息源文件",
+          tone: "neutral",
+          statusText: "暂无状态",
+          summaryText: "当前还没有告警文件状态。",
+          buildings: [],
+          uploadLastRunAt: "",
+          uploadLastSuccessAt: "",
+          uploadLastError: "",
+          uploadRecordCount: 0,
+          uploadFileCount: 0,
+          uploadConsumedCount: 0,
+          uploadRunning: false,
+          uploadStartedAt: "",
+          uploadCurrentMode: "",
+          uploadCurrentScope: "",
+          uploadRunningText: "",
+        }
+      );
+    });
+    const alarmEventUploadTarget = computed(() => {
+      const alarmExportCfg = config.value?.alarm_export || {};
+      const legacyTarget = alarmExportCfg?.feishu && typeof alarmExportCfg.feishu === "object"
+        ? alarmExportCfg.feishu
+        : {};
+      const sharedUploadCfg = alarmExportCfg?.shared_source_upload && typeof alarmExportCfg.shared_source_upload === "object"
+        ? alarmExportCfg.shared_source_upload
+        : {};
+      const overrideTarget = sharedUploadCfg?.target && typeof sharedUploadCfg.target === "object"
+        ? sharedUploadCfg.target
+        : {};
+      const mergedTarget = { ...legacyTarget, ...overrideTarget };
+      const appToken = String(mergedTarget.app_token || "").trim();
+      const tableId = String(mergedTarget.table_id || "").trim();
+      const replaceExistingOnFull = sharedUploadCfg.replace_existing_on_full !== false;
+      return {
+        appToken,
+        tableId,
+        configured: Boolean(appToken && tableId),
+        replaceExistingOnFull,
+        statusText: appToken && tableId ? "已配置" : "未配置",
+        hintText: appToken && tableId
+          ? (replaceExistingOnFull ? "全量上传会先清表再重传。" : "全量上传不会清空目标表。")
+          : "请先在配置中心的功能配置里补齐告警信息上传目标多维表。",
+      };
+    });
     const effectiveRoleMode = computed(() =>
       normalizeDeploymentRoleMode(
         config.value?.deployment?.role_mode || health.deployment?.role_mode || "",
@@ -436,11 +519,12 @@ createApp({
     const showCommonSchedulerConfigTab = computed(() => configRoleMode.value !== "internal");
     const showNotifyConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeishuAuthConfigTab = computed(() => configRoleMode.value !== "internal");
-    const showCommonAlarmDbConfigTab = computed(() => configRoleMode.value !== "internal");
+    const showCommonAlarmDbConfigTab = computed(() => configRoleMode.value === "internal");
     const showConsoleConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureMonthlyConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureHandoverConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureWetBulbCollectionConfigTab = computed(() => configRoleMode.value !== "internal");
+    const showFeatureAlarmExportConfigTab = computed(() => configRoleMode.value !== "internal");
     const showSheetImportConfigTab = computed(() => configRoleMode.value !== "internal");
     const showManualFeatureConfigTab = computed(() => configRoleMode.value !== "internal");
     const showRuntimeNetworkPanel = computed(() => false);
@@ -846,6 +930,10 @@ createApp({
       cancelBridgeTask,
       retryBridgeTask,
       refreshCurrentHourSourceCache,
+      refreshManualAlarmSourceCache,
+      deleteManualAlarmSourceCacheFiles,
+      uploadAlarmSourceCacheFull,
+      uploadAlarmSourceCacheBuilding,
       fetchRuntimeResources,
       fetchConfig,
       fetchHandoverEngineerDirectory,
@@ -1842,13 +1930,14 @@ createApp({
       (roleMode) => {
         applyDashboardRoleMode(roleMode);
         const hiddenCommonTabs = roleMode === "internal"
-          ? new Set(["common_paths", "common_console", "common_network", "common_scheduler", "common_notify", "common_feishu_auth", "common_alarm_db"])
-          : new Set(["common_network"]);
+          ? new Set(["common_paths", "common_console", "common_network", "common_scheduler", "common_notify", "common_feishu_auth"])
+          : new Set(["common_network", "common_alarm_db"]);
         const hiddenFeatureTabs = new Set(["feature_alarm"]);
         if (roleMode === "internal") {
           hiddenFeatureTabs.add("feature_monthly");
           hiddenFeatureTabs.add("feature_handover");
           hiddenFeatureTabs.add("feature_wet_bulb_collection");
+          hiddenFeatureTabs.add("feature_alarm_export");
           hiddenFeatureTabs.add("feature_sheet");
           hiddenFeatureTabs.add("feature_manual");
         }
@@ -2174,6 +2263,7 @@ createApp({
       showFeatureMonthlyConfigTab,
       showFeatureHandoverConfigTab,
       showFeatureWetBulbCollectionConfigTab,
+      showFeatureAlarmExportConfigTab,
       showSheetImportConfigTab,
       showManualFeatureConfigTab,
       showRuntimeNetworkPanel,
@@ -2249,6 +2339,8 @@ createApp({
       actionKeyUpdaterCheck,
       actionKeyUpdaterApply,
       actionKeySourceCacheRefreshCurrentHour,
+      actionKeySourceCacheRefreshAlarmManual,
+      actionKeySourceCacheDeleteAlarmManual,
       actionKeyHandoverConfirmAll,
       actionKeyHandoverCloudRetryAll,
       actionKeyHandoverDailyReportAuthOpen,
@@ -2370,6 +2462,10 @@ createApp({
       getHandoverDailyReportRestoreActionKey,
       runUpdaterMainAction,
       refreshCurrentHourSourceCache,
+      refreshManualAlarmSourceCache,
+      deleteManualAlarmSourceCacheFiles,
+      uploadAlarmSourceCacheFull,
+      uploadAlarmSourceCacheBuilding,
       addSheetRuleRow,
       removeSheetRuleRow,
       startScheduler,
@@ -2401,6 +2497,17 @@ createApp({
       fetchHandoverEngineerDirectory,
       isSourceCacheRefreshCurrentHourLocked,
       currentHourRefreshButtonText,
+      isSourceCacheRefreshAlarmManualLocked,
+      manualAlarmRefreshButtonText,
+      isSourceCacheDeleteAlarmManualLocked,
+      manualAlarmDeleteButtonText,
+      externalAlarmUploadBuilding,
+      isSourceCacheUploadAlarmFullLocked,
+      isSourceCacheUploadAlarmBuildingLocked,
+      externalAlarmUploadFullButtonText,
+      externalAlarmUploadBuildingButtonText,
+      externalAlarmReadinessFamily,
+      alarmEventUploadTarget,
     };
   },
   template: APP_TEMPLATE,

@@ -44,6 +44,7 @@ class InternalDownloadBrowserPool:
     BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
     MAX_RECOVERY_ATTEMPTS = 3
     RECOVERY_PROBE_INTERVAL_SEC = 60
+    ALARM_PAGE_PATH = "/page/warn_event/warn_event.html"
 
     def __init__(
         self,
@@ -152,6 +153,8 @@ class InternalDownloadBrowserPool:
         state = str(login_state or "").strip().lower()
         if state == "expired" or "login_required" in normalized or "登录态" in str(error_text or ""):
             return "login_expired"
+        if "告警页面" in str(error_text or "") or "告警查询" in str(error_text or ""):
+            return "alarm_query_failed"
         if "err_empty_response" in normalized or "page.goto:" in normalized:
             return "page_unreachable"
         if "err_connection_refused" in normalized:
@@ -176,6 +179,7 @@ class InternalDownloadBrowserPool:
         mapping = {
             "login_failed": "登录失败",
             "login_expired": "登录失效",
+            "alarm_query_failed": "告警查询失败",
             "page_unreachable": "页面无响应",
             "page_connection_refused": "页面拒绝连接",
             "page_timeout": "页面访问超时",
@@ -396,6 +400,16 @@ class InternalDownloadBrowserPool:
             return ""
         return f"http://{host}/page/main/main.html"
 
+    @classmethod
+    def _resolve_alarm_page_url(cls, site: dict[str, Any]) -> str:
+        host = str(site.get("host", "") or "").strip()
+        if not host:
+            return ""
+        host = host.replace("http://", "").replace("https://", "").strip().strip("/")
+        if not host:
+            return ""
+        return f"http://{host}{cls.ALARM_PAGE_PATH}"
+
     async def _login_if_needed(self, building: str, page: Page, site: dict[str, Any]) -> None:
         login_timeout_ms = self._resolve_login_timeout_ms()
         username = str(site.get("username", "") or "").strip()
@@ -610,8 +624,14 @@ class InternalDownloadBrowserPool:
             )
             return
         page = slot.get("page")
+        alarm_page = slot.get("alarm_page")
         context = slot.get("context")
         browser = slot.get("browser")
+        try:
+            if alarm_page is not None and alarm_page is not page and not alarm_page.is_closed():
+                await alarm_page.close()
+        except Exception:
+            pass
         try:
             if page is not None and not page.is_closed():
                 await page.close()
@@ -663,6 +683,7 @@ class InternalDownloadBrowserPool:
             "browser": browser,
             "context": context,
             "page": page,
+            "alarm_page": None,
         }
         self._update_slot(
             building,
@@ -702,6 +723,39 @@ class InternalDownloadBrowserPool:
         if not browser_connected or context is None or page_closed:
             return await self._create_or_replace_slot(building)
         return page
+
+    async def _ensure_alarm_page(self, building: str) -> Page:
+        slot = self._browser_slots.get(building)
+        if not slot:
+            await self._create_or_replace_slot(building)
+            slot = self._browser_slots.get(building)
+        if not slot:
+            raise RuntimeError(f"{building} 浏览器上下文未初始化")
+        context = slot.get("context")
+        if context is None:
+            await self._create_or_replace_slot(building)
+            slot = self._browser_slots.get(building)
+            context = slot.get("context") if isinstance(slot, dict) else None
+        if context is None:
+            raise RuntimeError(f"{building} 浏览器上下文未初始化")
+        alarm_page = slot.get("alarm_page")
+        try:
+            alarm_page_closed = True if alarm_page is None else alarm_page.is_closed()
+        except Exception:
+            alarm_page_closed = True
+        if alarm_page_closed:
+            alarm_page = await context.new_page()
+            slot["alarm_page"] = alarm_page
+        site = self._find_site(building)
+        target_url = self._resolve_alarm_page_url(site or {})
+        if not target_url:
+            raise RuntimeError(f"{building} 告警页面地址未配置")
+        await prepare_reusable_page(
+            alarm_page,
+            target_url=target_url,
+            refresh_timeout_ms=self._resolve_refresh_timeout_ms(),
+        )
+        return alarm_page
 
     async def _async_start(self) -> None:
         configure_playwright_environment(self.runtime_config)
@@ -894,6 +948,156 @@ class InternalDownloadBrowserPool:
                 raise last_exc
             raise RuntimeError(f"{building} 下载未能开始")
 
+    async def _run_building_alarm_job(
+        self,
+        building: str,
+        runner: Callable[[Page], Awaitable[Any]],
+    ) -> Any:
+        if building not in self.BUILDINGS:
+            raise ValueError(f"不支持的内网下载楼栋: {building}")
+        lock = self._locks.get(building)
+        if lock is None:
+            raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
+        async with lock:
+            last_exc: Exception | None = None
+            for attempt in range(2):
+                page = await self._ensure_page(building)
+                await self._fail_if_login_not_ready(building, page)
+                try:
+                    await self._ensure_logged_in(building, page)
+                except Exception as exc:  # noqa: BLE001
+                    failure_kind = self._classify_failure_kind(exc, login_state=self._slot_login_state(building))
+                    if failure_kind == "unknown":
+                        raise
+                    recovered = await self._attempt_building_recovery(
+                        building,
+                        base_reason=str(exc),
+                        failure_kind=failure_kind or "browser_issue",
+                        from_probe=False,
+                    )
+                    if not recovered:
+                        pause_info = self.get_building_pause_info(building)
+                        raise BuildingPausedError(
+                            building,
+                            str(pause_info.get("suspend_reason", "") or str(exc)).strip(),
+                            failure_kind=str(pause_info.get("failure_kind", "") or failure_kind).strip() or "browser_issue",
+                        ) from exc
+                    last_exc = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
+                    continue
+                self._update_slot(
+                    building,
+                    in_use=True,
+                    last_used_at=_now_text(),
+                    last_result="running",
+                    last_error="",
+                )
+                try:
+                    alarm_page = await self._ensure_alarm_page(building)
+                    result = await runner(alarm_page)
+                    refreshed_page = await self._ensure_page(building)
+                    if refreshed_page is not page:
+                        self._log(f"[共享桥接] 楼栋浏览器异常，已重建: {building}")
+                        await self._ensure_logged_in(building, refreshed_page)
+                    self._update_slot(
+                        building,
+                        in_use=False,
+                        last_used_at=_now_text(),
+                        last_result="success",
+                        last_error="",
+                    )
+                    return result
+                except Exception as exc:  # noqa: BLE001
+                    error_text = str(exc)
+                    self._last_error = error_text
+                    failure_kind = self._classify_failure_kind(error_text)
+                    if failure_kind == "unknown":
+                        failure_kind = "alarm_query_failed"
+                    recovered = await self._attempt_building_recovery(
+                        building,
+                        base_reason=error_text,
+                        failure_kind=failure_kind or "browser_issue",
+                        from_probe=False,
+                    )
+                    if recovered and attempt == 0:
+                        last_exc = exc if isinstance(exc, Exception) else RuntimeError(error_text)
+                        continue
+                    if not recovered:
+                        pause_info = self.get_building_pause_info(building)
+                        self._update_slot(
+                            building,
+                            in_use=False,
+                            last_used_at=_now_text(),
+                            last_result="failed",
+                            last_error=str(pause_info.get("suspend_reason", "") or error_text).strip(),
+                        )
+                        raise BuildingPausedError(
+                            building,
+                            str(pause_info.get("suspend_reason", "") or error_text).strip(),
+                            failure_kind=str(pause_info.get("failure_kind", "") or failure_kind).strip() or "browser_issue",
+                        ) from exc
+                    self._update_slot(
+                        building,
+                        in_use=False,
+                        last_used_at=_now_text(),
+                        last_result="failed",
+                        last_error=error_text,
+                    )
+                    raise
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError(f"{building} 告警信息导出未能开始")
+
+    async def _run_existing_building_alarm_page_job(
+        self,
+        building: str,
+        runner: Callable[[Page], Awaitable[Any]],
+    ) -> Any:
+        if building not in self.BUILDINGS:
+            raise ValueError(f"不支持的内网下载楼栋: {building}")
+        lock = self._locks.get(building)
+        if lock is None:
+            raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
+        async with lock:
+            slot = self._browser_slots.get(building)
+            if not isinstance(slot, dict):
+                raise RuntimeError(f"{building} 浏览器上下文未初始化")
+            alarm_page = slot.get("alarm_page")
+            try:
+                alarm_page_closed = True if alarm_page is None else alarm_page.is_closed()
+            except Exception:
+                alarm_page_closed = True
+            if alarm_page_closed:
+                raise RuntimeError(f"{building} 当前告警页面未打开，调试不会新开页")
+            await self._fail_if_login_not_ready(building, alarm_page)
+            self._update_slot(
+                building,
+                in_use=True,
+                last_used_at=_now_text(),
+                last_result="running",
+                last_error="",
+            )
+            try:
+                result = await runner(alarm_page)
+                self._update_slot(
+                    building,
+                    in_use=False,
+                    last_used_at=_now_text(),
+                    last_result="success",
+                    last_error="",
+                )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                error_text = str(exc)
+                self._last_error = error_text
+                self._update_slot(
+                    building,
+                    in_use=False,
+                    last_used_at=_now_text(),
+                    last_result="failed",
+                    last_error=error_text,
+                )
+                raise
+
     def submit_building_job(
         self,
         building: str,
@@ -906,6 +1110,36 @@ class InternalDownloadBrowserPool:
             return future
         return asyncio.run_coroutine_threadsafe(
             self._run_building_job(building, runner),
+            loop,
+        )
+
+    def submit_building_alarm_job(
+        self,
+        building: str,
+        runner: Callable[[Page], Awaitable[Any]],
+    ) -> concurrent.futures.Future[Any]:
+        loop = self._loop
+        if not self.is_running() or loop is None:
+            future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+            future.set_exception(RuntimeError("内网下载浏览器池未启动"))
+            return future
+        return asyncio.run_coroutine_threadsafe(
+            self._run_building_alarm_job(building, runner),
+            loop,
+        )
+
+    def submit_existing_building_alarm_page_job(
+        self,
+        building: str,
+        runner: Callable[[Page], Awaitable[Any]],
+    ) -> concurrent.futures.Future[Any]:
+        loop = self._loop
+        if not self.is_running() or loop is None:
+            future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+            future.set_exception(RuntimeError("内网下载浏览器池未启动"))
+            return future
+        return asyncio.run_coroutine_threadsafe(
+            self._run_existing_building_alarm_page_job(building, runner),
             loop,
         )
 

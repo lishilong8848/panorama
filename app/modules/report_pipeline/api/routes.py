@@ -1259,6 +1259,8 @@ def health(
     runtime_cfg = container.runtime_config
     role_mode = _deployment_role_mode(container)
     include_handover_runtime_context = role_mode != "internal"
+    include_network_probe = role_mode != "internal"
+    include_wet_bulb_target_preview = role_mode != "internal"
 
     wifi_name = None
     interface_name = ""
@@ -1269,14 +1271,15 @@ def health(
     last_wifi_error = ""
     try:
         if container.wifi_service:
-            if include_handover_runtime_context:
+            if include_network_probe:
                 wifi_name = container.wifi_service.current_ssid()
                 interface_name = container.wifi_service.current_interface_name()
                 visible_targets = container.wifi_service.visible_targets()
-            last_switch_report = container.wifi_service.get_last_switch_report()
-            last_wifi_result = str(last_switch_report.get("result", "") or "")
-            last_wifi_error_type = str(last_switch_report.get("error_type", "") or "")
-            last_wifi_error = str(last_switch_report.get("error", "") or "")
+            if include_network_probe:
+                last_switch_report = container.wifi_service.get_last_switch_report()
+                last_wifi_result = str(last_switch_report.get("result", "") or "")
+                last_wifi_error_type = str(last_switch_report.get("error_type", "") or "")
+                last_wifi_error = str(last_switch_report.get("error", "") or "")
     except Exception:  # noqa: BLE001
         wifi_name = None
 
@@ -1288,7 +1291,11 @@ def health(
     if not isinstance(wet_bulb_cfg, dict):
         wet_bulb_cfg = {}
     wet_bulb_scheduler_snapshot = container.wet_bulb_collection_scheduler_status()
-    wet_bulb_target_preview = WetBulbCollectionService(runtime_cfg).build_target_descriptor(force_refresh=False)
+    wet_bulb_target_preview = (
+        WetBulbCollectionService(runtime_cfg).build_target_descriptor(force_refresh=False)
+        if include_wet_bulb_target_preview
+        else {}
+    )
     handover_slots = (
         handover_scheduler_snapshot.get("slots", {})
         if isinstance(handover_scheduler_snapshot.get("slots", {}), dict)

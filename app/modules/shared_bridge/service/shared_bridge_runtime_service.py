@@ -275,11 +275,12 @@ class SharedBridgeRuntimeService:
                 },
                 "handover_log_family": {},
                 "monthly_report_family": {},
+                "alarm_event_family": {},
             }
         )
         internal_alert_status = (
             self._build_external_internal_alert_status(self._store.list_external_alert_projections())
-            if self._store is not None
+            if self._store is not None and normalized_mode != "internal_light"
             else self._empty_internal_alert_status()
         )
         return {
@@ -1061,6 +1062,31 @@ class SharedBridgeRuntimeService:
 
     def start_today_source_cache_refresh(self) -> Dict[str, Any]:
         return self.start_current_hour_source_cache_refresh()
+
+    def start_manual_alarm_source_cache_refresh(self) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            return {"accepted": False, "running": False, "reason": "disabled"}
+        return self._source_cache_service.start_manual_alarm_refresh()
+
+    def delete_manual_alarm_source_cache_files(self) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            return {"accepted": False, "reason": "disabled", "deleted_count": 0}
+        return self._source_cache_service.delete_manual_alarm_files()
+
+    def upload_alarm_event_source_cache_full_to_bitable(self) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            return {"accepted": False, "reason": "disabled"}
+        return self._source_cache_service.upload_alarm_event_entries_full_to_bitable()
+
+    def upload_alarm_event_source_cache_single_building_to_bitable(self, *, building: str) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            return {"accepted": False, "reason": "disabled"}
+        return self._source_cache_service.upload_alarm_event_entries_single_building_to_bitable(building=building)
+
+    def debug_alarm_page_actions(self, *, building: str) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            return {"ok": False, "reason": "disabled"}
+        return self._source_cache_service.debug_alarm_page_actions(building=building)
 
     def list_monthly_pending_resume_runs(self) -> List[Dict[str, Any]]:
         if not self.shared_bridge_root:

@@ -126,6 +126,7 @@ function ensureRoot(cfg) {
   cfg.updater = cfg.updater || {};
   cfg.feishu = cfg.feishu || {};
   cfg.alarm_common_db = cfg.alarm_common_db || {};
+  cfg.alarm_export = cfg.alarm_export || {};
   cfg.feishu_sheet_import = cfg.feishu_sheet_import || {};
   cfg.handover_log = cfg.handover_log || {};
   cfg.day_metric_upload = cfg.day_metric_upload || {};
@@ -183,6 +184,11 @@ function ensureRoot(cfg) {
   cfg.wet_bulb_collection.target = cfg.wet_bulb_collection.target || {};
   cfg.wet_bulb_collection.fields = cfg.wet_bulb_collection.fields || {};
   cfg.wet_bulb_collection.cooling_mode = cfg.wet_bulb_collection.cooling_mode || {};
+  cfg.alarm_export.feishu = cfg.alarm_export.feishu || {};
+  cfg.alarm_export.shared_source_upload =
+    cfg.alarm_export.shared_source_upload && typeof cfg.alarm_export.shared_source_upload === "object"
+      ? cfg.alarm_export.shared_source_upload
+      : {};
   cfg.day_metric_upload.source = cfg.day_metric_upload.source || {};
   cfg.day_metric_upload.behavior = cfg.day_metric_upload.behavior || {};
 }
@@ -889,6 +895,40 @@ function applyAlarmCommonDbDefaults(cfg) {
   setStringDefault(db, "host_source", "site_host");
 }
 
+function applyAlarmExportDefaults(cfg) {
+  const alarmExport = cfg.alarm_export;
+  const feishu = alarmExport.feishu;
+  const sharedSourceUpload = alarmExport.shared_source_upload;
+  const legacyTarget =
+    sharedSourceUpload.target && typeof sharedSourceUpload.target === "object"
+      ? sharedSourceUpload.target
+      : {};
+
+  if (!String(feishu.app_token || "").trim() && String(legacyTarget.app_token || "").trim()) {
+    feishu.app_token = String(legacyTarget.app_token || "").trim();
+  }
+  if (!String(feishu.table_id || "").trim() && String(legacyTarget.table_id || "").trim()) {
+    feishu.table_id = String(legacyTarget.table_id || "").trim();
+  }
+  if ((!Number.isInteger(feishu.page_size) || feishu.page_size <= 0) && Number.isInteger(legacyTarget.page_size) && legacyTarget.page_size > 0) {
+    feishu.page_size = legacyTarget.page_size;
+  }
+  if ((!Number.isInteger(feishu.delete_batch_size) || feishu.delete_batch_size <= 0) && Number.isInteger(legacyTarget.delete_batch_size) && legacyTarget.delete_batch_size > 0) {
+    feishu.delete_batch_size = legacyTarget.delete_batch_size;
+  }
+  if ((!Number.isInteger(feishu.create_batch_size) || feishu.create_batch_size <= 0) && Number.isInteger(legacyTarget.create_batch_size) && legacyTarget.create_batch_size > 0) {
+    feishu.create_batch_size = legacyTarget.create_batch_size;
+  }
+
+  setStringDefault(feishu, "app_token", "");
+  setStringDefault(feishu, "table_id", "");
+  setNumberDefault(feishu, "page_size", 500);
+  setNumberDefault(feishu, "delete_batch_size", 500);
+  setNumberDefault(feishu, "create_batch_size", 200);
+  setBooleanDefault(sharedSourceUpload, "replace_existing_on_full", true);
+  delete sharedSourceUpload.target;
+}
+
 function applyNetworkDefaults(cfg) {
   setNumberDefault(cfg.network, "connect_poll_interval_sec", 1);
   delete cfg.network.enable_auto_switch_wifi;
@@ -1035,6 +1075,7 @@ export function ensureConfigShape(raw) {
   applyInternalSourceSiteDefaults(cfg);
   applyHandoverDefaults(cfg);
   applyAlarmCommonDbDefaults(cfg);
+  applyAlarmExportDefaults(cfg);
   applyNetworkDefaults(cfg);
   applyWetBulbCollectionDefaults(cfg);
   applyDayMetricUploadDefaults(cfg);

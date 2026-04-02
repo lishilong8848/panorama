@@ -591,6 +591,9 @@ export function createAppState(vueApi) {
           last_success_at: "",
           last_error: "",
           failed_buildings: [],
+          blocked_buildings: [],
+          running_buildings: [],
+          completed_buildings: [],
           scope_text: "当前小时",
         },
         handover_log_family: {
@@ -601,6 +604,13 @@ export function createAppState(vueApi) {
           buildings: [],
         },
         monthly_report_family: {
+          ready_count: 0,
+          failed_buildings: [],
+          last_success_at: "",
+          current_bucket: "",
+          buildings: [],
+        },
+        alarm_event_family: {
           ready_count: 0,
           failed_buildings: [],
           last_success_at: "",
@@ -1189,13 +1199,16 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const relativePath = String(raw?.relative_path || "").trim();
     const resolvedFilePath = String(raw?.resolved_file_path || "").trim();
     const rawStatus = String(raw?.status || "").trim().toLowerCase();
-    const statusKey = ["ready", "failed", "downloading"].includes(rawStatus) ? rawStatus : "waiting";
+    const statusKey = ["ready", "failed", "downloading", "consumed"].includes(rawStatus) ? rawStatus : "waiting";
     const ready = statusKey === "ready" && Boolean(raw?.ready);
     let tone = "warning";
     let stateText = "等待中";
     if (statusKey === "ready" && ready) {
       tone = "success";
       stateText = "已就绪";
+    } else if (statusKey === "consumed") {
+      tone = "info";
+      stateText = "已消费";
     } else if (statusKey === "downloading") {
       tone = "info";
       stateText = "下载中";
@@ -1208,6 +1221,8 @@ function normalizeInternalDownloadPoolSlot(slot) {
     }
     const detailText = blocked
       ? `${blockedReason || "楼栋页面异常，等待内网恢复"}${nextProbeAt ? ` / 下次自动检测：${nextProbeAt}` : ""}`
+      : statusKey === "consumed"
+        ? (downloadedAt ? `外网已消费并删除 / ${downloadedAt}` : "外网已消费并删除")
       : (lastError || downloadedAt || (resolvedFilePath ? resolvedFilePath : "等待共享文件就绪"));
     return {
       building,
@@ -1255,14 +1270,15 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const hasBlocked = buildings.length
       ? buildings.some((item) => item.blocked)
       : blockedBuildings.length > 0;
+    const bucketScopeText = key === "alarm_event_family" ? "本次定时" : "本小时";
     const tone = hasFailures ? "danger" : allReady ? "success" : "warning";
     const statusText = hasFailures
-      ? "本小时存在失败楼栋"
+      ? `${bucketScopeText}存在失败楼栋`
       : hasBlocked
-        ? "本小时存在等待恢复楼栋"
+        ? `${bucketScopeText}存在等待恢复楼栋`
       : allReady
-        ? "本小时全部就绪"
-        : "本小时仍有楼栋等待中";
+        ? `${bucketScopeText}全部就绪`
+        : `${bucketScopeText}仍有楼栋等待中`;
     return {
       key,
       title,
@@ -1391,6 +1407,103 @@ function normalizeInternalDownloadPoolSlot(slot) {
       summaryText,
     };
   }
+  function normalizeAlarmEventReadinessBuilding(raw, fallbackBucket) {
+    const building = String(raw?.building || "").trim() || "-";
+    const bucketKey = String(raw?.bucket_key || "").trim() || String(fallbackBucket || "").trim() || "-";
+    const downloadedAt = String(raw?.downloaded_at || "").trim();
+    const lastError = formatSharedBridgeRuntimeError(raw?.last_error);
+    const relativePath = String(raw?.relative_path || "").trim();
+    const resolvedFilePath = String(raw?.resolved_file_path || "").trim();
+    const blocked = Boolean(raw?.blocked);
+    const blockedReason = formatInternalDownloadPoolError(raw?.blocked_reason || raw?.last_error);
+    const rawStatus = String(raw?.status || "").trim().toLowerCase();
+    const statusKey = ["ready", "failed", "consumed"].includes(rawStatus) ? rawStatus : "waiting";
+    let tone = "warning";
+    let stateText = "等待定时文件";
+    if (statusKey === "ready") {
+      tone = "success";
+      stateText = "已就绪";
+    } else if (statusKey === "consumed") {
+      tone = "info";
+      stateText = "已消费";
+    } else if (statusKey === "failed") {
+      tone = "danger";
+      stateText = "失败";
+    } else if (blocked) {
+      tone = "warning";
+      stateText = "等待内网恢复";
+    }
+    return {
+      building,
+      bucketKey,
+      statusKey,
+      usingFallback: false,
+      versionGap: null,
+      downloadedAt,
+      lastError,
+      relativePath,
+      resolvedFilePath,
+      tone,
+      stateText,
+      detailText: blocked
+        ? (blockedReason || "等待内网恢复")
+        : statusKey === "consumed"
+          ? "定时告警文件已被外网消费"
+          : (lastError || downloadedAt || (resolvedFilePath ? resolvedFilePath : "等待 08 点 / 16 点定时文件")),
+    };
+  }
+  function normalizeAlarmEventReadinessOverview({ key, title, payload }) {
+    const familyPayload = payload && typeof payload === "object" ? payload : {};
+    const currentBucket = String(familyPayload.current_bucket || "").trim();
+    const buildings = Array.isArray(familyPayload.buildings)
+      ? familyPayload.buildings.map((item) => normalizeAlarmEventReadinessBuilding(item, currentBucket))
+      : [];
+    const buildingMap = new Map(buildings.map((item) => [String(item.building || "").trim(), item]));
+    const normalizedBuildings = INTERNAL_BUILDINGS.map(
+      (building) => buildingMap.get(building) || normalizeAlarmEventReadinessBuilding({ building }, currentBucket),
+    );
+    const consumedCount = normalizedBuildings.filter((item) => item.statusKey === "consumed").length;
+    const readyCount = normalizedBuildings.filter((item) => item.statusKey === "ready").length;
+    const failedBuildings = normalizedBuildings.filter((item) => item.statusKey === "failed").map((item) => item.building);
+    const blockedBuildings = normalizedBuildings.filter((item) => item.stateText === "等待内网恢复").map((item) => item.building);
+    let tone = "warning";
+    let statusText = "等待定时文件";
+    let summaryText = "外网只读取 08 点和 16 点的告警信息文件。";
+    if (failedBuildings.length) {
+      tone = "danger";
+      statusText = "存在失败楼栋";
+      summaryText = `以下楼栋告警信息文件处理失败：${failedBuildings.join(" / ")}`;
+    } else if (blockedBuildings.length) {
+      tone = "warning";
+      statusText = "等待内网恢复";
+      summaryText = `以下楼栋正在等待内网恢复：${blockedBuildings.join(" / ")}`;
+    } else if (readyCount > 0) {
+      tone = "success";
+      statusText = "定时文件已就绪";
+      summaryText = `当前定时桶 ${currentBucket || "-"} 已有 ${readyCount}/5 个楼栋告警文件可供外网消费。`;
+    } else if (consumedCount > 0) {
+      tone = "info";
+      statusText = "定时文件已消费";
+      summaryText = `当前定时桶 ${currentBucket || "-"} 的告警信息文件已消费 ${consumedCount}/5 个楼栋。`;
+    }
+    return {
+      key,
+      title,
+      bestBucketKey: currentBucket,
+      bestBucketAgeHours: null,
+      bestBucketAgeText: "",
+      isBestBucketTooOld: false,
+      fallbackBuildings: [],
+      missingBuildings: [],
+      staleBuildings: [],
+      buildings: normalizedBuildings,
+      canProceed: readyCount > 0,
+      tone,
+      statusText,
+      summaryText,
+      participatesInAutoRetry: false,
+    };
+  }
   const internalDownloadPoolOverview = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
     if (roleMode !== "internal") {
@@ -1476,7 +1589,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       return {
         tone: "neutral",
         statusText: "仅内网端启用",
-        summaryText: "小时预下载缓存仓只在内网端运行，外网端默认只消费共享目录中的最新有效文件。",
+        summaryText: "共享缓存仓只在内网端运行，外网端默认只消费共享目录中的最新有效文件。",
         currentHourBucket: "-",
         lastRunAt: "",
         lastSuccessAt: "",
@@ -1504,6 +1617,9 @@ function normalizeInternalDownloadPoolSlot(slot) {
       : rawCache.monthly_family && typeof rawCache.monthly_family === "object"
         ? rawCache.monthly_family
         : {};
+    const alarmFamily = rawCache.alarm_event_family && typeof rawCache.alarm_event_family === "object"
+      ? rawCache.alarm_event_family
+      : {};
     const families = [
       normalizeSourceCacheFamilyOverview({
         key: "handover_log_family",
@@ -1517,26 +1633,32 @@ function normalizeInternalDownloadPoolSlot(slot) {
         payload: monthlyFamily,
         fallbackBucket: currentHourBucket,
       }),
+      normalizeSourceCacheFamilyOverview({
+        key: "alarm_event_family",
+        title: "告警信息源文件",
+        payload: alarmFamily,
+        fallbackBucket: String(alarmFamily.current_bucket || "").trim() || currentHourBucket,
+      }),
     ];
     let tone = "warning";
     let statusText = "准备中";
-    let summaryText = "内网端会按自然小时为每个楼预下载两类源文件：交接班日志源文件和全景平台月报源文件。";
+    let summaryText = "内网端会维护三组共享源文件：交接班日志源文件、全景平台月报源文件，以及每天 08:00 / 16:00 的告警信息源文件。";
     if (!enabled) {
       tone = "warning";
       statusText = "未启用";
-      summaryText = "当前未启用小时预下载缓存仓。";
+      summaryText = "当前未启用共享缓存仓。";
     } else if (families.some((family) => family.hasFailures) || lastError) {
       tone = "danger";
       statusText = "最近一轮存在失败";
-      summaryText = "最近一轮小时预下载存在失败楼栋，请检查共享目录权限和内网页面登录状态。";
+      summaryText = "最近一轮共享文件同步存在失败楼栋，请检查共享目录权限和内网页面登录状态。";
     } else if (families.every((family) => family.allReady && family.buildings.length > 0)) {
       tone = "success";
-      statusText = "本小时缓存已全部就绪";
-      summaryText = "两个源文件族当前小时的楼栋缓存都已就绪，外网会直接消费共享目录中的最新文件。";
+      statusText = "本轮共享文件已全部就绪";
+      summaryText = "交接班、月报和告警信息三组共享文件都已就绪。";
     } else if (running) {
       tone = "warning";
       statusText = "运行中";
-      summaryText = "当前小时缓存仓正在维护 latest 桶，外网默认只消费本小时最新的两类源文件。";
+      summaryText = "共享缓存仓正在维护交接班、月报和最近应执行的告警信息文件。";
     }
     return {
       tone,
@@ -1669,6 +1791,15 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const failedBuildings = Array.isArray(payload.failed_buildings)
       ? payload.failed_buildings.map((item) => String(item || "").trim()).filter(Boolean)
       : [];
+    const blockedBuildings = Array.isArray(payload.blocked_buildings)
+      ? payload.blocked_buildings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const runningBuildings = Array.isArray(payload.running_buildings)
+      ? payload.running_buildings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const completedBuildings = Array.isArray(payload.completed_buildings)
+      ? payload.completed_buildings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
     if (roleMode !== "internal") {
       return {
         tone: "neutral",
@@ -1678,49 +1809,76 @@ function normalizeInternalDownloadPoolSlot(slot) {
         lastSuccessAt: "",
         lastError: "",
         failedBuildings: [],
+        blockedBuildings: [],
+        runningBuildings: [],
+        completedBuildings: [],
       };
     }
     if (running) {
+      const runningSummary = runningBuildings.length
+        ? `当前并行处理中：${runningBuildings.join(" / ")}`
+        : "正在立即补下当前小时的交接班日志源文件、全景平台月报源文件，以及最近应执行的告警信息源文件。";
       return {
         tone: "warning",
         statusText: "当前小时下载中",
-        summaryText: "正在立即补下当前小时的交接班日志源文件和全景平台月报源文件。",
+        summaryText: runningSummary,
         lastRunAt,
         lastSuccessAt,
         lastError,
         failedBuildings,
+        blockedBuildings,
+        runningBuildings,
+        completedBuildings,
       };
     }
-    if (failedBuildings.length || lastError) {
+    if (failedBuildings.length || blockedBuildings.length || lastError) {
+      let summaryText = "当前小时下载最近一轮存在失败项，请检查对应楼栋的登录态、共享目录权限和下载页面可用性。";
+      if (!failedBuildings.length && blockedBuildings.length) {
+        summaryText = `以下楼栋正在等待恢复后再继续下载：${blockedBuildings.join(" / ")}`;
+      } else if (failedBuildings.length && blockedBuildings.length) {
+        summaryText = `失败项：${failedBuildings.join(" / ")}；等待恢复：${blockedBuildings.join(" / ")}`;
+      }
       return {
         tone: "danger",
         statusText: "最近一轮存在失败",
-        summaryText: "当前小时下载最近一轮存在失败项，请检查对应楼栋的登录态、共享目录权限和下载页面可用性。",
+        summaryText,
         lastRunAt,
         lastSuccessAt,
         lastError,
         failedBuildings,
+        blockedBuildings,
+        runningBuildings,
+        completedBuildings,
       };
     }
     if (lastSuccessAt) {
+      const summaryText = completedBuildings.length
+        ? `最近一轮已完成：${completedBuildings.join(" / ")}`
+        : "当前小时共享文件和最近应执行的告警信息源文件已完成一轮立即补下。";
       return {
         tone: "success",
         statusText: "最近一轮已完成",
-        summaryText: "当前小时的双源文件已完成一轮立即补下。",
+        summaryText,
         lastRunAt,
         lastSuccessAt,
         lastError: "",
         failedBuildings: [],
+        blockedBuildings: [],
+        runningBuildings,
+        completedBuildings,
       };
     }
     return {
       tone: "neutral",
       statusText: "尚未手动执行",
-      summaryText: "可手动触发“立即下载当前小时全部文件”，补下当前小时 10 个文件。",
+      summaryText: "可手动触发“立即下载当前小时全部文件”，同时补下当前小时共享文件和最近应执行的告警信息文件。",
       lastRunAt,
       lastSuccessAt,
       lastError,
       failedBuildings,
+      blockedBuildings,
+      runningBuildings,
+      completedBuildings,
     };
   });
   const internalSourceCacheHistoryOverview = computed(() => {
@@ -1756,15 +1914,15 @@ function normalizeInternalDownloadPoolSlot(slot) {
       .slice(0, 8);
     let tone = sourceCache.tone || "neutral";
     let statusText = "按小时维护中";
-    let summaryText = "内网端会按自然小时持续维护双源文件缓存，并保留最近一次当前小时手动补下结果。";
+    let summaryText = "内网端会按小时维护交接班、月报缓存，并在每天 08:00 / 16:00 维护告警信息源文件。";
     if (currentHourRefresh.tone === "danger" || sourceCache.tone === "danger") {
       tone = "danger";
       statusText = "最近存在失败";
       summaryText = "最近一轮小时下载或当前小时手动补下存在失败，请检查对应楼栋登录态、共享目录权限和下载页面可用性。";
     } else if (sourceCache.tone === "success") {
       tone = "success";
-      statusText = "本小时缓存已就绪";
-      summaryText = "当前小时的交接班日志源文件和全景平台月报源文件都已就绪，可供外网直接消费。";
+      statusText = "本轮缓存已就绪";
+      summaryText = "当前小时交接班、月报文件和最近一轮告警信息源文件都已就绪。";
     } else if (currentHourRefresh.tone === "warning") {
       tone = "warning";
       statusText = "当前小时下载中";
@@ -1810,7 +1968,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
     const rawCache = health.shared_bridge?.internal_source_cache || {};
     const lastError = formatSharedBridgeRuntimeError(rawCache.last_error);
-    const families = [
+    const gatingFamilies = [
       normalizeLatestSelectionOverview({
         key: "handover_log_family",
         title: "交接班日志源文件",
@@ -1822,6 +1980,12 @@ function normalizeInternalDownloadPoolSlot(slot) {
         payload: (rawCache.monthly_report_family || rawCache.monthly_family || {}).latest_selection || {},
       }),
     ];
+    const alarmFamily = normalizeAlarmEventReadinessOverview({
+      key: "alarm_event_family",
+      title: "告警信息源文件",
+      payload: rawCache.alarm_event_family || {},
+    });
+    const families = [...gatingFamilies, alarmFamily];
     if (roleMode !== "external") {
       return {
         tone: "neutral",
@@ -1836,17 +2000,17 @@ function normalizeInternalDownloadPoolSlot(slot) {
         familyRetrySignatures: {},
       };
     }
-    const hasStale = families.some((family) => family.staleBuildings.length > 0);
-    const hasTooOld = families.some((family) => family.isBestBucketTooOld);
-    const hasMissing = families.some((family) => family.missingBuildings.length > 0);
-    const hasFallback = families.some((family) => family.fallbackBuildings.length > 0);
-    const allReady = families.every((family) => family.canProceed && family.buildings.length > 0);
-    const referenceBucketKey = families
+    const hasStale = gatingFamilies.some((family) => family.staleBuildings.length > 0);
+    const hasTooOld = gatingFamilies.some((family) => family.isBestBucketTooOld);
+    const hasMissing = gatingFamilies.some((family) => family.missingBuildings.length > 0);
+    const hasFallback = gatingFamilies.some((family) => family.fallbackBuildings.length > 0);
+    const allReady = gatingFamilies.every((family) => family.canProceed && family.buildings.length > 0);
+    const referenceBucketKey = gatingFamilies
       .map((family) => family.bestBucketKey)
       .filter(Boolean)
       .sort()
       .slice(-1)[0] || "-";
-    const autoRetrySignature = families.map((family) => [
+    const autoRetrySignature = gatingFamilies.map((family) => [
       family.key,
       family.bestBucketKey,
       family.buildings.map((building) =>
@@ -1862,10 +2026,10 @@ function normalizeInternalDownloadPoolSlot(slot) {
       family.bestBucketAgeText,
     ].join("=")).join("||");
     const familyCanProceed = Object.fromEntries(
-      families.map((family) => [family.key, Boolean(family.canProceed)]),
+      gatingFamilies.map((family) => [family.key, Boolean(family.canProceed)]),
     );
     const familyRetrySignatures = Object.fromEntries(
-      families.map((family) => [
+      gatingFamilies.map((family) => [
         family.key,
         [
           family.bestBucketKey,

@@ -128,6 +128,35 @@ export async function refreshCurrentHourSourceCacheApi() {
   });
 }
 
+export async function refreshManualAlarmSourceCacheApi() {
+  return apiJson("/api/bridge/source-cache/refresh-alarm-manual", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function deleteManualAlarmSourceCacheFilesApi() {
+  return apiJson("/api/bridge/source-cache/delete-manual-alarm-files", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function uploadAlarmSourceCacheFullApi() {
+  return apiJson("/api/bridge/source-cache/alarm/upload-full", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function uploadAlarmSourceCacheBuildingApi(building) {
+  const buildingText = String(building || "").trim();
+  return apiJson(appendQuery("/api/bridge/source-cache/alarm/upload-building", { building: buildingText }), {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 export async function startSchedulerApi() {
   return apiJson("/api/scheduler/start", { method: "POST", body: "{}" });
 }

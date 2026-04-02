@@ -524,6 +524,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
     sheet_import = _dict(features.get("sheet_import"))
     handover_log = _dict(features.get("handover_log"))
     day_metric_upload = _dict(features.get("day_metric_upload"))
+    alarm_export = _dict(features.get("alarm_export"))
     manual_upload_gui = _dict(features.get("manual_upload_gui"))
     common_alarm_db = copy.deepcopy(_dict(common.get("alarm_db")))
 
@@ -611,6 +612,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "feishu_sheet_import": copy.deepcopy(sheet_import),
         "handover_log": runtime_handover_log,
         "day_metric_upload": copy.deepcopy(day_metric_upload),
+        "alarm_export": copy.deepcopy(alarm_export),
         "manual_upload_gui": copy.deepcopy(manual_upload_gui),
         "web": copy.deepcopy(console),
     }
@@ -708,6 +710,10 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
     features["day_metric_upload"] = deep_merge_defaults(
         _dict(runtime.get("day_metric_upload")),
         day_metric_upload,
+    )
+    features["alarm_export"] = deep_merge_defaults(
+        _dict(runtime.get("alarm_export")),
+        _dict(features.get("alarm_export")),
     )
     _apply_single_root_paths(common, features)
 

@@ -71,6 +71,13 @@ def _collect_buildings(cfg: Dict[str, Any]) -> list[str]:
     return output
 
 
+def _normalize_role_mode(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"internal", "external"}:
+        return text
+    return ""
+
+
 def _validate(cfg: Dict[str, Any]) -> None:
     required_sections = [
         "download",
@@ -118,6 +125,9 @@ def load_handover_config(config: Dict[str, Any] | None = None) -> Dict[str, Any]
     base_cfg["network"] = copy.deepcopy(global_network)
     base_cfg["_global_feishu"] = copy.deepcopy(global_feishu)
     base_cfg["_global_paths"] = copy.deepcopy(global_paths)
+    base_cfg["_deployment_role_mode"] = _normalize_role_mode(
+        (runtime_cfg.get("deployment", {}) if isinstance(runtime_cfg.get("deployment", {}), dict) else {}).get("role_mode", "")
+    )
 
     # One-time compatibility in runtime: old rule structures are converted to cell_rules.
     base_cfg = migrate_legacy_rule_structures(base_cfg)

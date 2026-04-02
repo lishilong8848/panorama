@@ -38,6 +38,10 @@ import {
   runHandoverDailyReportScreenshotTestApi,
   uploadHandoverDailyReportAssetApi,
   putConfigApi,
+  refreshManualAlarmSourceCacheApi,
+  deleteManualAlarmSourceCacheFilesApi,
+  uploadAlarmSourceCacheFullApi,
+  uploadAlarmSourceCacheBuildingApi,
 } from "./api_client.js";
 import { prepareConfigPayloadForSave } from "./config_save_validation.js";
 import { buildUpdaterApplyMessage, mapUpdaterResultText } from "./updater_text.js";
@@ -59,6 +63,10 @@ const ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE = "handover_review:access_reprob
 const ACTION_KEY_BRIDGE_CANCEL_PREFIX = "bridge:cancel:";
 const ACTION_KEY_BRIDGE_RETRY_PREFIX = "bridge:retry:";
 const ACTION_KEY_SOURCE_CACHE_REFRESH_CURRENT_HOUR = "bridge:source_cache_refresh_current_hour";
+const ACTION_KEY_SOURCE_CACHE_REFRESH_ALARM_MANUAL = "bridge:source_cache_refresh_alarm_manual";
+const ACTION_KEY_SOURCE_CACHE_DELETE_ALARM_MANUAL = "bridge:source_cache_delete_alarm_manual";
+const ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_FULL = "bridge:source_cache_upload_alarm_full";
+const ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_BUILDING = "bridge:source_cache_upload_alarm_building";
 const ENGINEER_DIRECTORY_CACHE_KEY = "handover_engineer_directory_daily_cache_v1";
 
 export function createRuntimeHealthConfigActions(ctx) {
@@ -954,6 +962,83 @@ export function createRuntimeHealthConfigActions(ctx) {
     };
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_SOURCE_CACHE_REFRESH_CURRENT_HOUR, runner, { cooldownMs: 0 });
+    }
+    return runner();
+  }
+
+  async function refreshManualAlarmSourceCache() {
+    const runner = async () => {
+      try {
+        const data = await refreshManualAlarmSourceCacheApi();
+        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        message.value = String(data?.message || "").trim() || "已开始手动拉取告警信息文件";
+        return data;
+      } catch (err) {
+        message.value = `手动拉取告警信息文件失败: ${err}`;
+        return { ok: false, error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_SOURCE_CACHE_REFRESH_ALARM_MANUAL, runner, { cooldownMs: 0 });
+    }
+    return runner();
+  }
+
+  async function deleteManualAlarmSourceCacheFiles() {
+    const runner = async () => {
+      try {
+        const data = await deleteManualAlarmSourceCacheFilesApi();
+        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        message.value = String(data?.message || "").trim() || "已删除手动拉取的告警信息文件";
+        return data;
+      } catch (err) {
+        message.value = `删除手动告警信息文件失败: ${err}`;
+        return { ok: false, error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_SOURCE_CACHE_DELETE_ALARM_MANUAL, runner, { cooldownMs: 0 });
+    }
+    return runner();
+  }
+
+  async function uploadAlarmSourceCacheFull() {
+    const runner = async () => {
+      try {
+        const data = await uploadAlarmSourceCacheFullApi();
+        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        message.value = String(data?.message || "").trim() || "已完成告警信息文件全量上传";
+        return data;
+      } catch (err) {
+        message.value = `告警信息文件全量上传失败: ${err}`;
+        return { ok: false, error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_FULL, runner, { cooldownMs: 0 });
+    }
+    return runner();
+  }
+
+  async function uploadAlarmSourceCacheBuilding(building) {
+    const buildingText = String(building || "").trim();
+    if (!buildingText) {
+      message.value = "请选择要上传的楼栋";
+      return { ok: false, error: "missing_building" };
+    }
+    const runner = async () => {
+      try {
+        const data = await uploadAlarmSourceCacheBuildingApi(buildingText);
+        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        message.value = String(data?.message || "").trim() || `已完成 ${buildingText} 告警信息文件追加上传`;
+        return data;
+      } catch (err) {
+        message.value = `${buildingText} 告警信息文件追加上传失败: ${err}`;
+        return { ok: false, error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(`${ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_BUILDING}:${buildingText}`, runner, { cooldownMs: 0 });
     }
     return runner();
   }
@@ -1933,6 +2018,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     cancelBridgeTask,
     retryBridgeTask,
     refreshCurrentHourSourceCache,
+    refreshManualAlarmSourceCache,
+    deleteManualAlarmSourceCacheFiles,
+    uploadAlarmSourceCacheFull,
+    uploadAlarmSourceCacheBuilding,
     fetchRuntimeResources,
     fetchHandoverDailyReportContext,
     fetchConfig,
@@ -1968,6 +2057,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     ACTION_KEY_HANDOVER_CONFIRM_ALL,
     ACTION_KEY_HANDOVER_CLOUD_RETRY_ALL,
     ACTION_KEY_HANDOVER_DAILY_REPORT_AUTH_OPEN,
+    ACTION_KEY_SOURCE_CACHE_REFRESH_ALARM_MANUAL,
+    ACTION_KEY_SOURCE_CACHE_DELETE_ALARM_MANUAL,
+    ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_FULL,
+    ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_BUILDING,
     ACTION_KEY_HANDOVER_DAILY_REPORT_SCREENSHOT_TEST,
     ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE,
     ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,

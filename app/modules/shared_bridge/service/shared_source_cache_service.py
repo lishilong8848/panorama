@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import concurrent.futures
 import copy
 import hashlib
 import threading
@@ -8,8 +9,18 @@ from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+import openpyxl
+
+from app.modules.shared_bridge.service.alarm_event_page_export_service import (
+    collect_alarm_event_rows,
+    exercise_alarm_event_page_actions,
+    scheduled_bucket_for_time,
+    write_alarm_event_workbook,
+)
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
+from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.shared.utils.atomic_file import atomic_copy_file, validate_excel_workbook_file
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
@@ -20,6 +31,7 @@ from pipeline_utils import load_download_module
 _DEFAULT_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"]
 FAMILY_HANDOVER_LOG = "handover_log_family"
 FAMILY_MONTHLY_REPORT = "monthly_report_family"
+FAMILY_ALARM_EVENT = "alarm_event_family"
 LEGACY_FAMILY_ALIASES = {
     FAMILY_HANDOVER_LOG: ("handover_family",),
     FAMILY_MONTHLY_REPORT: ("monthly_family",),
@@ -27,10 +39,55 @@ LEGACY_FAMILY_ALIASES = {
 FAMILY_DIR_NAMES = {
     FAMILY_HANDOVER_LOG: "handover_log",
     FAMILY_MONTHLY_REPORT: "monthly_report",
+    FAMILY_ALARM_EVENT: "alarm_event",
 }
 FAMILY_LABELS = {
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
     FAMILY_MONTHLY_REPORT: "全景平台月报源文件",
+    FAMILY_ALARM_EVENT: "告警信息源文件",
+}
+
+ALARM_EVENT_BITABLE_TARGET_FIELDS = {
+    "level": "等级",
+    "building": "楼栋",
+    "content": "告警内容",
+    "position": "具体位置",
+    "object": "监控对象",
+    "event_time": "产生时间",
+    "accept_time": "受理时间",
+    "is_accept": "处理状态",
+    "accept_by": "受理人",
+    "accept_content": "受理描述",
+    "recover_time": "恢复时间",
+    "is_recover": "恢复状态",
+    "event_suggest": "处理建议",
+    "event_type": "告警类型",
+    "trigger_value": "触发值",
+    "confirm_type": "告警分类",
+    "confirm_time": "确认时间",
+    "confirm_by": "确认人",
+    "confirm_description": "确认描述",
+}
+
+ALARM_EVENT_HEADER_ALIASES = {
+    "level": {"级别", "等级", "level"},
+    "content": {"内容", "告警内容", "content"},
+    "position": {"位置", "具体位置", "position"},
+    "object": {"对象", "监控对象", "object"},
+    "event_time": {"告警时间", "产生时间", "event_time"},
+    "accept_time": {"接警时间", "受理时间", "accept_time"},
+    "is_accept": {"处理状态", "is_accept"},
+    "accept_by": {"处理人", "受理人", "accept_by"},
+    "accept_content": {"处理内容", "受理描述", "accept_content"},
+    "recover_time": {"恢复时间", "recover_time"},
+    "is_recover": {"恢复状态", "is_recover"},
+    "event_suggest": {"建议", "处理建议", "event_suggest"},
+    "event_type": {"事件类型", "告警类型", "event_type"},
+    "confirm_type": {"确认类型", "告警分类", "confirm_type"},
+    "confirm_time": {"确认时间", "confirm_time"},
+    "confirm_by": {"确认人", "confirm_by"},
+    "confirm_description": {"确认说明", "确认描述", "confirm_description"},
+    "trigger_value": {"触发值", "实时值", "当前值", "real_value", "trigger_value"},
 }
 
 
@@ -107,10 +164,19 @@ class SharedSourceCacheService:
         self._last_run_at = ""
         self._last_success_at = ""
         self._current_hour_bucket = ""
-        self._active_latest_downloads: Dict[tuple[str, str, str], str] = {}
+        self._active_latest_downloads: Dict[tuple[str, str, str, str], str] = {}
+        self._manual_alarm_refresh_thread: threading.Thread | None = None
+        self._monthly_download_module: Any | None = None
+        self._monthly_download_module_lock = threading.Lock()
         self._family_status: Dict[str, Dict[str, Any]] = {
             FAMILY_HANDOVER_LOG: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_MONTHLY_REPORT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+            FAMILY_ALARM_EVENT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+        }
+        self._light_building_status: Dict[str, Dict[str, Dict[str, Any]]] = {
+            FAMILY_HANDOVER_LOG: {},
+            FAMILY_MONTHLY_REPORT: {},
+            FAMILY_ALARM_EVENT: {},
         }
         self._current_hour_refresh: Dict[str, Any] = {
             "running": False,
@@ -119,10 +185,201 @@ class SharedSourceCacheService:
             "last_error": "",
             "failed_buildings": [],
             "blocked_buildings": [],
-            "scope_text": "当前小时",
+            "running_buildings": [],
+            "completed_buildings": [],
+            "scope_text": "当前小时 / 最近定时",
         }
         self._last_scheduler_log_signature = ""
+        self._alarm_external_upload_state: Dict[str, Any] = {
+            "running": False,
+            "started_at": "",
+            "current_mode": "",
+            "current_scope": "",
+            "last_run_at": "",
+            "last_success_at": "",
+            "last_error": "",
+            "last_mode": "",
+            "last_scope": "",
+            "uploaded_record_count": 0,
+            "uploaded_file_count": 0,
+            "consumed_count": 0,
+            "failed_entries": [],
+            "deleted_before_upload_count": 0,
+        }
         self._refresh_config()
+        with self._lock:
+            self._reset_light_building_state_unlocked()
+
+    def _default_light_building_status(self, *, building: str, bucket_key: str) -> Dict[str, Any]:
+        return {
+            "building": str(building or "").strip(),
+            "bucket_key": str(bucket_key or "").strip(),
+            "status": "waiting",
+            "ready": False,
+            "downloaded_at": "",
+            "last_error": "",
+            "relative_path": "",
+            "resolved_file_path": "",
+            "started_at": "",
+            "blocked": False,
+            "blocked_reason": "",
+            "next_probe_at": "",
+        }
+
+    def _reset_light_building_state_unlocked(self) -> None:
+        buildings = self.get_enabled_buildings()
+        current_bucket = self._current_hour_bucket or self.current_hour_bucket()
+        alarm_bucket = (
+            str(self._family_status.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip()
+            or self.current_alarm_bucket()
+        )
+        self._family_status.setdefault(FAMILY_HANDOVER_LOG, {})["current_bucket"] = current_bucket
+        self._family_status.setdefault(FAMILY_MONTHLY_REPORT, {})["current_bucket"] = current_bucket
+        self._family_status.setdefault(FAMILY_ALARM_EVENT, {})["current_bucket"] = alarm_bucket
+        for family_name, bucket_key in (
+            (FAMILY_HANDOVER_LOG, current_bucket),
+            (FAMILY_MONTHLY_REPORT, current_bucket),
+            (FAMILY_ALARM_EVENT, alarm_bucket),
+        ):
+            family_cache = self._light_building_status.setdefault(family_name, {})
+            for building in buildings:
+                family_cache.setdefault(
+                    building,
+                    self._default_light_building_status(building=building, bucket_key=bucket_key),
+                )
+
+    def _ensure_light_family_cache_unlocked(
+        self,
+        *,
+        source_family: str,
+        bucket_key: str,
+        buildings: List[str] | None = None,
+    ) -> None:
+        normalized_family = self._normalize_source_family(source_family)
+        family_cache = self._light_building_status.setdefault(normalized_family, {})
+        for building in (buildings or self.get_enabled_buildings()):
+            building_name = str(building or "").strip()
+            if not building_name:
+                continue
+            current = family_cache.get(building_name)
+            current_bucket = str(current.get("bucket_key", "") or "").strip() if isinstance(current, dict) else ""
+            if current_bucket != str(bucket_key or "").strip():
+                family_cache[building_name] = self._default_light_building_status(
+                    building=building_name,
+                    bucket_key=bucket_key,
+                )
+        self._family_status.setdefault(normalized_family, {})["current_bucket"] = str(bucket_key or "").strip()
+
+    def _set_light_building_status_unlocked(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        normalized_family = self._normalize_source_family(source_family)
+        building_name = str(building or "").strip()
+        effective_bucket = str(bucket_key or "").strip()
+        base = self._default_light_building_status(building=building_name, bucket_key=effective_bucket)
+        base.update(payload if isinstance(payload, dict) else {})
+        base["building"] = building_name
+        base["bucket_key"] = effective_bucket
+        status_text = str(base.get("status", "") or "").strip().lower() or "waiting"
+        base["status"] = status_text
+        base["ready"] = bool(base.get("ready", False) or status_text == "ready")
+        self._light_building_status.setdefault(normalized_family, {})[building_name] = base
+        self._family_status.setdefault(normalized_family, {})["current_bucket"] = effective_bucket
+
+    def _set_light_building_status_from_entry_unlocked(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+        entry: Dict[str, Any],
+        file_path: Path | None,
+    ) -> None:
+        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+        status_text = str(entry.get("status", "") or "").strip().lower() or "waiting"
+        resolved_path = str(file_path) if file_path is not None and status_text == "ready" else ""
+        downloaded_at = ""
+        if status_text == "consumed":
+            downloaded_at = str(metadata.get("consumed_at", "") or entry.get("downloaded_at", "") or "").strip()
+        else:
+            downloaded_at = str(entry.get("downloaded_at", "") or "").strip()
+        self._set_light_building_status_unlocked(
+            source_family=source_family,
+            building=building,
+            bucket_key=bucket_key,
+            payload={
+                "status": status_text,
+                "ready": status_text == "ready",
+                "downloaded_at": downloaded_at,
+                "last_error": str(metadata.get("error", "") or "").strip() if status_text == "failed" else "",
+                "relative_path": str(entry.get("relative_path", "") or "").strip(),
+                "resolved_file_path": resolved_path,
+                "started_at": "",
+                "blocked": False,
+                "blocked_reason": "",
+                "next_probe_at": "",
+            },
+        )
+
+    def _build_internal_light_family_snapshot(
+        self,
+        *,
+        source_family: str,
+        current_bucket: str,
+        cached_rows: Dict[str, Dict[str, Any]],
+        active_downloads: Dict[tuple[str, str, str, str], str],
+    ) -> Dict[str, Any]:
+        normalized_family = self._normalize_source_family(source_family)
+        buildings = self.get_enabled_buildings()
+        building_rows: List[Dict[str, Any]] = []
+        for building in buildings:
+            cached = copy.deepcopy(cached_rows.get(building) or self._default_light_building_status(building=building, bucket_key=current_bucket))
+            if str(cached.get("bucket_key", "") or "").strip() != str(current_bucket or "").strip():
+                cached = self._default_light_building_status(building=building, bucket_key=current_bucket)
+            active_key = (normalized_family, building, "latest", current_bucket)
+            active_started_at = str(active_downloads.get(active_key, "") or "").strip()
+            if active_started_at:
+                cached = {
+                    **self._default_light_building_status(building=building, bucket_key=current_bucket),
+                    "status": "downloading",
+                    "started_at": active_started_at,
+                }
+            pause_info = (
+                self.download_browser_pool.get_building_pause_info(building)
+                if self.download_browser_pool is not None and hasattr(self.download_browser_pool, "get_building_pause_info")
+                else {}
+            )
+            if bool(pause_info.get("suspended", False)) and str(cached.get("status", "") or "").strip().lower() not in {"ready", "consumed", "failed"}:
+                blocked_reason = str(
+                    pause_info.get("suspend_reason", "") or pause_info.get("pending_issue_summary", "") or ""
+                ).strip()
+                cached = {
+                    **self._default_light_building_status(building=building, bucket_key=current_bucket),
+                    "status": "waiting",
+                    "last_error": blocked_reason,
+                    "blocked": True,
+                    "blocked_reason": blocked_reason,
+                    "next_probe_at": str(pause_info.get("next_probe_at", "") or "").strip(),
+                }
+            building_rows.append(cached)
+        ready_count = sum(1 for item in building_rows if bool(item.get("ready")))
+        failed_buildings = [str(item.get("building", "") or "").strip() for item in building_rows if str(item.get("status", "") or "").strip().lower() == "failed"]
+        blocked_buildings = [str(item.get("building", "") or "").strip() for item in building_rows if bool(item.get("blocked", False))]
+        last_success_candidates = [str(item.get("downloaded_at", "") or "").strip() for item in building_rows if str(item.get("downloaded_at", "") or "").strip()]
+        return {
+            "ready_count": ready_count,
+            "failed_buildings": failed_buildings,
+            "blocked_buildings": blocked_buildings,
+            "last_success_at": max(last_success_candidates) if last_success_candidates else "",
+            "current_bucket": current_bucket,
+            "buildings": building_rows,
+            "latest_selection": {},
+        }
 
     def _refresh_config(self) -> None:
         deployment = self.runtime_config.get("deployment", {}) if isinstance(self.runtime_config.get("deployment", {}), dict) else {}
@@ -140,11 +397,14 @@ class SharedSourceCacheService:
         self.history_fill_timeout_sec = max(60, int(source_cache.get("history_fill_timeout_sec", 1800) or 1800))
         self._handover_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_HANDOVER_LOG] if self.shared_root else None
         self._monthly_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_MONTHLY_REPORT] if self.shared_root else None
+        self._alarm_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_ALARM_EVENT] if self.shared_root else None
         self._tmp_root = self.shared_root / "tmp" / "source_cache" if self.shared_root else None
 
     def update_runtime_config(self, runtime_config: Dict[str, Any]) -> None:
         self.runtime_config = copy.deepcopy(runtime_config if isinstance(runtime_config, dict) else {})
         self._refresh_config()
+        with self._lock:
+            self._reset_light_building_state_unlocked()
 
     def update_download_browser_pool(self, download_browser_pool: Any | None) -> None:
         self.download_browser_pool = download_browser_pool
@@ -219,18 +479,25 @@ class SharedSourceCacheService:
         with self._lock:
             thread = self._thread
             current_hour_refresh_thread = self._current_hour_refresh_thread
+            manual_alarm_refresh_thread = self._manual_alarm_refresh_thread
             if not thread:
                 self._stop_event.set()
                 self._current_hour_refresh_thread = None
+                self._manual_alarm_refresh_thread = None
                 if current_hour_refresh_thread:
                     current_hour_refresh_thread.join(timeout=5)
+                if manual_alarm_refresh_thread:
+                    manual_alarm_refresh_thread.join(timeout=5)
                 return {"stopped": False, "running": False, "reason": "not_running"}
             self._stop_event.set()
             self._thread = None
             self._current_hour_refresh_thread = None
+            self._manual_alarm_refresh_thread = None
         thread.join(timeout=5)
         if current_hour_refresh_thread:
             current_hour_refresh_thread.join(timeout=5)
+        if manual_alarm_refresh_thread:
+            manual_alarm_refresh_thread.join(timeout=5)
         return {"stopped": True, "running": False, "reason": "stopped"}
 
     def is_running(self) -> bool:
@@ -239,7 +506,6 @@ class SharedSourceCacheService:
 
     def get_health_snapshot(self, *, mode: str = "external_full") -> Dict[str, Any]:
         normalized_mode = str(mode or "external_full").strip().lower() or "external_full"
-        include_latest_selection = normalized_mode != "internal_light"
         with self._lock:
             current_bucket = self._current_hour_bucket or self.current_hour_bucket()
             families = copy.deepcopy(self._family_status)
@@ -247,6 +513,51 @@ class SharedSourceCacheService:
             last_run_at = self._last_run_at
             last_success_at = self._last_success_at
             last_error = self._last_error
+            light_building_status = copy.deepcopy(self._light_building_status)
+            active_downloads = dict(self._active_latest_downloads)
+            alarm_external_upload = copy.deepcopy(self._alarm_external_upload_state)
+        if normalized_mode == "internal_light":
+            alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
+            handover_family = self._build_internal_light_family_snapshot(
+                source_family=FAMILY_HANDOVER_LOG,
+                current_bucket=current_bucket,
+                cached_rows=light_building_status.get(FAMILY_HANDOVER_LOG, {}),
+                active_downloads=active_downloads,
+            )
+            monthly_family = self._build_internal_light_family_snapshot(
+                source_family=FAMILY_MONTHLY_REPORT,
+                current_bucket=current_bucket,
+                cached_rows=light_building_status.get(FAMILY_MONTHLY_REPORT, {}),
+                active_downloads=active_downloads,
+            )
+            alarm_family = self._build_internal_light_family_snapshot(
+                source_family=FAMILY_ALARM_EVENT,
+                current_bucket=alarm_bucket,
+                cached_rows=light_building_status.get(FAMILY_ALARM_EVENT, {}),
+                active_downloads=active_downloads,
+            )
+            families[FAMILY_HANDOVER_LOG] = {**families.get(FAMILY_HANDOVER_LOG, {}), **handover_family}
+            families[FAMILY_MONTHLY_REPORT] = {**families.get(FAMILY_MONTHLY_REPORT, {}), **monthly_family}
+            families[FAMILY_ALARM_EVENT] = {
+                **families.get(FAMILY_ALARM_EVENT, {}),
+                **alarm_family,
+                "external_upload": alarm_external_upload,
+            }
+            return {
+                "enabled": bool(self.enabled and self.role_mode in {"internal", "external"}),
+                "scheduler_running": bool(self.role_mode == "internal" and self.is_running()),
+                "current_hour_bucket": current_bucket,
+                "last_run_at": last_run_at,
+                "last_success_at": last_success_at,
+                "last_error": last_error,
+                "cache_root": str(self.shared_root) if self.shared_root else "",
+                "current_hour_refresh": current_hour_refresh,
+                FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
+                FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
+                FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
+            }
+        include_latest_selection = True
+        alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
         snapshot_error = ""
         try:
             handover_family = self._build_family_health_snapshot(
@@ -266,8 +577,22 @@ class SharedSourceCacheService:
         except Exception as exc:  # noqa: BLE001
             monthly_family = {"current_bucket": current_bucket, "buildings": []}
             snapshot_error = snapshot_error or str(exc)
+        try:
+            alarm_family = self._build_family_health_snapshot(
+                source_family=FAMILY_ALARM_EVENT,
+                current_bucket=alarm_bucket,
+                include_latest_selection=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            alarm_family = {"current_bucket": alarm_bucket, "buildings": []}
+            snapshot_error = snapshot_error or str(exc)
         families[FAMILY_HANDOVER_LOG] = {**families.get(FAMILY_HANDOVER_LOG, {}), **handover_family}
         families[FAMILY_MONTHLY_REPORT] = {**families.get(FAMILY_MONTHLY_REPORT, {}), **monthly_family}
+        families[FAMILY_ALARM_EVENT] = {
+            **families.get(FAMILY_ALARM_EVENT, {}),
+            **alarm_family,
+            "external_upload": alarm_external_upload,
+        }
         return {
             "enabled": bool(self.enabled and self.role_mode in {"internal", "external"}),
             "scheduler_running": bool(self.role_mode == "internal" and self.is_running()),
@@ -279,6 +604,7 @@ class SharedSourceCacheService:
             "current_hour_refresh": current_hour_refresh,
             FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
             FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
+            FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
         }
 
     def _get_source_cache_entry(
@@ -311,7 +637,7 @@ class SharedSourceCacheService:
             if self.download_browser_pool is not None and hasattr(self.download_browser_pool, "get_building_pause_info")
             else {}
         )
-        active_key = (self._normalize_source_family(source_family), building, bucket_key)
+        active_key = (self._normalize_source_family(source_family), building, "latest", bucket_key)
         with self._lock:
             active_started_at = self._active_latest_downloads.get(active_key, "")
         if active_started_at:
@@ -352,6 +678,28 @@ class SharedSourceCacheService:
                     "blocked_reason": "",
                     "next_probe_at": "",
                 }
+        consumed_entry = self._get_source_cache_entry(
+            source_family=source_family,
+            building=building,
+            bucket_kind="latest",
+            bucket_key=bucket_key,
+            status="consumed",
+        )
+        if consumed_entry:
+            metadata = consumed_entry.get("metadata", {}) if isinstance(consumed_entry.get("metadata", {}), dict) else {}
+            return {
+                "building": building,
+                "bucket_key": bucket_key,
+                "status": "consumed",
+                "ready": False,
+                "downloaded_at": str(metadata.get("consumed_at", "") or consumed_entry.get("downloaded_at", "") or "").strip(),
+                "last_error": "",
+                "relative_path": str(consumed_entry.get("relative_path", "") or "").strip(),
+                "resolved_file_path": "",
+                "blocked": False,
+                "blocked_reason": "",
+                "next_probe_at": "",
+            }
         if bool(pause_info.get("suspended", False)):
             blocked_reason = str(pause_info.get("suspend_reason", "") or pause_info.get("pending_issue_summary", "") or "").strip()
             return {
@@ -444,7 +792,7 @@ class SharedSourceCacheService:
                 source_family=source_family,
                 buildings=buildings,
             )
-            if include_latest_selection
+            if include_latest_selection and self._normalize_source_family(source_family) != FAMILY_ALARM_EVENT
             else {}
         )
         return {
@@ -464,6 +812,8 @@ class SharedSourceCacheService:
             self._handover_cache_root.mkdir(parents=True, exist_ok=True)
         if self._monthly_cache_root is not None:
             self._monthly_cache_root.mkdir(parents=True, exist_ok=True)
+        if self._alarm_cache_root is not None:
+            self._alarm_cache_root.mkdir(parents=True, exist_ok=True)
         self._tmp_root.mkdir(parents=True, exist_ok=True)
 
     def _hash_file(self, path: Path) -> str:
@@ -491,6 +841,8 @@ class SharedSourceCacheService:
             return self._handover_cache_root
         if normalized_family == FAMILY_MONTHLY_REPORT and self._monthly_cache_root is not None:
             return self._monthly_cache_root
+        if normalized_family == FAMILY_ALARM_EVENT and self._alarm_cache_root is not None:
+            return self._alarm_cache_root
         raise RuntimeError("共享缓存根目录未配置")
 
     def _month_segment(self, value: str) -> str:
@@ -500,9 +852,51 @@ class SharedSourceCacheService:
         now = datetime.now()
         return now.strftime("%Y%m")
 
+    def _bucket_path_segment(self, bucket_key: str, *, bucket_kind: str = "latest") -> str:
+        text = str(bucket_key or "").strip()
+        if bucket_kind == "manual":
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H%M%S", "%Y%m%d%H%M%S"):
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    return parsed.strftime("%Y%m%d--%H%M%S--manual")
+                except ValueError:
+                    continue
+        bucket_dt = _parse_hour_bucket(text)
+        if bucket_dt is not None:
+            return bucket_dt.strftime("%Y%m%d--%H")
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if bucket_kind == "manual" and len(digits) >= 14:
+            try:
+                parsed = datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
+                return parsed.strftime("%Y%m%d--%H%M%S--manual")
+            except ValueError:
+                pass
+        if bucket_kind == "latest" and len(digits) >= 10:
+            return f"{digits[:8]}--{digits[8:10]}"
+        safe = "".join(ch for ch in text if ch.isalnum() or ch in {"-", "_"})
+        if safe:
+            return safe
+        return "manual" if bucket_kind == "manual" else "current"
+
     def _file_suffix(self, source_path: Path) -> str:
         suffix = str(source_path.suffix or "").strip()
         return suffix if suffix else ".xlsx"
+
+    def _get_monthly_download_module(self):
+        with self._monthly_download_module_lock:
+            if self._monthly_download_module is None:
+                self._monthly_download_module = load_download_module()
+            return self._monthly_download_module
+
+    @staticmethod
+    def _normalize_single_fill_result(result: Any) -> Dict[str, Any] | None:
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, list):
+            for item in result:
+                if isinstance(item, dict):
+                    return item
+        return None
 
     def _failed_marker_relative_path(
         self,
@@ -549,27 +943,77 @@ class SharedSourceCacheService:
             period_text = self._handover_shift_text(duty_shift)
             folder_name = f"{duty_digits}--{period_text}"
             file_name = f"{duty_digits}--{period_text}--{FAMILY_LABELS[normalized_family]}--{str(building or '').strip()}{self._file_suffix(source_path)}"
+        elif normalized_family == FAMILY_ALARM_EVENT:
+            folder_name = duty_digits
+            file_name = f"{duty_digits}--{FAMILY_LABELS[normalized_family]}--{str(building or '').strip()}{self._file_suffix(source_path)}"
         else:
             folder_name = f"{duty_digits}--月报"
             file_name = f"{duty_digits}--月报--{str(building or '').strip()}{self._file_suffix(source_path)}"
         return self._family_root(source_family) / month_segment / folder_name / file_name
 
+    def _manual_alarm_target_path(self, *, bucket_key: str, building: str, source_path: Path) -> Path:
+        digits = "".join(ch for ch in str(bucket_key or "").strip() if ch.isdigit())
+        if len(digits) >= 14:
+            month_segment = digits[:6]
+            folder_name = f"{digits[:8]}--{digits[8:14]}--manual"
+        else:
+            now_text = datetime.now().strftime("%Y%m%d%H%M%S")
+            month_segment = now_text[:6]
+            folder_name = f"{now_text[:8]}--{now_text[8:14]}--manual"
+        label = FAMILY_LABELS[FAMILY_ALARM_EVENT]
+        file_name = f"{folder_name}--{label}--{str(building or '').strip()}{self._file_suffix(source_path)}"
+        return self._family_root(FAMILY_ALARM_EVENT) / month_segment / folder_name / file_name
+
+    def current_alarm_bucket(self, when: datetime | None = None) -> str:
+        return scheduled_bucket_for_time(when)
+
+    def _auto_alarm_bucket(self, when: datetime | None = None) -> str:
+        now = when or datetime.now()
+        if now.hour >= 16:
+            return now.strftime("%Y-%m-%d 16")
+        if now.hour >= 8:
+            return now.strftime("%Y-%m-%d 08")
+        return ""
+
+    def _alarm_temp_root(self, *, bucket_key: str, building: str, bucket_kind: str = "latest") -> Path:
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存临时目录未配置")
+        normalized_kind = str(bucket_kind or "").strip().lower() or "latest"
+        bucket_segment = self._bucket_path_segment(bucket_key, bucket_kind=normalized_kind)
+        return self._tmp_root / "alarm_event_latest" / bucket_segment / building
+
+    def _is_alarm_scheduled_bucket_key(self, bucket_key: str) -> bool:
+        bucket_dt = _parse_hour_bucket(bucket_key)
+        return bool(bucket_dt and bucket_dt.hour in {8, 16})
+
+    def _alarm_manual_bucket(self, when: datetime | None = None) -> str:
+        return (when or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+
     def _store_entry(self, *, source_family: str, building: str, bucket_kind: str, bucket_key: str, duty_date: str, duty_shift: str, source_path: Path, status: str, metadata: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if self.store is None:
             raise RuntimeError("共享缓存存储未初始化")
         normalized_family = self._normalize_source_family(source_family)
-        target_path = self._latest_target_path(
-            source_family=normalized_family,
-            building=building,
-            bucket_key=bucket_key,
-            source_path=source_path,
-        ) if bucket_kind == "latest" else self._date_target_path(
-            source_family=normalized_family,
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            building=building,
-            source_path=source_path,
-        )
+        if bucket_kind == "latest":
+            target_path = self._latest_target_path(
+                source_family=normalized_family,
+                building=building,
+                bucket_key=bucket_key,
+                source_path=source_path,
+            )
+        elif bucket_kind == "manual" and normalized_family == FAMILY_ALARM_EVENT:
+            target_path = self._manual_alarm_target_path(
+                bucket_key=bucket_key,
+                building=building,
+                source_path=source_path,
+            )
+        else:
+            target_path = self._date_target_path(
+                source_family=normalized_family,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                building=building,
+                source_path=source_path,
+            )
         cached = self._cache_file(source_path=source_path, target_path=target_path)
         downloaded_at = _now_text()
         self.store.upsert_source_cache_entry(
@@ -586,6 +1030,30 @@ class SharedSourceCacheService:
             size_bytes=int(cached["size_bytes"]),
             metadata=metadata or {},
         )
+        if bucket_kind == "latest":
+            with self._lock:
+                self._ensure_light_family_cache_unlocked(
+                    source_family=normalized_family,
+                    bucket_key=bucket_key,
+                    buildings=[building],
+                )
+                self._set_light_building_status_unlocked(
+                    source_family=normalized_family,
+                    building=building,
+                    bucket_key=bucket_key,
+                    payload={
+                        "status": str(status or "").strip().lower() or "ready",
+                        "ready": str(status or "").strip().lower() == "ready",
+                        "downloaded_at": downloaded_at,
+                        "last_error": "",
+                        "relative_path": str(cached["relative_path"]),
+                        "resolved_file_path": str(target_path) if str(status or "").strip().lower() == "ready" else "",
+                        "started_at": "",
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "next_probe_at": "",
+                    },
+                )
         return {
             "building": building,
             "bucket_kind": bucket_kind,
@@ -637,6 +1105,35 @@ class SharedSourceCacheService:
             size_bytes=0,
             metadata=payload,
         )
+        if bucket_kind == "latest":
+            with self._lock:
+                self._ensure_light_family_cache_unlocked(
+                    source_family=source_family,
+                    bucket_key=bucket_key,
+                    buildings=[building],
+                )
+                self._set_light_building_status_unlocked(
+                    source_family=source_family,
+                    building=building,
+                    bucket_key=bucket_key,
+                    payload={
+                        "status": "failed",
+                        "ready": False,
+                        "downloaded_at": _now_text(),
+                        "last_error": str(payload.get("error", "") or "").strip(),
+                        "relative_path": self._failed_marker_relative_path(
+                            source_family=source_family,
+                            bucket_kind=bucket_kind,
+                            bucket_key=bucket_key,
+                            building=building,
+                        ),
+                        "resolved_file_path": "",
+                        "started_at": "",
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "next_probe_at": "",
+                    },
+                )
 
     def _get_ready_entry(self, *, source_family: str, building: str, bucket_kind: str, bucket_key: str = "", duty_date: str = "", duty_shift: str = "") -> Dict[str, Any] | None:
         if self.store is None:
@@ -1172,7 +1669,7 @@ class SharedSourceCacheService:
         save_dir = self._tmp_root / "monthly_latest" / bucket_key / building
         save_dir.mkdir(parents=True, exist_ok=True)
         cfg = self._prepare_monthly_runtime_config(buildings=[building], save_dir=save_dir)
-        module = load_download_module()
+        module = self._get_monthly_download_module()
         result = module.run_download_only_auto_once(cfg, source_name=f"共享缓存-月报-{building}")
         file_items = result.get("file_items", []) if isinstance(result.get("file_items", []), list) else []
         output: List[Dict[str, Any]] = []
@@ -1203,7 +1700,7 @@ class SharedSourceCacheService:
         save_dir = self._tmp_root / "monthly_by_date" / ("_".join(selected_dates) or "manual")
         save_dir.mkdir(parents=True, exist_ok=True)
         cfg = self._prepare_monthly_runtime_config(buildings=target_buildings, save_dir=save_dir)
-        module = load_download_module()
+        module = self._get_monthly_download_module()
         result = module.run_download_only_with_selected_dates(cfg, selected_dates=selected_dates, source_name="共享缓存-月报历史日期")
         file_items = result.get("file_items", []) if isinstance(result.get("file_items", []), list) else []
         output: List[Dict[str, Any]] = []
@@ -1228,6 +1725,828 @@ class SharedSourceCacheService:
             )
         return output
 
+    def fill_alarm_event_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+        if self.download_browser_pool is None or not hasattr(self.download_browser_pool, "submit_building_alarm_job"):
+            raise RuntimeError("内网下载浏览器池未启动")
+        temp_root = self._alarm_temp_root(bucket_key=bucket_key, building=building, bucket_kind="latest")
+        temp_root.mkdir(parents=True, exist_ok=True)
+        workbook_path = temp_root / f"{building}.xlsx"
+
+        async def _runner(page):  # noqa: ANN001
+            return await collect_alarm_event_rows(page)
+
+        future = self.download_browser_pool.submit_building_alarm_job(building, _runner)
+        result = future.result(timeout=self.history_fill_timeout_sec)
+        payload = result if isinstance(result, dict) else {}
+        rows = payload.get("rows", []) if isinstance(payload.get("rows", []), list) else []
+        write_alarm_event_workbook(workbook_path, rows)
+        return self._store_entry(
+            source_family=FAMILY_ALARM_EVENT,
+            building=building,
+            bucket_kind="latest",
+            bucket_key=bucket_key,
+            duty_date="",
+            duty_shift="",
+            source_path=workbook_path,
+            status="ready",
+            metadata={
+                "family": FAMILY_ALARM_EVENT,
+                "building": building,
+                "row_count": len(rows),
+                "query_start": str(payload.get("query_start", "") or "").strip(),
+                "query_end": str(payload.get("query_end", "") or "").strip(),
+            },
+        )
+
+    def fill_alarm_event_manual(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+        if self.download_browser_pool is None or not hasattr(self.download_browser_pool, "submit_building_alarm_job"):
+            raise RuntimeError("内网下载浏览器池未启动")
+        temp_root = self._alarm_temp_root(bucket_key=bucket_key, building=building, bucket_kind="manual")
+        temp_root.mkdir(parents=True, exist_ok=True)
+        workbook_path = temp_root / f"{building}.xlsx"
+
+        async def _runner(page):  # noqa: ANN001
+            return await collect_alarm_event_rows(page)
+
+        future = self.download_browser_pool.submit_building_alarm_job(building, _runner)
+        result = future.result(timeout=self.history_fill_timeout_sec)
+        payload = result if isinstance(result, dict) else {}
+        rows = payload.get("rows", []) if isinstance(payload.get("rows", []), list) else []
+        write_alarm_event_workbook(workbook_path, rows)
+        return self._store_entry(
+            source_family=FAMILY_ALARM_EVENT,
+            building=building,
+            bucket_kind="manual",
+            bucket_key=bucket_key,
+            duty_date="",
+            duty_shift="",
+            source_path=workbook_path,
+            status="ready",
+            metadata={
+                "family": FAMILY_ALARM_EVENT,
+                "building": building,
+                "row_count": len(rows),
+                "query_start": str(payload.get("query_start", "") or "").strip(),
+                "query_end": str(payload.get("query_end", "") or "").strip(),
+                "manual": True,
+            },
+        )
+
+    def _run_manual_alarm_refresh_impl(self) -> Dict[str, Any]:
+        self._ensure_dirs()
+        bucket_key = self._alarm_manual_bucket()
+        completed_units: List[str] = []
+        failed_units: List[str] = []
+        blocked_units: List[str] = []
+        self._emit(f"[共享缓存] 开始手动拉取告警信息文件 bucket={bucket_key}")
+        pending_buildings: List[str] = []
+        for building in self.get_enabled_buildings():
+            pause_info = (
+                self.download_browser_pool.get_building_pause_info(building)
+                if self.download_browser_pool is not None and hasattr(self.download_browser_pool, "get_building_pause_info")
+                else {}
+            )
+            if bool(pause_info.get("suspended", False)):
+                blocked_units.append(building)
+                continue
+            pending_buildings.append(building)
+        future_map: Dict[concurrent.futures.Future[Any], str] = {}
+        if pending_buildings:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(pending_buildings), len(_DEFAULT_BUILDINGS))) as executor:
+                for building in pending_buildings:
+                    future = executor.submit(
+                        self.fill_alarm_event_manual,
+                        building=building,
+                        bucket_key=bucket_key,
+                        emit_log=self._emit,
+                    )
+                    future_map[future] = building
+                for future in concurrent.futures.as_completed(future_map):
+                    building = future_map[future]
+                    try:
+                        future.result()
+                        completed_units.append(building)
+                        with self._lock:
+                            self._last_success_at = _now_text()
+                    except Exception as exc:  # noqa: BLE001
+                        error_text = str(exc)
+                        failed_units.append(building)
+                        with self._lock:
+                            self._last_error = error_text
+                        self._record_failed_entry(
+                            source_family=FAMILY_ALARM_EVENT,
+                            building=building,
+                            bucket_kind="manual",
+                            bucket_key=bucket_key,
+                            error_text=error_text,
+                            metadata={
+                                "family": FAMILY_ALARM_EVENT,
+                                "building": building,
+                                "manual": True,
+                            },
+                        )
+                        self._emit(f"[共享缓存] 手动拉取告警信息失败 building={building}: {exc}")
+        if failed_units:
+            self._emit(
+                f"[共享缓存] 手动拉取告警信息结束：成功楼栋 {', '.join(completed_units) or '-'}；"
+                f"失败楼栋 {', '.join(failed_units)}；等待恢复楼栋 {', '.join(blocked_units) or '-'}"
+            )
+        elif blocked_units:
+            self._emit(
+                f"[共享缓存] 手动拉取告警信息结束：成功楼栋 {', '.join(completed_units) or '-'}；"
+                f"等待恢复楼栋 {', '.join(blocked_units)}"
+            )
+        else:
+            self._emit(f"[共享缓存] 手动拉取告警信息完成：成功楼栋 {', '.join(completed_units) or '-'}")
+        return {
+            "accepted": True,
+            "running": False,
+            "reason": "completed",
+            "scope": "alarm_manual",
+            "bucket_key": bucket_key,
+            "running_buildings": pending_buildings,
+            "completed_buildings": completed_units,
+            "failed_buildings": failed_units,
+            "blocked_buildings": blocked_units,
+        }
+
+    def _run_manual_alarm_refresh_background(self) -> None:
+        try:
+            self._run_manual_alarm_refresh_impl()
+        finally:
+            with self._lock:
+                self._manual_alarm_refresh_thread = None
+
+    def start_manual_alarm_refresh(self) -> Dict[str, Any]:
+        if not self.enabled or self.role_mode != "internal" or self.store is None:
+            return {"accepted": False, "running": False, "reason": "disabled"}
+        with self._lock:
+            thread = self._manual_alarm_refresh_thread
+            if thread and thread.is_alive():
+                return {"accepted": False, "running": True, "reason": "already_running"}
+            self._manual_alarm_refresh_thread = threading.Thread(
+                target=self._run_manual_alarm_refresh_background,
+                name="shared-source-cache-alarm-manual",
+                daemon=True,
+            )
+            self._manual_alarm_refresh_thread.start()
+        return {
+            "accepted": True,
+            "running": True,
+            "reason": "started",
+            "scope": "alarm_manual",
+            "bucket_key": self._alarm_manual_bucket(),
+        }
+
+    def delete_manual_alarm_files(self) -> Dict[str, Any]:
+        if not self.enabled or self.role_mode != "internal" or self.store is None:
+            return {"accepted": False, "reason": "disabled", "deleted_count": 0}
+        deleted_count = 0
+        deleted_buildings: List[str] = []
+        rows = self.store.list_source_cache_entries(
+            source_family=FAMILY_ALARM_EVENT,
+            bucket_kind="manual",
+            limit=1000,
+        )
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            relative_path = str(row.get("relative_path", "") or "").strip()
+            file_path = self._resolve_relative_path_under_shared_root(relative_path)
+            try:
+                if file_path is not None and file_path.exists():
+                    file_path.unlink()
+            except OSError:
+                pass
+            if self.store.delete_source_cache_entry(str(row.get("entry_id", "") or "").strip()):
+                deleted_count += 1
+                building = str(row.get("building", "") or "").strip()
+                if building:
+                    deleted_buildings.append(building)
+        return {
+            "accepted": True,
+            "reason": "deleted",
+            "deleted_count": deleted_count,
+            "deleted_buildings": deleted_buildings,
+        }
+
+    def debug_alarm_page_actions(self, *, building: str) -> Dict[str, Any]:
+        building_name = str(building or "").strip()
+        if not building_name:
+            raise RuntimeError("缺少楼栋参数")
+        if self.download_browser_pool is None or not hasattr(self.download_browser_pool, "submit_existing_building_alarm_page_job"):
+            raise RuntimeError("内网下载浏览器池未启动")
+
+        async def _runner(page):  # noqa: ANN001
+            return await exercise_alarm_event_page_actions(page)
+
+        future = self.download_browser_pool.submit_existing_building_alarm_page_job(building_name, _runner)
+        result = future.result(timeout=self.history_fill_timeout_sec)
+        payload = result if isinstance(result, dict) else {}
+        return {
+            "ok": True,
+            "building": building_name,
+            "query_start": str(payload.get("query_start", "") or "").strip(),
+            "query_end": str(payload.get("query_end", "") or "").strip(),
+            "row_count": int(payload.get("row_count", 0) or 0),
+            "current_page": int(payload.get("current_page", 1) or 1),
+            "content_column_visible": bool(payload.get("content_column_visible", False)),
+            "start_time_ready": bool(payload.get("start_time_ready", False)),
+            "page_url": str(payload.get("page_url", "") or "").strip(),
+        }
+
+    @staticmethod
+    def _normalize_alarm_header_text(value: Any) -> str:
+        text = str(value or "").strip().replace("（", "(").replace("）", ")")
+        return "".join(ch for ch in text.lower() if not ch.isspace())
+
+    @staticmethod
+    def _normalize_alarm_cell_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d %H:%M:%S")
+        if isinstance(value, dt_time):
+            return value.strftime("%H:%M:%S")
+        text = str(value).strip()
+        if text in {"--", "-"}:
+            return ""
+        return text
+
+    @staticmethod
+    def _parse_alarm_datetime_text(text: Any) -> datetime | None:
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        normalized = raw.replace("/", "-")
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(normalized, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _resolve_alarm_event_upload_target_fields(self) -> Dict[str, str]:
+        defaults = copy.deepcopy(ALARM_EVENT_BITABLE_TARGET_FIELDS)
+        alarm_export_cfg = self.runtime_config.get("alarm_export", {})
+        if not isinstance(alarm_export_cfg, dict):
+            return defaults
+        shared_upload_cfg = alarm_export_cfg.get("shared_source_upload", {})
+        if not isinstance(shared_upload_cfg, dict):
+            return defaults
+        custom_fields = shared_upload_cfg.get("target_fields", {})
+        if not isinstance(custom_fields, dict):
+            return defaults
+        for key, value in custom_fields.items():
+            key_text = str(key or "").strip()
+            value_text = str(value or "").strip()
+            if key_text in defaults and value_text:
+                defaults[key_text] = value_text
+        return defaults
+
+    @staticmethod
+    def _read_positive_int(value: Any, default: int, minimum: int = 1) -> int:
+        try:
+            parsed = int(value or 0)
+        except Exception:  # noqa: BLE001
+            parsed = default
+        return max(minimum, parsed or default)
+
+    def _resolve_alarm_event_upload_target(self) -> Dict[str, Any]:
+        auth_cfg = self.runtime_config.get("feishu", {})
+        if not isinstance(auth_cfg, dict):
+            auth_cfg = {}
+        app_id = str(auth_cfg.get("app_id", "") or "").strip()
+        app_secret = str(auth_cfg.get("app_secret", "") or "").strip()
+        if not app_id or not app_secret:
+            raise RuntimeError("飞书鉴权配置缺失：feishu.app_id/app_secret 不能为空")
+
+        alarm_export_cfg = self.runtime_config.get("alarm_export", {})
+        if not isinstance(alarm_export_cfg, dict):
+            alarm_export_cfg = {}
+        legacy_target = alarm_export_cfg.get("feishu", {})
+        if not isinstance(legacy_target, dict):
+            legacy_target = {}
+        shared_upload_cfg = alarm_export_cfg.get("shared_source_upload", {})
+        if not isinstance(shared_upload_cfg, dict):
+            shared_upload_cfg = {}
+        target_cfg = shared_upload_cfg.get("target", {})
+        if not isinstance(target_cfg, dict):
+            target_cfg = {}
+
+        merged_target = {**legacy_target, **target_cfg}
+        app_token = str(merged_target.get("app_token", "") or "").strip()
+        table_id = str(merged_target.get("table_id", "") or "").strip()
+        if not app_token or not table_id:
+            raise RuntimeError("告警多维目标未配置：alarm_export.feishu.app_token/table_id 不能为空")
+
+        replace_existing_on_full = shared_upload_cfg.get("replace_existing_on_full")
+        if not isinstance(replace_existing_on_full, bool):
+            replace_existing_on_full = True
+        return {
+            "app_id": app_id,
+            "app_secret": app_secret,
+            "app_token": app_token,
+            "table_id": table_id,
+            "timeout": self._read_positive_int(auth_cfg.get("timeout"), 30),
+            "request_retry_count": max(0, int(auth_cfg.get("request_retry_count", 3) or 3)),
+            "request_retry_interval_sec": max(0.0, float(auth_cfg.get("request_retry_interval_sec", 2) or 2)),
+            "list_page_size": self._read_positive_int(merged_target.get("page_size"), 500),
+            "delete_batch_size": self._read_positive_int(merged_target.get("delete_batch_size"), 500),
+            "create_batch_size": self._read_positive_int(merged_target.get("create_batch_size"), 200),
+            "replace_existing_on_full": bool(replace_existing_on_full),
+        }
+
+    def _build_alarm_event_bitable_client(self, target: Dict[str, Any]) -> FeishuBitableClient:
+        return FeishuBitableClient(
+            app_id=str(target.get("app_id", "") or "").strip(),
+            app_secret=str(target.get("app_secret", "") or "").strip(),
+            app_token=str(target.get("app_token", "") or "").strip(),
+            calc_table_id=str(target.get("table_id", "") or "").strip(),
+            attachment_table_id=str(target.get("table_id", "") or "").strip(),
+            timeout=self._read_positive_int(target.get("timeout"), 30),
+            request_retry_count=max(0, int(target.get("request_retry_count", 3) or 3)),
+            request_retry_interval_sec=max(0.0, float(target.get("request_retry_interval_sec", 2) or 2)),
+            date_text_to_timestamp_ms_fn=date_text_to_timestamp_ms,
+            canonical_metric_name_fn=lambda value: str(value or "").strip(),
+            dimension_mapping={},
+        )
+
+    def _select_alarm_ready_entries_for_external_upload(self, *, building: str = "") -> List[Dict[str, Any]]:
+        if self.store is None:
+            return []
+        building_filter = str(building or "").strip()
+        rows = self.store.list_source_cache_entries(
+            source_family=FAMILY_ALARM_EVENT,
+            bucket_kind="latest",
+            status="ready",
+            limit=5000,
+        )
+        selected_by_building: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_building = str(row.get("building", "") or "").strip()
+            if not row_building:
+                continue
+            if building_filter and row_building != building_filter:
+                continue
+            bucket_key = str(row.get("bucket_key", "") or "").strip()
+            if not self._is_alarm_scheduled_bucket_key(bucket_key):
+                continue
+            if row_building not in selected_by_building:
+                selected_by_building[row_building] = row
+        if not selected_by_building:
+            return []
+        ordered_buildings = self.get_enabled_buildings()
+        selected: List[Dict[str, Any]] = []
+        for name in ordered_buildings:
+            if name in selected_by_building:
+                selected.append(selected_by_building[name])
+        for name in sorted(selected_by_building.keys()):
+            if all(str(item.get("building", "") or "").strip() != name for item in selected):
+                selected.append(selected_by_building[name])
+        return selected
+
+    def _extract_alarm_entry_records_for_upload(
+        self,
+        *,
+        entry: Dict[str, Any],
+        building: str,
+        target_fields: Dict[str, str],
+        max_age_days: int,
+    ) -> Dict[str, Any]:
+        file_path = self._resolve_entry_file_path(entry)
+        if file_path is None:
+            raise RuntimeError("共享文件不存在或不可访问")
+        validate_excel_workbook_file(file_path)
+        workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            sheet = workbook.active
+            rows_iter = sheet.iter_rows(values_only=True)
+            header_row = next(rows_iter, None)
+            if header_row is None:
+                return {"records": [], "total_rows": 0, "kept_rows": 0}
+            header_map: Dict[str, int] = {}
+            for index, cell_value in enumerate(header_row):
+                normalized_header = self._normalize_alarm_header_text(cell_value)
+                if not normalized_header:
+                    continue
+                for canonical_key, aliases in ALARM_EVENT_HEADER_ALIASES.items():
+                    if canonical_key in header_map:
+                        continue
+                    normalized_aliases = {
+                        "".join(ch for ch in str(alias or "").strip().lower() if not ch.isspace())
+                        for alias in aliases
+                    }
+                    if normalized_header in normalized_aliases:
+                        header_map[canonical_key] = index
+            if "event_time" not in header_map:
+                raise RuntimeError("告警文件缺少“告警时间/产生时间”列")
+
+            cutoff_at = datetime.now() - timedelta(days=max(1, int(max_age_days or 60)))
+            records: List[Dict[str, Any]] = []
+            total_rows = 0
+            kept_rows = 0
+
+            def _pick(row_values: tuple[Any, ...], key: str) -> str:
+                idx = header_map.get(key)
+                if idx is None or idx >= len(row_values):
+                    return ""
+                return self._normalize_alarm_cell_text(row_values[idx])
+
+            for row_values in rows_iter:
+                if row_values is None:
+                    continue
+                values = tuple(row_values)
+                if not any(str(value or "").strip() for value in values):
+                    continue
+                total_rows += 1
+                event_time_text = _pick(values, "event_time")
+                event_time = self._parse_alarm_datetime_text(event_time_text)
+                if event_time is None or event_time < cutoff_at:
+                    continue
+                kept_rows += 1
+                source_payload = {
+                    "level": _pick(values, "level"),
+                    "building": str(building or "").strip(),
+                    "content": _pick(values, "content"),
+                    "position": _pick(values, "position"),
+                    "object": _pick(values, "object"),
+                    "event_time": event_time_text,
+                    "accept_time": _pick(values, "accept_time"),
+                    "is_accept": _pick(values, "is_accept"),
+                    "accept_by": _pick(values, "accept_by"),
+                    "accept_content": _pick(values, "accept_content"),
+                    "recover_time": _pick(values, "recover_time"),
+                    "is_recover": _pick(values, "is_recover"),
+                    "event_suggest": _pick(values, "event_suggest"),
+                    "event_type": _pick(values, "event_type"),
+                    "trigger_value": _pick(values, "trigger_value"),
+                    "confirm_type": _pick(values, "confirm_type"),
+                    "confirm_time": _pick(values, "confirm_time"),
+                    "confirm_by": _pick(values, "confirm_by"),
+                    "confirm_description": _pick(values, "confirm_description"),
+                }
+                fields: Dict[str, Any] = {}
+                for source_key, field_name in target_fields.items():
+                    text = str(field_name or "").strip()
+                    if not text:
+                        continue
+                    fields[text] = source_payload.get(source_key, "")
+                if fields:
+                    records.append(fields)
+            return {"records": records, "total_rows": total_rows, "kept_rows": kept_rows}
+        finally:
+            workbook.close()
+
+    def _consume_alarm_entry_after_upload(self, *, entry: Dict[str, Any], consumed_by_mode: str) -> bool:
+        if self.store is None:
+            return False
+        entry_id = str(entry.get("entry_id", "") or "").strip()
+        if not entry_id:
+            return False
+        file_path = self._resolve_entry_file_path(entry)
+        try:
+            if file_path is not None and file_path.exists():
+                file_path.unlink(missing_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            self.store.update_source_cache_entry_status(
+                entry_id,
+                status="failed",
+                metadata_update={
+                    "error": f"上传后消费删除失败：{exc}",
+                    "consume_failed_at": _now_text(),
+                },
+            )
+            return False
+        consumed_at = _now_text()
+        self.store.update_source_cache_entry_status(
+            entry_id,
+            status="consumed",
+            metadata_update={
+                "consumed_at": consumed_at,
+                "consumed_by_role": self.role_mode,
+                "consumed_by_family": FAMILY_ALARM_EVENT,
+                "consumed_by_mode": str(consumed_by_mode or "").strip(),
+            },
+        )
+        return True
+
+    def _set_alarm_external_upload_state(
+        self,
+        *,
+        running: bool,
+        started_at: str,
+        current_mode: str,
+        current_scope: str,
+        mode: str,
+        scope: str,
+        uploaded_record_count: int,
+        uploaded_file_count: int,
+        consumed_count: int,
+        failed_entries: List[str],
+        deleted_before_upload_count: int,
+        last_error: str,
+        success: bool,
+    ) -> None:
+        now_text = _now_text()
+        with self._lock:
+            self._alarm_external_upload_state = {
+                "running": bool(running),
+                "started_at": str(started_at or "").strip(),
+                "current_mode": str(current_mode or "").strip(),
+                "current_scope": str(current_scope or "").strip(),
+                "last_run_at": now_text,
+                "last_success_at": now_text if success else str(self._alarm_external_upload_state.get("last_success_at", "") or "").strip(),
+                "last_error": str(last_error or "").strip(),
+                "last_mode": str(mode or "").strip(),
+                "last_scope": str(scope or "").strip(),
+                "uploaded_record_count": max(0, int(uploaded_record_count or 0)),
+                "uploaded_file_count": max(0, int(uploaded_file_count or 0)),
+                "consumed_count": max(0, int(consumed_count or 0)),
+                "failed_entries": [str(item or "").strip() for item in failed_entries if str(item or "").strip()],
+                "deleted_before_upload_count": max(0, int(deleted_before_upload_count or 0)),
+            }
+
+    def _begin_alarm_external_upload(self, *, mode: str, scope: str) -> Dict[str, Any]:
+        started_at = _now_text()
+        normalized_mode = str(mode or "").strip()
+        normalized_scope = str(scope or "").strip() or "all"
+        with self._lock:
+            if bool(self._alarm_external_upload_state.get("running")):
+                return {
+                    "accepted": False,
+                    "running": True,
+                    "reason": "already_running",
+                    "mode": str(self._alarm_external_upload_state.get("current_mode", "") or "").strip()
+                    or str(self._alarm_external_upload_state.get("last_mode", "") or "").strip(),
+                    "scope": str(self._alarm_external_upload_state.get("current_scope", "") or "").strip()
+                    or str(self._alarm_external_upload_state.get("last_scope", "") or "").strip()
+                    or "all",
+                    "started_at": str(self._alarm_external_upload_state.get("started_at", "") or "").strip(),
+                }
+            self._alarm_external_upload_state = {
+                **self._alarm_external_upload_state,
+                "running": True,
+                "started_at": started_at,
+                "current_mode": normalized_mode,
+                "current_scope": normalized_scope,
+                "last_error": "",
+            }
+        return {"accepted": True, "running": True, "started_at": started_at}
+
+    def upload_alarm_event_entries_to_bitable(
+        self,
+        *,
+        mode: str,
+        building: str = "",
+        replace_existing: bool | None,
+        max_age_days: int = 60,
+    ) -> Dict[str, Any]:
+        if not self.enabled or self.role_mode != "external" or self.store is None:
+            return {"accepted": False, "reason": "disabled"}
+
+        normalized_mode = str(mode or "").strip().lower() or "full"
+        target_building = str(building or "").strip()
+        begin_state = self._begin_alarm_external_upload(mode=normalized_mode, scope=target_building or "all")
+        if not bool(begin_state.get("accepted")):
+            return begin_state
+        started_at = str(begin_state.get("started_at", "") or "").strip()
+        resolved_target: Dict[str, Any] | None = None
+        if replace_existing is None:
+            try:
+                resolved_target = self._resolve_alarm_event_upload_target()
+                replace_existing = bool(resolved_target.get("replace_existing_on_full", True))
+            except Exception as exc:  # noqa: BLE001
+                error_text = str(exc)
+                self._set_alarm_external_upload_state(
+                    running=False,
+                    started_at="",
+                    current_mode="",
+                    current_scope="",
+                    mode=normalized_mode,
+                    scope=target_building or "all",
+                    uploaded_record_count=0,
+                    uploaded_file_count=0,
+                    consumed_count=0,
+                    failed_entries=[],
+                    deleted_before_upload_count=0,
+                    last_error=error_text,
+                    success=False,
+                )
+                return {
+                    "accepted": False,
+                    "reason": "misconfigured",
+                    "mode": normalized_mode,
+                    "scope": target_building or "all",
+                    "running": False,
+                    "error": error_text,
+                }
+        selected_entries = self._select_alarm_ready_entries_for_external_upload(building=target_building)
+        if not selected_entries:
+            self._set_alarm_external_upload_state(
+                running=False,
+                started_at="",
+                current_mode="",
+                current_scope="",
+                mode=normalized_mode,
+                scope=target_building or "all",
+                uploaded_record_count=0,
+                uploaded_file_count=0,
+                consumed_count=0,
+                failed_entries=[],
+                deleted_before_upload_count=0,
+                last_error="",
+                success=True,
+            )
+            return {
+                "accepted": True,
+                "reason": "no_ready_entries",
+                "mode": normalized_mode,
+                "scope": target_building or "all",
+                "uploaded_record_count": 0,
+                "uploaded_file_count": 0,
+                "consumed_count": 0,
+                "failed_entries": [],
+            }
+
+        target_fields = self._resolve_alarm_event_upload_target_fields()
+        parse_failed_entries: List[str] = []
+        parsed_entries: List[tuple[Dict[str, Any], Dict[str, Any]]] = []
+        aggregated_records: List[Dict[str, Any]] = []
+        for entry in selected_entries:
+            row_building = str(entry.get("building", "") or "").strip()
+            try:
+                parsed = self._extract_alarm_entry_records_for_upload(
+                    entry=entry,
+                    building=row_building,
+                    target_fields=target_fields,
+                    max_age_days=max_age_days,
+                )
+                parsed_entries.append((entry, parsed))
+                aggregated_records.extend(parsed.get("records", []) if isinstance(parsed.get("records", []), list) else [])
+            except Exception as exc:  # noqa: BLE001
+                parse_failed_entries.append(row_building or "未知楼栋")
+                entry_id = str(entry.get("entry_id", "") or "").strip()
+                if entry_id:
+                    self.store.update_source_cache_entry_status(
+                        entry_id,
+                        status="failed",
+                        metadata_update={
+                            "error": f"外网告警上传前解析失败：{exc}",
+                            "upload_failed_at": _now_text(),
+                        },
+                    )
+
+        if not parsed_entries:
+            error_text = "所有告警文件解析失败，未执行上传"
+            self._set_alarm_external_upload_state(
+                running=False,
+                started_at="",
+                current_mode="",
+                current_scope="",
+                mode=normalized_mode,
+                scope=target_building or "all",
+                uploaded_record_count=0,
+                uploaded_file_count=0,
+                consumed_count=0,
+                failed_entries=parse_failed_entries,
+                deleted_before_upload_count=0,
+                last_error=error_text,
+                success=False,
+            )
+            return {
+                "accepted": False,
+                "reason": "all_entries_parse_failed",
+                "mode": normalized_mode,
+                "scope": target_building or "all",
+                "uploaded_record_count": 0,
+                "uploaded_file_count": 0,
+                "consumed_count": 0,
+                "failed_entries": parse_failed_entries,
+                "error": error_text,
+            }
+
+        try:
+            target = resolved_target or self._resolve_alarm_event_upload_target()
+            client = self._build_alarm_event_bitable_client(target)
+            table_id = str(target.get("table_id", "") or "").strip()
+            deleted_count = 0
+            if bool(replace_existing):
+                deleted_count = client.clear_table(
+                    table_id=table_id,
+                    list_page_size=self._read_positive_int(target.get("list_page_size"), 500),
+                    delete_batch_size=self._read_positive_int(target.get("delete_batch_size"), 500),
+                )
+            if aggregated_records:
+                client.batch_create_records(
+                    table_id=table_id,
+                    fields_list=aggregated_records,
+                    batch_size=self._read_positive_int(target.get("create_batch_size"), 200),
+                )
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            self._set_alarm_external_upload_state(
+                running=False,
+                started_at="",
+                current_mode="",
+                current_scope="",
+                mode=normalized_mode,
+                scope=target_building or "all",
+                uploaded_record_count=0,
+                uploaded_file_count=0,
+                consumed_count=0,
+                failed_entries=parse_failed_entries,
+                deleted_before_upload_count=0,
+                last_error=error_text,
+                success=False,
+            )
+            return {
+                "accepted": False,
+                "reason": "upload_failed",
+                "mode": normalized_mode,
+                "scope": target_building or "all",
+                "uploaded_record_count": 0,
+                "uploaded_file_count": 0,
+                "consumed_count": 0,
+                "failed_entries": parse_failed_entries,
+                "error": error_text,
+            }
+
+        consumed_count = 0
+        consume_failed_entries: List[str] = []
+        consumed_buildings: List[str] = []
+        for entry, _parsed in parsed_entries:
+            row_building = str(entry.get("building", "") or "").strip()
+            if self._consume_alarm_entry_after_upload(entry=entry, consumed_by_mode=normalized_mode):
+                consumed_count += 1
+                if row_building:
+                    consumed_buildings.append(row_building)
+            elif row_building:
+                consume_failed_entries.append(row_building)
+
+        failed_entries = [*parse_failed_entries, *consume_failed_entries]
+        success = len(failed_entries) == 0
+        self._set_alarm_external_upload_state(
+            running=False,
+            started_at="",
+            current_mode="",
+            current_scope="",
+            mode=normalized_mode,
+            scope=target_building or "all",
+            uploaded_record_count=len(aggregated_records),
+            uploaded_file_count=len(parsed_entries),
+            consumed_count=consumed_count,
+            failed_entries=failed_entries,
+            deleted_before_upload_count=deleted_count,
+            last_error="" if success else "存在失败楼栋，请查看 failed_entries",
+            success=success,
+        )
+        return {
+            "accepted": True,
+            "reason": "completed" if success else "partial_completed",
+            "mode": normalized_mode,
+            "scope": target_building or "all",
+            "uploaded_record_count": len(aggregated_records),
+            "uploaded_file_count": len(parsed_entries),
+            "consumed_count": consumed_count,
+            "consumed_buildings": consumed_buildings,
+            "failed_entries": failed_entries,
+            "deleted_before_upload_count": deleted_count,
+            "kept_days": max(1, int(max_age_days or 60)),
+            "started_at": started_at,
+            "running": False,
+        }
+
+    def upload_alarm_event_entries_full_to_bitable(self) -> Dict[str, Any]:
+        return self.upload_alarm_event_entries_to_bitable(
+            mode="full",
+            building="",
+            replace_existing=None,
+            max_age_days=60,
+        )
+
+    def upload_alarm_event_entries_single_building_to_bitable(self, *, building: str) -> Dict[str, Any]:
+        building_name = str(building or "").strip()
+        if not building_name:
+            return {"accepted": False, "reason": "invalid_building", "error": "缺少楼栋参数"}
+        return self.upload_alarm_event_entries_to_bitable(
+            mode="single_building",
+            building=building_name,
+            replace_existing=False,
+            max_age_days=60,
+        )
+
+    def consume_ready_alarm_event_entries(self) -> Dict[str, Any]:
+        return {
+            "accepted": False,
+            "reason": "retired",
+            "consumed_count": 0,
+            "failed_count": 0,
+            "consumed_buildings": [],
+        }
+
     def _entry_exists_for_bucket(self, *, source_family: str, building: str, bucket_kind: str, bucket_key: str) -> bool:
         if self.store is None:
             return False
@@ -1250,25 +2569,44 @@ class SharedSourceCacheService:
         bucket_key: str,
         fill_func: Callable[..., Any],
         force_retry_failed: bool = False,
-    ) -> None:
+    ) -> Dict[str, Any]:
         buildings = self.get_enabled_buildings()
+        normalized_family = self._normalize_source_family(source_family)
         ready_count = 0
         failed_buildings: List[str] = []
         blocked_buildings: List[str] = []
+        running_buildings: List[str] = []
+        completed_buildings: List[str] = []
+        pending_buildings: List[str] = []
+        with self._lock:
+            self._ensure_light_family_cache_unlocked(
+                source_family=normalized_family,
+                bucket_key=bucket_key,
+                buildings=buildings,
+            )
         for building in buildings:
             entry_exists = self._entry_exists_for_bucket(
-                source_family=source_family,
+                source_family=normalized_family,
                 building=building,
                 bucket_kind="latest",
                 bucket_key=bucket_key,
             )
             ready_entry = self._get_ready_entry(
-                source_family=source_family,
+                source_family=normalized_family,
                 building=building,
                 bucket_kind="latest",
                 bucket_key=bucket_key,
             )
-            if ready_entry:
+            ready_file_path = self._resolve_entry_file_path(ready_entry) if ready_entry else None
+            if ready_entry and ready_file_path is not None:
+                with self._lock:
+                    self._set_light_building_status_from_entry_unlocked(
+                        source_family=normalized_family,
+                        building=building,
+                        bucket_key=bucket_key,
+                        entry=ready_entry,
+                        file_path=ready_file_path,
+                    )
                 ready_count += 1
                 continue
             pause_info = (
@@ -1278,42 +2616,180 @@ class SharedSourceCacheService:
             )
             if bool(pause_info.get("suspended", False)):
                 blocked_buildings.append(building)
+                blocked_reason = str(
+                    pause_info.get("suspend_reason", "") or pause_info.get("pending_issue_summary", "") or ""
+                ).strip()
+                with self._lock:
+                    self._set_light_building_status_unlocked(
+                        source_family=normalized_family,
+                        building=building,
+                        bucket_key=bucket_key,
+                        payload={
+                            "status": "waiting",
+                            "ready": False,
+                            "downloaded_at": "",
+                            "last_error": blocked_reason,
+                            "relative_path": "",
+                            "resolved_file_path": "",
+                            "started_at": "",
+                            "blocked": True,
+                            "blocked_reason": blocked_reason,
+                            "next_probe_at": str(pause_info.get("next_probe_at", "") or "").strip(),
+                        },
+                    )
                 continue
             if entry_exists and not force_retry_failed:
                 failed_buildings.append(building)
-                continue
-            active_key = (self._normalize_source_family(source_family), building, bucket_key)
-            try:
-                with self._lock:
-                    self._active_latest_downloads[active_key] = _now_text()
-                fill_func(building=building, bucket_key=bucket_key, emit_log=self._emit)
-                ready_count += 1
-                with self._lock:
-                    self._last_success_at = _now_text()
-            except Exception as exc:  # noqa: BLE001
-                failed_buildings.append(building)
-                error_text = str(exc)
-                with self._lock:
-                    self._last_error = error_text
-                self._record_failed_entry(
-                    source_family=source_family,
+                failed_entry = self._get_source_cache_entry(
+                    source_family=normalized_family,
                     building=building,
                     bucket_kind="latest",
                     bucket_key=bucket_key,
-                    error_text=error_text,
-                    metadata={"family": self._normalize_source_family(source_family), "building": building},
+                    status="failed",
                 )
-                self._emit(f"[共享缓存] 本小时预下载失败 family={source_family} building={building}: {exc}")
-            finally:
                 with self._lock:
-                    self._active_latest_downloads.pop(active_key, None)
+                    if failed_entry:
+                        self._set_light_building_status_from_entry_unlocked(
+                            source_family=normalized_family,
+                            building=building,
+                            bucket_key=bucket_key,
+                            entry=failed_entry,
+                            file_path=None,
+                        )
+                    else:
+                        self._set_light_building_status_unlocked(
+                            source_family=normalized_family,
+                            building=building,
+                            bucket_key=bucket_key,
+                            payload={
+                                "status": "failed",
+                                "ready": False,
+                                "downloaded_at": "",
+                                "last_error": "",
+                                "relative_path": "",
+                                "resolved_file_path": "",
+                                "started_at": "",
+                                "blocked": False,
+                                "blocked_reason": "",
+                                "next_probe_at": "",
+                            },
+                        )
+                continue
+            pending_buildings.append(building)
+        future_map: Dict[concurrent.futures.Future[Any], tuple[str, tuple[str, str, str, str]]] = {}
+        if pending_buildings:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(pending_buildings), len(_DEFAULT_BUILDINGS))) as executor:
+                for building in pending_buildings:
+                    active_key = (normalized_family, building, "latest", bucket_key)
+                    started_at = _now_text()
+                    with self._lock:
+                        self._active_latest_downloads[active_key] = started_at
+                        self._set_light_building_status_unlocked(
+                            source_family=normalized_family,
+                            building=building,
+                            bucket_key=bucket_key,
+                            payload={
+                                "status": "downloading",
+                                "ready": False,
+                                "downloaded_at": "",
+                                "last_error": "",
+                                "relative_path": "",
+                                "resolved_file_path": "",
+                                "started_at": started_at,
+                                "blocked": False,
+                                "blocked_reason": "",
+                                "next_probe_at": "",
+                            },
+                        )
+                    running_buildings.append(building)
+                    future = executor.submit(
+                        fill_func,
+                        building=building,
+                        bucket_key=bucket_key,
+                        emit_log=self._emit,
+                    )
+                    future_map[future] = (building, active_key)
+                for future in concurrent.futures.as_completed(future_map):
+                    building, active_key = future_map[future]
+                    try:
+                        result = self._normalize_single_fill_result(future.result())
+                        if isinstance(result, dict):
+                            with self._lock:
+                                self._set_light_building_status_unlocked(
+                                    source_family=normalized_family,
+                                    building=building,
+                                    bucket_key=bucket_key,
+                                    payload={
+                                        "status": "ready",
+                                        "ready": True,
+                                        "downloaded_at": str(result.get("downloaded_at", "") or "").strip(),
+                                        "last_error": "",
+                                        "relative_path": str(result.get("relative_path", "") or "").strip(),
+                                        "resolved_file_path": str(result.get("file_path", "") or "").strip(),
+                                        "started_at": "",
+                                        "blocked": False,
+                                        "blocked_reason": "",
+                                        "next_probe_at": "",
+                                    },
+                                )
+                        ready_count += 1
+                        completed_buildings.append(building)
+                        with self._lock:
+                            self._last_success_at = _now_text()
+                    except Exception as exc:  # noqa: BLE001
+                        failed_buildings.append(building)
+                        error_text = str(exc)
+                        with self._lock:
+                            self._last_error = error_text
+                            self._set_light_building_status_unlocked(
+                                source_family=normalized_family,
+                                building=building,
+                                bucket_key=bucket_key,
+                                payload={
+                                    "status": "failed",
+                                    "ready": False,
+                                    "downloaded_at": "",
+                                    "last_error": error_text,
+                                    "relative_path": self._failed_marker_relative_path(
+                                        source_family=normalized_family,
+                                        bucket_kind="latest",
+                                        bucket_key=bucket_key,
+                                        building=building,
+                                    ),
+                                    "resolved_file_path": "",
+                                    "started_at": "",
+                                    "blocked": False,
+                                    "blocked_reason": "",
+                                    "next_probe_at": "",
+                                },
+                            )
+                        self._record_failed_entry(
+                            source_family=normalized_family,
+                            building=building,
+                            bucket_kind="latest",
+                            bucket_key=bucket_key,
+                            error_text=error_text,
+                            metadata={"family": normalized_family, "building": building},
+                        )
+                        self._emit(f"[共享缓存] 本小时预下载失败 family={normalized_family} building={building}: {exc}")
+                    finally:
+                        with self._lock:
+                            self._active_latest_downloads.pop(active_key, None)
         with self._lock:
-            family_status = self._family_status.setdefault(source_family, {})
+            family_status = self._family_status.setdefault(normalized_family, {})
             family_status["ready_count"] = ready_count
             family_status["failed_buildings"] = failed_buildings
             family_status["blocked_buildings"] = blocked_buildings
             family_status["last_success_at"] = self._last_success_at if ready_count > 0 else family_status.get("last_success_at", "")
             family_status["current_bucket"] = bucket_key
+        return {
+            "ready_count": ready_count,
+            "failed_buildings": failed_buildings,
+            "blocked_buildings": blocked_buildings,
+            "running_buildings": running_buildings,
+            "completed_buildings": completed_buildings,
+            "current_bucket": bucket_key,
+        }
 
     def _run_current_bucket_once(self) -> None:
         self._ensure_dirs()
@@ -1329,6 +2805,23 @@ class SharedSourceCacheService:
             if not handover_failed and not monthly_failed:
                 self._last_error = ""
 
+    def _run_alarm_bucket_if_due(self, when: datetime | None = None) -> None:
+        bucket_key = self._auto_alarm_bucket(when)
+        if not bucket_key:
+            return
+        with self._lock:
+            current_bucket = str(self._family_status.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip()
+        if current_bucket == bucket_key:
+            return
+        self._ensure_dirs()
+        self._refresh_family_bucket(
+            source_family=FAMILY_ALARM_EVENT,
+            bucket_key=bucket_key,
+            fill_func=self.fill_alarm_event_latest,
+        )
+        with self._lock:
+            self._last_run_at = _now_text()
+
     def _mark_current_hour_refresh(self, **fields: Any) -> None:
         with self._lock:
             self._current_hour_refresh.update(fields)
@@ -1338,6 +2831,8 @@ class SharedSourceCacheService:
         bucket_key = self.current_hour_bucket()
         failed_units: List[str] = []
         blocked_units: List[str] = []
+        running_units: List[str] = []
+        completed_units: List[str] = []
         self._mark_current_hour_refresh(
             running=True,
             last_run_at=_now_text(),
@@ -1345,25 +2840,48 @@ class SharedSourceCacheService:
             last_error="",
             failed_buildings=[],
             blocked_buildings=[],
+            running_buildings=[],
+            completed_buildings=[],
         )
         self._emit(f"[共享缓存] 开始立即补下当前小时全部文件 bucket={bucket_key}")
-        self._refresh_family_bucket(
+        handover_result = self._refresh_family_bucket(
             source_family=FAMILY_HANDOVER_LOG,
             bucket_key=bucket_key,
             fill_func=self.fill_handover_latest,
             force_retry_failed=True,
-        )
-        self._refresh_family_bucket(
+        ) or {}
+        monthly_result = self._refresh_family_bucket(
             source_family=FAMILY_MONTHLY_REPORT,
             bucket_key=bucket_key,
             fill_func=self.fill_monthly_latest,
             force_retry_failed=True,
-        )
-        for family_key in (FAMILY_HANDOVER_LOG, FAMILY_MONTHLY_REPORT):
-            family_status = self._family_status.get(family_key, {})
-            for building in family_status.get("failed_buildings", []) or []:
+        ) or {}
+        alarm_result: Dict[str, Any] = {
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "running_buildings": [],
+            "completed_buildings": [],
+        }
+        alarm_bucket_key = self.current_alarm_bucket()
+        if alarm_bucket_key:
+            alarm_result = self._refresh_family_bucket(
+                source_family=FAMILY_ALARM_EVENT,
+                bucket_key=alarm_bucket_key,
+                fill_func=self.fill_alarm_event_latest,
+                force_retry_failed=True,
+            ) or {}
+        for family_key, result in (
+            (FAMILY_HANDOVER_LOG, handover_result),
+            (FAMILY_MONTHLY_REPORT, monthly_result),
+            (FAMILY_ALARM_EVENT, alarm_result),
+        ):
+            for building in result.get("running_buildings", []) or []:
+                running_units.append(f"{building}/{family_key}")
+            for building in result.get("completed_buildings", []) or []:
+                completed_units.append(f"{building}/{family_key}")
+            for building in result.get("failed_buildings", []) or []:
                 failed_units.append(f"{building}/{family_key}")
-            for building in family_status.get("blocked_buildings", []) or []:
+            for building in result.get("blocked_buildings", []) or []:
                 blocked_units.append(f"{building}/{family_key}")
         success_at = _now_text() if not failed_units else ""
         last_error = self._last_error if (failed_units or blocked_units) else ""
@@ -1377,6 +2895,8 @@ class SharedSourceCacheService:
             last_error=last_error,
             failed_buildings=failed_units,
             blocked_buildings=blocked_units,
+            running_buildings=running_units,
+            completed_buildings=completed_units,
         )
         if failed_units:
             self._emit(f"[共享缓存] 当前小时立即补下结束：存在失败项 {', '.join(failed_units)}")
@@ -1427,29 +2947,43 @@ class SharedSourceCacheService:
                     continue
                 if self.run_on_startup and not startup_done:
                     self._run_current_bucket_once()
+                    self._run_alarm_bucket_if_due()
                     startup_done = True
                 else:
                     bucket = self.current_hour_bucket()
                     if bucket != self._current_hour_bucket:
                         self._run_current_bucket_once()
+                    self._run_alarm_bucket_if_due()
                 if startup_done:
                     handover_status = self._family_status.get(FAMILY_HANDOVER_LOG, {})
                     monthly_status = self._family_status.get(FAMILY_MONTHLY_REPORT, {})
+                    alarm_status = self._family_status.get(FAMILY_ALARM_EVENT, {})
                     signature = "|".join(
                         [
                             self._current_hour_bucket,
                             ",".join(str(item) for item in handover_status.get("blocked_buildings", []) or []),
                             ",".join(str(item) for item in monthly_status.get("blocked_buildings", []) or []),
+                            ",".join(str(item) for item in alarm_status.get("blocked_buildings", []) or []),
                             str(bool(self._last_error)),
                         ]
                     )
                     if signature != self._last_scheduler_log_signature:
                         self._last_scheduler_log_signature = signature
-                        if handover_status.get("blocked_buildings") or monthly_status.get("blocked_buildings"):
-                            blocked = list(handover_status.get("blocked_buildings", []) or []) + list(monthly_status.get("blocked_buildings", []) or [])
-                            self._emit(f"[共享缓存] 小时预下载调度等待楼栋恢复: bucket={self._current_hour_bucket}, 楼栋={' / '.join(blocked)}")
+                        if handover_status.get("blocked_buildings") or monthly_status.get("blocked_buildings") or alarm_status.get("blocked_buildings"):
+                            blocked = (
+                                list(handover_status.get("blocked_buildings", []) or [])
+                                + list(monthly_status.get("blocked_buildings", []) or [])
+                                + list(alarm_status.get("blocked_buildings", []) or [])
+                            )
+                            self._emit(
+                                f"[共享缓存] 调度等待楼栋恢复: 小时桶={self._current_hour_bucket}, "
+                                f"告警桶={str(alarm_status.get('current_bucket', '') or '').strip() or '-'}, 楼栋={' / '.join(blocked)}"
+                            )
                         elif not self._last_error:
-                            self._emit(f"[共享缓存] 小时预下载调度运行中: bucket={self._current_hour_bucket}")
+                            self._emit(
+                                f"[共享缓存] 小时预下载调度运行中: bucket={self._current_hour_bucket}, "
+                                f"告警定时桶={str(alarm_status.get('current_bucket', '') or '').strip() or '-'}"
+                            )
             except Exception as exc:  # noqa: BLE001
                 self._last_error = str(exc)
                 self._last_run_at = _now_text()

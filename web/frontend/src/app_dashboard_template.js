@@ -1304,6 +1304,122 @@
           </div>
         </section>
 
+        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'alarm_event_upload'">
+          <h3 class="card-title">告警信息上传</h3>
+          <div class="hint">状态总览只保留告警文件只读状态，所有告警上传入口统一收在这个专项模块里。</div>
+          <div class="hint">外网端只读取 08 点和 16 点的共享告警文件，并只上传 60 天内的告警记录。</div>
+
+          <div class="day-metric-top-grid">
+            <article class="task-block task-block-accent">
+              <div class="task-block-head">
+                <div>
+                  <div class="task-block-kicker">执行入口</div>
+                  <h3 class="card-title">上传到告警多维表</h3>
+                </div>
+                <span class="status-badge status-badge-soft" :class="'tone-' + externalAlarmReadinessFamily.tone">
+                  {{ externalAlarmReadinessFamily.statusText }}
+                </span>
+              </div>
+              <div class="hint">全量上传会遍历当前可消费的 08/16 定时告警文件；单楼追加上传只处理选中楼栋。</div>
+              <div class="hint">{{ externalAlarmReadinessFamily.summaryText }}</div>
+              <div class="task-grid two-col" style="margin-top:10px;">
+                <div class="form-row">
+                  <label class="label">追加楼栋</label>
+                  <select v-model="externalAlarmUploadBuilding">
+                    <option value="A楼">A楼</option>
+                    <option value="B楼">B楼</option>
+                    <option value="C楼">C楼</option>
+                    <option value="D楼">D楼</option>
+                    <option value="E楼">E楼</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label class="label">执行策略</label>
+                  <div class="readonly-inline-card">
+                    {{ alarmEventUploadTarget.replaceExistingOnFull ? '全量清表重传 / 单楼增量追加' : '全量增量写入 / 单楼增量追加' }}
+                  </div>
+                </div>
+              </div>
+              <div class="btn-line" style="margin-top:10px;">
+                <button
+                  class="btn btn-primary"
+                  :disabled="!canRun || isSourceCacheUploadAlarmFullLocked"
+                  @click="uploadAlarmSourceCacheFull"
+                >
+                  {{ externalAlarmUploadFullButtonText }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isSourceCacheUploadAlarmBuildingLocked"
+                  @click="uploadAlarmSourceCacheBuilding(externalAlarmUploadBuilding)"
+                >
+                  {{ externalAlarmUploadBuildingButtonText }}
+                </button>
+              </div>
+            </article>
+
+            <article class="task-block">
+              <div class="task-block-head">
+                <div>
+                  <div class="task-block-kicker">目标配置</div>
+                  <h3 class="card-title">当前告警多维表</h3>
+                </div>
+                <span class="status-badge status-badge-soft" :class="alarmEventUploadTarget.configured ? 'tone-success' : 'tone-warning'">
+                  {{ alarmEventUploadTarget.statusText }}
+                </span>
+              </div>
+              <div class="day-metric-summary-grid">
+                <div class="readonly-inline-card">App Token：{{ alarmEventUploadTarget.appToken || '-' }}</div>
+                <div class="readonly-inline-card">Table ID：{{ alarmEventUploadTarget.tableId || '-' }}</div>
+                <div class="readonly-inline-card">最近上传：{{ externalAlarmReadinessFamily.uploadLastRunAt || '-' }}</div>
+                <div class="readonly-inline-card">最近成功：{{ externalAlarmReadinessFamily.uploadLastSuccessAt || '-' }}</div>
+                <div class="readonly-inline-card">上传记录：{{ externalAlarmReadinessFamily.uploadRecordCount || 0 }} 条</div>
+                <div class="readonly-inline-card">消费文件：{{ externalAlarmReadinessFamily.uploadConsumedCount || 0 }} 份</div>
+              </div>
+              <div class="hint" style="margin-top:10px;">{{ alarmEventUploadTarget.hintText }}</div>
+              <div class="hint" v-if="externalAlarmReadinessFamily.uploadRunning">
+                {{ externalAlarmReadinessFamily.uploadRunningText }}
+              </div>
+              <div class="hint" v-if="externalAlarmReadinessFamily.uploadLastError">
+                最近上传异常：{{ externalAlarmReadinessFamily.uploadLastError }}
+              </div>
+            </article>
+          </div>
+
+          <article class="task-block" style="margin-top:16px;">
+            <div class="task-block-head">
+              <div>
+                <div class="task-block-kicker">共享文件</div>
+                <h3 class="card-title">08/16 告警文件就绪情况</h3>
+              </div>
+              <span class="status-badge status-badge-soft" :class="'tone-' + externalAlarmReadinessFamily.tone">
+                {{ externalAlarmReadinessFamily.statusText }}
+              </span>
+            </div>
+            <div class="hint">{{ externalAlarmReadinessFamily.summaryText }}</div>
+            <div class="hint" v-if="externalAlarmReadinessFamily.bestBucketKey">
+              当前定时桶：{{ externalAlarmReadinessFamily.bestBucketKey }}
+            </div>
+            <div class="source-cache-building-grid" v-if="externalAlarmReadinessFamily.buildings && externalAlarmReadinessFamily.buildings.length" style="margin-top:12px;">
+              <div
+                class="internal-download-slot"
+                v-for="building in externalAlarmReadinessFamily.buildings"
+                :key="'alarm-upload-family-' + building.building"
+              >
+                <div class="internal-download-slot-head">
+                  <span class="internal-download-slot-title">{{ building.building }}</span>
+                  <span class="status-badge status-badge-soft" :class="'tone-' + building.tone">{{ building.stateText }}</span>
+                </div>
+                <div class="hint">时间桶：{{ building.bucketKey || externalAlarmReadinessFamily.bestBucketKey || '-' }}</div>
+                <div class="hint">{{ building.detailText || '-' }}</div>
+                <div class="hint" v-if="building.resolvedFilePath">共享路径：{{ building.resolvedFilePath }}</div>
+                <div class="hint" v-else-if="building.statusKey === 'consumed' && building.relativePath">已消费并删除：{{ building.relativePath }}</div>
+              </div>
+            </div>
+            <div class="hint" v-else style="margin-top:10px;">当前没有可展示的楼栋告警文件状态。</div>
+          </article>
+        </section>
+
         <section class="content-card log-wrap" v-if="dashboardActiveModule === 'runtime_logs'">
           <div class="log-toolbar">
             <div>

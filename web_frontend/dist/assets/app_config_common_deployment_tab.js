@@ -74,7 +74,7 @@
   <template v-if="isInternalDeploymentRole">
     <div class="section-title">内网下载站点</div>
     <div class="hint">
-      这里是一套共用的 5 楼配置。交接班日志源文件和全景平台月报源文件都使用这同一套地址、账号和密码。
+      这里是一套共用的 5 楼配置。交接班日志源文件、全景平台月报源文件以及告警信息源文件都使用这同一套地址、账号和密码。
     </div>
     <div class="config-grid-table-wrap">
       <table class="config-grid-table">
@@ -99,7 +99,7 @@
       </table>
     </div>
     <div class="hint">
-      密码按当前要求明文显示。内网端会固定按 A 到 E 楼、每小时两类源文件共 10 个下载单元运行。
+      密码按当前要求明文显示。内网端会固定按 A 到 E 楼维护三组来源：交接班和月报按小时刷新，告警信息每天 08:00 / 16:00 各拉取一次。
     </div>
   </template>
 </div>

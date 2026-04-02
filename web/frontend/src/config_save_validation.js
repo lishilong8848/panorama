@@ -1237,6 +1237,59 @@ function validateAndNormalizeHandoverReviewUi(payload) {
   return { ok: true };
 }
 
+function validateAndNormalizeAlarmExport(payload) {
+  payload.alarm_export = payload.alarm_export || {};
+  const alarmExport = payload.alarm_export;
+  alarmExport.feishu = alarmExport.feishu && typeof alarmExport.feishu === "object" ? alarmExport.feishu : {};
+  alarmExport.shared_source_upload =
+    alarmExport.shared_source_upload && typeof alarmExport.shared_source_upload === "object"
+      ? alarmExport.shared_source_upload
+      : {};
+  const legacyTarget =
+    alarmExport.shared_source_upload.target && typeof alarmExport.shared_source_upload.target === "object"
+      ? alarmExport.shared_source_upload.target
+      : {};
+
+  if (!String(alarmExport.feishu.app_token || "").trim() && String(legacyTarget.app_token || "").trim()) {
+    alarmExport.feishu.app_token = String(legacyTarget.app_token || "").trim();
+  }
+  if (!String(alarmExport.feishu.table_id || "").trim() && String(legacyTarget.table_id || "").trim()) {
+    alarmExport.feishu.table_id = String(legacyTarget.table_id || "").trim();
+  }
+
+  alarmExport.feishu.app_token = String(alarmExport.feishu.app_token || "").trim();
+  alarmExport.feishu.table_id = String(alarmExport.feishu.table_id || "").trim();
+  alarmExport.feishu.page_size = Number.parseInt(alarmExport.feishu.page_size ?? legacyTarget.page_size ?? 500, 10);
+  alarmExport.feishu.delete_batch_size = Number.parseInt(
+    alarmExport.feishu.delete_batch_size ?? legacyTarget.delete_batch_size ?? 500,
+    10,
+  );
+  alarmExport.feishu.create_batch_size = Number.parseInt(
+    alarmExport.feishu.create_batch_size ?? legacyTarget.create_batch_size ?? 200,
+    10,
+  );
+  alarmExport.shared_source_upload.replace_existing_on_full =
+    alarmExport.shared_source_upload.replace_existing_on_full !== false;
+  delete alarmExport.shared_source_upload.target;
+
+  if (!alarmExport.feishu.app_token) {
+    return { ok: false, error: "告警信息上传配置不能为空：请填写告警多维 App Token" };
+  }
+  if (!alarmExport.feishu.table_id) {
+    return { ok: false, error: "告警信息上传配置不能为空：请填写告警多维 Table ID" };
+  }
+  if (!Number.isInteger(alarmExport.feishu.page_size) || alarmExport.feishu.page_size <= 0) {
+    return { ok: false, error: "告警信息上传配置错误：清表分页大小必须大于0" };
+  }
+  if (!Number.isInteger(alarmExport.feishu.delete_batch_size) || alarmExport.feishu.delete_batch_size <= 0) {
+    return { ok: false, error: "告警信息上传配置错误：清表删除批次必须大于0" };
+  }
+  if (!Number.isInteger(alarmExport.feishu.create_batch_size) || alarmExport.feishu.create_batch_size <= 0) {
+    return { ok: false, error: "告警信息上传配置错误：写入批次大小必须大于0" };
+  }
+  return { ok: true };
+}
+
 function validateAndNormalizeWetBulbCollection(payload) {
   payload.wet_bulb_collection = payload.wet_bulb_collection || {};
   const wet = payload.wet_bulb_collection;
@@ -1479,32 +1532,34 @@ export function prepareConfigPayloadForSave({
   payload.alarm_common_db.accept_description_field = String(payload.alarm_common_db.accept_description_field || "").trim();
   payload.alarm_common_db.host_source = String(payload.alarm_common_db.host_source || "site_host").trim() || "site_host";
 
-  if (!Number.isInteger(payload.alarm_common_db.port) || payload.alarm_common_db.port <= 0) {
-    return { ok: false, error: "告警数据库端口必须大于0" };
-  }
-  if (!Number.isInteger(payload.alarm_common_db.connect_timeout_sec) || payload.alarm_common_db.connect_timeout_sec <= 0) {
-    return { ok: false, error: "告警数据库连接超时必须大于0" };
-  }
-  if (!Number.isInteger(payload.alarm_common_db.read_timeout_sec) || payload.alarm_common_db.read_timeout_sec <= 0) {
-    return { ok: false, error: "告警数据库读取超时必须大于0" };
-  }
-  if (!Number.isInteger(payload.alarm_common_db.write_timeout_sec) || payload.alarm_common_db.write_timeout_sec <= 0) {
-    return { ok: false, error: "告警数据库写入超时必须大于0" };
-  }
-  if (!payload.alarm_common_db.user) return { ok: false, error: "告警数据库用户不能为空" };
-  if (!payload.alarm_common_db.password) return { ok: false, error: "告警数据库密码不能为空" };
-  if (!payload.alarm_common_db.database) return { ok: false, error: "告警数据库名不能为空" };
-  if (!payload.alarm_common_db.table_pattern) return { ok: false, error: "告警数据库表格名规则不能为空" };
-  if (!payload.alarm_common_db.table_pattern.includes("{year}") || !payload.alarm_common_db.table_pattern.includes("{month")) {
-    return { ok: false, error: "告警数据库表格名规则必须包含 {year} 与 {month}" };
-  }
-  if (!payload.alarm_common_db.charset) return { ok: false, error: "告警数据库字符集不能为空" };
-  if (!payload.alarm_common_db.time_field_mode) return { ok: false, error: "告警数据库时间字段模式不能为空" };
-  if (!payload.alarm_common_db.time_field) return { ok: false, error: "告警数据库时间字段不能为空" };
-  if (!payload.alarm_common_db.masked_field) return { ok: false, error: "告警数据库 masked 字段不能为空" };
-  if (!payload.alarm_common_db.is_recover_field) return { ok: false, error: "告警数据库 is_recover 字段不能为空" };
-  if (!payload.alarm_common_db.accept_description_field) {
-    return { ok: false, error: "告警数据库 accept_description 字段不能为空" };
+  if (deploymentRoleMode === "internal") {
+    if (!Number.isInteger(payload.alarm_common_db.port) || payload.alarm_common_db.port <= 0) {
+      return { ok: false, error: "告警数据库端口必须大于0" };
+    }
+    if (!Number.isInteger(payload.alarm_common_db.connect_timeout_sec) || payload.alarm_common_db.connect_timeout_sec <= 0) {
+      return { ok: false, error: "告警数据库连接超时必须大于0" };
+    }
+    if (!Number.isInteger(payload.alarm_common_db.read_timeout_sec) || payload.alarm_common_db.read_timeout_sec <= 0) {
+      return { ok: false, error: "告警数据库读取超时必须大于0" };
+    }
+    if (!Number.isInteger(payload.alarm_common_db.write_timeout_sec) || payload.alarm_common_db.write_timeout_sec <= 0) {
+      return { ok: false, error: "告警数据库写入超时必须大于0" };
+    }
+    if (!payload.alarm_common_db.user) return { ok: false, error: "告警数据库用户不能为空" };
+    if (!payload.alarm_common_db.password) return { ok: false, error: "告警数据库密码不能为空" };
+    if (!payload.alarm_common_db.database) return { ok: false, error: "告警数据库名不能为空" };
+    if (!payload.alarm_common_db.table_pattern) return { ok: false, error: "告警数据库表格名规则不能为空" };
+    if (!payload.alarm_common_db.table_pattern.includes("{year}") || !payload.alarm_common_db.table_pattern.includes("{month")) {
+      return { ok: false, error: "告警数据库表格名规则必须包含 {year} 与 {month}" };
+    }
+    if (!payload.alarm_common_db.charset) return { ok: false, error: "告警数据库字符集不能为空" };
+    if (!payload.alarm_common_db.time_field_mode) return { ok: false, error: "告警数据库时间字段模式不能为空" };
+    if (!payload.alarm_common_db.time_field) return { ok: false, error: "告警数据库时间字段不能为空" };
+    if (!payload.alarm_common_db.masked_field) return { ok: false, error: "告警数据库 masked 字段不能为空" };
+    if (!payload.alarm_common_db.is_recover_field) return { ok: false, error: "告警数据库 is_recover 字段不能为空" };
+    if (!payload.alarm_common_db.accept_description_field) {
+      return { ok: false, error: "告警数据库 accept_description 字段不能为空" };
+    }
   }
 
   payload.handover_log = payload.handover_log || {};
@@ -1644,6 +1699,10 @@ export function prepareConfigPayloadForSave({
   const handoverReviewUiValidation = validateAndNormalizeHandoverReviewUi(payload);
   if (!handoverReviewUiValidation.ok) {
     return handoverReviewUiValidation;
+  }
+  const alarmExportValidation = validateAndNormalizeAlarmExport(payload);
+  if (!alarmExportValidation.ok) {
+    return alarmExportValidation;
   }
   const wetBulbCollectionValidation = validateAndNormalizeWetBulbCollection(payload);
   if (!wetBulbCollectionValidation.ok) {

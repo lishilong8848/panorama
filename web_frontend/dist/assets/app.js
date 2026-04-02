@@ -404,6 +404,8 @@ createApp({
     const actionKeyUpdaterApply = "updater:apply";
     const actionKeyUpdaterRestart = "updater:restart";
     const actionKeySourceCacheRefreshCurrentHour = "bridge:source_cache_refresh_current_hour";
+    const actionKeySourceCacheRefreshAlarmManual = "bridge:source_cache_refresh_alarm_manual";
+    const actionKeySourceCacheDeleteAlarmManual = "bridge:source_cache_delete_alarm_manual";
     const actionKeyHandoverConfirmAll = "handover_review:confirm_all";
     const actionKeyHandoverCloudRetryAll = "handover_review:cloud_retry_all";
     const actionKeyHandoverFollowupContinue = "job:handover_followup_continue";
@@ -417,8 +419,16 @@ createApp({
         isActionLocked(actionKeyUpdaterRestart),
     );
     const isSourceCacheRefreshCurrentHourLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshCurrentHour));
+    const isSourceCacheRefreshAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshAlarmManual));
+    const isSourceCacheDeleteAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheDeleteAlarmManual));
     const currentHourRefreshButtonText = computed(() =>
       isSourceCacheRefreshCurrentHourLocked.value ? "下载中..." : "立即下载当前小时全部文件",
+    );
+    const manualAlarmRefreshButtonText = computed(() =>
+      isSourceCacheRefreshAlarmManualLocked.value ? "拉取中..." : "一键拉取告警文件",
+    );
+    const manualAlarmDeleteButtonText = computed(() =>
+      isSourceCacheDeleteAlarmManualLocked.value ? "删除中..." : "删除手动告警文件",
     );
     const effectiveRoleMode = computed(() =>
       normalizeDeploymentRoleMode(
@@ -436,7 +446,7 @@ createApp({
     const showCommonSchedulerConfigTab = computed(() => configRoleMode.value !== "internal");
     const showNotifyConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeishuAuthConfigTab = computed(() => configRoleMode.value !== "internal");
-    const showCommonAlarmDbConfigTab = computed(() => configRoleMode.value !== "internal");
+    const showCommonAlarmDbConfigTab = computed(() => false);
     const showConsoleConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureMonthlyConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureHandoverConfigTab = computed(() => configRoleMode.value !== "internal");
@@ -846,6 +856,8 @@ createApp({
       cancelBridgeTask,
       retryBridgeTask,
       refreshCurrentHourSourceCache,
+      refreshManualAlarmSourceCache,
+      deleteManualAlarmSourceCacheFiles,
       fetchRuntimeResources,
       fetchConfig,
       fetchHandoverEngineerDirectory,
@@ -1843,7 +1855,7 @@ createApp({
         applyDashboardRoleMode(roleMode);
         const hiddenCommonTabs = roleMode === "internal"
           ? new Set(["common_paths", "common_console", "common_network", "common_scheduler", "common_notify", "common_feishu_auth", "common_alarm_db"])
-          : new Set(["common_network"]);
+          : new Set(["common_network", "common_alarm_db"]);
         const hiddenFeatureTabs = new Set(["feature_alarm"]);
         if (roleMode === "internal") {
           hiddenFeatureTabs.add("feature_monthly");
@@ -2249,6 +2261,8 @@ createApp({
       actionKeyUpdaterCheck,
       actionKeyUpdaterApply,
       actionKeySourceCacheRefreshCurrentHour,
+      actionKeySourceCacheRefreshAlarmManual,
+      actionKeySourceCacheDeleteAlarmManual,
       actionKeyHandoverConfirmAll,
       actionKeyHandoverCloudRetryAll,
       actionKeyHandoverDailyReportAuthOpen,
@@ -2370,6 +2384,8 @@ createApp({
       getHandoverDailyReportRestoreActionKey,
       runUpdaterMainAction,
       refreshCurrentHourSourceCache,
+      refreshManualAlarmSourceCache,
+      deleteManualAlarmSourceCacheFiles,
       addSheetRuleRow,
       removeSheetRuleRow,
       startScheduler,
@@ -2401,6 +2417,10 @@ createApp({
       fetchHandoverEngineerDirectory,
       isSourceCacheRefreshCurrentHourLocked,
       currentHourRefreshButtonText,
+      isSourceCacheRefreshAlarmManualLocked,
+      manualAlarmRefreshButtonText,
+      isSourceCacheDeleteAlarmManualLocked,
+      manualAlarmDeleteButtonText,
     };
   },
   template: APP_TEMPLATE,

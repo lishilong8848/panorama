@@ -141,7 +141,7 @@
           </div>
           <div class="status-subsection-head">
             <span class="status-panel-kicker">最新共享文件状态</span>
-            <span class="status-inline-note">交接班源文件与月报源文件实时同步显示</span>
+            <span class="status-inline-note">交接班源文件、月报源文件和告警信息源文件实时同步显示</span>
           </div>
           <div class="source-cache-family-grid" v-if="internalRealtimeSourceFamilies && internalRealtimeSourceFamilies.length">
             <div
@@ -241,6 +241,15 @@
                 <span class="status-inline-note" v-if="family.bestBucketAgeText">距当前约 {{ family.bestBucketAgeText }}</span>
                 <span class="status-inline-note">{{ family.summaryText }}</span>
               </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadLastRunAt">
+                最近上传：{{ family.uploadLastRunAt }} / 记录 {{ family.uploadRecordCount || 0 }} 条 / 文件 {{ family.uploadFileCount || 0 }} 份 / 消费 {{ family.uploadConsumedCount || 0 }} 份
+              </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadRunning">
+                {{ family.uploadRunningText }}
+              </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadLastError">
+                最近上传异常：{{ family.uploadLastError }}
+              </div>
               <div class="source-cache-building-grid" v-if="family.buildings && family.buildings.length">
                 <div
                   class="internal-download-slot"
@@ -255,6 +264,7 @@
                   <div class="hint" v-if="building.usingFallback && building.versionGap !== null">较最新版本落后 {{ building.versionGap }} 桶</div>
                   <div class="hint">{{ building.lastError ? ("最近错误：" + building.lastError) : ("最近成功：" + (building.downloadedAt || "-")) }}</div>
                   <div class="hint" v-if="building.resolvedFilePath">共享路径：{{ building.resolvedFilePath }}</div>
+                  <div class="hint" v-else-if="building.statusKey === 'consumed' && building.relativePath">已消费并删除：{{ building.relativePath }}</div>
                   <div class="hint" v-else-if="building.statusKey !== 'waiting'">共享文件未登记</div>
                 </div>
               </div>
@@ -283,6 +293,22 @@
                 :disabled="isSourceCacheRefreshCurrentHourLocked"
               >
                 {{ currentHourRefreshButtonText }}
+              </button>
+              <button
+                class="btn btn-secondary"
+                type="button"
+                @click="refreshManualAlarmSourceCache"
+                :disabled="isSourceCacheRefreshAlarmManualLocked"
+              >
+                {{ manualAlarmRefreshButtonText }}
+              </button>
+              <button
+                class="btn btn-secondary"
+                type="button"
+                @click="deleteManualAlarmSourceCacheFiles"
+                :disabled="isSourceCacheDeleteAlarmManualLocked"
+              >
+                {{ manualAlarmDeleteButtonText }}
               </button>
             </div>
           </div>
@@ -313,7 +339,16 @@
             <div class="hint">{{ currentHourRefreshOverview.summaryText }}</div>
             <div class="hint" v-if="currentHourRefreshOverview.lastRunAt">最近触发：{{ currentHourRefreshOverview.lastRunAt }}</div>
             <div class="hint" v-if="currentHourRefreshOverview.lastSuccessAt">最近完成：{{ currentHourRefreshOverview.lastSuccessAt }}</div>
-          <div class="hint" v-if="currentHourRefreshOverview.failedBuildings && currentHourRefreshOverview.failedBuildings.length">
+            <div class="hint" v-if="currentHourRefreshOverview.runningBuildings && currentHourRefreshOverview.runningBuildings.length">
+              当前进行中：{{ currentHourRefreshOverview.runningBuildings.join(' / ') }}
+            </div>
+            <div class="hint" v-if="currentHourRefreshOverview.completedBuildings && currentHourRefreshOverview.completedBuildings.length">
+              本轮完成：{{ currentHourRefreshOverview.completedBuildings.join(' / ') }}
+            </div>
+            <div class="hint" v-if="currentHourRefreshOverview.blockedBuildings && currentHourRefreshOverview.blockedBuildings.length">
+              等待恢复：{{ currentHourRefreshOverview.blockedBuildings.join(' / ') }}
+            </div>
+            <div class="hint" v-if="currentHourRefreshOverview.failedBuildings && currentHourRefreshOverview.failedBuildings.length">
               失败项：{{ currentHourRefreshOverview.failedBuildings.join(' / ') }}
             </div>
             <div class="hint" v-if="currentHourRefreshOverview.lastError">最近错误：{{ currentHourRefreshOverview.lastError }}</div>

@@ -25,6 +25,16 @@ def _valid_time(value: str) -> bool:
     return bool(re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(value).strip()))
 
 
+def _deployment_role_mode(cfg: Dict[str, Any]) -> str:
+    common = cfg.get("common", {})
+    if not isinstance(common, dict):
+        return ""
+    deployment = common.get("deployment", {})
+    if not isinstance(deployment, dict):
+        return ""
+    return normalize_role_mode(deployment.get("role_mode"))
+
+
 def _normalize_sheet_rules_config(raw_rules: Any) -> List[Dict[str, Any]]:
     if isinstance(raw_rules, dict):
         normalized_input: List[Any] = []
@@ -204,6 +214,8 @@ def _validate_updater(cfg: Dict[str, Any]) -> None:
 
 
 def _validate_common_alarm_db(cfg: Dict[str, Any]) -> None:
+    if _deployment_role_mode(cfg) == "external":
+        return
     alarm_db = cfg.get("common", {}).get("alarm_db", {})
     if not isinstance(alarm_db, dict):
         raise ValueError("配置错误: common.alarm_db 缺失或格式错误")
@@ -237,6 +249,27 @@ def _validate_common_alarm_db(cfg: Dict[str, Any]) -> None:
         raise ValueError("配置错误: common.alarm_db.read_timeout_sec 必须大于0")
     if int(alarm_db.get("write_timeout_sec", 0)) <= 0:
         raise ValueError("配置错误: common.alarm_db.write_timeout_sec 必须大于0")
+
+
+def _validate_alarm_export(cfg: Dict[str, Any]) -> None:
+    features = cfg.get("features", {})
+    if not isinstance(features, dict):
+        raise ValueError("配置错误: features 缺失或格式错误")
+    alarm_export = features.get("alarm_export", {})
+    if not isinstance(alarm_export, dict):
+        raise ValueError("配置错误: features.alarm_export 缺失或格式错误")
+    feishu = alarm_export.get("feishu", {})
+    if not isinstance(feishu, dict):
+        raise ValueError("配置错误: features.alarm_export.feishu 缺失或格式错误")
+
+    app_token = str(feishu.get("app_token", "") or "").strip()
+    table_id = str(feishu.get("table_id", "") or "").strip()
+    if bool(app_token) != bool(table_id):
+        raise ValueError("配置错误: features.alarm_export.feishu.app_token 与 table_id 必须同时填写或同时留空")
+
+    for key in ("page_size", "delete_batch_size", "create_batch_size"):
+        if int(feishu.get(key, 0) or 0) <= 0:
+            raise ValueError(f"配置错误: features.alarm_export.feishu.{key} 必须大于0")
 
 
 def _validate_resume(cfg: Dict[str, Any]) -> None:
@@ -1443,6 +1476,7 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _validate_sheet_import(normalized_v3)
     _validate_console(normalized_v3)
     _validate_common_alarm_db(normalized_v3)
+    _validate_alarm_export(normalized_v3)
     _validate_handover_scheduler(normalized_v3)
     _validate_handover_template(normalized_v3)
     _validate_handover_download(normalized_v3)
