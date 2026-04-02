@@ -165,6 +165,8 @@ class _StreamProxy(io.TextIOBase):
 
 
 class JobService:
+    TASK_ENGINE_CLEANUP_INTERVAL_SEC = 600.0
+
     def __init__(self, log_buffer_size: int = 5000) -> None:
         self.log_buffer_size = max(200, int(log_buffer_size))
         self._lock = threading.RLock()
@@ -210,6 +212,7 @@ class JobService:
         self._worker_cancel_timeout_sec = 10.0
         self._worker_heartbeat_interval_sec = 5.0
         self._task_engine_recovery_completed = False
+        self._task_engine_last_cleanup_monotonic = 0.0
 
     def update_log_buffer_size(self, value: int) -> None:
         self.log_buffer_size = max(200, int(value))
@@ -226,6 +229,9 @@ class JobService:
         worker_app_dir: Path | None = None,
         current_ssid_getter: Callable[[], str | None] | None = None,
     ) -> None:
+        previous_db = self._task_engine_db
+        if previous_db is not None:
+            previous_db.close()
         self._task_engine_store = TaskEngineStore(runtime_config=runtime_config, app_dir=app_dir)
         self._task_engine_db = TaskEngineDatabase(runtime_config=runtime_config, app_dir=app_dir)
         self._config_snapshot_getter = config_snapshot_getter
@@ -270,6 +276,35 @@ class JobService:
         self._worker_heartbeat_interval_sec = max(1.0, float(execution_cfg.get("worker_heartbeat_interval_sec", 5) or 5))
         self._persist_resource_snapshot()
         self._restore_incomplete_jobs()
+
+    def shutdown_task_engine(self) -> None:
+        db = self._task_engine_db
+        self._task_engine_db = None
+        if db is not None:
+            db.close()
+
+    def cleanup_terminal_jobs(self, *, retention_days: int = 14) -> int:
+        if not self._task_engine_db:
+            return 0
+        return int(self._task_engine_db.cleanup_terminal_jobs(retention_days=retention_days) or 0)
+
+    def _maybe_cleanup_task_engine(self) -> None:
+        if not self._task_engine_db:
+            return
+        now_monotonic = time.monotonic()
+        if now_monotonic - float(self._task_engine_last_cleanup_monotonic or 0.0) < self.TASK_ENGINE_CLEANUP_INTERVAL_SEC:
+            return
+        self._task_engine_last_cleanup_monotonic = now_monotonic
+        try:
+            self._task_engine_db.cleanup_terminal_jobs(retention_days=14)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def task_engine_runtime_snapshot(self) -> Dict[str, Any]:
+        self._maybe_cleanup_task_engine()
+        if not self._task_engine_db:
+            return {"write_queue_length": 0, "last_cleanup_at": "", "closed": True}
+        return self._task_engine_db.runtime_snapshot()
 
     def _next_sequence(self) -> int:
         self._job_sequence += 1

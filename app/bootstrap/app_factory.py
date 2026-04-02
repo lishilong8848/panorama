@@ -177,6 +177,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_alert_log_uploader(source="关闭自动")
             if container.shared_bridge_service:
                 container.stop_shared_bridge(source="关闭自动")
+            container.job_service.shutdown_task_engine()
             container.add_system_log("Web控制台已关闭")
 
     app = FastAPI(

@@ -144,6 +144,8 @@ def _normalize_nullable_text(value: Any) -> str:
 
 
 class SharedSourceCacheService:
+    EXTERNAL_FULL_SNAPSHOT_MAX_AGE_SEC = 15.0
+
     def __init__(
         self,
         *,
@@ -206,9 +208,16 @@ class SharedSourceCacheService:
             "failed_entries": [],
             "deleted_before_upload_count": 0,
         }
+        self._external_full_snapshot_cache: Dict[str, Any] = {}
+        self._external_full_snapshot_dirty = True
+        self._external_full_snapshot_built_monotonic = 0.0
         self._refresh_config()
         with self._lock:
             self._reset_light_building_state_unlocked()
+
+    def _mark_external_full_snapshot_dirty(self) -> None:
+        with self._lock:
+            self._external_full_snapshot_dirty = True
 
     def _default_light_building_status(self, *, building: str, bucket_key: str) -> Dict[str, Any]:
         return {
@@ -381,6 +390,82 @@ class SharedSourceCacheService:
             "latest_selection": {},
         }
 
+    def _build_external_full_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            current_bucket = self._current_hour_bucket or self.current_hour_bucket()
+            families = copy.deepcopy(self._family_status)
+            current_hour_refresh = copy.deepcopy(self._current_hour_refresh)
+            last_run_at = self._last_run_at
+            last_success_at = self._last_success_at
+            last_error = self._last_error
+            alarm_external_upload = copy.deepcopy(self._alarm_external_upload_state)
+        include_latest_selection = True
+        alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
+        snapshot_error = ""
+        try:
+            handover_family = self._build_family_health_snapshot(
+                source_family=FAMILY_HANDOVER_LOG,
+                current_bucket=current_bucket,
+                include_latest_selection=include_latest_selection,
+            )
+        except Exception as exc:  # noqa: BLE001
+            handover_family = {"current_bucket": current_bucket, "buildings": []}
+            snapshot_error = str(exc)
+        try:
+            monthly_family = self._build_family_health_snapshot(
+                source_family=FAMILY_MONTHLY_REPORT,
+                current_bucket=current_bucket,
+                include_latest_selection=include_latest_selection,
+            )
+        except Exception as exc:  # noqa: BLE001
+            monthly_family = {"current_bucket": current_bucket, "buildings": []}
+            snapshot_error = snapshot_error or str(exc)
+        try:
+            alarm_family = self._build_family_health_snapshot(
+                source_family=FAMILY_ALARM_EVENT,
+                current_bucket=alarm_bucket,
+                include_latest_selection=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            alarm_family = {"current_bucket": alarm_bucket, "buildings": []}
+            snapshot_error = snapshot_error or str(exc)
+        families[FAMILY_HANDOVER_LOG] = {**families.get(FAMILY_HANDOVER_LOG, {}), **handover_family}
+        families[FAMILY_MONTHLY_REPORT] = {**families.get(FAMILY_MONTHLY_REPORT, {}), **monthly_family}
+        families[FAMILY_ALARM_EVENT] = {
+            **families.get(FAMILY_ALARM_EVENT, {}),
+            **alarm_family,
+            "external_upload": alarm_external_upload,
+        }
+        return {
+            "enabled": bool(self.enabled and self.role_mode in {"internal", "external"}),
+            "scheduler_running": bool(self.role_mode == "internal" and self.is_running()),
+            "current_hour_bucket": current_bucket,
+            "last_run_at": last_run_at,
+            "last_success_at": last_success_at,
+            "last_error": last_error or snapshot_error,
+            "cache_root": str(self.shared_root) if self.shared_root else "",
+            "current_hour_refresh": current_hour_refresh,
+            FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
+            FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
+            FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
+        }
+
+    def _get_external_full_snapshot_cached(self) -> Dict[str, Any]:
+        with self._lock:
+            should_rebuild = self._external_full_snapshot_dirty or not self._external_full_snapshot_cache
+            if not should_rebuild:
+                age_sec = time.monotonic() - float(self._external_full_snapshot_built_monotonic or 0.0)
+                should_rebuild = age_sec >= self.EXTERNAL_FULL_SNAPSHOT_MAX_AGE_SEC
+            cached_snapshot = copy.deepcopy(self._external_full_snapshot_cache) if not should_rebuild else {}
+        if not should_rebuild:
+            return cached_snapshot
+        snapshot = self._build_external_full_snapshot()
+        with self._lock:
+            self._external_full_snapshot_cache = copy.deepcopy(snapshot)
+            self._external_full_snapshot_dirty = False
+            self._external_full_snapshot_built_monotonic = time.monotonic()
+        return snapshot
+
     def _refresh_config(self) -> None:
         deployment = self.runtime_config.get("deployment", {}) if isinstance(self.runtime_config.get("deployment", {}), dict) else {}
         shared_bridge = self.runtime_config.get("shared_bridge", {}) if isinstance(self.runtime_config.get("shared_bridge", {}), dict) else {}
@@ -403,6 +488,7 @@ class SharedSourceCacheService:
     def update_runtime_config(self, runtime_config: Dict[str, Any]) -> None:
         self.runtime_config = copy.deepcopy(runtime_config if isinstance(runtime_config, dict) else {})
         self._refresh_config()
+        self._mark_external_full_snapshot_dirty()
         with self._lock:
             self._reset_light_building_state_unlocked()
 
@@ -556,56 +642,7 @@ class SharedSourceCacheService:
                 FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
                 FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
             }
-        include_latest_selection = True
-        alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
-        snapshot_error = ""
-        try:
-            handover_family = self._build_family_health_snapshot(
-                source_family=FAMILY_HANDOVER_LOG,
-                current_bucket=current_bucket,
-                include_latest_selection=include_latest_selection,
-            )
-        except Exception as exc:  # noqa: BLE001
-            handover_family = {"current_bucket": current_bucket, "buildings": []}
-            snapshot_error = str(exc)
-        try:
-            monthly_family = self._build_family_health_snapshot(
-                source_family=FAMILY_MONTHLY_REPORT,
-                current_bucket=current_bucket,
-                include_latest_selection=include_latest_selection,
-            )
-        except Exception as exc:  # noqa: BLE001
-            monthly_family = {"current_bucket": current_bucket, "buildings": []}
-            snapshot_error = snapshot_error or str(exc)
-        try:
-            alarm_family = self._build_family_health_snapshot(
-                source_family=FAMILY_ALARM_EVENT,
-                current_bucket=alarm_bucket,
-                include_latest_selection=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            alarm_family = {"current_bucket": alarm_bucket, "buildings": []}
-            snapshot_error = snapshot_error or str(exc)
-        families[FAMILY_HANDOVER_LOG] = {**families.get(FAMILY_HANDOVER_LOG, {}), **handover_family}
-        families[FAMILY_MONTHLY_REPORT] = {**families.get(FAMILY_MONTHLY_REPORT, {}), **monthly_family}
-        families[FAMILY_ALARM_EVENT] = {
-            **families.get(FAMILY_ALARM_EVENT, {}),
-            **alarm_family,
-            "external_upload": alarm_external_upload,
-        }
-        return {
-            "enabled": bool(self.enabled and self.role_mode in {"internal", "external"}),
-            "scheduler_running": bool(self.role_mode == "internal" and self.is_running()),
-            "current_hour_bucket": current_bucket,
-            "last_run_at": last_run_at,
-            "last_success_at": last_success_at,
-            "last_error": last_error or snapshot_error,
-            "cache_root": str(self.shared_root) if self.shared_root else "",
-            "current_hour_refresh": current_hour_refresh,
-            FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
-            FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
-            FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
-        }
+        return self._get_external_full_snapshot_cached()
 
     def _get_source_cache_entry(
         self,
@@ -1030,6 +1067,7 @@ class SharedSourceCacheService:
             size_bytes=int(cached["size_bytes"]),
             metadata=metadata or {},
         )
+        self._mark_external_full_snapshot_dirty()
         if bucket_kind == "latest":
             with self._lock:
                 self._ensure_light_family_cache_unlocked(
@@ -1105,6 +1143,7 @@ class SharedSourceCacheService:
             size_bytes=0,
             metadata=payload,
         )
+        self._mark_external_full_snapshot_dirty()
         if bucket_kind == "latest":
             with self._lock:
                 self._ensure_light_family_cache_unlocked(
@@ -1898,6 +1937,71 @@ class SharedSourceCacheService:
             "bucket_key": self._alarm_manual_bucket(),
         }
 
+    @staticmethod
+    def _cleanup_retention_days_for_entry(entry: Dict[str, Any]) -> int:
+        bucket_kind = str(entry.get("bucket_kind", "") or "").strip().lower()
+        status = str(entry.get("status", "") or "").strip().lower()
+        if status == "failed":
+            return 7
+        if bucket_kind == "manual":
+            return 3
+        if status == "consumed":
+            return 7
+        if bucket_kind == "date":
+            return 60
+        return 7
+
+    @staticmethod
+    def _entry_cleanup_reference_time(entry: Dict[str, Any]) -> datetime | None:
+        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+        candidates = [
+            metadata.get("consumed_at"),
+            entry.get("downloaded_at"),
+            entry.get("updated_at"),
+            entry.get("created_at"),
+        ]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            try:
+                return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+        return None
+
+    def cleanup_expired_entries(self, *, limit: int = 20000) -> Dict[str, Any]:
+        if self.store is None or self.shared_root is None or not hasattr(self.store, "list_cleanup_candidate_source_cache_entries"):
+            return {"deleted_entries": 0, "deleted_files": 0}
+        now_dt = datetime.now()
+        deleted_entries = 0
+        deleted_files = 0
+        rows = self.store.list_cleanup_candidate_source_cache_entries(limit=limit)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            reference_dt = self._entry_cleanup_reference_time(row)
+            if reference_dt is None:
+                continue
+            retention_days = self._cleanup_retention_days_for_entry(row)
+            if reference_dt > now_dt - timedelta(days=retention_days):
+                continue
+            file_path = self._resolve_relative_path_under_shared_root(str(row.get("relative_path", "") or "").strip())
+            try:
+                if file_path is not None and file_path.exists():
+                    file_path.unlink(missing_ok=True)
+                    deleted_files += 1
+            except Exception:  # noqa: BLE001
+                pass
+            if self.store.delete_source_cache_entry(str(row.get("entry_id", "") or "").strip()):
+                deleted_entries += 1
+        if deleted_entries > 0:
+            self._mark_external_full_snapshot_dirty()
+        return {
+            "deleted_entries": deleted_entries,
+            "deleted_files": deleted_files,
+        }
+
     def delete_manual_alarm_files(self) -> Dict[str, Any]:
         if not self.enabled or self.role_mode != "internal" or self.store is None:
             return {"accepted": False, "reason": "disabled", "deleted_count": 0}
@@ -1923,6 +2027,8 @@ class SharedSourceCacheService:
                 building = str(row.get("building", "") or "").strip()
                 if building:
                     deleted_buildings.append(building)
+        if deleted_count > 0:
+            self._mark_external_full_snapshot_dirty()
         return {
             "accepted": True,
             "reason": "deleted",
@@ -2231,6 +2337,7 @@ class SharedSourceCacheService:
                 "consumed_by_mode": str(consumed_by_mode or "").strip(),
             },
         )
+        self._mark_external_full_snapshot_dirty()
         return True
 
     def _set_alarm_external_upload_state(
@@ -2268,6 +2375,7 @@ class SharedSourceCacheService:
                 "failed_entries": [str(item or "").strip() for item in failed_entries if str(item or "").strip()],
                 "deleted_before_upload_count": max(0, int(deleted_before_upload_count or 0)),
             }
+            self._external_full_snapshot_dirty = True
 
     def _begin_alarm_external_upload(self, *, mode: str, scope: str) -> Dict[str, Any]:
         started_at = _now_text()

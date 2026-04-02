@@ -15,6 +15,16 @@ def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _parse_text_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
 class SharedBridgeStore:
     def __init__(self, root_dir: str | Path, *, busy_timeout_ms: int = 5000) -> None:
         self.root_dir = Path(root_dir)
@@ -924,7 +934,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
+            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
 
     def create_day_metric_from_download_task(
@@ -1023,7 +1033,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
+            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
 
     def create_wet_bulb_collection_task(
@@ -1119,7 +1129,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
+            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
 
     def create_monthly_auto_once_task(
@@ -1211,7 +1221,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
+            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
 
     def create_monthly_multi_date_task(
@@ -1298,7 +1308,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
+            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
 
     def create_monthly_resume_upload_task(
@@ -1374,7 +1384,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
+            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
 
     def create_handover_cache_fill_task(
@@ -1479,7 +1489,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
+            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
 
     def create_monthly_cache_fill_task(
@@ -1561,7 +1571,7 @@ class SharedBridgeStore:
             )
         payload = self.get_task(task_id)
         if not payload:
-            raise RuntimeError(f"閲嶆柊鍔犺浇鍏变韩浠诲姟澶辫触 {task_id}")
+            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
 
     def create_internal_browser_alert_task(
@@ -1786,6 +1796,78 @@ class SharedBridgeStore:
                 "UPDATE bridge_tasks SET updated_at=?, revision=revision+1 WHERE task_id=?",
                 (now_dt.strftime("%Y-%m-%d %H:%M:%S"), task_text),
             )
+
+    def sweep_expired_running_tasks(self, *, stale_task_timeout_sec: int) -> int:
+        now_dt = datetime.now()
+        now_text = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        stale_before_text = (now_dt - timedelta(seconds=max(60, int(stale_task_timeout_sec or 1800)))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        expired_rows: List[sqlite3.Row] = []
+        with self.connect() as conn:
+            expired_rows = conn.execute(
+                """
+                SELECT t.task_id, s.stage_id, t.feature, s.lease_expires_at
+                FROM bridge_tasks t
+                JOIN bridge_stages s ON s.task_id = t.task_id
+                WHERE s.status='running'
+                  AND s.lease_expires_at != ''
+                  AND s.lease_expires_at < ?
+                  AND COALESCE(NULLIF(s.started_at, ''), NULLIF(t.updated_at, ''), t.created_at) < ?
+                ORDER BY t.updated_at ASC, t.task_id ASC, s.stage_id ASC
+                """,
+                (now_text, stale_before_text),
+            ).fetchall()
+            for row in expired_rows:
+                task_id = str(row["task_id"] or "").strip()
+                stage_id = str(row["stage_id"] or "").strip()
+                if not task_id or not stage_id:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE bridge_stages
+                    SET status='failed',
+                        result_json=?,
+                        error='lease_expired',
+                        claimed_by_node_id='',
+                        claim_token='',
+                        lease_expires_at='',
+                        finished_at=?,
+                        revision=revision+1
+                    WHERE task_id=? AND stage_id=? AND status='running'
+                    """,
+                    (
+                        json.dumps({"status": "failed", "error": "lease_expired"}, ensure_ascii=False),
+                        now_text,
+                        task_id,
+                        stage_id,
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE bridge_tasks
+                    SET status='stale',
+                        error='lease_expired',
+                        updated_at=?,
+                        revision=revision+1
+                    WHERE task_id=?
+                    """,
+                    (now_text, task_id),
+                )
+                self._insert_event(
+                    conn,
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    side="system",
+                    level="error",
+                    event_type="lease_expired",
+                    payload={
+                        "message": "共享桥接阶段租约已过期，任务已收口为 stale",
+                        "feature": str(row["feature"] or "").strip(),
+                        "lease_expires_at": str(row["lease_expires_at"] or "").strip(),
+                    },
+                )
+        return len(expired_rows)
 
     def upsert_artifact(
         self,
@@ -2052,6 +2134,66 @@ class SharedBridgeStore:
             )
         return bool(int(deleted.rowcount or 0) > 0)
 
+    def list_cleanup_candidate_source_cache_entries(self, *, limit: int = 20000) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,
+                       downloaded_at, relative_path, status, file_hash, size_bytes, metadata_json, created_at, updated_at
+                FROM source_cache_entries
+                ORDER BY updated_at ASC, downloaded_at ASC, entry_id ASC
+                LIMIT ?
+                """,
+                (max(1, int(limit or 1)),),
+            ).fetchall()
+        return [self._row_to_source_cache_entry_dict(row) for row in rows]
+
+    def cleanup_terminal_history(self, *, retention_days: int = 14) -> Dict[str, Any]:
+        cutoff_text = (datetime.now() - timedelta(days=max(1, int(retention_days or 14)))).strftime("%Y-%m-%d %H:%M:%S")
+        deleted_task_ids: List[str] = []
+        deleted_artifact_paths: List[str] = []
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT task_id
+                FROM bridge_tasks
+                WHERE status IN ({", ".join("?" for _ in _TERMINAL_TASK_STATUSES)})
+                  AND updated_at < ?
+                ORDER BY updated_at ASC, task_id ASC
+                """,
+                (*sorted(_TERMINAL_TASK_STATUSES), cutoff_text),
+            ).fetchall()
+            deleted_task_ids = [str(row["task_id"] or "").strip() for row in rows if str(row["task_id"] or "").strip()]
+            if not deleted_task_ids:
+                return {"deleted_tasks": 0, "artifact_relative_paths": []}
+            placeholders = ", ".join("?" for _ in deleted_task_ids)
+            artifact_rows = conn.execute(
+                f"SELECT relative_path FROM bridge_artifacts WHERE task_id IN ({placeholders})",
+                deleted_task_ids,
+            ).fetchall()
+            deleted_artifact_paths = [
+                str(row["relative_path"] or "").strip().replace("\\", "/")
+                for row in artifact_rows
+                if str(row["relative_path"] or "").strip()
+            ]
+            conn.execute(f"DELETE FROM bridge_artifacts WHERE task_id IN ({placeholders})", deleted_task_ids)
+            conn.execute(f"DELETE FROM bridge_events WHERE task_id IN ({placeholders})", deleted_task_ids)
+            conn.execute(f"DELETE FROM bridge_stages WHERE task_id IN ({placeholders})", deleted_task_ids)
+            conn.execute(f"DELETE FROM bridge_tasks WHERE task_id IN ({placeholders})", deleted_task_ids)
+        return {
+            "deleted_tasks": len(deleted_task_ids),
+            "artifact_relative_paths": deleted_artifact_paths,
+        }
+
+    def cleanup_stale_nodes(self, *, retention_days: int = 2) -> int:
+        cutoff_text = (datetime.now() - timedelta(days=max(1, int(retention_days or 2)))).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connect() as conn:
+            deleted = conn.execute(
+                "DELETE FROM bridge_nodes WHERE last_seen_at != '' AND last_seen_at < ?",
+                (cutoff_text,),
+            )
+        return int(deleted.rowcount or 0)
+
     def complete_stage(
         self,
         *,
@@ -2304,3 +2446,4 @@ class SharedBridgeStore:
             "created_at": str(row["created_at"] or ""),
             "updated_at": str(row["updated_at"] or ""),
         }
+

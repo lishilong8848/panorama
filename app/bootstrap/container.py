@@ -610,6 +610,10 @@ class AppContainer:
                 "db_status": "stopped" if bridge_active else "disabled",
                 "last_error": "",
                 "last_poll_at": "",
+                "last_cleanup_at": "",
+                "cleanup_deleted_tasks": 0,
+                "cleanup_deleted_entries": 0,
+                "cleanup_deleted_files": 0,
                 "pending_internal": 0,
                 "pending_external": 0,
                 "problematic": 0,
@@ -638,6 +642,21 @@ class AppContainer:
                 "last_error": "",
             }
         return snapshot
+
+    def alert_log_uploader_snapshot(self) -> Dict[str, Any]:
+        if not self.alert_log_uploader:
+            return {
+                "running": False,
+                "pending_lines": 0,
+                "queue_file_size_bytes": 0,
+                "oldest_pending_at": "",
+                "last_flush_at": "",
+                "last_error": "",
+            }
+        return self.alert_log_uploader.runtime_snapshot()
+
+    def task_engine_snapshot(self) -> Dict[str, Any]:
+        return self.job_service.task_engine_runtime_snapshot()
 
     def updater_snapshot(self) -> Dict[str, Any]:
         if not self.updater_service:

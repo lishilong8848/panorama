@@ -124,3 +124,22 @@ def test_job_service_reuses_active_job_by_dedupe_key_from_sqlite(tmp_path: Path)
     assert second.job_id == first.job_id
     release.set()
     service.wait_job(first.job_id, timeout_sec=3)
+
+
+def test_job_service_task_engine_runtime_snapshot_and_shutdown(tmp_path: Path) -> None:
+    service = JobService()
+    service.configure_task_engine(
+        runtime_config={"paths": {}},
+        app_dir=tmp_path,
+        config_snapshot_getter=lambda: {"paths": {}},
+    )
+
+    snapshot = service.task_engine_runtime_snapshot()
+
+    assert snapshot["write_queue_length"] >= 0
+    assert snapshot["closed"] is False
+
+    service.shutdown_task_engine()
+
+    closed_snapshot = service.task_engine_runtime_snapshot()
+    assert closed_snapshot["closed"] is True

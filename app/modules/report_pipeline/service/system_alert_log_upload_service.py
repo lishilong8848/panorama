@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import threading
@@ -17,6 +17,10 @@ class SystemAlertLogUploadService:
     IDLE_SECONDS = 30.0
     POLL_INTERVAL_SECONDS = 1.0
     BATCH_SIZE = 100
+    FORCE_FLUSH_PENDING_LINES = 1000
+    FORCE_FLUSH_AGE_SECONDS = 600.0
+    COMPACT_UPLOADED_LINES_THRESHOLD = 5000
+    COMPACT_FILE_SIZE_THRESHOLD_BYTES = 5 * 1024 * 1024
 
     def __init__(
         self,
@@ -41,6 +45,8 @@ class SystemAlertLogUploadService:
         self._thread: threading.Thread | None = None
         self._last_active_at = time.monotonic()
         self._state = self._load_state()
+        self._last_flush_at = ""
+        self._last_error = ""
 
     @staticmethod
     def _resolve_runtime_root(runtime_state_root: str) -> Path:
@@ -99,12 +105,72 @@ class SystemAlertLogUploadService:
 
     def _loop(self) -> None:
         while not self._stop.wait(self.POLL_INTERVAL_SECONDS):
-            if str(self._active_job_id_getter() or "").strip():
+            active_job_id = str(self._active_job_id_getter() or "").strip()
+            if active_job_id:
                 self._last_active_at = time.monotonic()
+                if self._should_force_flush():
+                    self._flush_pending()
                 continue
-            if time.monotonic() - self._last_active_at < self.IDLE_SECONDS:
+            if time.monotonic() - self._last_active_at < self.IDLE_SECONDS and not self._should_force_flush():
                 continue
             self._flush_pending()
+
+    def _pending_queue_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            if not self._queue_path.exists():
+                return {
+                    "pending_lines": 0,
+                    "queue_file_size_bytes": 0,
+                    "oldest_pending_at": "",
+                    "oldest_pending_age_sec": 0.0,
+                }
+            try:
+                raw_lines = self._queue_path.read_text(encoding="utf-8").splitlines()
+            except Exception:  # noqa: BLE001
+                return {
+                    "pending_lines": 0,
+                    "queue_file_size_bytes": int(self._queue_path.stat().st_size) if self._queue_path.exists() else 0,
+                    "oldest_pending_at": "",
+                    "oldest_pending_age_sec": 0.0,
+                }
+            start = int(self._state.get("uploaded_line_count", 0) or 0)
+            pending_lines = max(0, len(raw_lines) - start)
+            oldest_pending_at = ""
+            oldest_pending_age_sec = 0.0
+            for raw_line in raw_lines[start:]:
+                text = str(raw_line or "").strip()
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except Exception:  # noqa: BLE001
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                timestamp_text = str(payload.get("timestamp", "") or "").strip()
+                if not timestamp_text:
+                    continue
+                oldest_pending_at = timestamp_text
+                try:
+                    oldest_pending_age_sec = max(
+                        0.0,
+                        time.time() - time.mktime(time.strptime(timestamp_text, "%Y-%m-%d %H:%M:%S")),
+                    )
+                except Exception:  # noqa: BLE001
+                    oldest_pending_age_sec = 0.0
+                break
+            return {
+                "pending_lines": pending_lines,
+                "queue_file_size_bytes": int(self._queue_path.stat().st_size) if self._queue_path.exists() else 0,
+                "oldest_pending_at": oldest_pending_at,
+                "oldest_pending_age_sec": oldest_pending_age_sec,
+            }
+
+    def _should_force_flush(self) -> bool:
+        stats = self._pending_queue_stats()
+        if int(stats.get("pending_lines", 0) or 0) > self.FORCE_FLUSH_PENDING_LINES:
+            return True
+        return float(stats.get("oldest_pending_age_sec", 0.0) or 0.0) > self.FORCE_FLUSH_AGE_SECONDS
 
     def _load_pending_batch(self, limit: int) -> tuple[List[Dict[str, Any]], int]:
         with self._lock:
@@ -142,11 +208,36 @@ class SystemAlertLogUploadService:
             current = int(self._state.get("uploaded_line_count", 0) or 0)
             self._state["uploaded_line_count"] = current + consumed
             self._save_state()
+        self._compact_queue_file_if_needed()
         if uploaded_ids and callable(self._mark_uploaded):
             try:
                 self._mark_uploaded(uploaded_ids)
             except Exception:  # noqa: BLE001
                 pass
+
+    def _compact_queue_file_if_needed(self) -> None:
+        with self._lock:
+            if not self._queue_path.exists():
+                return
+            uploaded_line_count = int(self._state.get("uploaded_line_count", 0) or 0)
+            try:
+                file_size = int(self._queue_path.stat().st_size)
+            except Exception:  # noqa: BLE001
+                file_size = 0
+            if (
+                uploaded_line_count < self.COMPACT_UPLOADED_LINES_THRESHOLD
+                and file_size < self.COMPACT_FILE_SIZE_THRESHOLD_BYTES
+            ):
+                return
+            try:
+                lines = self._queue_path.read_text(encoding="utf-8").splitlines()
+            except Exception:  # noqa: BLE001
+                return
+            remaining = lines[uploaded_line_count:] if uploaded_line_count < len(lines) else []
+            payload = ("\n".join(remaining) + ("\n" if remaining else ""))
+            self._queue_path.write_text(payload, encoding="utf-8")
+            self._state["uploaded_line_count"] = 0
+            self._save_state()
 
     def _build_client(self) -> FeishuBitableClient:
         config = self._config_getter() if callable(self._config_getter) else {}
@@ -198,11 +289,24 @@ class SystemAlertLogUploadService:
             try:
                 self._upload_entries(entries)
             except Exception as exc:  # noqa: BLE001
+                self._last_error = str(exc)
                 self._emit_log(f"[系统告警上报] 上传失败: {exc}")
                 return
             self._advance_uploaded_cursor(
                 consumed,
                 [int(item.get("id", 0) or 0) for item in entries if int(item.get("id", 0) or 0) > 0],
             )
+            self._last_error = ""
+            self._last_flush_at = time.strftime("%Y-%m-%d %H:%M:%S")
             self._emit_log(f"[系统告警上报] 上传完成 count={len(entries)}")
 
+    def runtime_snapshot(self) -> Dict[str, Any]:
+        stats = self._pending_queue_stats()
+        return {
+            "running": bool(self.is_running()),
+            "pending_lines": int(stats.get("pending_lines", 0) or 0),
+            "queue_file_size_bytes": int(stats.get("queue_file_size_bytes", 0) or 0),
+            "oldest_pending_at": str(stats.get("oldest_pending_at", "") or "").strip(),
+            "last_flush_at": str(self._last_flush_at or "").strip(),
+            "last_error": str(self._last_error or "").strip(),
+        }

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
@@ -83,6 +83,44 @@ def test_system_alert_log_upload_service_uploads_only_alert_lines(tmp_path: Path
         }
     ]
     assert uploaded_ids == [7]
+    snapshot = service.runtime_snapshot()
+    assert snapshot["pending_lines"] == 0
+    assert snapshot["last_error"] == ""
+
+
+def test_system_alert_log_upload_service_compacts_uploaded_queue_file(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    service = SystemAlertLogUploadService(
+        config_getter=lambda: {"common": {"feishu_auth": {"app_id": "app", "app_secret": "secret"}}},
+        active_job_id_getter=lambda: "",
+        emit_log=lambda _text: None,
+        runtime_state_root=str(runtime_root),
+    )
+
+    for index in range(3):
+        service.enqueue_entry(
+            {
+                "id": index + 1,
+                "timestamp": "2026-03-25 16:18:58",
+                "level": "warning",
+                "source": "system",
+                "line": f"line-{index + 1}",
+            }
+        )
+    service._state["uploaded_line_count"] = service.COMPACT_UPLOADED_LINES_THRESHOLD
+    service._save_state()
+    service._queue_path.write_text(
+        "\n".join(
+            ['{"timestamp":"2026-03-25 16:18:58","line":"historical"}'] * service.COMPACT_UPLOADED_LINES_THRESHOLD
+            + ['{"timestamp":"2026-03-25 16:18:58","line":"line-3"}']
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    service._compact_queue_file_if_needed()
+
+    assert service._queue_path.read_text(encoding="utf-8").strip().endswith("line-3\"}")
+    assert int(service._state.get("uploaded_line_count", 0) or 0) == 0
 
 
 def test_job_service_global_sink_receives_job_output() -> None:

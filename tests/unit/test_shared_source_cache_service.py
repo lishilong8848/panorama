@@ -233,6 +233,46 @@ def test_internal_light_health_snapshot_uses_cached_building_rows_only(work_dir:
     assert buildings['B楼']['status'] == 'waiting'
 
 
+def test_external_full_health_snapshot_uses_cached_copy_until_marked_dirty(
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    call_counter = {'count': 0}
+
+    def _fake_build_family_health_snapshot(*, source_family: str, current_bucket: str, include_latest_selection: bool):  # noqa: ANN001
+        call_counter['count'] += 1
+        return {
+            'ready_count': 0,
+            'failed_buildings': [],
+            'blocked_buildings': [],
+            'last_success_at': '',
+            'current_bucket': current_bucket,
+            'buildings': [],
+            'latest_selection': {} if not include_latest_selection else {'source_family': source_family},
+        }
+
+    monkeypatch.setattr(service, '_build_family_health_snapshot', _fake_build_family_health_snapshot)
+
+    first = service.get_health_snapshot(mode='external_full')
+    second = service.get_health_snapshot(mode='external_full')
+
+    assert first[FAMILY_HANDOVER_LOG]['latest_selection'] == {'source_family': FAMILY_HANDOVER_LOG}
+    assert second[FAMILY_HANDOVER_LOG]['latest_selection'] == {'source_family': FAMILY_HANDOVER_LOG}
+    assert call_counter['count'] == 3
+
+    service._mark_external_full_snapshot_dirty()
+    service.get_health_snapshot(mode='external_full')
+    assert call_counter['count'] == 6
+
+
 def test_alarm_event_recent_bucket_uses_previous_day_16_before_morning(work_dir: Path) -> None:
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)

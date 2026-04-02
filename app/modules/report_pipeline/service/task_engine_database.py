@@ -4,6 +4,7 @@ import json
 import queue
 import sqlite3
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -15,6 +16,9 @@ def _json_ready(value: Any) -> Any:
 
 
 class TaskEngineDatabase:
+    WRITE_QUEUE_MAXSIZE = 5000
+    WRITE_PUT_TIMEOUT_SEC = 5.0
+
     def __init__(
         self,
         *,
@@ -25,7 +29,10 @@ class TaskEngineDatabase:
         self.root = self.runtime_root / "task_engine"
         self.root.mkdir(parents=True, exist_ok=True)
         self.db_path = self.root / "task_engine.db"
-        self._writes: queue.Queue[tuple[Callable[[sqlite3.Connection], Any], threading.Event, dict[str, Any]]] = queue.Queue()
+        self._writes: queue.Queue[Any] = queue.Queue(maxsize=self.WRITE_QUEUE_MAXSIZE)
+        self._closed = False
+        self._close_sentinel = object()
+        self._last_cleanup_at = ""
         self._init_db()
         self._writer = threading.Thread(target=self._writer_loop, name="task-engine-sqlite-writer", daemon=True)
         self._writer.start()
@@ -182,7 +189,10 @@ class TaskEngineDatabase:
         conn = self._connect()
         try:
             while True:
-                callback, done, holder = self._writes.get()
+                item = self._writes.get()
+                if item is self._close_sentinel:
+                    return
+                callback, done, holder = item
                 try:
                     holder["result"] = callback(conn)
                 except Exception as exc:  # noqa: BLE001
@@ -193,9 +203,16 @@ class TaskEngineDatabase:
             conn.close()
 
     def _write(self, callback: Callable[[sqlite3.Connection], Any]) -> Any:
+        if self._closed:
+            raise RuntimeError("TaskEngineDatabase 已关闭")
         done = threading.Event()
         holder: dict[str, Any] = {}
-        self._writes.put((callback, done, holder))
+        try:
+            self._writes.put((callback, done, holder), timeout=self.WRITE_PUT_TIMEOUT_SEC)
+        except queue.Full as exc:
+            raise RuntimeError(
+                f"任务引擎 SQLite 写队列已满，当前长度={self._writes.qsize()}，请检查长时间写入堆积"
+            ) from exc
         done.wait()
         error = holder.get("error")
         if error is not None:
@@ -658,3 +675,51 @@ class TaskEngineDatabase:
             ],
             "resources": resources,
         }
+
+    def cleanup_terminal_jobs(self, *, retention_days: int = 14) -> int:
+        cutoff_dt = datetime.now() - timedelta(days=max(1, int(retention_days or 14)))
+        cutoff_text = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+        terminal_statuses = ("success", "failed", "cancelled")
+
+        def _op(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(1) AS cnt
+                FROM jobs
+                WHERE lower(status) IN ({", ".join("?" for _ in terminal_statuses)})
+                  AND COALESCE(NULLIF(finished_at, ''), created_at) < ?
+                """,
+                (*terminal_statuses, cutoff_text),
+            ).fetchone()
+            conn.execute(
+                f"""
+                DELETE FROM jobs
+                WHERE lower(status) IN ({", ".join("?" for _ in terminal_statuses)})
+                  AND COALESCE(NULLIF(finished_at, ''), created_at) < ?
+                """,
+                (*terminal_statuses, cutoff_text),
+            )
+            return int((row["cnt"] if row else 0) or 0)
+
+        deleted = int(self._write(_op) or 0)
+        self._last_cleanup_at = _now_text()
+        return deleted
+
+    def runtime_snapshot(self) -> dict[str, Any]:
+        return {
+            "write_queue_length": int(self._writes.qsize()),
+            "last_cleanup_at": str(self._last_cleanup_at or "").strip(),
+            "closed": bool(self._closed),
+        }
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._writes.put(self._close_sentinel, timeout=self.WRITE_PUT_TIMEOUT_SEC)
+        except queue.Full:
+            pass
+        writer = getattr(self, "_writer", None)
+        if writer and writer.is_alive():
+            writer.join(timeout=5)

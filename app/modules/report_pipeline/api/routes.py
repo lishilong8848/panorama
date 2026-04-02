@@ -1416,6 +1416,23 @@ def health(
     get_next_offset = getattr(container, "system_log_next_offset", None)
     system_log_next_offset = int(get_next_offset() or 0) if callable(get_next_offset) else len(system_logs)
     shared_bridge_snapshot = _shared_bridge_health_snapshot(container, request, role_mode=role_mode)
+    task_engine_snapshot = (
+        container.task_engine_snapshot()
+        if hasattr(container, "task_engine_snapshot")
+        else {"write_queue_length": 0, "last_cleanup_at": "", "closed": True}
+    )
+    alert_log_queue_snapshot = (
+        container.alert_log_uploader_snapshot()
+        if hasattr(container, "alert_log_uploader_snapshot")
+        else {
+            "running": False,
+            "pending_lines": 0,
+            "queue_file_size_bytes": 0,
+            "oldest_pending_at": "",
+            "last_flush_at": "",
+            "last_error": "",
+        }
+    )
 
     return {
         "ok": True,
@@ -1427,6 +1444,8 @@ def health(
         "active_job_id": container.job_service.active_job_id(),
         "active_job_ids": container.job_service.active_job_ids(include_waiting=True),
         "job_counts": container.job_service.job_counts(),
+        "task_engine": task_engine_snapshot,
+        "system_alert_log_queue": alert_log_queue_snapshot,
         "scheduler": {
             "enabled": bool(scheduler.enabled) if scheduler else False,
                 "status": scheduler.status_text() if scheduler else "未初始化",

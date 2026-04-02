@@ -83,6 +83,9 @@ class SharedBridgeRuntimeService:
     INTERNAL_BROWSER_ALERT_FEATURE = "internal_browser_alert"
     INTERNAL_BROWSER_ALERT_QUIET_SEC = 600
     INTERNAL_BROWSER_ALERT_DEDUPE_SEC = 3600
+    CLEANUP_INTERVAL_SEC = 600
+    TASK_RETENTION_DAYS = 14
+    NODE_RETENTION_DAYS = 2
 
     def __init__(
         self,
@@ -105,6 +108,10 @@ class SharedBridgeRuntimeService:
         self._internal_download_pool: InternalDownloadBrowserPool | None = None
         self._source_cache_service: SharedSourceCacheService | None = None
         self._startup_logged = False
+        self._last_cleanup_at = ""
+        self._cleanup_deleted_tasks = 0
+        self._cleanup_deleted_entries = 0
+        self._cleanup_deleted_files = 0
         self._refresh_config()
 
     def _refresh_config(self) -> None:
@@ -165,6 +172,10 @@ class SharedBridgeRuntimeService:
             self._startup_logged = False
             self._last_error = ""
             self._last_poll_at = ""
+            self._last_cleanup_at = ""
+            self._cleanup_deleted_tasks = 0
+            self._cleanup_deleted_entries = 0
+            self._cleanup_deleted_files = 0
             if not self._should_run():
                 self._db_status = "disabled"
                 self._counts = {"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0, "node_count": 0}
@@ -290,6 +301,10 @@ class SharedBridgeRuntimeService:
             "db_status": self._db_status,
             "last_error": self._last_error,
             "last_poll_at": self._last_poll_at,
+            "last_cleanup_at": self._last_cleanup_at,
+            "cleanup_deleted_tasks": int(self._cleanup_deleted_tasks or 0),
+            "cleanup_deleted_entries": int(self._cleanup_deleted_entries or 0),
+            "cleanup_deleted_files": int(self._cleanup_deleted_files or 0),
             "pending_internal": int(self._counts.get("pending_internal", 0)),
             "pending_external": int(self._counts.get("pending_external", 0)),
             "problematic": int(self._counts.get("problematic", 0)),
@@ -1117,6 +1132,62 @@ class SharedBridgeRuntimeService:
             host_name=socket.gethostname(),
             version=self.app_version,
         )
+
+    def _delete_relative_files_under_shared_root(self, relative_paths: List[str]) -> int:
+        if not self.shared_bridge_root:
+            return 0
+        deleted_count = 0
+        root = Path(self.shared_bridge_root)
+        for item in relative_paths:
+            relative_text = str(item or "").strip().replace("\\", "/")
+            if not relative_text:
+                continue
+            try:
+                candidate = root / relative_text
+                if candidate.exists():
+                    candidate.unlink(missing_ok=True)
+                    deleted_count += 1
+            except Exception:  # noqa: BLE001
+                continue
+        return deleted_count
+
+    def _run_housekeeping(self) -> None:
+        if not self._store:
+            return
+        if self._source_cache_service is not None and getattr(self._source_cache_service, "store", None) is not self._store:
+            self._source_cache_service.store = self._store
+        stale_count = 0
+        if hasattr(self._store, "sweep_expired_running_tasks"):
+            stale_count = int(
+                self._store.sweep_expired_running_tasks(stale_task_timeout_sec=self.stale_task_timeout_sec) or 0
+            )
+        history_result: Dict[str, Any] = {"deleted_tasks": 0, "artifact_relative_paths": []}
+        if hasattr(self._store, "cleanup_terminal_history"):
+            raw_history_result = self._store.cleanup_terminal_history(retention_days=self.TASK_RETENTION_DAYS)
+            if isinstance(raw_history_result, dict):
+                history_result = raw_history_result
+        deleted_task_files = self._delete_relative_files_under_shared_root(history_result.get("artifact_relative_paths", []))
+        deleted_nodes = 0
+        if hasattr(self._store, "cleanup_stale_nodes"):
+            deleted_nodes = int(self._store.cleanup_stale_nodes(retention_days=self.NODE_RETENTION_DAYS) or 0)
+        entry_cleanup = (
+            self._source_cache_service.cleanup_expired_entries()
+            if self._source_cache_service is not None
+            else {"deleted_entries": 0, "deleted_files": 0}
+        )
+        self._last_cleanup_at = _now_text()
+        self._cleanup_deleted_tasks = int(history_result.get("deleted_tasks", 0) if isinstance(history_result, dict) else 0)
+        self._cleanup_deleted_entries = int(entry_cleanup.get("deleted_entries", 0) if isinstance(entry_cleanup, dict) else 0)
+        self._cleanup_deleted_files = deleted_task_files + int(
+            entry_cleanup.get("deleted_files", 0) if isinstance(entry_cleanup, dict) else 0
+        )
+        if stale_count or self._cleanup_deleted_tasks or self._cleanup_deleted_entries or deleted_nodes or self._cleanup_deleted_files:
+            self._emit_system_log(
+                "[共享桥接] housekeeping 完成: "
+                f"stale={stale_count}, deleted_tasks={self._cleanup_deleted_tasks}, "
+                f"deleted_entries={self._cleanup_deleted_entries}, deleted_files={self._cleanup_deleted_files}, "
+                f"deleted_nodes={deleted_nodes}"
+            )
 
     @staticmethod
     def _is_recoverable_store_error(exc: Exception) -> bool:
@@ -2518,6 +2589,7 @@ class SharedBridgeRuntimeService:
 
     def _loop(self) -> None:
         next_heartbeat = 0.0
+        next_cleanup = 0.0
         while not self._stop_event.is_set():
             now_monotonic = time.monotonic()
             try:
@@ -2529,6 +2601,9 @@ class SharedBridgeRuntimeService:
                     if now_monotonic >= next_heartbeat:
                         self._touch_node()
                         next_heartbeat = now_monotonic + self.heartbeat_interval_sec
+                    if now_monotonic >= next_cleanup:
+                        self._run_housekeeping()
+                        next_cleanup = now_monotonic + self.CLEANUP_INTERVAL_SEC
                     if self.role_mode == "internal":
                         self._process_internal_browser_alerts()
                     self._process_one_task_if_needed()

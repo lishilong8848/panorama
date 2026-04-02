@@ -44,6 +44,8 @@ class InternalDownloadBrowserPool:
     BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
     MAX_RECOVERY_ATTEMPTS = 3
     RECOVERY_PROBE_INTERVAL_SEC = 60
+    RECYCLE_AFTER_AGE_SEC = 12 * 60 * 60
+    RECYCLE_AFTER_JOB_COUNT = 100
     ALARM_PAGE_PATH = "/page/warn_event/warn_event.html"
 
     def __init__(
@@ -83,6 +85,10 @@ class InternalDownloadBrowserPool:
                 "last_failure_at": "",
                 "next_probe_at": "",
                 "pending_issue_summary": "",
+                "slot_created_at": "",
+                "last_recycled_at": "",
+                "jobs_since_recycle": 0,
+                "pending_recycle": False,
             }
             for building in self.BUILDINGS
         }
@@ -146,6 +152,31 @@ class InternalDownloadBrowserPool:
             "pending_issue_summary": str(slot.get("pending_issue_summary", "") or "").strip(),
             "login_state": str(slot.get("login_state", "") or "").strip(),
         }
+
+    def _slot_age_sec(self, building: str) -> int:
+        slot = self._slot_snapshot(building)
+        created_at = _parse_text_datetime(slot.get("slot_created_at"))
+        if created_at is None:
+            return 0
+        return max(0, int((datetime.now() - created_at).total_seconds()))
+
+    def _mark_slot_recycle_pending_if_needed(self, building: str) -> None:
+        slot = self._slot_snapshot(building)
+        jobs_since_recycle = int(slot.get("jobs_since_recycle", 0) or 0)
+        slot_age_sec = self._slot_age_sec(building)
+        should_recycle = (
+            slot_age_sec > self.RECYCLE_AFTER_AGE_SEC
+            or jobs_since_recycle >= self.RECYCLE_AFTER_JOB_COUNT
+        )
+        if should_recycle:
+            self._update_slot(building, pending_recycle=True)
+
+    async def _recycle_slot_if_needed(self, building: str) -> None:
+        slot = self._slot_snapshot(building)
+        if not bool(slot.get("pending_recycle", False)) or bool(slot.get("in_use", False)):
+            return
+        await self._create_or_replace_slot(building)
+        self._log(f"[共享桥接] 楼栋浏览器已滚动回收: {building}")
 
     @staticmethod
     def _classify_failure_kind(error_text: Any, *, login_state: str = "") -> str:
@@ -662,12 +693,17 @@ class InternalDownloadBrowserPool:
             last_failure_at="",
             next_probe_at="",
             pending_issue_summary="",
+            slot_created_at="",
+            last_recycled_at="",
+            jobs_since_recycle=0,
+            pending_recycle=False,
         )
 
     async def _create_or_replace_slot(self, building: str) -> Page:
         if self._playwright is None:
             raise RuntimeError("内网下载浏览器池未初始化")
         await self._close_slot(building)
+        recycled_at = _now_text()
         launch_kwargs = self._resolve_browser_options()
         try:
             browser = await self._playwright.chromium.launch(**launch_kwargs)
@@ -702,6 +738,10 @@ class InternalDownloadBrowserPool:
             last_failure_at="",
             next_probe_at="",
             pending_issue_summary="",
+            slot_created_at=recycled_at,
+            last_recycled_at=recycled_at,
+            jobs_since_recycle=0,
+            pending_recycle=False,
         )
         return page
 
@@ -861,6 +901,8 @@ class InternalDownloadBrowserPool:
         if lock is None:
             raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
         async with lock:
+            self._mark_slot_recycle_pending_if_needed(building)
+            await self._recycle_slot_if_needed(building)
             last_exc: Exception | None = None
             for attempt in range(2):
                 page = await self._ensure_page(building)
@@ -905,7 +947,10 @@ class InternalDownloadBrowserPool:
                         last_used_at=_now_text(),
                         last_result="success",
                         last_error="",
+                        jobs_since_recycle=int(self._slot_snapshot(building).get("jobs_since_recycle", 0) or 0) + 1,
                     )
+                    self._mark_slot_recycle_pending_if_needed(building)
+                    await self._recycle_slot_if_needed(building)
                     self._log(f"[共享桥接] 楼栋浏览器复用成功: {building}")
                     return result
                 except Exception as exc:  # noqa: BLE001
@@ -959,6 +1004,8 @@ class InternalDownloadBrowserPool:
         if lock is None:
             raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
         async with lock:
+            self._mark_slot_recycle_pending_if_needed(building)
+            await self._recycle_slot_if_needed(building)
             last_exc: Exception | None = None
             for attempt in range(2):
                 page = await self._ensure_page(building)
@@ -1004,7 +1051,10 @@ class InternalDownloadBrowserPool:
                         last_used_at=_now_text(),
                         last_result="success",
                         last_error="",
+                        jobs_since_recycle=int(self._slot_snapshot(building).get("jobs_since_recycle", 0) or 0) + 1,
                     )
+                    self._mark_slot_recycle_pending_if_needed(building)
+                    await self._recycle_slot_if_needed(building)
                     return result
                 except Exception as exc:  # noqa: BLE001
                     error_text = str(exc)
@@ -1146,6 +1196,15 @@ class InternalDownloadBrowserPool:
     def get_health_snapshot(self) -> Dict[str, Any]:
         with self._state_lock:
             page_slots = [copy.deepcopy(self._slot_state[building]) for building in self.BUILDINGS]
+        for slot in page_slots:
+            created_at = _parse_text_datetime(slot.get("slot_created_at"))
+            slot["slot_age_sec"] = (
+                max(0, int((datetime.now() - created_at).total_seconds()))
+                if created_at is not None
+                else 0
+            )
+            slot["jobs_since_recycle"] = int(slot.get("jobs_since_recycle", 0) or 0)
+            slot["pending_recycle"] = bool(slot.get("pending_recycle", False))
         active_buildings = [slot["building"] for slot in page_slots if bool(slot.get("in_use", False))]
         return {
             "enabled": True,

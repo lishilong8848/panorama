@@ -41,6 +41,9 @@ def test_internal_download_pool_health_snapshot_defaults_login_fields() -> None:
     assert snapshot['page_slots'][0]['login_state'] == 'waiting'
     assert snapshot['page_slots'][0]['last_login_at'] == ''
     assert snapshot['page_slots'][0]['login_error'] == ''
+    assert snapshot['page_slots'][0]['slot_age_sec'] == 0
+    assert snapshot['page_slots'][0]['jobs_since_recycle'] == 0
+    assert snapshot['page_slots'][0]['pending_recycle'] is False
 
 
 
@@ -84,6 +87,9 @@ def test_shared_bridge_health_snapshot_contains_internal_download_pool() -> None
     assert snapshot['internal_download_pool']['browser_ready'] is True
     assert snapshot['internal_download_pool']['page_slots'][0]['building'] == 'A楼'
     assert snapshot['internal_download_pool']['page_slots'][0]['login_state'] == 'ready'
+    assert snapshot['cleanup_deleted_tasks'] == 0
+    assert snapshot['cleanup_deleted_entries'] == 0
+    assert snapshot['cleanup_deleted_files'] == 0
 
 
 
