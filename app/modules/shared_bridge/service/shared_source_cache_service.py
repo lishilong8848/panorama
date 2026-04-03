@@ -22,6 +22,7 @@ from app.modules.shared_bridge.service.alarm_event_page_export_service import (
     scheduled_bucket_for_time,
     write_alarm_event_json,
 )
+from app.modules.shared_bridge.service.alarm_external_selection import build_alarm_external_selection
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver, build_bitable_url
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
@@ -478,168 +479,31 @@ class SharedSourceCacheService:
             FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
         }
 
-    def _list_alarm_external_candidate_entries(self, *, building: str = "") -> List[Dict[str, Any]]:
-        if self.store is None:
-            return []
-        building_filter = str(building or "").strip()
-        rows: List[Dict[str, Any]] = []
-        for status in ("ready", "consumed"):
-            rows.extend(
-                item
-                for item in self.store.list_source_cache_entries(
-                    source_family=FAMILY_ALARM_EVENT,
-                    building=building_filter,
-                    status=status,
-                    limit=20000,
-                )
-                if isinstance(item, dict)
-            )
-        candidates: List[Dict[str, Any]] = []
-        for row in rows:
-            row_building = str(row.get("building", "") or "").strip()
-            if not row_building:
-                continue
-            if building_filter and row_building != building_filter:
-                continue
-            bucket_kind = str(row.get("bucket_kind", "") or "").strip().lower()
-            if bucket_kind not in {"latest", "manual"}:
-                continue
-            status = str(row.get("status", "") or "").strip().lower()
-            if status not in {"ready", "consumed"}:
-                continue
-            downloaded_at = str(row.get("downloaded_at", "") or "").strip()
-            downloaded_at_dt = self._parse_alarm_datetime_text(downloaded_at)
-            if downloaded_at_dt is None:
-                continue
-            resolved_file_path = ""
-            if status == "ready":
-                file_path = self._resolve_entry_file_path(row)
-                if file_path is None:
-                    continue
-                resolved_file_path = str(file_path)
-            candidates.append(
-                {
-                    **row,
-                    "_downloaded_at_dt": downloaded_at_dt,
-                    "_resolved_file_path": resolved_file_path,
-                }
-            )
-        candidates.sort(
-            key=lambda item: (
-                item.get("_downloaded_at_dt") or datetime.min,
-                str(item.get("updated_at", "") or "").strip(),
-                str(item.get("entry_id", "") or "").strip(),
-            ),
-            reverse=True,
-        )
-        return candidates
-
     def _build_alarm_external_selection(self, *, building: str = "") -> Dict[str, Any]:
-        reference_date = _now_dt().date()
-        previous_date = reference_date - timedelta(days=1)
-        requested_buildings = [
-            str(item or "").strip()
-            for item in ([building] if str(building or "").strip() else self.get_enabled_buildings())
-            if str(item or "").strip()
-        ]
-        target_buildings = list(dict.fromkeys(requested_buildings))
-        grouped: Dict[str, List[Dict[str, Any]]] = {name: [] for name in target_buildings}
-        for candidate in self._list_alarm_external_candidate_entries(building=building):
-            row_building = str(candidate.get("building", "") or "").strip()
-            if row_building in grouped:
-                grouped[row_building].append(candidate)
-        selected_entries: List[Dict[str, Any]] = []
-        building_rows: List[Dict[str, Any]] = []
-        used_previous_day_fallback: List[str] = []
-        missing_today_buildings: List[str] = []
-        missing_both_days_buildings: List[str] = []
-        for name in target_buildings:
-            candidates = grouped.get(name, [])
-            today_candidates = [
-                item for item in candidates
-                if isinstance(item.get("_downloaded_at_dt"), datetime)
-                and item["_downloaded_at_dt"].date() == reference_date
-            ]
-            previous_day_candidates = [
-                item for item in candidates
-                if isinstance(item.get("_downloaded_at_dt"), datetime)
-                and item["_downloaded_at_dt"].date() == previous_date
-            ]
-            selected: Dict[str, Any] | None = None
-            selection_scope = ""
-            if today_candidates:
-                selected = today_candidates[0]
-                selection_scope = "today"
-            else:
-                missing_today_buildings.append(name)
-                if previous_day_candidates:
-                    selected = previous_day_candidates[0]
-                    selection_scope = "yesterday_fallback"
-                    used_previous_day_fallback.append(name)
-                else:
-                    missing_both_days_buildings.append(name)
-            if selected is None:
-                building_rows.append(
-                    {
-                        "building": name,
-                        "bucket_key": "",
-                        "status": "waiting",
-                        "ready": False,
-                        "downloaded_at": "",
-                        "selected_downloaded_at": "",
-                        "last_error": "",
-                        "relative_path": "",
-                        "resolved_file_path": "",
-                        "blocked": False,
-                        "blocked_reason": "",
-                        "next_probe_at": "",
-                        "source_kind": "",
-                        "selection_scope": "missing",
-                    }
-                )
-                continue
-            row_status = str(selected.get("status", "") or "").strip().lower()
-            row_downloaded_at = str(selected.get("downloaded_at", "") or "").strip()
-            building_rows.append(
-                {
-                    "building": name,
-                    "bucket_key": str(selected.get("bucket_key", "") or "").strip(),
-                    "status": row_status or "waiting",
-                    "ready": row_status == "ready",
-                    "downloaded_at": row_downloaded_at,
-                    "selected_downloaded_at": row_downloaded_at,
-                    "last_error": "",
-                    "relative_path": str(selected.get("relative_path", "") or "").strip(),
-                    "resolved_file_path": str(selected.get("_resolved_file_path", "") or "").strip(),
-                    "blocked": False,
-                    "blocked_reason": "",
-                    "next_probe_at": "",
-                    "source_kind": str(selected.get("bucket_kind", "") or "").strip().lower(),
-                    "selection_scope": selection_scope,
-                }
-            )
-            if row_status == "ready":
-                selected_entries.append(selected)
-        last_success_candidates = [
-            str(item.get("selected_downloaded_at", "") or "").strip()
-            for item in building_rows
-            if str(item.get("selected_downloaded_at", "") or "").strip()
-        ]
-        return {
-            "selection_policy": "today_latest_else_yesterday_fallback",
-            "selection_reference_date": reference_date.isoformat(),
-            "used_previous_day_fallback": used_previous_day_fallback,
-            "missing_today_buildings": missing_today_buildings,
-            "missing_both_days_buildings": missing_both_days_buildings,
-            "ready_count": sum(1 for item in building_rows if bool(item.get("ready"))),
-            "failed_buildings": [],
-            "blocked_buildings": [],
-            "last_success_at": max(last_success_candidates) if last_success_candidates else "",
-            "current_bucket": reference_date.isoformat(),
-            "buildings": building_rows,
-            "latest_selection": {},
-            "selected_entries": selected_entries,
-        }
+        if self.store is None or self.shared_root is None:
+            return {
+                "selection_policy": "today_latest_else_yesterday_fallback",
+                "selection_reference_date": _now_dt().date().isoformat(),
+                "used_previous_day_fallback": [],
+                "missing_today_buildings": [],
+                "missing_both_days_buildings": [],
+                "ready_count": 0,
+                "failed_buildings": [],
+                "blocked_buildings": [],
+                "last_success_at": "",
+                "current_bucket": _now_dt().date().isoformat(),
+                "buildings": [],
+                "latest_selection": {},
+                "selected_entries": [],
+                "selected_by_building": {},
+            }
+        return build_alarm_external_selection(
+            store=self.store,
+            shared_root=self.shared_root,
+            reference_date=_now_dt().date(),
+            enabled_buildings=self.get_enabled_buildings(),
+            building=building,
+        )
 
     def _build_alarm_external_health_snapshot(self) -> Dict[str, Any]:
         selection = self._build_alarm_external_selection()
@@ -2861,89 +2725,33 @@ class SharedSourceCacheService:
             return 0
         return client.batch_delete_records(table_id=table_id, record_ids=record_ids, batch_size=delete_batch_size)
 
-    def _consume_alarm_entry_after_upload(
+    def _mark_alarm_entry_uploaded(
         self,
         *,
         entry: Dict[str, Any],
-        consumed_by_mode: str,
-        consumed_reason: str = "",
+        uploaded_by_mode: str,
+        uploaded_scope: str,
     ) -> bool:
         if self.store is None:
             return False
         entry_id = str(entry.get("entry_id", "") or "").strip()
         if not entry_id:
             return False
-        file_path = self._resolve_entry_file_path(entry)
-        try:
-            if file_path is not None and file_path.exists():
-                file_path.unlink(missing_ok=True)
-        except Exception as exc:  # noqa: BLE001
-            self.store.update_source_cache_entry_status(
-                entry_id,
-                status="failed",
-                metadata_update={
-                    "error": f"上传后消费删除失败：{exc}",
-                    "consume_failed_at": _now_text(),
-                },
-            )
-            return False
-        consumed_at = _now_text()
+        uploaded_at = _now_text()
+        current_status = str(entry.get("status", "") or "").strip().lower() or "ready"
         self.store.update_source_cache_entry_status(
             entry_id,
-            status="consumed",
+            status=current_status,
             metadata_update={
-                "consumed_at": consumed_at,
-                "consumed_by_role": self.role_mode,
-                "consumed_by_family": FAMILY_ALARM_EVENT,
-                "consumed_by_mode": str(consumed_by_mode or "").strip(),
-                "consumed_reason": str(consumed_reason or "").strip(),
+                "last_uploaded_at": uploaded_at,
+                "last_uploaded_by_role": self.role_mode,
+                "last_uploaded_by_family": FAMILY_ALARM_EVENT,
+                "last_uploaded_mode": str(uploaded_by_mode or "").strip(),
+                "last_uploaded_scope": str(uploaded_scope or "").strip(),
             },
         )
         self._mark_external_full_snapshot_dirty()
         return True
-
-    def _consume_superseded_alarm_ready_entries_after_upload(
-        self,
-        *,
-        entry: Dict[str, Any],
-        consumed_by_mode: str,
-    ) -> Dict[str, Any]:
-        if self.store is None:
-            return {"consumed_count": 0, "failed_buildings": []}
-        building = str(entry.get("building", "") or "").strip()
-        current_entry_id = str(entry.get("entry_id", "") or "").strip()
-        current_downloaded_at_dt = self._parse_alarm_datetime_text(str(entry.get("downloaded_at", "") or "").strip())
-        if not building or current_downloaded_at_dt is None:
-            return {"consumed_count": 0, "failed_buildings": []}
-        rows = self.store.list_source_cache_entries(
-            source_family=FAMILY_ALARM_EVENT,
-            building=building,
-            status="ready",
-            limit=5000,
-        )
-        consumed_count = 0
-        failed_buildings: List[str] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            row_entry_id = str(row.get("entry_id", "") or "").strip()
-            if not row_entry_id or row_entry_id == current_entry_id:
-                continue
-            row_bucket_kind = str(row.get("bucket_kind", "") or "").strip().lower()
-            if row_bucket_kind not in {"latest", "manual"}:
-                continue
-            row_downloaded_at_dt = self._parse_alarm_datetime_text(str(row.get("downloaded_at", "") or "").strip())
-            if row_downloaded_at_dt is None or row_downloaded_at_dt >= current_downloaded_at_dt:
-                continue
-            if self._consume_alarm_entry_after_upload(
-                entry=row,
-                consumed_by_mode=consumed_by_mode,
-                consumed_reason="superseded_by_newer_bucket",
-            ):
-                consumed_count += 1
-            else:
-                failed_buildings.append(building)
-        return {"consumed_count": consumed_count, "failed_buildings": failed_buildings}
 
     def _set_alarm_external_upload_state(
         self,
@@ -3316,18 +3124,12 @@ class SharedSourceCacheService:
         consumed_buildings: List[str] = []
         for entry, _parsed in parsed_entries:
             row_building = str(entry.get("building", "") or "").strip()
-            if self._consume_alarm_entry_after_upload(entry=entry, consumed_by_mode=normalized_mode):
-                consumed_count += 1
-                if row_building:
-                    consumed_buildings.append(row_building)
-                    superseded = self._consume_superseded_alarm_ready_entries_after_upload(
-                        entry=entry,
-                        consumed_by_mode=normalized_mode,
-                    )
-                    consumed_count += int(superseded.get("consumed_count", 0) or 0)
-                    consume_failed_entries.extend(
-                        [item for item in superseded.get("failed_buildings", []) if str(item or "").strip()]
-                    )
+            if self._mark_alarm_entry_uploaded(
+                entry=entry,
+                uploaded_by_mode=normalized_mode,
+                uploaded_scope=scope_text,
+            ):
+                continue
             elif row_building:
                 consume_failed_entries.append(row_building)
 
@@ -3349,7 +3151,7 @@ class SharedSourceCacheService:
             success=success,
         )
         self._emit_alarm_upload_log(
-            f"[共享缓存] 外网告警文件上传完成: mode={normalized_mode}, scope={scope_text}, records={len(aggregated_records)}, files={len(parsed_entries)}, consumed={consumed_count}"
+            f"[共享缓存] 外网告警文件上传完成: mode={normalized_mode}, scope={scope_text}, records={len(aggregated_records)}, files={len(parsed_entries)}, retained_files={len(parsed_entries)}"
             + (f", failed_entries={', '.join(failed_entries)}" if failed_entries else ""),
             emit_log=emit_log,
         )

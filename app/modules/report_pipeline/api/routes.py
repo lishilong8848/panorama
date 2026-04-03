@@ -33,7 +33,10 @@ from app.modules.report_pipeline.service.calculation_service import CalculationS
 from app.modules.report_pipeline.service.job_service import JobBusyError
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
-from app.modules.shared_bridge.service.shared_source_cache_service import is_accessible_cached_file_path
+from app.modules.shared_bridge.service.shared_source_cache_service import (
+    SharedSourceCacheService,
+    is_accessible_cached_file_path,
+)
 from app.shared.utils.runtime_temp_workspace import (
     cleanup_runtime_temp_dir,
     create_runtime_temp_dir,
@@ -1395,6 +1398,7 @@ def health(
     include_network_probe = role_mode != "internal"
     include_wet_bulb_target_preview = role_mode != "internal"
     include_day_metric_target_preview = role_mode != "internal"
+    include_alarm_event_target_preview = role_mode != "internal"
 
     wifi_name = None
     interface_name = ""
@@ -1433,6 +1437,13 @@ def health(
     day_metric_target_preview = (
         DayMetricBitableExportService(load_handover_config(runtime_cfg)).build_target_descriptor(force_refresh=False)
         if include_day_metric_target_preview
+        else {}
+    )
+    alarm_event_target_preview = (
+        SharedSourceCacheService(runtime_config=runtime_cfg, store=None).get_alarm_event_upload_target_preview(
+            force_refresh=False
+        )
+        if include_alarm_event_target_preview
         else {}
     )
     handover_slots = (
@@ -1676,6 +1687,9 @@ def health(
             else True,
             "target_preview": day_metric_target_preview,
         },
+        "alarm_event_upload": {
+            "target_preview": alarm_event_target_preview,
+        },
         "updater": {
             "enabled": bool(runtime_cfg.get("updater", {}).get("enabled", True))
             if isinstance(runtime_cfg.get("updater", {}), dict)
@@ -1882,6 +1896,34 @@ def reprobe_handover_review_access(request: Request) -> Dict[str, Any]:
     return {
         "ok": bool(str(snapshot.get("review_base_url_effective", "") or "").strip()),
         "handover_review_access": snapshot,
+    }
+
+
+@router.post("/api/runtime/alarm-event-upload-target/open")
+def open_alarm_event_upload_target(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    runtime_cfg = _runtime_config(container)
+    preview = SharedSourceCacheService(runtime_config=runtime_cfg, store=None).get_alarm_event_upload_target_preview(
+        force_refresh=True
+    )
+    display_url = str(preview.get("display_url", "") or preview.get("bitable_url", "") or "").strip()
+    target_kind = str(preview.get("target_kind", "") or "").strip()
+    configured_app_token = str(preview.get("configured_app_token", "") or "").strip()
+    operation_app_token = str(preview.get("operation_app_token", "") or "").strip()
+    table_id = str(preview.get("table_id", "") or "").strip()
+    message = str(preview.get("message", "") or "").strip()
+    container.add_system_log(
+        "[告警上传][目标链接] 打开多维表: "
+        f"kind={target_kind or '-'}, "
+        f"display_url={display_url or '-'}, "
+        f"configured_app_token={configured_app_token or '-'}, "
+        f"operation_app_token={operation_app_token or '-'}, "
+        f"table_id={table_id or '-'}, "
+        f"message={message or '-'}"
+    )
+    return {
+        "ok": bool(display_url),
+        "target_preview": preview,
     }
 
 

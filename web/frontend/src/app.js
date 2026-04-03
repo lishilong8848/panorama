@@ -576,7 +576,6 @@ createApp({
           uploadLastError: "",
           uploadRecordCount: 0,
           uploadFileCount: 0,
-          uploadConsumedCount: 0,
           uploadRunning: false,
           uploadStartedAt: "",
           uploadCurrentMode: "",
@@ -593,7 +592,6 @@ createApp({
       const uploadLastSuccessAt = String(family.uploadLastSuccessAt || "").trim();
       const uploadRecordCount = Number.parseInt(String(family.uploadRecordCount || 0), 10) || 0;
       const uploadFileCount = Number.parseInt(String(family.uploadFileCount || 0), 10) || 0;
-      const uploadConsumedCount = Number.parseInt(String(family.uploadConsumedCount || 0), 10) || 0;
       if (uploadRunning) {
         return {
           tone: "info",
@@ -612,7 +610,7 @@ createApp({
         return {
           tone: "success",
           statusText: "最近上传成功",
-          summaryText: `最近上传：${uploadLastRunAt || uploadLastSuccessAt}（记录 ${uploadRecordCount} 条，文件 ${uploadFileCount} 份，消费 ${uploadConsumedCount} 份）。`,
+          summaryText: `最近上传：${uploadLastRunAt || uploadLastSuccessAt}（记录 ${uploadRecordCount} 条，文件 ${uploadFileCount} 份，源文件保留）。`,
         };
       }
       return {
@@ -633,21 +631,47 @@ createApp({
         ? sharedUploadCfg.target
         : {};
       const mergedTarget = { ...legacyTarget, ...overrideTarget };
+      const preview = health.alarm_event_upload?.target_preview || {};
       const appToken = String(mergedTarget.app_token || "").trim();
       const tableId = String(mergedTarget.table_id || "").trim();
-      const displayUrl = appToken && tableId ? `https://vnet.feishu.cn/base/${appToken}?table=${tableId}` : "";
+      const baseUrl = String(mergedTarget.base_url || "").trim();
+      const wikiUrl = String(mergedTarget.wiki_url || "").trim();
+      const displayUrl = String(preview?.display_url || preview?.bitable_url || "").trim()
+        || wikiUrl
+        || baseUrl
+        || (appToken && tableId ? `https://vnet.feishu.cn/base/${appToken}?table=${tableId}` : "");
+      const targetKind = String(preview?.target_kind || "").trim()
+        || (wikiUrl
+          ? "wiki_url"
+          : baseUrl
+            ? "base_url"
+            : appToken && tableId
+              ? "token_pair"
+              : "");
       const replaceExistingOnFull = sharedUploadCfg.replace_existing_on_full !== false;
       return {
-        appToken,
-        tableId,
+        appToken: String(preview?.configured_app_token || "").trim() || appToken,
+        operationAppToken: String(preview?.operation_app_token || "").trim(),
+        tableId: String(preview?.table_id || "").trim() || tableId,
+        baseUrl,
+        wikiUrl,
         displayUrl,
         bitableUrl: displayUrl,
-        configured: Boolean(appToken && tableId),
+        targetKind,
+        configured: Boolean(displayUrl || (appToken && tableId)),
         replaceExistingOnFull,
-        statusText: appToken && tableId ? "已配置" : "未配置",
-        hintText: appToken && tableId
-          ? (replaceExistingOnFull ? "全量上传会先清表再重传。" : "全量上传不会清空目标表。")
-          : "请先在配置中心的功能配置里补齐告警信息上传目标多维表。",
+        statusText: displayUrl || (appToken && tableId) ? "已配置" : "未配置",
+        hintText:
+          String(preview?.message || "").trim()
+          || (
+            targetKind === "wiki_token_pair" || targetKind === "wiki_url"
+              ? "当前自动识别为 Wiki 多维表链接。"
+              : targetKind === "base_token_pair" || targetKind === "base_url"
+                ? "当前自动识别为 Base 多维表链接。"
+                : appToken && tableId
+                  ? "当前按 App Token 和 Table ID 生成目标多维表链接。"
+                  : "请先在配置中心的功能配置里补齐告警信息上传目标多维表。"
+          ),
       };
     });
     const dayMetricUploadTarget = computed(() => {
@@ -722,6 +746,325 @@ createApp({
     const showManualFeatureConfigTab = computed(() => configRoleMode.value !== "internal");
     const showRuntimeNetworkPanel = computed(() => false);
     const showDashboardPageNav = computed(() => deploymentRoleMode.value !== "internal");
+    const currentTaskOverview = computed(() => {
+      const current = currentJob.value || runningJobs.value[0] || waitingResourceJobs.value[0] || null;
+      const runningCount = Number(runningJobs.value.length || 0);
+      const waitingCount = Number(waitingResourceJobs.value.length || 0);
+      const bridgeCount = Number(activeBridgeTasks.value.length || 0);
+      const recentFailure = (recentFinishedJobs.value || []).find((job) =>
+        ["failed", "partial_failed", "blocked_precondition", "interrupted"].includes(
+          String(job?.status || "").trim().toLowerCase(),
+        ),
+      );
+      let tone = "neutral";
+      let statusText = "当前空闲";
+      let summaryText = "暂无长耗时任务，可直接从主动作开始。";
+      let nextActionText = "需要细节时再展开“任务与资源”，避免先陷进状态细节。";
+      if (runningCount > 0) {
+        tone = "info";
+        statusText = "有任务正在执行";
+        summaryText = `当前有 ${runningCount} 个运行中任务${waitingCount > 0 ? `，另有 ${waitingCount} 个等待资源` : ""}。`;
+        nextActionText = "优先盯住当前任务；长操作的结果、进度和错误都以任务区为准。";
+      } else if (waitingCount > 0) {
+        tone = "warning";
+        statusText = "任务正在等待资源";
+        summaryText = `当前有 ${waitingCount} 个任务等待资源，可先检查网络、共享桥接或浏览器池状态。`;
+        nextActionText = "先处理资源阻塞，再决定是否重试任务。";
+      } else if (bridgeCount > 0) {
+        tone = "warning";
+        statusText = "共享桥接仍在推进";
+        summaryText = `当前有 ${bridgeCount} 个共享协同任务仍未结束。`;
+        nextActionText = "优先查看共享协同任务，再执行新的跨机动作。";
+      } else if (recentFailure) {
+        tone = "danger";
+        statusText = "最近有失败任务";
+        summaryText = `最近失败任务：${recentFailure.name || recentFailure.feature || recentFailure.job_id || "-"}`;
+        nextActionText = "先看失败摘要和任务详情，再决定是否重试。";
+      }
+      return {
+        tone,
+        statusText,
+        summaryText,
+        nextActionText,
+        focusTitle: current ? (current.name || current.feature || current.job_id || "-") : "当前没有选中任务",
+        focusMeta: current
+          ? `${formatJobKind(current)} / ${formatJobStatus(current.status || "running")}`
+          : "可以直接开始新的流程动作",
+        items: [
+          { label: "运行中任务", value: `${runningCount} 个`, tone: runningCount > 0 ? "info" : "neutral" },
+          { label: "等待资源", value: `${waitingCount} 个`, tone: waitingCount > 0 ? "warning" : "neutral" },
+          { label: "共享协同", value: `${bridgeCount} 个`, tone: bridgeCount > 0 ? "warning" : "neutral" },
+          {
+            label: "最近失败",
+            value: recentFailure ? (recentFailure.name || recentFailure.feature || recentFailure.job_id || "-") : "无",
+            tone: recentFailure ? "danger" : "success",
+          },
+        ],
+      };
+    });
+    const homeOverview = computed(() => {
+      if (deploymentRoleMode.value === "internal") {
+        const runtime = internalRuntimeOverview.value || {};
+        return {
+          tone: runtime.tone || "neutral",
+          statusText: runtime.statusText || "等待内网运行态",
+          summaryText: runtime.summaryText || "内网端首页应优先关注浏览器池、共享文件和当前小时刷新。",
+          nextActionText: runtime.errorText
+            ? "先处理最近异常，再决定是否重新下载当前小时文件。"
+            : "先看浏览器池和共享文件是否健康，再执行手动动作。",
+          items: [
+            { label: "共享文件", value: runtime.statusText || "-", tone: runtime.tone || "neutral" },
+            { label: "浏览器池", value: runtime.poolStatusText || "-", tone: runtime.poolStatusText ? "info" : "neutral" },
+            {
+              label: "当前轮次",
+              value: runtime.currentHourRefresh?.statusText || "-",
+              tone: runtime.currentHourRefresh?.tone || "neutral",
+            },
+            { label: "当前任务", value: currentTaskOverview.value.statusText, tone: currentTaskOverview.value.tone },
+          ],
+          actions: [
+            { id: "refresh_current_hour", label: currentHourRefreshButtonText.value, desc: "立即刷新当前小时三组共享文件" },
+            { id: "refresh_manual_alarm", label: manualAlarmRefreshButtonText.value, desc: "单独拉取近 60 天告警 JSON" },
+            { id: "open_config", label: "打开本地配置", desc: "检查共享目录、浏览器池和桥接参数" },
+          ],
+        };
+      }
+      const cache = sharedSourceCacheReadinessOverview.value || {};
+      const review = handoverReviewOverview.value || {};
+      const alarmUpload = externalAlarmUploadStatus.value || {};
+      let tone = "success";
+      let statusText = "可以继续外网主流程";
+      let summaryText = "共享文件已就绪，当前可以直接进入自动流程、交接班或告警上传。";
+      let nextActionText = "优先从“立即自动流程”开始；需要专项处理时再进入交接班日志或告警信息上传。";
+      if (!cache.canProceedLatest) {
+        tone = cache.tone || "warning";
+        statusText = cache.statusText || "等待共享文件就绪";
+        summaryText = cache.summaryText || "共享文件还没准备好，先不要急着做外网上传。";
+        nextActionText = "先去状态总览确认缺哪一组文件、哪几个楼还在等待。";
+      } else if (review.hasAnySession && !review.allConfirmed) {
+        tone = review.tone || "warning";
+        statusText = "当前批次还有待确认楼栋";
+        summaryText = review.summaryText || "交接班批次还没完成确认。";
+        nextActionText = "先处理交接班确认，再继续后续云表或派生上传动作。";
+      } else if (alarmUpload.tone === "danger") {
+        tone = "warning";
+        statusText = "最近专项上传有异常";
+        summaryText = alarmUpload.summaryText || "最近专项上传失败，但共享源文件仍保留。";
+        nextActionText = "进入告警信息上传模块看任务摘要和运行日志，不要只盯卡片提示。";
+      } else if (currentTaskOverview.value.tone === "info" || currentTaskOverview.value.tone === "warning") {
+        tone = currentTaskOverview.value.tone;
+        statusText = currentTaskOverview.value.statusText;
+        summaryText = currentTaskOverview.value.summaryText;
+        nextActionText = currentTaskOverview.value.nextActionText;
+      }
+      return {
+        tone,
+        statusText,
+        summaryText,
+        nextActionText,
+        items: [
+          { label: "共享文件", value: cache.statusText || "-", tone: cache.tone || "neutral" },
+          { label: "交接班确认", value: review.summaryText || "当前无待确认批次", tone: review.tone || "neutral" },
+          { label: "告警上传", value: alarmUpload.statusText || "-", tone: alarmUpload.tone || "neutral" },
+          { label: "当前任务", value: currentTaskOverview.value.statusText, tone: currentTaskOverview.value.tone },
+        ],
+        actions: [
+          { id: "open_auto_flow", label: "立即自动流程", desc: "从共享文件主链开始执行外网默认流程" },
+          { id: "open_handover_log", label: "交接班处理", desc: "处理审核、回补和交接班后续上传" },
+          { id: "open_alarm_upload", label: "告警上传", desc: "检查今天最新告警文件并执行 60 天上传" },
+        ],
+      };
+    });
+    const statusDiagnosisOverview = computed(() => {
+      if (deploymentRoleMode.value === "internal") {
+        const runtime = internalRuntimeOverview.value || {};
+        const currentRefresh = runtime.currentHourRefresh || {};
+        const failureText = String(currentRefresh.lastError || runtime.poolErrorText || runtime.errorText || "").trim();
+        let tone = runtime.tone || "neutral";
+        let statusText = runtime.statusText || "等待内网运行态";
+        let reasonText = runtime.summaryText || "当前没有足够的内网运行态摘要。";
+        let actionText = "先确认浏览器池和共享目录是否正常，再决定是否触发下载。";
+        if (failureText) {
+          tone = "danger";
+          statusText = "当前有需要人工处理的问题";
+          reasonText = failureText;
+          actionText = "优先看失败楼栋或登录失败楼，再决定是否重新下载当前小时或手动拉取告警。";
+        } else if (currentRefresh.tone === "warning" || currentRefresh.tone === "info") {
+          tone = currentRefresh.tone || "warning";
+          statusText = currentRefresh.statusText || "当前共享文件仍在推进";
+          reasonText = currentRefresh.summaryText || runtime.summaryText || "";
+          actionText = "先等待本轮执行结束；需要抢修时再用手动拉取。";
+        }
+        return {
+          tone,
+          statusText,
+          reasonText,
+          actionText,
+          items: [
+            { label: "共享文件", value: runtime.statusText || "-", tone: runtime.tone || "neutral" },
+            { label: "浏览器池", value: runtime.poolStatusText || "-", tone: runtime.poolStatusText ? "info" : "neutral" },
+            { label: "当前轮次", value: currentRefresh.statusText || "-", tone: currentRefresh.tone || "neutral" },
+            { label: "当前任务", value: currentTaskOverview.value.statusText, tone: currentTaskOverview.value.tone },
+          ],
+          actions: [
+            { id: "refresh_current_hour", label: currentHourRefreshButtonText.value },
+            { id: "refresh_manual_alarm", label: manualAlarmRefreshButtonText.value },
+            { id: "open_config", label: "打开本地配置" },
+          ],
+        };
+      }
+      const cache = sharedSourceCacheReadinessOverview.value || {};
+      const review = handoverReviewOverview.value || {};
+      const alarmUpload = externalAlarmUploadStatus.value || {};
+      let tone = "success";
+      let statusText = "外网链路可继续执行";
+      let reasonText = "共享文件已就绪，没有发现需要先处理的阻塞。";
+      let actionText = "优先使用自动流程；需要专项处理时再进入交接班或告警上传模块。";
+      if (!cache.canProceedLatest) {
+        tone = cache.tone || "warning";
+        statusText = cache.statusText || "等待共享文件就绪";
+        reasonText = cache.summaryText || "共享文件还不完整。";
+        actionText = "先看最新共享文件就绪情况，确认缺失楼栋和等待原因。";
+      } else if (review.hasAnySession && !review.allConfirmed) {
+        tone = review.tone || "warning";
+        statusText = "当前批次还有待确认楼栋";
+        reasonText = review.summaryText || "交接班确认未结束。";
+        actionText = "先完成交接班确认，再执行后续上传或派生动作。";
+      } else if (alarmUpload.tone === "danger") {
+        tone = "warning";
+        statusText = "最近告警上传异常";
+        reasonText = alarmUpload.summaryText || "最近一次告警上传失败。";
+        actionText = "进入告警上传模块查看任务和运行日志，文件状态本身仍以 ready 为准。";
+      }
+      return {
+        tone,
+        statusText,
+        reasonText,
+        actionText,
+        items: [
+          { label: "共享文件", value: cache.statusText || "-", tone: cache.tone || "neutral" },
+          { label: "交接班确认", value: review.summaryText || "当前无待确认批次", tone: review.tone || "neutral" },
+          { label: "告警上传", value: alarmUpload.statusText || "-", tone: alarmUpload.tone || "neutral" },
+          { label: "当前任务", value: currentTaskOverview.value.statusText, tone: currentTaskOverview.value.tone },
+        ],
+        actions: [
+          { id: "open_auto_flow", label: "进入自动流程" },
+          { id: "open_handover_log", label: "进入交接班" },
+          { id: "open_alarm_upload", label: "进入告警上传" },
+        ],
+      };
+    });
+    const configGuidanceOverview = computed(() => {
+      const role = configRoleMode.value || deploymentRoleMode.value;
+      const sharedRoot = resolveSharedBridgeRoleRoot(config.value, role);
+      const feishuAppId = String(config.value?.feishu?.app_id || "").trim();
+      const feishuAppSecret = String(config.value?.feishu?.app_secret || "").trim();
+      const handoverTemplatePath = String(config.value?.handover_log?.template?.source_path || "").trim();
+      const handoverCloudRoot = String(config.value?.handover_log?.cloud_sheet_sync?.root_wiki_url || "").trim();
+      const sections = [
+        {
+          id: "common_deployment",
+          label: "角色与监听",
+          ready: Boolean(role),
+          value: role ? formatDeploymentRoleLabel(role) : "未选择",
+          tone: role ? "success" : "warning",
+          hint: role
+            ? `当前配置角色：${formatDeploymentRoleLabel(role)}`
+            : "需要先选择有效角色，否则无法确定本机监听模式。",
+        },
+        {
+          id: "common_deployment",
+          label: "共享目录",
+          ready: Boolean(sharedRoot),
+          value: sharedRoot || "未配置",
+          tone: sharedRoot ? "success" : "warning",
+          hint: sharedRoot
+            ? "共享桥接、源文件和批准版本都会依赖该目录。"
+            : "未配置共享目录时，内外网主链无法通过共享缓存协同。",
+        },
+        {
+          id: "common_feishu_auth",
+          label: "飞书鉴权",
+          ready: Boolean(feishuAppId && feishuAppSecret),
+          value: feishuAppId && feishuAppSecret ? "已配置" : "未配置",
+          tone: feishuAppId && feishuAppSecret ? "success" : "warning",
+          hint: feishuAppId && feishuAppSecret
+            ? "飞书应用鉴权已具备。"
+            : "缺少 app_id 或 app_secret 时，涉及多维表的模块无法稳定运行。",
+        },
+      ];
+      if (role !== "internal") {
+        sections.push(
+          {
+            id: "feature_handover",
+            label: "交接班模板",
+            ready: Boolean(handoverTemplatePath),
+            value: handoverTemplatePath ? "已配置" : "未配置",
+            tone: handoverTemplatePath ? "success" : "warning",
+            hint: handoverTemplatePath || "交接班日志没有模板路径时无法生成文件。",
+          },
+          {
+            id: "feature_handover",
+            label: "交接班云表",
+            ready: Boolean(handoverCloudRoot),
+            value: handoverCloudRoot ? "已配置" : "未配置",
+            tone: handoverCloudRoot ? "success" : "warning",
+            hint: handoverCloudRoot || "未配置根 Wiki 地址时，交接班后续云表链路无法完整执行。",
+          },
+          {
+            id: "feature_handover",
+            label: "12项目标",
+            ready: Boolean(dayMetricUploadTarget.value?.configured),
+            value: dayMetricUploadTarget.value?.statusText || "未配置",
+            tone: dayMetricUploadTarget.value?.configured ? "success" : "warning",
+            hint: dayMetricUploadTarget.value?.hintText || "",
+          },
+          {
+            id: "feature_alarm_export",
+            label: "告警目标",
+            ready: Boolean(alarmEventUploadTarget.value?.configured),
+            value: alarmEventUploadTarget.value?.statusText || "未配置",
+            tone: alarmEventUploadTarget.value?.configured ? "success" : "warning",
+            hint: alarmEventUploadTarget.value?.hintText || "",
+          },
+        );
+      }
+      const readyCount = sections.filter((item) => item.ready).length;
+      const missingLabels = sections.filter((item) => !item.ready).map((item) => item.label);
+      const restartRequired = Boolean(
+        configRoleMode.value && deploymentRoleMode.value && configRoleMode.value !== deploymentRoleMode.value,
+      );
+      let tone = "warning";
+      let statusText = "仍有关键配置待补齐";
+      let summaryText = `当前已完成 ${readyCount}/${sections.length} 项关键配置。`;
+      if (readyCount === sections.length) {
+        tone = "success";
+        statusText = "关键配置已齐套";
+        summaryText = "当前高频主链所需配置已经齐套，后续再按模块补高级参数即可。";
+      } else if (readyCount === 0) {
+        tone = "danger";
+        statusText = "当前还没有完成关键配置";
+        summaryText = "建议先从角色、共享目录和飞书鉴权开始，不要直接填全部细项。";
+      } else if (missingLabels.length) {
+        summaryText = `当前已完成 ${readyCount}/${sections.length} 项关键配置，仍缺：${missingLabels.join(" / ")}。`;
+      }
+      const quickTabs = [
+        { id: "common_deployment", label: "角色与共享目录" },
+        ...(showFeishuAuthConfigTab.value ? [{ id: "common_feishu_auth", label: "飞书鉴权" }] : []),
+        ...(showFeatureHandoverConfigTab.value ? [{ id: "feature_handover", label: "交接班" }] : []),
+        ...(showFeatureAlarmExportConfigTab.value ? [{ id: "feature_alarm_export", label: "告警上传" }] : []),
+      ];
+      return {
+        tone,
+        statusText,
+        summaryText,
+        restartImpactText: restartRequired
+          ? `当前配置角色与正在运行角色不同，保存后会自动重启并切换到${formatDeploymentRoleLabel(configRoleMode.value)}。`
+          : "大多数配置保存后可直接生效；只有角色监听模式变化时才需要自动重启。",
+        sections,
+        quickTabs,
+      };
+    });
     const appShellTitle = computed(() => {
       if (deploymentRoleMode.value === "internal") return "内网端本地管理页";
       if (deploymentRoleMode.value === "external") return "外网业务控制台";
@@ -1127,6 +1470,7 @@ createApp({
       deleteManualAlarmSourceCacheFiles,
       uploadAlarmSourceCacheFull,
       uploadAlarmSourceCacheBuilding,
+      openAlarmEventUploadTarget,
       fetchRuntimeResources,
       fetchConfig,
       fetchHandoverEngineerDirectory,
@@ -1170,6 +1514,42 @@ createApp({
       ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE,
       ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,
     } = runtimeActions;
+
+    async function runHomeQuickAction(actionId) {
+      const action = String(actionId || "").trim().toLowerCase();
+      if (!action) return;
+      if (action === "open_auto_flow") {
+        openDashboardPage();
+        setDashboardActiveModule("auto_flow");
+        return;
+      }
+      if (action === "open_handover_log") {
+        openDashboardPage();
+        setDashboardActiveModule("handover_log");
+        return;
+      }
+      if (action === "open_alarm_upload") {
+        openDashboardPage();
+        setDashboardActiveModule("alarm_event_upload");
+        return;
+      }
+      if (action === "open_runtime_logs") {
+        openDashboardPage();
+        setDashboardActiveModule("runtime_logs");
+        return;
+      }
+      if (action === "refresh_current_hour") {
+        await refreshCurrentHourSourceCache();
+        return;
+      }
+      if (action === "refresh_manual_alarm") {
+        await refreshManualAlarmSourceCache();
+        return;
+      }
+      if (action === "open_config") {
+        openConfigPage();
+      }
+    }
 
     function closeStartupRoleSelector({ handled = false } = {}) {
       startupRoleSelectorVisible.value = false;
@@ -2593,6 +2973,10 @@ createApp({
       handoverDailyReportExternalTestVm,
       canRewriteHandoverDailyReportRecord,
       updaterResultText,
+      currentTaskOverview,
+      homeOverview,
+      statusDiagnosisOverview,
+      configGuidanceOverview,
       dashboardActiveModuleHero,
       updaterMainButtonText,
       isUpdaterActionLocked,
@@ -2705,6 +3089,7 @@ createApp({
       openStatusPage,
       openDashboardPage,
       openConfigPage,
+      runHomeQuickAction,
       switchConfigTab,
       setDashboardActiveModule,
       openDashboardMenuDrawer,
@@ -2812,6 +3197,7 @@ createApp({
       deleteManualAlarmSourceCacheFiles,
       uploadAlarmSourceCacheFull,
       uploadAlarmSourceCacheBuilding,
+      openAlarmEventUploadTarget,
       addSheetRuleRow,
       removeSheetRuleRow,
       startScheduler,

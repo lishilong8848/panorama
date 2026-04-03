@@ -47,6 +47,7 @@ class BuildingResult:
     day_metric_export: Dict[str, Any] = field(default_factory=dict)
     cloud_sheet_sync: Dict[str, Any] = field(default_factory=dict)
     review_session: Dict[str, Any] = field(default_factory=dict)
+    alarm_summary: Dict[str, Any] = field(default_factory=dict)
     batch_key: str = ""
     confirmed: bool = False
     errors: List[str] = field(default_factory=list)
@@ -62,6 +63,7 @@ class BuildingResult:
             "day_metric_export": dict(self.day_metric_export or {}),
             "cloud_sheet_sync": dict(self.cloud_sheet_sync or {}),
             "review_session": dict(self.review_session or {}),
+            "alarm_summary": dict(self.alarm_summary or {}),
             "batch_key": self.batch_key,
             "confirmed": self.confirmed,
             "errors": self.errors,

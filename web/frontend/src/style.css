@@ -1513,6 +1513,36 @@ a {
   padding: 12px 14px;
 }
 
+.readonly-token-card {
+  display: grid;
+  align-items: start;
+  gap: 4px;
+  min-height: 44px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
+.readonly-token-card-wide {
+  grid-column: span 2;
+}
+
+.readonly-token-card-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-3);
+}
+
+.readonly-token-card-value {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 input[type="text"],
 input[type="number"],
 input[type="date"],

@@ -1480,7 +1480,7 @@ def test_external_consume_ready_alarm_event_entries_is_retired_and_keeps_files_u
     assert len(remaining_manual) == 1
 
 
-def test_external_upload_alarm_entries_full_consumes_files_after_success(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_external_upload_alarm_entries_full_keeps_files_ready_after_success(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
@@ -1576,19 +1576,20 @@ def test_external_upload_alarm_entries_full_consumes_files_after_success(work_di
 
     assert result['accepted'] is True
     assert result['uploaded_record_count'] == 1
-    assert result['consumed_count'] == 1
-    assert result['consumed_buildings'] == ['A楼']
-    assert not cached_path.exists()
-    consumed_rows = store.list_source_cache_entries(
+    assert result['consumed_count'] == 0
+    assert result['consumed_buildings'] == []
+    assert cached_path.exists()
+    ready_rows = store.list_source_cache_entries(
         source_family=FAMILY_ALARM_EVENT,
         building='A楼',
         bucket_kind='latest',
         bucket_key='2026-04-01 08',
-        status='consumed',
+        status='ready',
         limit=1,
     )
-    assert len(consumed_rows) == 1
-    assert consumed_rows[0]['metadata']['consumed_by_mode'] == 'full'
+    assert len(ready_rows) == 1
+    assert ready_rows[0]['metadata']['last_uploaded_mode'] == 'full'
+    assert ready_rows[0]['metadata']['last_uploaded_scope'] == 'all'
 
     assert len(_FakeBitableClient.instances) == 1
     fake_client = _FakeBitableClient.instances[0]
@@ -2040,8 +2041,8 @@ def test_external_alarm_selection_prefers_today_latest_else_yesterday_fallback(
 
     assert alarm_family['selection_policy'] == 'today_latest_else_yesterday_fallback'
     assert alarm_family['selection_reference_date'] == '2026-04-03'
-    assert alarm_family['used_previous_day_fallback'] == ['B楼']
-    assert sorted(alarm_family['missing_today_buildings']) == ['B楼', 'D楼']
+    assert alarm_family['used_previous_day_fallback'] == ['B楼', 'C楼']
+    assert sorted(alarm_family['missing_today_buildings']) == ['B楼', 'C楼', 'D楼']
     assert alarm_family['missing_both_days_buildings'] == ['D楼']
 
     assert buildings['A楼']['source_kind'] == 'manual'
@@ -2050,17 +2051,18 @@ def test_external_alarm_selection_prefers_today_latest_else_yesterday_fallback(
     assert buildings['B楼']['source_kind'] == 'latest'
     assert buildings['B楼']['selection_scope'] == 'yesterday_fallback'
     assert buildings['B楼']['status'] == 'ready'
-    assert buildings['C楼']['selection_scope'] == 'today'
-    assert buildings['C楼']['status'] == 'consumed'
+    assert buildings['C楼']['selection_scope'] == 'yesterday_fallback'
+    assert buildings['C楼']['status'] == 'ready'
     assert buildings['D楼']['selection_scope'] == 'missing'
     assert buildings['D楼']['status'] == 'waiting'
     assert buildings['E楼']['selection_scope'] == 'today'
     assert buildings['E楼']['status'] == 'ready'
 
     selected_by_building = {item['building']: item for item in selected_entries}
-    assert set(selected_by_building.keys()) == {'A楼', 'B楼', 'E楼'}
+    assert set(selected_by_building.keys()) == {'A楼', 'B楼', 'C楼', 'E楼'}
     assert selected_by_building['A楼']['bucket_kind'] == 'manual'
     assert selected_by_building['B楼']['bucket_key'] == '2026-04-02 16'
+    assert selected_by_building['C楼']['bucket_key'] == '2026-04-02 16'
     assert selected_by_building['E楼']['bucket_key'] == '2026-04-03 07'
 
 
@@ -2141,8 +2143,8 @@ def test_external_upload_alarm_entries_single_building_keeps_only_rows_within_60
 
     assert result['accepted'] is True
     assert result['uploaded_record_count'] == 1
-    assert result['consumed_count'] == 1
-    assert result['consumed_buildings'] == ['B楼']
+    assert result['consumed_count'] == 0
+    assert result['consumed_buildings'] == []
     assert len(_FakeBitableClient.instances) == 1
     fake_client = _FakeBitableClient.instances[0]
     assert fake_client.clear_calls == []
@@ -2238,23 +2240,25 @@ def test_external_upload_alarm_entries_single_building_allows_yesterday_fallback
 
     assert result['accepted'] is True
     assert result['uploaded_record_count'] == 1
-    assert result['consumed_count'] == 1
-    assert result['consumed_buildings'] == ['B楼']
+    assert result['consumed_count'] == 0
+    assert result['consumed_buildings'] == []
     assert result['used_previous_day_fallback'] == ['B楼']
     assert result['selection_reference_date'] == '2026-04-03'
-    assert not Path(entry['file_path']).exists()
-    consumed_rows = store.list_source_cache_entries(
+    assert Path(entry['file_path']).exists()
+    ready_rows = store.list_source_cache_entries(
         source_family=FAMILY_ALARM_EVENT,
         building='B楼',
         bucket_kind='manual',
         bucket_key='2026-04-02 18:00:00',
-        status='consumed',
+        status='ready',
         limit=1,
     )
-    assert len(consumed_rows) == 1
+    assert len(ready_rows) == 1
+    assert ready_rows[0]['metadata']['last_uploaded_mode'] == 'single_building'
+    assert ready_rows[0]['metadata']['last_uploaded_scope'] == 'B楼'
 
 
-def test_external_upload_alarm_entries_single_building_consumes_superseded_ready_files(
+def test_external_upload_alarm_entries_single_building_keeps_selected_and_older_ready_files(
     work_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2344,15 +2348,15 @@ def test_external_upload_alarm_entries_single_building_consumes_superseded_ready
     result = service.upload_alarm_event_entries_single_building_to_bitable(building='B楼')
 
     assert result['accepted'] is True
-    assert result['consumed_count'] == 2
-    assert not Path(newer_entry['file_path']).exists()
-    assert not Path(older_entry['file_path']).exists()
+    assert result['consumed_count'] == 0
+    assert Path(newer_entry['file_path']).exists()
+    assert Path(older_entry['file_path']).exists()
     newer_rows = store.list_source_cache_entries(
         source_family=FAMILY_ALARM_EVENT,
         building='B楼',
         bucket_kind='manual',
         bucket_key='2026-04-03 09:30:00',
-        status='consumed',
+        status='ready',
         limit=1,
     )
     older_rows = store.list_source_cache_entries(
@@ -2360,10 +2364,12 @@ def test_external_upload_alarm_entries_single_building_consumes_superseded_ready
         building='B楼',
         bucket_kind='latest',
         bucket_key='2026-04-02 16',
-        status='consumed',
+        status='ready',
         limit=1,
     )
     assert len(newer_rows) == 1
     assert len(older_rows) == 1
-    assert older_rows[0]['metadata']['consumed_reason'] == 'superseded_by_newer_bucket'
+    assert newer_rows[0]['metadata']['last_uploaded_mode'] == 'single_building'
+    assert newer_rows[0]['metadata']['last_uploaded_scope'] == 'B楼'
+    assert 'consumed_reason' not in older_rows[0]['metadata']
 

@@ -138,6 +138,16 @@ class AlarmSummary:
     used_host: str
     used_mode: str
     queried_tables: List[str]
+    source: str = "alarm_db"
+    building: str = ""
+    source_kind: str = ""
+    selection_scope: str = ""
+    selected_downloaded_at: str = ""
+    query_start: str = ""
+    query_end: str = ""
+    coverage_ok: bool = True
+    fallback_used: bool = False
+    error: str = ""
 
 
 class AlarmRepository:

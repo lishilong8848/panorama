@@ -106,7 +106,7 @@ class _FakeBridgeService:
             "mode": "full",
             "scope": "all",
             "uploaded_record_count": 120,
-            "consumed_count": 5,
+            "consumed_count": 0,
             "failed_entries": [],
         }
 
@@ -118,7 +118,7 @@ class _FakeBridgeService:
             "mode": "single_building",
             "scope": building,
             "uploaded_record_count": 24,
-            "consumed_count": 1,
+            "consumed_count": 0,
             "failed_entries": [],
         }
 

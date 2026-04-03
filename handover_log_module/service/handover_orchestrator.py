@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List
 
 from handover_log_module.core.models import BuildingResult, RunSummary
 from handover_log_module.core.shift_window import build_duty_window, format_duty_date_text, parse_duty_date
+from handover_log_module.repository.alarm_json_repository import AlarmJsonRepository
 from handover_log_module.repository.alarm_repository import AlarmRepository
 from handover_log_module.repository.change_management_repository import ChangeRowsByBuilding
 from handover_log_module.repository.event_sections_repository import EventQueryByBuilding
@@ -89,6 +90,7 @@ class HandoverOrchestrator:
         self._extract_service = HandoverExtractService(config)
         self._fill_service = HandoverFillService(config)
         self._alarm_repo = AlarmRepository(config)
+        self._alarm_json_repo = AlarmJsonRepository(config)
         self._shift_roster_repo = ShiftRosterRepository(config)
         self._event_category_builder = EventCategoryPayloadBuilder(config)
         self._change_management_builder = ChangeManagementPayloadBuilder(
@@ -373,6 +375,56 @@ class HandoverOrchestrator:
                 return str(raw_val or "").strip()
         return ""
 
+    @staticmethod
+    def _safe_alarm_count(value: Any, default_text: str) -> int:
+        try:
+            return max(0, int(value))
+        except Exception:  # noqa: BLE001
+            try:
+                return max(0, int(str(default_text or "0").strip() or "0"))
+            except Exception:  # noqa: BLE001
+                return 0
+
+    def _build_alarm_summary_payload(
+        self,
+        *,
+        source: str,
+        building: str,
+        start_time: str,
+        end_time: str,
+        fallback: Dict[str, str],
+        total_text: str,
+        unrecovered_text: str,
+        accept_desc_text: str,
+        alarm_summary: Any | None = None,
+        coverage_ok: bool = True,
+        fallback_used: bool = False,
+        error: str = "",
+    ) -> Dict[str, Any]:
+        return {
+            "source": str(source or "").strip(),
+            "building": str(building or "").strip(),
+            "window_start": str(start_time or "").strip(),
+            "window_end": str(end_time or "").strip(),
+            "total_count": self._safe_alarm_count(
+                getattr(alarm_summary, "total_count", total_text),
+                fallback.get("total", "0"),
+            ),
+            "unrecovered_count": self._safe_alarm_count(
+                getattr(alarm_summary, "unrecovered_count", unrecovered_text),
+                fallback.get("unrecovered", "0"),
+            ),
+            "accept_description": str(accept_desc_text or "").strip() or fallback.get("accept_desc", "/"),
+            "source_kind": str(getattr(alarm_summary, "source_kind", "") or "").strip(),
+            "selection_scope": str(getattr(alarm_summary, "selection_scope", "") or "").strip(),
+            "selected_downloaded_at": str(getattr(alarm_summary, "selected_downloaded_at", "") or "").strip(),
+            "query_start": str(getattr(alarm_summary, "query_start", "") or "").strip(),
+            "query_end": str(getattr(alarm_summary, "query_end", "") or "").strip(),
+            "coverage_ok": bool(coverage_ok),
+            "fallback_used": bool(fallback_used),
+            "error": str(error or "").strip(),
+        }
+
     def _build_fixed_values_with_alarm(
         self,
         *,
@@ -384,16 +436,56 @@ class HandoverOrchestrator:
         emit_log: Callable[[str], None],
         roster_assignment: ShiftRosterAssignment | None = None,
         include_roster: bool = True,
-    ) -> tuple[Dict[str, str], datetime]:
+        alarm_selection_snapshot: Dict[str, Any] | None = None,
+        alarm_document_cache: Dict[str, Dict[str, Any]] | None = None,
+    ) -> tuple[Dict[str, str], datetime, Dict[str, Any]]:
         fallback = self._build_alarm_fallback()
         total_text = fallback["total"]
         unrecovered_text = fallback["unrecovered"]
         accept_desc_text = fallback["accept_desc"]
+        alarm_summary_payload: Dict[str, Any] = {}
         if self._deployment_role_mode() == "external":
-            emit_log(
-                f"[交接班][告警填充] building={building} 当前为外网端，"
-                "已跳过告警数据库查询，按默认值填充"
-            )
+            try:
+                alarm_summary = self._alarm_json_repo.query_alarm_summary(
+                    building=building,
+                    start_time=start_time,
+                    end_time=end_time,
+                    emit_log=emit_log,
+                    selection_snapshot=alarm_selection_snapshot,
+                    document_cache=alarm_document_cache,
+                )
+                total_text = str(alarm_summary.total_count)
+                unrecovered_text = str(alarm_summary.unrecovered_count)
+                accept_desc_text = str(alarm_summary.accept_description or "").strip() or fallback["accept_desc"]
+                alarm_summary_payload = self._build_alarm_summary_payload(
+                    source="alarm_json",
+                    building=building,
+                    start_time=start_time,
+                    end_time=end_time,
+                    fallback=fallback,
+                    total_text=total_text,
+                    unrecovered_text=unrecovered_text,
+                    accept_desc_text=accept_desc_text,
+                    alarm_summary=alarm_summary,
+                    coverage_ok=bool(getattr(alarm_summary, "coverage_ok", True)),
+                    fallback_used=bool(getattr(alarm_summary, "fallback_used", False)),
+                    error=str(getattr(alarm_summary, "error", "") or "").strip(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][告警JSON] building={building} 读取失败，按兜底填充: {exc}")
+                alarm_summary_payload = self._build_alarm_summary_payload(
+                    source="alarm_json",
+                    building=building,
+                    start_time=start_time,
+                    end_time=end_time,
+                    fallback=fallback,
+                    total_text=total_text,
+                    unrecovered_text=unrecovered_text,
+                    accept_desc_text=accept_desc_text,
+                    coverage_ok=False,
+                    fallback_used=True,
+                    error=str(exc),
+                )
         else:
             try:
                 alarm_summary = self._alarm_repo.query_alarm_summary(
@@ -409,8 +501,34 @@ class HandoverOrchestrator:
                     f"[交接班][告警查询] building={building}, total={total_text}, "
                     f"unrecovered={unrecovered_text}, accept_desc={accept_desc_text}"
                 )
+                alarm_summary_payload = self._build_alarm_summary_payload(
+                    source="alarm_db",
+                    building=building,
+                    start_time=start_time,
+                    end_time=end_time,
+                    fallback=fallback,
+                    total_text=total_text,
+                    unrecovered_text=unrecovered_text,
+                    accept_desc_text=accept_desc_text,
+                    alarm_summary=alarm_summary,
+                    coverage_ok=True,
+                    fallback_used=False,
+                )
             except Exception as exc:  # noqa: BLE001
                 emit_log(f"[交接班][告警查询] building={building} 查询失败，按兜底填充: {exc}")
+                alarm_summary_payload = self._build_alarm_summary_payload(
+                    source="alarm_db",
+                    building=building,
+                    start_time=start_time,
+                    end_time=end_time,
+                    fallback=fallback,
+                    total_text=total_text,
+                    unrecovered_text=unrecovered_text,
+                    accept_desc_text=accept_desc_text,
+                    coverage_ok=False,
+                    fallback_used=True,
+                    error=str(exc),
+                )
 
         fixed_cell_values = self._build_fixed_cell_values(
             duty_date=duty_date,
@@ -431,7 +549,7 @@ class HandoverOrchestrator:
             )
         duty_day = parse_duty_date(duty_date)
         date_ref_override = datetime(duty_day.year, duty_day.month, duty_day.day, 0, 0, 0)
-        return fixed_cell_values, date_ref_override
+        return fixed_cell_values, date_ref_override, alarm_summary_payload
 
     def _infer_duty_by_now(self, now: datetime | None = None) -> tuple[str, str]:
         cursor = now or datetime.now()
@@ -474,6 +592,9 @@ class HandoverOrchestrator:
         exercise_rows_by_building: ExerciseRowsByBuilding | None = None,
         maintenance_rows_by_building: MaintenanceRowsByBuilding | None = None,
         other_important_work_rows_by_building: OtherImportantWorkRowsByBuilding | None = None,
+        alarm_selection_snapshot: Dict[str, Any] | None = None,
+        alarm_document_cache: Dict[str, Dict[str, Any]] | None = None,
+        alarm_summary_payload: Dict[str, Any] | None = None,
         source_mode: str = "from_file",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
@@ -484,6 +605,7 @@ class HandoverOrchestrator:
         start_time_text = str(start_time or "").strip()
         end_time_text = str(end_time or "").strip()
         roster_applied = False
+        resolved_alarm_summary = dict(alarm_summary_payload or {})
 
         # 无论是否传入 fixed_cell_values，只要班次上下文不完整，都先自动推断，
         # 保证 from-file / from-download / 手动 / 自动路径都能走统一的白班多维上报判定。
@@ -510,7 +632,7 @@ class HandoverOrchestrator:
                 )
                 start_time_text = duty_window.start_time
                 end_time_text = duty_window.end_time
-            fixed_cell_values, date_ref_override = self._build_fixed_values_with_alarm(
+            fixed_cell_values, date_ref_override, resolved_alarm_summary = self._build_fixed_values_with_alarm(
                 building=building,
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
@@ -518,6 +640,8 @@ class HandoverOrchestrator:
                 end_time=end_time_text,
                 emit_log=emit_log,
                 roster_assignment=roster_assignment,
+                alarm_selection_snapshot=alarm_selection_snapshot,
+                alarm_document_cache=alarm_document_cache,
             )
             roster_applied = True
             emit_log(
@@ -620,6 +744,7 @@ class HandoverOrchestrator:
                 emit_log(f"[交接班][其他重要工作] 构建失败，按空分类继续: {exc}")
             category_payloads = combined_category_payloads
 
+        result.alarm_summary = dict(resolved_alarm_summary or {})
         upload_date = _norm(duty_date_text or (end_time_text.split(" ")[0] if end_time_text else ""), "-")
         failed_stage = "数据解析"
         managed_source_file_cache: Dict[str, Any] | None = None
@@ -742,6 +867,7 @@ class HandoverOrchestrator:
                         if isinstance(review_session.get("cloud_sheet_sync", {}), dict)
                         else {}
                     )
+                    result.alarm_summary = dict(resolved_alarm_summary or {})
                     emit_log(
                         "[交接班][审核会话] 已登记 "
                         f"building={building}, session_id={review_session.get('session_id', '-')}, "
@@ -763,6 +889,8 @@ class HandoverOrchestrator:
                         )
                     result.errors.append(f"审核会话登记失败: {exc}")
                     emit_log(f"[交接班][审核会话] 登记失败 building={building}: {exc}")
+            if not result.alarm_summary:
+                result.alarm_summary = dict(resolved_alarm_summary or {})
             result.success = True
             emit_log(
                 "[文件上传成功] 功能=交接班日志 阶段=输出完成 楼栋="
@@ -824,6 +952,14 @@ class HandoverOrchestrator:
                 duty_shift=query_context.duty_shift,
                 emit_log=emit_log,
             )
+        alarm_selection_snapshot: Dict[str, Any] | None = None
+        alarm_document_cache: Dict[str, Dict[str, Any]] | None = None
+        if self._deployment_role_mode() == "external" and query_context.duty_date and query_context.duty_shift and selected_buildings:
+            try:
+                alarm_selection_snapshot = self._alarm_json_repo.build_selection_snapshot(buildings=selected_buildings)
+                alarm_document_cache = {}
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][告警JSON] 批量选源快照构建失败，后续按单楼兜底: {exc}")
 
         for building, data_file in normalized_files:
             try:
@@ -839,6 +975,8 @@ class HandoverOrchestrator:
                     exercise_rows_by_building=query_context.exercise_rows_by_building,
                     maintenance_rows_by_building=query_context.maintenance_rows_by_building,
                     other_important_work_rows_by_building=query_context.other_important_work_rows_by_building,
+                    alarm_selection_snapshot=alarm_selection_snapshot,
+                    alarm_document_cache=alarm_document_cache,
                     source_mode="from_file",
                     emit_log=emit_log,
                 )
@@ -866,6 +1004,9 @@ class HandoverOrchestrator:
                     else {},
                     review_session=dict(row.get("review_session", {}))
                     if isinstance(row.get("review_session", {}), dict)
+                    else {},
+                    alarm_summary=dict(row.get("alarm_summary", {}))
+                    if isinstance(row.get("alarm_summary", {}), dict)
                     else {},
                     batch_key=str(row.get("batch_key", "")),
                     confirmed=bool(row.get("confirmed", False)),
@@ -948,7 +1089,20 @@ class HandoverOrchestrator:
                 )
 
             success_items = download_result.get("success_files", [])
-            prebuilt_fixed: Dict[str, tuple[Dict[str, str], datetime, ShiftRosterAssignment | None]] = {}
+            success_buildings = [
+                str(item.get("building", "")).strip()
+                for item in success_items
+                if str(item.get("building", "")).strip()
+            ]
+            alarm_selection_snapshot: Dict[str, Any] | None = None
+            alarm_document_cache: Dict[str, Dict[str, Any]] | None = None
+            if self._deployment_role_mode() == "external" and duty_date_text and duty_shift_text and success_buildings:
+                try:
+                    alarm_selection_snapshot = self._alarm_json_repo.build_selection_snapshot(buildings=success_buildings)
+                    alarm_document_cache = {}
+                except Exception as exc:  # noqa: BLE001
+                    emit_log(f"[交接班][告警JSON] 选源快照构建失败，后续按单楼兜底: {exc}")
+            prebuilt_fixed: Dict[str, tuple[Dict[str, str], datetime, ShiftRosterAssignment | None, Dict[str, Any]]] = {}
             if duty_date_text and duty_shift_text:
                 download_cfg = self.config.get("download", {})
                 shift_windows = {}
@@ -965,7 +1119,7 @@ class HandoverOrchestrator:
                     if not building:
                         continue
                     assignment = roster_prefetch.get(building)
-                    fixed_cell_values, date_ref_override = self._build_fixed_values_with_alarm(
+                    fixed_cell_values, date_ref_override, alarm_summary_payload = self._build_fixed_values_with_alarm(
                         building=building,
                         duty_date=duty_date_text,
                         duty_shift=duty_shift_text,
@@ -974,8 +1128,10 @@ class HandoverOrchestrator:
                         emit_log=emit_log,
                         roster_assignment=assignment,
                         include_roster=False,
+                        alarm_selection_snapshot=alarm_selection_snapshot,
+                        alarm_document_cache=alarm_document_cache,
                     )
-                    prebuilt_fixed[building] = (fixed_cell_values, date_ref_override, assignment)
+                    prebuilt_fixed[building] = (fixed_cell_values, date_ref_override, assignment, alarm_summary_payload)
 
             # 内网下载和告警查询完成后优先切回外网，再执行飞书相关填充。
             if success_items:
@@ -1014,11 +1170,6 @@ class HandoverOrchestrator:
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班][云表预建] 批次状态登记失败: {exc}")
 
-            success_buildings = [
-                str(item.get("building", "")).strip()
-                for item in success_items
-                if str(item.get("building", "")).strip()
-            ]
             query_context = HandoverQueryContext(
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
@@ -1044,12 +1195,13 @@ class HandoverOrchestrator:
                 assignment = query_context.roster_assignments.get(building) or roster_prefetch.get(building)
                 fixed_cell_values: Dict[str, str] | None = None
                 date_ref_override: datetime | None = None
+                alarm_summary_payload: Dict[str, Any] | None = None
                 if duty_date_text and duty_shift_text:
                     prebuilt = prebuilt_fixed.get(building)
                     if prebuilt is not None:
-                        fixed_cell_values, date_ref_override, assignment = prebuilt
+                        fixed_cell_values, date_ref_override, assignment, alarm_summary_payload = prebuilt
                     else:
-                        fixed_cell_values, date_ref_override = self._build_fixed_values_with_alarm(
+                        fixed_cell_values, date_ref_override, alarm_summary_payload = self._build_fixed_values_with_alarm(
                             building=building,
                             duty_date=duty_date_text,
                             duty_shift=duty_shift_text,
@@ -1058,6 +1210,8 @@ class HandoverOrchestrator:
                             emit_log=emit_log,
                             roster_assignment=assignment,
                             include_roster=False,
+                            alarm_selection_snapshot=alarm_selection_snapshot,
+                            alarm_document_cache=alarm_document_cache,
                         )
 
                 one = self.run_from_existing_file(
@@ -1076,6 +1230,9 @@ class HandoverOrchestrator:
                     exercise_rows_by_building=query_context.exercise_rows_by_building,
                     maintenance_rows_by_building=query_context.maintenance_rows_by_building,
                     other_important_work_rows_by_building=query_context.other_important_work_rows_by_building,
+                    alarm_selection_snapshot=alarm_selection_snapshot,
+                    alarm_document_cache=alarm_document_cache,
+                    alarm_summary_payload=alarm_summary_payload,
                     source_mode="from_download",
                     emit_log=emit_log,
                 )
@@ -1095,6 +1252,9 @@ class HandoverOrchestrator:
                         else {},
                         review_session=dict(row.get("review_session", {}))
                         if isinstance(row.get("review_session", {}), dict)
+                        else {},
+                        alarm_summary=dict(row.get("alarm_summary", {}))
+                        if isinstance(row.get("alarm_summary", {}), dict)
                         else {},
                         batch_key=str(row.get("batch_key", "")),
                         confirmed=bool(row.get("confirmed", False)),
