@@ -1,26 +1,33 @@
 ﻿from __future__ import annotations
 
+import ast
 import concurrent.futures
 import copy
 import hashlib
+import json
 import threading
 import time
 from datetime import datetime, time as dt_time, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 import openpyxl
 
 from app.modules.shared_bridge.service.alarm_event_page_export_service import (
+    build_alarm_event_json_document,
     collect_alarm_event_rows,
-    exercise_alarm_event_page_actions,
+    load_alarm_event_json,
+    stream_alarm_event_json_document,
     scheduled_bucket_for_time,
-    write_alarm_event_workbook,
+    write_alarm_event_json,
 )
+from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver, build_bitable_url
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
+from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
 from app.shared.utils.atomic_file import atomic_copy_file, validate_excel_workbook_file
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
@@ -68,6 +75,7 @@ ALARM_EVENT_BITABLE_TARGET_FIELDS = {
     "confirm_by": "确认人",
     "confirm_description": "确认描述",
 }
+ALARM_EVENT_ALLOWED_UPLOAD_KEYS = tuple(ALARM_EVENT_BITABLE_TARGET_FIELDS.keys())
 
 ALARM_EVENT_HEADER_ALIASES = {
     "level": {"级别", "等级", "level"},
@@ -88,6 +96,16 @@ ALARM_EVENT_HEADER_ALIASES = {
     "confirm_by": {"确认人", "confirm_by"},
     "confirm_description": {"确认说明", "确认描述", "confirm_description"},
     "trigger_value": {"触发值", "实时值", "当前值", "real_value", "trigger_value"},
+}
+
+ALARM_EVENT_BITABLE_DATETIME_FIELDS = {
+    "event_time",
+    "accept_time",
+    "recover_time",
+    "confirm_time",
+}
+ALARM_EVENT_BITABLE_NUMBER_FIELDS = {
+    "trigger_value",
 }
 
 
@@ -168,6 +186,20 @@ class SharedSourceCacheService:
         self._current_hour_bucket = ""
         self._active_latest_downloads: Dict[tuple[str, str, str, str], str] = {}
         self._manual_alarm_refresh_thread: threading.Thread | None = None
+        self._manual_alarm_refresh: Dict[str, Any] = {
+            "running": False,
+            "last_run_at": "",
+            "last_success_at": "",
+            "last_error": "",
+            "bucket_key": "",
+            "successful_buildings": [],
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "total_row_count": 0,
+            "building_row_counts": {},
+            "query_start": "",
+            "query_end": "",
+        }
         self._monthly_download_module: Any | None = None
         self._monthly_download_module_lock = threading.Lock()
         self._family_status: Dict[str, Dict[str, Any]] = {
@@ -421,11 +453,7 @@ class SharedSourceCacheService:
             monthly_family = {"current_bucket": current_bucket, "buildings": []}
             snapshot_error = snapshot_error or str(exc)
         try:
-            alarm_family = self._build_family_health_snapshot(
-                source_family=FAMILY_ALARM_EVENT,
-                current_bucket=alarm_bucket,
-                include_latest_selection=False,
-            )
+            alarm_family = self._build_alarm_external_health_snapshot()
         except Exception as exc:  # noqa: BLE001
             alarm_family = {"current_bucket": alarm_bucket, "buildings": []}
             snapshot_error = snapshot_error or str(exc)
@@ -448,6 +476,186 @@ class SharedSourceCacheService:
             FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
             FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
             FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
+        }
+
+    def _list_alarm_external_candidate_entries(self, *, building: str = "") -> List[Dict[str, Any]]:
+        if self.store is None:
+            return []
+        building_filter = str(building or "").strip()
+        rows: List[Dict[str, Any]] = []
+        for status in ("ready", "consumed"):
+            rows.extend(
+                item
+                for item in self.store.list_source_cache_entries(
+                    source_family=FAMILY_ALARM_EVENT,
+                    building=building_filter,
+                    status=status,
+                    limit=20000,
+                )
+                if isinstance(item, dict)
+            )
+        candidates: List[Dict[str, Any]] = []
+        for row in rows:
+            row_building = str(row.get("building", "") or "").strip()
+            if not row_building:
+                continue
+            if building_filter and row_building != building_filter:
+                continue
+            bucket_kind = str(row.get("bucket_kind", "") or "").strip().lower()
+            if bucket_kind not in {"latest", "manual"}:
+                continue
+            status = str(row.get("status", "") or "").strip().lower()
+            if status not in {"ready", "consumed"}:
+                continue
+            downloaded_at = str(row.get("downloaded_at", "") or "").strip()
+            downloaded_at_dt = self._parse_alarm_datetime_text(downloaded_at)
+            if downloaded_at_dt is None:
+                continue
+            resolved_file_path = ""
+            if status == "ready":
+                file_path = self._resolve_entry_file_path(row)
+                if file_path is None:
+                    continue
+                resolved_file_path = str(file_path)
+            candidates.append(
+                {
+                    **row,
+                    "_downloaded_at_dt": downloaded_at_dt,
+                    "_resolved_file_path": resolved_file_path,
+                }
+            )
+        candidates.sort(
+            key=lambda item: (
+                item.get("_downloaded_at_dt") or datetime.min,
+                str(item.get("updated_at", "") or "").strip(),
+                str(item.get("entry_id", "") or "").strip(),
+            ),
+            reverse=True,
+        )
+        return candidates
+
+    def _build_alarm_external_selection(self, *, building: str = "") -> Dict[str, Any]:
+        reference_date = _now_dt().date()
+        previous_date = reference_date - timedelta(days=1)
+        requested_buildings = [
+            str(item or "").strip()
+            for item in ([building] if str(building or "").strip() else self.get_enabled_buildings())
+            if str(item or "").strip()
+        ]
+        target_buildings = list(dict.fromkeys(requested_buildings))
+        grouped: Dict[str, List[Dict[str, Any]]] = {name: [] for name in target_buildings}
+        for candidate in self._list_alarm_external_candidate_entries(building=building):
+            row_building = str(candidate.get("building", "") or "").strip()
+            if row_building in grouped:
+                grouped[row_building].append(candidate)
+        selected_entries: List[Dict[str, Any]] = []
+        building_rows: List[Dict[str, Any]] = []
+        used_previous_day_fallback: List[str] = []
+        missing_today_buildings: List[str] = []
+        missing_both_days_buildings: List[str] = []
+        for name in target_buildings:
+            candidates = grouped.get(name, [])
+            today_candidates = [
+                item for item in candidates
+                if isinstance(item.get("_downloaded_at_dt"), datetime)
+                and item["_downloaded_at_dt"].date() == reference_date
+            ]
+            previous_day_candidates = [
+                item for item in candidates
+                if isinstance(item.get("_downloaded_at_dt"), datetime)
+                and item["_downloaded_at_dt"].date() == previous_date
+            ]
+            selected: Dict[str, Any] | None = None
+            selection_scope = ""
+            if today_candidates:
+                selected = today_candidates[0]
+                selection_scope = "today"
+            else:
+                missing_today_buildings.append(name)
+                if previous_day_candidates:
+                    selected = previous_day_candidates[0]
+                    selection_scope = "yesterday_fallback"
+                    used_previous_day_fallback.append(name)
+                else:
+                    missing_both_days_buildings.append(name)
+            if selected is None:
+                building_rows.append(
+                    {
+                        "building": name,
+                        "bucket_key": "",
+                        "status": "waiting",
+                        "ready": False,
+                        "downloaded_at": "",
+                        "selected_downloaded_at": "",
+                        "last_error": "",
+                        "relative_path": "",
+                        "resolved_file_path": "",
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "next_probe_at": "",
+                        "source_kind": "",
+                        "selection_scope": "missing",
+                    }
+                )
+                continue
+            row_status = str(selected.get("status", "") or "").strip().lower()
+            row_downloaded_at = str(selected.get("downloaded_at", "") or "").strip()
+            building_rows.append(
+                {
+                    "building": name,
+                    "bucket_key": str(selected.get("bucket_key", "") or "").strip(),
+                    "status": row_status or "waiting",
+                    "ready": row_status == "ready",
+                    "downloaded_at": row_downloaded_at,
+                    "selected_downloaded_at": row_downloaded_at,
+                    "last_error": "",
+                    "relative_path": str(selected.get("relative_path", "") or "").strip(),
+                    "resolved_file_path": str(selected.get("_resolved_file_path", "") or "").strip(),
+                    "blocked": False,
+                    "blocked_reason": "",
+                    "next_probe_at": "",
+                    "source_kind": str(selected.get("bucket_kind", "") or "").strip().lower(),
+                    "selection_scope": selection_scope,
+                }
+            )
+            if row_status == "ready":
+                selected_entries.append(selected)
+        last_success_candidates = [
+            str(item.get("selected_downloaded_at", "") or "").strip()
+            for item in building_rows
+            if str(item.get("selected_downloaded_at", "") or "").strip()
+        ]
+        return {
+            "selection_policy": "today_latest_else_yesterday_fallback",
+            "selection_reference_date": reference_date.isoformat(),
+            "used_previous_day_fallback": used_previous_day_fallback,
+            "missing_today_buildings": missing_today_buildings,
+            "missing_both_days_buildings": missing_both_days_buildings,
+            "ready_count": sum(1 for item in building_rows if bool(item.get("ready"))),
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "last_success_at": max(last_success_candidates) if last_success_candidates else "",
+            "current_bucket": reference_date.isoformat(),
+            "buildings": building_rows,
+            "latest_selection": {},
+            "selected_entries": selected_entries,
+        }
+
+    def _build_alarm_external_health_snapshot(self) -> Dict[str, Any]:
+        selection = self._build_alarm_external_selection()
+        return {
+            "ready_count": int(selection.get("ready_count", 0) or 0),
+            "failed_buildings": list(selection.get("failed_buildings", []) or []),
+            "blocked_buildings": list(selection.get("blocked_buildings", []) or []),
+            "last_success_at": str(selection.get("last_success_at", "") or "").strip(),
+            "current_bucket": str(selection.get("selection_reference_date", "") or "").strip(),
+            "buildings": list(selection.get("buildings", []) or []),
+            "latest_selection": {},
+            "selection_policy": str(selection.get("selection_policy", "") or "").strip(),
+            "selection_reference_date": str(selection.get("selection_reference_date", "") or "").strip(),
+            "used_previous_day_fallback": list(selection.get("used_previous_day_fallback", []) or []),
+            "missing_today_buildings": list(selection.get("missing_today_buildings", []) or []),
+            "missing_both_days_buildings": list(selection.get("missing_both_days_buildings", []) or []),
         }
 
     def _get_external_full_snapshot_cached(self) -> Dict[str, Any]:
@@ -602,6 +810,7 @@ class SharedSourceCacheService:
             light_building_status = copy.deepcopy(self._light_building_status)
             active_downloads = dict(self._active_latest_downloads)
             alarm_external_upload = copy.deepcopy(self._alarm_external_upload_state)
+            manual_alarm_refresh = copy.deepcopy(self._manual_alarm_refresh)
         if normalized_mode == "internal_light":
             alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
             handover_family = self._build_internal_light_family_snapshot(
@@ -628,6 +837,7 @@ class SharedSourceCacheService:
                 **families.get(FAMILY_ALARM_EVENT, {}),
                 **alarm_family,
                 "external_upload": alarm_external_upload,
+                "manual_refresh": manual_alarm_refresh,
             }
             return {
                 "enabled": bool(self.enabled and self.role_mode in {"internal", "external"}),
@@ -862,9 +1072,21 @@ class SharedSourceCacheService:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    @staticmethod
+    def _validate_cached_source_file(path: Path) -> None:
+        suffix = str(path.suffix or "").strip().lower()
+        if suffix == ".json":
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("告警 JSON 文件顶层必须是对象")
+            if not isinstance(payload.get("rows"), list):
+                raise ValueError("告警 JSON 文件缺少 rows 数组")
+            return
+        validate_excel_workbook_file(path)
+
     def _cache_file(self, *, source_path: Path, target_path: Path) -> Dict[str, Any]:
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_copy_file(source_path, target_path, validator=validate_excel_workbook_file, temp_suffix=".downloading")
+        atomic_copy_file(source_path, target_path, validator=self._validate_cached_source_file, temp_suffix=".downloading")
         return {
             "file_hash": self._hash_file(target_path),
             "size_bytes": int(target_path.stat().st_size),
@@ -1067,6 +1289,12 @@ class SharedSourceCacheService:
             size_bytes=int(cached["size_bytes"]),
             metadata=metadata or {},
         )
+        if normalized_family == FAMILY_ALARM_EVENT:
+            try:
+                if source_path.exists() and source_path.resolve() != target_path.resolve():
+                    source_path.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
         self._mark_external_full_snapshot_dirty()
         if bucket_kind == "latest":
             with self._lock:
@@ -1769,16 +1997,34 @@ class SharedSourceCacheService:
             raise RuntimeError("内网下载浏览器池未启动")
         temp_root = self._alarm_temp_root(bucket_key=bucket_key, building=building, bucket_kind="latest")
         temp_root.mkdir(parents=True, exist_ok=True)
-        workbook_path = temp_root / f"{building}.xlsx"
+        json_path = temp_root / f"{building}.json"
 
-        async def _runner(page):  # noqa: ANN001
-            return await collect_alarm_event_rows(page)
+        async def _runner(api_context, base_url):  # noqa: ANN001
+            return await stream_alarm_event_json_document(
+                api_context,
+                base_url=base_url,
+                output_path=json_path,
+                source_family=FAMILY_ALARM_EVENT,
+                building=building,
+                bucket_kind="latest",
+                bucket_key=bucket_key,
+                emit_log=emit_log,
+                log_prefix=f"[共享缓存][告警API][{building}] ",
+            )
 
         future = self.download_browser_pool.submit_building_alarm_job(building, _runner)
         result = future.result(timeout=self.history_fill_timeout_sec)
         payload = result if isinstance(result, dict) else {}
         rows = payload.get("rows", []) if isinstance(payload.get("rows", []), list) else []
-        write_alarm_event_workbook(workbook_path, rows)
+        if not json_path.exists():
+            document = build_alarm_event_json_document(
+                source_family=FAMILY_ALARM_EVENT,
+                building=building,
+                bucket_kind="latest",
+                bucket_key=bucket_key,
+                payload=payload,
+            )
+            write_alarm_event_json(json_path, document)
         return self._store_entry(
             source_family=FAMILY_ALARM_EVENT,
             building=building,
@@ -1786,14 +2032,15 @@ class SharedSourceCacheService:
             bucket_key=bucket_key,
             duty_date="",
             duty_shift="",
-            source_path=workbook_path,
+            source_path=json_path,
             status="ready",
             metadata={
                 "family": FAMILY_ALARM_EVENT,
                 "building": building,
-                "row_count": len(rows),
+                "row_count": int(payload.get("row_count", len(rows)) or 0),
                 "query_start": str(payload.get("query_start", "") or "").strip(),
                 "query_end": str(payload.get("query_end", "") or "").strip(),
+                "count_summary": payload.get("count_summary", {}) if isinstance(payload.get("count_summary", {}), dict) else {},
             },
         )
 
@@ -1802,16 +2049,34 @@ class SharedSourceCacheService:
             raise RuntimeError("内网下载浏览器池未启动")
         temp_root = self._alarm_temp_root(bucket_key=bucket_key, building=building, bucket_kind="manual")
         temp_root.mkdir(parents=True, exist_ok=True)
-        workbook_path = temp_root / f"{building}.xlsx"
+        json_path = temp_root / f"{building}.json"
 
-        async def _runner(page):  # noqa: ANN001
-            return await collect_alarm_event_rows(page)
+        async def _runner(api_context, base_url):  # noqa: ANN001
+            return await stream_alarm_event_json_document(
+                api_context,
+                base_url=base_url,
+                output_path=json_path,
+                source_family=FAMILY_ALARM_EVENT,
+                building=building,
+                bucket_kind="manual",
+                bucket_key=bucket_key,
+                emit_log=emit_log,
+                log_prefix=f"[共享缓存][告警API][{building}] ",
+            )
 
         future = self.download_browser_pool.submit_building_alarm_job(building, _runner)
         result = future.result(timeout=self.history_fill_timeout_sec)
         payload = result if isinstance(result, dict) else {}
         rows = payload.get("rows", []) if isinstance(payload.get("rows", []), list) else []
-        write_alarm_event_workbook(workbook_path, rows)
+        if not json_path.exists():
+            document = build_alarm_event_json_document(
+                source_family=FAMILY_ALARM_EVENT,
+                building=building,
+                bucket_kind="manual",
+                bucket_key=bucket_key,
+                payload=payload,
+            )
+            write_alarm_event_json(json_path, document)
         return self._store_entry(
             source_family=FAMILY_ALARM_EVENT,
             building=building,
@@ -1819,14 +2084,15 @@ class SharedSourceCacheService:
             bucket_key=bucket_key,
             duty_date="",
             duty_shift="",
-            source_path=workbook_path,
+            source_path=json_path,
             status="ready",
             metadata={
                 "family": FAMILY_ALARM_EVENT,
                 "building": building,
-                "row_count": len(rows),
+                "row_count": int(payload.get("row_count", len(rows)) or 0),
                 "query_start": str(payload.get("query_start", "") or "").strip(),
                 "query_end": str(payload.get("query_end", "") or "").strip(),
+                "count_summary": payload.get("count_summary", {}) if isinstance(payload.get("count_summary", {}), dict) else {},
                 "manual": True,
             },
         )
@@ -1837,6 +2103,25 @@ class SharedSourceCacheService:
         completed_units: List[str] = []
         failed_units: List[str] = []
         blocked_units: List[str] = []
+        manual_error_text = ""
+        building_row_counts: Dict[str, int] = {}
+        query_start = ""
+        query_end = ""
+        with self._lock:
+            self._manual_alarm_refresh = {
+                "running": True,
+                "last_run_at": _now_text(),
+                "last_success_at": str(self._manual_alarm_refresh.get("last_success_at", "") or "").strip(),
+                "last_error": "",
+                "bucket_key": bucket_key,
+                "successful_buildings": [],
+                "failed_buildings": [],
+                "blocked_buildings": [],
+                "total_row_count": 0,
+                "building_row_counts": {},
+                "query_start": "",
+                "query_end": "",
+            }
         self._emit(f"[共享缓存] 开始手动拉取告警信息文件 bucket={bucket_key}")
         pending_buildings: List[str] = []
         for building in self.get_enabled_buildings():
@@ -1863,12 +2148,22 @@ class SharedSourceCacheService:
                 for future in concurrent.futures.as_completed(future_map):
                     building = future_map[future]
                     try:
-                        future.result()
+                        result = future.result()
                         completed_units.append(building)
+                        if isinstance(result, dict):
+                            metadata = result.get("metadata", {}) if isinstance(result.get("metadata", {}), dict) else {}
+                            row_count = int(metadata.get("row_count", 0) or 0)
+                            building_row_counts[building] = row_count
+                            if not query_start:
+                                query_start = str(metadata.get("query_start", "") or "").strip()
+                            if not query_end:
+                                query_end = str(metadata.get("query_end", "") or "").strip()
                         with self._lock:
                             self._last_success_at = _now_text()
                     except Exception as exc:  # noqa: BLE001
                         error_text = str(exc)
+                        if not manual_error_text:
+                            manual_error_text = error_text
                         failed_units.append(building)
                         with self._lock:
                             self._last_error = error_text
@@ -1885,6 +2180,22 @@ class SharedSourceCacheService:
                             },
                         )
                         self._emit(f"[共享缓存] 手动拉取告警信息失败 building={building}: {exc}")
+        total_row_count = sum(building_row_counts.values())
+        with self._lock:
+            self._manual_alarm_refresh = {
+                "running": False,
+                "last_run_at": str(self._manual_alarm_refresh.get("last_run_at", "") or "").strip() or _now_text(),
+                "last_success_at": _now_text() if completed_units else str(self._manual_alarm_refresh.get("last_success_at", "") or "").strip(),
+                "last_error": str(manual_error_text or "").strip(),
+                "bucket_key": bucket_key,
+                "successful_buildings": list(completed_units),
+                "failed_buildings": list(failed_units),
+                "blocked_buildings": list(blocked_units),
+                "total_row_count": total_row_count,
+                "building_row_counts": dict(building_row_counts),
+                "query_start": query_start,
+                "query_end": query_end,
+            }
         if failed_units:
             self._emit(
                 f"[共享缓存] 手动拉取告警信息结束：成功楼栋 {', '.join(completed_units) or '-'}；"
@@ -1907,6 +2218,10 @@ class SharedSourceCacheService:
             "completed_buildings": completed_units,
             "failed_buildings": failed_units,
             "blocked_buildings": blocked_units,
+            "total_row_count": total_row_count,
+            "building_row_counts": building_row_counts,
+            "query_start": query_start,
+            "query_end": query_end,
         }
 
     def _run_manual_alarm_refresh_background(self) -> None:
@@ -2029,6 +2344,21 @@ class SharedSourceCacheService:
                     deleted_buildings.append(building)
         if deleted_count > 0:
             self._mark_external_full_snapshot_dirty()
+        with self._lock:
+            self._manual_alarm_refresh = {
+                "running": False,
+                "last_run_at": "",
+                "last_success_at": "",
+                "last_error": "",
+                "bucket_key": "",
+                "successful_buildings": [],
+                "failed_buildings": [],
+                "blocked_buildings": [],
+                "total_row_count": 0,
+                "building_row_counts": {},
+                "query_start": "",
+                "query_end": "",
+            }
         return {
             "accepted": True,
             "reason": "deleted",
@@ -2037,29 +2367,7 @@ class SharedSourceCacheService:
         }
 
     def debug_alarm_page_actions(self, *, building: str) -> Dict[str, Any]:
-        building_name = str(building or "").strip()
-        if not building_name:
-            raise RuntimeError("缺少楼栋参数")
-        if self.download_browser_pool is None or not hasattr(self.download_browser_pool, "submit_existing_building_alarm_page_job"):
-            raise RuntimeError("内网下载浏览器池未启动")
-
-        async def _runner(page):  # noqa: ANN001
-            return await exercise_alarm_event_page_actions(page)
-
-        future = self.download_browser_pool.submit_existing_building_alarm_page_job(building_name, _runner)
-        result = future.result(timeout=self.history_fill_timeout_sec)
-        payload = result if isinstance(result, dict) else {}
-        return {
-            "ok": True,
-            "building": building_name,
-            "query_start": str(payload.get("query_start", "") or "").strip(),
-            "query_end": str(payload.get("query_end", "") or "").strip(),
-            "row_count": int(payload.get("row_count", 0) or 0),
-            "current_page": int(payload.get("current_page", 1) or 1),
-            "content_column_visible": bool(payload.get("content_column_visible", False)),
-            "start_time_ready": bool(payload.get("start_time_ready", False)),
-            "page_url": str(payload.get("page_url", "") or "").strip(),
-        }
+        raise RuntimeError("告警页面调试入口已退役，当前版本仅支持 API 拉取")
 
     @staticmethod
     def _normalize_alarm_header_text(value: Any) -> str:
@@ -2093,7 +2401,7 @@ class SharedSourceCacheService:
         return None
 
     def _resolve_alarm_event_upload_target_fields(self) -> Dict[str, str]:
-        defaults = copy.deepcopy(ALARM_EVENT_BITABLE_TARGET_FIELDS)
+        defaults = {key: str(value or "").strip() for key, value in ALARM_EVENT_BITABLE_TARGET_FIELDS.items()}
         alarm_export_cfg = self.runtime_config.get("alarm_export", {})
         if not isinstance(alarm_export_cfg, dict):
             return defaults
@@ -2108,7 +2416,11 @@ class SharedSourceCacheService:
             value_text = str(value or "").strip()
             if key_text in defaults and value_text:
                 defaults[key_text] = value_text
-        return defaults
+        return {
+            key: value
+            for key, value in defaults.items()
+            if key in ALARM_EVENT_ALLOWED_UPLOAD_KEYS and str(value or "").strip()
+        }
 
     @staticmethod
     def _read_positive_int(value: Any, default: int, minimum: int = 1) -> int:
@@ -2141,10 +2453,16 @@ class SharedSourceCacheService:
             target_cfg = {}
 
         merged_target = {**legacy_target, **target_cfg}
-        app_token = str(merged_target.get("app_token", "") or "").strip()
+        configured_app_token = str(merged_target.get("app_token", "") or "").strip()
         table_id = str(merged_target.get("table_id", "") or "").strip()
-        if not app_token or not table_id:
+        if not configured_app_token or not table_id:
             raise RuntimeError("告警多维目标未配置：alarm_export.feishu.app_token/table_id 不能为空")
+
+        target_preview = self.get_alarm_event_upload_target_preview(force_refresh=False)
+        operation_app_token = str(target_preview.get("operation_app_token", "") or "").strip() or configured_app_token
+        display_url = str(target_preview.get("display_url", "") or target_preview.get("bitable_url", "") or "").strip()
+        if not display_url:
+            display_url = build_bitable_url(configured_app_token, table_id)
 
         replace_existing_on_full = shared_upload_cfg.get("replace_existing_on_full")
         if not isinstance(replace_existing_on_full, bool):
@@ -2152,8 +2470,15 @@ class SharedSourceCacheService:
         return {
             "app_id": app_id,
             "app_secret": app_secret,
-            "app_token": app_token,
+            "configured_app_token": configured_app_token,
+            "operation_app_token": operation_app_token,
+            "app_token": operation_app_token,
             "table_id": table_id,
+            "target_kind": str(target_preview.get("target_kind", "") or "").strip(),
+            "resolved_from": str(target_preview.get("resolved_from", "") or "").strip(),
+            "wiki_node_token": str(target_preview.get("wiki_node_token", "") or "").strip(),
+            "display_url": display_url,
+            "bitable_url": display_url,
             "timeout": self._read_positive_int(auth_cfg.get("timeout"), 30),
             "request_retry_count": max(0, int(auth_cfg.get("request_retry_count", 3) or 3)),
             "request_retry_interval_sec": max(0.0, float(auth_cfg.get("request_retry_interval_sec", 2) or 2)),
@@ -2162,6 +2487,76 @@ class SharedSourceCacheService:
             "create_batch_size": self._read_positive_int(merged_target.get("create_batch_size"), 200),
             "replace_existing_on_full": bool(replace_existing_on_full),
         }
+
+    def _new_alarm_event_target_resolver(self) -> BitableTargetResolver:
+        global_feishu = self.runtime_config.get("feishu", {}) if isinstance(self.runtime_config.get("feishu", {}), dict) else {}
+        return BitableTargetResolver(
+            app_id=str(global_feishu.get("app_id", "")).strip(),
+            app_secret=str(global_feishu.get("app_secret", "")).strip(),
+            timeout=int(global_feishu.get("timeout", 30) or 30),
+            request_retry_count=int(global_feishu.get("request_retry_count", 3) or 3),
+            request_retry_interval_sec=float(global_feishu.get("request_retry_interval_sec", 2) or 2),
+        )
+
+    def get_alarm_event_upload_target_preview(self, *, force_refresh: bool = False) -> Dict[str, Any]:
+        alarm_export_cfg = self.runtime_config.get("alarm_export", {})
+        if not isinstance(alarm_export_cfg, dict):
+            alarm_export_cfg = {}
+        legacy_target = alarm_export_cfg.get("feishu", {})
+        if not isinstance(legacy_target, dict):
+            legacy_target = {}
+        shared_upload_cfg = alarm_export_cfg.get("shared_source_upload", {})
+        if not isinstance(shared_upload_cfg, dict):
+            shared_upload_cfg = {}
+        target_cfg = shared_upload_cfg.get("target", {})
+        if not isinstance(target_cfg, dict):
+            target_cfg = {}
+        merged_target = {**legacy_target, **target_cfg}
+        configured_app_token = str(merged_target.get("app_token", "") or "").strip()
+        table_id = str(merged_target.get("table_id", "") or "").strip()
+        if not configured_app_token or not table_id:
+            return {
+                "configured_app_token": configured_app_token,
+                "operation_app_token": "",
+                "app_token": "",
+                "table_id": table_id,
+                "target_kind": "invalid",
+                "display_url": "",
+                "bitable_url": "",
+                "wiki_node_token": "",
+                "message": "请先在配置中心补齐告警多维 App Token 和 Table ID",
+                "resolved_at": "",
+            }
+        try:
+            preview = self._new_alarm_event_target_resolver().resolve_token_pair_preview(
+                configured_app_token=configured_app_token,
+                table_id=table_id,
+                force_refresh=force_refresh,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "configured_app_token": configured_app_token,
+                "operation_app_token": configured_app_token,
+                "app_token": configured_app_token,
+                "table_id": table_id,
+                "target_kind": "probe_error",
+                "display_url": build_bitable_url(configured_app_token, table_id),
+                "bitable_url": build_bitable_url(configured_app_token, table_id),
+                "wiki_node_token": "",
+                "message": str(exc),
+                "resolved_at": _now_text(),
+            }
+        preview_payload = dict(preview if isinstance(preview, dict) else {})
+        preview_payload["configured_app_token"] = str(preview_payload.get("configured_app_token", "") or configured_app_token).strip()
+        preview_payload["operation_app_token"] = str(preview_payload.get("operation_app_token", "") or preview_payload.get("app_token", "") or configured_app_token).strip()
+        preview_payload["app_token"] = preview_payload["operation_app_token"]
+        preview_payload["table_id"] = str(preview_payload.get("table_id", "") or table_id).strip()
+        display_url = str(preview_payload.get("display_url", "") or preview_payload.get("bitable_url", "") or "").strip()
+        if not display_url:
+            display_url = build_bitable_url(configured_app_token, table_id)
+        preview_payload["display_url"] = display_url
+        preview_payload["bitable_url"] = display_url
+        return preview_payload
 
     def _build_alarm_event_bitable_client(self, target: Dict[str, Any]) -> FeishuBitableClient:
         return FeishuBitableClient(
@@ -2179,52 +2574,155 @@ class SharedSourceCacheService:
         )
 
     def _select_alarm_ready_entries_for_external_upload(self, *, building: str = "") -> List[Dict[str, Any]]:
-        if self.store is None:
-            return []
-        building_filter = str(building or "").strip()
-        rows = self.store.list_source_cache_entries(
-            source_family=FAMILY_ALARM_EVENT,
-            bucket_kind="latest",
-            status="ready",
-            limit=5000,
-        )
-        selected_by_building: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            row_building = str(row.get("building", "") or "").strip()
-            if not row_building:
-                continue
-            if building_filter and row_building != building_filter:
-                continue
-            bucket_key = str(row.get("bucket_key", "") or "").strip()
-            if not self._is_alarm_scheduled_bucket_key(bucket_key):
-                continue
-            if row_building not in selected_by_building:
-                selected_by_building[row_building] = row
-        if not selected_by_building:
-            return []
-        ordered_buildings = self.get_enabled_buildings()
-        selected: List[Dict[str, Any]] = []
-        for name in ordered_buildings:
-            if name in selected_by_building:
-                selected.append(selected_by_building[name])
-        for name in sorted(selected_by_building.keys()):
-            if all(str(item.get("building", "") or "").strip() != name for item in selected):
-                selected.append(selected_by_building[name])
-        return selected
+        selection = self._build_alarm_external_selection(building=building)
+        return [
+            item
+            for item in selection.get("selected_entries", []) or []
+            if isinstance(item, dict)
+        ]
 
-    def _extract_alarm_entry_records_for_upload(
+    def _extract_alarm_entry_records_from_json_for_upload(
         self,
         *,
-        entry: Dict[str, Any],
+        file_path: Path,
         building: str,
         target_fields: Dict[str, str],
         max_age_days: int,
     ) -> Dict[str, Any]:
-        file_path = self._resolve_entry_file_path(entry)
-        if file_path is None:
-            raise RuntimeError("共享文件不存在或不可访问")
+        payload = load_alarm_event_json(file_path)
+        bucket_kind = str(payload.get("bucket_kind", "") or "").strip().lower()
+        payload_building = str(payload.get("building", "") or "").strip()
+        if bucket_kind not in {"latest", "manual"}:
+            raise RuntimeError(f"告警 JSON bucket_kind 不可外网消费: {bucket_kind or '<empty>'}")
+        if payload_building and str(building or "").strip() and payload_building != str(building or "").strip():
+            raise RuntimeError(f"告警 JSON building 与索引楼栋不一致: payload={payload_building}, entry={building}")
+        rows = payload.get("rows", []) if isinstance(payload.get("rows", []), list) else []
+        cutoff_at = datetime.now() - timedelta(days=max(1, int(max_age_days or 60)))
+        records: List[Dict[str, Any]] = []
+        total_rows = 0
+        kept_rows = 0
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            total_rows += 1
+            event_time_text = self._normalize_alarm_cell_text(item.get("event_time"))
+            event_time = self._parse_alarm_datetime_text(event_time_text)
+            if event_time is None or event_time < cutoff_at:
+                continue
+            kept_rows += 1
+            source_payload = {
+                "level": self._normalize_alarm_cell_text(item.get("level")),
+                "building": str(item.get("building", "") or "").strip() or str(building or "").strip(),
+                "content": self._normalize_alarm_cell_text(item.get("content")),
+                "position": self._normalize_alarm_cell_text(item.get("position")),
+                "object": self._normalize_alarm_cell_text(item.get("object")),
+                "event_time": event_time_text,
+                "accept_time": self._normalize_alarm_cell_text(item.get("accept_time")),
+                "is_accept": self._normalize_alarm_cell_text(item.get("is_accept")),
+                "accept_by": self._normalize_alarm_cell_text(item.get("accept_by")),
+                "accept_content": self._normalize_alarm_cell_text(item.get("accept_content")),
+                "recover_time": self._normalize_alarm_cell_text(item.get("recover_time")),
+                "is_recover": self._normalize_alarm_cell_text(item.get("is_recover")),
+                "event_suggest": self._normalize_alarm_cell_text(item.get("event_suggest")),
+                "event_type": self._normalize_alarm_cell_text(item.get("event_type")),
+                "trigger_value": self._normalize_alarm_cell_text(item.get("event_snapshot")),
+                "confirm_type": self._normalize_alarm_cell_text(item.get("confirm_type")),
+                "confirm_time": self._normalize_alarm_cell_text(item.get("confirm_time")),
+                "confirm_by": self._normalize_alarm_cell_text(item.get("confirm_by")),
+                "confirm_description": self._normalize_alarm_cell_text(item.get("confirm_description")),
+            }
+            fields: Dict[str, Any] = {}
+            for source_key, field_name in target_fields.items():
+                text = str(field_name or "").strip()
+                if not text:
+                    continue
+                mapped_value = self._map_alarm_upload_field_value(source_key, source_payload.get(source_key, ""))
+                if source_key in (ALARM_EVENT_BITABLE_DATETIME_FIELDS | ALARM_EVENT_BITABLE_NUMBER_FIELDS) and mapped_value in {"", None}:
+                    continue
+                fields[text] = mapped_value
+            if fields:
+                records.append(fields)
+        return {"records": records, "total_rows": total_rows, "kept_rows": kept_rows}
+
+    @staticmethod
+    def _bitable_field_text(value: Any) -> str:
+        if isinstance(value, list):
+            return " ".join(str(item or "").strip() for item in value if str(item or "").strip()).strip()
+        if isinstance(value, dict):
+            return str(value.get("text") or value.get("name") or value.get("value") or "").strip()
+        return str(value or "").strip()
+
+    def _emit_alarm_upload_log(self, text: str, emit_log: Callable[[str], None] | None = None) -> None:
+        line = str(text or "").strip()
+        if not line:
+            return
+        if callable(emit_log):
+            emit_log(line)
+            return
+        self._emit(line)
+
+    @staticmethod
+    def _summarize_alarm_upload_error(error: Any) -> str:
+        text = str(error or "").strip()
+        if not text:
+            return "告警信息文件上传失败"
+        detail = ""
+        candidate = text
+        if "{" in candidate and "}" in candidate:
+            brace_start = candidate.find("{")
+            brace_end = candidate.rfind("}")
+            if brace_start >= 0 and brace_end > brace_start:
+                candidate = candidate[brace_start : brace_end + 1]
+        try:
+            payload = ast.literal_eval(candidate)
+        except Exception:  # noqa: BLE001
+            payload = None
+        if isinstance(payload, dict):
+            detail = str(payload.get("msg", "") or "").strip()
+            inner = payload.get("error", {}) if isinstance(payload.get("error", {}), dict) else {}
+            message = str(inner.get("message", "") or "").strip()
+            lowered = f"{detail} {message}".lower()
+            if "datetimefieldconvfail" in lowered or "unix timestamp" in lowered:
+                summary = "飞书日期字段格式错误，请查看运行日志"
+            elif "numberfieldconvfail" in lowered or "must be a number" in lowered:
+                summary = "飞书数值字段格式错误，请查看运行日志"
+            else:
+                summary = detail or message or text
+        else:
+            summary = text
+        return summary
+
+    @staticmethod
+    def _coerce_alarm_number_field(value: Any) -> Any:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        normalized = text.replace(",", "")
+        try:
+            number = Decimal(normalized)
+        except (InvalidOperation, ValueError):
+            return ""
+        if number == number.to_integral():
+            return int(number)
+        return float(number)
+
+    @staticmethod
+    def _map_alarm_upload_field_value(source_key: str, value: Any) -> Any:
+        if source_key in ALARM_EVENT_BITABLE_DATETIME_FIELDS:
+            timestamp_ms = parse_timestamp_ms(value)
+            return int(timestamp_ms) if timestamp_ms is not None else ""
+        if source_key in ALARM_EVENT_BITABLE_NUMBER_FIELDS:
+            return SharedSourceCacheService._coerce_alarm_number_field(value)
+        return value
+
+    def _extract_alarm_entry_records_from_workbook_for_upload(
+        self,
+        *,
+        file_path: Path,
+        building: str,
+        target_fields: Dict[str, str],
+        max_age_days: int,
+    ) -> Dict[str, Any]:
         validate_excel_workbook_file(file_path)
         workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
         try:
@@ -2299,14 +2797,77 @@ class SharedSourceCacheService:
                     text = str(field_name or "").strip()
                     if not text:
                         continue
-                    fields[text] = source_payload.get(source_key, "")
+                    mapped_value = self._map_alarm_upload_field_value(source_key, source_payload.get(source_key, ""))
+                    if source_key in (ALARM_EVENT_BITABLE_DATETIME_FIELDS | ALARM_EVENT_BITABLE_NUMBER_FIELDS) and mapped_value in {"", None}:
+                        continue
+                    fields[text] = mapped_value
                 if fields:
                     records.append(fields)
             return {"records": records, "total_rows": total_rows, "kept_rows": kept_rows}
         finally:
             workbook.close()
 
-    def _consume_alarm_entry_after_upload(self, *, entry: Dict[str, Any], consumed_by_mode: str) -> bool:
+    def _extract_alarm_entry_records_for_upload(
+        self,
+        *,
+        entry: Dict[str, Any],
+        building: str,
+        target_fields: Dict[str, str],
+        max_age_days: int,
+    ) -> Dict[str, Any]:
+        file_path = self._resolve_entry_file_path(entry)
+        if file_path is None:
+            raise RuntimeError("共享文件不存在或不可访问")
+        if str(file_path.suffix or "").strip().lower() == ".json":
+            return self._extract_alarm_entry_records_from_json_for_upload(
+                file_path=file_path,
+                building=building,
+                target_fields=target_fields,
+                max_age_days=max_age_days,
+            )
+        return self._extract_alarm_entry_records_from_workbook_for_upload(
+            file_path=file_path,
+            building=building,
+            target_fields=target_fields,
+            max_age_days=max_age_days,
+        )
+
+    def _delete_alarm_records_for_building_from_bitable(
+        self,
+        *,
+        client: FeishuBitableClient,
+        table_id: str,
+        building: str,
+        target_fields: Dict[str, str],
+        list_page_size: int,
+        delete_batch_size: int,
+    ) -> int:
+        building_field_name = str(target_fields.get("building", "") or "").strip()
+        building_text = str(building or "").strip()
+        if not table_id or not building_field_name or not building_text:
+            return 0
+        rows = client.list_records(table_id=table_id, page_size=list_page_size)
+        record_ids: List[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            fields = row.get("fields", {}) if isinstance(row.get("fields", {}), dict) else {}
+            if self._bitable_field_text(fields.get(building_field_name)) != building_text:
+                continue
+            record_id = str(row.get("record_id", "") or "").strip()
+            if record_id:
+                record_ids.append(record_id)
+        if not record_ids:
+            return 0
+        return client.batch_delete_records(table_id=table_id, record_ids=record_ids, batch_size=delete_batch_size)
+
+    def _consume_alarm_entry_after_upload(
+        self,
+        *,
+        entry: Dict[str, Any],
+        consumed_by_mode: str,
+        consumed_reason: str = "",
+    ) -> bool:
         if self.store is None:
             return False
         entry_id = str(entry.get("entry_id", "") or "").strip()
@@ -2335,10 +2896,54 @@ class SharedSourceCacheService:
                 "consumed_by_role": self.role_mode,
                 "consumed_by_family": FAMILY_ALARM_EVENT,
                 "consumed_by_mode": str(consumed_by_mode or "").strip(),
+                "consumed_reason": str(consumed_reason or "").strip(),
             },
         )
         self._mark_external_full_snapshot_dirty()
         return True
+
+    def _consume_superseded_alarm_ready_entries_after_upload(
+        self,
+        *,
+        entry: Dict[str, Any],
+        consumed_by_mode: str,
+    ) -> Dict[str, Any]:
+        if self.store is None:
+            return {"consumed_count": 0, "failed_buildings": []}
+        building = str(entry.get("building", "") or "").strip()
+        current_entry_id = str(entry.get("entry_id", "") or "").strip()
+        current_downloaded_at_dt = self._parse_alarm_datetime_text(str(entry.get("downloaded_at", "") or "").strip())
+        if not building or current_downloaded_at_dt is None:
+            return {"consumed_count": 0, "failed_buildings": []}
+        rows = self.store.list_source_cache_entries(
+            source_family=FAMILY_ALARM_EVENT,
+            building=building,
+            status="ready",
+            limit=5000,
+        )
+        consumed_count = 0
+        failed_buildings: List[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_entry_id = str(row.get("entry_id", "") or "").strip()
+            if not row_entry_id or row_entry_id == current_entry_id:
+                continue
+            row_bucket_kind = str(row.get("bucket_kind", "") or "").strip().lower()
+            if row_bucket_kind not in {"latest", "manual"}:
+                continue
+            row_downloaded_at_dt = self._parse_alarm_datetime_text(str(row.get("downloaded_at", "") or "").strip())
+            if row_downloaded_at_dt is None or row_downloaded_at_dt >= current_downloaded_at_dt:
+                continue
+            if self._consume_alarm_entry_after_upload(
+                entry=row,
+                consumed_by_mode=consumed_by_mode,
+                consumed_reason="superseded_by_newer_bucket",
+            ):
+                consumed_count += 1
+            else:
+                failed_buildings.append(building)
+        return {"consumed_count": consumed_count, "failed_buildings": failed_buildings}
 
     def _set_alarm_external_upload_state(
         self,
@@ -2411,23 +3016,30 @@ class SharedSourceCacheService:
         building: str = "",
         replace_existing: bool | None,
         max_age_days: int = 60,
+        emit_log: Callable[[str], None] | None = None,
     ) -> Dict[str, Any]:
         if not self.enabled or self.role_mode != "external" or self.store is None:
             return {"accepted": False, "reason": "disabled"}
 
         normalized_mode = str(mode or "").strip().lower() or "full"
         target_building = str(building or "").strip()
+        scope_text = target_building or "all"
         begin_state = self._begin_alarm_external_upload(mode=normalized_mode, scope=target_building or "all")
         if not bool(begin_state.get("accepted")):
             return begin_state
         started_at = str(begin_state.get("started_at", "") or "").strip()
+        self._emit_alarm_upload_log(
+            f"[共享缓存] 外网告警文件上传开始: mode={normalized_mode}, scope={scope_text}, kept_days={max(1, int(max_age_days or 60))}",
+            emit_log=emit_log,
+        )
         resolved_target: Dict[str, Any] | None = None
         if replace_existing is None:
             try:
                 resolved_target = self._resolve_alarm_event_upload_target()
                 replace_existing = bool(resolved_target.get("replace_existing_on_full", True))
             except Exception as exc:  # noqa: BLE001
-                error_text = str(exc)
+                raw_error_text = str(exc)
+                error_text = self._summarize_alarm_upload_error(raw_error_text)
                 self._set_alarm_external_upload_state(
                     running=False,
                     started_at="",
@@ -2443,15 +3055,40 @@ class SharedSourceCacheService:
                     last_error=error_text,
                     success=False,
                 )
+                self._emit_alarm_upload_log(
+                    f"[共享缓存] 外网告警文件上传失败: mode={normalized_mode}, scope={scope_text}, error={error_text}",
+                    emit_log=emit_log,
+                )
                 return {
                     "accepted": False,
                     "reason": "misconfigured",
                     "mode": normalized_mode,
-                    "scope": target_building or "all",
+                    "scope": scope_text,
                     "running": False,
                     "error": error_text,
                 }
-        selected_entries = self._select_alarm_ready_entries_for_external_upload(building=target_building)
+        selection = self._build_alarm_external_selection(building=target_building)
+        selected_entries = [
+            item
+            for item in selection.get("selected_entries", []) or []
+            if isinstance(item, dict)
+        ]
+        used_previous_day_fallback = [
+            str(item or "").strip()
+            for item in selection.get("used_previous_day_fallback", []) or []
+            if str(item or "").strip()
+        ]
+        missing_today_buildings = [
+            str(item or "").strip()
+            for item in selection.get("missing_today_buildings", []) or []
+            if str(item or "").strip()
+        ]
+        missing_both_days_buildings = [
+            str(item or "").strip()
+            for item in selection.get("missing_both_days_buildings", []) or []
+            if str(item or "").strip()
+        ]
+        selection_reference_date = str(selection.get("selection_reference_date", "") or "").strip()
         if not selected_entries:
             self._set_alarm_external_upload_state(
                 running=False,
@@ -2468,15 +3105,23 @@ class SharedSourceCacheService:
                 last_error="",
                 success=True,
             )
+            self._emit_alarm_upload_log(
+                f"[共享缓存] 外网告警文件上传完成: mode={normalized_mode}, scope={scope_text}, no_ready_entries=true",
+                emit_log=emit_log,
+            )
             return {
                 "accepted": True,
                 "reason": "no_ready_entries",
                 "mode": normalized_mode,
-                "scope": target_building or "all",
+                "scope": scope_text,
                 "uploaded_record_count": 0,
                 "uploaded_file_count": 0,
                 "consumed_count": 0,
                 "failed_entries": [],
+                "used_previous_day_fallback": used_previous_day_fallback,
+                "missing_today_buildings": missing_today_buildings,
+                "missing_both_days_buildings": missing_both_days_buildings,
+                "selection_reference_date": selection_reference_date,
             }
 
         target_fields = self._resolve_alarm_event_upload_target_fields()
@@ -2507,6 +3152,45 @@ class SharedSourceCacheService:
                         },
                     )
 
+        if normalized_mode == "full" and parse_failed_entries:
+            error_text = "存在告警文件预检失败楼栋，未执行清表或上传"
+            self._set_alarm_external_upload_state(
+                running=False,
+                started_at="",
+                current_mode="",
+                current_scope="",
+                mode=normalized_mode,
+                scope=target_building or "all",
+                uploaded_record_count=0,
+                uploaded_file_count=0,
+                consumed_count=0,
+                failed_entries=parse_failed_entries,
+                deleted_before_upload_count=0,
+                last_error=error_text,
+                success=False,
+            )
+            self._emit_alarm_upload_log(
+                f"[共享缓存] 外网告警文件预检失败: mode={normalized_mode}, scope={scope_text}, failed_entries={', '.join(parse_failed_entries)}",
+                emit_log=emit_log,
+            )
+            return {
+                "accepted": False,
+                "reason": "precheck_failed",
+                "mode": normalized_mode,
+                "scope": scope_text,
+                "uploaded_record_count": 0,
+                "uploaded_file_count": 0,
+                "consumed_count": 0,
+                "failed_entries": parse_failed_entries,
+                "error": error_text,
+                "started_at": started_at,
+                "running": False,
+                "used_previous_day_fallback": used_previous_day_fallback,
+                "missing_today_buildings": missing_today_buildings,
+                "missing_both_days_buildings": missing_both_days_buildings,
+                "selection_reference_date": selection_reference_date,
+            }
+
         if not parsed_entries:
             error_text = "所有告警文件解析失败，未执行上传"
             self._set_alarm_external_upload_state(
@@ -2524,24 +3208,54 @@ class SharedSourceCacheService:
                 last_error=error_text,
                 success=False,
             )
+            self._emit_alarm_upload_log(
+                f"[共享缓存] 外网告警文件上传失败: mode={normalized_mode}, scope={scope_text}, error={error_text}",
+                emit_log=emit_log,
+            )
             return {
                 "accepted": False,
                 "reason": "all_entries_parse_failed",
                 "mode": normalized_mode,
-                "scope": target_building or "all",
+                "scope": scope_text,
                 "uploaded_record_count": 0,
                 "uploaded_file_count": 0,
                 "consumed_count": 0,
                 "failed_entries": parse_failed_entries,
                 "error": error_text,
+                "used_previous_day_fallback": used_previous_day_fallback,
+                "missing_today_buildings": missing_today_buildings,
+                "missing_both_days_buildings": missing_both_days_buildings,
+                "selection_reference_date": selection_reference_date,
             }
 
         try:
             target = resolved_target or self._resolve_alarm_event_upload_target()
             client = self._build_alarm_event_bitable_client(target)
             table_id = str(target.get("table_id", "") or "").strip()
+            last_progress_checkpoint = 0
+
+            def _progress_callback(uploaded: int, total: int) -> None:
+                nonlocal last_progress_checkpoint
+                current_checkpoint = max(0, int(uploaded or 0)) // 100
+                while current_checkpoint > last_progress_checkpoint:
+                    last_progress_checkpoint += 1
+                    checkpoint_value = last_progress_checkpoint * 100
+                    self._emit_alarm_upload_log(
+                        f"[共享缓存] 外网告警上传进度: mode={normalized_mode}, scope={scope_text}, uploaded={min(checkpoint_value, max(0, int(total or 0)))}/{max(0, int(total or 0))}",
+                        emit_log=emit_log,
+                    )
+
             deleted_count = 0
-            if bool(replace_existing):
+            if normalized_mode == "single_building":
+                deleted_count = self._delete_alarm_records_for_building_from_bitable(
+                    client=client,
+                    table_id=table_id,
+                    building=target_building,
+                    target_fields=target_fields,
+                    list_page_size=self._read_positive_int(target.get("list_page_size"), 500),
+                    delete_batch_size=self._read_positive_int(target.get("delete_batch_size"), 500),
+                )
+            elif bool(replace_existing):
                 deleted_count = client.clear_table(
                     table_id=table_id,
                     list_page_size=self._read_positive_int(target.get("list_page_size"), 500),
@@ -2552,9 +3266,11 @@ class SharedSourceCacheService:
                     table_id=table_id,
                     fields_list=aggregated_records,
                     batch_size=self._read_positive_int(target.get("create_batch_size"), 200),
+                    progress_callback=_progress_callback,
                 )
         except Exception as exc:  # noqa: BLE001
-            error_text = str(exc)
+            raw_error_text = str(exc)
+            error_text = self._summarize_alarm_upload_error(raw_error_text)
             self._set_alarm_external_upload_state(
                 running=False,
                 started_at="",
@@ -2570,16 +3286,29 @@ class SharedSourceCacheService:
                 last_error=error_text,
                 success=False,
             )
+            self._emit_alarm_upload_log(
+                f"[共享缓存] 外网告警文件上传失败: mode={normalized_mode}, scope={scope_text}, error={error_text}",
+                emit_log=emit_log,
+            )
+            if raw_error_text and raw_error_text != error_text:
+                self._emit_alarm_upload_log(
+                    f"[共享缓存] 外网告警文件上传错误详情: mode={normalized_mode}, scope={scope_text}, detail={raw_error_text}",
+                    emit_log=emit_log,
+                )
             return {
                 "accepted": False,
                 "reason": "upload_failed",
                 "mode": normalized_mode,
-                "scope": target_building or "all",
+                "scope": scope_text,
                 "uploaded_record_count": 0,
                 "uploaded_file_count": 0,
                 "consumed_count": 0,
                 "failed_entries": parse_failed_entries,
                 "error": error_text,
+                "used_previous_day_fallback": used_previous_day_fallback,
+                "missing_today_buildings": missing_today_buildings,
+                "missing_both_days_buildings": missing_both_days_buildings,
+                "selection_reference_date": selection_reference_date,
             }
 
         consumed_count = 0
@@ -2591,6 +3320,14 @@ class SharedSourceCacheService:
                 consumed_count += 1
                 if row_building:
                     consumed_buildings.append(row_building)
+                    superseded = self._consume_superseded_alarm_ready_entries_after_upload(
+                        entry=entry,
+                        consumed_by_mode=normalized_mode,
+                    )
+                    consumed_count += int(superseded.get("consumed_count", 0) or 0)
+                    consume_failed_entries.extend(
+                        [item for item in superseded.get("failed_buildings", []) if str(item or "").strip()]
+                    )
             elif row_building:
                 consume_failed_entries.append(row_building)
 
@@ -2611,11 +3348,16 @@ class SharedSourceCacheService:
             last_error="" if success else "存在失败楼栋，请查看 failed_entries",
             success=success,
         )
+        self._emit_alarm_upload_log(
+            f"[共享缓存] 外网告警文件上传完成: mode={normalized_mode}, scope={scope_text}, records={len(aggregated_records)}, files={len(parsed_entries)}, consumed={consumed_count}"
+            + (f", failed_entries={', '.join(failed_entries)}" if failed_entries else ""),
+            emit_log=emit_log,
+        )
         return {
             "accepted": True,
             "reason": "completed" if success else "partial_completed",
             "mode": normalized_mode,
-            "scope": target_building or "all",
+            "scope": scope_text,
             "uploaded_record_count": len(aggregated_records),
             "uploaded_file_count": len(parsed_entries),
             "consumed_count": consumed_count,
@@ -2625,17 +3367,31 @@ class SharedSourceCacheService:
             "kept_days": max(1, int(max_age_days or 60)),
             "started_at": started_at,
             "running": False,
+            "used_previous_day_fallback": used_previous_day_fallback,
+            "missing_today_buildings": missing_today_buildings,
+            "missing_both_days_buildings": missing_both_days_buildings,
+            "selection_reference_date": selection_reference_date,
         }
 
-    def upload_alarm_event_entries_full_to_bitable(self) -> Dict[str, Any]:
+    def upload_alarm_event_entries_full_to_bitable(
+        self,
+        *,
+        emit_log: Callable[[str], None] | None = None,
+    ) -> Dict[str, Any]:
         return self.upload_alarm_event_entries_to_bitable(
             mode="full",
             building="",
             replace_existing=None,
             max_age_days=60,
+            emit_log=emit_log,
         )
 
-    def upload_alarm_event_entries_single_building_to_bitable(self, *, building: str) -> Dict[str, Any]:
+    def upload_alarm_event_entries_single_building_to_bitable(
+        self,
+        *,
+        building: str,
+        emit_log: Callable[[str], None] | None = None,
+    ) -> Dict[str, Any]:
         building_name = str(building or "").strip()
         if not building_name:
             return {"accepted": False, "reason": "invalid_building", "error": "缺少楼栋参数"}
@@ -2644,6 +3400,7 @@ class SharedSourceCacheService:
             building=building_name,
             replace_existing=False,
             max_age_days=60,
+            emit_log=emit_log,
         )
 
     def consume_ready_alarm_event_entries(self) -> Dict[str, Any]:

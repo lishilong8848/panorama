@@ -394,7 +394,7 @@
       {{ isActionLocked(actionKeyHandoverReviewAccessReprobe) ? '探测中...' : '重新探测审核访问地址' }}
     </button>
   </div>
-  <div class="hint">当前审核访问地址已持久化，本机后续启动不会自动重新探测。</div>
+  <div class="hint">当前审核访问地址已持久化；外网端启动后会基于真实审核页访问结果进行校验。</div>
   <div class="hint" v-if="health.handover.review_base_url_effective_source === 'auto'">
     当前自动地址来自已缓存的历史诊断结果；只有手动点击“重新探测审核访问地址”才会再次探测。
   </div>

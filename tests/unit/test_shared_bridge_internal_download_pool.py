@@ -234,6 +234,159 @@ def test_run_building_job_failure_does_not_pollute_other_building_slots() -> Non
 
 
 
+def test_run_building_alarm_job_uses_api_request_context_and_disposes_it() -> None:
+    pool = InternalDownloadBrowserPool(runtime_config={})
+    pool._locks = {'A楼': asyncio.Lock()}
+    page = object()
+    login_calls = []
+    api_context_calls = []
+
+    class _FakeApiContext:
+        def __init__(self) -> None:
+            self.disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    api_context = _FakeApiContext()
+
+    async def _fake_ensure_page(_building: str):
+        return page
+
+    async def _fake_ensure_logged_in(building: str, current_page):  # noqa: ANN001
+        login_calls.append((building, current_page))
+
+    async def _fake_create_alarm_api_request_context(building: str):
+        api_context_calls.append(building)
+        return api_context, "http://192.168.1.10"
+
+    async def _runner(current_request_context, base_url: str):  # noqa: ANN001
+        assert current_request_context is api_context
+        assert base_url == "http://192.168.1.10"
+        return {"status": "ok"}
+
+    pool._ensure_page = _fake_ensure_page  # type: ignore[method-assign]
+    pool._ensure_logged_in = _fake_ensure_logged_in  # type: ignore[method-assign]
+    pool._create_alarm_api_request_context = _fake_create_alarm_api_request_context  # type: ignore[method-assign]
+
+    result = asyncio.run(pool._run_building_alarm_job('A楼', _runner))
+
+    assert result == {"status": "ok"}
+    assert login_calls == [('A楼', page)]
+    assert api_context_calls == ['A楼']
+    assert api_context.disposed is True
+    slot = _find_slot(pool.get_health_snapshot(), 'A楼')
+    assert slot['login_state'] == 'ready'
+    assert slot['login_error'] == ''
+    assert slot['last_result'] == 'success'
+    assert slot['last_error'] == ''
+
+
+def test_classify_failure_kind_treats_etimedout_as_page_timeout() -> None:
+    kind = InternalDownloadBrowserPool._classify_failure_kind(
+        "APIRequestContext.post: connect ETIMEDOUT 192.168.232.53:80"
+    )
+    assert kind == 'page_timeout'
+
+
+def test_run_building_alarm_job_retries_again_after_successful_recovery() -> None:
+    pool = InternalDownloadBrowserPool(runtime_config={})
+    pool._locks = {'A楼': asyncio.Lock()}
+    page = object()
+    api_contexts = []
+    recovery_calls = []
+    attempts = {'runner': 0}
+
+    class _FakeApiContext:
+        def __init__(self) -> None:
+            self.disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    async def _fake_ensure_page(_building: str):
+        return page
+
+    async def _fake_ensure_logged_in(_building: str, _page):  # noqa: ANN001
+        return None
+
+    async def _fake_create_alarm_api_request_context(_building: str):
+        ctx = _FakeApiContext()
+        api_contexts.append(ctx)
+        return ctx, "http://192.168.1.10"
+
+    async def _fake_attempt_recovery(_building: str, *, base_reason: str, failure_kind: str, from_probe: bool = False):  # noqa: ANN001
+        recovery_calls.append({
+            'base_reason': base_reason,
+            'failure_kind': failure_kind,
+            'from_probe': from_probe,
+        })
+        return True
+
+    async def _runner(_current_request_context, _base_url: str):  # noqa: ANN001
+        attempts['runner'] += 1
+        if attempts['runner'] < 3:
+            raise RuntimeError("APIRequestContext.post: connect ETIMEDOUT 192.168.232.53:80")
+        return {"status": "ok"}
+
+    pool._ensure_page = _fake_ensure_page  # type: ignore[method-assign]
+    pool._ensure_logged_in = _fake_ensure_logged_in  # type: ignore[method-assign]
+    pool._create_alarm_api_request_context = _fake_create_alarm_api_request_context  # type: ignore[method-assign]
+    pool._attempt_building_recovery = _fake_attempt_recovery  # type: ignore[method-assign]
+
+    result = asyncio.run(pool._run_building_alarm_job('A楼', _runner))
+
+    assert result == {"status": "ok"}
+    assert attempts['runner'] == 3
+    assert len(recovery_calls) == 2
+    assert all(call['failure_kind'] == 'page_timeout' for call in recovery_calls)
+    assert len(api_contexts) == 3
+    assert all(ctx.disposed is True for ctx in api_contexts)
+    slot = _find_slot(pool.get_health_snapshot(), 'A楼')
+    assert slot['login_state'] == 'ready'
+    assert slot['last_result'] == 'success'
+
+
+def test_recovery_probe_clears_failed_login_state_when_page_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    pool = InternalDownloadBrowserPool(runtime_config={})
+    pool._locks = {'A楼': asyncio.Lock()}
+    pool._update_slot(
+        'A楼',
+        page_ready=True,
+        login_state='failed',
+        login_error='旧登录失败',
+        last_error='旧登录失败',
+        last_result='failed',
+    )
+
+    async def _fake_ensure_page(_building: str):
+        return object()
+
+    async def _fake_probe_existing_login_state(_page) -> str:  # noqa: ANN001
+        return 'ready'
+
+    original_sleep = asyncio.sleep
+    sleep_calls = {'count': 0}
+
+    async def _fake_sleep(_delay: float) -> None:
+        sleep_calls['count'] += 1
+        if sleep_calls['count'] >= 2:
+            raise asyncio.CancelledError
+        await original_sleep(0)
+
+    pool._ensure_page = _fake_ensure_page  # type: ignore[method-assign]
+    pool._probe_existing_login_state = _fake_probe_existing_login_state  # type: ignore[method-assign]
+    monkeypatch.setattr(asyncio, 'sleep', _fake_sleep)
+
+    asyncio.run(pool._async_recovery_probe_loop())
+
+    slot = _find_slot(pool.get_health_snapshot(), 'A楼')
+    assert slot['login_state'] == 'ready'
+    assert slot['login_error'] == ''
+    assert slot['last_error'] == ''
+    assert slot['last_result'] == 'ready'
+
+
 def test_external_shared_bridge_start_stops_leftover_internal_pool() -> None:
     calls = {'stop': 0}
 

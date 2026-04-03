@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 import re
 import socket
 import subprocess
@@ -41,6 +42,7 @@ from app.shared.utils.runtime_temp_workspace import (
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.event_followup_cache_store import EventFollowupCacheStore
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
+from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
 from handover_log_module.service.review_session_service import ReviewSessionService
@@ -114,6 +116,73 @@ def _deployment_role_mode(container) -> str:
     if text in {"internal", "external"}:
         return text
     return ""
+
+
+def _config_last_started_role_mode(cfg: Dict[str, Any]) -> str:
+    common = cfg.get("common", {}) if isinstance(cfg, dict) else {}
+    deployment = common.get("deployment", {}) if isinstance(common, dict) else {}
+    if not isinstance(deployment, dict):
+        return ""
+    return normalize_role_mode(deployment.get("last_started_role_mode"))
+
+
+def _config_role_mode(cfg: Dict[str, Any]) -> str:
+    common = cfg.get("common", {}) if isinstance(cfg, dict) else {}
+    deployment = common.get("deployment", {}) if isinstance(common, dict) else {}
+    if not isinstance(deployment, dict):
+        return ""
+    return normalize_role_mode(deployment.get("role_mode"))
+
+
+def _normalize_console_bind_host(value: Any) -> str:
+    return str(value or "").strip() or "127.0.0.1"
+
+
+def _is_loopback_console_host(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if text in {"127.0.0.1", "::1", "localhost"}:
+        return True
+    try:
+        return ip_address(text).is_loopback
+    except ValueError:
+        return False
+
+
+def _resolve_runtime_console_bind_host(container) -> str:
+    env_host = str(os.environ.get("QJPT_CONSOLE_BIND_HOST", "") or "").strip()
+    if env_host:
+        return _normalize_console_bind_host(env_host)
+    config = container.config if isinstance(getattr(container, "config", None), dict) else {}
+    common_cfg = config.get("common", {}) if isinstance(config.get("common", {}), dict) else {}
+    console_cfg = common_cfg.get("console", {}) if isinstance(common_cfg, dict) else {}
+    host = _normalize_console_bind_host(console_cfg.get("host", "127.0.0.1"))
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        return "127.0.0.1"
+    return host
+
+
+def _resolve_runtime_console_bind_port(container) -> int:
+    env_port = str(os.environ.get("QJPT_CONSOLE_BIND_PORT", "") or "").strip()
+    if env_port:
+        try:
+            return int(env_port)
+        except Exception:  # noqa: BLE001
+            pass
+    config = container.config if isinstance(getattr(container, "config", None), dict) else {}
+    common_cfg = config.get("common", {}) if isinstance(config.get("common", {}), dict) else {}
+    console_cfg = common_cfg.get("console", {}) if isinstance(common_cfg, dict) else {}
+    return _resolve_console_port(console_cfg)
+
+
+def _review_access_probe_guard(container) -> tuple[bool, str, str]:
+    role_mode = _deployment_role_mode(container)
+    if role_mode != "external":
+        return False, "internal_local_only", "当前为内网端，不提供局域网审核访问地址"
+    bind_host = _resolve_runtime_console_bind_host(container)
+    if _is_loopback_console_host(bind_host):
+        return False, "external_bind_required", "当前外网端未开放局域网监听，无法生成审核访问地址"
+    return True, "", ""
 
 
 def _ensure_not_internal_role(container, detail: str) -> None:
@@ -361,7 +430,7 @@ def _get_or_create_bridge_task(
     raise AttributeError(f"共享桥接服务缺少方法: {get_or_create_name}/{create_name}")
 
 
-def _role_restart_signature(cfg: Dict[str, Any]) -> str:
+def _role_restart_signature(cfg: Dict[str, Any], *, include_role_mode: bool = True) -> str:
     common = cfg.get("common", {}) if isinstance(cfg, dict) else {}
     deployment = common.get("deployment", {}) if isinstance(common, dict) else {}
     shared_bridge = common.get("shared_bridge", {}) if isinstance(common, dict) else {}
@@ -371,7 +440,6 @@ def _role_restart_signature(cfg: Dict[str, Any]) -> str:
         role_mode,
     )
     payload = {
-        "role_mode": role_mode,
         "node_id": str(deployment.get("node_id", "") or "").strip(),
         "node_label": str(deployment.get("node_label", "") or "").strip(),
         "bridge_enabled": bool(resolved_shared_bridge.get("enabled", False)),
@@ -379,6 +447,8 @@ def _role_restart_signature(cfg: Dict[str, Any]) -> str:
         "bridge_internal_root_dir": str(resolved_shared_bridge.get("internal_root_dir", "") or "").strip(),
         "bridge_external_root_dir": str(resolved_shared_bridge.get("external_root_dir", "") or "").strip(),
     }
+    if include_role_mode:
+        payload["role_mode"] = role_mode
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
@@ -635,12 +705,16 @@ def _materialize_review_access_snapshot(
         review_cfg.get("public_base_url", "") if isinstance(review_cfg, dict) else ""
     )
     persisted = _normalize_review_access_state(state or _load_review_access_state(container))
+    probe_enabled, disabled_status, disabled_error = _review_access_probe_guard(container)
     effective_base_url = ""
     effective_source = ""
     status = "no_candidate"
     error = ""
 
-    if configured_base_url:
+    if not probe_enabled:
+        status = disabled_status
+        error = disabled_error
+    elif configured_base_url:
         effective_base_url = configured_base_url
         effective_source = "manual"
         status = "manual_ok"
@@ -660,17 +734,24 @@ def _materialize_review_access_snapshot(
         "review_base_url": configured_base_url,
         "review_base_url_effective": effective_base_url,
         "review_base_url_effective_source": effective_source,
-        "review_base_url_candidates": list(persisted.get("candidates", [])),
+        "review_base_url_candidates": list(persisted.get("candidates", [])) if probe_enabled else [],
         "review_base_url_status": status,
         "review_base_url_error": "" if effective_base_url else error,
-        "review_base_url_validated_candidates": copy.deepcopy(persisted.get("validated_candidates", [])),
-        "review_base_url_candidate_results": copy.deepcopy(persisted.get("candidate_results", [])),
+        "review_base_url_validated_candidates": (
+            copy.deepcopy(persisted.get("validated_candidates", [])) if probe_enabled else []
+        ),
+        "review_base_url_candidate_results": (
+            copy.deepcopy(persisted.get("candidate_results", [])) if probe_enabled else []
+        ),
         "review_base_url_manual_available": True,
         "review_base_url_configured_at": str(persisted.get("configured_at", "") or "").strip(),
         "review_base_url_last_probe_at": str(persisted.get("last_probe_at", "") or "").strip(),
         "duty_date": str(duty_date or "").strip(),
         "duty_shift": str(duty_shift or "").strip().lower(),
-        "review_links": _build_review_links_for_base_url(review_cfg if isinstance(review_cfg, dict) else {}, effective_base_url),
+        "review_links": _build_review_links_for_base_url(
+            review_cfg if isinstance(review_cfg, dict) else {},
+            effective_base_url,
+        ) if probe_enabled else [],
         "console_port": _resolve_console_port(console_cfg),
     }
 
@@ -709,17 +790,43 @@ def _probe_and_persist_review_access_snapshot(
 ) -> Dict[str, Any]:
     config = container.config if isinstance(getattr(container, "config", None), dict) else {}
     console_cfg = config.get("common", {}).get("console", {}) if isinstance(config.get("common", {}), dict) else {}
-    resolved_port = _resolve_console_port(console_cfg, request_port=port)
+    resolved_port = _resolve_runtime_console_bind_port(container) if port is None else _resolve_console_port(
+        console_cfg,
+        request_port=port,
+    )
     review_cfg = (
         config.get("features", {}).get("handover_log", {}).get("review_ui", {})
         if isinstance(config.get("features", {}), dict)
         else {}
     )
+    probe_enabled, disabled_status, disabled_error = _review_access_probe_guard(container)
     configured_base_url = _normalize_review_base_url(
         review_cfg.get("public_base_url", "") if isinstance(review_cfg, dict) else ""
     )
     previous = _load_review_access_state(container)
     now_text = _review_access_now_text()
+    state = _normalize_review_access_state(previous)
+    if not probe_enabled:
+        state["configured"] = bool(previous.get("configured", False)) or bool(configured_base_url)
+        state["effective_base_url"] = ""
+        state["effective_source"] = ""
+        state["candidates"] = []
+        state["validated_candidates"] = []
+        state["candidate_results"] = []
+        state["status"] = disabled_status
+        state["error"] = disabled_error
+        state["last_probe_at"] = now_text
+        state["configured_at"] = str(state.get("configured_at", "") or "").strip() or (
+            now_text if state["configured"] else ""
+        )
+        persisted = _save_review_access_state(container, state)
+        return _materialize_review_access_snapshot(
+            container,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            state=persisted,
+        )
+
     candidate_hosts = _detect_lan_ipv4s(request_host=request_host)
     candidate_base_urls = [f"http://{host}:{resolved_port}" for host in candidate_hosts]
     probe_targets = _review_probe_targets(review_cfg if isinstance(review_cfg, dict) else {})
@@ -727,7 +834,6 @@ def _probe_and_persist_review_access_snapshot(
     validated_candidates = [copy.deepcopy(item) for item in candidate_results if bool(item.get("ok"))]
     auto_success = validated_candidates[0] if validated_candidates else None
 
-    state = _normalize_review_access_state(previous)
     state["configured"] = bool(previous.get("configured", False)) or bool(configured_base_url) or bool(auto_success)
     state["candidates"] = candidate_base_urls
     state["validated_candidates"] = validated_candidates
@@ -775,17 +881,50 @@ def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, An
     if not isinstance(deployment_snapshot, dict):
         deployment_snapshot = {"role_mode": "", "node_id": "", "node_label": ""}
     role_mode = str(deployment_snapshot.get("role_mode", "") or "").strip().lower()
+    last_started_role_mode = str(deployment_snapshot.get("last_started_role_mode", "") or "").strip().lower()
     if role_mode not in {"internal", "external"}:
         deployment_snapshot = {
             **deployment_snapshot,
             "role_mode": "",
+            "last_started_role_mode": "",
             "node_id": str(deployment_snapshot.get("node_id", "") or "").strip(),
             "node_label": str(deployment_snapshot.get("node_label", "") or "").strip(),
+        }
+        role_mode = ""
+        last_started_role_mode = ""
+    elif last_started_role_mode not in {"internal", "external"}:
+        deployment_snapshot = {
+            **deployment_snapshot,
+            "last_started_role_mode": "",
         }
     runtime_activated = bool(getattr(request.app.state, "runtime_services_activated", False))
     activation_phase = str(getattr(request.app.state, "runtime_activation_phase", "") or "").strip()
     activation_error = str(getattr(request.app.state, "runtime_activation_error", "") or "").strip()
     startup_role_confirmed = bool(getattr(request.app.state, "startup_role_confirmed", False))
+    startup_handoff = {
+        "active": False,
+        "mode": "",
+        "target_role_mode": "",
+        "requested_at": "",
+        "reason": "",
+        "nonce": "",
+    }
+    get_startup_role_handoff = getattr(container, "get_startup_role_handoff", None)
+    if callable(get_startup_role_handoff):
+        try:
+            handoff_payload = get_startup_role_handoff()
+        except Exception:  # noqa: BLE001
+            handoff_payload = {}
+        if isinstance(handoff_payload, dict):
+            startup_handoff = {
+                "active": bool(handoff_payload.get("active", False)),
+                "mode": str(handoff_payload.get("mode", "") or "").strip(),
+                "target_role_mode": str(handoff_payload.get("target_role_mode", "") or "").strip(),
+                "requested_at": str(handoff_payload.get("requested_at", "") or "").strip(),
+                "reason": str(handoff_payload.get("reason", "") or "").strip(),
+                "nonce": str(handoff_payload.get("nonce", "") or "").strip(),
+            }
+    role_is_valid = role_mode in {"internal", "external"}
     has_active_resume = False
     if runtime_activated and role_mode == "external":
         try:
@@ -806,7 +945,8 @@ def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, An
         "startup_time": startup_time,
         "deployment": deployment_snapshot,
         "startup_role_confirmed": startup_role_confirmed,
-        "role_selection_required": (not startup_role_confirmed) or role_mode not in {"internal", "external"},
+        "role_selection_required": (not startup_role_confirmed) or (not role_is_valid),
+        "startup_handoff": startup_handoff,
         "runtime_activated": runtime_activated,
         "activation_phase": activation_phase,
         "activation_error": activation_error,
@@ -875,6 +1015,13 @@ def _collect_windows_ipconfig_ipv4s() -> list[tuple[str, str]]:
         if not match:
             continue
         ip_text = match.group(0)
+        adapter_text = str(current_adapter or "").strip().lower()
+        if not adapter_text:
+            continue
+        if any(keyword in adapter_text for keyword in _VIRTUAL_ADAPTER_KEYWORDS):
+            continue
+        if not any(keyword in adapter_text for keyword in _PREFERRED_ADAPTER_KEYWORDS):
+            continue
         if _is_private_ipv4(ip_text):
             entries.append((ip_text, current_adapter))
     return entries
@@ -882,19 +1029,10 @@ def _collect_windows_ipconfig_ipv4s() -> list[tuple[str, str]]:
 
 def _lan_candidate_priority(*, source: str, adapter_name: str = "") -> int:
     source_text = str(source or "").strip().lower()
-    adapter_text = str(adapter_name or "").strip().lower()
     if source_text == "request":
         return 0
     if source_text == "ipconfig":
-        if any(keyword in adapter_text for keyword in _VIRTUAL_ADAPTER_KEYWORDS):
-            return 80
-        if any(keyword in adapter_text for keyword in _PREFERRED_ADAPTER_KEYWORDS):
-            return 10
         return 20
-    if source_text == "udp":
-        return 30
-    if source_text == "hostname":
-        return 40
     return 50
 
 
@@ -907,6 +1045,14 @@ def _detect_lan_ipv4s(request_host: str = "") -> list[str]:
         text = str(value or "").strip()
         if not _is_private_ipv4(text):
             return
+        adapter_text = str(adapter_name or "").strip().lower()
+        if source == "ipconfig":
+            if not adapter_text:
+                return
+            if any(keyword in adapter_text for keyword in _VIRTUAL_ADAPTER_KEYWORDS):
+                return
+            if not any(keyword in adapter_text for keyword in _PREFERRED_ADAPTER_KEYWORDS):
+                return
         priority = _lan_candidate_priority(source=source, adapter_name=adapter_name)
         current = ordered.get(text)
         if current is None or (priority, order) < current:
@@ -916,30 +1062,6 @@ def _detect_lan_ipv4s(request_host: str = "") -> list[str]:
     _push(request_host, source="request")
     for ip_text, adapter_name in _collect_windows_ipconfig_ipv4s():
         _push(ip_text, source="ipconfig", adapter_name=adapter_name)
-    probe_targets = ("192.168.1.1", "10.255.255.255", "172.16.0.1", "8.8.8.8")
-    for host in probe_targets:
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.connect((host, 80))
-            _push(str(sock.getsockname()[0] or "").strip(), source="udp")
-        except OSError:
-            pass
-        finally:
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-
-    try:
-        hostname = socket.gethostname()
-        for family, _, _, _, sockaddr in socket.getaddrinfo(hostname, None, family=socket.AF_INET):
-            if family != socket.AF_INET or not sockaddr:
-                continue
-            _push(str(sockaddr[0] or "").strip(), source="hostname")
-    except OSError:
-        pass
     return [item[0] for item in sorted(ordered.items(), key=lambda pair: pair[1])]
 
 
@@ -983,7 +1105,7 @@ def _review_probe_targets(review_cfg: Dict[str, Any]) -> list[Dict[str, str]]:
             {
                 "code": code,
                 "name": name or code.upper(),
-                "path": f"/api/handover/review/{code}",
+                "path": f"/handover/review/{code}",
             }
         )
     if targets:
@@ -992,7 +1114,7 @@ def _review_probe_targets(review_cfg: Dict[str, Any]) -> list[Dict[str, str]]:
         {
             "code": str(item.get("code", "") or "").strip().lower(),
             "name": str(item.get("name", "") or "").strip(),
-            "path": f"/api/handover/review/{str(item.get('code', '') or '').strip().lower()}",
+            "path": f"/handover/review/{str(item.get('code', '') or '').strip().lower()}",
         }
         for item in _DEFAULT_REVIEW_BUILDINGS
     ]
@@ -1001,11 +1123,13 @@ def _review_probe_targets(review_cfg: Dict[str, Any]) -> list[Dict[str, str]]:
 def _is_review_probe_success(status_code: int, content_type: str, body_text: str) -> bool:
     content = str(content_type or "").lower()
     body_lower = str(body_text or "").lower()
-    if status_code == 200:
-        return "application/json" in content and "\"ok\"" in body_lower
-    if status_code == 404:
-        return "application/json" in content and "\"detail\"" in body_lower
-    return False
+    if status_code != 200:
+        return False
+    if "text/html" not in content:
+        return False
+    has_html_shell = "<html" in body_lower or "<!doctype html" in body_lower
+    has_frontend_marker = "/assets/" in body_lower or "/assets-src/" in body_lower or "id=\"app\"" in body_lower
+    return has_html_shell and has_frontend_marker
 
 
 def _probe_review_target_url(base_url: str, probe_path: str, *, timeout_sec: float = 1.5) -> Dict[str, Any]:
@@ -1019,7 +1143,7 @@ def _probe_review_target_url(base_url: str, probe_path: str, *, timeout_sec: flo
     request = urllib.request.Request(
         target_url,
         headers={
-            "Accept": "application/json",
+            "Accept": "text/html,application/xhtml+xml",
             "User-Agent": "QJPT-ReviewProbe/1.0",
         },
         method="GET",
@@ -1183,6 +1307,15 @@ def schedule_handover_review_access_startup_probe(
 ) -> None:
     if getattr(container, "_handover_review_access_probe_scheduled", False):
         return
+    probe_enabled, _, disabled_error = _review_access_probe_guard(container)
+    if not probe_enabled:
+        setattr(container, "_handover_review_access_probe_scheduled", True)
+        if disabled_error:
+            try:
+                container.add_system_log(f"[交接班审核访问] 已跳过启动探测: {disabled_error}")
+            except Exception:  # noqa: BLE001
+                pass
+        return
     current_snapshot = _materialize_review_access_snapshot(container)
     if bool(current_snapshot.get("configured", False)):
         setattr(container, "_handover_review_access_probe_scheduled", True)
@@ -1261,6 +1394,7 @@ def health(
     include_handover_runtime_context = role_mode != "internal"
     include_network_probe = role_mode != "internal"
     include_wet_bulb_target_preview = role_mode != "internal"
+    include_day_metric_target_preview = role_mode != "internal"
 
     wifi_name = None
     interface_name = ""
@@ -1294,6 +1428,11 @@ def health(
     wet_bulb_target_preview = (
         WetBulbCollectionService(runtime_cfg).build_target_descriptor(force_refresh=False)
         if include_wet_bulb_target_preview
+        else {}
+    )
+    day_metric_target_preview = (
+        DayMetricBitableExportService(load_handover_config(runtime_cfg)).build_target_descriptor(force_refresh=False)
+        if include_day_metric_target_preview
         else {}
     )
     handover_slots = (
@@ -1531,6 +1670,12 @@ def health(
             },
             "target_preview": wet_bulb_target_preview,
         },
+        "day_metric_upload": {
+            "enabled": bool(runtime_cfg.get("day_metric_upload", {}).get("enabled", True))
+            if isinstance(runtime_cfg.get("day_metric_upload", {}), dict)
+            else True,
+            "target_preview": day_metric_target_preview,
+        },
         "updater": {
             "enabled": bool(runtime_cfg.get("updater", {}).get("enabled", True))
             if isinstance(runtime_cfg.get("updater", {}), dict)
@@ -1623,7 +1768,19 @@ def put_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
             clear_paths=clear_paths if isinstance(clear_paths, list) else [],
             force_overwrite=force_overwrite,
         )
-        restart_required = _role_restart_signature(container.config) != _role_restart_signature(merge_result.merged)
+        current_role_mode = normalize_role_mode(
+            _config_last_started_role_mode(container.config) or _config_role_mode(container.config)
+        )
+        target_role_mode = normalize_role_mode(_config_role_mode(merge_result.merged))
+        role_restart_required = current_role_mode != target_role_mode
+        other_restart_required = _role_restart_signature(
+            container.config,
+            include_role_mode=False,
+        ) != _role_restart_signature(
+            merge_result.merged,
+            include_role_mode=False,
+        )
+        restart_required = role_restart_required or other_restart_required
         merged = _strip_retired_wet_bulb_fields(merge_result.merged)
         saved = save_settings(merged, container.config_path)
         container.reload_config(saved)
@@ -1667,8 +1824,19 @@ def restart_app(
     if callable(has_incomplete_jobs) and bool(has_incomplete_jobs()):
         raise HTTPException(status_code=409, detail="当前仍有任务在运行，请等待全部任务结束后再重启程序")
     source = str(payload.get("source", "manual") or "manual").strip() or "manual"
+    target_role_mode = normalize_role_mode(payload.get("target_role_mode")) or _config_role_mode(container.config)
+    wrote_startup_handoff = False
     try:
         with container.job_service.resource_guard(name="app_restart", resource_keys=["updater:global"]):
+            write_startup_role_handoff = getattr(container, "write_startup_role_handoff", None)
+            if source == "startup_role_picker" and callable(write_startup_role_handoff) and target_role_mode in {"internal", "external"}:
+                write_startup_role_handoff(
+                    target_role_mode=target_role_mode,
+                    source=source,
+                    reason=str(payload.get("reason", "") or "").strip(),
+                    source_startup_time=str(getattr(request.app.state, "started_at", "") or "").strip(),
+                )
+                wrote_startup_handoff = True
             ok, result_text = container.request_app_restart(
                 {
                     **payload,
@@ -1688,6 +1856,10 @@ def restart_app(
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
+        if wrote_startup_handoff:
+            clear_startup_role_handoff = getattr(container, "clear_startup_role_handoff", None)
+            if callable(clear_startup_role_handoff):
+                clear_startup_role_handoff()
         raise HTTPException(status_code=400, detail=f"触发程序重启失败: {exc}") from exc
 
 
@@ -1704,7 +1876,8 @@ def reprobe_handover_review_access(request: Request) -> Dict[str, Any]:
         "[交接班审核访问] 手动重新探测完成: "
         f"effective={str(snapshot.get('review_base_url_effective', '') or '-').strip() or '-'}, "
         f"source={str(snapshot.get('review_base_url_effective_source', '') or '-').strip() or '-'}, "
-        f"validated={len(snapshot.get('review_base_url_validated_candidates', []) or [])}"
+        f"validated={len(snapshot.get('review_base_url_validated_candidates', []) or [])}, "
+        f"status={str(snapshot.get('review_base_url_status', '') or '-').strip() or '-'}"
     )
     return {
         "ok": bool(str(snapshot.get("review_base_url_effective", "") or "").strip()),
@@ -1815,7 +1988,7 @@ def job_auto_once(request: Request) -> Dict[str, Any]:
 
 @router.post("/api/jobs/alarm-export/run")
 def job_alarm_export_run(request: Request) -> Dict[str, Any]:
-    raise HTTPException(status_code=410, detail="告警导出功能已暂时停用，当前版本不再提供该入口")
+    raise HTTPException(status_code=410, detail="旧告警导出入口已退役，当前主链为“内网 API 拉取 -> 共享 JSON -> 外网上传”")
 
 
 @router.post("/api/jobs/wet-bulb-collection/run")

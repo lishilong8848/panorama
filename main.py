@@ -154,6 +154,11 @@ def _normalize_role_mode(value: object) -> str:
     return ""
 
 
+def _is_loopback_host(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"127.0.0.1", "::1", "localhost"}
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="全景平台月报控制台入口")
     parser.add_argument("--config", default="", help="覆盖默认配置文件路径")
@@ -200,8 +205,13 @@ def main(argv: list[str] | None = None) -> None:
     port = int(args.port) if args.port else int(console_cfg.get("port", 18765))
     if deployment_role_mode == "internal":
         host = "127.0.0.1"
+    elif deployment_role_mode == "external" and _is_loopback_host(host):
+        host = "0.0.0.0"
     elif not deployment_role_mode:
         host = "127.0.0.1"
+
+    os.environ["QJPT_CONSOLE_BIND_HOST"] = host
+    os.environ["QJPT_CONSOLE_BIND_PORT"] = str(port)
 
     disable_browser_auto_open = bool(str(os.environ.get("QJPT_DISABLE_BROWSER_AUTO_OPEN", "") or "").strip())
     auto_open = (
@@ -220,6 +230,8 @@ def main(argv: list[str] | None = None) -> None:
             print(f"[控制台] 局域网访问地址: {lan_url}", flush=True)
         elif host == "0.0.0.0":
             print("[控制台] 未检测到可用局域网 IPv4，浏览器将回退为本机地址。", flush=True)
+        else:
+            print("[控制台] 当前外网端未开放局域网监听，请检查监听 host 配置。", flush=True)
     else:
         print(f"[控制台] 本机访问地址: {local_url}", flush=True)
         print("[启动] 当前未确认启动角色，仅加载最小控制台壳。", flush=True)

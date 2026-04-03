@@ -83,6 +83,7 @@ export function convertV3ConfigToLegacy(v3) {
     handover_log: clone(features.handover_log || {}),
     day_metric_upload: clone(features.day_metric_upload || {}),
     wet_bulb_collection: clone(features.wet_bulb_collection || {}),
+    alarm_export: clone(features.alarm_export || {}),
     manual_upload_gui: clone(features.manual_upload_gui || {}),
     web: clone(common.console || {}),
     alarm_common_db: clone(common.alarm_db || {}),
@@ -164,6 +165,7 @@ export function convertLegacyConfigToV3(legacy) {
       handover_log: clone(src.handover_log || {}),
       day_metric_upload: clone(src.day_metric_upload || {}),
       wet_bulb_collection: clone(src.wet_bulb_collection || {}),
+      alarm_export: clone(src.alarm_export || {}),
       manual_upload_gui: clone(src.manual_upload_gui || {}),
     },
   };

@@ -229,15 +229,26 @@ class FeishuBitableClient:
             params=params or {},
         )
 
-    def batch_create_records(self, table_id: str, fields_list: List[Dict[str, Any]], batch_size: int = 200) -> List[Dict[str, Any]]:
+    def batch_create_records(
+        self,
+        table_id: str,
+        fields_list: List[Dict[str, Any]],
+        batch_size: int = 200,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> List[Dict[str, Any]]:
         if not fields_list:
             return []
         url = self.BATCH_CREATE_RECORD_URL.format(app_token=self.app_token, table_id=table_id)
         responses: List[Dict[str, Any]] = []
+        total = len(fields_list)
+        uploaded = 0
         for i in range(0, len(fields_list), batch_size):
             chunk = fields_list[i : i + batch_size]
             payload = {"records": [{"fields": fields} for fields in chunk]}
             responses.append(self._post_json(url, payload))
+            uploaded += len(chunk)
+            if callable(progress_callback):
+                progress_callback(uploaded, total)
         return responses
 
     def list_records(

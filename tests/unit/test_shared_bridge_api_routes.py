@@ -68,21 +68,6 @@ class _FakeBridgeService:
             "deleted_count": 3,
             "deleted_buildings": ["A楼", "B楼", "C楼"],
         }
-        self.upload_alarm_full_result = {
-            "accepted": True,
-            "mode": "full",
-            "uploaded_record_count": 120,
-            "consumed_count": 5,
-            "failed_entries": [],
-        }
-        self.upload_alarm_building_result = {
-            "accepted": True,
-            "mode": "single_building",
-            "uploaded_record_count": 24,
-            "consumed_count": 1,
-            "failed_entries": [],
-        }
-
     def list_tasks(self, limit: int = 100):  # noqa: ANN001
         return [
             {
@@ -113,20 +98,88 @@ class _FakeBridgeService:
     def delete_manual_alarm_source_cache_files(self):
         return dict(self.delete_manual_alarm_result)
 
-    def upload_alarm_event_source_cache_full_to_bitable(self):
-        return dict(self.upload_alarm_full_result)
+    def upload_alarm_event_source_cache_full_to_bitable(self, *, emit_log=None):
+        if callable(emit_log):
+            emit_log("[共享缓存] 外网告警文件上传开始: mode=full, scope=all, kept_days=60")
+        return {
+            "accepted": True,
+            "mode": "full",
+            "scope": "all",
+            "uploaded_record_count": 120,
+            "consumed_count": 5,
+            "failed_entries": [],
+        }
 
-    def upload_alarm_event_source_cache_single_building_to_bitable(self, *, building: str):
-        payload = dict(self.upload_alarm_building_result)
-        payload["scope"] = building
-        return payload
+    def upload_alarm_event_source_cache_single_building_to_bitable(self, *, building: str, emit_log=None):
+        if callable(emit_log):
+            emit_log(f"[共享缓存] 外网告警文件上传开始: mode=single_building, scope={building}, kept_days=60")
+        return {
+            "accepted": True,
+            "mode": "single_building",
+            "scope": building,
+            "uploaded_record_count": 24,
+            "consumed_count": 1,
+            "failed_entries": [],
+        }
+
+
+class _FakeJob:
+    def __init__(self, payload):
+        self._payload = dict(payload)
+
+    def to_dict(self):
+        return dict(self._payload)
+
+
+class _FakeJobService:
+    def __init__(self) -> None:
+        self.active_by_dedupe: dict[str, dict] = {}
+        self.started_jobs: list[dict] = []
+
+    def find_active_job_by_dedupe_key(self, dedupe_key: str):
+        return self.active_by_dedupe.get(str(dedupe_key or "").strip())
+
+    def start_job(
+        self,
+        *,
+        name,
+        run_func,
+        resource_keys=None,
+        priority="manual",
+        feature="",
+        dedupe_key="",
+        submitted_by="manual",
+    ):
+        payload = {
+            "job_id": f"job-{len(self.started_jobs) + 1}",
+            "name": name,
+            "status": "queued",
+            "feature": feature,
+            "priority": priority,
+            "resource_keys": list(resource_keys or []),
+            "dedupe_key": dedupe_key,
+            "submitted_by": submitted_by,
+            "created_at": "2026-04-03 02:00:00",
+        }
+        self.started_jobs.append(
+            {
+                "payload": dict(payload),
+                "run_func": run_func,
+            }
+        )
+        if dedupe_key:
+            self.active_by_dedupe[str(dedupe_key).strip()] = dict(payload)
+        return _FakeJob(payload)
 
 
 def _fake_request(service: _FakeBridgeService | None = None, *, role_mode: str = "external"):
+    job_service = _FakeJobService()
     container = SimpleNamespace(
         deployment_snapshot=lambda: {"role_mode": role_mode, "node_id": "node-ext-01", "node_label": "外网机"},
         shared_bridge_snapshot=lambda: {"enabled": True, "root_dir": "D:/QJPT_Shared", "db_status": "ok"},
         shared_bridge_service=service,
+        job_service=job_service,
+        add_system_log=lambda *_args, **_kwargs: None,
     )
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
 
@@ -326,41 +379,42 @@ def test_bridge_source_cache_delete_manual_alarm_files_accepts_internal_role() -
 def test_bridge_source_cache_alarm_upload_full_accepts_external_role() -> None:
     service = _FakeBridgeService()
     request = _fake_request(service, role_mode="external")
-    request.app.state.container.add_system_log = lambda *_args, **_kwargs: None
 
     response = routes.bridge_source_cache_alarm_upload_full(request)
 
     assert response["ok"] is True
     assert response["accepted"] is True
-    assert response["uploaded_record_count"] == 120
-    assert response["consumed_count"] == 5
+    assert response["running"] is True
+    assert response["job"]["feature"] == "alarm_event_upload"
+    assert response["job"]["dedupe_key"] == "alarm_event_upload:full"
+    assert "已提交" in response["message"]
 
 
 def test_bridge_source_cache_alarm_upload_building_accepts_external_role() -> None:
     service = _FakeBridgeService()
     request = _fake_request(service, role_mode="external")
-    request.app.state.container.add_system_log = lambda *_args, **_kwargs: None
 
     response = routes.bridge_source_cache_alarm_upload_building(request, building="C楼")
 
     assert response["ok"] is True
     assert response["accepted"] is True
+    assert response["running"] is True
     assert response["scope"] == "C楼"
-    assert response["uploaded_record_count"] == 24
+    assert response["job"]["dedupe_key"] == "alarm_event_upload:building:C楼"
+    assert "刷新上传" in response["message"]
 
 
 def test_bridge_source_cache_alarm_upload_full_returns_running_state_when_already_running() -> None:
     service = _FakeBridgeService()
-    service.upload_alarm_full_result = {
-        "accepted": False,
-        "running": True,
-        "reason": "already_running",
-        "mode": "full",
-        "scope": "all",
-        "started_at": "2026-04-02 10:00:00",
-    }
     request = _fake_request(service, role_mode="external")
-    request.app.state.container.add_system_log = lambda *_args, **_kwargs: None
+    request.app.state.container.job_service.active_by_dedupe["alarm_event_upload:full"] = {
+        "job_id": "job-existing-full",
+        "name": "告警信息全量上传（60天）",
+        "status": "running",
+        "feature": "alarm_event_upload",
+        "dedupe_key": "alarm_event_upload:full",
+        "created_at": "2026-04-02 10:00:00",
+    }
 
     response = routes.bridge_source_cache_alarm_upload_full(request)
 
@@ -368,20 +422,21 @@ def test_bridge_source_cache_alarm_upload_full_returns_running_state_when_alread
     assert response["accepted"] is False
     assert response["running"] is True
     assert response["reason"] == "already_running"
+    assert response["job"]["job_id"] == "job-existing-full"
+    assert "聚焦到现有任务" in response["message"]
 
 
 def test_bridge_source_cache_alarm_upload_building_returns_running_state_when_already_running() -> None:
     service = _FakeBridgeService()
-    service.upload_alarm_building_result = {
-        "accepted": False,
-        "running": True,
-        "reason": "already_running",
-        "mode": "full",
-        "scope": "all",
-        "started_at": "2026-04-02 10:00:00",
-    }
     request = _fake_request(service, role_mode="external")
-    request.app.state.container.add_system_log = lambda *_args, **_kwargs: None
+    request.app.state.container.job_service.active_by_dedupe["alarm_event_upload:building:C楼"] = {
+        "job_id": "job-existing-building",
+        "name": "告警信息单楼刷新上传（60天）- C楼",
+        "status": "running",
+        "feature": "alarm_event_upload",
+        "dedupe_key": "alarm_event_upload:building:C楼",
+        "created_at": "2026-04-02 10:00:00",
+    }
 
     response = routes.bridge_source_cache_alarm_upload_building(request, building="C楼")
 
@@ -389,6 +444,7 @@ def test_bridge_source_cache_alarm_upload_building_returns_running_state_when_al
     assert response["accepted"] is False
     assert response["running"] is True
     assert response["reason"] == "already_running"
+    assert response["job"]["job_id"] == "job-existing-building"
 
 
 def test_bridge_source_cache_alarm_upload_full_rejects_internal_role() -> None:
@@ -399,6 +455,16 @@ def test_bridge_source_cache_alarm_upload_full_rejects_internal_role() -> None:
 
     assert excinfo.value.status_code == 409
     assert "仅外网端允许上传告警信息文件到多维表" in str(excinfo.value.detail)
+
+
+def test_bridge_source_cache_debug_alarm_page_actions_is_gone() -> None:
+    request = _fake_request(_FakeBridgeService(), role_mode="internal")
+
+    with pytest.raises(HTTPException) as excinfo:
+        routes.bridge_source_cache_debug_alarm_page_actions(request, building="A楼")
+
+    assert excinfo.value.status_code == 410
+    assert "仅支持 API 拉取" in str(excinfo.value.detail)
 
 
 def test_bridge_source_cache_refresh_today_is_gone() -> None:

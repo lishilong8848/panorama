@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import concurrent.futures
+import json
 import shutil
 import threading
 import uuid
@@ -13,6 +14,7 @@ import pytest
 import app.modules.shared_bridge.service.shared_source_cache_service as cache_module
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.modules.shared_bridge.service.shared_source_cache_service import (
+    ALARM_EVENT_BITABLE_TARGET_FIELDS,
     FAMILY_ALARM_EVENT,
     FAMILY_HANDOVER_LOG,
     FAMILY_MONTHLY_REPORT,
@@ -73,6 +75,79 @@ def _build_runtime_config(
                 'replace_existing_on_full': True,
             },
         },
+    }
+
+
+def _write_alarm_json(
+    path: Path,
+    *,
+    rows: list[dict[str, object]] | None = None,
+    query_start: str = '2026-02-01 00:00:00',
+    query_end: str = '2026-04-01 12:05:00',
+    building: str = 'A楼',
+    bucket_kind: str = 'latest',
+    bucket_key: str = '2026-04-01 08',
+) -> None:
+    payload = {
+        'schema_version': 1,
+        'source_family': FAMILY_ALARM_EVENT,
+        'building': building,
+        'bucket_kind': bucket_kind,
+        'bucket_key': bucket_key,
+        'generated_at': '2026-04-01 12:05:00',
+        'query_start': query_start,
+        'query_end': query_end,
+        'row_count': len(rows or []),
+        'count_summary': {},
+        'rows': rows or [],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def _add_alarm_cache_entry(
+    *,
+    store: SharedBridgeStore,
+    shared_root: Path,
+    building: str,
+    bucket_kind: str,
+    bucket_key: str,
+    downloaded_at: str,
+    status: str = 'ready',
+    rows: list[dict[str, object]] | None = None,
+    suffix: str = 'json',
+) -> dict:
+    folder_name = f"{building}-{bucket_kind}-{bucket_key}".replace(":", "-").replace(" ", "_")
+    target_path = shared_root / '告警信息源文件' / 'test' / f'{folder_name}.{suffix}'
+    if suffix.lower() == 'json':
+        _write_alarm_json(
+            target_path,
+            building=building,
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            rows=rows or [],
+        )
+    else:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b'test')
+    relative_path = str(target_path.relative_to(shared_root)).replace('\\', '/')
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_ALARM_EVENT,
+        building=building,
+        bucket_kind=bucket_kind,
+        bucket_key=bucket_key,
+        duty_date='',
+        duty_shift='',
+        downloaded_at=downloaded_at,
+        relative_path=relative_path,
+        status=status,
+        file_hash=f'hash-{building}-{bucket_kind}-{bucket_key}',
+        size_bytes=int(target_path.stat().st_size) if target_path.exists() else 0,
+        metadata={},
+    )
+    return {
+        'file_path': str(target_path),
+        'relative_path': relative_path,
     }
 
 
@@ -266,11 +341,11 @@ def test_external_full_health_snapshot_uses_cached_copy_until_marked_dirty(
 
     assert first[FAMILY_HANDOVER_LOG]['latest_selection'] == {'source_family': FAMILY_HANDOVER_LOG}
     assert second[FAMILY_HANDOVER_LOG]['latest_selection'] == {'source_family': FAMILY_HANDOVER_LOG}
-    assert call_counter['count'] == 3
+    assert call_counter['count'] == 2
 
     service._mark_external_full_snapshot_dirty()
     service.get_health_snapshot(mode='external_full')
-    assert call_counter['count'] == 6
+    assert call_counter['count'] == 4
 
 
 def test_alarm_event_recent_bucket_uses_previous_day_16_before_morning(work_dir: Path) -> None:
@@ -344,11 +419,12 @@ def test_fill_alarm_event_latest_exports_workbook_and_indexes_entry(work_dir: Pa
 
     output_path = Path(entry['file_path'])
     assert output_path.exists()
-    workbook = openpyxl.load_workbook(output_path)
-    sheet = workbook.active
-    assert sheet.title == '告警信息'
-    assert sheet.max_row == 2
-    assert sheet['A2'].value == '次要'
+    payload = json.loads(output_path.read_text(encoding='utf-8'))
+    assert payload['schema_version'] == 1
+    assert payload['building'] == 'A楼'
+    assert payload['bucket_key'] == '2026-04-01 08'
+    assert payload['row_count'] == 1
+    assert payload['rows'][0]['level'] == '次要'
     rows = store.list_source_cache_entries(
         source_family=FAMILY_ALARM_EVENT,
         building='A楼',
@@ -449,8 +525,8 @@ def test_run_manual_alarm_refresh_impl_returns_parallel_summary(
             'building': building,
             'bucket_key': bucket_key,
             'downloaded_at': '2026-04-01 17:30:00',
-            'relative_path': f'告警信息源文件/{building}.xlsx',
-            'file_path': str(shared_root / '告警信息源文件' / f'{building}.xlsx'),
+            'relative_path': f'告警信息源文件/{building}.json',
+            'file_path': str(shared_root / '告警信息源文件' / f'{building}.json'),
         }
 
     monkeypatch.setattr(service, 'fill_alarm_event_manual', _fake_fill)
@@ -1168,7 +1244,7 @@ def test_fill_alarm_event_manual_indexes_manual_bucket_and_manual_path(work_dir:
     )
 
     assert entry['bucket_kind'] == 'manual'
-    assert '--manual--告警信息源文件--A楼.xlsx' in entry['relative_path']
+    assert '--manual--告警信息源文件--A楼.json' in entry['relative_path']
     rows = store.list_source_cache_entries(
         source_family=FAMILY_ALARM_EVENT,
         building='A楼',
@@ -1191,12 +1267,10 @@ def test_delete_manual_alarm_files_only_deletes_manual_entries(work_dir: Path) -
         emit_log=lambda *_args, **_kwargs: None,
     )
 
-    manual_source = work_dir / 'manual.xlsx'
-    scheduled_source = work_dir / 'scheduled.xlsx'
-    workbook = openpyxl.Workbook()
-    workbook.active['A1'] = 'alarm'
-    workbook.save(manual_source)
-    workbook.save(scheduled_source)
+    manual_source = work_dir / 'manual.json'
+    scheduled_source = work_dir / 'scheduled.json'
+    _write_alarm_json(manual_source, bucket_kind='manual', bucket_key='2026-04-01 manual-1200')
+    _write_alarm_json(scheduled_source, bucket_kind='latest', bucket_key='2026-04-01 08')
 
     manual_entry = service._store_entry(  # noqa: SLF001
         source_family=FAMILY_ALARM_EVENT,
@@ -1250,6 +1324,51 @@ def test_delete_manual_alarm_files_only_deletes_manual_entries(work_dir: Path) -
     assert len(remaining) == 1
 
 
+def test_internal_light_snapshot_includes_manual_alarm_refresh_summary(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='internal', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    def _fake_fill_alarm_event_manual(*, building: str, bucket_key: str, emit_log):  # noqa: ANN001
+        row_count_map = {'A楼': 12, 'B楼': 8}
+        count = row_count_map.get(building, 0)
+        return {
+            'building': building,
+            'bucket_kind': 'manual',
+            'bucket_key': bucket_key,
+            'downloaded_at': '2026-04-03 00:20:18',
+            'relative_path': f'告警信息源文件/test/{building}.json',
+            'file_path': str(shared_root / '告警信息源文件' / 'test' / f'{building}.json'),
+            'metadata': {
+                'row_count': count,
+                'query_start': '2026-02-02 00:20:18',
+                'query_end': '2026-04-03 00:20:18',
+            },
+        }
+
+    monkeypatch.setattr(service, 'get_enabled_buildings', lambda: ['A楼', 'B楼'])
+    monkeypatch.setattr(service, 'fill_alarm_event_manual', _fake_fill_alarm_event_manual)
+
+    result = service._run_manual_alarm_refresh_impl()  # noqa: SLF001
+    snapshot = service.get_health_snapshot(mode='internal_light')
+    manual_refresh = snapshot[FAMILY_ALARM_EVENT]['manual_refresh']
+
+    assert result['accepted'] is True
+    assert result['total_row_count'] == 20
+    assert result['building_row_counts'] == {'A楼': 12, 'B楼': 8}
+    assert manual_refresh['running'] is False
+    assert manual_refresh['total_row_count'] == 20
+    assert manual_refresh['building_row_counts'] == {'A楼': 12, 'B楼': 8}
+    assert manual_refresh['successful_buildings'] == ['A楼', 'B楼']
+    assert manual_refresh['query_start'] == '2026-02-02 00:20:18'
+    assert manual_refresh['query_end'] == '2026-04-03 00:20:18'
+
+
 def test_external_consume_ready_alarm_event_entries_is_retired_and_keeps_files_unchanged(work_dir: Path) -> None:
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)
@@ -1260,20 +1379,14 @@ def test_external_consume_ready_alarm_event_entries_is_retired_and_keeps_files_u
         emit_log=lambda *_args, **_kwargs: None,
     )
 
-    def _make_workbook(path: Path, value: str) -> None:
-        workbook = openpyxl.Workbook()
-        workbook.active['A1'] = value
-        path.parent.mkdir(parents=True, exist_ok=True)
-        workbook.save(path)
-
-    scheduled_08 = work_dir / 'scheduled_08.xlsx'
-    scheduled_16 = work_dir / 'scheduled_16.xlsx'
-    unscheduled_10 = work_dir / 'scheduled_10.xlsx'
-    manual_source = work_dir / 'manual.xlsx'
-    _make_workbook(scheduled_08, '08')
-    _make_workbook(scheduled_16, '16')
-    _make_workbook(unscheduled_10, '10')
-    _make_workbook(manual_source, 'manual')
+    scheduled_08 = work_dir / 'scheduled_08.json'
+    scheduled_16 = work_dir / 'scheduled_16.json'
+    unscheduled_10 = work_dir / 'scheduled_10.json'
+    manual_source = work_dir / 'manual.json'
+    _write_alarm_json(scheduled_08, bucket_key='2026-04-01 08')
+    _write_alarm_json(scheduled_16, building='B楼', bucket_key='2026-04-01 16')
+    _write_alarm_json(unscheduled_10, building='C楼', bucket_key='2026-04-01 10')
+    _write_alarm_json(manual_source, building='D楼', bucket_kind='manual', bucket_key='2026-04-01 manual-1200')
 
     entry_08 = service._store_entry(  # noqa: SLF001
         source_family=FAMILY_ALARM_EVENT,
@@ -1395,7 +1508,13 @@ def test_external_upload_alarm_entries_full_consumes_files_after_success(work_di
             )
             return 3
 
-        def batch_create_records(self, table_id: str, fields_list: list[dict], batch_size: int = 200) -> list[dict]:
+        def batch_create_records(
+            self,
+            table_id: str,
+            fields_list: list[dict],
+            batch_size: int = 200,
+            progress_callback=None,
+        ) -> list[dict]:
             self.create_calls.append(
                 {
                     'table_id': table_id,
@@ -1403,62 +1522,41 @@ def test_external_upload_alarm_entries_full_consumes_files_after_success(work_di
                     'fields_list': fields_list,
                 }
             )
+            if callable(progress_callback):
+                progress_callback(len(fields_list), len(fields_list))
             return []
 
     monkeypatch.setattr(cache_module, 'FeishuBitableClient', _FakeBitableClient)
 
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.append(
-        [
-            '级别',
-            '内容',
-            '位置',
-            '对象',
-            '告警时间',
-            '接警时间',
-            '处理状态',
-            '处理人',
-            '处理内容',
-            '恢复时间',
-            '恢复状态',
-            '告警快照',
-            '事件类型',
-            '确认类型',
-            '建议',
-            '确认时间',
-            '确认人',
-            '确认说明',
-            '实时值',
-            '阈值',
-        ]
+    source = work_dir / 'alarm_a.json'
+    _write_alarm_json(
+        source,
+        building='A楼',
+        bucket_key='2026-04-01 08',
+        rows=[
+            {
+                'level': '次要',
+                'content': '风机状态: 告警',
+                'position': 'E楼/三层/空调区2',
+                'object': 'E-311-CRAH-10',
+                'event_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'accept_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'is_accept': '已处理',
+                'accept_by': '系统管理员',
+                'accept_content': '测试受理',
+                'recover_time': '',
+                'is_recover': '未恢复',
+                'event_snapshot': '12.5',
+                'event_type': '不正常值',
+                'confirm_type': '真实告警',
+                'event_suggest': '测试建议',
+                'confirm_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'confirm_by': '系统管理员',
+                'confirm_description': '测试确认',
+                'alarm_threshold': '',
+            }
+        ],
     )
-    sheet.append(
-        [
-            '次要',
-            '风机状态: 告警',
-            'E楼/三层/空调区2',
-            'E-311-CRAH-10',
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            '已处理',
-            '系统管理员',
-            '测试受理',
-            '--',
-            '未恢复',
-            '关闭',
-            '不正常值',
-            '真实告警',
-            '测试建议',
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            '系统管理员',
-            '测试确认',
-            '12.5',
-            '0',
-        ]
-    )
-    source = work_dir / 'alarm_a.xlsx'
-    workbook.save(source)
     entry = service._store_entry(  # noqa: SLF001
         source_family=FAMILY_ALARM_EVENT,
         building='A楼',
@@ -1470,6 +1568,7 @@ def test_external_upload_alarm_entries_full_consumes_files_after_success(work_di
         status='ready',
         metadata={},
     )
+    assert not source.exists()
     cached_path = Path(entry['file_path'])
     assert cached_path.exists()
 
@@ -1498,7 +1597,235 @@ def test_external_upload_alarm_entries_full_consumes_files_after_success(work_di
     fields = fake_client.create_calls[0]['fields_list'][0]
     assert fields['楼栋'] == 'A楼'
     assert fields['告警内容'] == '风机状态: 告警'
-    assert fields['产生时间']
+    assert isinstance(fields['产生时间'], int)
+    assert isinstance(fields['受理时间'], int)
+    assert isinstance(fields['确认时间'], int)
+    assert isinstance(fields['触发值'], (int, float))
+    assert '恢复时间' not in fields
+    assert set(fields.keys()).issubset(set(ALARM_EVENT_BITABLE_TARGET_FIELDS.values()))
+
+
+def test_external_upload_alarm_entries_full_logs_progress_every_100_records(
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    now_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    rows = [
+        {
+            'level': '次要',
+            'content': f'记录-{idx}',
+            'position': 'A楼/位置',
+            'object': f'A-{idx}',
+            'event_time': now_text,
+            'accept_time': now_text,
+            'is_accept': '已处理',
+            'accept_by': '系统管理员',
+            'accept_content': '受理',
+            'recover_time': '',
+            'is_recover': '未恢复',
+            'event_snapshot': str(idx),
+            'event_type': '不正常值',
+            'confirm_type': '真实告警',
+            'event_suggest': '建议',
+            'confirm_time': now_text,
+            'confirm_by': '系统管理员',
+            'confirm_description': '确认',
+            'alarm_threshold': '',
+        }
+        for idx in range(250)
+    ]
+
+    class _FakeBitableClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            self.create_calls = []
+
+        def clear_table(self, table_id: str, list_page_size: int = 500, delete_batch_size: int = 500) -> int:
+            return 0
+
+        def batch_create_records(
+            self,
+            table_id: str,
+            fields_list: list[dict],
+            batch_size: int = 200,
+            progress_callback=None,
+        ) -> list[dict]:
+            self.create_calls.append({'table_id': table_id, 'batch_size': batch_size, 'size': len(fields_list)})
+            for uploaded in (60, 120, 180, 240, len(fields_list)):
+                if callable(progress_callback):
+                    progress_callback(uploaded, len(fields_list))
+            return []
+
+    monkeypatch.setattr(cache_module, 'FeishuBitableClient', _FakeBitableClient)
+
+    source = work_dir / 'alarm_progress.json'
+    _write_alarm_json(
+        source,
+        building='A楼',
+        bucket_key='2026-04-01 08',
+        rows=rows,
+    )
+    service._store_entry(  # noqa: SLF001
+        source_family=FAMILY_ALARM_EVENT,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 08',
+        duty_date='',
+        duty_shift='',
+        source_path=source,
+        status='ready',
+        metadata={},
+    )
+
+    logs: list[str] = []
+    result = service.upload_alarm_event_entries_full_to_bitable(emit_log=logs.append)
+
+    assert result['accepted'] is True
+    assert any('uploaded=100/250' in line for line in logs)
+    assert any('uploaded=200/250' in line for line in logs)
+    assert not any('uploaded=300/250' in line for line in logs)
+
+
+def test_external_upload_alarm_entries_full_rejects_precheck_failure_without_remote_mutation(
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    class _FakeBitableClient:
+        instances = []
+
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            self.clear_calls = []
+            self.create_calls = []
+            _FakeBitableClient.instances.append(self)
+
+        def clear_table(self, table_id: str, list_page_size: int = 500, delete_batch_size: int = 500) -> int:
+            self.clear_calls.append({'table_id': table_id})
+            return 0
+
+        def batch_create_records(
+            self,
+            table_id: str,
+            fields_list: list[dict],
+            batch_size: int = 200,
+            progress_callback=None,
+        ) -> list[dict]:
+            self.create_calls.append({'table_id': table_id, 'fields_list': fields_list})
+            if callable(progress_callback):
+                progress_callback(len(fields_list), len(fields_list))
+            return []
+
+    monkeypatch.setattr(cache_module, 'FeishuBitableClient', _FakeBitableClient)
+
+    valid_source = work_dir / 'alarm_valid.json'
+    invalid_source = work_dir / 'alarm_invalid.json'
+    now_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    _write_alarm_json(
+        valid_source,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 08',
+        rows=[
+            {
+                'level': '次要',
+                'content': '有效记录',
+                'position': 'A楼/位置',
+                'object': 'A-OBJ',
+                'event_time': now_text,
+                'accept_time': now_text,
+                'is_accept': '已处理',
+                'accept_by': '系统管理员',
+                'accept_content': '受理',
+                'recover_time': '',
+                'is_recover': '未恢复',
+                'event_snapshot': '1',
+                'event_type': '不正常值',
+                'confirm_type': '真实告警',
+                'event_suggest': '建议',
+                'confirm_time': now_text,
+                'confirm_by': '系统管理员',
+                'confirm_description': '确认',
+                'alarm_threshold': '',
+            }
+        ],
+    )
+    _write_alarm_json(
+        invalid_source,
+        building='B楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 08',
+        rows=[],
+    )
+    invalid_payload = json.loads(invalid_source.read_text(encoding='utf-8'))
+    invalid_payload['schema_version'] = 2
+    invalid_source.write_text(json.dumps(invalid_payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    valid_entry = service._store_entry(  # noqa: SLF001
+        source_family=FAMILY_ALARM_EVENT,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 08',
+        duty_date='',
+        duty_shift='',
+        source_path=valid_source,
+        status='ready',
+        metadata={},
+    )
+    invalid_entry = service._store_entry(  # noqa: SLF001
+        source_family=FAMILY_ALARM_EVENT,
+        building='B楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 08',
+        duty_date='',
+        duty_shift='',
+        source_path=invalid_source,
+        status='ready',
+        metadata={},
+    )
+
+    result = service.upload_alarm_event_entries_full_to_bitable()
+
+    assert result['accepted'] is False
+    assert result['reason'] == 'precheck_failed'
+    assert result['uploaded_record_count'] == 0
+    assert result['consumed_count'] == 0
+    assert result['failed_entries'] == ['B楼']
+    assert _FakeBitableClient.instances == []
+    assert Path(valid_entry['file_path']).exists()
+    assert Path(invalid_entry['file_path']).exists()
+    ready_rows = store.list_source_cache_entries(
+        source_family=FAMILY_ALARM_EVENT,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 08',
+        status='ready',
+        limit=1,
+    )
+    failed_rows = store.list_source_cache_entries(
+        source_family=FAMILY_ALARM_EVENT,
+        building='B楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 08',
+        status='failed',
+        limit=1,
+    )
+    assert len(ready_rows) == 1
+    assert len(failed_rows) == 1
 
 
 def test_external_upload_alarm_entries_is_single_flight_and_reports_running_state(
@@ -1514,58 +1841,35 @@ def test_external_upload_alarm_entries_is_single_flight_and_reports_running_stat
         emit_log=lambda *_args, **_kwargs: None,
     )
 
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.append(
-        [
-            '级别',
-            '内容',
-            '位置',
-            '对象',
-            '告警时间',
-            '接警时间',
-            '处理状态',
-            '处理人',
-            '处理内容',
-            '恢复时间',
-            '恢复状态',
-            '告警快照',
-            '事件类型',
-            '确认类型',
-            '建议',
-            '确认时间',
-            '确认人',
-            '确认说明',
-            '实时值',
-            '阈值',
-        ]
+    source = work_dir / 'alarm_single_flight.json'
+    _write_alarm_json(
+        source,
+        building='A楼',
+        bucket_key='2026-04-01 08',
+        rows=[
+            {
+                'level': '次要',
+                'content': '风机状态: 告警',
+                'position': 'A楼/三层/空调区2',
+                'object': 'A-311-CRAH-10',
+                'event_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'accept_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'is_accept': '已处理',
+                'accept_by': '系统管理员',
+                'accept_content': '测试受理',
+                'recover_time': '',
+                'is_recover': '未恢复',
+                'event_snapshot': '12.5',
+                'event_type': '不正常值',
+                'confirm_type': '真实告警',
+                'event_suggest': '测试建议',
+                'confirm_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'confirm_by': '系统管理员',
+                'confirm_description': '测试确认',
+                'alarm_threshold': '',
+            }
+        ],
     )
-    sheet.append(
-        [
-            '次要',
-            '风机状态: 告警',
-            'A楼/三层/空调区2',
-            'A-311-CRAH-10',
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            '已处理',
-            '系统管理员',
-            '测试受理',
-            '--',
-            '未恢复',
-            '关闭',
-            '不正常值',
-            '真实告警',
-            '测试建议',
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            '系统管理员',
-            '测试确认',
-            '12.5',
-            '0',
-        ]
-    )
-    source = work_dir / 'alarm_single_flight.xlsx'
-    workbook.save(source)
     service._store_entry(  # noqa: SLF001
         source_family=FAMILY_ALARM_EVENT,
         building='A楼',
@@ -1590,7 +1894,15 @@ def test_external_upload_alarm_entries_is_single_flight_and_reports_running_stat
             assert release.wait(timeout=5)
             return 0
 
-        def batch_create_records(self, table_id: str, fields_list: list[dict], batch_size: int = 200) -> list[dict]:
+        def batch_create_records(
+            self,
+            table_id: str,
+            fields_list: list[dict],
+            batch_size: int = 200,
+            progress_callback=None,
+        ) -> list[dict]:
+            if callable(progress_callback):
+                progress_callback(len(fields_list), len(fields_list))
             return []
 
     monkeypatch.setattr(cache_module, 'FeishuBitableClient', _BlockingBitableClient)
@@ -1626,6 +1938,132 @@ def test_external_upload_alarm_entries_is_single_flight_and_reports_running_stat
     assert upload_state_after['last_scope'] == 'all'
 
 
+def test_external_alarm_selection_prefers_today_latest_else_yesterday_fallback(
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    fixed_now = datetime(2026, 4, 3, 10, 0, 0)
+    monkeypatch.setattr(cache_module, '_now_dt', lambda: fixed_now)
+
+    now_text = fixed_now.strftime('%Y-%m-%d %H:%M:%S')
+    rows = [
+        {
+            'level': '次要',
+            'content': '测试记录',
+            'position': '测试位置',
+            'object': 'TEST-OBJ',
+            'event_time': now_text,
+            'accept_time': now_text,
+            'is_accept': '已处理',
+            'accept_by': '系统管理员',
+            'accept_content': '受理',
+            'recover_time': '',
+            'is_recover': '未恢复',
+            'event_snapshot': '1',
+            'event_type': '不正常值',
+            'confirm_type': '真实告警',
+            'event_suggest': '建议',
+            'confirm_time': now_text,
+            'confirm_by': '系统管理员',
+            'confirm_description': '确认',
+            'alarm_threshold': '',
+        }
+    ]
+    _add_alarm_cache_entry(
+        store=store,
+        shared_root=shared_root,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-03 08',
+        downloaded_at='2026-04-03 08:00:00',
+        rows=rows,
+    )
+    _add_alarm_cache_entry(
+        store=store,
+        shared_root=shared_root,
+        building='A楼',
+        bucket_kind='manual',
+        bucket_key='2026-04-03 09:30:00',
+        downloaded_at='2026-04-03 09:30:00',
+        rows=rows,
+    )
+    _add_alarm_cache_entry(
+        store=store,
+        shared_root=shared_root,
+        building='B楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-02 16',
+        downloaded_at='2026-04-02 16:05:00',
+        rows=rows,
+    )
+    _add_alarm_cache_entry(
+        store=store,
+        shared_root=shared_root,
+        building='C楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-02 16',
+        downloaded_at='2026-04-02 16:10:00',
+        rows=rows,
+    )
+    _add_alarm_cache_entry(
+        store=store,
+        shared_root=shared_root,
+        building='C楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-03 09',
+        downloaded_at='2026-04-03 09:10:00',
+        status='consumed',
+        rows=rows,
+    )
+    _add_alarm_cache_entry(
+        store=store,
+        shared_root=shared_root,
+        building='E楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-03 07',
+        downloaded_at='2026-04-03 07:05:00',
+        rows=rows,
+    )
+
+    snapshot = service.get_health_snapshot(mode='external_full')
+    alarm_family = snapshot[FAMILY_ALARM_EVENT]
+    buildings = {item['building']: item for item in alarm_family['buildings']}
+    selected_entries = service._select_alarm_ready_entries_for_external_upload()  # noqa: SLF001
+
+    assert alarm_family['selection_policy'] == 'today_latest_else_yesterday_fallback'
+    assert alarm_family['selection_reference_date'] == '2026-04-03'
+    assert alarm_family['used_previous_day_fallback'] == ['B楼']
+    assert sorted(alarm_family['missing_today_buildings']) == ['B楼', 'D楼']
+    assert alarm_family['missing_both_days_buildings'] == ['D楼']
+
+    assert buildings['A楼']['source_kind'] == 'manual'
+    assert buildings['A楼']['selection_scope'] == 'today'
+    assert buildings['A楼']['status'] == 'ready'
+    assert buildings['B楼']['source_kind'] == 'latest'
+    assert buildings['B楼']['selection_scope'] == 'yesterday_fallback'
+    assert buildings['B楼']['status'] == 'ready'
+    assert buildings['C楼']['selection_scope'] == 'today'
+    assert buildings['C楼']['status'] == 'consumed'
+    assert buildings['D楼']['selection_scope'] == 'missing'
+    assert buildings['D楼']['status'] == 'waiting'
+    assert buildings['E楼']['selection_scope'] == 'today'
+    assert buildings['E楼']['status'] == 'ready'
+
+    selected_by_building = {item['building']: item for item in selected_entries}
+    assert set(selected_by_building.keys()) == {'A楼', 'B楼', 'E楼'}
+    assert selected_by_building['A楼']['bucket_kind'] == 'manual'
+    assert selected_by_building['B楼']['bucket_key'] == '2026-04-02 16'
+    assert selected_by_building['E楼']['bucket_key'] == '2026-04-03 07'
+
+
 def test_external_upload_alarm_entries_single_building_keeps_only_rows_within_60_days(
     work_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1645,14 +2083,35 @@ def test_external_upload_alarm_entries_single_building_keeps_only_rows_within_60
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
             self.clear_calls = []
             self.create_calls = []
+            self.list_calls = []
+            self.delete_calls = []
             _FakeBitableClient.instances.append(self)
 
         def clear_table(self, table_id: str, list_page_size: int = 500, delete_batch_size: int = 500) -> int:
             self.clear_calls.append({'table_id': table_id, 'list_page_size': list_page_size, 'delete_batch_size': delete_batch_size})
             return 0
 
-        def batch_create_records(self, table_id: str, fields_list: list[dict], batch_size: int = 200) -> list[dict]:
+        def list_records(self, table_id: str, page_size: int = 500, max_records: int = 0, *, view_id: str = "", filter_formula: str = "") -> list[dict]:
+            self.list_calls.append({'table_id': table_id, 'page_size': page_size})
+            return [
+                {'record_id': 'record-b-1', 'fields': {'楼栋': 'B楼', '告警内容': '旧记录'}},
+                {'record_id': 'record-a-1', 'fields': {'楼栋': 'A楼', '告警内容': '其他楼栋记录'}},
+            ]
+
+        def batch_delete_records(self, table_id: str, record_ids: list[str], batch_size: int = 500) -> int:
+            self.delete_calls.append({'table_id': table_id, 'record_ids': list(record_ids), 'batch_size': batch_size})
+            return len(record_ids)
+
+        def batch_create_records(
+            self,
+            table_id: str,
+            fields_list: list[dict],
+            batch_size: int = 200,
+            progress_callback=None,
+        ) -> list[dict]:
             self.create_calls.append({'table_id': table_id, 'batch_size': batch_size, 'fields_list': fields_list})
+            if callable(progress_callback):
+                progress_callback(len(fields_list), len(fields_list))
             return []
 
     monkeypatch.setattr(cache_module, 'FeishuBitableClient', _FakeBitableClient)
@@ -1687,8 +2146,224 @@ def test_external_upload_alarm_entries_single_building_keeps_only_rows_within_60
     assert len(_FakeBitableClient.instances) == 1
     fake_client = _FakeBitableClient.instances[0]
     assert fake_client.clear_calls == []
+    assert len(fake_client.list_calls) == 1
+    assert len(fake_client.delete_calls) == 1
+    assert fake_client.delete_calls[0]['record_ids'] == ['record-b-1']
     assert len(fake_client.create_calls) == 1
     uploaded_rows = fake_client.create_calls[0]['fields_list']
     assert len(uploaded_rows) == 1
     assert uploaded_rows[0]['告警内容'] == '近60天记录'
+
+
+def test_external_upload_alarm_entries_single_building_allows_yesterday_fallback(
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    fixed_now = datetime(2026, 4, 3, 10, 0, 0)
+    monkeypatch.setattr(cache_module, '_now_dt', lambda: fixed_now)
+
+    class _FakeBitableClient:
+        instances = []
+
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            self.list_calls = []
+            self.delete_calls = []
+            self.create_calls = []
+            _FakeBitableClient.instances.append(self)
+
+        def list_records(self, table_id: str, page_size: int = 500, max_records: int = 0, *, view_id: str = "", filter_formula: str = "") -> list[dict]:
+            self.list_calls.append({'table_id': table_id, 'page_size': page_size})
+            return []
+
+        def batch_delete_records(self, table_id: str, record_ids: list[str], batch_size: int = 500) -> int:
+            self.delete_calls.append({'table_id': table_id, 'record_ids': list(record_ids), 'batch_size': batch_size})
+            return 0
+
+        def batch_create_records(
+            self,
+            table_id: str,
+            fields_list: list[dict],
+            batch_size: int = 200,
+            progress_callback=None,
+        ) -> list[dict]:
+            self.create_calls.append({'table_id': table_id, 'batch_size': batch_size, 'fields_list': fields_list})
+            if callable(progress_callback):
+                progress_callback(len(fields_list), len(fields_list))
+            return []
+
+    monkeypatch.setattr(cache_module, 'FeishuBitableClient', _FakeBitableClient)
+
+    rows = [
+        {
+            'level': '次要',
+            'content': '昨天最新文件',
+            'position': 'B楼/位置',
+            'object': 'B-OBJ',
+            'event_time': fixed_now.strftime('%Y-%m-%d %H:%M:%S'),
+            'accept_time': fixed_now.strftime('%Y-%m-%d %H:%M:%S'),
+            'is_accept': '已处理',
+            'accept_by': '系统管理员',
+            'accept_content': '受理',
+            'recover_time': '',
+            'is_recover': '未恢复',
+            'event_snapshot': '2',
+            'event_type': '不正常值',
+            'confirm_type': '真实告警',
+            'event_suggest': '建议',
+            'confirm_time': fixed_now.strftime('%Y-%m-%d %H:%M:%S'),
+            'confirm_by': '系统管理员',
+            'confirm_description': '确认',
+            'alarm_threshold': '',
+        }
+    ]
+    entry = _add_alarm_cache_entry(
+        store=store,
+        shared_root=shared_root,
+        building='B楼',
+        bucket_kind='manual',
+        bucket_key='2026-04-02 18:00:00',
+        downloaded_at='2026-04-02 18:00:00',
+        rows=rows,
+    )
+
+    result = service.upload_alarm_event_entries_single_building_to_bitable(building='B楼')
+
+    assert result['accepted'] is True
+    assert result['uploaded_record_count'] == 1
+    assert result['consumed_count'] == 1
+    assert result['consumed_buildings'] == ['B楼']
+    assert result['used_previous_day_fallback'] == ['B楼']
+    assert result['selection_reference_date'] == '2026-04-03'
+    assert not Path(entry['file_path']).exists()
+    consumed_rows = store.list_source_cache_entries(
+        source_family=FAMILY_ALARM_EVENT,
+        building='B楼',
+        bucket_kind='manual',
+        bucket_key='2026-04-02 18:00:00',
+        status='consumed',
+        limit=1,
+    )
+    assert len(consumed_rows) == 1
+
+
+def test_external_upload_alarm_entries_single_building_consumes_superseded_ready_files(
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    class _FakeBitableClient:
+        instances = []
+
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            self.list_calls = []
+            self.delete_calls = []
+            self.create_calls = []
+            _FakeBitableClient.instances.append(self)
+
+        def list_records(self, table_id: str, page_size: int = 500, max_records: int = 0, *, view_id: str = "", filter_formula: str = "") -> list[dict]:
+            self.list_calls.append({'table_id': table_id, 'page_size': page_size})
+            return []
+
+        def batch_delete_records(self, table_id: str, record_ids: list[str], batch_size: int = 500) -> int:
+            self.delete_calls.append({'table_id': table_id, 'record_ids': list(record_ids), 'batch_size': batch_size})
+            return 0
+
+        def batch_create_records(
+            self,
+            table_id: str,
+            fields_list: list[dict],
+            batch_size: int = 200,
+            progress_callback=None,
+        ) -> list[dict]:
+            self.create_calls.append({'table_id': table_id, 'batch_size': batch_size, 'fields_list': fields_list})
+            if callable(progress_callback):
+                progress_callback(len(fields_list), len(fields_list))
+            return []
+
+    monkeypatch.setattr(cache_module, 'FeishuBitableClient', _FakeBitableClient)
+
+    now_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    rows = [
+        {
+            'level': '次要',
+            'content': '较新手动文件',
+            'position': 'B楼/位置',
+            'object': 'B-OBJ',
+            'event_time': now_text,
+            'accept_time': now_text,
+            'is_accept': '已处理',
+            'accept_by': '系统管理员',
+            'accept_content': '受理',
+            'recover_time': '',
+            'is_recover': '未恢复',
+            'event_snapshot': '1',
+            'event_type': '不正常值',
+            'confirm_type': '真实告警',
+            'event_suggest': '建议',
+            'confirm_time': now_text,
+            'confirm_by': '系统管理员',
+            'confirm_description': '确认',
+            'alarm_threshold': '',
+        }
+    ]
+    newer_entry = _add_alarm_cache_entry(
+        store=store,
+        shared_root=shared_root,
+        building='B楼',
+        bucket_kind='manual',
+        bucket_key='2026-04-03 09:30:00',
+        downloaded_at='2026-04-03 09:30:00',
+        rows=rows,
+    )
+    older_entry = _add_alarm_cache_entry(
+        store=store,
+        shared_root=shared_root,
+        building='B楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-02 16',
+        downloaded_at='2026-04-02 16:00:00',
+        rows=rows,
+    )
+
+    result = service.upload_alarm_event_entries_single_building_to_bitable(building='B楼')
+
+    assert result['accepted'] is True
+    assert result['consumed_count'] == 2
+    assert not Path(newer_entry['file_path']).exists()
+    assert not Path(older_entry['file_path']).exists()
+    newer_rows = store.list_source_cache_entries(
+        source_family=FAMILY_ALARM_EVENT,
+        building='B楼',
+        bucket_kind='manual',
+        bucket_key='2026-04-03 09:30:00',
+        status='consumed',
+        limit=1,
+    )
+    older_rows = store.list_source_cache_entries(
+        source_family=FAMILY_ALARM_EVENT,
+        building='B楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-02 16',
+        status='consumed',
+        limit=1,
+    )
+    assert len(newer_rows) == 1
+    assert len(older_rows) == 1
+    assert older_rows[0]['metadata']['consumed_reason'] == 'superseded_by_newer_bucket'
 

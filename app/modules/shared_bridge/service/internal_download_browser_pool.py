@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import APIRequestContext, Browser, BrowserContext, Page, Playwright, async_playwright
 
 from pipeline_utils import configure_playwright_environment
 from app.shared.utils.playwright_page_reuse import prepare_reusable_page
@@ -43,10 +43,10 @@ class BuildingPausedError(RuntimeError):
 class InternalDownloadBrowserPool:
     BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
     MAX_RECOVERY_ATTEMPTS = 3
+    MAX_JOB_ATTEMPTS = 3
     RECOVERY_PROBE_INTERVAL_SEC = 60
     RECYCLE_AFTER_AGE_SEC = 12 * 60 * 60
     RECYCLE_AFTER_JOB_COUNT = 100
-    ALARM_PAGE_PATH = "/page/warn_event/warn_event.html"
 
     def __init__(
         self,
@@ -184,13 +184,18 @@ class InternalDownloadBrowserPool:
         state = str(login_state or "").strip().lower()
         if state == "expired" or "login_required" in normalized or "登录态" in str(error_text or ""):
             return "login_expired"
-        if "告警页面" in str(error_text or "") or "告警查询" in str(error_text or ""):
+        if "告警页面" in str(error_text or "") or "告警查询" in str(error_text or "") or "告警 api" in normalized:
             return "alarm_query_failed"
         if "err_empty_response" in normalized or "page.goto:" in normalized:
             return "page_unreachable"
         if "err_connection_refused" in normalized:
             return "page_connection_refused"
-        if "err_connection_timed_out" in normalized or "err_timed_out" in normalized:
+        if (
+            "err_connection_timed_out" in normalized
+            or "err_timed_out" in normalized
+            or "etimedout" in normalized
+            or "connect timeout" in normalized
+        ):
             return "page_timeout"
         if "err_name_not_resolved" in normalized:
             return "page_address_invalid"
@@ -432,14 +437,14 @@ class InternalDownloadBrowserPool:
         return f"http://{host}/page/main/main.html"
 
     @classmethod
-    def _resolve_alarm_page_url(cls, site: dict[str, Any]) -> str:
+    def _resolve_api_base_url(cls, site: dict[str, Any]) -> str:
         host = str(site.get("host", "") or "").strip()
         if not host:
             return ""
         host = host.replace("http://", "").replace("https://", "").strip().strip("/")
         if not host:
             return ""
-        return f"http://{host}{cls.ALARM_PAGE_PATH}"
+        return f"http://{host}"
 
     async def _login_if_needed(self, building: str, page: Page, site: dict[str, Any]) -> None:
         login_timeout_ms = self._resolve_login_timeout_ms()
@@ -558,6 +563,10 @@ class InternalDownloadBrowserPool:
         for _label, step in attempts[: self.MAX_RECOVERY_ATTEMPTS]:
             recovery_attempts += 1
             self._update_slot(building, recovery_attempts=recovery_attempts)
+            self._log(
+                f"[共享桥接] 楼栋浏览器自动恢复尝试: {building}, step={_label}, "
+                f"attempt={recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS}"
+            )
             ok, reason = await step()
             if ok:
                 self._clear_issue_state(building)
@@ -572,6 +581,10 @@ class InternalDownloadBrowserPool:
                 self._log(f"[共享桥接] 楼栋浏览器状态恢复: {building}")
                 return True
             latest_reason = self._format_login_error(reason or latest_reason)
+            self._log(
+                f"[共享桥接] 楼栋浏览器自动恢复失败: {building}, step={_label}, "
+                f"attempt={recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS}, reason={latest_reason}"
+            )
         summary = self._suspend_building(
             building,
             failure_kind=failure_kind or "browser_issue",
@@ -594,20 +607,38 @@ class InternalDownloadBrowserPool:
                 await asyncio.sleep(1)
                 for building in self.BUILDINGS:
                     slot = self._slot_snapshot(building)
-                    if not bool(slot.get("suspended", False)):
+                    suspended = bool(slot.get("suspended", False))
+                    login_state = str(slot.get("login_state", "") or "").strip().lower()
+                    if not suspended and login_state not in {"failed", "expired"}:
                         continue
                     next_probe_at = _parse_text_datetime(slot.get("next_probe_at"))
-                    if next_probe_at and datetime.now() < next_probe_at:
+                    if suspended and next_probe_at and datetime.now() < next_probe_at:
                         continue
                     lock = self._locks.get(building)
                     if lock is None or lock.locked():
                         continue
                     async with lock:
                         current = self._slot_snapshot(building)
-                        if not bool(current.get("suspended", False)):
+                        current_suspended = bool(current.get("suspended", False))
+                        current_login_state = str(current.get("login_state", "") or "").strip().lower()
+                        if not current_suspended and current_login_state not in {"failed", "expired"}:
                             continue
                         try:
                             page = await self._ensure_page(building)
+                            probe_state = await self._probe_existing_login_state(page)
+                            if probe_state == "ready":
+                                self._clear_issue_state(building)
+                                self._update_slot(
+                                    building,
+                                    login_state="ready",
+                                    login_error="",
+                                    last_error="",
+                                    last_login_at=_now_text(),
+                                    last_result="ready",
+                                )
+                                continue
+                            if not current_suspended:
+                                continue
                             await self._raise_if_suspended(building, page)
                             if not bool(self._slot_snapshot(building).get("suspended", False)):
                                 continue
@@ -655,14 +686,8 @@ class InternalDownloadBrowserPool:
             )
             return
         page = slot.get("page")
-        alarm_page = slot.get("alarm_page")
         context = slot.get("context")
         browser = slot.get("browser")
-        try:
-            if alarm_page is not None and alarm_page is not page and not alarm_page.is_closed():
-                await alarm_page.close()
-        except Exception:
-            pass
         try:
             if page is not None and not page.is_closed():
                 await page.close()
@@ -719,7 +744,6 @@ class InternalDownloadBrowserPool:
             "browser": browser,
             "context": context,
             "page": page,
-            "alarm_page": None,
         }
         self._update_slot(
             building,
@@ -764,38 +788,25 @@ class InternalDownloadBrowserPool:
             return await self._create_or_replace_slot(building)
         return page
 
-    async def _ensure_alarm_page(self, building: str) -> Page:
+    async def _create_alarm_api_request_context(self, building: str) -> tuple[APIRequestContext, str]:
         slot = self._browser_slots.get(building)
-        if not slot:
-            await self._create_or_replace_slot(building)
-            slot = self._browser_slots.get(building)
-        if not slot:
+        if not isinstance(slot, dict):
             raise RuntimeError(f"{building} 浏览器上下文未初始化")
         context = slot.get("context")
-        if context is None:
-            await self._create_or_replace_slot(building)
-            slot = self._browser_slots.get(building)
-            context = slot.get("context") if isinstance(slot, dict) else None
-        if context is None:
+        if not isinstance(context, BrowserContext):
             raise RuntimeError(f"{building} 浏览器上下文未初始化")
-        alarm_page = slot.get("alarm_page")
-        try:
-            alarm_page_closed = True if alarm_page is None else alarm_page.is_closed()
-        except Exception:
-            alarm_page_closed = True
-        if alarm_page_closed:
-            alarm_page = await context.new_page()
-            slot["alarm_page"] = alarm_page
         site = self._find_site(building)
-        target_url = self._resolve_alarm_page_url(site or {})
-        if not target_url:
-            raise RuntimeError(f"{building} 告警页面地址未配置")
-        await prepare_reusable_page(
-            alarm_page,
-            target_url=target_url,
-            refresh_timeout_ms=self._resolve_refresh_timeout_ms(),
+        base_url = self._resolve_api_base_url(site or {})
+        if not base_url:
+            raise RuntimeError(f"{building} 告警 API 地址未配置")
+        if self._playwright is None:
+            raise RuntimeError("内网下载浏览器池未初始化")
+        storage_state = await context.storage_state()
+        request_context = await self._playwright.request.new_context(
+            base_url=base_url,
+            storage_state=storage_state,
         )
-        return alarm_page
+        return request_context, base_url
 
     async def _async_start(self) -> None:
         configure_playwright_environment(self.runtime_config)
@@ -904,7 +915,7 @@ class InternalDownloadBrowserPool:
             self._mark_slot_recycle_pending_if_needed(building)
             await self._recycle_slot_if_needed(building)
             last_exc: Exception | None = None
-            for attempt in range(2):
+            for attempt in range(self.MAX_JOB_ATTEMPTS):
                 page = await self._ensure_page(building)
                 await self._fail_if_login_not_ready(building, page)
                 try:
@@ -944,7 +955,10 @@ class InternalDownloadBrowserPool:
                     self._update_slot(
                         building,
                         in_use=False,
+                        login_state="ready",
+                        login_error="",
                         last_used_at=_now_text(),
+                        last_login_at=_now_text(),
                         last_result="success",
                         last_error="",
                         jobs_since_recycle=int(self._slot_snapshot(building).get("jobs_since_recycle", 0) or 0) + 1,
@@ -964,7 +978,7 @@ class InternalDownloadBrowserPool:
                             failure_kind=failure_kind or "browser_issue",
                             from_probe=False,
                         )
-                        if recovered and attempt == 0:
+                        if recovered and attempt < self.MAX_JOB_ATTEMPTS - 1:
                             last_exc = exc if isinstance(exc, Exception) else RuntimeError(error_text)
                             continue
                         if not recovered:
@@ -996,7 +1010,7 @@ class InternalDownloadBrowserPool:
     async def _run_building_alarm_job(
         self,
         building: str,
-        runner: Callable[[Page], Awaitable[Any]],
+        runner: Callable[[APIRequestContext, str], Awaitable[Any]],
     ) -> Any:
         if building not in self.BUILDINGS:
             raise ValueError(f"不支持的内网下载楼栋: {building}")
@@ -1007,7 +1021,7 @@ class InternalDownloadBrowserPool:
             self._mark_slot_recycle_pending_if_needed(building)
             await self._recycle_slot_if_needed(building)
             last_exc: Exception | None = None
-            for attempt in range(2):
+            for attempt in range(self.MAX_JOB_ATTEMPTS):
                 page = await self._ensure_page(building)
                 await self._fail_if_login_not_ready(building, page)
                 try:
@@ -1038,9 +1052,10 @@ class InternalDownloadBrowserPool:
                     last_result="running",
                     last_error="",
                 )
+                request_context: APIRequestContext | None = None
                 try:
-                    alarm_page = await self._ensure_alarm_page(building)
-                    result = await runner(alarm_page)
+                    request_context, base_url = await self._create_alarm_api_request_context(building)
+                    result = await runner(request_context, base_url)
                     refreshed_page = await self._ensure_page(building)
                     if refreshed_page is not page:
                         self._log(f"[共享桥接] 楼栋浏览器异常，已重建: {building}")
@@ -1048,7 +1063,10 @@ class InternalDownloadBrowserPool:
                     self._update_slot(
                         building,
                         in_use=False,
+                        login_state="ready",
+                        login_error="",
                         last_used_at=_now_text(),
+                        last_login_at=_now_text(),
                         last_result="success",
                         last_error="",
                         jobs_since_recycle=int(self._slot_snapshot(building).get("jobs_since_recycle", 0) or 0) + 1,
@@ -1068,7 +1086,7 @@ class InternalDownloadBrowserPool:
                         failure_kind=failure_kind or "browser_issue",
                         from_probe=False,
                     )
-                    if recovered and attempt == 0:
+                    if recovered and attempt < self.MAX_JOB_ATTEMPTS - 1:
                         last_exc = exc if isinstance(exc, Exception) else RuntimeError(error_text)
                         continue
                     if not recovered:
@@ -1093,60 +1111,15 @@ class InternalDownloadBrowserPool:
                         last_error=error_text,
                     )
                     raise
+                finally:
+                    if request_context is not None:
+                        try:
+                            await request_context.dispose()
+                        except Exception:
+                            pass
             if last_exc is not None:
                 raise last_exc
             raise RuntimeError(f"{building} 告警信息导出未能开始")
-
-    async def _run_existing_building_alarm_page_job(
-        self,
-        building: str,
-        runner: Callable[[Page], Awaitable[Any]],
-    ) -> Any:
-        if building not in self.BUILDINGS:
-            raise ValueError(f"不支持的内网下载楼栋: {building}")
-        lock = self._locks.get(building)
-        if lock is None:
-            raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
-        async with lock:
-            slot = self._browser_slots.get(building)
-            if not isinstance(slot, dict):
-                raise RuntimeError(f"{building} 浏览器上下文未初始化")
-            alarm_page = slot.get("alarm_page")
-            try:
-                alarm_page_closed = True if alarm_page is None else alarm_page.is_closed()
-            except Exception:
-                alarm_page_closed = True
-            if alarm_page_closed:
-                raise RuntimeError(f"{building} 当前告警页面未打开，调试不会新开页")
-            await self._fail_if_login_not_ready(building, alarm_page)
-            self._update_slot(
-                building,
-                in_use=True,
-                last_used_at=_now_text(),
-                last_result="running",
-                last_error="",
-            )
-            try:
-                result = await runner(alarm_page)
-                self._update_slot(
-                    building,
-                    in_use=False,
-                    last_used_at=_now_text(),
-                    last_result="success",
-                    last_error="",
-                )
-                return result
-            except Exception as exc:  # noqa: BLE001
-                error_text = str(exc)
-                self._last_error = error_text
-                self._update_slot(
-                    building,
-                    in_use=False,
-                    last_used_at=_now_text(),
-                    last_result="failed",
-                    last_error=error_text,
-                )
-                raise
 
     def submit_building_job(
         self,
@@ -1166,7 +1139,7 @@ class InternalDownloadBrowserPool:
     def submit_building_alarm_job(
         self,
         building: str,
-        runner: Callable[[Page], Awaitable[Any]],
+        runner: Callable[[APIRequestContext, str], Awaitable[Any]],
     ) -> concurrent.futures.Future[Any]:
         loop = self._loop
         if not self.is_running() or loop is None:
@@ -1175,21 +1148,6 @@ class InternalDownloadBrowserPool:
             return future
         return asyncio.run_coroutine_threadsafe(
             self._run_building_alarm_job(building, runner),
-            loop,
-        )
-
-    def submit_existing_building_alarm_page_job(
-        self,
-        building: str,
-        runner: Callable[[Page], Awaitable[Any]],
-    ) -> concurrent.futures.Future[Any]:
-        loop = self._loop
-        if not self.is_running() or loop is None:
-            future: concurrent.futures.Future[Any] = concurrent.futures.Future()
-            future.set_exception(RuntimeError("内网下载浏览器池未启动"))
-            return future
-        return asyncio.run_coroutine_threadsafe(
-            self._run_existing_building_alarm_page_job(building, runner),
             loop,
         )
 

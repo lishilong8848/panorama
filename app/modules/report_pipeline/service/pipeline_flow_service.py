@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from typing import Any, Callable, Dict, List, Type
@@ -43,15 +43,15 @@ def run_pipeline_with_time_windows(
     if browsers_path:
         emit_log(f"[Playwright] 使用浏览器目录: {browsers_path}")
     elif browser_channel:
-        emit_log(f"[Playwright] 未内置 ms-playwright 目录，使用系统浏览器 channel={browser_channel}。")
+        emit_log(f"[Playwright] 未内置 ms-playwright 目录，使用系统浏览器 channel={browser_channel}")
     else:
-        emit_log("[Playwright] 未内置 ms-playwright 目录，将尝试 Playwright 默认浏览器配置。")
+        emit_log("[Playwright] 未内置 ms-playwright 目录，将尝试 Playwright 默认浏览器配置")
 
     calc_module = load_calc_module()
     if not hasattr(calc_module, "run_with_explicit_files"):
-        raise RuntimeError("计算脚本缺少 run_with_explicit_files 入口，请先升级表格计算模块代码。")
+        raise RuntimeError("计算脚本缺少 run_with_explicit_files 入口，请先升级表格计算模块代码")
     if not hasattr(calc_module, "run_with_explicit_file_items"):
-        raise RuntimeError("计算脚本缺少 run_with_explicit_file_items 入口，请先升级表格计算模块代码。")
+        raise RuntimeError("计算脚本缺少 run_with_explicit_file_items 入口，请先升级表格计算模块代码")
 
     network_cfg = config["network"]
     feishu_cfg = config["feishu"]
@@ -85,9 +85,10 @@ def run_pipeline_with_time_windows(
     wifi = build_wifi_switcher(network_cfg, log_cb=emit_log)
     require_saved = bool(network_cfg["require_saved_profiles"])
     original_ssid = wifi.get_current_ssid()
-    emit_log(f"[网络] 当前SSID: {original_ssid}")
     pending_notify_events: List[Any] = []
     enable_auto_switch_wifi = bool(network_cfg.get("enable_auto_switch_wifi", True))
+    if enable_auto_switch_wifi:
+        emit_log(f"[网络] 当前SSID: {original_ssid}")
 
     internal_ssid = str(network_cfg["internal_ssid"]).strip()
     external_ssid = str(network_cfg["external_ssid"]).strip()
@@ -103,7 +104,7 @@ def run_pipeline_with_time_windows(
         profile_name=str(network_cfg.get("internal_profile_name", "") or "").strip() or None,
     )
     if skipped:
-        emit_log("[网络] 当前角色不使用单机切网，跳过切换到内网")
+        pass
     elif not ok:
         emit_log(f"[网络] 切换内网失败: {msg}")
         log_file_failure(
@@ -197,7 +198,7 @@ def run_pipeline_with_time_windows(
     sync_summary_from_checkpoint(summary, checkpoint)
 
     if not checkpoint["file_items"]:
-        emit_log("[下载] 所有日期均未下载到有效文件，本次任务结束。")
+        emit_log("[下载] 所有日期均未下载到有效文件，本次任务结束")
         checkpoint["stage"] = "completed"
         checkpoint["last_error"] = ""
         checkpoint = save_checkpoint_and_index(config, checkpoint)
@@ -213,8 +214,6 @@ def run_pipeline_with_time_windows(
         )
         if switch_back and original_ssid and enable_auto_switch_wifi:
             wifi.connect(original_ssid, require_saved_profile=require_saved)
-        elif switch_back and original_ssid:
-            emit_log("[网络] 当前角色不使用单机切网，跳过切回原SSID")
         return summary
 
     need_upload = bool(feishu_cfg["enable_upload"])
@@ -228,7 +227,7 @@ def run_pipeline_with_time_windows(
             profile_name=str(network_cfg.get("external_profile_name", "") or "").strip() or None,
         )
         if skipped:
-            emit_log("[网络] 当前角色不使用单机切网，跳过切换到外网")
+            pass
         elif not ok:
             emit_log(f"[网络] 切换外网失败: {msg}")
             log_file_failure(
@@ -264,8 +263,6 @@ def run_pipeline_with_time_windows(
             )
             if switch_back and original_ssid and enable_auto_switch_wifi:
                 wifi.connect(original_ssid, require_saved_profile=require_saved)
-            elif switch_back and original_ssid:
-                emit_log("[网络] 当前角色不使用单机切网，跳过切回原SSID")
             return summary
         else:
             emit_log(f"[网络] {msg}")
@@ -307,7 +304,7 @@ def run_pipeline_with_time_windows(
                 checkpoint["last_error"] = f"上传存在失败项: {summary['pending_upload_count']}"
             elif int(summary.get("file_missing_count", 0)) > 0:
                 checkpoint["stage"] = "completed_with_failures"
-                checkpoint["last_error"] = f"有缺失文件: {summary['file_missing_count']}"
+                checkpoint["last_error"] = f"存在缺失文件: {summary['file_missing_count']}"
             else:
                 checkpoint["stage"] = "completed"
                 checkpoint["last_error"] = ""
@@ -315,7 +312,7 @@ def run_pipeline_with_time_windows(
             sync_summary_from_checkpoint(summary, checkpoint)
 
             if upload_result["failed_count"] > 0:
-                detail = f"run_id={checkpoint['run_id']}; 上传失败{upload_result['failed_count']}项，可继续续传。"
+                detail = f"run_id={checkpoint['run_id']}; 上传失败{upload_result['failed_count']}项，可继续续传"
                 emit_log(f"[上传] {detail}")
                 notify_event(
                     config,
@@ -326,7 +323,7 @@ def run_pipeline_with_time_windows(
                     external_ssid=external_ssid,
                     pending_events=pending_notify_events,
                 )
-            emit_log(f"[{source_name}] 本次任务处理完成。")
+            emit_log(f"[{source_name}] 本次任务处理完成")
         elif only_this_run:
             calc_module.run_with_explicit_file_items(
                 config=config,
@@ -338,7 +335,7 @@ def run_pipeline_with_time_windows(
             checkpoint["last_error"] = ""
             checkpoint = save_checkpoint_and_index(config, checkpoint)
             sync_summary_from_checkpoint(summary, checkpoint)
-            emit_log(f"[{source_name}] 本次任务处理完成。")
+            emit_log(f"[{source_name}] 本次任务处理完成")
         else:
             config["input"]["excel_dir"] = run_save_dir
             results = calc_module.run_with_config(config)
@@ -348,7 +345,7 @@ def run_pipeline_with_time_windows(
             checkpoint["last_error"] = ""
             checkpoint = save_checkpoint_and_index(config, checkpoint)
             sync_summary_from_checkpoint(summary, checkpoint)
-            emit_log(f"[{source_name}] 本次任务处理完成。")
+            emit_log(f"[{source_name}] 本次任务处理完成")
     except Exception as exc:  # noqa: BLE001
         detail = str(exc)
         summary["error"] = detail
@@ -389,6 +386,4 @@ def run_pipeline_with_time_windows(
             if current != original_ssid:
                 ok, msg = wifi.connect(original_ssid, require_saved_profile=require_saved)
                 emit_log(f"[网络] 恢复原SSID: {'成功' if ok else '失败'} - {msg}")
-        elif switch_back and original_ssid:
-            emit_log("[网络] 当前角色不使用单机切网，跳过恢复原SSID")
     return summary

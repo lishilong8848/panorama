@@ -8,6 +8,7 @@ from app.modules.report_pipeline.api import routes
 def _make_config(
     *,
     role_mode: str = "",
+    last_started_role_mode: str = "",
     bridge_enabled: bool = False,
     bridge_root_dir: str = "",
     bridge_internal_root_dir: str = "",
@@ -18,6 +19,7 @@ def _make_config(
         "common": {
             "deployment": {
                 "role_mode": role_mode,
+                "last_started_role_mode": last_started_role_mode,
                 "node_id": "",
                 "node_label": "",
             },
@@ -66,8 +68,8 @@ def _make_container(current_config):
 
 
 def test_put_config_marks_restart_required_when_role_mode_changes(monkeypatch) -> None:
-    current = _make_config(role_mode="", bridge_enabled=False, bridge_root_dir="")
-    incoming = _make_config(role_mode="external", bridge_enabled=True, bridge_root_dir="D:/QJPT_Shared")
+    current = _make_config(role_mode="", last_started_role_mode="", bridge_enabled=False, bridge_root_dir="")
+    incoming = _make_config(role_mode="external", last_started_role_mode="", bridge_enabled=True, bridge_root_dir="D:/QJPT_Shared")
     container = _make_container(current)
 
     monkeypatch.setattr(
@@ -86,8 +88,8 @@ def test_put_config_marks_restart_required_when_role_mode_changes(monkeypatch) -
 
 
 def test_put_config_marks_restart_required_when_shared_bridge_changes(monkeypatch) -> None:
-    current = _make_config(role_mode="external", bridge_enabled=True, bridge_root_dir="D:/QJPT_Shared")
-    incoming = _make_config(role_mode="external", bridge_enabled=True, bridge_root_dir="E:/QJPT_Shared")
+    current = _make_config(role_mode="external", last_started_role_mode="external", bridge_enabled=True, bridge_root_dir="D:/QJPT_Shared")
+    incoming = _make_config(role_mode="external", last_started_role_mode="external", bridge_enabled=True, bridge_root_dir="E:/QJPT_Shared")
     container = _make_container(current)
 
     monkeypatch.setattr(
@@ -106,8 +108,8 @@ def test_put_config_marks_restart_required_when_shared_bridge_changes(monkeypatc
 
 
 def test_put_config_keeps_restart_required_false_when_role_signature_unchanged(monkeypatch) -> None:
-    current = _make_config(role_mode="", bridge_enabled=False, bridge_root_dir="")
-    incoming = _make_config(role_mode="", bridge_enabled=False, bridge_root_dir="")
+    current = _make_config(role_mode="", last_started_role_mode="", bridge_enabled=False, bridge_root_dir="")
+    incoming = _make_config(role_mode="", last_started_role_mode="", bridge_enabled=False, bridge_root_dir="")
     container = _make_container(current)
 
     monkeypatch.setattr(
@@ -128,12 +130,14 @@ def test_put_config_keeps_restart_required_false_when_role_signature_unchanged(m
 def test_put_config_marks_restart_required_when_external_role_root_switches_to_role_specific_path(monkeypatch) -> None:
     current = _make_config(
         role_mode="external",
+        last_started_role_mode="external",
         bridge_enabled=True,
         bridge_root_dir="D:/legacy-shared",
         bridge_external_root_dir="D:/legacy-shared",
     )
     incoming = _make_config(
         role_mode="external",
+        last_started_role_mode="external",
         bridge_enabled=True,
         bridge_root_dir="D:/legacy-shared",
         bridge_external_root_dir="\\\\172.16.1.2\\share",
@@ -153,3 +157,23 @@ def test_put_config_marks_restart_required_when_external_role_root_switches_to_r
 
     assert response["ok"] is True
     assert response["restart_required"] is True
+
+
+def test_put_config_skips_restart_when_target_role_matches_last_started_role(monkeypatch) -> None:
+    current = _make_config(role_mode="internal", last_started_role_mode="internal", bridge_enabled=False, bridge_root_dir="")
+    incoming = _make_config(role_mode="internal", last_started_role_mode="internal", bridge_enabled=False, bridge_root_dir="")
+    container = _make_container(current)
+
+    monkeypatch.setattr(
+        routes,
+        "merge_user_config_payload",
+        lambda payload, _current, clear_paths=None, force_overwrite=False: SimpleNamespace(merged=payload),
+    )
+    monkeypatch.setattr(routes, "save_settings", lambda settings, _path: settings)
+    monkeypatch.setattr(routes, "_materialize_review_access_snapshot", lambda _container: {"configured": False})
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None)
+
+    response = routes.put_config(incoming, _make_request(container))
+
+    assert response["ok"] is True
+    assert response["restart_required"] is False

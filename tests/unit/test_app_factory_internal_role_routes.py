@@ -15,10 +15,27 @@ class _FakeJobService:
     def active_job_id(self):
         return ""
 
+    def active_job_ids(self, include_waiting=True):
+        return []
+
+    def job_counts(self):
+        return {"queued": 0, "running": 0, "finished": 0, "failed": 0}
+
+    def shutdown_task_engine(self):
+        return None
+
 
 class _FakeContainer:
     def __init__(self, *, frontend_root: Path, role_mode: str = "internal"):
-        self.config = {"common": {"console": {}}}
+        self.config = {
+            "common": {
+                "console": {},
+                "deployment": {
+                    "role_mode": role_mode,
+                    "last_started_role_mode": "",
+                },
+            }
+        }
         self.runtime_config = {}
         self.config_path = frontend_root / "config.json"
         self.frontend_mode = "source"
@@ -35,6 +52,16 @@ class _FakeContainer:
         self.runtime_services_armed = False
         self.runtime_service_start_calls = []
         self.role_mode = role_mode
+        self.startup_handoff = {
+            "active": False,
+            "mode": "",
+            "target_role_mode": "",
+            "requested_at": "",
+            "reason": "",
+            "nonce": "",
+        }
+        self.startup_handoff_cleared = 0
+        self.system_log_next_offset = lambda: 0
 
     def add_system_log(self, *_args, **_kwargs):
         return None
@@ -72,6 +99,20 @@ class _FakeContainer:
     def deployment_snapshot(self):
         return {"role_mode": self.role_mode, "node_id": "internal-node", "node_label": "内网端"}
 
+    def get_startup_role_handoff(self):
+        return dict(self.startup_handoff)
+
+    def clear_startup_role_handoff(self):
+        self.startup_handoff = {
+            "active": False,
+            "mode": "",
+            "target_role_mode": "",
+            "requested_at": "",
+            "reason": "",
+            "nonce": "",
+        }
+        self.startup_handoff_cleared += 1
+
     def shared_bridge_snapshot(self):
         return {"enabled": True, "root_dir": "D:/QJPT_Shared", "db_status": "ok"}
 
@@ -92,7 +133,23 @@ def _build_app(monkeypatch, tmp_path: Path, *, role_mode: str = "internal"):
     container = _FakeContainer(frontend_root=frontend_root, role_mode=role_mode)
     monkeypatch.setattr(app_factory, "build_container", lambda: container)
     monkeypatch.setattr(app_factory, "_is_loopback_client", lambda _host: True)
+    monkeypatch.setattr(app_factory, "save_settings", lambda settings, _path: settings)
     return app_factory.create_app(enable_lifespan=False)
+
+
+def _build_app_with_lifespan(monkeypatch, tmp_path: Path, *, role_mode: str = "internal"):
+    frontend_root = tmp_path / "frontend"
+    frontend_root.mkdir()
+    (frontend_root / "index.html").write_text(
+        """<!doctype html><html><head></head><body><div id=\"app\"></div><script type=\"module\" src=\"/assets/app.js\"></script></body></html>""",
+        encoding="utf-8",
+    )
+    (frontend_root / "app.js").write_text("export const ok = true;", encoding="utf-8")
+    container = _FakeContainer(frontend_root=frontend_root, role_mode=role_mode)
+    monkeypatch.setattr(app_factory, "build_container", lambda: container)
+    monkeypatch.setattr(app_factory, "_is_loopback_client", lambda _host: True)
+    monkeypatch.setattr(app_factory, "save_settings", lambda settings, _path: settings)
+    return app_factory.create_app(enable_lifespan=True)
 
 
 def test_internal_role_blocks_business_job_routes(monkeypatch, tmp_path):
@@ -152,6 +209,34 @@ def test_startup_runtime_requires_explicit_activation(monkeypatch, tmp_path):
         assert app.state.startup_role_confirmed is True
 
 
+def test_startup_runtime_clears_handoff_after_restart_resume(monkeypatch, tmp_path):
+    app = _build_app(monkeypatch, tmp_path, role_mode="external")
+    container = app.state.container
+    container.startup_handoff = {
+        "active": True,
+        "mode": "startup_role_resume",
+        "target_role_mode": "external",
+        "requested_at": "2026-04-03 08:35:00",
+        "reason": "role_mode_switch",
+        "nonce": "handoff-123",
+    }
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/runtime/activate-startup",
+            json={
+                "source": "startup_role_resume_after_restart",
+                "startup_handoff_nonce": "handoff-123",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert container.startup_handoff_cleared == 1
+        assert container.startup_handoff["active"] is False
+
+
 def test_startup_runtime_rejects_missing_role(monkeypatch, tmp_path):
     app = _build_app(monkeypatch, tmp_path, role_mode="")
     container = app.state.container
@@ -167,6 +252,22 @@ def test_startup_runtime_rejects_missing_role(monkeypatch, tmp_path):
         assert container.runtime_services_armed is False
         assert container.runtime_service_start_calls == []
         assert app.state.startup_role_confirmed is False
+
+
+def test_lifespan_keeps_saved_role_unactivated_until_user_confirms(monkeypatch, tmp_path):
+    app = _build_app_with_lifespan(monkeypatch, tmp_path, role_mode="external")
+    container = app.state.container
+
+    with TestClient(app) as client:
+        response = client.get("/api/health/bootstrap")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert container.runtime_services_armed is False
+        assert container.runtime_service_start_calls == []
+        assert app.state.startup_role_confirmed is False
+        assert payload["runtime_activated"] is False
+        assert payload["role_selection_required"] is True
 
 
 def test_app_factory_routes_do_not_leave_mock_val_ser_fields(monkeypatch, tmp_path):

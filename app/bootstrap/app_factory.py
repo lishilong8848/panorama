@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import copy
 from contextlib import asynccontextmanager
 import os
 import subprocess
@@ -16,6 +17,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.bootstrap.container import build_container
+from app.config.config_adapter import normalize_role_mode, adapt_runtime_config
+from app.config.settings_loader import save_settings
 from app.modules.handover_review.api.routes import router as handover_review_router
 from app.modules.feishu.api.routes import router as feishu_router
 from app.modules.notify.api.routes import router as notify_router
@@ -153,6 +156,28 @@ def _initialize_handover_daily_report_auth(container) -> None:
 def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     container = build_container()
 
+    def _persist_last_started_role_mode(role_mode: str) -> None:
+        normalized_role = normalize_role_mode(role_mode)
+        if normalized_role not in {"internal", "external"}:
+            return
+        current_config = container.config if isinstance(container.config, dict) else {}
+        common_cfg = current_config.get("common", {}) if isinstance(current_config.get("common", {}), dict) else {}
+        deployment_cfg = common_cfg.get("deployment", {}) if isinstance(common_cfg, dict) else {}
+        current_last_started = normalize_role_mode(deployment_cfg.get("last_started_role_mode"))
+        if current_last_started == normalized_role:
+            return
+        updated = copy.deepcopy(current_config)
+        updated.setdefault("common", {})
+        if not isinstance(updated["common"], dict):
+            updated["common"] = {}
+        updated["common"].setdefault("deployment", {})
+        if not isinstance(updated["common"]["deployment"], dict):
+            updated["common"]["deployment"] = {}
+        updated["common"]["deployment"]["last_started_role_mode"] = normalized_role
+        saved = save_settings(updated, container.config_path)
+        container.config = copy.deepcopy(saved)
+        container.runtime_config = adapt_runtime_config(container.config)
+
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         _install_windows_asyncio_exception_filter(container)
@@ -245,6 +270,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             }
         if bool(getattr(app.state, "runtime_services_activated", False)):
             app.state.startup_role_confirmed = True
+            try:
+                _persist_last_started_role_mode(role_mode)
+            except Exception as exc:  # noqa: BLE001
+                container.add_system_log(f"[启动] 回写最近成功启动角色失败：{exc}")
             return {
                 "ok": True,
                 "activated": True,
@@ -278,6 +307,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             app.state.runtime_activation_phase = "activated"
             app.state.runtime_activation_error = ""
             app.state.startup_role_confirmed = True
+            try:
+                _persist_last_started_role_mode(role_mode)
+            except Exception as exc:  # noqa: BLE001
+                container.add_system_log(f"[启动] 回写最近成功启动角色失败：{exc}")
             return {
                 "ok": True,
                 "activated": True,
@@ -339,8 +372,20 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             payload = {}
 
         source = str(payload.get("source", "") or "").strip() or "启动角色确认"
+        startup_handoff_nonce = str(payload.get("startup_handoff_nonce", "") or "").strip()
         try:
             result = await asyncio.to_thread(_activate_runtime_services, source)
+            if bool(result.get("ok", False)):
+                get_startup_role_handoff = getattr(container, "get_startup_role_handoff", None)
+                clear_startup_role_handoff = getattr(container, "clear_startup_role_handoff", None)
+                if callable(get_startup_role_handoff) and callable(clear_startup_role_handoff):
+                    handoff = get_startup_role_handoff()
+                    handoff_nonce = str(handoff.get("nonce", "") or "").strip() if isinstance(handoff, dict) else ""
+                    if handoff_nonce and (
+                        source == "startup_role_resume_after_restart"
+                        or (startup_handoff_nonce and startup_handoff_nonce == handoff_nonce)
+                    ):
+                        clear_startup_role_handoff()
             return JSONResponse(content=result)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse(
@@ -806,7 +851,15 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
             app_dir = get_app_dir()
             launcher_bat = app_dir / "启动程序.bat"
-            if sys.platform.startswith("win") and launcher_bat.exists():
+            portable_launcher = app_dir / "portable_launcher.py"
+            if (
+                not getattr(sys, "frozen", False)
+                and not str(os.environ.get("QJPT_PORTABLE_LAUNCHER", "") or "").strip()
+                and portable_launcher.exists()
+            ):
+                cmd = [sys.executable, str(portable_launcher)]
+                popen_kwargs = {"cwd": str(app_dir)}
+            elif sys.platform.startswith("win") and launcher_bat.exists():
                 cmd = ["cmd.exe", "/c", str(launcher_bat)]
                 popen_kwargs = {"cwd": str(app_dir)}
             elif getattr(sys, "frozen", False):

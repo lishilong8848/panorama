@@ -13,6 +13,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
         },
         "deployment": {
             "role_mode": "",
+            "last_started_role_mode": "",
             "node_id": "",
             "node_label": "",
         },

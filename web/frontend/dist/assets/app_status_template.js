@@ -98,32 +98,79 @@
         <article v-if="isInternalDeploymentRole" class="status-card status-card-wide">
           <div class="status-card-head">
             <div>
-              <span class="status-panel-kicker">内网楼栋状态</span>
-              <h2 class="status-panel-title">5个楼实时状态</h2>
+              <span class="status-panel-kicker">内网运行态</span>
+              <h2 class="status-panel-title">5个楼实时状态与共享文件仓</h2>
             </div>
-            <span class="status-badge status-badge-solid" :class="'tone-' + internalDownloadPoolOverview.tone">
-              {{ internalDownloadPoolOverview.statusText }}
-            </span>
+            <div class="status-page-hero-actions">
+              <span class="status-badge status-badge-solid" :class="'tone-' + internalRuntimeOverview.tone">
+                {{ internalRuntimeOverview.statusText }}
+              </span>
+              <button
+                class="btn btn-warning"
+                type="button"
+                @click="refreshCurrentHourSourceCache"
+                :disabled="isSourceCacheRefreshCurrentHourLocked"
+              >
+                {{ currentHourRefreshButtonText }}
+              </button>
+              <button
+                class="btn btn-secondary"
+                type="button"
+                @click="refreshManualAlarmSourceCache"
+                :disabled="isSourceCacheRefreshAlarmManualLocked"
+              >
+                {{ manualAlarmRefreshButtonText }}
+              </button>
+              <button
+                class="btn btn-secondary"
+                type="button"
+                @click="deleteManualAlarmSourceCacheFiles"
+                :disabled="isSourceCacheDeleteAlarmManualLocked"
+              >
+                {{ manualAlarmDeleteButtonText }}
+              </button>
+            </div>
           </div>
-          <div class="hint">{{ internalDownloadPoolOverview.summaryText }}</div>
-          <div class="hint">每 2 秒自动刷新一次，实时显示 A楼 / B楼 / C楼 / D楼 / E楼 的页面、占用和登录状态。</div>
-          <div class="status-list">
+          <div class="hint">{{ internalRuntimeOverview.summaryText }}</div>
+          <div class="hint">每 2 秒自动刷新一次，实时显示 A楼 / B楼 / C楼 / D楼 / E楼 的页面、占用和登录状态，以及三组共享文件状态。</div>
+          <div class="status-list" v-if="internalRuntimeOverview.items && internalRuntimeOverview.items.length">
             <div
               class="status-list-row"
-              v-for="item in internalDownloadPoolOverview.items"
-              :key="'status-internal-download-pool-' + item.label"
+              v-for="item in internalRuntimeOverview.items"
+              :key="'status-internal-runtime-source-' + item.label"
             >
               <span class="status-list-label">{{ item.label }}</span>
               <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
             </div>
           </div>
-          <div class="hint" v-if="internalDownloadPoolOverview.errorText">
-            最近异常：{{ internalDownloadPoolOverview.errorText }}
+          <div class="hint" v-if="internalRuntimeOverview.cacheRoot">
+            缓存目录：{{ internalRuntimeOverview.cacheRoot }}
+          </div>
+          <div class="hint" v-if="internalRuntimeOverview.errorText">
+            最近异常：{{ internalRuntimeOverview.errorText }}
+          </div>
+          <div class="status-subsection-head">
+            <span class="status-panel-kicker">5个楼实时状态</span>
+            <span class="status-inline-note">{{ internalRuntimeOverview.poolStatusText }}</span>
+          </div>
+          <div class="hint">{{ internalRuntimeOverview.poolSummaryText }}</div>
+          <div class="status-list" v-if="internalRuntimeOverview.poolItems && internalRuntimeOverview.poolItems.length">
+            <div
+              class="status-list-row"
+              v-for="item in internalRuntimeOverview.poolItems"
+              :key="'status-internal-runtime-pool-' + item.label"
+            >
+              <span class="status-list-label">{{ item.label }}</span>
+              <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
+            </div>
+          </div>
+          <div class="hint" v-if="internalRuntimeOverview.poolErrorText">
+            最近异常：{{ internalRuntimeOverview.poolErrorText }}
           </div>
           <div class="internal-download-pool-grid">
             <div
               class="internal-download-slot"
-              v-for="slot in internalDownloadPoolOverview.slots"
+              v-for="slot in internalRuntimeOverview.slots"
               :key="'status-download-slot-' + slot.building"
             >
               <div class="internal-download-slot-head">
@@ -140,14 +187,36 @@
             </div>
           </div>
           <div class="status-subsection-head">
+            <span class="status-panel-kicker">当前共享文件执行状态</span>
+            <span class="status-badge status-badge-soft" :class="'tone-' + internalRuntimeOverview.currentHourRefresh.tone">
+              {{ internalRuntimeOverview.currentHourRefresh.statusText }}
+            </span>
+          </div>
+          <div class="hint">{{ internalRuntimeOverview.currentHourRefresh.summaryText }}</div>
+          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.lastRunAt">最近触发：{{ internalRuntimeOverview.currentHourRefresh.lastRunAt }}</div>
+          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.lastSuccessAt">最近完成：{{ internalRuntimeOverview.currentHourRefresh.lastSuccessAt }}</div>
+          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.runningBuildings && internalRuntimeOverview.currentHourRefresh.runningBuildings.length">
+            当前进行中：{{ internalRuntimeOverview.currentHourRefresh.runningBuildings.join(' / ') }}
+          </div>
+          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.completedBuildings && internalRuntimeOverview.currentHourRefresh.completedBuildings.length">
+            本轮完成：{{ internalRuntimeOverview.currentHourRefresh.completedBuildings.join(' / ') }}
+          </div>
+          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.blockedBuildings && internalRuntimeOverview.currentHourRefresh.blockedBuildings.length">
+            等待恢复：{{ internalRuntimeOverview.currentHourRefresh.blockedBuildings.join(' / ') }}
+          </div>
+          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.failedBuildings && internalRuntimeOverview.currentHourRefresh.failedBuildings.length">
+            失败项：{{ internalRuntimeOverview.currentHourRefresh.failedBuildings.join(' / ') }}
+          </div>
+          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.lastError">最近错误：{{ internalRuntimeOverview.currentHourRefresh.lastError }}</div>
+          <div class="status-subsection-head">
             <span class="status-panel-kicker">最新共享文件状态</span>
             <span class="status-inline-note">交接班源文件、月报源文件和告警信息源文件实时同步显示</span>
           </div>
-          <div class="source-cache-family-grid" v-if="internalRealtimeSourceFamilies && internalRealtimeSourceFamilies.length">
+          <div class="source-cache-family-grid" v-if="internalRuntimeOverview.families && internalRuntimeOverview.families.length">
             <div
               class="internal-download-slot"
-              v-for="family in internalRealtimeSourceFamilies"
-              :key="'status-internal-realtime-source-family-' + family.key"
+              v-for="family in internalRuntimeOverview.families"
+              :key="'status-internal-runtime-family-' + family.key"
             >
               <div class="internal-download-slot-head">
                 <span class="internal-download-slot-title">{{ family.title }}</span>
@@ -157,11 +226,29 @@
                 <span class="status-inline-note">当前桶：{{ family.currentBucket }}</span>
                 <span class="status-inline-note">最近成功：{{ family.lastSuccessAt || "-" }}</span>
               </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.manualRefresh && family.manualRefresh.running">
+                最近一次手动拉取进行中：{{ family.manualRefresh.bucketKey || '-' }}
+              </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.manualRefresh && family.manualRefresh.lastSuccessAt">
+                最近一次手动拉取：{{ family.manualRefresh.lastSuccessAt }} / 桶 {{ family.manualRefresh.bucketKey || '-' }} / 总计 {{ family.manualRefresh.totalRowCount || 0 }} 条
+              </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.manualRefresh && family.manualRefresh.queryStart">
+                查询时间窗：{{ family.manualRefresh.queryStart }} ~ {{ family.manualRefresh.queryEnd || '-' }}
+              </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.manualRefresh && family.manualRefresh.failedBuildings && family.manualRefresh.failedBuildings.length">
+                手动拉取失败楼栋：{{ family.manualRefresh.failedBuildings.join(' / ') }}
+              </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.manualRefresh && family.manualRefresh.blockedBuildings && family.manualRefresh.blockedBuildings.length">
+                手动拉取等待恢复：{{ family.manualRefresh.blockedBuildings.join(' / ') }}
+              </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.manualRefresh && family.manualRefresh.lastError">
+                最近手动拉取错误：{{ family.manualRefresh.lastError }}
+              </div>
               <div class="source-cache-building-grid">
                 <div
                   class="internal-download-slot"
                   v-for="building in family.buildings"
-                  :key="'status-internal-realtime-source-building-' + family.key + '-' + building.building"
+                  :key="'status-internal-runtime-building-' + family.key + '-' + building.building"
                 >
                   <div class="internal-download-slot-head">
                     <span class="internal-download-slot-title">{{ building.building }}</span>
@@ -169,8 +256,20 @@
                   </div>
                   <div class="hint">时间桶：{{ building.bucketKey || family.currentBucket }}</div>
                   <div class="hint">{{ building.detailText }}</div>
+                  <div class="hint" v-if="family.key === 'alarm_event_family' && family.manualRefresh && family.manualRefresh.buildingRowCounts && family.manualRefresh.buildingRowCounts[building.building] !== undefined">
+                    最近手动拉取：{{ family.manualRefresh.buildingRowCounts[building.building] }} 条
+                  </div>
                   <div class="hint" v-if="building.relativePath">缓存文件：{{ building.relativePath }}</div>
                 </div>
+              </div>
+              <div class="hint" v-if="family.failedBuildings && family.failedBuildings.length">
+                失败楼栋：{{ family.failedBuildings.join(' / ') }}
+              </div>
+              <div class="hint" v-if="family.blockedBuildings && family.blockedBuildings.length">
+                等待恢复：{{ family.blockedBuildings.join(' / ') }}
+              </div>
+              <div class="hint" v-if="!family.failedBuildings.length && !family.blockedBuildings.length">
+                已就绪楼栋数：{{ family.readyCount }}
               </div>
             </div>
           </div>
@@ -237,9 +336,20 @@
                 <span class="status-badge status-badge-soft" :class="'tone-' + family.tone">{{ family.statusText }}</span>
               </div>
               <div class="internal-download-slot-meta">
-                <span class="status-inline-note">最新时间桶：{{ family.bestBucketKey || sharedSourceCacheReadinessOverview.referenceBucketKey }}</span>
-                <span class="status-inline-note" v-if="family.bestBucketAgeText">距当前约 {{ family.bestBucketAgeText }}</span>
+                <span class="status-inline-note" v-if="family.key === 'alarm_event_family'">选择策略：当天最新一份，缺失则回退昨天最新</span>
+                <span class="status-inline-note" v-else>最新时间桶：{{ family.bestBucketKey || sharedSourceCacheReadinessOverview.referenceBucketKey }}</span>
+                <span class="status-inline-note" v-if="family.key === 'alarm_event_family' && family.selectionReferenceDate">参考日期：{{ family.selectionReferenceDate }}</span>
+                <span class="status-inline-note" v-else-if="family.bestBucketAgeText">距当前约 {{ family.bestBucketAgeText }}</span>
                 <span class="status-inline-note">{{ family.summaryText }}</span>
+              </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadLastRunAt">
+                最近上传：{{ family.uploadLastRunAt }} / 记录 {{ family.uploadRecordCount || 0 }} 条 / 文件 {{ family.uploadFileCount || 0 }} 份 / 消费 {{ family.uploadConsumedCount || 0 }} 份
+              </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadRunning">
+                {{ family.uploadRunningText }}
+              </div>
+              <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadLastError">
+                最近上传异常：{{ family.uploadLastError }}
               </div>
               <div class="source-cache-building-grid" v-if="family.buildings && family.buildings.length">
                 <div
@@ -251,7 +361,10 @@
                     <span class="internal-download-slot-title">{{ building.building }}</span>
                     <span class="status-badge status-badge-soft" :class="'tone-' + building.tone">{{ building.stateText }}</span>
                   </div>
-                  <div class="hint">时间桶：{{ building.bucketKey || family.bestBucketKey || sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
+                  <div class="hint" v-if="family.key === 'alarm_event_family'">来源：{{ building.sourceKindText || '-' }}</div>
+                  <div class="hint" v-if="family.key === 'alarm_event_family'">选择：{{ building.selectionScopeText || '-' }}</div>
+                  <div class="hint" v-if="family.key === 'alarm_event_family'">选中文件时间：{{ building.selectedDownloadedAt || '-' }}</div>
+                  <div class="hint" v-else>时间桶：{{ building.bucketKey || family.bestBucketKey || sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
                   <div class="hint" v-if="building.usingFallback && building.versionGap !== null">较最新版本落后 {{ building.versionGap }} 桶</div>
                   <div class="hint">{{ building.lastError ? ("最近错误：" + building.lastError) : ("最近成功：" + (building.downloadedAt || "-")) }}</div>
                   <div class="hint" v-if="building.resolvedFilePath">共享路径：{{ building.resolvedFilePath }}</div>
@@ -264,117 +377,6 @@
           </div>
           <div class="hint" v-if="sharedSourceCacheReadinessOverview.errorText">
             最近异常：{{ sharedSourceCacheReadinessOverview.errorText }}
-          </div>
-        </article>
-
-        <article v-if="isInternalDeploymentRole" class="status-card status-card-wide">
-          <div class="status-card-head">
-            <div>
-              <span class="status-panel-kicker">共享文件仓</span>
-              <h2 class="status-panel-title">双源文件小时缓存</h2>
-            </div>
-            <div class="status-page-hero-actions">
-              <span class="status-badge status-badge-solid" :class="'tone-' + internalSourceCacheOverview.tone">
-                {{ internalSourceCacheOverview.statusText }}
-              </span>
-              <button
-                class="btn btn-warning"
-                type="button"
-                @click="refreshCurrentHourSourceCache"
-                :disabled="isSourceCacheRefreshCurrentHourLocked"
-              >
-                {{ currentHourRefreshButtonText }}
-              </button>
-              <button
-                class="btn btn-secondary"
-                type="button"
-                @click="refreshManualAlarmSourceCache"
-                :disabled="isSourceCacheRefreshAlarmManualLocked"
-              >
-                {{ manualAlarmRefreshButtonText }}
-              </button>
-              <button
-                class="btn btn-secondary"
-                type="button"
-                @click="deleteManualAlarmSourceCacheFiles"
-                :disabled="isSourceCacheDeleteAlarmManualLocked"
-              >
-                {{ manualAlarmDeleteButtonText }}
-              </button>
-            </div>
-          </div>
-          <div class="hint">{{ internalSourceCacheOverview.summaryText }}</div>
-          <div class="status-list">
-            <div
-              class="status-list-row"
-              v-for="item in internalSourceCacheOverview.items"
-              :key="'status-internal-source-cache-' + item.label"
-            >
-              <span class="status-list-label">{{ item.label }}</span>
-              <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
-            </div>
-          </div>
-          <div class="hint" v-if="internalSourceCacheOverview.cacheRoot">
-            缓存目录：{{ internalSourceCacheOverview.cacheRoot }}
-          </div>
-          <div class="hint" v-if="internalSourceCacheOverview.errorText">
-            最近异常：{{ internalSourceCacheOverview.errorText }}
-          </div>
-          <div class="status-card-inline status-card-inline-stack">
-            <div class="status-card-inline-item">
-              <span class="status-list-label">当前小时下载</span>
-              <span class="status-badge status-badge-soft" :class="'tone-' + currentHourRefreshOverview.tone">
-                {{ currentHourRefreshOverview.statusText }}
-              </span>
-            </div>
-            <div class="hint">{{ currentHourRefreshOverview.summaryText }}</div>
-            <div class="hint" v-if="currentHourRefreshOverview.lastRunAt">最近触发：{{ currentHourRefreshOverview.lastRunAt }}</div>
-            <div class="hint" v-if="currentHourRefreshOverview.lastSuccessAt">最近完成：{{ currentHourRefreshOverview.lastSuccessAt }}</div>
-            <div class="hint" v-if="currentHourRefreshOverview.runningBuildings && currentHourRefreshOverview.runningBuildings.length">
-              当前进行中：{{ currentHourRefreshOverview.runningBuildings.join(' / ') }}
-            </div>
-            <div class="hint" v-if="currentHourRefreshOverview.completedBuildings && currentHourRefreshOverview.completedBuildings.length">
-              本轮完成：{{ currentHourRefreshOverview.completedBuildings.join(' / ') }}
-            </div>
-            <div class="hint" v-if="currentHourRefreshOverview.blockedBuildings && currentHourRefreshOverview.blockedBuildings.length">
-              等待恢复：{{ currentHourRefreshOverview.blockedBuildings.join(' / ') }}
-            </div>
-            <div class="hint" v-if="currentHourRefreshOverview.failedBuildings && currentHourRefreshOverview.failedBuildings.length">
-              失败项：{{ currentHourRefreshOverview.failedBuildings.join(' / ') }}
-            </div>
-            <div class="hint" v-if="currentHourRefreshOverview.lastError">最近错误：{{ currentHourRefreshOverview.lastError }}</div>
-          </div>
-          <div class="source-cache-family-grid" v-if="internalSourceCacheOverview.families && internalSourceCacheOverview.families.length">
-            <div
-              class="internal-download-slot"
-              v-for="family in internalSourceCacheOverview.families"
-              :key="'status-source-family-' + family.key"
-            >
-              <div class="internal-download-slot-head">
-                <span class="internal-download-slot-title">{{ family.title }}</span>
-                <span class="status-badge status-badge-soft" :class="'tone-' + family.tone">{{ family.statusText }}</span>
-              </div>
-              <div class="internal-download-slot-meta">
-                <span class="status-inline-note">当前桶：{{ family.currentBucket || internalSourceCacheOverview.currentHourBucket }}</span>
-                <span class="status-inline-note">最近成功：{{ family.lastSuccessAt || "-" }}</span>
-              </div>
-              <div class="hint">{{ (family.failedBuildings && family.failedBuildings.length) ? ("失败楼栋：" + family.failedBuildings.join(" / ")) : ("当前小时已就绪楼栋数：" + family.readyCount) }}</div>
-              <div class="source-cache-building-grid" v-if="family.buildings && family.buildings.length">
-                <div
-                  class="internal-download-slot"
-                  v-for="building in family.buildings"
-                  :key="'status-source-cache-building-' + family.key + '-' + building.building"
-                >
-                  <div class="internal-download-slot-head">
-                    <span class="internal-download-slot-title">{{ building.building }}</span>
-                    <span class="status-badge status-badge-soft" :class="'tone-' + building.tone">{{ building.stateText }}</span>
-                  </div>
-                  <div class="hint">{{ building.lastError ? ("最近错误：" + building.lastError) : ("最近成功：" + (building.downloadedAt || "-")) }}</div>
-                  <div class="hint" v-if="building.relativePath">缓存文件：{{ building.relativePath }}</div>
-                </div>
-              </div>
-              <div class="hint" v-else>暂无楼栋明细</div>
-            </div>
           </div>
         </article>
 
@@ -448,7 +450,7 @@
           <div class="status-card-head">
             <div>
               <span class="status-panel-kicker">下载历史</span>
-              <h2 class="status-panel-title">每小时下载状态与历史</h2>
+              <h2 class="status-panel-title">最近调度与历史</h2>
             </div>
             <span class="status-badge status-badge-solid" :class="'tone-' + internalSourceCacheHistoryOverview.tone">
               {{ internalSourceCacheHistoryOverview.statusText }}
@@ -463,24 +465,6 @@
             >
               <span class="status-list-label">{{ item.label }}</span>
               <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
-            </div>
-          </div>
-          <div class="source-cache-family-grid" v-if="internalSourceCacheHistoryOverview.families && internalSourceCacheHistoryOverview.families.length">
-            <div
-              class="internal-download-slot"
-              v-for="family in internalSourceCacheHistoryOverview.families"
-              :key="'status-source-cache-history-family-' + family.key"
-            >
-              <div class="internal-download-slot-head">
-                <span class="internal-download-slot-title">{{ family.title }}</span>
-                <span class="status-badge status-badge-soft" :class="'tone-' + family.tone">{{ family.statusText }}</span>
-              </div>
-              <div class="internal-download-slot-meta">
-                <span class="status-inline-note">当前桶：{{ family.currentBucket }}</span>
-                <span class="status-inline-note">最近成功：{{ family.lastSuccessAt }}</span>
-              </div>
-              <div class="hint" v-if="family.failedSummary">最近失败楼栋：{{ family.failedSummary }}</div>
-              <div class="hint" v-else>{{ family.readyCountText }}</div>
             </div>
           </div>
           <div class="hint" v-if="internalSourceCacheHistoryOverview.lastError">

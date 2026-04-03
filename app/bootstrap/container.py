@@ -1,15 +1,17 @@
 ﻿from __future__ import annotations
 
 import copy
+import json
 import re
 import sys
 import threading
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from app.config.config_adapter import adapt_runtime_config, resolve_shared_bridge_paths
+from app.config.config_adapter import adapt_runtime_config, normalize_role_mode, resolve_shared_bridge_paths
 from app.config.secret_masking import load_masked_settings
 from app.config.settings_loader import load_bootstrap_settings
 from app.modules.network.service.wifi_switch_service import WifiSwitchService
@@ -22,10 +24,14 @@ from app.modules.scheduler.service.daily_scheduler_service import DailyAutoSched
 from app.modules.scheduler.service.handover_scheduler_manager import HandoverSchedulerManager
 from app.modules.scheduler.service.interval_scheduler_service import IntervalSchedulerService
 from app.modules.updater.service.updater_service import UpdaterService
+from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
+from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from pipeline_utils import get_app_dir, get_bundle_dir
 
 
 APP_VERSION = "web-3.0.0"
+_STARTUP_ROLE_HANDOFF_FILE_NAME = "startup_role_handoff.json"
+_STARTUP_ROLE_HANDOFF_TTL = timedelta(minutes=5)
 _WARNING_RE = re.compile(r"(^|:)\s*(?:\w+)?Warning:", re.IGNORECASE)
 _ERROR_PATTERNS = (
     "traceback (most recent call last):",
@@ -72,6 +78,9 @@ class AppContainer:
         role_mode = str(deployment.get("role_mode", "") or "").strip().lower()
         if role_mode not in {"internal", "external"}:
             role_mode = ""
+        last_started_role_mode = str(deployment.get("last_started_role_mode", "") or "").strip().lower()
+        if last_started_role_mode not in {"internal", "external"}:
+            last_started_role_mode = ""
         node_id = str(deployment.get("node_id", "") or "").strip()
         node_label = str(deployment.get("node_label", "") or "").strip()
         if not node_label and role_mode == "internal":
@@ -80,6 +89,7 @@ class AppContainer:
             node_label = "外网端"
         return {
             "role_mode": role_mode,
+            "last_started_role_mode": last_started_role_mode,
             "node_id": node_id,
             "node_label": node_label,
         }
@@ -396,6 +406,103 @@ class AppContainer:
             return False, "当前未绑定程序重启回调"
         return callback(dict(context or {}))
 
+    def _startup_role_handoff_path(self) -> Path:
+        runtime_state_root = resolve_runtime_state_root(
+            runtime_config=self.runtime_config,
+            app_dir=get_app_dir(),
+        )
+        return runtime_state_root / _STARTUP_ROLE_HANDOFF_FILE_NAME
+
+    @staticmethod
+    def _inactive_startup_role_handoff() -> Dict[str, Any]:
+        return {
+            "active": False,
+            "mode": "",
+            "target_role_mode": "",
+            "requested_at": "",
+            "source": "",
+            "reason": "",
+            "source_startup_time": "",
+            "nonce": "",
+        }
+
+    def clear_startup_role_handoff(self) -> None:
+        path = self._startup_role_handoff_path()
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def get_startup_role_handoff(self) -> Dict[str, Any]:
+        inactive = self._inactive_startup_role_handoff()
+        path = self._startup_role_handoff_path()
+        if not path.exists():
+            return inactive
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            self.clear_startup_role_handoff()
+            return inactive
+        if not isinstance(raw, dict):
+            self.clear_startup_role_handoff()
+            return inactive
+        mode = str(raw.get("mode", "") or "").strip()
+        target_role_mode = normalize_role_mode(raw.get("target_role_mode"))
+        requested_at_text = str(raw.get("requested_at", "") or "").strip()
+        source = str(raw.get("source", "") or "").strip()
+        reason = str(raw.get("reason", "") or "").strip()
+        source_startup_time = str(raw.get("source_startup_time", "") or "").strip()
+        nonce = str(raw.get("nonce", "") or "").strip()
+        if mode != "startup_role_resume" or target_role_mode not in {"internal", "external"} or not requested_at_text or not nonce:
+            self.clear_startup_role_handoff()
+            return inactive
+        try:
+            requested_at = datetime.strptime(requested_at_text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            self.clear_startup_role_handoff()
+            return inactive
+        if datetime.now() - requested_at > _STARTUP_ROLE_HANDOFF_TTL:
+            self.clear_startup_role_handoff()
+            return inactive
+        return {
+            "active": True,
+            "mode": mode,
+            "target_role_mode": target_role_mode,
+            "requested_at": requested_at_text,
+            "source": source,
+            "reason": reason,
+            "source_startup_time": source_startup_time,
+            "nonce": nonce,
+        }
+
+    def write_startup_role_handoff(
+        self,
+        *,
+        target_role_mode: str,
+        source: str,
+        reason: str = "",
+        source_startup_time: str = "",
+    ) -> Dict[str, Any]:
+        normalized_role = normalize_role_mode(target_role_mode)
+        if normalized_role not in {"internal", "external"}:
+            raise ValueError("启动角色交接只支持 internal/external")
+        payload = {
+            "mode": "startup_role_resume",
+            "target_role_mode": normalized_role,
+            "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": str(source or "").strip(),
+            "reason": str(reason or "").strip(),
+            "source_startup_time": str(source_startup_time or "").strip(),
+            "nonce": uuid.uuid4().hex,
+        }
+        atomic_write_text(
+            self._startup_role_handoff_path(),
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            validator=validate_json_file,
+        )
+        return self.get_startup_role_handoff()
+
     def start_scheduler(self, source: str = "手动") -> Dict[str, Any]:
         if not self.scheduler:
             self.scheduler = self._build_scheduler()
@@ -586,9 +693,20 @@ class AppContainer:
         return result
 
     def deployment_snapshot(self) -> Dict[str, Any]:
+        configured = self._configured_deployment_snapshot()
         if not self.shared_bridge_service:
-            return self._configured_deployment_snapshot()
-        return self.shared_bridge_service.get_deployment_snapshot()
+            return configured
+        runtime_snapshot = self.shared_bridge_service.get_deployment_snapshot()
+        if not isinstance(runtime_snapshot, dict):
+            return configured
+        return {
+            **configured,
+            **{
+                "role_mode": str(runtime_snapshot.get("role_mode", "") or configured.get("role_mode", "")).strip().lower(),
+                "node_id": str(runtime_snapshot.get("node_id", "") or configured.get("node_id", "")).strip(),
+                "node_label": str(runtime_snapshot.get("node_label", "") or configured.get("node_label", "")).strip(),
+            },
+        }
 
     def shared_bridge_snapshot(self, *, mode: str = "external_full") -> Dict[str, Any]:
         if not self.shared_bridge_service:

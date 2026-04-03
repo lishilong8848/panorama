@@ -142,6 +142,21 @@ export async function deleteManualAlarmSourceCacheFilesApi() {
   });
 }
 
+export async function uploadAlarmSourceCacheFullApi() {
+  return apiJson("/api/bridge/source-cache/alarm/upload-full", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function uploadAlarmSourceCacheBuildingApi(building) {
+  const buildingText = String(building || "").trim();
+  return apiJson(appendQuery("/api/bridge/source-cache/alarm/upload-building", { building: buildingText }), {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 export async function startSchedulerApi() {
   return apiJson("/api/scheduler/start", { method: "POST", body: "{}" });
 }

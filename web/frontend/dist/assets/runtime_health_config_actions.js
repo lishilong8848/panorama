@@ -40,6 +40,8 @@ import {
   putConfigApi,
   refreshManualAlarmSourceCacheApi,
   deleteManualAlarmSourceCacheFilesApi,
+  uploadAlarmSourceCacheFullApi,
+  uploadAlarmSourceCacheBuildingApi,
 } from "./api_client.js";
 import { prepareConfigPayloadForSave } from "./config_save_validation.js";
 import { buildUpdaterApplyMessage, mapUpdaterResultText } from "./updater_text.js";
@@ -63,6 +65,8 @@ const ACTION_KEY_BRIDGE_RETRY_PREFIX = "bridge:retry:";
 const ACTION_KEY_SOURCE_CACHE_REFRESH_CURRENT_HOUR = "bridge:source_cache_refresh_current_hour";
 const ACTION_KEY_SOURCE_CACHE_REFRESH_ALARM_MANUAL = "bridge:source_cache_refresh_alarm_manual";
 const ACTION_KEY_SOURCE_CACHE_DELETE_ALARM_MANUAL = "bridge:source_cache_delete_alarm_manual";
+const ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_FULL = "bridge:source_cache_upload_alarm_full";
+const ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_BUILDING = "bridge:source_cache_upload_alarm_building";
 const ENGINEER_DIRECTORY_CACHE_KEY = "handover_engineer_directory_daily_cache_v1";
 
 export function createRuntimeHealthConfigActions(ctx) {
@@ -600,6 +604,25 @@ export function createRuntimeHealthConfigActions(ctx) {
         ? data.role_selection_required
         : health.role_selection_required,
     );
+    if (data.startup_handoff && typeof data.startup_handoff === "object") {
+      Object.assign(health.startup_handoff, {
+        active: Boolean(data.startup_handoff.active),
+        mode: String(data.startup_handoff.mode || "").trim(),
+        target_role_mode: String(data.startup_handoff.target_role_mode || "").trim().toLowerCase(),
+        requested_at: String(data.startup_handoff.requested_at || "").trim(),
+        reason: String(data.startup_handoff.reason || "").trim(),
+        nonce: String(data.startup_handoff.nonce || "").trim(),
+      });
+    } else if (health.startup_handoff && typeof health.startup_handoff === "object") {
+      Object.assign(health.startup_handoff, {
+        active: false,
+        mode: "",
+        target_role_mode: "",
+        requested_at: "",
+        reason: "",
+        nonce: "",
+      });
+    }
     health.runtime_activated = Boolean(
       typeof data.runtime_activated === "boolean"
         ? data.runtime_activated
@@ -634,6 +657,24 @@ export function createRuntimeHealthConfigActions(ctx) {
         Object.assign(health.wet_bulb_collection.target_preview, data.wet_bulb_collection.target_preview);
       } else {
         Object.assign(health.wet_bulb_collection.target_preview, {
+          configured_app_token: "",
+          operation_app_token: "",
+          table_id: "",
+          target_kind: "",
+          display_url: "",
+          bitable_url: "",
+          wiki_node_token: "",
+          message: "",
+          resolved_at: "",
+        });
+      }
+    }
+    if (data.day_metric_upload && typeof data.day_metric_upload === "object") {
+      health.day_metric_upload.enabled = Boolean(data.day_metric_upload.enabled);
+      if (data.day_metric_upload.target_preview && typeof data.day_metric_upload.target_preview === "object") {
+        Object.assign(health.day_metric_upload.target_preview, data.day_metric_upload.target_preview);
+      } else {
+        Object.assign(health.day_metric_upload.target_preview, {
           configured_app_token: "",
           operation_app_token: "",
           table_id: "",
@@ -817,6 +858,27 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
   }
 
+  function patchAlarmUploadRunningState(data, fallbackMode, fallbackScope) {
+    const family =
+      health.shared_bridge?.internal_source_cache?.alarm_event_family &&
+      typeof health.shared_bridge.internal_source_cache.alarm_event_family === "object"
+        ? health.shared_bridge.internal_source_cache.alarm_event_family
+        : null;
+    if (!family) return;
+    const uploadState =
+      family.external_upload && typeof family.external_upload === "object"
+        ? family.external_upload
+        : {};
+    family.external_upload = {
+      ...uploadState,
+      running: Boolean(data?.running),
+      started_at: String(data?.started_at || uploadState.started_at || "").trim(),
+      current_mode: String(data?.mode || fallbackMode || uploadState.current_mode || "").trim(),
+      current_scope: String(data?.scope || fallbackScope || uploadState.current_scope || "").trim(),
+      last_error: "",
+    };
+  }
+
   async function fetchBridgeTaskDetail(taskId, options = {}) {
     if (isUpdaterTrafficPaused()) return false;
     const taskIdText = String(taskId || "").trim();
@@ -994,6 +1056,53 @@ export function createRuntimeHealthConfigActions(ctx) {
     };
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_SOURCE_CACHE_DELETE_ALARM_MANUAL, runner, { cooldownMs: 0 });
+    }
+    return runner();
+  }
+
+  async function uploadAlarmSourceCacheFull() {
+    const runner = async () => {
+      try {
+        const data = await uploadAlarmSourceCacheFullApi();
+        patchAlarmUploadRunningState(data, "full", "all");
+        await focusAcceptedJob(
+          data,
+          String(data?.message || "").trim() || "已提交告警信息文件全量上传任务",
+        );
+        return data;
+      } catch (err) {
+        message.value = `告警信息文件全量上传失败: ${err}`;
+        return { ok: false, error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_FULL, runner, { cooldownMs: 0 });
+    }
+    return runner();
+  }
+
+  async function uploadAlarmSourceCacheBuilding(building) {
+    const buildingText = String(building || "").trim();
+    if (!buildingText) {
+      message.value = "请选择要上传的楼栋";
+      return { ok: false, error: "missing_building" };
+    }
+    const runner = async () => {
+      try {
+        const data = await uploadAlarmSourceCacheBuildingApi(buildingText);
+        patchAlarmUploadRunningState(data, "single_building", buildingText);
+        await focusAcceptedJob(
+          data,
+          String(data?.message || "").trim() || `已提交 ${buildingText} 告警信息文件刷新上传任务`,
+        );
+        return data;
+      } catch (err) {
+        message.value = `${buildingText} 告警信息文件刷新上传失败: ${err}`;
+        return { ok: false, error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(`${ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_BUILDING}:${buildingText}`, runner, { cooldownMs: 0 });
     }
     return runner();
   }
@@ -1311,7 +1420,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
   }
 
-  async function saveConfigInternal({ auto = false } = {}) {
+  async function saveConfigInternal({ auto = false, skipPostSaveHealthRefresh = false } = {}) {
     const payloadState = buildPreparedSavePayload();
     if (!payloadState.ok) {
       if (!auto) {
@@ -1341,8 +1450,10 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
       clearEngineerDirectoryCache();
       applyHandoverReviewAccessSnapshot(data?.handover_review_access);
-      void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
-      scheduleEngineerDirectoryPrefetch(0);
+      if (!skipPostSaveHealthRefresh) {
+        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        scheduleEngineerDirectoryPrefetch(0);
+      }
       if (!auto) {
         const warnings = Array.isArray(data?.warnings) ? data.warnings.filter(Boolean) : [];
         const restartNote = Boolean(data?.restart_required) ? "；角色/共享桥接配置需重启后完全生效" : "";
@@ -1364,16 +1475,22 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
   }
 
-  async function saveConfig() {
-    const runner = async () => saveConfigInternal({ auto: false });
+  async function saveConfig(options = {}) {
+    const runner = async () => saveConfigInternal({
+      auto: false,
+      skipPostSaveHealthRefresh: Boolean(options?.skipPostSaveHealthRefresh),
+    });
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_SAVE_CONFIG, runner, { cooldownMs: 500 });
     }
     return runner();
   }
 
-  async function autoSaveConfig() {
-    const runner = async () => saveConfigInternal({ auto: true });
+  async function autoSaveConfig(options = {}) {
+    const runner = async () => saveConfigInternal({
+      auto: true,
+      skipPostSaveHealthRefresh: Boolean(options?.skipPostSaveHealthRefresh),
+    });
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_SAVE_CONFIG, runner, { cooldownMs: 500 });
     }
@@ -1514,6 +1631,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         const data = await restartAppApi({
           source: String(options?.source || "manual").trim() || "manual",
           reason: String(options?.reason || "").trim(),
+          target_role_mode: String(options?.targetRoleMode || "").trim().toLowerCase(),
         });
         message.value = String(options?.message || "角色切换已提交，正在等待服务恢复。");
         beginUpdaterRestartRecovery({
@@ -1552,6 +1670,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     try {
       const data = await activateStartupRuntimeApi({
         source: String(options?.source || "").trim() || "启动角色确认",
+        startup_handoff_nonce: String(options?.startupHandoffNonce || "").trim(),
       });
       return {
         ok: data?.ok !== false,
@@ -1975,6 +2094,8 @@ export function createRuntimeHealthConfigActions(ctx) {
     refreshCurrentHourSourceCache,
     refreshManualAlarmSourceCache,
     deleteManualAlarmSourceCacheFiles,
+    uploadAlarmSourceCacheFull,
+    uploadAlarmSourceCacheBuilding,
     fetchRuntimeResources,
     fetchHandoverDailyReportContext,
     fetchConfig,
@@ -2012,6 +2133,8 @@ export function createRuntimeHealthConfigActions(ctx) {
     ACTION_KEY_HANDOVER_DAILY_REPORT_AUTH_OPEN,
     ACTION_KEY_SOURCE_CACHE_REFRESH_ALARM_MANUAL,
     ACTION_KEY_SOURCE_CACHE_DELETE_ALARM_MANUAL,
+    ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_FULL,
+    ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_BUILDING,
     ACTION_KEY_HANDOVER_DAILY_REPORT_SCREENSHOT_TEST,
     ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE,
     ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,

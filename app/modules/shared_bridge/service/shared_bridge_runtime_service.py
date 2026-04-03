@@ -47,7 +47,7 @@ from handover_log_module.service.handover_download_service import HandoverDownlo
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 
 RETIRED_SHARED_BRIDGE_FEATURES: Dict[str, str] = {
-    "alarm_export": "告警导出功能已暂时停用，当前版本不再执行数据库查询或上传",
+    "alarm_export": "旧告警导出入口已退役，当前版本仅保留“内网 API 拉取 -> 共享 JSON -> 外网上传”主链",
 }
 
 
@@ -1088,20 +1088,32 @@ class SharedBridgeRuntimeService:
             return {"accepted": False, "reason": "disabled", "deleted_count": 0}
         return self._source_cache_service.delete_manual_alarm_files()
 
-    def upload_alarm_event_source_cache_full_to_bitable(self) -> Dict[str, Any]:
+    def upload_alarm_event_source_cache_full_to_bitable(
+        self,
+        *,
+        emit_log=None,
+    ) -> Dict[str, Any]:
         if self._source_cache_service is None:
             return {"accepted": False, "reason": "disabled"}
-        return self._source_cache_service.upload_alarm_event_entries_full_to_bitable()
+        return self._source_cache_service.upload_alarm_event_entries_full_to_bitable(emit_log=emit_log)
 
-    def upload_alarm_event_source_cache_single_building_to_bitable(self, *, building: str) -> Dict[str, Any]:
+    def upload_alarm_event_source_cache_single_building_to_bitable(
+        self,
+        *,
+        building: str,
+        emit_log=None,
+    ) -> Dict[str, Any]:
         if self._source_cache_service is None:
             return {"accepted": False, "reason": "disabled"}
-        return self._source_cache_service.upload_alarm_event_entries_single_building_to_bitable(building=building)
+        return self._source_cache_service.upload_alarm_event_entries_single_building_to_bitable(
+            building=building,
+            emit_log=emit_log,
+        )
 
     def debug_alarm_page_actions(self, *, building: str) -> Dict[str, Any]:
         if self._source_cache_service is None:
             return {"ok": False, "reason": "disabled"}
-        return self._source_cache_service.debug_alarm_page_actions(building=building)
+        raise RuntimeError("告警页面调试入口已退役，当前版本仅支持 API 拉取")
 
     def list_monthly_pending_resume_runs(self) -> List[Dict[str, Any]]:
         if not self.shared_bridge_root:

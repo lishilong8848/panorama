@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 import copy
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -61,6 +61,33 @@ def _ensure_bridge_write_allowed(request: Request) -> None:
             status_code=409,
             detail="当前为内网端，本地管理页只提供共享任务只读查看，请在外网端执行重试或取消。",
         )
+
+
+def _start_local_background_job(
+    container,
+    *,
+    name: str,
+    feature: str,
+    dedupe_key: str,
+    resource_keys: list[str] | tuple[str, ...],
+    run_func: Callable[[Callable[[str], None]], Any],
+) -> Dict[str, Any]:
+    job_service = container.job_service
+    normalized_dedupe_key = str(dedupe_key or "").strip()
+    if normalized_dedupe_key:
+        existing = job_service.find_active_job_by_dedupe_key(normalized_dedupe_key)
+        if isinstance(existing, dict):
+            return {"job": existing, "reused": True}
+    job = job_service.start_job(
+        name=name,
+        run_func=run_func,
+        resource_keys=list(resource_keys),
+        priority="manual",
+        feature=feature,
+        dedupe_key=normalized_dedupe_key,
+        submitted_by="manual",
+    )
+    return {"job": job.to_dict(), "reused": False}
 
 
 def _bridge_text(value: Any) -> str:
@@ -369,7 +396,7 @@ def bridge_source_cache_delete_manual_alarm_files(request: Request) -> Dict[str,
         "ok": True,
         "accepted": True,
         "deleted_count": deleted_count,
-        "message": "已删除手动拉取的告警信息文件，只保留 08 点和 16 点定时文件",
+        "message": "已删除手动拉取的告警信息文件",
         **result,
     }
 
@@ -382,28 +409,57 @@ def bridge_source_cache_alarm_upload_full(request: Request) -> Dict[str, Any]:
     service = getattr(container, "shared_bridge_service", None)
     if service is None:
         raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
-    result = service.upload_alarm_event_source_cache_full_to_bitable()
-    if not bool(result.get("accepted")) and str(result.get("reason", "")).strip() == "already_running":
+    dedupe_key = "alarm_event_upload:full"
+
+    def _run(emit_log) -> Dict[str, Any]:
+        def _combined_log(line: str) -> None:
+            text = str(line or "").strip()
+            if not text:
+                return
+            emit_log(text)
+
+        result = service.upload_alarm_event_source_cache_full_to_bitable(emit_log=_combined_log)
+        accepted = bool(result.get("accepted"))
+        reason = str(result.get("reason", "") or "").strip()
+        if not accepted:
+            error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
+            raise RuntimeError(error_text)
+        if reason == "partial_completed":
+            failed_entries = ", ".join(str(item or "").strip() for item in result.get("failed_entries", []) or [] if str(item or "").strip())
+            raise RuntimeError(f"存在失败楼栋，请查看日志{f'：{failed_entries}' if failed_entries else ''}")
+        return result
+
+    job_result = _start_local_background_job(
+        container,
+        name="告警信息全量上传（60天）",
+        feature="alarm_event_upload",
+        dedupe_key=dedupe_key,
+        resource_keys=["alarm_upload:global"],
+        run_func=_run,
+    )
+    job = job_result["job"]
+    if bool(job_result.get("reused")):
         return {
             "ok": True,
             "accepted": False,
             "running": True,
-            "message": "告警信息文件上传已在执行中",
-            **result,
+            "message": "告警信息文件上传已在执行中，已聚焦到现有任务",
+            "job": job,
+            "reason": "already_running",
+            "mode": "full",
+            "scope": "all",
+            "started_at": str(job.get("started_at") or job.get("created_at") or "").strip(),
         }
-    if not bool(result.get("accepted")):
-        error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
-        raise HTTPException(status_code=409, detail=error_text)
-    uploaded_count = int(result.get("uploaded_record_count", 0) or 0)
-    consumed_count = int(result.get("consumed_count", 0) or 0)
-    container.add_system_log(
-        f"[共享缓存] 外网告警文件全量上传完成: records={uploaded_count}, consumed_files={consumed_count}"
-    )
+    container.add_system_log(f"[任务] 已提交: 告警信息全量上传（60天） ({job.get('job_id', '')})")
     return {
         "ok": True,
         "accepted": True,
-        "message": "已完成告警信息文件全量上传（60天内）",
-        **result,
+        "running": True,
+        "message": "已提交告警信息全量上传任务（60天内）",
+        "job": job,
+        "mode": "full",
+        "scope": "all",
+        "started_at": str(job.get("started_at") or job.get("created_at") or "").strip(),
     }
 
 
@@ -418,30 +474,60 @@ def bridge_source_cache_alarm_upload_building(
     service = getattr(container, "shared_bridge_service", None)
     if service is None:
         raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
-    result = service.upload_alarm_event_source_cache_single_building_to_bitable(building=building)
-    if not bool(result.get("accepted")) and str(result.get("reason", "")).strip() == "already_running":
-        building_text = str(building or "").strip()
+    building_text = str(building or "").strip()
+
+    def _run(emit_log) -> Dict[str, Any]:
+        def _combined_log(line: str) -> None:
+            text = str(line or "").strip()
+            if not text:
+                return
+            emit_log(text)
+
+        result = service.upload_alarm_event_source_cache_single_building_to_bitable(
+            building=building_text,
+            emit_log=_combined_log,
+        )
+        accepted = bool(result.get("accepted"))
+        reason = str(result.get("reason", "") or "").strip()
+        if not accepted:
+            error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
+            raise RuntimeError(error_text)
+        if reason == "partial_completed":
+            failed_entries = ", ".join(str(item or "").strip() for item in result.get("failed_entries", []) or [] if str(item or "").strip())
+            raise RuntimeError(f"存在失败楼栋，请查看日志{f'：{failed_entries}' if failed_entries else ''}")
+        return result
+
+    job_result = _start_local_background_job(
+        container,
+        name=f"告警信息单楼刷新上传（60天）- {building_text}",
+        feature="alarm_event_upload",
+        dedupe_key=f"alarm_event_upload:building:{building_text}",
+        resource_keys=["alarm_upload:global"],
+        run_func=_run,
+    )
+    job = job_result["job"]
+    if bool(job_result.get("reused")):
         return {
             "ok": True,
             "accepted": False,
             "running": True,
-            "message": f"告警信息文件上传已在执行中：{building_text or '当前楼栋'} 请求已复用现有上传",
-            **result,
+            "message": f"告警信息文件上传已在执行中：{building_text} 请求已复用现有任务",
+            "job": job,
+            "reason": "already_running",
+            "mode": "single_building",
+            "scope": building_text,
+            "started_at": str(job.get("started_at") or job.get("created_at") or "").strip(),
         }
-    if not bool(result.get("accepted")):
-        error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
-        raise HTTPException(status_code=409, detail=error_text)
-    building_text = str(building or "").strip()
-    uploaded_count = int(result.get("uploaded_record_count", 0) or 0)
-    consumed_count = int(result.get("consumed_count", 0) or 0)
-    container.add_system_log(
-        f"[共享缓存] 外网告警文件单楼上传完成: building={building_text}, records={uploaded_count}, consumed_files={consumed_count}"
-    )
+    container.add_system_log(f"[任务] 已提交: 告警信息单楼刷新上传（60天）- {building_text} ({job.get('job_id', '')})")
     return {
         "ok": True,
         "accepted": True,
-        "message": f"已完成 {building_text} 告警信息文件追加上传（60天内）",
-        **result,
+        "running": True,
+        "message": f"已提交 {building_text} 告警信息文件刷新上传任务（60天内）",
+        "job": job,
+        "mode": "single_building",
+        "scope": building_text,
+        "started_at": str(job.get("started_at") or job.get("created_at") or "").strip(),
     }
 
 
@@ -450,18 +536,7 @@ def bridge_source_cache_debug_alarm_page_actions(
     request: Request,
     building: str = Query(..., description="楼栋，如 A楼"),
 ) -> Dict[str, Any]:
-    if _deployment_role_mode(request) != "internal":
-        raise HTTPException(status_code=409, detail="当前仅内网端允许调试告警页面操作")
-    container = request.app.state.container
-    service = getattr(container, "shared_bridge_service", None)
-    if service is None:
-        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
-    try:
-        result = service.debug_alarm_page_actions(building=building)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    container.add_system_log(f"[共享缓存] 已执行告警页面调试操作 building={str(building or '').strip()}")
-    return result
+    raise HTTPException(status_code=410, detail="告警页面调试入口已退役，当前版本仅支持 API 拉取")
 
 
 @router.post("/api/bridge/source-cache/refresh-today")

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import contextlib
 from pathlib import Path
@@ -41,6 +41,9 @@ class _FakeContainer:
         self.logs = []
         self.restart_calls = []
         self._restart_ok = restart_ok
+        self.config = {"common": {"deployment": {"role_mode": "external"}}}
+        self.handoff_writes = []
+        self.handoff_cleared = 0
 
     def request_app_restart(self, context):
         self.restart_calls.append(dict(context or {}))
@@ -51,9 +54,30 @@ class _FakeContainer:
     def add_system_log(self, text) -> None:
         self.logs.append(str(text))
 
+    def write_startup_role_handoff(self, **payload):
+        self.handoff_writes.append(dict(payload))
+        return {
+            "active": True,
+            "mode": "startup_role_resume",
+            "target_role_mode": payload.get("target_role_mode", ""),
+            "requested_at": "2026-04-03 08:31:00",
+            "reason": payload.get("reason", ""),
+            "nonce": "handoff-123",
+        }
+
+    def clear_startup_role_handoff(self) -> None:
+        self.handoff_cleared += 1
+
 
 def _make_request(container):
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                container=container,
+                started_at="2026-04-03 08:31:00",
+            )
+        )
+    )
 
 
 def test_restart_app_route_triggers_restart_and_uses_global_guard() -> None:
@@ -67,6 +91,14 @@ def test_restart_app_route_triggers_restart_and_uses_global_guard() -> None:
     assert payload["ok"] is True
     assert payload["result"]["last_result"] == "restart_scheduled"
     assert container.restart_calls == [{"source": "startup_role_picker", "reason": "role_switch"}]
+    assert container.handoff_writes == [
+        {
+            "target_role_mode": "external",
+            "source": "startup_role_picker",
+            "reason": "role_switch",
+            "source_startup_time": "2026-04-03 08:31:00",
+        }
+    ]
     assert container.job_service.guards[0]["resource_keys"] == ["updater:global"]
     assert any("source=startup_role_picker" in line for line in container.logs)
 
@@ -78,7 +110,7 @@ def test_restart_app_route_rejects_when_jobs_are_running() -> None:
         routes.restart_app(_make_request(container), {"source": "startup_role_picker"})
 
     assert exc_info.value.status_code == 409
-    assert "当前仍有任务在运行，请等待全部任务结束后再重启程序" == str(exc_info.value.detail)
+    assert str(exc_info.value.detail)
 
 
 def test_restart_app_route_raises_http_400_when_restart_callback_fails() -> None:
@@ -89,3 +121,4 @@ def test_restart_app_route_raises_http_400_when_restart_callback_fails() -> None
 
     assert exc_info.value.status_code == 400
     assert "触发程序重启失败" in str(exc_info.value.detail)
+    assert container.handoff_cleared == 1

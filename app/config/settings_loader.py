@@ -151,6 +151,9 @@ def _validate_deployment_and_shared_bridge(cfg: Dict[str, Any]) -> None:
     role_mode = normalize_role_mode(deployment.get("role_mode"))
     if role_mode not in {"", "internal", "external"}:
         raise ValueError("配置错误: common.deployment.role_mode 必须是 internal / external，或留空等待启动确认")
+    last_started_role_mode = normalize_role_mode(deployment.get("last_started_role_mode"))
+    if last_started_role_mode not in {"", "internal", "external"}:
+        raise ValueError("配置错误: common.deployment.last_started_role_mode 必须是 internal / external，或留空")
     shared_bridge = common.get("shared_bridge", {})
     if not isinstance(shared_bridge, dict):
         raise ValueError("配置错误: common.shared_bridge 缺失或格式错误")

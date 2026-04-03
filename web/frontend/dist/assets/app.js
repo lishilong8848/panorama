@@ -12,6 +12,10 @@ import { clone, expandDateRange, todayText } from "./config_helpers.js";
 const { createApp, onMounted, onBeforeUnmount, computed, watch, ref } = Vue;
 const HANDOVER_DUTY_CONTEXT_STORAGE_KEY = "handover_duty_context";
 const APP_BOOT_OVERLAY_ID = "app-boot-overlay";
+const STARTUP_ROLE_RESTART_PENDING_KEY = "startup_role_restart_pending_v1";
+const STARTUP_ROLE_RESTART_RESUME_KEY = "startup_role_restart_resume_v1";
+const STARTUP_ROLE_RESTART_PENDING_TTL_MS = 5 * 60 * 1000;
+
 function normalizeDeploymentRoleMode(value) {
   const text = String(value || "").trim().toLowerCase();
   if (["internal", "external"].includes(text)) return text;
@@ -195,6 +199,105 @@ function persistHandoverDutyContext(dutyDate, dutyShift) {
   }
 }
 
+function readStartupRoleRestartPending() {
+  if (typeof window === "undefined" || !window.sessionStorage) return null;
+  try {
+    const raw = window.sessionStorage.getItem(STARTUP_ROLE_RESTART_PENDING_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const role = normalizeDeploymentRoleMode(parsed?.role_mode);
+    const requestedAt = Number.parseInt(String(parsed?.requested_at || 0), 10);
+    if (!role || !Number.isFinite(requestedAt) || requestedAt <= 0) {
+      window.sessionStorage.removeItem(STARTUP_ROLE_RESTART_PENDING_KEY);
+      return null;
+    }
+    if (Date.now() - requestedAt > STARTUP_ROLE_RESTART_PENDING_TTL_MS) {
+      window.sessionStorage.removeItem(STARTUP_ROLE_RESTART_PENDING_KEY);
+      return null;
+    }
+    return {
+      role_mode: role,
+      requested_at: requestedAt,
+      source_startup_token: String(parsed?.source_startup_token || "").trim(),
+    };
+  } catch (_) {
+    try {
+      window.sessionStorage.removeItem(STARTUP_ROLE_RESTART_PENDING_KEY);
+    } catch (_) {
+      // ignore sessionStorage errors
+    }
+    return null;
+  }
+}
+
+function writeStartupRoleRestartPending(roleMode, sourceStartupToken = "") {
+  if (typeof window === "undefined" || !window.sessionStorage) return;
+  const role = normalizeDeploymentRoleMode(roleMode);
+  if (!role) return;
+  try {
+    window.sessionStorage.setItem(
+      STARTUP_ROLE_RESTART_PENDING_KEY,
+      JSON.stringify({
+        role_mode: role,
+        requested_at: Date.now(),
+        source_startup_token: String(sourceStartupToken || "").trim(),
+      }),
+    );
+  } catch (_) {
+    // ignore sessionStorage errors
+  }
+}
+
+function readStartupRoleRestartResume() {
+  if (typeof window === "undefined" || !window.sessionStorage) return null;
+  try {
+    const raw = window.sessionStorage.getItem(STARTUP_ROLE_RESTART_RESUME_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const role = normalizeDeploymentRoleMode(parsed?.role_mode);
+    const requestedAt = Number.parseInt(String(parsed?.requested_at || 0), 10);
+    const sourceStartupToken = String(parsed?.source_startup_token || "").trim();
+    if (!role || !Number.isFinite(requestedAt) || requestedAt <= 0 || !sourceStartupToken) {
+      window.sessionStorage.removeItem(STARTUP_ROLE_RESTART_RESUME_KEY);
+      return null;
+    }
+    if (Date.now() - requestedAt > STARTUP_ROLE_RESTART_PENDING_TTL_MS) {
+      window.sessionStorage.removeItem(STARTUP_ROLE_RESTART_RESUME_KEY);
+      return null;
+    }
+    return {
+      role_mode: role,
+      requested_at: requestedAt,
+      source_startup_token: sourceStartupToken,
+    };
+  } catch (_) {
+    try {
+      window.sessionStorage.removeItem(STARTUP_ROLE_RESTART_RESUME_KEY);
+    } catch (_) {
+      // ignore sessionStorage errors
+    }
+    return null;
+  }
+}
+
+function clearStartupRoleRestartPending() {
+  if (typeof window === "undefined" || !window.sessionStorage) return;
+  try {
+    window.sessionStorage.removeItem(STARTUP_ROLE_RESTART_PENDING_KEY);
+  } catch (_) {
+    // ignore sessionStorage errors
+  }
+}
+
+function clearStartupRoleRestartResume() {
+  if (typeof window === "undefined" || !window.sessionStorage) return;
+  try {
+    window.sessionStorage.removeItem(STARTUP_ROLE_RESTART_RESUME_KEY);
+  } catch (_) {
+    // ignore sessionStorage errors
+  }
+}
+
 if (isHandoverReviewPath(window.location.pathname)) {
   mountHandoverReviewApp(Vue);
   finishAppBoot();
@@ -322,6 +425,7 @@ createApp({
       internalRealtimeSourceFamilies,
       externalInternalAlertOverview,
       currentHourRefreshOverview,
+      internalRuntimeOverview,
       internalSourceCacheHistoryOverview,
       sharedSourceCacheReadinessOverview,
       updaterMirrorOverview,
@@ -364,6 +468,8 @@ createApp({
     const startupRoleLoadingSubtitle = ref("");
     const startupRoleLoadingStage = ref("");
     const startupRoleAutoActivationKey = ref("");
+    const startupRoleSuppressedHandoffNonce = ref("");
+    const startupRoleFlowState = ref("selecting");
     const startupRoleBridgeDraft = ref(buildStartupBridgeDraft({}));
     const startupRoleAdvancedVisible = ref(false);
     const startupRoleOptions = Object.freeze([
@@ -378,6 +484,8 @@ createApp({
         description: "统一发起协同任务，优先读取共享文件；缺失时再等待内网补采。",
       },
     ]);
+    clearStartupRoleRestartPending();
+    clearStartupRoleRestartResume();
 
     const actionKeyAutoOnce = "job:auto_once";
     const actionKeyMultiDate = "job:multi_date";
@@ -406,6 +514,8 @@ createApp({
     const actionKeySourceCacheRefreshCurrentHour = "bridge:source_cache_refresh_current_hour";
     const actionKeySourceCacheRefreshAlarmManual = "bridge:source_cache_refresh_alarm_manual";
     const actionKeySourceCacheDeleteAlarmManual = "bridge:source_cache_delete_alarm_manual";
+    const actionKeySourceCacheUploadAlarmFull = "bridge:source_cache_upload_alarm_full";
+    const actionKeySourceCacheUploadAlarmBuildingPrefix = "bridge:source_cache_upload_alarm_building:";
     const actionKeyHandoverConfirmAll = "handover_review:confirm_all";
     const actionKeyHandoverCloudRetryAll = "handover_review:cloud_retry_all";
     const actionKeyHandoverFollowupContinue = "job:handover_followup_continue";
@@ -421,6 +531,15 @@ createApp({
     const isSourceCacheRefreshCurrentHourLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshCurrentHour));
     const isSourceCacheRefreshAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshAlarmManual));
     const isSourceCacheDeleteAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheDeleteAlarmManual));
+    const externalAlarmUploadBuilding = ref("A楼");
+    const isAlarmSourceCacheUploadRunning = computed(() => Boolean(externalAlarmReadinessFamily.value?.uploadRunning));
+    const isSourceCacheUploadAlarmFullLocked = computed(() =>
+      isAlarmSourceCacheUploadRunning.value || isActionLocked(actionKeySourceCacheUploadAlarmFull),
+    );
+    const isSourceCacheUploadAlarmBuildingLocked = computed(() =>
+      isAlarmSourceCacheUploadRunning.value ||
+      isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${String(externalAlarmUploadBuilding.value || "").trim()}`),
+    );
     const currentHourRefreshButtonText = computed(() =>
       isSourceCacheRefreshCurrentHourLocked.value ? "下载中..." : "立即下载当前小时全部文件",
     );
@@ -430,6 +549,153 @@ createApp({
     const manualAlarmDeleteButtonText = computed(() =>
       isSourceCacheDeleteAlarmManualLocked.value ? "删除中..." : "删除手动告警文件",
     );
+    const externalAlarmUploadFullButtonText = computed(() => {
+      if (isAlarmSourceCacheUploadRunning.value) return "上传进行中...";
+      return isActionLocked(actionKeySourceCacheUploadAlarmFull) ? "上传中..." : "告警全量上传（60天）";
+    });
+    const externalAlarmUploadBuildingButtonText = computed(() => {
+      if (isAlarmSourceCacheUploadRunning.value) return "上传进行中...";
+      return isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${String(externalAlarmUploadBuilding.value || "").trim()}`)
+        ? "刷新中..."
+        : "单楼刷新上传";
+    });
+    const externalAlarmReadinessFamily = computed(() => {
+      const families = Array.isArray(sharedSourceCacheReadinessOverview.value?.families)
+        ? sharedSourceCacheReadinessOverview.value.families
+        : [];
+      return (
+        families.find((item) => String(item?.key || "").trim() === "alarm_event_family") || {
+          key: "alarm_event_family",
+          title: "告警信息源文件",
+          tone: "neutral",
+          statusText: "暂无状态",
+          summaryText: "当前还没有告警文件状态。",
+          buildings: [],
+          uploadLastRunAt: "",
+          uploadLastSuccessAt: "",
+          uploadLastError: "",
+          uploadRecordCount: 0,
+          uploadFileCount: 0,
+          uploadConsumedCount: 0,
+          uploadRunning: false,
+          uploadStartedAt: "",
+          uploadCurrentMode: "",
+          uploadCurrentScope: "",
+          uploadRunningText: "",
+        }
+      );
+    });
+    const externalAlarmUploadStatus = computed(() => {
+      const family = externalAlarmReadinessFamily.value || {};
+      const uploadRunning = Boolean(family.uploadRunning);
+      const uploadLastError = String(family.uploadLastError || "").trim();
+      const uploadLastRunAt = String(family.uploadLastRunAt || "").trim();
+      const uploadLastSuccessAt = String(family.uploadLastSuccessAt || "").trim();
+      const uploadRecordCount = Number.parseInt(String(family.uploadRecordCount || 0), 10) || 0;
+      const uploadFileCount = Number.parseInt(String(family.uploadFileCount || 0), 10) || 0;
+      const uploadConsumedCount = Number.parseInt(String(family.uploadConsumedCount || 0), 10) || 0;
+      if (uploadRunning) {
+        return {
+          tone: "info",
+          statusText: "上传进行中",
+          summaryText: String(family.uploadRunningText || "").trim() || "外网正在上传告警信息文件。",
+        };
+      }
+      if (uploadLastError) {
+        return {
+          tone: "danger",
+          statusText: "最近上传失败",
+          summaryText: `最近上传：${uploadLastRunAt || "-"}。${uploadLastError}`,
+        };
+      }
+      if (uploadLastSuccessAt) {
+        return {
+          tone: "success",
+          statusText: "最近上传成功",
+          summaryText: `最近上传：${uploadLastRunAt || uploadLastSuccessAt}（记录 ${uploadRecordCount} 条，文件 ${uploadFileCount} 份，消费 ${uploadConsumedCount} 份）。`,
+        };
+      }
+      return {
+        tone: family.tone || "warning",
+        statusText: "尚未上传",
+        summaryText: "尚未执行告警信息上传。",
+      };
+    });
+    const alarmEventUploadTarget = computed(() => {
+      const alarmExportCfg = config.value?.alarm_export || {};
+      const legacyTarget = alarmExportCfg?.feishu && typeof alarmExportCfg.feishu === "object"
+        ? alarmExportCfg.feishu
+        : {};
+      const sharedUploadCfg = alarmExportCfg?.shared_source_upload && typeof alarmExportCfg.shared_source_upload === "object"
+        ? alarmExportCfg.shared_source_upload
+        : {};
+      const overrideTarget = sharedUploadCfg?.target && typeof sharedUploadCfg.target === "object"
+        ? sharedUploadCfg.target
+        : {};
+      const mergedTarget = { ...legacyTarget, ...overrideTarget };
+      const appToken = String(mergedTarget.app_token || "").trim();
+      const tableId = String(mergedTarget.table_id || "").trim();
+      const displayUrl = appToken && tableId ? `https://vnet.feishu.cn/base/${appToken}?table=${tableId}` : "";
+      const replaceExistingOnFull = sharedUploadCfg.replace_existing_on_full !== false;
+      return {
+        appToken,
+        tableId,
+        displayUrl,
+        bitableUrl: displayUrl,
+        configured: Boolean(appToken && tableId),
+        replaceExistingOnFull,
+        statusText: appToken && tableId ? "已配置" : "未配置",
+        hintText: appToken && tableId
+          ? (replaceExistingOnFull ? "全量上传会先清表再重传。" : "全量上传不会清空目标表。")
+          : "请先在配置中心的功能配置里补齐告警信息上传目标多维表。",
+      };
+    });
+    const dayMetricUploadTarget = computed(() => {
+      const exportCfg = config.value?.handover_log?.day_metric_export || {};
+      const source = exportCfg?.source && typeof exportCfg.source === "object"
+        ? exportCfg.source
+        : {};
+      const preview = health.day_metric_upload?.target_preview || {};
+      const appToken = String(source.app_token || "").trim();
+      const tableId = String(source.table_id || "").trim();
+      const baseUrl = String(source.base_url || "").trim();
+      const wikiUrl = String(source.wiki_url || "").trim();
+      const displayUrl = String(preview?.display_url || preview?.bitable_url || "").trim()
+        || wikiUrl
+        || baseUrl
+        || (appToken && tableId ? `https://vnet.feishu.cn/base/${appToken}?table=${tableId}` : "");
+      const targetKind = String(preview?.target_kind || "").trim()
+        || (wikiUrl
+          ? "wiki_url"
+          : baseUrl
+            ? "base_url"
+            : appToken && tableId
+              ? "token_pair"
+              : "");
+      return {
+        appToken: String(preview?.configured_app_token || "").trim() || appToken,
+        operationAppToken: String(preview?.operation_app_token || "").trim(),
+        tableId: String(preview?.table_id || "").trim() || tableId,
+        baseUrl,
+        wikiUrl,
+        displayUrl,
+        bitableUrl: displayUrl,
+        targetKind,
+        configured: Boolean(displayUrl || (appToken && tableId)),
+        statusText: displayUrl || (appToken && tableId) ? "已配置" : "未配置",
+        hintText:
+          String(preview?.message || "").trim()
+          || (
+            targetKind === "wiki_token_pair" || targetKind === "wiki_url"
+              ? "当前自动识别为 Wiki 多维表链接。"
+              : targetKind === "base_token_pair" || targetKind === "base_url"
+                ? "当前自动识别为 Base 多维表链接。"
+                : appToken && tableId
+                  ? "当前按 App Token 和 Table ID 生成目标多维表链接。"
+                  : "请先在配置中心补齐 12 项独立上传目标多维表配置。"
+          ),
+      };
+    });
     const effectiveRoleMode = computed(() =>
       normalizeDeploymentRoleMode(
         config.value?.deployment?.role_mode || health.deployment?.role_mode || "",
@@ -446,11 +712,12 @@ createApp({
     const showCommonSchedulerConfigTab = computed(() => configRoleMode.value !== "internal");
     const showNotifyConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeishuAuthConfigTab = computed(() => configRoleMode.value !== "internal");
-    const showCommonAlarmDbConfigTab = computed(() => false);
+    const showCommonAlarmDbConfigTab = computed(() => configRoleMode.value === "internal");
     const showConsoleConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureMonthlyConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureHandoverConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureWetBulbCollectionConfigTab = computed(() => configRoleMode.value !== "internal");
+    const showFeatureAlarmExportConfigTab = computed(() => configRoleMode.value !== "internal");
     const showSheetImportConfigTab = computed(() => configRoleMode.value !== "internal");
     const showManualFeatureConfigTab = computed(() => configRoleMode.value !== "internal");
     const showRuntimeNetworkPanel = computed(() => false);
@@ -858,6 +1125,8 @@ createApp({
       refreshCurrentHourSourceCache,
       refreshManualAlarmSourceCache,
       deleteManualAlarmSourceCacheFiles,
+      uploadAlarmSourceCacheFull,
+      uploadAlarmSourceCacheBuilding,
       fetchRuntimeResources,
       fetchConfig,
       fetchHandoverEngineerDirectory,
@@ -909,6 +1178,7 @@ createApp({
       startupRoleDecisionReady.value = true;
       if (handled) {
         startupRoleSelectorHandled.value = true;
+        startupRoleFlowState.value = "activated";
       }
     }
 
@@ -922,6 +1192,7 @@ createApp({
       startupRoleSelectorVisible.value = true;
       startupRoleSelectorHandled.value = false;
       startupRoleSelectorBusy.value = false;
+      startupRoleFlowState.value = "selecting";
     }
 
     function showStartupRoleLoading({ title = "", subtitle = "", stage = "" } = {}) {
@@ -930,6 +1201,14 @@ createApp({
       startupRoleLoadingTitle.value = String(title || "").trim();
       startupRoleLoadingSubtitle.value = String(subtitle || "").trim();
       startupRoleLoadingStage.value = String(stage || "").trim();
+      const normalizedStage = String(stage || "").trim().toLowerCase();
+      if (normalizedStage === "restarting") {
+        startupRoleFlowState.value = "restarting";
+      } else if (normalizedStage === "reloading" || normalizedStage === "recovering") {
+        startupRoleFlowState.value = "recovering";
+      } else {
+        startupRoleFlowState.value = "activating";
+      }
     }
 
     function hideStartupRoleLoading() {
@@ -937,6 +1216,58 @@ createApp({
       startupRoleLoadingTitle.value = "";
       startupRoleLoadingSubtitle.value = "";
       startupRoleLoadingStage.value = "";
+    }
+
+    function clearStartupRoleRestartPendingState() {
+      clearStartupRoleRestartPending();
+    }
+
+    function clearStartupRoleRestartResumeState() {
+      clearStartupRoleRestartResume();
+    }
+
+    function clearLegacyStartupRoleRestartState() {
+      clearStartupRoleRestartPendingState();
+      clearStartupRoleRestartResumeState();
+    }
+
+    function currentStartupHandoff() {
+      const raw = health.startup_handoff;
+      if (!raw || typeof raw !== "object") {
+        return {
+          active: false,
+          mode: "",
+          target_role_mode: "",
+          requested_at: "",
+          reason: "",
+          nonce: "",
+        };
+      }
+      return {
+        active: Boolean(raw.active),
+        mode: String(raw.mode || "").trim(),
+        target_role_mode: normalizeDeploymentRoleMode(raw.target_role_mode),
+        requested_at: String(raw.requested_at || "").trim(),
+        reason: String(raw.reason || "").trim(),
+        nonce: String(raw.nonce || "").trim(),
+      };
+    }
+
+    function suppressCurrentStartupHandoff() {
+      const nonce = String(health.startup_handoff?.nonce || "").trim();
+      if (nonce) {
+        startupRoleSuppressedHandoffNonce.value = nonce;
+      }
+      if (health.startup_handoff && typeof health.startup_handoff === "object") {
+        Object.assign(health.startup_handoff, {
+          active: false,
+          mode: "",
+          target_role_mode: "",
+          requested_at: "",
+          reason: "",
+          nonce: "",
+        });
+      }
     }
 
     function syncStartupRoleBridgeDraft() {
@@ -952,23 +1283,44 @@ createApp({
       syncStartupRoleBridgeDraft();
     }
 
-    async function activateStartupRuntimeAfterSelection(source) {
+    async function activateStartupRuntimeAfterSelection(source, options = {}) {
       const targetRole = normalizeDeploymentRoleMode(
-        config.value?.deployment?.role_mode || startupRoleSelectorSelection.value || startupRoleCurrentMode.value,
+        options?.targetRoleMode || config.value?.deployment?.role_mode || startupRoleSelectorSelection.value || startupRoleCurrentMode.value,
       );
       showStartupRoleLoading({
         title: `正在加载${formatDeploymentRoleLabel(targetRole || "internal")}`,
         subtitle: "正在连接后台运行时，请稍候。",
         stage: "activating",
       });
-      const activationResult = await activateStartupRuntime({ source });
+      const activationResult = await activateStartupRuntime({
+        source,
+        startupHandoffNonce: String(options?.startupHandoffNonce || "").trim(),
+      });
       if (activationResult?.ok === false) {
         hideStartupRoleLoading();
+        startupRoleFlowState.value = "selecting";
         message.value = String(activationResult?.error || "").trim() || "后台运行时激活失败。";
         return false;
       }
+      // 先把门控字段本地置位，避免 watch 在远端快照刷新前回弹角色选择页。
+      health.runtime_activated = true;
+      health.startup_role_confirmed = true;
+      health.role_selection_required = false;
+      if (health.startup_handoff && typeof health.startup_handoff === "object") {
+        Object.assign(health.startup_handoff, {
+          active: false,
+          mode: "",
+          target_role_mode: "",
+          requested_at: "",
+          reason: "",
+          nonce: "",
+        });
+      }
+      startupRoleSuppressedHandoffNonce.value = "";
+      await fetchBootstrapHealth({ silentMessage: true });
       await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
       hideStartupRoleLoading();
+      startupRoleFlowState.value = "activated";
       return true;
     }
 
@@ -976,16 +1328,24 @@ createApp({
       if (startupRoleSelectorBusy.value) return;
       const targetRole = normalizeDeploymentRoleMode(startupRoleSelectorSelection.value);
       const currentRole = startupRoleCurrentMode.value;
+      startupRoleSelectorBusy.value = true;
       startupRoleSelectorMessage.value = "";
+      showStartupRoleLoading({
+        title: `正在准备${formatDeploymentRoleLabel(targetRole || "internal")}`,
+        subtitle: "正在校验启动参数，请稍候。",
+        stage: "validating",
+      });
 
       const draftValidationMessage = validateStartupBridgeDraft(targetRole, startupRoleBridgeDraft.value);
       if (draftValidationMessage) {
+        hideStartupRoleLoading();
+        startupRoleSelectorVisible.value = true;
+        startupRoleSelectorBusy.value = false;
         startupRoleSelectorMessage.value = draftValidationMessage;
         return;
       }
 
       if (targetRole === currentRole && !startupRoleHasRelevantDraftChanges.value) {
-        startupRoleSelectorBusy.value = true;
         showStartupRoleLoading({
           title: `正在启动${formatDeploymentRoleLabel(targetRole)}`,
           subtitle: "角色配置无需变更，正在进入对应页面。",
@@ -1003,7 +1363,6 @@ createApp({
       }
 
       const previousConfig = clone(config.value || {});
-      startupRoleSelectorBusy.value = true;
       showStartupRoleLoading({
         title: "正在保存角色配置",
         subtitle: `正在应用${formatDeploymentRoleLabel(targetRole)}配置，请稍候。`,
@@ -1051,7 +1410,10 @@ createApp({
             ),
           });
         }
-        const saveResult = await saveConfig();
+        const isRoleSwitch = targetRole !== currentRole;
+        const saveResult = await saveConfig({
+          skipPostSaveHealthRefresh: isRoleSwitch || Boolean(health.runtime_activated),
+        });
         if (!saveResult?.saved) {
           config.value = previousConfig;
           showStartupRoleSelector(
@@ -1062,28 +1424,29 @@ createApp({
           return;
         }
         const shouldRestartForStartupConfirm =
-          Boolean(saveResult?.restartRequired) && Boolean(health.runtime_activated);
+          Boolean(saveResult?.restartRequired) && (isRoleSwitch || Boolean(health.runtime_activated));
         if (shouldRestartForStartupConfirm) {
-          const isRoleSwitch = targetRole !== currentRole;
           hideStartupRoleLoading();
           const restartResult = await restartApplication({
             source: "startup_role_picker",
+            targetRoleMode: targetRole,
             reason: isRoleSwitch ? "role_mode_switch" : "startup_bridge_config_confirm",
             kicker: isRoleSwitch ? "角色切换中" : "桥接配置生效中",
             title: isRoleSwitch
               ? `正在切换到${formatDeploymentRoleLabel(targetRole)}`
               : `正在应用${formatDeploymentRoleLabel(targetRole)}桥接配置`,
             subtitle: isRoleSwitch
-              ? "角色配置已保存，程序正在重启并切换运行角色。"
-              : "桥接配置已保存，程序正在重启并应用新的运行参数。",
+              ? "角色配置已保存，程序正在当前窗口内重启并切换监听地址。"
+              : "桥接配置已保存，程序正在当前窗口内重启并应用新的运行参数。",
             reloadSubtitle: isRoleSwitch
-              ? "服务已恢复，正在刷新当前页面并接入新的运行角色。"
+              ? "服务已恢复，正在刷新当前页面并继续启动新的运行角色。"
               : "服务已恢复，正在刷新当前页面并接入新的桥接配置。",
             message: isRoleSwitch
-              ? `已提交切换到${formatDeploymentRoleLabel(targetRole)}，正在等待服务恢复。`
+              ? `已提交切换到${formatDeploymentRoleLabel(targetRole)}，正在当前窗口内重启并等待服务恢复。`
               : `已提交${formatDeploymentRoleLabel(targetRole)}桥接配置更新，正在等待服务恢复。`,
           });
           if (restartResult?.ok === false) {
+            clearLegacyStartupRoleRestartState();
             showStartupRoleSelector(
               String(restartResult?.error || "").trim() || "角色配置已保存，但触发程序重启失败。",
             );
@@ -1101,6 +1464,7 @@ createApp({
           return;
         }
         closeStartupRoleSelector({ handled: true });
+        clearLegacyStartupRoleRestartState();
         syncStartupRoleBridgeDraft();
         message.value =
           targetRole === currentRole
@@ -1108,6 +1472,7 @@ createApp({
             : `已切换到${formatDeploymentRoleLabel(targetRole)}。`;
       } catch (err) {
         config.value = previousConfig;
+        clearLegacyStartupRoleRestartState();
         showStartupRoleSelector(`角色切换失败: ${err}`);
       }
     }
@@ -1659,17 +2024,64 @@ createApp({
         configLoaded: configLoaded.value,
         currentRole: startupRoleCurrentMode.value,
         currentStartupToken: startupRoleCurrentToken.value,
+        flowState: startupRoleFlowState.value,
         overlayVisible: updaterUiOverlayVisible.value,
         startupRoleConfirmed: Boolean(health.startup_role_confirmed),
         runtimeActivated: Boolean(health.runtime_activated),
         roleSelectionRequired: Boolean(health.role_selection_required),
+        startupHandoffActive: Boolean(health.startup_handoff?.active),
+        startupHandoffRole: normalizeDeploymentRoleMode(health.startup_handoff?.target_role_mode),
+        startupHandoffNonce: String(health.startup_handoff?.nonce || "").trim(),
       }),
       (state) => {
         if (!state.bootstrapReady || !state.configLoaded) return;
         if (state.overlayVisible) return;
         const savedRole = normalizeDeploymentRoleMode(state.currentRole);
-        const needsRoleSelection = Boolean(state.roleSelectionRequired) || !state.startupRoleConfirmed;
+        const remoteNeedsRoleSelection = Boolean(state.roleSelectionRequired) || !state.startupRoleConfirmed;
+        const needsRoleSelection = remoteNeedsRoleSelection && state.flowState === "selecting";
+        const startupHandoff = currentStartupHandoff();
+        const canResumeAfterRestart =
+          Boolean(startupHandoff.active)
+          && Boolean(startupHandoff.target_role_mode)
+          && Boolean(startupHandoff.nonce)
+          && startupHandoff.nonce !== startupRoleSuppressedHandoffNonce.value;
+        if (canResumeAfterRestart) {
+          const resumeRole = startupHandoff.target_role_mode || savedRole || startupRoleSelectorSelection.value || "internal";
+          const activationKey = `${state.currentStartupToken || ""}|${resumeRole}|${startupHandoff.nonce}|restart_resume`;
+          if (startupRoleSelectorBusy.value || startupRoleLoadingVisible.value) return;
+          if (startupRoleAutoActivationKey.value === activationKey) return;
+          selectStartupRole(resumeRole);
+          syncStartupRoleBridgeDraft();
+          startupRoleDecisionReady.value = true;
+          startupRoleSelectorHandled.value = true;
+          startupRoleSelectorVisible.value = false;
+          startupRoleAutoActivationKey.value = activationKey;
+          startupRoleSelectorBusy.value = true;
+          showStartupRoleLoading({
+            title: `正在继续启动${formatDeploymentRoleLabel(resumeRole || "internal")}`,
+            subtitle: "服务已恢复，正在继续连接后台运行时，请稍候。",
+            stage: "restarting",
+          });
+          void (async () => {
+            const activated = await activateStartupRuntimeAfterSelection("startup_role_resume_after_restart", {
+              targetRoleMode: resumeRole,
+              startupHandoffNonce: startupHandoff.nonce,
+            });
+            startupRoleSelectorBusy.value = false;
+            if (!activated) {
+              suppressCurrentStartupHandoff();
+              clearLegacyStartupRoleRestartState();
+              message.value = "服务已恢复，但后台运行时启动失败，请重新确认启动角色。";
+              showStartupRoleSelector("后台运行时激活失败，请重新确认启动角色。");
+              return;
+            }
+            clearLegacyStartupRoleRestartState();
+            closeStartupRoleSelector({ handled: true });
+          })();
+          return;
+        }
         if (needsRoleSelection) {
+          clearLegacyStartupRoleRestartState();
           startupRoleAutoActivationKey.value = "";
           selectStartupRole(savedRole || startupRoleSelectorSelection.value || "internal");
           syncStartupRoleBridgeDraft();
@@ -1680,6 +2092,7 @@ createApp({
         if (!savedRole) {
           startupRoleAutoActivationKey.value = "";
           hideStartupRoleLoading();
+          startupRoleFlowState.value = "selecting";
           showStartupRoleSelector("请先选择有效角色。");
           return;
         }
@@ -1691,6 +2104,8 @@ createApp({
           startupRoleAutoActivationKey.value = activationKey;
           hideStartupRoleLoading();
           startupRoleSelectorBusy.value = false;
+          clearLegacyStartupRoleRestartState();
+          startupRoleSuppressedHandoffNonce.value = "";
           return;
         }
         if (startupRoleSelectorBusy.value || startupRoleLoadingVisible.value) return;
@@ -1703,13 +2118,19 @@ createApp({
           stage: "activating",
         });
         void (async () => {
-          const activated = await activateStartupRuntimeAfterSelection("startup_role_resume");
+          const activated = await activateStartupRuntimeAfterSelection("startup_role_resume", {
+            targetRoleMode: savedRole,
+          });
           startupRoleSelectorBusy.value = false;
           if (!activated) {
             message.value = "已检测到已保存角色，但后台运行时启动失败。";
+            startupRoleAutoActivationKey.value = "";
+            startupRoleFlowState.value = "selecting";
             hideStartupRoleLoading();
+            showStartupRoleSelector("后台运行时激活失败，请重新确认启动角色。");
             return;
           }
+          clearLegacyStartupRoleRestartState();
           closeStartupRoleSelector({ handled: true });
         })();
       },
@@ -1854,13 +2275,14 @@ createApp({
       (roleMode) => {
         applyDashboardRoleMode(roleMode);
         const hiddenCommonTabs = roleMode === "internal"
-          ? new Set(["common_paths", "common_console", "common_network", "common_scheduler", "common_notify", "common_feishu_auth", "common_alarm_db"])
+          ? new Set(["common_paths", "common_console", "common_network", "common_scheduler", "common_notify", "common_feishu_auth"])
           : new Set(["common_network", "common_alarm_db"]);
         const hiddenFeatureTabs = new Set(["feature_alarm"]);
         if (roleMode === "internal") {
           hiddenFeatureTabs.add("feature_monthly");
           hiddenFeatureTabs.add("feature_handover");
           hiddenFeatureTabs.add("feature_wet_bulb_collection");
+          hiddenFeatureTabs.add("feature_alarm_export");
           hiddenFeatureTabs.add("feature_sheet");
           hiddenFeatureTabs.add("feature_manual");
         }
@@ -2151,6 +2573,7 @@ createApp({
       internalRealtimeSourceFamilies,
       externalInternalAlertOverview,
       currentHourRefreshOverview,
+      internalRuntimeOverview,
       internalSourceCacheHistoryOverview,
       sharedSourceCacheReadinessOverview,
       updaterMirrorOverview,
@@ -2186,6 +2609,7 @@ createApp({
       showFeatureMonthlyConfigTab,
       showFeatureHandoverConfigTab,
       showFeatureWetBulbCollectionConfigTab,
+      showFeatureAlarmExportConfigTab,
       showSheetImportConfigTab,
       showManualFeatureConfigTab,
       showRuntimeNetworkPanel,
@@ -2386,6 +2810,8 @@ createApp({
       refreshCurrentHourSourceCache,
       refreshManualAlarmSourceCache,
       deleteManualAlarmSourceCacheFiles,
+      uploadAlarmSourceCacheFull,
+      uploadAlarmSourceCacheBuilding,
       addSheetRuleRow,
       removeSheetRuleRow,
       startScheduler,
@@ -2421,6 +2847,15 @@ createApp({
       manualAlarmRefreshButtonText,
       isSourceCacheDeleteAlarmManualLocked,
       manualAlarmDeleteButtonText,
+      externalAlarmUploadBuilding,
+      isSourceCacheUploadAlarmFullLocked,
+      isSourceCacheUploadAlarmBuildingLocked,
+      externalAlarmUploadFullButtonText,
+      externalAlarmUploadBuildingButtonText,
+      externalAlarmReadinessFamily,
+      externalAlarmUploadStatus,
+      alarmEventUploadTarget,
+      dayMetricUploadTarget,
     };
   },
   template: APP_TEMPLATE,

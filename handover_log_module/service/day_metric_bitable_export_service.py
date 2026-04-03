@@ -157,6 +157,45 @@ class DayMetricBitableExportService:
             request_retry_interval_sec=float(global_feishu.get("request_retry_interval_sec", 2) or 2),
         ).resolve(source)
 
+    def build_target_descriptor(self, cfg: Dict[str, Any] | None = None, *, force_refresh: bool = False) -> Dict[str, str]:
+        normalized = cfg if isinstance(cfg, dict) else self._normalize_cfg()
+        source = normalized.get("source", {}) if isinstance(normalized.get("source", {}), dict) else {}
+        global_feishu = self.handover_cfg.get("_global_feishu", {})
+        if not isinstance(global_feishu, dict):
+            global_feishu = {}
+        resolver = BitableTargetResolver(
+            app_id=str(global_feishu.get("app_id", "")).strip(),
+            app_secret=str(global_feishu.get("app_secret", "")).strip(),
+            timeout=int(global_feishu.get("timeout", 30) or 30),
+            request_retry_count=int(global_feishu.get("request_retry_count", 3) or 3),
+            request_retry_interval_sec=float(global_feishu.get("request_retry_interval_sec", 2) or 2),
+        )
+        base_url = str(source.get("base_url", "") or "").strip()
+        wiki_url = str(source.get("wiki_url", "") or "").strip()
+        if base_url or wiki_url:
+            resolved = resolver.resolve(source)
+            display_url = wiki_url or base_url or str(resolved.get("bitable_url", "")).strip()
+            return {
+                "configured_app_token": str(source.get("app_token", "") or "").strip(),
+                "operation_app_token": str(resolved.get("app_token", "") or "").strip(),
+                "app_token": str(resolved.get("app_token", "") or "").strip(),
+                "table_id": str(resolved.get("table_id", "") or "").strip(),
+                "target_kind": "wiki_url" if wiki_url else "base_url",
+                "resolved_from": str(resolved.get("resolved_from", "") or "").strip() or ("wiki_url" if wiki_url else "base_url"),
+                "display_url": display_url,
+                "bitable_url": display_url,
+                "wiki_node_token": str(resolved.get("wiki_node_token", "") or "").strip(),
+                "message": "",
+                "resolved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        return dict(
+            resolver.resolve_token_pair_preview(
+                configured_app_token=str(source.get("app_token", "")).strip(),
+                table_id=str(source.get("table_id", "")).strip(),
+                force_refresh=force_refresh,
+            )
+        )
+
     def _new_client(
         self,
         cfg: Dict[str, Any],

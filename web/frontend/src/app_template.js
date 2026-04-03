@@ -27,11 +27,17 @@ const APP_TEMPLATE_PREFIX = `
       <div class="app-runtime-overlay-card">
         <div class="app-runtime-overlay-kicker">
           {{
-            startupRoleLoadingStage === 'saving'
-              ? '正在保存配置'
-              : startupRoleLoadingStage === 'activating'
-                ? '正在加载角色页面'
-                : '正在应用角色'
+            startupRoleLoadingStage === 'validating'
+              ? '正在校验启动参数'
+              : startupRoleLoadingStage === 'saving'
+                ? '正在保存配置'
+                : startupRoleLoadingStage === 'restarting'
+                  ? '正在切换监听并重启'
+                  : startupRoleLoadingStage === 'recovering'
+                    ? '服务恢复中'
+                    : startupRoleLoadingStage === 'activating'
+                      ? '正在加载角色页面'
+                      : '正在应用角色'
           }}
         </div>
         <div class="app-runtime-overlay-title">{{ startupRoleLoadingTitle || '正在应用启动角色' }}</div>
@@ -49,13 +55,13 @@ const APP_TEMPLATE_PREFIX = `
       aria-modal="true"
     >
       <div class="startup-role-gate-card">
-        <div class="startup-role-gate-head">
-          <div class="startup-role-gate-kicker">启动角色确认</div>
-          <div class="startup-role-gate-title">选择本次程序启动角色</div>
-          <div class="startup-role-gate-subtitle">
-            角色确认完成前，主界面不会进入运行态。确认后系统会直接保存配置并加载对应角色页面。
+          <div class="startup-role-gate-head">
+            <div class="startup-role-gate-kicker">启动角色确认</div>
+            <div class="startup-role-gate-title">选择本次程序启动角色</div>
+            <div class="startup-role-gate-subtitle">
+            每次启动都会先显示这一页；确认角色后，系统才会进入对应的内网端或外网端页面。
+            </div>
           </div>
-        </div>
 
         <template v-if="startupRoleGateReady">
           <div class="startup-role-gate-meta">

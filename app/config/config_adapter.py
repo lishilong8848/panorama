@@ -418,6 +418,7 @@ def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
         features = _dict(cfg.get("features"))
         deployment = deep_merge_defaults(_dict(common.get("deployment")), _dict(DEFAULT_CONFIG_V3["common"].get("deployment")))
         deployment["role_mode"] = normalize_role_mode(deployment.get("role_mode"))
+        deployment["last_started_role_mode"] = normalize_role_mode(deployment.get("last_started_role_mode"))
         common["deployment"] = deployment
         common["shared_bridge"] = _resolve_shared_bridge_paths(common, deployment)
         common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
@@ -506,6 +507,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
     handover_shared_source_dir = _join_path_text(business_root, HANDOVER_SHARED_SOURCE_SUBDIR)
     deployment = deep_merge_defaults(_dict(common.get("deployment")), _dict(DEFAULT_CONFIG_V3["common"].get("deployment")))
     deployment["role_mode"] = normalize_role_mode(deployment.get("role_mode"))
+    deployment["last_started_role_mode"] = normalize_role_mode(deployment.get("last_started_role_mode"))
     shared_bridge = _resolve_shared_bridge_paths(common, deployment)
     internal_source_cache = deep_merge_defaults(
         _dict(common.get("internal_source_cache")),
@@ -639,6 +641,7 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
 
     deployment = deep_merge_defaults(_dict(runtime.get("deployment")), _dict(common.get("deployment")))
     deployment["role_mode"] = _normalize_role_mode(deployment.get("role_mode"))
+    deployment["last_started_role_mode"] = _normalize_role_mode(deployment.get("last_started_role_mode"))
     common["deployment"] = deployment
     shared_bridge = deep_merge_defaults(_dict(runtime.get("shared_bridge")), _dict(common.get("shared_bridge")))
     active_root = str(shared_bridge.get("root_dir", "") or "").strip()

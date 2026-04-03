@@ -14,7 +14,7 @@ from app.modules.report_pipeline.api import routes
 
 def _base_config(public_base_url: str = ""):
     return {
-        "common": {"console": {"port": 18765}},
+        "common": {"console": {"port": 18765, "host": "0.0.0.0"}},
         "features": {
             "handover_log": {
                 "review_ui": {
@@ -37,6 +37,7 @@ def _make_container(public_base_url: str = ""):
     container.runtime_config = config
     container.config_path = PROJECT_ROOT / "dummy.json"
     container.version = "3.0.0"
+    container.deployment_snapshot = lambda: {"role_mode": "external", "node_id": "external-node", "node_label": "外网端"}
     container._logs = logs
     container.add_system_log = logs.append
 
@@ -110,7 +111,7 @@ def test_review_access_uses_persisted_auto_snapshot_without_reprobe(monkeypatch,
 def test_put_config_persists_manual_snapshot_and_invalidates_probe_cache(monkeypatch, tmp_path):
     state_path = tmp_path / "handover_review_access_state.json"
     monkeypatch.setattr(routes, "_resolve_review_access_state_path", lambda _container: state_path)
-    routes._review_base_probe_cache[(('http://192.168.1.20:18765',), (("a", "A楼", "/api/handover/review/a"),))] = {
+    routes._review_base_probe_cache[(('http://192.168.1.20:18765',), (("a", "A楼", "/handover/review/a"),))] = {
         "checked_at": 1.0,
         "result": [],
     }
@@ -176,6 +177,8 @@ def test_reprobe_route_runs_probe_and_persists_snapshot(monkeypatch, tmp_path):
     container = _make_container()
     state_path = tmp_path / "handover_review_access_state.json"
     monkeypatch.setattr(routes, "_resolve_review_access_state_path", lambda _container: state_path)
+    monkeypatch.setenv("QJPT_CONSOLE_BIND_HOST", "0.0.0.0")
+    monkeypatch.setenv("QJPT_CONSOLE_BIND_PORT", "18765")
     monkeypatch.setattr(routes, "_detect_lan_ipv4s", lambda request_host="": ["192.168.31.10"])
     monkeypatch.setattr(
         routes,
@@ -186,8 +189,8 @@ def test_reprobe_route_runs_probe_and_persists_snapshot(monkeypatch, tmp_path):
                 "ok": True,
                 "error": "",
                 "probes": [
-                    {"code": "a", "name": "A楼", "path": "/api/handover/review/a", "ok": True, "error": ""},
-                    {"code": "b", "name": "B楼", "path": "/api/handover/review/b", "ok": True, "error": ""},
+                    {"code": "a", "name": "A楼", "path": "/handover/review/a", "ok": True, "error": ""},
+                    {"code": "b", "name": "B楼", "path": "/handover/review/b", "ok": True, "error": ""},
                 ],
             }
         ],
@@ -201,3 +204,80 @@ def test_reprobe_route_runs_probe_and_persists_snapshot(monkeypatch, tmp_path):
     assert response["handover_review_access"]["review_base_url_effective_source"] == "auto"
     assert persisted["configured"] is True
     assert persisted["effective_source"] == "auto"
+
+
+def test_detect_lan_ipv4s_only_keeps_physical_adapter_addresses(monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "_collect_windows_ipconfig_ipv4s",
+        lambda: [
+            ("192.168.224.122", "Wi-Fi"),
+            ("192.168.122.1", "vEthernet (Default Switch)"),
+            ("192.168.56.1", "VirtualBox Host-Only Network"),
+            ("10.10.10.10", "Ethernet"),
+        ],
+    )
+
+    result = routes._detect_lan_ipv4s(request_host="127.0.0.1")
+
+    assert result == ["192.168.224.122", "10.10.10.10"]
+
+
+def test_collect_windows_ipconfig_ipv4s_excludes_virtual_adapters(monkeypatch):
+    sample_output = """
+Windows IP Configuration
+
+Wireless LAN adapter Wi-Fi:
+
+   IPv4 Address. . . . . . . . . . . : 192.168.224.122
+
+Ethernet adapter vEthernet (Default Switch):
+
+   IPv4 Address. . . . . . . . . . . : 192.168.122.1
+
+Ethernet adapter Ethernet:
+
+   IPv4 Address. . . . . . . . . . . : 10.10.10.10
+"""
+
+    class _Completed:
+        stdout = sample_output.encode("utf-8")
+
+    monkeypatch.setattr(routes.subprocess, "run", lambda *args, **kwargs: _Completed())
+
+    result = routes._collect_windows_ipconfig_ipv4s()
+
+    assert result == [("192.168.224.122", "Wireless LAN adapter Wi-Fi"), ("10.10.10.10", "Ethernet adapter Ethernet")]
+
+
+def test_external_loopback_bind_clears_effective_review_access(monkeypatch, tmp_path):
+    container = _make_container()
+    state_path = tmp_path / "handover_review_access_state.json"
+    monkeypatch.setattr(routes, "_resolve_review_access_state_path", lambda _container: state_path)
+    container.deployment_snapshot = lambda: {"role_mode": "external", "node_id": "external-node", "node_label": "外网端"}
+    monkeypatch.setenv("QJPT_CONSOLE_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("QJPT_CONSOLE_BIND_PORT", "18765")
+
+    routes._save_review_access_state(
+        container,
+        {
+            "configured": True,
+            "effective_base_url": "http://192.168.224.122:18765",
+            "effective_source": "auto",
+            "candidates": ["http://192.168.224.122:18765"],
+            "validated_candidates": [{"base_url": "http://192.168.224.122:18765", "ok": True, "probes": []}],
+            "candidate_results": [{"base_url": "http://192.168.224.122:18765", "ok": True, "probes": []}],
+            "status": "auto_ok",
+            "error": "",
+            "configured_at": "2026-04-03 09:00:00",
+            "last_probe_at": "2026-04-03 09:00:00",
+        },
+    )
+
+    result = routes._probe_and_persist_review_access_snapshot(container)
+
+    assert result["review_base_url_effective"] == ""
+    assert result["review_links"] == []
+    assert result["review_base_url_status"] == "external_bind_required"
+    assert "局域网监听" in result["review_base_url_error"]
+    assert result["review_base_url_candidates"] == []

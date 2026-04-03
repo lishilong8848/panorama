@@ -443,6 +443,14 @@ export function createAppState(vueApi) {
     startup_time: "",
     startup_role_confirmed: false,
     role_selection_required: false,
+    startup_handoff: {
+      active: false,
+      mode: "",
+      target_role_mode: "",
+      requested_at: "",
+      reason: "",
+      nonce: "",
+    },
     runtime_activated: false,
     activation_phase: "",
     activation_error: "",
@@ -537,6 +545,20 @@ export function createAppState(vueApi) {
         executor_bound: false,
         callback_name: "-",
       },
+      target_preview: {
+        configured_app_token: "",
+        operation_app_token: "",
+        table_id: "",
+        target_kind: "",
+        display_url: "",
+        bitable_url: "",
+        wiki_node_token: "",
+        message: "",
+        resolved_at: "",
+      },
+    },
+    day_metric_upload: {
+      enabled: false,
       target_preview: {
         configured_app_token: "",
         operation_app_token: "",
@@ -1261,6 +1283,34 @@ function normalizeInternalDownloadPoolSlot(slot) {
     );
     const currentBucket = String(familyPayload.current_bucket || "").trim() || String(fallbackBucket || "").trim();
     const lastSuccessAt = String(familyPayload.last_success_at || "").trim();
+    const rawManualRefresh = familyPayload.manual_refresh && typeof familyPayload.manual_refresh === "object"
+      ? familyPayload.manual_refresh
+      : {};
+    const manualRefresh = {
+      running: Boolean(rawManualRefresh.running),
+      lastRunAt: String(rawManualRefresh.last_run_at || "").trim(),
+      lastSuccessAt: String(rawManualRefresh.last_success_at || "").trim(),
+      lastError: formatSharedBridgeRuntimeError(rawManualRefresh.last_error),
+      bucketKey: String(rawManualRefresh.bucket_key || "").trim(),
+      successfulBuildings: Array.isArray(rawManualRefresh.successful_buildings)
+        ? rawManualRefresh.successful_buildings.map((item) => String(item || "").trim()).filter(Boolean)
+        : [],
+      failedBuildings: Array.isArray(rawManualRefresh.failed_buildings)
+        ? rawManualRefresh.failed_buildings.map((item) => String(item || "").trim()).filter(Boolean)
+        : [],
+      blockedBuildings: Array.isArray(rawManualRefresh.blocked_buildings)
+        ? rawManualRefresh.blocked_buildings.map((item) => String(item || "").trim()).filter(Boolean)
+        : [],
+      totalRowCount: Number.parseInt(String(rawManualRefresh.total_row_count || 0), 10) || 0,
+      buildingRowCounts: rawManualRefresh.building_row_counts && typeof rawManualRefresh.building_row_counts === "object"
+        ? Object.fromEntries(
+          Object.entries(rawManualRefresh.building_row_counts)
+            .map(([name, value]) => [String(name || "").trim(), Number.parseInt(String(value || 0), 10) || 0]),
+        )
+        : {},
+      queryStart: String(rawManualRefresh.query_start || "").trim(),
+      queryEnd: String(rawManualRefresh.query_end || "").trim(),
+    };
     const hasFailures = buildings.length
       ? buildings.some((item) => item.statusKey === "failed")
       : failedBuildings.length > 0;
@@ -1293,6 +1343,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       allReady,
       tone,
       statusText,
+      manualRefresh,
     };
   }
   function normalizeLatestSelectionBuildingStatus(raw, fallbackBucket) {
@@ -1411,15 +1462,18 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const building = String(raw?.building || "").trim() || "-";
     const bucketKey = String(raw?.bucket_key || "").trim() || String(fallbackBucket || "").trim() || "-";
     const downloadedAt = String(raw?.downloaded_at || "").trim();
+    const selectedDownloadedAt = String(raw?.selected_downloaded_at || downloadedAt || "").trim();
     const lastError = formatSharedBridgeRuntimeError(raw?.last_error);
     const relativePath = String(raw?.relative_path || "").trim();
     const resolvedFilePath = String(raw?.resolved_file_path || "").trim();
     const blocked = Boolean(raw?.blocked);
     const blockedReason = formatInternalDownloadPoolError(raw?.blocked_reason || raw?.last_error);
+    const sourceKind = String(raw?.source_kind || "").trim().toLowerCase();
+    const selectionScope = String(raw?.selection_scope || "").trim().toLowerCase();
     const rawStatus = String(raw?.status || "").trim().toLowerCase();
     const statusKey = ["ready", "failed", "consumed"].includes(rawStatus) ? rawStatus : "waiting";
     let tone = "warning";
-    let stateText = "等待定时文件";
+    let stateText = "今天和昨天都缺文件";
     if (statusKey === "ready") {
       tone = "success";
       stateText = "已就绪";
@@ -1433,6 +1487,14 @@ function normalizeInternalDownloadPoolSlot(slot) {
       tone = "warning";
       stateText = "等待内网恢复";
     }
+    const sourceKindText = sourceKind === "manual" ? "手动" : sourceKind === "latest" ? "定时" : "";
+    const selectionScopeText = selectionScope === "today"
+      ? "今天最新"
+      : selectionScope === "yesterday_fallback"
+        ? "昨天回退"
+        : selectionScope === "missing"
+          ? "今天和昨天都缺文件"
+          : "";
     return {
       building,
       bucketKey,
@@ -1445,16 +1507,35 @@ function normalizeInternalDownloadPoolSlot(slot) {
       resolvedFilePath,
       tone,
       stateText,
+      sourceKind,
+      sourceKindText,
+      selectionScope,
+      selectionScopeText,
+      selectedDownloadedAt,
       detailText: blocked
         ? (blockedReason || "等待内网恢复")
         : statusKey === "consumed"
-          ? "定时告警文件已被外网消费"
-          : (lastError || downloadedAt || (resolvedFilePath ? resolvedFilePath : "等待 08 点 / 16 点定时文件")),
+          ? "本次选中的告警文件已被外网消费"
+          : (lastError || selectedDownloadedAt || (resolvedFilePath ? resolvedFilePath : "今天和昨天都没有可用告警文件")),
     };
   }
   function normalizeAlarmEventReadinessOverview({ key, title, payload }) {
     const familyPayload = payload && typeof payload === "object" ? payload : {};
     const currentBucket = String(familyPayload.current_bucket || "").trim();
+    const selectionPolicy = String(familyPayload.selection_policy || "").trim();
+    const selectionReferenceDate = String(familyPayload.selection_reference_date || "").trim();
+    const usedPreviousDayFallback = Array.isArray(familyPayload.used_previous_day_fallback)
+      ? familyPayload.used_previous_day_fallback.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const missingTodayBuildings = Array.isArray(familyPayload.missing_today_buildings)
+      ? familyPayload.missing_today_buildings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const missingBothDaysBuildings = Array.isArray(familyPayload.missing_both_days_buildings)
+      ? familyPayload.missing_both_days_buildings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const uploadState = familyPayload.external_upload && typeof familyPayload.external_upload === "object"
+      ? familyPayload.external_upload
+      : {};
     const buildings = Array.isArray(familyPayload.buildings)
       ? familyPayload.buildings.map((item) => normalizeAlarmEventReadinessBuilding(item, currentBucket))
       : [];
@@ -1464,11 +1545,27 @@ function normalizeInternalDownloadPoolSlot(slot) {
     );
     const consumedCount = normalizedBuildings.filter((item) => item.statusKey === "consumed").length;
     const readyCount = normalizedBuildings.filter((item) => item.statusKey === "ready").length;
+    const todaySelectedCount = normalizedBuildings.filter((item) =>
+      item.selectionScope === "today" && ["ready", "consumed"].includes(item.statusKey),
+    ).length;
     const failedBuildings = normalizedBuildings.filter((item) => item.statusKey === "failed").map((item) => item.building);
     const blockedBuildings = normalizedBuildings.filter((item) => item.stateText === "等待内网恢复").map((item) => item.building);
+    const uploadLastRunAt = String(uploadState.last_run_at || "").trim();
+    const uploadLastSuccessAt = String(uploadState.last_success_at || "").trim();
+    const uploadLastError = formatSharedBridgeRuntimeError(uploadState.last_error);
+    const uploadRecordCount = Number.parseInt(String(uploadState.uploaded_record_count || 0), 10) || 0;
+    const uploadFileCount = Number.parseInt(String(uploadState.uploaded_file_count || 0), 10) || 0;
+    const uploadConsumedCount = Number.parseInt(String(uploadState.consumed_count || 0), 10) || 0;
+    const uploadRunning = Boolean(uploadState.running);
+    const uploadStartedAt = String(uploadState.started_at || "").trim();
+    const uploadCurrentMode = String(uploadState.current_mode || "").trim();
+    const uploadCurrentScope = String(uploadState.current_scope || "").trim();
+    const uploadRunningText = uploadRunning
+      ? `正在上传${uploadCurrentMode === "single_building" ? `（${uploadCurrentScope || "单楼"}）` : "（全量）"}${uploadStartedAt ? `，开始于 ${uploadStartedAt}` : ""}`
+      : "";
     let tone = "warning";
-    let statusText = "等待定时文件";
-    let summaryText = "外网只读取 08 点和 16 点的告警信息文件。";
+    let statusText = "等待当天最新文件";
+    let summaryText = "当前策略：当天最新一份，缺失则回退昨天最新。";
     if (failedBuildings.length) {
       tone = "danger";
       statusText = "存在失败楼栋";
@@ -1477,14 +1574,25 @@ function normalizeInternalDownloadPoolSlot(slot) {
       tone = "warning";
       statusText = "等待内网恢复";
       summaryText = `以下楼栋正在等待内网恢复：${blockedBuildings.join(" / ")}`;
+    } else if (missingBothDaysBuildings.length) {
+      tone = readyCount > 0 || consumedCount > 0 ? "warning" : "danger";
+      statusText = "存在缺失楼栋";
+      summaryText = `当前策略：当天最新一份，缺失则回退昨天最新。今天最新 ${todaySelectedCount}/5 楼；昨天回退 ${usedPreviousDayFallback.length}/5 楼；今天和昨天都缺文件 ${missingBothDaysBuildings.length}/5 楼。`;
+    } else if (usedPreviousDayFallback.length) {
+      tone = "warning";
+      statusText = "存在昨天回退";
+      summaryText = `当前策略：当天最新一份，缺失则回退昨天最新。今天最新 ${todaySelectedCount}/5 楼；昨天回退 ${usedPreviousDayFallback.length}/5 楼。`;
     } else if (readyCount > 0) {
       tone = "success";
-      statusText = "定时文件已就绪";
-      summaryText = `当前定时桶 ${currentBucket || "-"} 已有 ${readyCount}/5 个楼栋告警文件可供外网消费。`;
+      statusText = "当天最新已就绪";
+      summaryText = `当前策略：当天最新一份，缺失则回退昨天最新。今天已有 ${todaySelectedCount || readyCount}/5 个楼栋告警文件可供外网消费。`;
     } else if (consumedCount > 0) {
       tone = "info";
-      statusText = "定时文件已消费";
-      summaryText = `当前定时桶 ${currentBucket || "-"} 的告警信息文件已消费 ${consumedCount}/5 个楼栋。`;
+      statusText = "最新文件已消费";
+      summaryText = `今天或昨天回退选中的告警文件已消费 ${consumedCount}/5 个楼栋。`;
+    }
+    if (uploadLastRunAt) {
+      summaryText += ` 最近上传：${uploadLastRunAt}（记录 ${uploadRecordCount} 条，文件 ${uploadFileCount} 份，消费 ${uploadConsumedCount} 份）。`;
     }
     return {
       key,
@@ -1502,6 +1610,23 @@ function normalizeInternalDownloadPoolSlot(slot) {
       statusText,
       summaryText,
       participatesInAutoRetry: false,
+      uploadLastRunAt,
+      uploadLastSuccessAt,
+      uploadLastError,
+      uploadRecordCount,
+      uploadFileCount,
+      uploadConsumedCount,
+      uploadRunning,
+      uploadStartedAt,
+      uploadCurrentMode,
+      uploadCurrentScope,
+      uploadRunningText,
+      selectionPolicy,
+      selectionReferenceDate,
+      usedPreviousDayFallback,
+      missingTodayBuildings,
+      missingBothDaysBuildings,
+      todaySelectedCount,
     };
   }
   const internalDownloadPoolOverview = computed(() => {
@@ -1881,6 +2006,54 @@ function normalizeInternalDownloadPoolSlot(slot) {
       completedBuildings,
     };
   });
+  const internalRuntimeOverview = computed(() => {
+    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
+    if (roleMode !== "internal") {
+      return {
+        tone: "neutral",
+        statusText: "仅内网端启用",
+        summaryText: "",
+        items: [],
+        cacheRoot: "",
+        errorText: "",
+        poolStatusText: "",
+        poolSummaryText: "",
+        poolItems: [],
+        poolErrorText: "",
+        slots: [],
+        currentHourRefresh: {
+          tone: "neutral",
+          statusText: "",
+          summaryText: "",
+          lastRunAt: "",
+          lastSuccessAt: "",
+          lastError: "",
+          failedBuildings: [],
+          blockedBuildings: [],
+          runningBuildings: [],
+          completedBuildings: [],
+        },
+        families: [],
+      };
+    }
+    const sourceCache = internalSourceCacheOverview.value;
+    const downloadPool = internalDownloadPoolOverview.value;
+    return {
+      tone: sourceCache.tone,
+      statusText: sourceCache.statusText,
+      summaryText: sourceCache.summaryText,
+      items: Array.isArray(sourceCache.items) ? sourceCache.items : [],
+      cacheRoot: sourceCache.cacheRoot || "",
+      errorText: sourceCache.errorText || "",
+      poolStatusText: downloadPool.statusText || "",
+      poolSummaryText: downloadPool.summaryText || "",
+      poolItems: Array.isArray(downloadPool.items) ? downloadPool.items : [],
+      poolErrorText: downloadPool.errorText || "",
+      slots: Array.isArray(downloadPool.slots) ? downloadPool.slots : [],
+      currentHourRefresh: currentHourRefreshOverview.value,
+      families: Array.isArray(sourceCache.families) ? sourceCache.families : [],
+    };
+  });
   const internalSourceCacheHistoryOverview = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
     if (roleMode !== "internal") {
@@ -1889,44 +2062,29 @@ function normalizeInternalDownloadPoolSlot(slot) {
         statusText: "",
         summaryText: "",
         items: [],
-        families: [],
         recentLogs: [],
       };
     }
     const sourceCache = internalSourceCacheOverview.value;
     const currentHourRefresh = currentHourRefreshOverview.value;
-    const families = Array.isArray(sourceCache.families)
-      ? sourceCache.families.map((family) => ({
-        key: family.key,
-        title: family.title,
-        tone: family.tone,
-        statusText: family.statusText,
-        currentBucket: family.currentBucket || sourceCache.currentHourBucket || "-",
-        lastSuccessAt: family.lastSuccessAt || "-",
-        failedSummary: Array.isArray(family.failedBuildings) && family.failedBuildings.length
-          ? family.failedBuildings.join(" / ")
-          : "",
-        readyCountText: `${Number(family.readyCount || 0)} / ${Array.isArray(family.buildings) ? family.buildings.length : 0} 个楼已就绪`,
-      }))
-      : [];
     const recentLogs = internalOpsLogs.value
       .filter((line) => line.includes("[共享缓存]"))
       .slice(0, 8);
-    let tone = sourceCache.tone || "neutral";
-    let statusText = "按小时维护中";
-    let summaryText = "内网端会按小时维护交接班、月报缓存，并在每天 08:00 / 16:00 维护告警信息源文件。";
+    let tone = "neutral";
+    let statusText = "暂无历史";
+    let summaryText = "这里只保留最近调度、最近成功、最近错误和共享缓存日志，不再重复展示当前实时状态。";
     if (currentHourRefresh.tone === "danger" || sourceCache.tone === "danger") {
       tone = "danger";
       statusText = "最近存在失败";
-      summaryText = "最近一轮小时下载或当前小时手动补下存在失败，请检查对应楼栋登录态、共享目录权限和下载页面可用性。";
-    } else if (sourceCache.tone === "success") {
+      summaryText = "最近一轮小时下载或手动补下存在失败，请检查对应楼栋登录态、共享目录权限和下载页面可用性。";
+    } else if (sourceCache.lastSuccessAt || currentHourRefresh.lastSuccessAt) {
       tone = "success";
-      statusText = "本轮缓存已就绪";
-      summaryText = "当前小时交接班、月报文件和最近一轮告警信息源文件都已就绪。";
-    } else if (currentHourRefresh.tone === "warning") {
+      statusText = "最近调度正常";
+      summaryText = "最近一次共享缓存调度和手动补下已完成，可在这里查看历史时间点和最近日志。";
+    } else if (sourceCache.lastRunAt || currentHourRefresh.lastRunAt || recentLogs.length) {
       tone = "warning";
-      statusText = "当前小时下载中";
-      summaryText = currentHourRefresh.summaryText || summaryText;
+      statusText = "已有历史记录";
+      summaryText = "最近已有共享缓存调度记录，当前卡片只保留历史摘要和最近日志。";
     }
     return {
       tone,
@@ -1958,8 +2116,12 @@ function normalizeInternalDownloadPoolSlot(slot) {
           value: currentHourRefresh.lastSuccessAt || "-",
           tone: currentHourRefresh.lastSuccessAt ? "success" : "neutral",
         },
+        {
+          label: "最近错误",
+          value: currentHourRefresh.lastError || sourceCache.errorText || "-",
+          tone: currentHourRefresh.lastError || sourceCache.errorText ? "danger" : "neutral",
+        },
       ],
-      families,
       recentLogs,
       lastError: currentHourRefresh.lastError || sourceCache.errorText || "",
     };
@@ -2594,6 +2756,22 @@ function normalizeInternalDownloadPoolSlot(slot) {
           { label: "下次执行", value: health.wet_bulb_collection?.scheduler?.next_run_time || "-" },
         ],
       },
+      alarm_event_upload: (() => {
+        const families = Array.isArray(sharedSourceCacheReadinessOverview.value?.families)
+          ? sharedSourceCacheReadinessOverview.value.families
+          : [];
+        const alarmFamily = families.find((item) => String(item?.key || "").trim() === "alarm_event_family") || {};
+        return {
+          eyebrow: "专项上传",
+          title: "告警信息上传",
+          description: "按楼读取当天最新一份告警文件，缺失则回退昨天最新，并将 60 天内记录写入目标多维表。",
+          metrics: [
+            { label: "最近上传", value: alarmFamily.uploadLastRunAt || "-" },
+            { label: "上传记录", value: `${alarmFamily.uploadRecordCount || 0} 条` },
+            { label: "已消费文件", value: `${alarmFamily.uploadConsumedCount || 0} 份` },
+          ],
+        };
+      })(),
       runtime_logs: {
         eyebrow: "运行追踪",
         title: "运行日志与任务状态",
@@ -2748,6 +2926,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
     internalRealtimeSourceFamilies,
     externalInternalAlertOverview,
     currentHourRefreshOverview,
+    internalRuntimeOverview,
     internalSourceCacheHistoryOverview,
     sharedSourceCacheReadinessOverview,
     updaterMirrorOverview,
