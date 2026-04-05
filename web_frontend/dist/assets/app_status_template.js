@@ -36,6 +36,41 @@
       </section>
 
       <section class="status-page-grid">
+        <article :class="['status-card', isInternalDeploymentRole ? 'status-card-wide' : '']">
+          <div class="status-card-head">
+            <div>
+              <span class="status-panel-kicker">诊断优先</span>
+              <h2 class="status-panel-title">当前结论与下一步</h2>
+            </div>
+            <span class="status-badge status-badge-solid" :class="'tone-' + statusDiagnosisOverview.tone">
+              {{ statusDiagnosisOverview.statusText }}
+            </span>
+          </div>
+          <div class="hint">{{ statusDiagnosisOverview.reasonText }}</div>
+          <div class="hint" v-if="statusDiagnosisOverview.actionText">建议动作：{{ statusDiagnosisOverview.actionText }}</div>
+          <div class="status-list" v-if="statusDiagnosisOverview.items && statusDiagnosisOverview.items.length">
+            <div
+              class="status-list-row"
+              v-for="item in statusDiagnosisOverview.items"
+              :key="'status-diagnosis-' + item.label"
+            >
+              <span class="status-list-label">{{ item.label }}</span>
+              <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
+            </div>
+          </div>
+          <div class="btn-line" style="margin-top:10px;" v-if="statusDiagnosisOverview.actions && statusDiagnosisOverview.actions.length">
+            <button
+              v-for="action in statusDiagnosisOverview.actions"
+              :key="'status-diagnosis-action-' + action.id"
+              class="btn"
+              :class="action.id === 'refresh_current_hour' ? 'btn-warning' : action.id === 'refresh_manual_alarm' ? 'btn-secondary' : 'btn-ghost'"
+              @click="runHomeQuickAction(action.id)"
+            >
+              {{ action.label }}
+            </button>
+          </div>
+        </article>
+
         <article v-if="!isInternalDeploymentRole" class="status-card">
           <div class="status-card-head">
             <div>
@@ -343,7 +378,7 @@
                 <span class="status-inline-note">{{ family.summaryText }}</span>
               </div>
               <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadLastRunAt">
-                最近上传：{{ family.uploadLastRunAt }} / 记录 {{ family.uploadRecordCount || 0 }} 条 / 文件 {{ family.uploadFileCount || 0 }} 份 / 消费 {{ family.uploadConsumedCount || 0 }} 份
+                最近上传：{{ family.uploadLastRunAt }} / 记录 {{ family.uploadRecordCount || 0 }} 条 / 文件 {{ family.uploadFileCount || 0 }} 份 / 源文件保留
               </div>
               <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadRunning">
                 {{ family.uploadRunningText }}
@@ -368,7 +403,7 @@
                   <div class="hint" v-if="building.usingFallback && building.versionGap !== null">较最新版本落后 {{ building.versionGap }} 桶</div>
                   <div class="hint">{{ building.lastError ? ("最近错误：" + building.lastError) : ("最近成功：" + (building.downloadedAt || "-")) }}</div>
                   <div class="hint" v-if="building.resolvedFilePath">共享路径：{{ building.resolvedFilePath }}</div>
-                  <div class="hint" v-else-if="building.statusKey === 'consumed' && building.relativePath">已消费并删除：{{ building.relativePath }}</div>
+                  <div class="hint" v-else-if="building.relativePath">缓存文件：{{ building.relativePath }}</div>
                   <div class="hint" v-else-if="building.statusKey !== 'waiting'">共享文件未登记</div>
                 </div>
               </div>

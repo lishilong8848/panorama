@@ -157,6 +157,13 @@ export async function uploadAlarmSourceCacheBuildingApi(building) {
   });
 }
 
+export async function openAlarmEventUploadTargetApi() {
+  return apiJson("/api/runtime/alarm-event-upload-target/open", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 export async function startSchedulerApi() {
   return apiJson("/api/scheduler/start", { method: "POST", body: "{}" });
 }

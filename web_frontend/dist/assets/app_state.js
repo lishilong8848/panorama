@@ -571,6 +571,20 @@ export function createAppState(vueApi) {
         resolved_at: "",
       },
     },
+    alarm_event_upload: {
+      enabled: false,
+      target_preview: {
+        configured_app_token: "",
+        operation_app_token: "",
+        table_id: "",
+        target_kind: "",
+        display_url: "",
+        bitable_url: "",
+        wiki_node_token: "",
+        message: "",
+        resolved_at: "",
+      },
+    },
     deployment: {
       role_mode: "",
       node_id: "",
@@ -1471,15 +1485,12 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const sourceKind = String(raw?.source_kind || "").trim().toLowerCase();
     const selectionScope = String(raw?.selection_scope || "").trim().toLowerCase();
     const rawStatus = String(raw?.status || "").trim().toLowerCase();
-    const statusKey = ["ready", "failed", "consumed"].includes(rawStatus) ? rawStatus : "waiting";
+    const statusKey = ["ready", "failed"].includes(rawStatus) ? rawStatus : "waiting";
     let tone = "warning";
     let stateText = "今天和昨天都缺文件";
     if (statusKey === "ready") {
       tone = "success";
       stateText = "已就绪";
-    } else if (statusKey === "consumed") {
-      tone = "info";
-      stateText = "已消费";
     } else if (statusKey === "failed") {
       tone = "danger";
       stateText = "失败";
@@ -1514,9 +1525,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       selectedDownloadedAt,
       detailText: blocked
         ? (blockedReason || "等待内网恢复")
-        : statusKey === "consumed"
-          ? "本次选中的告警文件已被外网消费"
-          : (lastError || selectedDownloadedAt || (resolvedFilePath ? resolvedFilePath : "今天和昨天都没有可用告警文件")),
+        : (lastError || selectedDownloadedAt || (resolvedFilePath ? resolvedFilePath : "今天和昨天都没有可用告警文件")),
     };
   }
   function normalizeAlarmEventReadinessOverview({ key, title, payload }) {
@@ -1543,10 +1552,9 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const normalizedBuildings = INTERNAL_BUILDINGS.map(
       (building) => buildingMap.get(building) || normalizeAlarmEventReadinessBuilding({ building }, currentBucket),
     );
-    const consumedCount = normalizedBuildings.filter((item) => item.statusKey === "consumed").length;
     const readyCount = normalizedBuildings.filter((item) => item.statusKey === "ready").length;
     const todaySelectedCount = normalizedBuildings.filter((item) =>
-      item.selectionScope === "today" && ["ready", "consumed"].includes(item.statusKey),
+      item.selectionScope === "today" && item.statusKey === "ready",
     ).length;
     const failedBuildings = normalizedBuildings.filter((item) => item.statusKey === "failed").map((item) => item.building);
     const blockedBuildings = normalizedBuildings.filter((item) => item.stateText === "等待内网恢复").map((item) => item.building);
@@ -1555,7 +1563,6 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const uploadLastError = formatSharedBridgeRuntimeError(uploadState.last_error);
     const uploadRecordCount = Number.parseInt(String(uploadState.uploaded_record_count || 0), 10) || 0;
     const uploadFileCount = Number.parseInt(String(uploadState.uploaded_file_count || 0), 10) || 0;
-    const uploadConsumedCount = Number.parseInt(String(uploadState.consumed_count || 0), 10) || 0;
     const uploadRunning = Boolean(uploadState.running);
     const uploadStartedAt = String(uploadState.started_at || "").trim();
     const uploadCurrentMode = String(uploadState.current_mode || "").trim();
@@ -1575,7 +1582,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       statusText = "等待内网恢复";
       summaryText = `以下楼栋正在等待内网恢复：${blockedBuildings.join(" / ")}`;
     } else if (missingBothDaysBuildings.length) {
-      tone = readyCount > 0 || consumedCount > 0 ? "warning" : "danger";
+      tone = readyCount > 0 ? "warning" : "danger";
       statusText = "存在缺失楼栋";
       summaryText = `当前策略：当天最新一份，缺失则回退昨天最新。今天最新 ${todaySelectedCount}/5 楼；昨天回退 ${usedPreviousDayFallback.length}/5 楼；今天和昨天都缺文件 ${missingBothDaysBuildings.length}/5 楼。`;
     } else if (usedPreviousDayFallback.length) {
@@ -1586,13 +1593,9 @@ function normalizeInternalDownloadPoolSlot(slot) {
       tone = "success";
       statusText = "当天最新已就绪";
       summaryText = `当前策略：当天最新一份，缺失则回退昨天最新。今天已有 ${todaySelectedCount || readyCount}/5 个楼栋告警文件可供外网消费。`;
-    } else if (consumedCount > 0) {
-      tone = "info";
-      statusText = "最新文件已消费";
-      summaryText = `今天或昨天回退选中的告警文件已消费 ${consumedCount}/5 个楼栋。`;
     }
     if (uploadLastRunAt) {
-      summaryText += ` 最近上传：${uploadLastRunAt}（记录 ${uploadRecordCount} 条，文件 ${uploadFileCount} 份，消费 ${uploadConsumedCount} 份）。`;
+      summaryText += ` 最近上传：${uploadLastRunAt}（记录 ${uploadRecordCount} 条，文件 ${uploadFileCount} 份，源文件保留）。`;
     }
     return {
       key,
@@ -1615,7 +1618,6 @@ function normalizeInternalDownloadPoolSlot(slot) {
       uploadLastError,
       uploadRecordCount,
       uploadFileCount,
-      uploadConsumedCount,
       uploadRunning,
       uploadStartedAt,
       uploadCurrentMode,
@@ -1865,7 +1867,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       return {
         tone: "neutral",
         statusText: "仅外网端展示",
-        summaryText: "外网端通过已消费的内网环境告警任务展示 5 楼状态。",
+        summaryText: "外网端通过内网环境告警状态展示 5 楼状态。",
         items: [],
         buildings: [],
       };
@@ -2768,7 +2770,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
           metrics: [
             { label: "最近上传", value: alarmFamily.uploadLastRunAt || "-" },
             { label: "上传记录", value: `${alarmFamily.uploadRecordCount || 0} 条` },
-            { label: "已消费文件", value: `${alarmFamily.uploadConsumedCount || 0} 份` },
+            { label: "参与文件", value: `${alarmFamily.uploadFileCount || 0} 份` },
           ],
         };
       })(),

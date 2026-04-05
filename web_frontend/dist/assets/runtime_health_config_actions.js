@@ -42,6 +42,7 @@ import {
   deleteManualAlarmSourceCacheFilesApi,
   uploadAlarmSourceCacheFullApi,
   uploadAlarmSourceCacheBuildingApi,
+  openAlarmEventUploadTargetApi,
 } from "./api_client.js";
 import { prepareConfigPayloadForSave } from "./config_save_validation.js";
 import { buildUpdaterApplyMessage, mapUpdaterResultText } from "./updater_text.js";
@@ -687,6 +688,24 @@ export function createRuntimeHealthConfigActions(ctx) {
         });
       }
     }
+    if (data.alarm_event_upload && typeof data.alarm_event_upload === "object") {
+      health.alarm_event_upload.enabled = Boolean(data.alarm_event_upload.enabled);
+      if (data.alarm_event_upload.target_preview && typeof data.alarm_event_upload.target_preview === "object") {
+        Object.assign(health.alarm_event_upload.target_preview, data.alarm_event_upload.target_preview);
+      } else {
+        Object.assign(health.alarm_event_upload.target_preview, {
+          configured_app_token: "",
+          operation_app_token: "",
+          table_id: "",
+          target_kind: "",
+          display_url: "",
+          bitable_url: "",
+          wiki_node_token: "",
+          message: "",
+          resolved_at: "",
+        });
+      }
+    }
     if (data.deployment && typeof data.deployment === "object") {
       Object.assign(health.deployment, data.deployment);
     }
@@ -1103,6 +1122,38 @@ export function createRuntimeHealthConfigActions(ctx) {
     };
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(`${ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_BUILDING}:${buildingText}`, runner, { cooldownMs: 0 });
+    }
+    return runner();
+  }
+
+  async function openAlarmEventUploadTarget() {
+    const runner = async () => {
+      try {
+        const data = await openAlarmEventUploadTargetApi();
+        const preview =
+          data?.target_preview && typeof data.target_preview === "object"
+            ? data.target_preview
+            : {};
+        if (health?.alarm_event_upload?.target_preview && typeof health.alarm_event_upload.target_preview === "object") {
+          Object.assign(health.alarm_event_upload.target_preview, preview);
+        }
+        const displayUrl = String(preview?.display_url || preview?.bitable_url || "").trim();
+        if (!displayUrl) {
+          message.value =
+            String(preview?.message || "").trim() || "当前未解析到可用的告警多维表链接，请查看系统日志。";
+          return { ok: false, error: "missing_display_url", target_preview: preview };
+        }
+        window.open(displayUrl, "_blank", "noopener,noreferrer");
+        const targetKind = String(preview?.target_kind || "").trim();
+        message.value = `已打开告警多维表（${targetKind || "unknown"}）`;
+        return data;
+      } catch (err) {
+        message.value = `打开告警多维表失败: ${err}`;
+        return { ok: false, error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight("alarm_event_upload:open_target", runner, { cooldownMs: 0 });
     }
     return runner();
   }
@@ -2096,6 +2147,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     deleteManualAlarmSourceCacheFiles,
     uploadAlarmSourceCacheFull,
     uploadAlarmSourceCacheBuilding,
+    openAlarmEventUploadTarget,
     fetchRuntimeResources,
     fetchHandoverDailyReportContext,
     fetchConfig,

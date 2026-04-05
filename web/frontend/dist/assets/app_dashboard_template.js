@@ -35,6 +35,78 @@
           </div>
         </section>
 
+        <section class="ops-job-grid" style="margin-bottom:12px;">
+          <article class="task-block task-block-compact">
+            <div class="task-block-head">
+              <div>
+                <div class="task-block-kicker">首页判断</div>
+                <h4 class="card-title">当前应该先做什么</h4>
+              </div>
+              <span class="status-badge status-badge-soft" :class="'tone-' + homeOverview.tone">
+                {{ homeOverview.statusText }}
+              </span>
+            </div>
+            <div class="hint">{{ homeOverview.summaryText }}</div>
+            <div class="hint" v-if="homeOverview.nextActionText">{{ homeOverview.nextActionText }}</div>
+            <div class="status-list" v-if="homeOverview.items && homeOverview.items.length" style="margin-top:10px;">
+              <div
+                class="status-list-row"
+                v-for="item in homeOverview.items"
+                :key="'dashboard-home-item-' + item.label"
+              >
+                <span class="status-list-label">{{ item.label }}</span>
+                <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="task-block task-block-compact">
+            <div class="task-block-head">
+              <div>
+                <div class="task-block-kicker">主动作</div>
+                <h4 class="card-title">常用入口</h4>
+              </div>
+            </div>
+            <div class="ops-job-list" v-if="homeOverview.actions && homeOverview.actions.length">
+              <button
+                v-for="action in homeOverview.actions"
+                :key="'dashboard-home-action-' + action.id"
+                class="btn btn-ghost ops-job-list-item"
+                @click="runHomeQuickAction(action.id)"
+              >
+                <span class="ops-job-list-title">{{ action.label }}</span>
+                <span class="ops-job-list-meta">{{ action.desc || '' }}</span>
+              </button>
+            </div>
+            <div class="hint" v-else>当前没有可显示的快捷入口。</div>
+          </article>
+
+          <article class="task-block task-block-compact">
+            <div class="task-block-head">
+              <div>
+                <div class="task-block-kicker">执行反馈</div>
+                <h4 class="card-title">当前任务</h4>
+              </div>
+              <span class="status-badge status-badge-soft" :class="'tone-' + currentTaskOverview.tone">
+                {{ currentTaskOverview.statusText }}
+              </span>
+            </div>
+            <div class="hint">{{ currentTaskOverview.summaryText }}</div>
+            <div class="hint">{{ currentTaskOverview.focusTitle }} / {{ currentTaskOverview.focusMeta }}</div>
+            <div class="hint" v-if="currentTaskOverview.nextActionText">{{ currentTaskOverview.nextActionText }}</div>
+            <div class="status-list" v-if="currentTaskOverview.items && currentTaskOverview.items.length" style="margin-top:10px;">
+              <div
+                class="status-list-row"
+                v-for="item in currentTaskOverview.items"
+                :key="'dashboard-task-overview-' + item.label"
+              >
+                <span class="status-list-label">{{ item.label }}</span>
+                <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
+              </div>
+            </div>
+          </article>
+        </section>
+
         <section class="content-card ops-job-panel">
           <div class="task-block-head">
             <div>
@@ -1384,22 +1456,27 @@
                 </span>
               </div>
               <div class="day-metric-summary-grid">
-                <div class="readonly-inline-card">App Token：{{ alarmEventUploadTarget.appToken || '-' }}</div>
-                <div class="readonly-inline-card">Table ID：{{ alarmEventUploadTarget.tableId || '-' }}</div>
+                <div class="readonly-token-card readonly-token-card-wide">
+                  <div class="readonly-token-card-label">App Token</div>
+                  <div class="readonly-token-card-value">{{ alarmEventUploadTarget.appToken || '-' }}</div>
+                </div>
+                <div class="readonly-token-card">
+                  <div class="readonly-token-card-label">Table ID</div>
+                  <div class="readonly-token-card-value">{{ alarmEventUploadTarget.tableId || '-' }}</div>
+                </div>
                 <div class="readonly-inline-card">最近上传：{{ externalAlarmReadinessFamily.uploadLastRunAt || '-' }}</div>
                 <div class="readonly-inline-card">最近成功：{{ externalAlarmReadinessFamily.uploadLastSuccessAt || '-' }}</div>
                 <div class="readonly-inline-card">上传记录：{{ externalAlarmReadinessFamily.uploadRecordCount || 0 }} 条</div>
-                <div class="readonly-inline-card">消费文件：{{ externalAlarmReadinessFamily.uploadConsumedCount || 0 }} 份</div>
+                <div class="readonly-inline-card">参与文件：{{ externalAlarmReadinessFamily.uploadFileCount || 0 }} 份</div>
               </div>
               <div class="btn-line" style="margin-top:10px;" v-if="alarmEventUploadTarget.displayUrl || alarmEventUploadTarget.bitableUrl">
-                <a
+                <button
                   class="btn btn-secondary"
-                  :href="alarmEventUploadTarget.displayUrl || alarmEventUploadTarget.bitableUrl"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  type="button"
+                  @click="openAlarmEventUploadTarget"
                 >
                   打开多维表
-                </a>
+                </button>
               </div>
               <div class="hint" style="margin-top:10px;">{{ alarmEventUploadTarget.hintText }}</div>
               <div class="hint" v-if="externalAlarmReadinessFamily.selectionReferenceDate">
@@ -1443,7 +1520,7 @@
                 <div class="hint">选中文件时间：{{ building.selectedDownloadedAt || '-' }}</div>
                 <div class="hint">{{ building.detailText || '-' }}</div>
                 <div class="hint" v-if="building.resolvedFilePath">共享路径：{{ building.resolvedFilePath }}</div>
-                <div class="hint" v-else-if="building.statusKey === 'consumed' && building.relativePath">已消费并删除：{{ building.relativePath }}</div>
+                <div class="hint" v-else-if="building.relativePath">缓存文件：{{ building.relativePath }}</div>
               </div>
             </div>
             <div class="hint" v-else style="margin-top:10px;">当前没有可展示的楼栋告警文件状态。</div>
