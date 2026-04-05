@@ -880,14 +880,37 @@ createApp({
         const runtime = internalRuntimeOverview.value || {};
         const currentRefresh = runtime.currentHourRefresh || {};
         const failureText = String(currentRefresh.lastError || runtime.poolErrorText || runtime.errorText || "").trim();
+        const currentProblemSlots = Array.isArray(runtime.slots)
+          ? runtime.slots.filter((slot) =>
+            Boolean(slot?.suspended) || ["failed"].includes(String(slot?.loginState || "").trim().toLowerCase()))
+          : [];
+        const currentProblemFamilies = Array.isArray(runtime.families)
+          ? runtime.families.filter((family) => Boolean(family?.hasFailures) || Boolean(family?.hasBlocked))
+          : [];
+        const hasCurrentFailure = Boolean(
+          (Array.isArray(currentRefresh.failedBuildings) && currentRefresh.failedBuildings.length)
+          || (Array.isArray(currentRefresh.blockedBuildings) && currentRefresh.blockedBuildings.length)
+          || currentProblemSlots.length
+          || currentProblemFamilies.length,
+        );
         let tone = runtime.tone || "neutral";
         let statusText = runtime.statusText || "等待内网运行态";
         let reasonText = runtime.summaryText || "当前没有足够的内网运行态摘要。";
         let actionText = "先确认浏览器池和共享目录是否正常，再决定是否触发下载。";
-        if (failureText) {
+        if (hasCurrentFailure) {
           tone = "danger";
           statusText = "当前有需要人工处理的问题";
-          reasonText = failureText;
+          if (currentRefresh.failedBuildings?.length || currentRefresh.blockedBuildings?.length) {
+            reasonText = currentRefresh.summaryText || failureText || runtime.summaryText || "";
+          } else if (currentProblemSlots.length) {
+            const slot = currentProblemSlots[0] || {};
+            reasonText = `${slot.building || "-"} ${slot.detailText || slot.stateText || "当前楼栋状态异常"}`;
+          } else if (currentProblemFamilies.length) {
+            const family = currentProblemFamilies[0] || {};
+            reasonText = family.statusText || failureText || runtime.summaryText || "";
+          } else {
+            reasonText = failureText || runtime.summaryText || "";
+          }
           actionText = "优先看失败楼栋或登录失败楼，再决定是否重新下载当前小时或手动拉取告警。";
         } else if (currentRefresh.tone === "warning" || currentRefresh.tone === "info") {
           tone = currentRefresh.tone || "warning";

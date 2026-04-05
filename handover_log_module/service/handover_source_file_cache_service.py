@@ -29,6 +29,17 @@ class HandoverSourceFileCacheService:
         self.handover_cfg = handover_cfg if isinstance(handover_cfg, dict) else {}
         self._business_root_override = Path(business_root_override) if business_root_override else None
 
+    def _deployment_role_mode(self) -> str:
+        text = str(self.handover_cfg.get("_deployment_role_mode", "") or "").strip().lower()
+        if text in {"internal", "external"}:
+            return text
+        return ""
+
+    def _local_cache_enabled(self) -> bool:
+        if self._business_root_override is not None:
+            return True
+        return self._deployment_role_mode() != "external"
+
     def _business_root(self) -> Path:
         if self._business_root_override is not None:
             root = self._business_root_override
@@ -63,18 +74,22 @@ class HandoverSourceFileCacheService:
 
     def cache_root(self) -> Path:
         root = self._business_root() / self.SHARED_ROOT_NAME
-        root.mkdir(parents=True, exist_ok=True)
+        if self._local_cache_enabled():
+            root.mkdir(parents=True, exist_ok=True)
         return root
 
     def download_cache_root(self) -> Path:
         root = self.cache_root() / self.DOWNLOAD_CACHE_DIR
-        root.mkdir(parents=True, exist_ok=True)
+        if self._local_cache_enabled():
+            root.mkdir(parents=True, exist_ok=True)
         return root
 
     def _download_index_path(self) -> Path:
         return self.cache_root() / self.DOWNLOAD_INDEX_FILE
 
     def _load_download_index(self) -> Dict[str, Any]:
+        if not self._local_cache_enabled():
+            return {}
         path = self._download_index_path()
         if not path.exists():
             return {}
@@ -92,6 +107,8 @@ class HandoverSourceFileCacheService:
         return output
 
     def _save_download_index(self, payload: Dict[str, Any]) -> None:
+        if not self._local_cache_enabled():
+            return
         path = self._download_index_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
@@ -132,6 +149,8 @@ class HandoverSourceFileCacheService:
         )
 
     def lookup_downloaded_source(self, *, identity: str) -> str:
+        if not self._local_cache_enabled():
+            return ""
         identity_text = str(identity or "").strip()
         if not identity_text:
             return ""
@@ -160,6 +179,8 @@ class HandoverSourceFileCacheService:
         file_path: str,
         emit_log: Callable[[str], None] = print,
     ) -> None:
+        if not self._local_cache_enabled():
+            return
         identity_text = str(identity or "").strip()
         file_text = str(file_path or "").strip()
         if not identity_text or not file_text:
@@ -175,6 +196,79 @@ class HandoverSourceFileCacheService:
         }
         self._save_download_index(payload)
         emit_log(f"[交接班][源文件缓存] 已登记共享源文件 identity={identity_text}, file={file_text}")
+
+    @staticmethod
+    def _parse_download_identity(identity: str) -> Dict[str, str] | None:
+        parts = str(identity or "").split("|")
+        if len(parts) != 7:
+            return None
+        return {
+            "building": str(parts[0] or "").strip(),
+            "template_name": str(parts[1] or "").strip(),
+            "duty_date": str(parts[2] or "").strip(),
+            "duty_shift": str(parts[3] or "").strip().lower(),
+            "start_time": str(parts[4] or "").strip(),
+            "end_time": str(parts[5] or "").strip(),
+            "scale_label": str(parts[6] or "").strip(),
+        }
+
+    @staticmethod
+    def _parse_index_timestamp(value: str) -> datetime:
+        text = str(value or "").strip()
+        if not text:
+            return datetime.min
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return datetime.min
+
+    def find_latest_downloaded_source_for_date(self, *, building: str, duty_date: str) -> str:
+        if not self._local_cache_enabled():
+            return ""
+        building_text = str(building or "").strip()
+        duty_date_text = str(duty_date or "").strip()
+        if not building_text or not duty_date_text:
+            return ""
+        payload = self._load_download_index()
+        best_path = ""
+        best_updated_at = datetime.min
+        mutated = False
+        for identity, record in list(payload.items()):
+            parsed = self._parse_download_identity(identity)
+            if not parsed:
+                continue
+            if parsed.get("building") != building_text or parsed.get("duty_date") != duty_date_text:
+                continue
+            file_path = str(record.get("file_path", "") or "").strip() if isinstance(record, dict) else ""
+            if not file_path:
+                payload.pop(identity, None)
+                mutated = True
+                continue
+            path = Path(file_path)
+            if not path.exists():
+                payload.pop(identity, None)
+                mutated = True
+                continue
+            try:
+                self._validate_cached_source(path)
+            except Exception:
+                payload.pop(identity, None)
+                mutated = True
+                continue
+            updated_at = self._parse_index_timestamp(record.get("updated_at", "") if isinstance(record, dict) else "")
+            if updated_at == datetime.min:
+                try:
+                    updated_at = datetime.fromtimestamp(path.stat().st_mtime)
+                except Exception:  # noqa: BLE001
+                    updated_at = datetime.min
+            if updated_at >= best_updated_at:
+                best_updated_at = updated_at
+                best_path = str(path)
+        if mutated:
+            self._save_download_index(payload)
+        return best_path
 
     @staticmethod
     def _sanitize_path_part(value: str) -> str:
@@ -202,6 +296,8 @@ class HandoverSourceFileCacheService:
             current = current.parent
 
     def is_managed_path(self, path: str | Path) -> bool:
+        if not self._local_cache_enabled():
+            return False
         raw_path = Path(path)
         try:
             raw_path.resolve().relative_to(self.cache_root().resolve())
@@ -240,6 +336,15 @@ class HandoverSourceFileCacheService:
         previous_stored_path: str = "",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
+        if not self._local_cache_enabled():
+            return {
+                "managed": False,
+                "stored_path": str(source_path or "").strip(),
+                "original_name": Path(str(original_name or "").strip() or "source.xlsx").name,
+                "stored_at": _now_text(),
+                "cleanup_status": "",
+                "cleanup_at": "",
+            }
         source = Path(str(source_path or "").strip())
         if not source.exists():
             raise FileNotFoundError(f"source file missing before cache persist: {source}")
@@ -303,6 +408,8 @@ class HandoverSourceFileCacheService:
         *,
         emit_log: Callable[[str], None] = print,
     ) -> bool:
+        if not self._local_cache_enabled():
+            return False
         raw = str(stored_path or "").strip()
         if not raw:
             return False
@@ -326,6 +433,8 @@ class HandoverSourceFileCacheService:
         referenced_paths: Iterable[str],
         emit_log: Callable[[str], None] = print,
     ) -> int:
+        if not self._local_cache_enabled():
+            return 0
         cache_root = self.cache_root()
         referenced: set[str] = set()
         for item in referenced_paths:

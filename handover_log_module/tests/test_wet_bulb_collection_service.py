@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 
@@ -54,6 +54,14 @@ def _build_success_target(*, target_kind: str = "base_token_pair") -> dict:
         "wiki_node_token": configured_token if target_kind == "wiki_token_pair" else "",
         "message": "",
         "resolved_at": "2026-03-27 16:00:00",
+    }
+
+
+def _build_runtime_config_for_run(*, enable_auto_switch_wifi: bool) -> dict:
+    return {
+        "network": {"enable_auto_switch_wifi": enable_auto_switch_wifi},
+        "handover_log": {"download": {"switch_to_internal_before_download": False}},
+        "wet_bulb_collection": {"enabled": True, "target": {"app_token": "configured_token", "table_id": "table_demo"}},
     }
 
 
@@ -118,33 +126,57 @@ def test_building_sequence_text_maps_building_to_text_number(building: str, expe
     assert WetBulbCollectionService._building_sequence_text(building) == expected  # noqa: SLF001
 
 
+def test_resolve_cooling_mode_prefers_code_1_when_multiple_modes_active() -> None:
+    service = WetBulbCollectionService({})
+    hits = {
+        "chiller_mode_1": MetricHit("chiller_mode_1", 1, "1号冷机模式", 2, "", ""),
+        "chiller_mode_2": MetricHit("chiller_mode_2", 2, "2号冷机模式", 1, "", ""),
+        "chiller_mode_3": MetricHit("chiller_mode_3", 3, "3号冷机模式", 4, "", ""),
+        "chiller_mode_4": MetricHit("chiller_mode_4", 4, "4号冷机模式", 4, "", ""),
+        "chiller_mode_5": MetricHit("chiller_mode_5", 5, "5号冷机模式", 4, "", ""),
+        "chiller_mode_6": MetricHit("chiller_mode_6", 6, "6号冷机模式", 4, "", ""),
+    }
+    effective_config = {
+        "chiller_mode": {
+            "west_keys": ["chiller_mode_1", "chiller_mode_2", "chiller_mode_3"],
+            "east_keys": ["chiller_mode_4", "chiller_mode_5", "chiller_mode_6"],
+        }
+    }
+
+    result = service._resolve_cooling_mode_value(hits=hits, effective_config=effective_config, cfg=_build_cfg())  # noqa: SLF001
+
+    assert result["source_code"] == "1"
+    assert result["source_text"] == "制冷"
+    assert result["upload_text"] == "机械制冷"
+
+
 class _FakeDownloadService:
     should_mark_switched = False
     switched_external_calls = 0
     last_config = None
     success_building = "A楼"
 
-    def __init__(self, config):
+    def __init__(self, config, download_browser_pool=None):  # noqa: ARG002
         self.config = config
         self.did_switch_internal_this_run = False
         type(self).last_config = config
 
-    def run(self, buildings=None, reuse_cached=True, emit_log=print):
+    def run(self, buildings=None, reuse_cached=True, emit_log=print):  # noqa: ARG002
         self.did_switch_internal_this_run = bool(type(self).should_mark_switched)
         return {
             "success_files": [{"building": type(self).success_building, "file_path": "fake.xlsx"}],
             "failed": [],
         }
 
-    def switch_external_after_download(self, emit_log=print):
+    def switch_external_after_download(self, emit_log=print):  # noqa: ARG002
         type(self).switched_external_calls += 1
 
 
 class _FakeExtractService:
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, config):  # noqa: ARG002
+        pass
 
-    def extract(self, building, data_file):
+    def extract(self, building, data_file):  # noqa: ARG002
         return {
             "hits": {
                 "wet_bulb": MetricHit("wet_bulb", 1, "室外湿球温度", 26.4, "", ""),
@@ -170,21 +202,13 @@ class _FakeClient:
     clear_calls = 0
     clear_deleted_count = 0
 
-    def clear_table(self, **kwargs):
+    def clear_table(self, **kwargs):  # noqa: ARG002
         type(self).clear_calls += 1
         return type(self).clear_deleted_count
 
     def batch_create_records(self, **kwargs):
         type(self).last_fields_list = kwargs.get("fields_list")
         return [{"record_id": "rec_new"}]
-
-
-def _build_runtime_config_for_run(*, enable_auto_switch_wifi: bool) -> dict:
-    return {
-        "network": {"enable_auto_switch_wifi": enable_auto_switch_wifi},
-        "handover_log": {"download": {"switch_to_internal_before_download": False}},
-        "wet_bulb_collection": {"enabled": True, "target": {"app_token": "configured_token", "table_id": "table_demo"}},
-    }
 
 
 def test_run_uses_datetime_timestamp_and_target_descriptor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,3 +280,35 @@ def test_run_fails_early_when_target_preview_is_invalid(monkeypatch: pytest.Monk
             "code": "target_invalid",
         }
     ]
+
+
+def test_continue_from_source_units_logs_runtime_error_failure_in_chinese(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = WetBulbCollectionService(_build_runtime_config_for_run(enable_auto_switch_wifi=False))
+    logs: list[str] = []
+
+    monkeypatch.setattr(
+        service,
+        "build_target_descriptor",
+        lambda cfg=None, force_refresh=False: _build_success_target(target_kind="wiki_token_pair"),
+    )
+    monkeypatch.setattr(wet_bulb_collection_module, "load_handover_config", lambda runtime: runtime.get("handover_log", {}))
+
+    class _ExplodingExtractService:
+        def __init__(self, config):  # noqa: ARG002
+            pass
+
+        def extract(self, building, data_file):  # noqa: ARG002
+            raise RuntimeError("page_timeout")
+
+    monkeypatch.setattr(wet_bulb_collection_module, "HandoverExtractService", _ExplodingExtractService)
+
+    result = service.continue_from_source_units(
+        source_units=[{"building": "E楼", "file_path": "fake.xlsx"}],
+        emit_log=logs.append,
+        cfg=_build_cfg(),
+        target_descriptor=_build_success_target(target_kind="wiki_token_pair"),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failed_buildings"] == [{"building": "E楼", "error": "页面超时", "code": "page_timeout"}]
+    assert any("[湿球温度定时采集][E楼] 提取失败: 页面超时" in line for line in logs)

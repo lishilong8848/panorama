@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -32,38 +33,53 @@ def _base_config() -> dict:
     }
 
 
-def test_ensure_internal_ready_uses_probe_when_auto_switch_disabled(monkeypatch) -> None:  # noqa: ANN001
+def test_ensure_internal_ready_skips_probe_when_auto_switch_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    messages: list[str] = []
+    service = module.HandoverDownloadService(_base_config())
+
+    def _probe_should_not_run(**_kwargs):
+        raise AssertionError("internal fixed-network flow should skip reachability probe")
+
+    monkeypatch.setattr(module, "probe_internal_reachability", _probe_should_not_run)
+
+    service.ensure_internal_ready(messages.append)
+
+    assert any("按当前网络直接执行内网阶段" in item for item in messages)
+    assert not any("探活" in item for item in messages)
+
+
+def test_ensure_external_ready_still_uses_probe_when_auto_switch_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     messages: list[str] = []
     service = module.HandoverDownloadService(_base_config())
     monkeypatch.setattr(
         module,
-        "probe_internal_reachability",
-        lambda **kwargs: {
+        "probe_external_reachability",
+        lambda **_kwargs: {
             "reachable": True,
-            "successful_host": "192.168.210.50",
-            "attempted_hosts": [site["host"] for site in kwargs["sites"]],
+            "host": "open.feishu.cn",
+            "port": 443,
             "error": "",
         },
     )
 
-    service.ensure_internal_ready(messages.append)
+    service.ensure_external_ready(messages.append)
 
-    assert any("当前角色不使用单机切网" in item for item in messages)
-    assert any("内网探活成功" in item for item in messages)
+    assert any("直接探测external网络可达性" in item for item in messages)
+    assert any("外网探活成功" in item for item in messages)
 
 
-def test_ensure_internal_ready_raises_probe_failure_instead_of_ssid_error(monkeypatch) -> None:  # noqa: ANN001
+def test_ensure_external_ready_raises_probe_failure_when_probe_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     service = module.HandoverDownloadService(_base_config())
     monkeypatch.setattr(
         module,
-        "probe_internal_reachability",
+        "probe_external_reachability",
         lambda **_kwargs: {
             "reachable": False,
-            "successful_host": "",
-            "attempted_hosts": ["192.168.210.50", "192.168.220.50"],
-            "error": "5 个楼栋站点 IP 均不可达",
+            "host": "open.feishu.cn",
+            "port": 443,
+            "error": "外网探活失败",
         },
     )
 
-    with pytest.raises(RuntimeError, match="internal网络探活失败"):
-        service.ensure_internal_ready(lambda _text: None)
+    with pytest.raises(RuntimeError, match="external网络探活失败"):
+        service.ensure_external_ready(lambda _text: None)

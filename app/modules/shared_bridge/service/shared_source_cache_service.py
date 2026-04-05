@@ -31,7 +31,6 @@ from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
 from app.shared.utils.atomic_file import atomic_copy_file, validate_excel_workbook_file
 from handover_log_module.api.facade import load_handover_config
-from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.service.handover_download_service import HandoverDownloadService
 from pipeline_utils import load_download_module
 
@@ -1367,6 +1366,59 @@ class SharedSourceCacheService:
                 return normalized_entry
         return None
 
+    def _get_latest_ready_handover_entry_for_date(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+    ) -> Dict[str, Any] | None:
+        if self.store is None:
+            return None
+        candidates: List[Dict[str, Any]] = []
+        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                duty_date=duty_date,
+                status="ready",
+                limit=50,
+            )
+            candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in candidates:
+            file_path = self._resolve_entry_file_path(entry)
+            if file_path is None:
+                continue
+            effective_context = self._resolve_handover_entry_duty_context(entry)
+            if effective_context["duty_date"] != duty_date:
+                continue
+            normalized_entry = dict(entry)
+            normalized_entry["file_path"] = str(file_path)
+            normalized_entry["duty_date"] = effective_context["duty_date"]
+            normalized_entry["duty_shift"] = effective_context["duty_shift"]
+            return normalized_entry
+        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                bucket_kind="latest",
+                status="ready",
+                limit=50,
+            )
+            candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in candidates:
+            file_path = self._resolve_entry_file_path(entry)
+            if file_path is None:
+                continue
+            effective_context = self._resolve_handover_entry_duty_context(entry)
+            if effective_context["duty_date"] != duty_date:
+                continue
+            normalized_entry = dict(entry)
+            normalized_entry["file_path"] = str(file_path)
+            normalized_entry["duty_date"] = effective_context["duty_date"]
+            normalized_entry["duty_shift"] = effective_context["duty_shift"]
+            return normalized_entry
+        return None
+
     def _handover_shift_boundaries(self) -> tuple[dt_time, dt_time]:
         try:
             cfg = load_handover_config(self.runtime_config)
@@ -1769,9 +1821,37 @@ class SharedSourceCacheService:
         return output
 
     def fill_day_metric_history(self, *, selected_dates: List[str], building_scope: str, building: str | None, emit_log: Callable[[str], None]) -> List[Dict[str, Any]]:
-        service = DayMetricStandaloneUploadService(self.runtime_config, download_browser_pool=self.download_browser_pool)
-        result = service.run_download_only(selected_dates=selected_dates, building_scope=building_scope, building=building, emit_log=emit_log)
-        rows = result.get("downloaded_files", []) if isinstance(result.get("downloaded_files", []), list) else []
+        target_buildings = (
+            [str(building or "").strip()]
+            if str(building_scope or "").strip() == "single"
+            else [str(item or "").strip() for item in self.get_enabled_buildings() if str(item or "").strip()]
+        )
+        target_buildings = [item for item in target_buildings if item]
+        rows: List[Dict[str, str]] = []
+        missing_units: List[str] = []
+        for duty_date in [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]:
+            for building_name in target_buildings:
+                entry = self._get_latest_ready_handover_entry_for_date(
+                    building=building_name,
+                    duty_date=duty_date,
+                )
+                source_file = str(entry.get("file_path", "") or "").strip() if isinstance(entry, dict) else ""
+                if not source_file:
+                    missing_units.append(f"{building_name}({duty_date})")
+                    continue
+                emit_log(
+                    f"[12项历史共享文件补采] 复用交接班源文件: duty_date={duty_date}, "
+                    f"building={building_name}, source={source_file}"
+                )
+                rows.append(
+                    {
+                        "duty_date": duty_date,
+                        "building": building_name,
+                        "source_file": source_file,
+                    }
+                )
+        if missing_units:
+            raise RuntimeError(f"缺少可复用的交接班源文件: {', '.join(missing_units)}")
         output: List[Dict[str, Any]] = []
         for item in rows:
             duty_date = str(item.get("duty_date", "") or "").strip()

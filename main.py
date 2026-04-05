@@ -18,6 +18,26 @@ from app.modules.updater.service.runtime_dependency_sync_service import (  # noq
 )
 
 
+def _configure_console_utf8() -> None:
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
 def _ensure_runtime_dependencies(runtime_config: dict | None = None) -> None:
     print(
         "[启动] 正在检查运行依赖，首次启动或版本更新后可能需要几分钟，请勿关闭此窗口。",
@@ -160,6 +180,7 @@ def _is_loopback_host(value: object) -> bool:
 
 
 def main(argv: list[str] | None = None) -> None:
+    _configure_console_utf8()
     parser = argparse.ArgumentParser(description="全景平台月报控制台入口")
     parser.add_argument("--config", default="", help="覆盖默认配置文件路径")
     parser.add_argument("--host", default="", help="覆盖配置中的 common.console.host")

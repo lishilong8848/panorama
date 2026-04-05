@@ -1852,7 +1852,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       tone = "warning";
       statusText = "未启用";
       summaryText = "当前未启用共享缓存仓。";
-    } else if (families.some((family) => family.hasFailures) || lastError) {
+    } else if (families.some((family) => family.hasFailures || family.hasBlocked) || (!lastSuccessAt && lastError)) {
       tone = "danger";
       statusText = "最近一轮存在失败";
       summaryText = "最近一轮共享文件同步存在失败楼栋，请检查共享目录权限和内网页面登录状态。";
@@ -2036,7 +2036,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
         completedBuildings,
       };
     }
-    if (failedBuildings.length || blockedBuildings.length || lastError) {
+    if (failedBuildings.length || blockedBuildings.length || (!lastSuccessAt && lastError)) {
       let summaryText = "当前小时下载最近一轮存在失败项，请检查对应楼栋的登录态、共享目录权限和下载页面可用性。";
       if (!failedBuildings.length && blockedBuildings.length) {
         summaryText = `以下楼栋正在等待恢复后再继续下载：${blockedBuildings.join(" / ")}`;
@@ -2049,7 +2049,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
         summaryText,
         lastRunAt,
         lastSuccessAt,
-        lastError,
+        lastError: failedBuildings.length || blockedBuildings.length ? lastError : "",
         failedBuildings,
         blockedBuildings,
         runningBuildings,

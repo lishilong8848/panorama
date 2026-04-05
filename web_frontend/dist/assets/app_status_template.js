@@ -415,7 +415,7 @@
           </div>
         </article>
 
-        <article v-if="false" class="status-card">
+        <article v-if="bridgeTasksEnabled" class="status-card">
           <div class="status-card-head">
             <div>
               <span class="status-panel-kicker">共享桥接</span>

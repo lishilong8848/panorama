@@ -135,6 +135,9 @@ class HandoverDownloadService:
         network_cfg = self.config.get("network", {})
         auto_switch_enabled = bool(network_cfg.get("enable_auto_switch_wifi", True))
         if not auto_switch_enabled:
+            if side == "internal":
+                emit_log("[交接班下载] 当前角色不使用单机切网，按当前网络直接执行内网阶段")
+                return
             emit_log(f"[交接班下载] 当前角色不使用单机切网，直接探测{side}网络可达性")
             ready, detail = self._probe_side_reachability(side, emit_log)
             if not ready:

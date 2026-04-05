@@ -2302,7 +2302,11 @@ def test_external_upload_alarm_entries_single_building_keeps_selected_and_older_
 
     monkeypatch.setattr(cache_module, 'FeishuBitableClient', _FakeBitableClient)
 
-    now_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now = datetime.now()
+    now_text = now.strftime('%Y-%m-%d %H:%M:%S')
+    manual_bucket_key = now.strftime('%Y-%m-%d %H:%M:%S')
+    yesterday_bucket_key = (now - timedelta(days=1)).strftime('%Y-%m-%d 16')
+    yesterday_downloaded_at = (now - timedelta(days=1)).strftime('%Y-%m-%d 16:00:00')
     rows = [
         {
             'level': '次要',
@@ -2331,8 +2335,8 @@ def test_external_upload_alarm_entries_single_building_keeps_selected_and_older_
         shared_root=shared_root,
         building='B楼',
         bucket_kind='manual',
-        bucket_key='2026-04-03 09:30:00',
-        downloaded_at='2026-04-03 09:30:00',
+        bucket_key=manual_bucket_key,
+        downloaded_at=now_text,
         rows=rows,
     )
     older_entry = _add_alarm_cache_entry(
@@ -2340,8 +2344,8 @@ def test_external_upload_alarm_entries_single_building_keeps_selected_and_older_
         shared_root=shared_root,
         building='B楼',
         bucket_kind='latest',
-        bucket_key='2026-04-02 16',
-        downloaded_at='2026-04-02 16:00:00',
+        bucket_key=yesterday_bucket_key,
+        downloaded_at=yesterday_downloaded_at,
         rows=rows,
     )
 
@@ -2355,7 +2359,7 @@ def test_external_upload_alarm_entries_single_building_keeps_selected_and_older_
         source_family=FAMILY_ALARM_EVENT,
         building='B楼',
         bucket_kind='manual',
-        bucket_key='2026-04-03 09:30:00',
+        bucket_key=manual_bucket_key,
         status='ready',
         limit=1,
     )
@@ -2363,7 +2367,7 @@ def test_external_upload_alarm_entries_single_building_keeps_selected_and_older_
         source_family=FAMILY_ALARM_EVENT,
         building='B楼',
         bucket_kind='latest',
-        bucket_key='2026-04-02 16',
+        bucket_key=yesterday_bucket_key,
         status='ready',
         limit=1,
     )

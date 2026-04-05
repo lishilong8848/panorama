@@ -827,26 +827,29 @@ class HandoverOrchestrator:
             }
             review_session: Dict[str, Any] = {}
             if duty_date_text and duty_shift_text and result.output_file:
+                managed_source_file_cache: Dict[str, Any] = {}
+                previous_managed_source_path = ""
                 if str(source_mode or "").strip().lower() == "from_file":
-                    session_id = self._review_session_service.build_session_id(building, duty_date_text, duty_shift_text)
-                    previous_session = self._review_session_service.get_session_by_id(session_id)
-                    previous_source_cache = (
-                        previous_session.get("source_file_cache", {})
-                        if isinstance(previous_session, dict) and isinstance(previous_session.get("source_file_cache", {}), dict)
-                        else {}
-                    )
-                    previous_managed_source_path = str(previous_source_cache.get("stored_path", "")).strip()
-                    managed_source_file_cache = self._managed_source_cache_service().persist_uploaded_source(
-                        source_path=data_file,
-                        building=building,
-                        duty_date=duty_date_text,
-                        duty_shift=duty_shift_text,
-                        session_id=session_id,
-                        original_name=Path(str(data_file or "").strip()).name,
-                        previous_stored_path=previous_managed_source_path,
-                        emit_log=emit_log,
-                    )
-                    result.data_file = str(managed_source_file_cache.get("stored_path", "")).strip() or result.data_file
+                    if self._deployment_role_mode() != "external":
+                        session_id = self._review_session_service.build_session_id(building, duty_date_text, duty_shift_text)
+                        previous_session = self._review_session_service.get_session_by_id(session_id)
+                        previous_source_cache = (
+                            previous_session.get("source_file_cache", {})
+                            if isinstance(previous_session, dict) and isinstance(previous_session.get("source_file_cache", {}), dict)
+                            else {}
+                        )
+                        previous_managed_source_path = str(previous_source_cache.get("stored_path", "")).strip()
+                        managed_source_file_cache = self._managed_source_cache_service().persist_uploaded_source(
+                            source_path=data_file,
+                            building=building,
+                            duty_date=duty_date_text,
+                            duty_shift=duty_shift_text,
+                            session_id=session_id,
+                            original_name=Path(str(data_file or "").strip()).name,
+                            previous_stored_path=previous_managed_source_path,
+                            emit_log=emit_log,
+                        )
+                        result.data_file = str(managed_source_file_cache.get("stored_path", "")).strip() or result.data_file
                 try:
                     review_session = self._review_session_service.register_generated_output(
                         building=building,

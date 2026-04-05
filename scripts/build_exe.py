@@ -57,11 +57,14 @@ EXCLUDE_TOP_LEVEL = {
     ".vscode",
     "__pycache__",
     ".pytest_cache",
+    ".pytest_tmp",
+    ".dev_instances",
     ".runtime",
     "runtime_state",
     "build",
     "dist",
     "build_output",
+    "output",
 }
 
 EXCLUDE_SUFFIX = {".pyc", ".pyo", ".tmp", ".log"}
@@ -72,6 +75,14 @@ PATCH_EXCLUDE_FILE_NAMES = {
     "handover_default.json",
     "handover_config.schema.json",
 }
+EPHEMERAL_NAME_MARKERS = (
+    ".backup.",
+    ".corrupted_",
+    ".extracted_from_pkg.",
+    ".recovered.",
+    ".syntaxfix.",
+)
+EPHEMERAL_NAME_SUFFIXES = (".bak", ".tmp_keep")
 PRESERVE_RELEASE_TOP_LEVEL_DIRS = {
     ".runtime",
     ".venv",
@@ -411,6 +422,15 @@ def _should_exclude(rel: Path, include_venv: bool, include_runtime: bool = True)
         return True
     if rel.parts and rel.parts[0] in EXCLUDE_TOP_LEVEL:
         return True
+    if rel.parts and str(rel.parts[0]).startswith(".tmp_"):
+        return True
+    rel_name = str(rel.name or "").strip().lower()
+    if rel_name.startswith(".tmp_"):
+        return True
+    if any(marker in rel_name for marker in EPHEMERAL_NAME_MARKERS):
+        return True
+    if any(rel_name.endswith(suffix) for suffix in EPHEMERAL_NAME_SUFFIXES):
+        return True
     if not include_runtime and rel.parts and rel.parts[0] == RUNTIME_DIR_NAME:
         return True
     if not include_venv and ".venv" in parts:
@@ -495,6 +515,15 @@ def _file_manifest(root: Path, *, include_venv: bool, include_runtime: bool = Tr
 def _should_exclude_from_patch(rel: Path) -> bool:
     rel_text = str(rel).replace("\\", "/")
     if rel_text.startswith(f"{RUNTIME_DIR_NAME}/"):
+        return True
+    if rel.parts and str(rel.parts[0]).startswith(".tmp_"):
+        return True
+    rel_name = str(rel.name or "").strip().lower()
+    if rel_name.startswith(".tmp_"):
+        return True
+    if any(marker in rel_name for marker in EPHEMERAL_NAME_MARKERS):
+        return True
+    if any(rel_name.endswith(suffix) for suffix in EPHEMERAL_NAME_SUFFIXES):
         return True
     if rel.name in PATCH_EXCLUDE_FILE_NAMES:
         return True

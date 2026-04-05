@@ -78,3 +78,33 @@ def test_update_applier_can_restore_backup_snapshot(tmp_path: Path) -> None:
     assert original_file.read_text(encoding="utf-8") == "old"
     assert removed_file.read_text(encoding="utf-8") == "legacy"
     assert not (app_dir / "added.txt").exists()
+
+
+def test_update_applier_streams_zip_members_without_extractall(tmp_path: Path, monkeypatch) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    patch_zip = tmp_path / "patch.zip"
+    backup_root = tmp_path / "backups"
+
+    with zipfile.ZipFile(patch_zip, "w") as archive:
+        archive.writestr("nested/foo.txt", "patched")
+
+    def _fail_extractall(self, *args, **kwargs):  # noqa: ANN001
+        raise AssertionError("extractall should not be called")
+
+    monkeypatch.setattr(zipfile.ZipFile, "extractall", _fail_extractall)
+
+    applier = UpdateApplier(
+        app_dir=app_dir,
+        runtime_state_root=str(tmp_path / ".runtime"),
+        emit_log=lambda _message: None,
+    )
+
+    result = applier.apply_patch_zip(
+        zip_path=patch_zip,
+        backup_root=backup_root,
+        max_backups=3,
+    )
+
+    assert result["replaced"] == 1
+    assert (app_dir / "nested" / "foo.txt").read_text(encoding="utf-8") == "patched"

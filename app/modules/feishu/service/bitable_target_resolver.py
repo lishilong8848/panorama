@@ -116,12 +116,12 @@ _PROBE_ERROR_HINTS = (
     "something went wrong",
     "temporary",
     "temporarily",
-    "闄愭祦",
-    "瓒呮椂",
-    "杩炴帴",
-    "閴存潈",
-    "鏉冮檺",
-    "鏆傛椂",
+    "限流",
+    "超时",
+    "连接",
+    "鉴权",
+    "权限",
+    "暂时",
 )
 _INVALID_HINTS = (
     "not found",
@@ -207,7 +207,7 @@ class BitableTargetResolver:
 
     def _new_wiki_client(self) -> FeishuSheetsClientRuntime:
         if not self.app_id or not self.app_secret:
-            raise ValueError("椋炰功閰嶇疆缂哄け: common.feishu_auth.app_id/app_secret")
+            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
         return FeishuSheetsClientRuntime(
             app_id=self.app_id,
             app_secret=self.app_secret,
@@ -253,7 +253,7 @@ class BitableTargetResolver:
         params: Dict[str, Any],
         context_label: str,
     ) -> Dict[str, Any]:
-        last_message = f"{context_label} 鎺㈡祴澶辫触"
+        last_message = f"{context_label} 探测失败"
         for auth_attempt in range(2):
             try:
                 token = client.refresh_token(force=auth_attempt > 0)
@@ -271,7 +271,7 @@ class BitableTargetResolver:
                 return {
                     "ok": False,
                     "kind": "probe_error",
-                    "message": f"{context_label} 鎺㈡祴澶辫触: {exc}",
+                    "message": f"{context_label} 探测失败: {exc}",
                 }
 
             status_code = int(getattr(response, "status_code", 0) or 0)
@@ -282,7 +282,7 @@ class BitableTargetResolver:
             body = body if isinstance(body, dict) else {}
 
             if status_code in {401, 403} and auth_attempt == 0:
-                last_message = f"{context_label} 閴存潈澶辫触"
+                last_message = f"{context_label} 鉴权失败"
                 continue
 
             if status_code >= 400:
@@ -290,7 +290,7 @@ class BitableTargetResolver:
                 return {
                     "ok": False,
                     "kind": self._classify_probe_failure(status_code=status_code, body=body),
-                    "message": f"{context_label} 鎺㈡祴澶辫触: {message}",
+                    "message": f"{context_label} 探测失败: {message}",
                 }
 
             if body.get("code") == 0:
@@ -300,7 +300,7 @@ class BitableTargetResolver:
             return {
                 "ok": False,
                 "kind": self._classify_probe_failure(status_code=status_code, body=body),
-                "message": f"{context_label} 鎺㈡祴澶辫触: {message}",
+                "message": f"{context_label} 探测失败: {message}",
             }
 
         return {"ok": False, "kind": "probe_error", "message": last_message}
@@ -334,7 +334,7 @@ class BitableTargetResolver:
             client,
             url=client.WIKI_GET_NODE_URL,
             params={"token": str(node_token or "").strip()},
-            context_label="Wiki 鑺傜偣",
+            context_label="Wiki 节点",
         )
         if not result.get("ok"):
             return result
@@ -357,7 +357,7 @@ class BitableTargetResolver:
             return {
                 "ok": False,
                 "kind": "invalid",
-                "message": "Wiki 鑺傜偣鏃犳晥: node_token 涓虹┖",
+                "message": "Wiki 节点无效: node_token 为空",
             }
         return {"ok": True, "node": node_summary}
 
@@ -501,7 +501,7 @@ class BitableTargetResolver:
             table_id = extract_bitable_table_id_from_url(base_url) or explicit_table_id
             if not app_token or not table_id:
                 raise ValueError(
-                    "澶氱淮鐩爣 base_url 鏃犳硶瑙ｆ瀽 app_token/table_id锛岃琛ュ厖 Table ID 鎴栨敼濉爣鍑?Base 閾炬帴"
+                    "多维目标 base_url 无法解析 app_token/table_id，请补充 Table ID 或改填标准 Base 链接"
                 )
             return {
                 "resolved_from": "base_url",
@@ -526,11 +526,11 @@ class BitableTargetResolver:
                 app_token = str(node.get("obj_token", "") or "").strip()
             if not table_id:
                 raise ValueError(
-                    "澶氱淮鐩爣 wiki_url 缂哄皯琛ㄦ爣璇嗭紝璇峰湪閾炬帴涓寘鍚?table 鍙傛暟鎴栧崟鐙～鍐?Table ID"
+                    "多维目标 wiki_url 缺少表标识，请在链接中包含 table 参数或单独填写 Table ID"
                 )
             if not app_token:
                 raise ValueError(
-                    "澶氱淮鐩爣 wiki_url 鏃犳硶瑙ｆ瀽 app_token锛岃鏀瑰～ Base 閾炬帴鎴栧崟鐙～鍐?App Token"
+                    "多维目标 wiki_url 无法解析 app_token，请改填 Base 链接或单独填写 App Token"
                 )
             return {
                 "resolved_from": "wiki_url",
@@ -553,4 +553,4 @@ class BitableTargetResolver:
                 "wiki_obj_type": "",
             }
 
-        raise ValueError("澶氱淮鐩爣閰嶇疆缂哄け: 璇峰～鍐?App Token/Table ID锛屾垨濉啓 Base/Wiki 閾炬帴")
+        raise ValueError("多维目标配置缺失: 请填写 App Token/Table ID，或填写 Base/Wiki 链接")

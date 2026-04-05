@@ -7,7 +7,7 @@
     <input type="text" v-model="config.download.save_dir" />
   </div>
   <div class="hint">
-    该目录下会自动派生：月报下载、交接班日志输出、交接班共享源文件。运行时状态目录固定为程序目录下 .runtime。
+    该目录下会自动派生：月报下载、交接班日志输出。交接班共享源文件目录仅用于内网下载缓存/内部复用，外网主链直接读取共享文件夹。运行时状态目录固定为程序目录下 .runtime。
   </div>
 
   <div class="section-title">交接班路径</div>

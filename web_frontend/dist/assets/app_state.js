@@ -99,6 +99,84 @@ function mapCloudSheetSyncVm(raw) {
   return { text: "云表未执行", tone: "neutral", url, error };
 }
 
+function buildHandoverReviewRowSnapshot(reviewRows, reviewLinks) {
+  const normalizedReviewRows = Array.isArray(reviewRows) ? reviewRows : [];
+  const normalizedReviewLinks = Array.isArray(reviewLinks) ? reviewLinks : [];
+  const reviewMap = new Map();
+  const linkMap = new Map();
+  const orderedBuildings = [...INTERNAL_BUILDINGS];
+
+  normalizedReviewRows.forEach((row) => {
+    const building = String(row?.building || "").trim();
+    if (!building) return;
+    if (!reviewMap.has(building)) {
+      reviewMap.set(building, row || {});
+    }
+    if (!orderedBuildings.includes(building)) {
+      orderedBuildings.push(building);
+    }
+  });
+
+  normalizedReviewLinks.forEach((row) => {
+    const building = String(row?.building || "").trim();
+    const url = String(row?.url || "").trim();
+    if (!building || !url) return;
+    if (!linkMap.has(building)) {
+      linkMap.set(building, {
+        building,
+        code: String(row?.code || "").trim().toLowerCase(),
+        url,
+      });
+    }
+    if (!orderedBuildings.includes(building)) {
+      orderedBuildings.push(building);
+    }
+  });
+
+  return orderedBuildings.map((building) => {
+    const reviewRow = reviewMap.get(building) || null;
+    const link = linkMap.get(building) || null;
+    let status = "missing";
+    let text = "未生成";
+    let tone = "neutral";
+
+    if (reviewRow) {
+      if (reviewRow?.has_session) {
+        if (reviewRow?.confirmed) {
+          status = "confirmed";
+          text = "已确认";
+          tone = "success";
+        } else {
+          status = "pending";
+          text = "待确认";
+          tone = "warning";
+        }
+      }
+    } else if (link?.url) {
+      status = "reachable";
+      text = "可访问";
+      tone = "info";
+    }
+
+    const cloudSheetSyncVm = mapCloudSheetSyncVm(reviewRow?.cloud_sheet_sync || {});
+    return {
+      building,
+      reviewRow,
+      link,
+      status,
+      text,
+      tone,
+      url: link?.url || "",
+      hasUrl: Boolean(String(link?.url || "").trim()),
+      cloudSheetSyncText: cloudSheetSyncVm.text,
+      cloudSheetSyncTone: cloudSheetSyncVm.tone,
+      cloudSheetUrl: cloudSheetSyncVm.url,
+      hasCloudSheetUrl: Boolean(cloudSheetSyncVm.url),
+      cloudSheetError: cloudSheetSyncVm.error,
+    };
+  });
+}
+
 function mapDailyReportAuthVm(raw) {
   const status = String(raw?.status || "").trim().toLowerCase();
   const error = String(raw?.error || "").trim();
@@ -1774,7 +1852,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       tone = "warning";
       statusText = "未启用";
       summaryText = "当前未启用共享缓存仓。";
-    } else if (families.some((family) => family.hasFailures) || lastError) {
+    } else if (families.some((family) => family.hasFailures || family.hasBlocked) || (!lastSuccessAt && lastError)) {
       tone = "danger";
       statusText = "最近一轮存在失败";
       summaryText = "最近一轮共享文件同步存在失败楼栋，请检查共享目录权限和内网页面登录状态。";
@@ -1958,7 +2036,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
         completedBuildings,
       };
     }
-    if (failedBuildings.length || blockedBuildings.length || lastError) {
+    if (failedBuildings.length || blockedBuildings.length || (!lastSuccessAt && lastError)) {
       let summaryText = "当前小时下载最近一轮存在失败项，请检查对应楼栋的登录态、共享目录权限和下载页面可用性。";
       if (!failedBuildings.length && blockedBuildings.length) {
         summaryText = `以下楼栋正在等待恢复后再继续下载：${blockedBuildings.join(" / ")}`;
@@ -1971,7 +2049,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
         summaryText,
         lastRunAt,
         lastSuccessAt,
-        lastError,
+        lastError: failedBuildings.length || blockedBuildings.length ? lastError : "",
         failedBuildings,
         blockedBuildings,
         runningBuildings,
@@ -2334,110 +2412,34 @@ function normalizeInternalDownloadPoolSlot(slot) {
   const handoverAfternoonDecisionText = computed(() =>
     mapSchedulerDecisionText(health.handover_scheduler?.afternoon?.last_decision),
   );
+  const handoverReviewRows = computed(() =>
+    buildHandoverReviewRowSnapshot(
+      Array.isArray(health.handover?.review_status?.buildings) ? health.handover.review_status.buildings : [],
+      Array.isArray(health.handover?.review_links) ? health.handover.review_links : [],
+    ),
+  );
   const handoverReviewStatusItems = computed(() => {
-    const rows = Array.isArray(health.handover?.review_status?.buildings)
-      ? health.handover.review_status.buildings
-      : [];
-    return rows.map((row) => {
-      const building = String(row?.building || "").trim();
-      if (!building) return null;
-      let label = "未确认";
-      if (!row?.has_session) {
-        label = "未生成";
-      } else if (row?.confirmed) {
-        label = "已确认";
-      }
-      return `${building} ${label}`;
-    }).filter(Boolean);
+    return handoverReviewRows.value.map((row) => `${row.building} ${row.text}`).filter(Boolean);
   });
   const handoverReviewLinks = computed(() => {
-    const rows = Array.isArray(health.handover?.review_links) ? health.handover.review_links : [];
-    return rows
-      .map((row) => {
-        const building = String(row?.building || "").trim();
-        const url = String(row?.url || "").trim();
-        if (!building || !url) return null;
-        return {
-          building,
-          code: String(row?.code || "").trim().toLowerCase(),
-          url,
-        };
-      })
-      .filter(Boolean);
+    return handoverReviewRows.value
+      .filter((row) => row.hasUrl)
+      .map((row) => ({
+        building: row.building,
+        code: String(row?.link?.code || "").trim().toLowerCase(),
+        url: row.url,
+      }));
   });
   const handoverReviewMatrix = computed(() => {
-    const rows = Array.isArray(health.handover?.review_status?.buildings)
-      ? health.handover.review_status.buildings
-      : [];
-    const links = Array.isArray(handoverReviewLinks.value) ? handoverReviewLinks.value : [];
-    const orderedBuildings = [];
-    rows.forEach((row) => {
-      const building = String(row?.building || "").trim();
-      if (building && !orderedBuildings.includes(building)) orderedBuildings.push(building);
-    });
-    links.forEach((row) => {
-      const building = String(row?.building || "").trim();
-      if (building && !orderedBuildings.includes(building)) orderedBuildings.push(building);
-    });
-    return orderedBuildings.map((building) => {
-      const statusRow = rows.find((row) => String(row?.building || "").trim() === building) || null;
-      const link = links.find((row) => row.building === building) || null;
-      if (!statusRow) {
-        return {
-          building,
-          status: "reachable",
-          text: "可访问",
-          tone: "info",
-          url: link?.url || "",
-        };
-      }
-      if (!statusRow?.has_session) {
-        return {
-          building,
-          status: "missing",
-          text: "未生成",
-          tone: "neutral",
-          url: link?.url || "",
-        };
-      }
-      if (statusRow?.confirmed) {
-        return {
-          building,
-          status: "confirmed",
-          text: "已确认",
-          tone: "success",
-          url: link?.url || "",
-        };
-      }
-      return {
-        building,
-        status: "pending",
-        text: "待确认",
-        tone: "warning",
-        url: link?.url || "",
-      };
-    });
+    return handoverReviewRows.value.map((row) => ({
+      building: row.building,
+      status: row.status,
+      text: row.text,
+      tone: row.tone,
+      url: row.url,
+    }));
   });
-  const handoverReviewBoardRows = computed(() => {
-    return handoverReviewMatrix.value.map((item) => {
-      const link = (handoverReviewLinks.value || []).find((row) => row.building === item.building);
-      const reviewRow =
-        (Array.isArray(health.handover?.review_status?.buildings) ? health.handover.review_status.buildings : []).find(
-          (row) => String(row?.building || "").trim() === item.building,
-        ) || {};
-      const cloudSheetSyncVm = mapCloudSheetSyncVm(reviewRow?.cloud_sheet_sync || {});
-      return {
-        ...item,
-        url: link?.url || "",
-        hasUrl: Boolean(String(link?.url || "").trim()),
-        cloudSheetSyncText: cloudSheetSyncVm.text,
-        cloudSheetSyncTone: cloudSheetSyncVm.tone,
-        cloudSheetUrl: cloudSheetSyncVm.url,
-        hasCloudSheetUrl: Boolean(cloudSheetSyncVm.url),
-        cloudSheetError: cloudSheetSyncVm.error,
-      };
-    });
-  });
+  const handoverReviewBoardRows = computed(() => handoverReviewRows.value);
   const dashboardSystemStatusItems = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment.role_mode || "");
     const items = [

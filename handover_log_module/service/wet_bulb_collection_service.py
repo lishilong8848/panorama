@@ -287,6 +287,20 @@ class WetBulbCollectionService:
         }
         return mapping.get(str(building or "").strip(), "")
 
+    @staticmethod
+    def _describe_extract_error(code: Any) -> str:
+        text = str(code or "").strip() or "extract_failed"
+        mapping = {
+            "cooling_mode_stopped_skipped": "冷源运行模式为停机，已跳过",
+            "cooling_mode_ambiguous": "冷源运行模式同时命中多个值",
+            "unknown_cooling_mode": "无法识别冷源运行模式",
+            "invalid_wet_bulb_temp": "无法解析湿球温度",
+            "unknown_building_sequence": "未识别楼栋序号",
+            "page_timeout": "页面超时",
+            "extract_failed": "提取失败",
+        }
+        return mapping.get(text, text)
+
     def list_existing_records(self, cfg: Dict[str, Any], emit_log: Callable[[str], None] = print) -> List[Dict[str, Any]]:
         target = cfg.get("target", {})
         target_descriptor = self.build_target_descriptor(cfg)
@@ -359,6 +373,11 @@ class WetBulbCollectionService:
             if isinstance(cooling_cfg.get("upload_value_map", {}), dict)
             else {}
         )
+        priority_order = [
+            str(item).strip()
+            for item in cooling_cfg.get("priority_order", [])
+            if str(item).strip()
+        ]
         skip_modes = {
             str(item).strip()
             for item in cooling_cfg.get("skip_modes", [])
@@ -395,7 +414,7 @@ class WetBulbCollectionService:
             return ""
 
         all_mode_hits: List[tuple[str, str, str]] = []
-        active_modes: Dict[str, Dict[str, str]] = {}
+        active_modes_by_code: Dict[str, Dict[str, str]] = {}
         for metric_key in ordered_keys:
             hit = hits.get(metric_key)
             if hit is None:
@@ -409,17 +428,30 @@ class WetBulbCollectionService:
             all_mode_hits.append((source_text, mode_code, metric_key))
             if source_text in skip_modes:
                 continue
-            active_modes[source_text] = {"mode_code": mode_code, "metric_key": metric_key}
+            active_modes_by_code.setdefault(
+                mode_code,
+                {
+                    "mode_code": mode_code,
+                    "metric_key": metric_key,
+                    "source_text": source_text,
+                },
+            )
 
-        if not active_modes:
+        if not active_modes_by_code:
             if all_mode_hits:
                 raise RuntimeError("cooling_mode_stopped_skipped")
             raise ValueError("unknown_cooling_mode")
-        if len(active_modes) > 1:
-            raise RuntimeError("cooling_mode_ambiguous")
+        resolved_meta: Dict[str, str] | None = None
+        if len(active_modes_by_code) > 1:
+            for preferred_code in priority_order:
+                candidate = active_modes_by_code.get(preferred_code)
+                if candidate is not None:
+                    resolved_meta = candidate
+                    break
+        if resolved_meta is None:
+            resolved_meta = next(iter(active_modes_by_code.values()))
 
-        source_text = next(iter(active_modes.keys()))
-        resolved_meta = active_modes[source_text]
+        source_text = str(resolved_meta.get("source_text", "")).strip()
         upload_text = str(upload_map.get(source_text, "")).strip()
         if not upload_text:
             raise ValueError("unknown_cooling_mode")
@@ -618,11 +650,14 @@ class WetBulbCollectionService:
                     )
                     emit_log(f"[湿球温度定时采集][{building}] 跳过: 冷源运行模式为停机")
                 else:
-                    failed_buildings.append({"building": building, "error": code, "code": code})
+                    error_text = self._describe_extract_error(code)
+                    failed_buildings.append({"building": building, "error": error_text, "code": code})
+                    emit_log(f"[湿球温度定时采集][{building}] 提取失败: {error_text}")
             except Exception as exc:
                 code = str(exc).strip() or "extract_failed"
-                failed_buildings.append({"building": building, "error": code, "code": code})
-                emit_log(f"[湿球温度定时采集][{building}] 提取失败: {code}")
+                error_text = self._describe_extract_error(code)
+                failed_buildings.append({"building": building, "error": error_text, "code": code})
+                emit_log(f"[湿球温度定时采集][{building}] 提取失败: {error_text}")
 
         if prepared_rows:
             client = self._new_client(normalized_cfg, target_descriptor=resolved_target)

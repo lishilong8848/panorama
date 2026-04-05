@@ -103,6 +103,16 @@ def test_smoke_import_modules_include_updater_modules() -> None:
     assert "app.modules.updater.core.versioning" in module.SMOKE_IMPORT_MODULES
 
 
+def test_patch_build_excludes_temp_and_backup_artifacts() -> None:
+    assert module._should_exclude(Path(".tmp_runtime_tests/shared_bridge_monthly_runtime/artifact.xlsx"), include_venv=False)
+    assert module._should_exclude(Path(".tmp_fix_bridge_store.py"), include_venv=False)
+    assert module._should_exclude(Path("output/run.log"), include_venv=False)
+    assert module._should_exclude(Path("表格计算配置.backup.20260403-081043.json"), include_venv=False)
+    assert module._should_exclude(Path("表格计算部分代码.py.recovered.tmp_keep"), include_venv=False)
+    assert module._should_exclude_from_patch(Path(".tmp_runtime_tests/shared_bridge_monthly_runtime/artifact.xlsx"))
+    assert module._should_exclude_from_patch(Path("表格计算配置.backup.20260403-081043.json"))
+
+
 def test_ensure_release_tree_imports_raises_when_import_check_fails(monkeypatch, tmp_path: Path) -> None:
     class _Result:
         def __init__(self) -> None:

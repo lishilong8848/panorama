@@ -2103,6 +2103,8 @@ class SharedBridgeRuntimeService:
             else:
                 raise RuntimeError(f"不支持的共享缓存补采类型: {continuation_kind or '-'}")
             if not cached_entries:
+                if continuation_kind == "day_metric":
+                    raise RuntimeError("缺少可复用的交接班源文件")
                 raise RuntimeError("共享缓存补采未生成任何源文件")
             stage_result = {
                 "status": "ready_for_external",

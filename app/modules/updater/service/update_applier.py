@@ -4,10 +4,10 @@ import json
 import shutil
 import zipfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List
 
-from app.shared.utils.runtime_temp_workspace import cleanup_runtime_temp_dir, create_runtime_temp_dir
+from app.shared.utils.atomic_file import atomic_write_file
 
 
 BACKUP_MANIFEST_NAME = "backup_manifest.json"
@@ -28,21 +28,36 @@ class UpdateApplier:
     def _log(self, text: str) -> None:
         self.emit_log(f"[Updater] {text}")
 
-    def _runtime_config_for_temp(self) -> Dict[str, Dict[str, str]] | None:
-        if not self.runtime_state_root:
-            return None
-        return {"paths": {"runtime_state_root": self.runtime_state_root}}
-
     @staticmethod
-    def _read_patch_meta(extracted_root: Path) -> Dict[str, Any]:
-        path = extracted_root / "patch_meta.json"
-        if not path.exists():
+    def _read_patch_meta_from_archive(archive: zipfile.ZipFile) -> Dict[str, Any]:
+        try:
+            raw = archive.read("patch_meta.json")
+        except KeyError:
             return {}
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(raw.decode("utf-8"))
             return payload if isinstance(payload, dict) else {}
         except Exception:  # noqa: BLE001
             return {}
+
+    @staticmethod
+    def _normalize_archive_member(filename: str) -> Path | None:
+        text = str(filename or "").replace("\\", "/").strip()
+        if not text or text.endswith("/"):
+            return None
+        pure = PurePosixPath(text.lstrip("/"))
+        parts = [str(part or "").strip() for part in pure.parts]
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            return None
+        return Path(*parts)
+
+    @staticmethod
+    def _write_archive_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo, target: Path) -> None:
+        def _writer(temp_path: Path) -> None:
+            with archive.open(info, "r") as source_handle, temp_path.open("wb") as target_handle:
+                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+
+        atomic_write_file(target, _writer, temp_suffix=".updating")
 
     @staticmethod
     def _prune_backups(backup_root: Path, max_backups: int) -> None:
@@ -108,19 +123,9 @@ class UpdateApplier:
         replaced = 0
         deleted = 0
         created_files: List[str] = []
-        temp_dir = create_runtime_temp_dir(
-            kind="updater_patch_apply",
-            runtime_config=self._runtime_config_for_temp(),
-            app_dir=self.app_dir,
-        )
-        patch_meta: Dict[str, Any] = {}
-        try:
-            extracted = temp_dir / "patch"
-            extracted.mkdir(parents=True, exist_ok=True)
-            with zipfile.ZipFile(zip_path, "r") as archive:
-                archive.extractall(extracted)
 
-            patch_meta = self._read_patch_meta(extracted)
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            patch_meta = self._read_patch_meta_from_archive(archive)
             delete_list: List[str] = []
             if isinstance(patch_meta.get("deleted_files"), list):
                 delete_list = [
@@ -129,10 +134,12 @@ class UpdateApplier:
                     if str(item).strip()
                 ]
 
-            for src in sorted(extracted.rglob("*")):
-                if not src.is_file():
+            for info in sorted(archive.infolist(), key=lambda item: item.filename):
+                if info.is_dir():
                     continue
-                rel = src.relative_to(extracted)
+                rel = self._normalize_archive_member(info.filename)
+                if rel is None:
+                    continue
                 rel_text = str(rel).replace("\\", "/")
                 if rel_text in {"patch_meta.json", "latest_patch.json"}:
                     continue
@@ -144,7 +151,7 @@ class UpdateApplier:
                 else:
                     created_files.append(rel_text)
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
+                self._write_archive_member(archive, info, dst)
                 replaced += 1
 
             for rel_text in delete_list:
@@ -162,14 +169,7 @@ class UpdateApplier:
                     shutil.rmtree(dst)
                     deleted += 1
 
-            self._write_backup_manifest(snapshot, created_files)
-        finally:
-            cleanup_runtime_temp_dir(
-                temp_dir,
-                runtime_config=self._runtime_config_for_temp(),
-                app_dir=self.app_dir,
-            )
-
+        self._write_backup_manifest(snapshot, created_files)
         self._prune_backups(backup_root, max_backups=max_backups)
         self._log(f"补丁应用完成: replaced={replaced}, deleted={deleted}, backup={snapshot}")
         return {
@@ -223,4 +223,3 @@ class UpdateApplier:
             "removed_created": removed,
             "backup": str(snapshot),
         }
-

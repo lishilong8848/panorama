@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import signal
@@ -16,11 +16,33 @@ PORTABLE_LAUNCHER_ENV = "QJPT_PORTABLE_LAUNCHER"
 DISABLE_BROWSER_AUTO_OPEN_ENV = "QJPT_DISABLE_BROWSER_AUTO_OPEN"
 
 
+def _configure_console_utf8() -> None:
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
 def _build_child_env(*, disable_browser_auto_open: bool = False) -> dict[str, str]:
     env = dict(os.environ)
     env[RESTART_EXIT_CODE_ENV] = str(RESTART_EXIT_CODE)
     env[PORTABLE_LAUNCHER_ENV] = "1"
     env["NODE_NO_WARNINGS"] = "1"
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     if disable_browser_auto_open:
         env[DISABLE_BROWSER_AUTO_OPEN_ENV] = "1"
     else:
@@ -40,6 +62,7 @@ def _spawn_child(*, disable_browser_auto_open: bool = False) -> subprocess.Popen
 
 
 def main() -> int:
+    _configure_console_utf8()
     if not MAIN_FILE.exists():
         print(f"[ERROR] 未找到启动文件: {MAIN_FILE}", file=sys.stderr)
         return 1
@@ -85,3 +108,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
