@@ -1986,7 +1986,7 @@ createApp({
 
     async function activateStartupRuntimeAfterSelection(source, options = {}) {
       const targetRole = normalizeDeploymentRoleMode(
-        options?.targetRoleMode || config.value?.deployment?.role_mode || startupRoleSelectorSelection.value || startupRoleCurrentMode.value,
+        options?.targetRoleMode || startupRoleSelectorSelection.value || config.value?.deployment?.role_mode || startupRoleCurrentMode.value,
       );
       showStartupRoleLoading({
         title: `正在加载${formatDeploymentRoleLabel(targetRole || "internal")}`,
@@ -2052,7 +2052,9 @@ createApp({
           subtitle: "角色配置无需变更，正在进入对应页面。",
           stage: "activating",
         });
-        const activated = await activateStartupRuntimeAfterSelection("startup_role_confirm");
+        const activated = await activateStartupRuntimeAfterSelection("startup_role_confirm", {
+          targetRoleMode: targetRole,
+        });
         if (!activated) {
           startupRoleSelectorBusy.value = false;
           showStartupRoleSelector("后台运行时激活失败。");
@@ -2119,7 +2121,7 @@ createApp({
           config.value = previousConfig;
           showStartupRoleSelector(
             saveResult?.reason === "invalid"
-              ? "当前配置校验失败，请检查启动角色参数或其余配置。"
+              ? String(saveResult?.error || "").trim() || "当前配置校验失败，请检查启动角色参数或其余配置。"
               : String(saveResult?.error || "").trim() || "保存角色配置失败。",
           );
           return;
@@ -2159,7 +2161,9 @@ createApp({
           subtitle: "配置已保存，正在连接后台运行时。",
           stage: "activating",
         });
-        const activated = await activateStartupRuntimeAfterSelection("startup_role_confirm_after_save");
+        const activated = await activateStartupRuntimeAfterSelection("startup_role_confirm_after_save", {
+          targetRoleMode: targetRole,
+        });
         if (!activated) {
           showStartupRoleSelector("后台运行时激活失败。");
           return;
@@ -2727,6 +2731,9 @@ createApp({
         currentStartupToken: startupRoleCurrentToken.value,
         flowState: startupRoleFlowState.value,
         overlayVisible: updaterUiOverlayVisible.value,
+        selectorVisible: startupRoleSelectorVisible.value,
+        selectorBusy: startupRoleSelectorBusy.value,
+        loadingVisible: startupRoleLoadingVisible.value,
         startupRoleConfirmed: Boolean(health.startup_role_confirmed),
         runtimeActivated: Boolean(health.runtime_activated),
         roleSelectionRequired: Boolean(health.role_selection_required),
@@ -2736,17 +2743,15 @@ createApp({
       }),
       (state) => {
         if (!state.bootstrapReady || !state.configLoaded) return;
-        if (state.overlayVisible) return;
+        if (state.overlayVisible || state.loadingVisible) return;
         const savedRole = normalizeDeploymentRoleMode(state.currentRole);
-        const remoteNeedsRoleSelection = Boolean(state.roleSelectionRequired) || !state.startupRoleConfirmed;
-        const needsRoleSelection = remoteNeedsRoleSelection && state.flowState === "selecting";
         const startupHandoff = currentStartupHandoff();
         const canResumeAfterRestart =
           Boolean(startupHandoff.active)
           && Boolean(startupHandoff.target_role_mode)
           && Boolean(startupHandoff.nonce)
           && startupHandoff.nonce !== startupRoleSuppressedHandoffNonce.value;
-        if (canResumeAfterRestart) {
+        if (canResumeAfterRestart && !state.runtimeActivated) {
           const resumeRole = startupHandoff.target_role_mode || savedRole || startupRoleSelectorSelection.value || "internal";
           const activationKey = `${state.currentStartupToken || ""}|${resumeRole}|${startupHandoff.nonce}|restart_resume`;
           if (startupRoleSelectorBusy.value || startupRoleLoadingVisible.value) return;
@@ -2781,27 +2786,13 @@ createApp({
           })();
           return;
         }
-        if (needsRoleSelection) {
-          clearLegacyStartupRoleRestartState();
-          startupRoleAutoActivationKey.value = "";
-          selectStartupRole(savedRole || startupRoleSelectorSelection.value || "internal");
-          syncStartupRoleBridgeDraft();
-          hideStartupRoleLoading();
-          showStartupRoleSelector("");
-          return;
-        }
-        if (!savedRole) {
-          startupRoleAutoActivationKey.value = "";
-          hideStartupRoleLoading();
-          startupRoleFlowState.value = "selecting";
-          showStartupRoleSelector("请先选择有效角色。");
-          return;
-        }
-        startupRoleDecisionReady.value = true;
-        startupRoleSelectorHandled.value = true;
-        startupRoleSelectorVisible.value = false;
-        const activationKey = `${state.currentStartupToken || ""}|${savedRole}`;
         if (state.runtimeActivated) {
+          const activatedRole =
+            savedRole || normalizeDeploymentRoleMode(startupRoleSelectorSelection.value) || "internal";
+          const activationKey = `${state.currentStartupToken || ""}|${activatedRole}`;
+          startupRoleDecisionReady.value = true;
+          startupRoleSelectorHandled.value = true;
+          startupRoleSelectorVisible.value = false;
           startupRoleAutoActivationKey.value = activationKey;
           hideStartupRoleLoading();
           startupRoleSelectorBusy.value = false;
@@ -2809,31 +2800,13 @@ createApp({
           startupRoleSuppressedHandoffNonce.value = "";
           return;
         }
-        if (startupRoleSelectorBusy.value || startupRoleLoadingVisible.value) return;
-        if (startupRoleAutoActivationKey.value === activationKey) return;
-        startupRoleAutoActivationKey.value = activationKey;
-        startupRoleSelectorBusy.value = true;
-        showStartupRoleLoading({
-          title: `正在加载${formatDeploymentRoleLabel(savedRole)}`,
-          subtitle: "正在应用已保存角色并连接后台运行时。",
-          stage: "activating",
-        });
-        void (async () => {
-          const activated = await activateStartupRuntimeAfterSelection("startup_role_resume", {
-            targetRoleMode: savedRole,
-          });
-          startupRoleSelectorBusy.value = false;
-          if (!activated) {
-            message.value = "已检测到已保存角色，但后台运行时启动失败。";
-            startupRoleAutoActivationKey.value = "";
-            startupRoleFlowState.value = "selecting";
-            hideStartupRoleLoading();
-            showStartupRoleSelector("后台运行时激活失败，请重新确认启动角色。");
-            return;
-          }
-          clearLegacyStartupRoleRestartState();
-          closeStartupRoleSelector({ handled: true });
-        })();
+        if (state.selectorVisible || state.selectorBusy) return;
+        clearLegacyStartupRoleRestartState();
+        startupRoleAutoActivationKey.value = "";
+        selectStartupRole(savedRole || startupRoleSelectorSelection.value || "internal");
+        syncStartupRoleBridgeDraft();
+        hideStartupRoleLoading();
+        showStartupRoleSelector(savedRole ? "" : "请先选择有效角色。");
       },
       { immediate: true, deep: false },
     );

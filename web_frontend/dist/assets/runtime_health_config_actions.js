@@ -1680,7 +1680,12 @@ export function createRuntimeHealthConfigActions(ctx) {
       if (!auto) {
         message.value = payloadState.error || "配置校验失败";
       }
-      return { saved: false, reason: "invalid", restartRequired: false };
+      return {
+        saved: false,
+        reason: "invalid",
+        restartRequired: false,
+        error: payloadState.error || "配置校验失败",
+      };
     }
     const { v3Payload, signature } = payloadState;
     const requestPayload = mergeConfigWithServerSnapshot(serverConfigSnapshot, v3Payload);

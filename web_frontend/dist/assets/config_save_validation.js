@@ -1428,7 +1428,7 @@ function validateAndNormalizeMonthlyChangeReport(payload) {
   if (!Number.isInteger(monthly.scheduler.day_of_month) || monthly.scheduler.day_of_month < 1 || monthly.scheduler.day_of_month > 31) {
     return { ok: false, error: "月度变更统计表调度日期必须在 1 到 31 之间" };
   }
-  if (!/^\\d{2}:\\d{2}:\\d{2}$/.test(monthly.scheduler.run_time)) {
+  if (!/^\d{2}:\d{2}:\d{2}$/.test(monthly.scheduler.run_time)) {
     return { ok: false, error: "月度变更统计表调度时间必须是 HH:MM:SS" };
   }
   if (!Number.isInteger(monthly.scheduler.check_interval_sec) || monthly.scheduler.check_interval_sec <= 0) {
