@@ -144,6 +144,8 @@ function ensureRoot(cfg) {
   cfg.handover_log.download = cfg.handover_log.download || {};
   cfg.handover_log.shift_roster = cfg.handover_log.shift_roster || {};
   cfg.handover_log.event_sections = cfg.handover_log.event_sections || {};
+  cfg.handover_log.monthly_event_report = cfg.handover_log.monthly_event_report || {};
+  cfg.handover_log.monthly_change_report = cfg.handover_log.monthly_change_report || {};
   cfg.handover_log.day_metric_export = cfg.handover_log.day_metric_export || {};
   cfg.handover_log.source_data_attachment_export = cfg.handover_log.source_data_attachment_export || {};
   cfg.handover_log.cloud_sheet_sync = cfg.handover_log.cloud_sheet_sync || {};
@@ -163,6 +165,11 @@ function ensureRoot(cfg) {
   cfg.handover_log.event_sections.column_mapping.fallback_cols = cfg.handover_log.event_sections.column_mapping.fallback_cols || {};
   cfg.handover_log.event_sections.progress_text = cfg.handover_log.event_sections.progress_text || {};
   cfg.handover_log.event_sections.cache = cfg.handover_log.event_sections.cache || {};
+  cfg.handover_log.monthly_event_report.template = cfg.handover_log.monthly_event_report.template || {};
+  cfg.handover_log.monthly_event_report.scheduler = cfg.handover_log.monthly_event_report.scheduler || {};
+  cfg.handover_log.monthly_event_report.test_delivery = cfg.handover_log.monthly_event_report.test_delivery || {};
+  cfg.handover_log.monthly_change_report.template = cfg.handover_log.monthly_change_report.template || {};
+  cfg.handover_log.monthly_change_report.scheduler = cfg.handover_log.monthly_change_report.scheduler || {};
   cfg.handover_log.day_metric_export.source = cfg.handover_log.day_metric_export.source || {};
   cfg.handover_log.day_metric_export.fields = cfg.handover_log.day_metric_export.fields || {};
   cfg.handover_log.source_data_attachment_export.source = cfg.handover_log.source_data_attachment_export.source || {};
@@ -370,6 +377,7 @@ function applyHandoverDefaults(cfg) {
   const shiftRoster = cfg.handover_log.shift_roster;
   const eventSections = cfg.handover_log.event_sections;
   const changeManagement = cfg.handover_log.change_management_section;
+  changeManagement.monthly_report_fields = changeManagement.monthly_report_fields || {};
   const exerciseManagement = cfg.handover_log.exercise_management_section;
   const maintenanceManagement = cfg.handover_log.maintenance_management_section;
   const otherImportantWork = cfg.handover_log.other_important_work_section;
@@ -380,6 +388,7 @@ function applyHandoverDefaults(cfg) {
   shiftRoster.engineer_directory = shiftRoster.engineer_directory || {};
   shiftRoster.engineer_directory.source = shiftRoster.engineer_directory.source || {};
   shiftRoster.engineer_directory.fields = shiftRoster.engineer_directory.fields || {};
+  shiftRoster.engineer_directory.delivery = shiftRoster.engineer_directory.delivery || {};
   shiftRoster.engineer_directory.match = shiftRoster.engineer_directory.match || {};
   changeManagement.source = changeManagement.source || {};
   changeManagement.fields = changeManagement.fields || {};
@@ -458,7 +467,11 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(engineerDirectory.fields, "building", "楼栋/专业");
   setStringDefault(engineerDirectory.fields, "specialty", "专业");
   setStringDefault(engineerDirectory.fields, "supervisor_text", "主管（文本）");
+  setStringDefault(engineerDirectory.fields, "supervisor_person", "主管");
   setStringDefault(engineerDirectory.fields, "position", "职位");
+  setStringDefault(engineerDirectory.fields, "recipient_id", "");
+  setStringDefault(engineerDirectory.delivery, "receive_id_type", "user_id");
+  setStringDefault(engineerDirectory.delivery, "position_keyword", "设施运维主管");
   setStringDefault(engineerDirectory.match, "building_mode", "exact_then_code");
 
   setBooleanDefault(eventSections, "enabled", true);
@@ -516,6 +529,63 @@ function applyHandoverDefaults(cfg) {
   setNumberDefault(eventSections.cache, "max_pending", 20000);
   setNumberDefault(eventSections.cache, "max_last_query_ids", 5000);
 
+  const monthlyEventReport = cfg.handover_log.monthly_event_report;
+  const monthlyChangeReport = cfg.handover_log.monthly_change_report;
+  setBooleanDefault(monthlyEventReport, "enabled", true);
+  setStringDefault(monthlyEventReport.template, "source_path", "月度事件统计表空模板.xlsx");
+  setStringDefault(monthlyEventReport.template, "change_source_path", "月度变更统计表空模板.xlsx");
+  setStringDefault(monthlyEventReport.template, "output_dir", "D:\\QLDownload\\月度统计表输出\\事件月度统计表");
+  setStringDefault(
+    monthlyEventReport.template,
+    "file_name_pattern",
+    "{building}_{month}_事件月度统计表.xlsx",
+  );
+  setBooleanDefault(monthlyEventReport.scheduler, "enabled", false);
+  setBooleanDefault(monthlyEventReport.scheduler, "auto_start_in_gui", false);
+  setNumberDefault(monthlyEventReport.scheduler, "day_of_month", 1);
+  setStringDefault(monthlyEventReport.scheduler, "run_time", "01:00:00");
+  setNumberDefault(monthlyEventReport.scheduler, "check_interval_sec", 30);
+  setStringDefault(
+    monthlyEventReport.scheduler,
+    "state_file",
+    "monthly_event_report_scheduler_state.json",
+  );
+  setStringDefault(monthlyEventReport.test_delivery, "receive_id_type", "open_id");
+  monthlyEventReport.test_delivery.receive_ids = Array.isArray(monthlyEventReport.test_delivery.receive_ids)
+    ? monthlyEventReport.test_delivery.receive_ids
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+        .filter((item, index, list) => list.indexOf(item) === index)
+    : ["ou_902e364a6c2c6c20893c02abe505a7b2"];
+  if (!monthlyEventReport.test_delivery.receive_ids.length) {
+    monthlyEventReport.test_delivery.receive_ids = ["ou_902e364a6c2c6c20893c02abe505a7b2"];
+  }
+
+  setBooleanDefault(monthlyChangeReport, "enabled", true);
+  setStringDefault(
+    monthlyChangeReport.template,
+    "source_path",
+    String(monthlyChangeReport.template.source_path || "").trim()
+      || String(monthlyEventReport.template.change_source_path || "").trim()
+      || "月度变更统计表空模板.xlsx",
+  );
+  setStringDefault(monthlyChangeReport.template, "output_dir", "D:\\QLDownload\\月度统计表输出\\变更月度统计表");
+  setStringDefault(
+    monthlyChangeReport.template,
+    "file_name_pattern",
+    "{building}_{month}_变更月度统计表.xlsx",
+  );
+  setBooleanDefault(monthlyChangeReport.scheduler, "enabled", false);
+  setBooleanDefault(monthlyChangeReport.scheduler, "auto_start_in_gui", false);
+  setNumberDefault(monthlyChangeReport.scheduler, "day_of_month", 1);
+  setStringDefault(monthlyChangeReport.scheduler, "run_time", "01:00:00");
+  setNumberDefault(monthlyChangeReport.scheduler, "check_interval_sec", 30);
+  setStringDefault(
+    monthlyChangeReport.scheduler,
+    "state_file",
+    "monthly_change_report_scheduler_state.json",
+  );
+
   setBooleanDefault(changeManagement, "enabled", true);
   setStringDefault(changeManagement.source, "app_token", "D01TwFPyXiJBY6kCBDZcMCGLnSe");
   setStringDefault(changeManagement.source, "table_id", "tblYodlEKeWzqogu");
@@ -527,6 +597,14 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(changeManagement.fields, "process_updates", "过程更新时间");
   setStringDefault(changeManagement.fields, "description", "名称");
   setStringDefault(changeManagement.fields, "specialty", "专业");
+  setStringDefault(changeManagement.monthly_report_fields, "building", String(changeManagement.fields.building || "").trim() || "楼栋");
+  setStringDefault(changeManagement.monthly_report_fields, "change_code", "变更编码");
+  setStringDefault(changeManagement.monthly_report_fields, "name", "名称");
+  setStringDefault(changeManagement.monthly_report_fields, "location", "位置");
+  setStringDefault(changeManagement.monthly_report_fields, "change_level", "智航-变更等级");
+  setStringDefault(changeManagement.monthly_report_fields, "status", "变更状态");
+  setStringDefault(changeManagement.monthly_report_fields, "start_time", "变更开始时间");
+  setStringDefault(changeManagement.monthly_report_fields, "end_time", "变更结束时间");
   setStringDefault(changeManagement.sections, "change_management", "变更管理");
   setBooleanDefault(changeManagement.column_mapping, "resolve_by_header", true);
   if (!Array.isArray(changeManagement.column_mapping.header_alias.change_level) || !changeManagement.column_mapping.header_alias.change_level.length) {

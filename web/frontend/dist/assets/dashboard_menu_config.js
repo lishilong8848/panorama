@@ -56,6 +56,11 @@ const SPECIAL_GROUP = {
       desc: '复用交接班日志源文件提取湿球温度和冷源运行模式，并写入多维表。',
     },
     {
+      id: 'monthly_event_report',
+      title: '月度统计表处理',
+      desc: '读取上一个自然月的新事件处理数据，按楼栋生成事件月度统计表到本地目录。',
+    },
+    {
       id: 'alarm_event_upload',
       title: '告警信息上传',
       desc: '读取 08/16 共享告警文件，筛选 60 天内记录并写入多维表。',

@@ -395,6 +395,10 @@ function validateAndNormalizeHandoverShiftRoster(payload) {
     roster.engineer_directory.fields && typeof roster.engineer_directory.fields === "object"
       ? roster.engineer_directory.fields
       : {};
+  roster.engineer_directory.delivery =
+    roster.engineer_directory.delivery && typeof roster.engineer_directory.delivery === "object"
+      ? roster.engineer_directory.delivery
+      : {};
   roster.engineer_directory.match =
     roster.engineer_directory.match && typeof roster.engineer_directory.match === "object"
       ? roster.engineer_directory.match
@@ -407,7 +411,13 @@ function validateAndNormalizeHandoverShiftRoster(payload) {
   roster.engineer_directory.fields.building = String(roster.engineer_directory.fields.building || "").trim();
   roster.engineer_directory.fields.specialty = String(roster.engineer_directory.fields.specialty || "").trim();
   roster.engineer_directory.fields.supervisor_text = String(roster.engineer_directory.fields.supervisor_text || "").trim();
+  roster.engineer_directory.fields.supervisor_person = String(roster.engineer_directory.fields.supervisor_person || "").trim();
   roster.engineer_directory.fields.position = String(roster.engineer_directory.fields.position || "").trim();
+  roster.engineer_directory.fields.recipient_id = String(roster.engineer_directory.fields.recipient_id || "").trim();
+  roster.engineer_directory.delivery.receive_id_type = String(roster.engineer_directory.delivery.receive_id_type || "user_id")
+    .trim()
+    .toLowerCase();
+  roster.engineer_directory.delivery.position_keyword = String(roster.engineer_directory.delivery.position_keyword || "").trim();
   roster.engineer_directory.match.building_mode = String(roster.engineer_directory.match.building_mode || "exact_then_code")
     .trim()
     .toLowerCase();
@@ -420,8 +430,18 @@ function validateAndNormalizeHandoverShiftRoster(payload) {
     if (!Number.isInteger(roster.engineer_directory.source.max_records) || roster.engineer_directory.source.max_records <= 0) {
       return { ok: false, error: "工程师目录读取 max_records 必须大于0" };
     }
-    if (!roster.engineer_directory.fields.building || !roster.engineer_directory.fields.specialty || !roster.engineer_directory.fields.supervisor_text) {
+    if (
+      !roster.engineer_directory.fields.building
+      || !roster.engineer_directory.fields.specialty
+      || !roster.engineer_directory.fields.supervisor_text
+    ) {
       return { ok: false, error: "工程师目录字段映射不能为空" };
+    }
+    if (!roster.engineer_directory.delivery.receive_id_type) {
+      return { ok: false, error: "工程师目录发送 receive_id_type 不能为空" };
+    }
+    if (!roster.engineer_directory.delivery.position_keyword) {
+      return { ok: false, error: "工程师目录发送职位关键字不能为空" };
     }
   }
 
@@ -576,6 +596,10 @@ function validateAndNormalizeHandoverChangeManagementSection(payload) {
   sectionCfg.enabled = Boolean(sectionCfg.enabled);
   sectionCfg.source = sectionCfg.source && typeof sectionCfg.source === "object" ? sectionCfg.source : {};
   sectionCfg.fields = sectionCfg.fields && typeof sectionCfg.fields === "object" ? sectionCfg.fields : {};
+  sectionCfg.monthly_report_fields =
+    sectionCfg.monthly_report_fields && typeof sectionCfg.monthly_report_fields === "object"
+      ? sectionCfg.monthly_report_fields
+      : {};
   sectionCfg.sections = sectionCfg.sections && typeof sectionCfg.sections === "object" ? sectionCfg.sections : {};
   sectionCfg.column_mapping =
     sectionCfg.column_mapping && typeof sectionCfg.column_mapping === "object" ? sectionCfg.column_mapping : {};
@@ -601,6 +625,14 @@ function validateAndNormalizeHandoverChangeManagementSection(payload) {
   sectionCfg.fields.process_updates = String(sectionCfg.fields.process_updates || "").trim();
   sectionCfg.fields.description = String(sectionCfg.fields.description || "").trim();
   sectionCfg.fields.specialty = String(sectionCfg.fields.specialty || "").trim();
+  sectionCfg.monthly_report_fields.building = String(sectionCfg.monthly_report_fields.building || "").trim();
+  sectionCfg.monthly_report_fields.change_code = String(sectionCfg.monthly_report_fields.change_code || "").trim();
+  sectionCfg.monthly_report_fields.name = String(sectionCfg.monthly_report_fields.name || "").trim();
+  sectionCfg.monthly_report_fields.location = String(sectionCfg.monthly_report_fields.location || "").trim();
+  sectionCfg.monthly_report_fields.change_level = String(sectionCfg.monthly_report_fields.change_level || "").trim();
+  sectionCfg.monthly_report_fields.status = String(sectionCfg.monthly_report_fields.status || "").trim();
+  sectionCfg.monthly_report_fields.start_time = String(sectionCfg.monthly_report_fields.start_time || "").trim();
+  sectionCfg.monthly_report_fields.end_time = String(sectionCfg.monthly_report_fields.end_time || "").trim();
 
   sectionCfg.sections.change_management = String(sectionCfg.sections.change_management || "").trim();
   sectionCfg.column_mapping.resolve_by_header = Boolean(sectionCfg.column_mapping.resolve_by_header);
@@ -649,6 +681,18 @@ function validateAndNormalizeHandoverChangeManagementSection(payload) {
     !sectionCfg.fields.specialty
   ) {
     return { ok: false, error: "变更管理字段映射（楼栋/更新时间/变更等级/过程更新时间/名称/专业）不能为空" };
+  }
+  if (
+    !sectionCfg.monthly_report_fields.building ||
+    !sectionCfg.monthly_report_fields.change_code ||
+    !sectionCfg.monthly_report_fields.name ||
+    !sectionCfg.monthly_report_fields.location ||
+    !sectionCfg.monthly_report_fields.change_level ||
+    !sectionCfg.monthly_report_fields.status ||
+    !sectionCfg.monthly_report_fields.start_time ||
+    !sectionCfg.monthly_report_fields.end_time
+  ) {
+    return { ok: false, error: "变更月报字段映射（楼栋/变更编码/名称/位置/智航-变更等级/变更状态/变更开始时间/变更结束时间）不能为空" };
   }
   if (!sectionCfg.sections.change_management) {
     return { ok: false, error: "变更管理分类名不能为空" };
@@ -1290,6 +1334,112 @@ function validateAndNormalizeAlarmExport(payload) {
   return { ok: true };
 }
 
+function validateAndNormalizeMonthlyEventReport(payload) {
+  payload.handover_log = payload.handover_log || {};
+  const handover = payload.handover_log;
+  handover.monthly_event_report =
+    handover.monthly_event_report && typeof handover.monthly_event_report === "object"
+      ? handover.monthly_event_report
+      : {};
+  const monthly = handover.monthly_event_report;
+  monthly.template = monthly.template && typeof monthly.template === "object" ? monthly.template : {};
+  monthly.scheduler = monthly.scheduler && typeof monthly.scheduler === "object" ? monthly.scheduler : {};
+  monthly.test_delivery = monthly.test_delivery && typeof monthly.test_delivery === "object" ? monthly.test_delivery : {};
+
+  monthly.enabled = monthly.enabled !== false;
+  monthly.template.source_path = String(monthly.template.source_path || "").trim();
+  monthly.template.change_source_path = String(monthly.template.change_source_path || "").trim();
+  monthly.template.output_dir = String(monthly.template.output_dir || "").trim();
+  monthly.template.file_name_pattern = String(monthly.template.file_name_pattern || "").trim();
+  monthly.scheduler.enabled = Boolean(monthly.scheduler.enabled);
+  monthly.scheduler.auto_start_in_gui = Boolean(monthly.scheduler.auto_start_in_gui);
+  monthly.scheduler.day_of_month = Number.parseInt(monthly.scheduler.day_of_month ?? 1, 10);
+  monthly.scheduler.run_time = String(monthly.scheduler.run_time || "").trim();
+  monthly.scheduler.check_interval_sec = Number.parseInt(monthly.scheduler.check_interval_sec ?? 30, 10);
+  monthly.scheduler.state_file = String(monthly.scheduler.state_file || "").trim();
+  monthly.test_delivery.receive_id_type = String(monthly.test_delivery.receive_id_type || "open_id").trim() || "open_id";
+  monthly.test_delivery.receive_ids = Array.isArray(monthly.test_delivery.receive_ids)
+    ? monthly.test_delivery.receive_ids
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+        .filter((item, index, list) => list.indexOf(item) === index)
+    : [];
+
+  if (!monthly.enabled) return { ok: true };
+  if (!monthly.template.source_path) {
+    return { ok: false, error: "月度事件统计表模板路径不能为空" };
+  }
+  if (!monthly.template.output_dir) {
+    return { ok: false, error: "月度事件统计表输出目录不能为空" };
+  }
+  if (!monthly.template.file_name_pattern) {
+    return { ok: false, error: "月度事件统计表文件命名规则不能为空" };
+  }
+  if (!Number.isInteger(monthly.scheduler.day_of_month) || monthly.scheduler.day_of_month < 1 || monthly.scheduler.day_of_month > 31) {
+    return { ok: false, error: "月度事件统计表调度日期必须在 1 到 31 之间" };
+  }
+  if (!/^\d{2}:\d{2}:\d{2}$/.test(monthly.scheduler.run_time)) {
+    return { ok: false, error: "月度事件统计表调度时间必须是 HH:MM:SS" };
+  }
+  if (!Number.isInteger(monthly.scheduler.check_interval_sec) || monthly.scheduler.check_interval_sec <= 0) {
+    return { ok: false, error: "月度事件统计表调度检查间隔必须大于 0 秒" };
+  }
+  if (!monthly.scheduler.state_file) {
+    return { ok: false, error: "月度事件统计表调度状态文件名不能为空" };
+  }
+  if (!monthly.test_delivery.receive_id_type) {
+    return { ok: false, error: "月度事件统计表测试发送 receive_id_type 不能为空" };
+  }
+  return { ok: true };
+}
+
+function validateAndNormalizeMonthlyChangeReport(payload) {
+  payload.handover_log = payload.handover_log || {};
+  const handover = payload.handover_log;
+  handover.monthly_change_report =
+    handover.monthly_change_report && typeof handover.monthly_change_report === "object"
+      ? handover.monthly_change_report
+      : {};
+  const monthly = handover.monthly_change_report;
+  monthly.template = monthly.template && typeof monthly.template === "object" ? monthly.template : {};
+  monthly.scheduler = monthly.scheduler && typeof monthly.scheduler === "object" ? monthly.scheduler : {};
+
+  monthly.enabled = monthly.enabled !== false;
+  monthly.template.source_path = String(monthly.template.source_path || "").trim();
+  monthly.template.output_dir = String(monthly.template.output_dir || "").trim();
+  monthly.template.file_name_pattern = String(monthly.template.file_name_pattern || "").trim();
+  monthly.scheduler.enabled = Boolean(monthly.scheduler.enabled);
+  monthly.scheduler.auto_start_in_gui = Boolean(monthly.scheduler.auto_start_in_gui);
+  monthly.scheduler.day_of_month = Number.parseInt(monthly.scheduler.day_of_month ?? 1, 10);
+  monthly.scheduler.run_time = String(monthly.scheduler.run_time || "").trim();
+  monthly.scheduler.check_interval_sec = Number.parseInt(monthly.scheduler.check_interval_sec ?? 30, 10);
+  monthly.scheduler.state_file = String(monthly.scheduler.state_file || "").trim();
+
+  if (!monthly.enabled) return { ok: true };
+  if (!monthly.template.source_path) {
+    return { ok: false, error: "月度变更统计表模板路径不能为空" };
+  }
+  if (!monthly.template.output_dir) {
+    return { ok: false, error: "月度变更统计表输出目录不能为空" };
+  }
+  if (!monthly.template.file_name_pattern) {
+    return { ok: false, error: "月度变更统计表文件命名规则不能为空" };
+  }
+  if (!Number.isInteger(monthly.scheduler.day_of_month) || monthly.scheduler.day_of_month < 1 || monthly.scheduler.day_of_month > 31) {
+    return { ok: false, error: "月度变更统计表调度日期必须在 1 到 31 之间" };
+  }
+  if (!/^\\d{2}:\\d{2}:\\d{2}$/.test(monthly.scheduler.run_time)) {
+    return { ok: false, error: "月度变更统计表调度时间必须是 HH:MM:SS" };
+  }
+  if (!Number.isInteger(monthly.scheduler.check_interval_sec) || monthly.scheduler.check_interval_sec <= 0) {
+    return { ok: false, error: "月度变更统计表调度检查间隔必须大于 0 秒" };
+  }
+  if (!monthly.scheduler.state_file) {
+    return { ok: false, error: "月度变更统计表调度状态文件名不能为空" };
+  }
+  return { ok: true };
+}
+
 function validateAndNormalizeWetBulbCollection(payload) {
   payload.wet_bulb_collection = payload.wet_bulb_collection || {};
   const wet = payload.wet_bulb_collection;
@@ -1667,6 +1817,14 @@ export function prepareConfigPayloadForSave({
   const handoverEventSectionsValidation = validateAndNormalizeHandoverEventSections(payload);
   if (!handoverEventSectionsValidation.ok) {
     return handoverEventSectionsValidation;
+  }
+  const monthlyEventReportValidation = validateAndNormalizeMonthlyEventReport(payload);
+  if (!monthlyEventReportValidation.ok) {
+    return monthlyEventReportValidation;
+  }
+  const monthlyChangeReportValidation = validateAndNormalizeMonthlyChangeReport(payload);
+  if (!monthlyChangeReportValidation.ok) {
+    return monthlyChangeReportValidation;
   }
   const handoverChangeManagementValidation = validateAndNormalizeHandoverChangeManagementSection(payload);
   if (!handoverChangeManagementValidation.ok) {

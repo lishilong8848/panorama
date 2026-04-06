@@ -101,6 +101,32 @@
   <div class="form-row"><label class="label">最近查询ID上限</label><input type="number" v-model.number="config.handover_log.event_sections.cache.max_last_query_ids" /></div>
   <div class="hint">历史事件跟进来源 = 非当班“事件闭环转检修中” + 缓存闭环回写；同时应用于“从已有数据表生成”和“使用共享文件生成”。</div>
 
+  <div class="section-title">月度统计表处理（事件月度统计表）</div>
+  <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_event_report.enabled" /> 启用月度事件统计表处理</label></div>
+  <div class="form-row"><label class="label">事件模板文件</label><input type="text" v-model="config.handover_log.monthly_event_report.template.source_path" /></div>
+  <div class="form-row"><label class="label">输出目录</label><input type="text" v-model="config.handover_log.monthly_event_report.template.output_dir" /></div>
+  <div class="form-row"><label class="label">文件命名规则</label><input type="text" v-model="config.handover_log.monthly_event_report.template.file_name_pattern" /></div>
+  <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_event_report.scheduler.enabled" /> 启用月度调度</label></div>
+  <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_event_report.scheduler.auto_start_in_gui" /> 启动后自动开启调度</label></div>
+  <div class="form-row"><label class="label">每月几号</label><input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_event_report.scheduler.day_of_month" /></div>
+  <div class="form-row"><label class="label">调度时间</label><input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" /></div>
+  <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.handover_log.monthly_event_report.scheduler.check_interval_sec" /></div>
+  <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_event_report.scheduler.state_file" /></div>
+  <div class="hint">数据源固定复用“新事件处理”同一张多维表。</div>
+
+  <div class="section-title">月度统计表处理（变更月度统计表）</div>
+  <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_change_report.enabled" /> 启用月度变更统计表处理</label></div>
+  <div class="form-row"><label class="label">变更模板文件</label><input type="text" v-model="config.handover_log.monthly_change_report.template.source_path" /></div>
+  <div class="form-row"><label class="label">输出目录</label><input type="text" v-model="config.handover_log.monthly_change_report.template.output_dir" /></div>
+  <div class="form-row"><label class="label">文件命名规则</label><input type="text" v-model="config.handover_log.monthly_change_report.template.file_name_pattern" /></div>
+  <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_change_report.scheduler.enabled" /> 启用月度调度</label></div>
+  <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_change_report.scheduler.auto_start_in_gui" /> 启动后自动开启调度</label></div>
+  <div class="form-row"><label class="label">每月几号</label><input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_change_report.scheduler.day_of_month" /></div>
+  <div class="form-row"><label class="label">调度时间</label><input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" /></div>
+  <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.handover_log.monthly_change_report.scheduler.check_interval_sec" /></div>
+  <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_change_report.scheduler.state_file" /></div>
+  <div class="hint">变更月报按“变更开始时间”归属到上一个自然月，输出只写本地文件，不上传飞书。</div>
+
   <div class="section-title">变更管理分类来源</div>
   <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.change_management_section.enabled" /> 启用变更管理写入</label></div>
   <div class="form-row"><label class="label">多维 App Token</label><input type="text" v-model="config.handover_log.change_management_section.source.app_token" /></div>
@@ -113,6 +139,14 @@
   <div class="form-row"><label class="label">字段：过程更新时间</label><input type="text" v-model="config.handover_log.change_management_section.fields.process_updates" /></div>
   <div class="form-row"><label class="label">字段：名称</label><input type="text" v-model="config.handover_log.change_management_section.fields.description" /></div>
   <div class="form-row"><label class="label">字段：专业</label><input type="text" v-model="config.handover_log.change_management_section.fields.specialty" /></div>
+  <div class="form-row"><label class="label">月报字段：楼栋</label><input type="text" v-model="config.handover_log.change_management_section.monthly_report_fields.building" /></div>
+  <div class="form-row"><label class="label">月报字段：变更编码</label><input type="text" v-model="config.handover_log.change_management_section.monthly_report_fields.change_code" /></div>
+  <div class="form-row"><label class="label">月报字段：名称</label><input type="text" v-model="config.handover_log.change_management_section.monthly_report_fields.name" /></div>
+  <div class="form-row"><label class="label">月报字段：位置</label><input type="text" v-model="config.handover_log.change_management_section.monthly_report_fields.location" /></div>
+  <div class="form-row"><label class="label">月报字段：智航-变更等级</label><input type="text" v-model="config.handover_log.change_management_section.monthly_report_fields.change_level" /></div>
+  <div class="form-row"><label class="label">月报字段：变更状态</label><input type="text" v-model="config.handover_log.change_management_section.monthly_report_fields.status" /></div>
+  <div class="form-row"><label class="label">月报字段：变更开始时间</label><input type="text" v-model="config.handover_log.change_management_section.monthly_report_fields.start_time" /></div>
+  <div class="form-row"><label class="label">月报字段：变更结束时间</label><input type="text" v-model="config.handover_log.change_management_section.monthly_report_fields.end_time" /></div>
   <div class="form-row"><label class="label">分类名：变更管理</label><input type="text" v-model="config.handover_log.change_management_section.sections.change_management" /></div>
   <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.change_management_section.column_mapping.resolve_by_header" /> 按模板表头自动定位列</label></div>
   <div class="form-row"><label class="label">表头别名：变更等级</label><input type="text" :value="(config.handover_log.change_management_section.column_mapping.header_alias.change_level || []).join(', ')" @input="config.handover_log.change_management_section.column_mapping.header_alias.change_level = $event.target.value.split(/[，,;\\s]+/).map(v => v.trim()).filter(Boolean)" /></div>
@@ -127,7 +161,7 @@
   <div class="form-row"><label class="label">白班默认结束</label><input type="time" step="1" v-model="config.handover_log.change_management_section.work_window_text.day_default_end" /></div>
   <div class="form-row"><label class="label">夜班作业时间锚点</label><input type="time" step="1" v-model="config.handover_log.change_management_section.work_window_text.night_anchor" /></div>
   <div class="form-row"><label class="label">夜班默认结束（次日）</label><input type="time" step="1" v-model="config.handover_log.change_management_section.work_window_text.night_default_end_next_day" /></div>
-  <div class="hint">变更管理仅取“更新最新的时间”命中当前班次，且楼栋字段恰好等于当前单楼的记录；多楼或园区共享记录不会进入变更管理。执行人按“当前楼栋 + 专业”匹配工程师目录主管。</div>
+  <div class="hint">变更管理分类仍按“更新最新的时间”命中当前班次；月度变更统计表则复用同一张多维表，并按“变更开始时间”统计上一个自然月。</div>
 
   <div class="section-title">演练管理分类来源</div>
   <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.exercise_management_section.enabled" /> 启用演练管理写入</label></div>
@@ -246,12 +280,45 @@
   <div class="form-row"><label class="label">字段：机楼</label><input type="text" v-model="config.handover_log.shift_roster.engineer_directory.fields.building" /></div>
   <div class="form-row"><label class="label">字段：专业</label><input type="text" v-model="config.handover_log.shift_roster.engineer_directory.fields.specialty" /></div>
   <div class="form-row"><label class="label">字段：主管（文本）</label><input type="text" v-model="config.handover_log.shift_roster.engineer_directory.fields.supervisor_text" /></div>
+  <div class="form-row"><label class="label">字段：主管（人员）</label><input type="text" v-model="config.handover_log.shift_roster.engineer_directory.fields.supervisor_person" /></div>
   <div class="form-row"><label class="label">字段：职位</label><input type="text" v-model="config.handover_log.shift_roster.engineer_directory.fields.position" /></div>
+  <div class="form-row"><label class="label">字段：飞书用户ID（可选）</label><input type="text" v-model="config.handover_log.shift_roster.engineer_directory.fields.recipient_id" /></div>
+  <div class="form-row">
+    <label class="label">发送 receive_id_type</label>
+    <select v-model="config.handover_log.shift_roster.engineer_directory.delivery.receive_id_type">
+      <option value="open_id">open_id</option>
+      <option value="user_id">user_id</option>
+      <option value="email">email</option>
+      <option value="mobile">mobile</option>
+    </select>
+  </div>
+  <div class="form-row"><label class="label">发送职位关键字</label><input type="text" v-model="config.handover_log.shift_roster.engineer_directory.delivery.position_keyword" /></div>
+  <div class="form-row">
+    <label class="label">目标状态</label>
+    <div class="hint" style="flex:1 1 auto;min-width:0;">{{ handoverEngineerDirectoryTarget.statusText }}</div>
+  </div>
+  <div class="form-row" v-if="handoverEngineerDirectoryTarget.displayUrl">
+    <label class="label">工程师多维地址</label>
+    <div class="hint" style="flex:1 1 auto;min-width:0;word-break:break-all;">
+      <a :href="handoverEngineerDirectoryTarget.displayUrl" target="_blank" rel="noopener noreferrer">
+        {{ handoverEngineerDirectoryTarget.displayUrl }}
+      </a>
+    </div>
+  </div>
   <div class="btn-line" style="margin:8px 0;">
+    <a
+      v-if="handoverEngineerDirectoryTarget.displayUrl"
+      class="btn btn-secondary"
+      :href="handoverEngineerDirectoryTarget.displayUrl"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      打开多维表
+    </a>
     <button class="btn btn-secondary" :disabled="handoverEngineerLoading" @click="fetchHandoverEngineerDirectory({ forceRefresh: true })">
       {{ handoverEngineerLoading ? '读取中...' : '刷新工程师目录' }}
     </button>
-    <span class="hint">用于查看各楼栋专业主管，后续填充交接班时复用。</span>
+    <span class="hint">{{ handoverEngineerDirectoryTarget.hintText || '用于查看各楼栋设施运维主管及其可直发飞书身份；如果主管字段是人员类型，会自动提取其中的飞书ID。' }}</span>
   </div>
   <table class="site-table" style="margin-bottom:8px;">
     <thead>
@@ -260,6 +327,7 @@
         <th style="width:120px;">专业</th>
         <th style="width:120px;">主管</th>
         <th>职位</th>
+        <th>飞书用户ID</th>
       </tr>
     </thead>
     <tbody>
@@ -268,9 +336,10 @@
         <td>{{ row.specialty || '-' }}</td>
         <td>{{ row.supervisor || '-' }}</td>
         <td>{{ row.position || '-' }}</td>
+        <td>{{ row.recipient_id || '-' }}</td>
       </tr>
       <tr v-if="!handoverEngineerDirectory.length">
-        <td colspan="4" class="hint">暂无工程师目录数据，点击“刷新工程师目录”读取。</td>
+        <td colspan="5" class="hint">暂无工程师目录数据，点击“刷新工程师目录”读取。</td>
       </tr>
     </tbody>
   </table>

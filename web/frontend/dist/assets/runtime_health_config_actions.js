@@ -641,6 +641,38 @@ export function createRuntimeHealthConfigActions(ctx) {
       Object.assign(health.handover_scheduler, data.handover_scheduler);
     }
     if (data.handover && typeof data.handover === "object") {
+      if (data.handover.engineer_directory && typeof data.handover.engineer_directory === "object") {
+        if (
+          data.handover.engineer_directory.target_preview
+          && typeof data.handover.engineer_directory.target_preview === "object"
+        ) {
+          Object.assign(health.handover.engineer_directory.target_preview, data.handover.engineer_directory.target_preview);
+        } else {
+          Object.assign(health.handover.engineer_directory.target_preview, {
+            configured_app_token: "",
+            operation_app_token: "",
+            table_id: "",
+            target_kind: "",
+            display_url: "",
+            bitable_url: "",
+            wiki_node_token: "",
+            message: "",
+            resolved_at: "",
+          });
+        }
+      } else if (health?.handover?.engineer_directory?.target_preview) {
+        Object.assign(health.handover.engineer_directory.target_preview, {
+          configured_app_token: "",
+          operation_app_token: "",
+          table_id: "",
+          target_kind: "",
+          display_url: "",
+          bitable_url: "",
+          wiki_node_token: "",
+          message: "",
+          resolved_at: "",
+        });
+      }
       if (data.handover.review_status && typeof data.handover.review_status === "object") {
         health.handover.review_status = {
           ...health.handover.review_status,
@@ -668,6 +700,170 @@ export function createRuntimeHealthConfigActions(ctx) {
           message: "",
           resolved_at: "",
         });
+      }
+    }
+    if (data.monthly_event_report && typeof data.monthly_event_report === "object") {
+      health.monthly_event_report.enabled = Boolean(data.monthly_event_report.enabled);
+      if (data.monthly_event_report.scheduler && typeof data.monthly_event_report.scheduler === "object") {
+        Object.assign(health.monthly_event_report.scheduler, data.monthly_event_report.scheduler);
+      }
+      if (data.monthly_event_report.last_run && typeof data.monthly_event_report.last_run === "object") {
+        Object.assign(health.monthly_event_report.last_run, data.monthly_event_report.last_run);
+      } else {
+        Object.assign(health.monthly_event_report.last_run, {
+          started_at: "",
+          finished_at: "",
+          status: "",
+          report_type: "",
+          scope: "",
+          building: "",
+          target_month: "",
+          generated_files: 0,
+          successful_buildings: [],
+          failed_buildings: [],
+          output_dir: "",
+          files_by_building: {},
+          error: "",
+        });
+      }
+      if (data.monthly_event_report.delivery && typeof data.monthly_event_report.delivery === "object") {
+        health.monthly_event_report.delivery.error = String(data.monthly_event_report.delivery.error || "");
+        if (data.monthly_event_report.delivery.last_run && typeof data.monthly_event_report.delivery.last_run === "object") {
+          Object.assign(health.monthly_event_report.delivery.last_run, data.monthly_event_report.delivery.last_run);
+        } else {
+          Object.assign(health.monthly_event_report.delivery.last_run, {
+            started_at: "",
+            finished_at: "",
+            status: "",
+            report_type: "",
+            scope: "",
+            building: "",
+            target_month: "",
+            successful_buildings: [],
+            failed_buildings: [],
+            sent_count: 0,
+            message_ids: {},
+            error: "",
+            test_mode: false,
+            test_receive_id: "",
+            test_receive_id_type: "",
+            test_receive_ids: [],
+            test_successful_receivers: [],
+            test_failed_receivers: [],
+            test_file_building: "",
+            test_file_name: "",
+          });
+        }
+        health.monthly_event_report.delivery.recipient_status_by_building = Array.isArray(data.monthly_event_report.delivery.recipient_status_by_building)
+          ? data.monthly_event_report.delivery.recipient_status_by_building
+          : [];
+      } else {
+        health.monthly_event_report.delivery.error = "";
+        Object.assign(health.monthly_event_report.delivery.last_run, {
+          started_at: "",
+          finished_at: "",
+          status: "",
+          report_type: "",
+          scope: "",
+          building: "",
+          target_month: "",
+          successful_buildings: [],
+          failed_buildings: [],
+          sent_count: 0,
+          message_ids: {},
+          error: "",
+          test_mode: false,
+          test_receive_id: "",
+          test_receive_id_type: "",
+          test_receive_ids: [],
+          test_successful_receivers: [],
+          test_failed_receivers: [],
+          test_file_building: "",
+          test_file_name: "",
+        });
+        health.monthly_event_report.delivery.recipient_status_by_building = [];
+      }
+    }
+    if (data.monthly_change_report && typeof data.monthly_change_report === "object") {
+      health.monthly_change_report.enabled = Boolean(data.monthly_change_report.enabled);
+      if (data.monthly_change_report.scheduler && typeof data.monthly_change_report.scheduler === "object") {
+        Object.assign(health.monthly_change_report.scheduler, data.monthly_change_report.scheduler);
+      }
+      if (data.monthly_change_report.last_run && typeof data.monthly_change_report.last_run === "object") {
+        Object.assign(health.monthly_change_report.last_run, data.monthly_change_report.last_run);
+      } else {
+        Object.assign(health.monthly_change_report.last_run, {
+          started_at: "",
+          finished_at: "",
+          status: "",
+          report_type: "",
+          scope: "",
+          building: "",
+          target_month: "",
+          generated_files: 0,
+          successful_buildings: [],
+          failed_buildings: [],
+          output_dir: "",
+          files_by_building: {},
+          error: "",
+        });
+      }
+      if (data.monthly_change_report.delivery && typeof data.monthly_change_report.delivery === "object") {
+        health.monthly_change_report.delivery.error = String(data.monthly_change_report.delivery.error || "");
+        if (data.monthly_change_report.delivery.last_run && typeof data.monthly_change_report.delivery.last_run === "object") {
+          Object.assign(health.monthly_change_report.delivery.last_run, data.monthly_change_report.delivery.last_run);
+        } else {
+          Object.assign(health.monthly_change_report.delivery.last_run, {
+            started_at: "",
+            finished_at: "",
+            status: "",
+            report_type: "",
+            scope: "",
+            building: "",
+            target_month: "",
+            successful_buildings: [],
+            failed_buildings: [],
+            sent_count: 0,
+            message_ids: {},
+            error: "",
+            test_mode: false,
+            test_receive_id: "",
+            test_receive_id_type: "",
+            test_receive_ids: [],
+            test_successful_receivers: [],
+            test_failed_receivers: [],
+            test_file_building: "",
+            test_file_name: "",
+          });
+        }
+        health.monthly_change_report.delivery.recipient_status_by_building = Array.isArray(data.monthly_change_report.delivery.recipient_status_by_building)
+          ? data.monthly_change_report.delivery.recipient_status_by_building
+          : [];
+      } else {
+        health.monthly_change_report.delivery.error = "";
+        Object.assign(health.monthly_change_report.delivery.last_run, {
+          started_at: "",
+          finished_at: "",
+          status: "",
+          report_type: "",
+          scope: "",
+          building: "",
+          target_month: "",
+          successful_buildings: [],
+          failed_buildings: [],
+          sent_count: 0,
+          message_ids: {},
+          error: "",
+          test_mode: false,
+          test_receive_id: "",
+          test_receive_id_type: "",
+          test_receive_ids: [],
+          test_successful_receivers: [],
+          test_failed_receivers: [],
+          test_file_building: "",
+          test_file_name: "",
+        });
+        health.monthly_change_report.delivery.recipient_status_by_building = [];
       }
     }
     if (data.day_metric_upload && typeof data.day_metric_upload === "object") {
@@ -1402,7 +1598,14 @@ export function createRuntimeHealthConfigActions(ctx) {
       handoverEngineerLoading.value = true;
       const data = await getHandoverEngineerDirectoryApi();
       const rows = Array.isArray(data?.rows) ? data.rows : [];
+      const preview =
+        data?.target_preview && typeof data.target_preview === "object"
+          ? data.target_preview
+          : null;
       handoverEngineerDirectory.value = rows;
+      if (preview && health?.handover?.engineer_directory?.target_preview) {
+        Object.assign(health.handover.engineer_directory.target_preview, preview);
+      }
       writeEngineerDirectoryCache(cacheSignature, rows);
       if (engineerDirectoryLoaded) {
         engineerDirectoryLoaded.value = true;
