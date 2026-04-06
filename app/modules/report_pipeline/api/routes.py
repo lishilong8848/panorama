@@ -47,6 +47,8 @@ from handover_log_module.repository.event_followup_cache_store import EventFollo
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
 from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
+from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
+from handover_log_module.service.monthly_report_delivery_service import MonthlyReportDeliveryService
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
@@ -1399,6 +1401,7 @@ def health(
     include_wet_bulb_target_preview = role_mode != "internal"
     include_day_metric_target_preview = role_mode != "internal"
     include_alarm_event_target_preview = role_mode != "internal"
+    include_engineer_directory_target_preview = role_mode != "internal"
 
     wifi_name = None
     interface_name = ""
@@ -1429,14 +1432,34 @@ def health(
     if not isinstance(wet_bulb_cfg, dict):
         wet_bulb_cfg = {}
     wet_bulb_scheduler_snapshot = container.wet_bulb_collection_scheduler_status()
+    handover_loaded_cfg = load_handover_config(runtime_cfg)
     wet_bulb_target_preview = (
         WetBulbCollectionService(runtime_cfg).build_target_descriptor(force_refresh=False)
         if include_wet_bulb_target_preview
         else {}
     )
+    monthly_event_report_service = MonthlyEventReportService(runtime_cfg)
+    monthly_event_report_scheduler_snapshot = container.monthly_event_report_scheduler_status()
+    monthly_event_report_last_run = monthly_event_report_service.get_last_run_snapshot()
+    try:
+        monthly_report_delivery_snapshot = MonthlyReportDeliveryService(runtime_cfg).build_delivery_health_snapshot(
+            report_type="event",
+            emit_log=lambda _text: None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        monthly_report_delivery_snapshot = {
+            "last_run": MonthlyReportDeliveryService(runtime_cfg).get_last_run_snapshot(),
+            "recipient_status_by_building": [],
+            "error": str(exc),
+        }
     day_metric_target_preview = (
-        DayMetricBitableExportService(load_handover_config(runtime_cfg)).build_target_descriptor(force_refresh=False)
+        DayMetricBitableExportService(handover_loaded_cfg).build_target_descriptor(force_refresh=False)
         if include_day_metric_target_preview
+        else {}
+    )
+    engineer_directory_target_preview = (
+        ShiftRosterRepository(handover_loaded_cfg).build_engineer_directory_target_descriptor(force_refresh=False)
+        if include_engineer_directory_target_preview
         else {}
     )
     alarm_event_target_preview = (
@@ -1531,7 +1554,6 @@ def health(
     handover_review_access = _empty_handover_review_access()
     if include_handover_runtime_context:
         try:
-            handover_loaded_cfg = load_handover_config(runtime_cfg)
             review_service = ReviewSessionService(handover_loaded_cfg)
             followup_service = ReviewFollowupTriggerService(handover_loaded_cfg)
             if selected_duty_date and selected_duty_shift:
@@ -1641,6 +1663,9 @@ def health(
                 "cache_state_path": str(handover_event_cache_path),
                 "pending_count": int(handover_event_pending_count),
             },
+            "engineer_directory": {
+                "target_preview": engineer_directory_target_preview,
+            },
             "review_status": handover_review_status,
             "review_links": handover_review_access.get("review_links", []),
             "review_base_url": str(handover_review_access.get("review_base_url", "") or ""),
@@ -1680,6 +1705,24 @@ def health(
                 "callback_name": container.wet_bulb_collection_scheduler_executor_name(),
             },
             "target_preview": wet_bulb_target_preview,
+        },
+        "monthly_event_report": {
+            "enabled": bool(monthly_event_report_service.is_enabled()),
+            "scheduler": {
+                "running": bool(monthly_event_report_scheduler_snapshot.get("running", False)),
+                "status": str(monthly_event_report_scheduler_snapshot.get("status", "未初始化")),
+                "next_run_time": str(monthly_event_report_scheduler_snapshot.get("next_run_time", "")),
+                "last_check_at": str(monthly_event_report_scheduler_snapshot.get("last_check_at", "")),
+                "last_decision": str(monthly_event_report_scheduler_snapshot.get("last_decision", "")),
+                "last_trigger_at": str(monthly_event_report_scheduler_snapshot.get("last_trigger_at", "")),
+                "last_trigger_result": str(monthly_event_report_scheduler_snapshot.get("last_trigger_result", "")),
+                "state_path": str(monthly_event_report_scheduler_snapshot.get("state_path", "")),
+                "state_exists": bool(monthly_event_report_scheduler_snapshot.get("state_exists", False)),
+                "executor_bound": bool(container.is_monthly_event_report_scheduler_executor_bound()),
+                "callback_name": container.monthly_event_report_scheduler_executor_name(),
+            },
+            "last_run": monthly_event_report_last_run,
+            "delivery": monthly_report_delivery_snapshot,
         },
         "day_metric_upload": {
             "enabled": bool(runtime_cfg.get("day_metric_upload", {}).get("enabled", True))
@@ -2124,6 +2167,145 @@ def job_wet_bulb_collection_run(request: Request) -> Dict[str, Any]:
             submitted_by="manual",
         )
         container.add_system_log(f"[任务] 已提交: 湿球温度定时采集 ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/jobs/monthly-event-report/run")
+def job_monthly_event_report_run(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    config = _runtime_config(container)
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起月度事件统计表处理")
+
+    service = MonthlyEventReportService(config)
+    raw_scope = payload.get("scope", "all") if isinstance(payload, dict) else "all"
+    raw_building = payload.get("building", "") if isinstance(payload, dict) else ""
+    try:
+        scope, building = service.normalize_scope(raw_scope, raw_building)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _, _, target_month = service.target_month_window(datetime.now())
+
+    def _run(emit_log):
+        return service.run(
+            scope=scope,
+            building=building,
+            emit_log=emit_log,
+            source="月度事件统计表处理",
+        )
+
+    try:
+        job = _start_background_job(
+            container,
+            name=service.job_name(scope, building),
+            run_func=_run,
+            worker_handler="",
+            worker_payload={},
+            resource_keys=_job_resource_keys("monthly_event_report:global"),
+            priority="manual",
+            feature="monthly_event_report",
+            dedupe_key=service.dedupe_key(scope, building, target_month=target_month),
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: {service.job_name(scope, building)} ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/jobs/monthly-report/send")
+def job_monthly_report_send(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    config = _runtime_config(container)
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起月度统计表发送")
+
+    service = MonthlyReportDeliveryService(config)
+    raw_payload = payload if isinstance(payload, dict) else {}
+    raw_report_type = raw_payload.get("report_type", "event")
+    test_mode = bool(raw_payload.get("test_mode", False))
+    raw_scope = raw_payload.get("scope", "all")
+    raw_building = raw_payload.get("building", "")
+    try:
+        report_type = service.normalize_report_type(raw_report_type)
+        if test_mode:
+            scope, building = "test", None
+        else:
+            scope, building = service.normalize_scope(raw_scope, raw_building)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    monthly_last_run = MonthlyEventReportService(config).get_last_run_snapshot()
+    target_month = str(monthly_last_run.get("target_month", "") or "").strip()
+    if not target_month:
+        raise HTTPException(status_code=409, detail="缺少最近成功生成的月度统计表文件，请先生成后再发送")
+
+    if test_mode:
+        raw_receive_ids = raw_payload.get("receive_ids", raw_payload.get("receive_id", ""))
+        receive_ids = service.normalize_receive_ids(raw_receive_ids)
+        if not receive_ids:
+            receive_ids = [service.default_test_open_id()]
+        receive_id_type = str(raw_payload.get("receive_id_type", "") or "").strip() or "open_id"
+
+        def _run(emit_log):
+            return service.run_send_test(
+                report_type=report_type,
+                receive_ids=receive_ids,
+                receive_id_type=receive_id_type,
+                emit_log=emit_log,
+                source="月度统计表发送测试",
+            )
+
+        try:
+            job = _start_background_job(
+                container,
+                name=service.test_job_name(report_type),
+                run_func=_run,
+                worker_handler="",
+                worker_payload={},
+                resource_keys=_job_resource_keys("monthly_event_report:global"),
+                priority="manual",
+                feature="monthly_report_send",
+                dedupe_key=service.test_dedupe_key(
+                    report_type,
+                    target_month=target_month,
+                    receive_ids=receive_ids,
+                ),
+                submitted_by="manual",
+            )
+            container.add_system_log(f"[任务] 已提交: {service.test_job_name(report_type)} ({job.job_id})")
+            return job.to_dict()
+        except JobBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def _run(emit_log):
+        return service.run_send(
+            report_type=report_type,
+            scope=scope,
+            building=building,
+            emit_log=emit_log,
+            source="月度统计表发送",
+        )
+
+    try:
+        job = _start_background_job(
+            container,
+            name=service.job_name(report_type, scope, building),
+            run_func=_run,
+            worker_handler="",
+            worker_payload={},
+            resource_keys=_job_resource_keys("monthly_event_report:global"),
+            priority="manual",
+            feature="monthly_report_send",
+            dedupe_key=service.dedupe_key(report_type, scope, building, target_month=target_month),
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: {service.job_name(report_type, scope, building)} ({job.job_id})")
         return job.to_dict()
     except JobBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3202,11 +3384,13 @@ def get_handover_engineer_directory(request: Request) -> Dict[str, Any]:
     repo = ShiftRosterRepository(handover_cfg)
     try:
         rows = repo.list_engineer_directory(emit_log=container.add_system_log)
+        target_preview = repo.build_engineer_directory_target_descriptor(force_refresh=True)
     except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail=f"读取工程师目录失败: {exc}") from exc
+        raise HTTPException(status_code=400, detail=f"读取工程师目录失败: {exc}") from exc
     return {
         "rows": rows,
         "count": len(rows),
+        "target_preview": target_preview,
     }
 
 

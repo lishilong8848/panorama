@@ -347,7 +347,13 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                         "building": "楼栋/专业",
                         "specialty": "专业",
                         "supervisor_text": "主管（文本）",
+                        "supervisor_person": "主管",
                         "position": "职位",
+                        "recipient_id": "",
+                    },
+                    "delivery": {
+                        "receive_id_type": "user_id",
+                        "position_keyword": "设施运维主管",
                     },
                     "match": {
                         "building_mode": "exact_then_code",
@@ -414,6 +420,27 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "state_file": "handover_shared_cache.json",
                     "max_pending": 20000,
                     "max_last_query_ids": 5000,
+                },
+            },
+            "monthly_event_report": {
+                "enabled": True,
+                "template": {
+                    "source_path": "月度事件统计表空模板.xlsx",
+                    "change_source_path": "月度变更统计表空模板.xlsx",
+                    "output_dir": "D:\\QLDownload\\月度统计表输出\\事件月度统计表",
+                    "file_name_pattern": "{building}_{month}_事件月度统计表.xlsx",
+                },
+                "scheduler": {
+                    "enabled": False,
+                    "auto_start_in_gui": False,
+                    "day_of_month": 1,
+                    "run_time": "01:00:00",
+                    "check_interval_sec": 30,
+                    "state_file": "monthly_event_report_scheduler_state.json",
+                },
+                "test_delivery": {
+                    "receive_id_type": "open_id",
+                    "receive_ids": ["ou_902e364a6c2c6c20893c02abe505a7b2"],
                 },
             },
             "change_management_section": {

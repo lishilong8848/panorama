@@ -511,10 +511,13 @@ def _validate_handover_shift_roster(cfg: Dict[str, Any]) -> None:
             raise ValueError("配置错误: features.handover_log.shift_roster.engineer_directory 必须是对象")
         eng_source = engineer_dir.get("source", {})
         eng_fields = engineer_dir.get("fields", {})
+        eng_delivery = engineer_dir.get("delivery", {})
         if not isinstance(eng_source, dict):
             raise ValueError("配置错误: features.handover_log.shift_roster.engineer_directory.source 必须是对象")
         if not isinstance(eng_fields, dict):
             raise ValueError("配置错误: features.handover_log.shift_roster.engineer_directory.fields 必须是对象")
+        if not isinstance(eng_delivery, dict):
+            raise ValueError("配置错误: features.handover_log.shift_roster.engineer_directory.delivery 必须是对象")
         if bool(engineer_dir.get("enabled", True)):
             if not str(eng_source.get("table_id", "")).strip():
                 raise ValueError("配置错误: features.handover_log.shift_roster.engineer_directory.source.table_id 不能为空")
@@ -522,6 +525,11 @@ def _validate_handover_shift_roster(cfg: Dict[str, Any]) -> None:
                 if not str(eng_fields.get(key, "")).strip():
                     raise ValueError(
                         f"配置错误: features.handover_log.shift_roster.engineer_directory.fields.{key} 不能为空"
+                    )
+            for key in ("receive_id_type", "position_keyword"):
+                if not str(eng_delivery.get(key, "")).strip():
+                    raise ValueError(
+                        f"配置错误: features.handover_log.shift_roster.engineer_directory.delivery.{key} 不能为空"
                     )
 
 
@@ -622,6 +630,61 @@ def _validate_handover_event_sections(cfg: Dict[str, Any]) -> None:
             raise ValueError("配置错误: features.handover_log.event_sections.cache.max_pending 必须大于0")
         if int(cache.get("max_last_query_ids", 0)) <= 0:
             raise ValueError("配置错误: features.handover_log.event_sections.cache.max_last_query_ids 必须大于0")
+
+
+def _validate_handover_monthly_event_report(cfg: Dict[str, Any]) -> None:
+    handover = cfg.get("features", {}).get("handover_log", {})
+    if not isinstance(handover, dict):
+        return
+    monthly_cfg = handover.get("monthly_event_report", {})
+    if not isinstance(monthly_cfg, dict):
+        raise ValueError("配置错误: features.handover_log.monthly_event_report 缺失或格式错误")
+
+    template = monthly_cfg.get("template", {})
+    scheduler = monthly_cfg.get("scheduler", {})
+    test_delivery = monthly_cfg.get("test_delivery", {})
+    if not isinstance(template, dict):
+        raise ValueError("配置错误: features.handover_log.monthly_event_report.template 必须是对象")
+    if not isinstance(scheduler, dict):
+        raise ValueError("配置错误: features.handover_log.monthly_event_report.scheduler 必须是对象")
+    if not isinstance(test_delivery, dict):
+        raise ValueError("配置错误: features.handover_log.monthly_event_report.test_delivery 必须是对象")
+
+    if bool(monthly_cfg.get("enabled", True)):
+        if not str(template.get("source_path", "")).strip():
+            raise ValueError("配置错误: features.handover_log.monthly_event_report.template.source_path 不能为空")
+        if not str(template.get("output_dir", "")).strip():
+            raise ValueError("配置错误: features.handover_log.monthly_event_report.template.output_dir 不能为空")
+        if not str(template.get("file_name_pattern", "")).strip():
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_event_report.template.file_name_pattern 不能为空"
+            )
+        day_of_month = int(scheduler.get("day_of_month", 0) or 0)
+        if day_of_month < 1 or day_of_month > 31:
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_event_report.scheduler.day_of_month 必须在1到31之间"
+            )
+        if not _valid_time(str(scheduler.get("run_time", ""))):
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_event_report.scheduler.run_time 必须是 HH:MM:SS"
+            )
+        if int(scheduler.get("check_interval_sec", 0)) <= 0:
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_event_report.scheduler.check_interval_sec 必须大于0"
+            )
+        if not str(scheduler.get("state_file", "")).strip():
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_event_report.scheduler.state_file 不能为空"
+            )
+        if not str(test_delivery.get("receive_id_type", "")).strip():
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_event_report.test_delivery.receive_id_type 不能为空"
+            )
+        receive_ids = test_delivery.get("receive_ids", [])
+        if not isinstance(receive_ids, list):
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_event_report.test_delivery.receive_ids 必须是数组"
+            )
 
 
 def _validate_handover_change_management_section(cfg: Dict[str, Any]) -> None:
@@ -1485,6 +1548,7 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _validate_handover_download(normalized_v3)
     _validate_handover_shift_roster(normalized_v3)
     _validate_handover_event_sections(normalized_v3)
+    _validate_handover_monthly_event_report(normalized_v3)
     _validate_handover_change_management_section(normalized_v3)
     _validate_handover_exercise_management_section(normalized_v3)
     _validate_handover_maintenance_management_section(normalized_v3)

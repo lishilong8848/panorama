@@ -221,6 +221,46 @@ export async function saveWetBulbCollectionSchedulerConfigApi(payload) {
   });
 }
 
+export async function startMonthlyEventReportJobApi(payload = {}) {
+  return apiJson("/api/jobs/monthly-event-report/run", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function startMonthlyReportSendJobApi(payload = {}) {
+  return apiJson("/api/jobs/monthly-report/send", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function startMonthlyReportSendTestJobApi(payload = {}) {
+  return apiJson("/api/jobs/monthly-report/send", {
+    method: "POST",
+    body: JSON.stringify({ ...(payload || {}), test_mode: true }),
+  });
+}
+
+export async function startMonthlyEventReportSchedulerApi() {
+  return apiJson("/api/scheduler/monthly-event-report/start", { method: "POST", body: "{}" });
+}
+
+export async function stopMonthlyEventReportSchedulerApi() {
+  return apiJson("/api/scheduler/monthly-event-report/stop", { method: "POST", body: "{}" });
+}
+
+export async function getMonthlyEventReportSchedulerStatusApi() {
+  return apiJson("/api/scheduler/monthly-event-report/status");
+}
+
+export async function saveMonthlyEventReportSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/monthly-event-report/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getHandoverEngineerDirectoryApi() {
   return apiJson("/api/handover/engineer-directory");
 }

@@ -1391,6 +1391,308 @@
           </div>
         </section>
 
+        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'monthly_event_report'">
+          <h3 class="card-title">月度统计表处理</h3>
+          <div class="hint">每次手动触发或调度执行时，固定读取上一个自然月的新事件处理数据，并生成本地 Excel 文件。</div>
+          <div class="hint">本轮只实现“事件月度统计表”；“月度变更统计表”仅保留模板占位，不执行处理链路。</div>
+
+          <div class="day-metric-top-grid">
+            <article class="task-block">
+              <div class="task-block-head">
+                <div>
+                  <div class="task-block-kicker">调度卡</div>
+                  <h3 class="card-title">月度事件统计调度</h3>
+                </div>
+                <span class="status-badge status-badge-soft" :class="'tone-' + (health.monthly_event_report.scheduler.running ? 'success' : 'neutral')">
+                  {{ health.monthly_event_report.scheduler.status || '-' }}
+                </span>
+              </div>
+              <div class="hint">下次执行：{{ health.monthly_event_report.scheduler.next_run_time || '-' }}</div>
+              <div class="hint">最近触发：{{ health.monthly_event_report.scheduler.last_trigger_at || '-' }} / {{ monthlyEventReportSchedulerTriggerText || '-' }}</div>
+              <div class="form-row">
+                <label><input type="checkbox" v-model="config.handover_log.monthly_event_report.scheduler.enabled" /> 启用调度</label>
+              </div>
+              <div class="form-row">
+                <label><input type="checkbox" v-model="config.handover_log.monthly_event_report.scheduler.auto_start_in_gui" /> 启动后自动开启</label>
+              </div>
+              <div class="task-grid two-col">
+                <div class="form-row">
+                  <label class="label">每月几号</label>
+                  <input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_event_report.scheduler.day_of_month" />
+                </div>
+                <div class="form-row">
+                  <label class="label">时间（HH:mm:ss）</label>
+                  <input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" />
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="label">检查间隔（秒）</label>
+                <input type="number" min="1" v-model.number="config.handover_log.monthly_event_report.scheduler.check_interval_sec" />
+              </div>
+              <div class="btn-line">
+                <button
+                  class="btn btn-success"
+                  :disabled="health.monthly_event_report.scheduler.running || isActionLocked(actionKeyMonthlyEventReportSchedulerStart)"
+                  @click="startMonthlyEventReportScheduler"
+                >
+                  {{
+                    isActionLocked(actionKeyMonthlyEventReportSchedulerStart)
+                      ? '启动中...'
+                      : (health.monthly_event_report.scheduler.running ? '已启动调度' : '启动调度')
+                  }}
+                </button>
+                <button
+                  class="btn btn-danger"
+                  :disabled="!health.monthly_event_report.scheduler.running || isActionLocked(actionKeyMonthlyEventReportSchedulerStop)"
+                  @click="stopMonthlyEventReportScheduler"
+                >
+                  {{ isActionLocked(actionKeyMonthlyEventReportSchedulerStop) ? '停止中...' : '停止调度' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="monthlyEventReportSchedulerQuickSaving || isActionLocked(actionKeyMonthlyEventReportSchedulerSave)"
+                  @click="saveMonthlyEventReportSchedulerQuickConfig"
+                >
+                  {{ monthlyEventReportSchedulerQuickSaving || isActionLocked(actionKeyMonthlyEventReportSchedulerSave) ? '保存中...' : '保存调度配置' }}
+                </button>
+              </div>
+            </article>
+
+            <article class="task-block task-block-accent">
+              <div class="task-block-head">
+                <div>
+                  <div class="task-block-kicker">手动触发卡</div>
+                  <h3 class="card-title">立即生成事件月度统计表</h3>
+                </div>
+                <span class="status-badge status-badge-soft tone-info">上月窗口</span>
+              </div>
+              <div class="hint">全部楼栋固定为 A楼、B楼、C楼、D楼、E楼；即使某楼无数据，也会生成空表。</div>
+              <div class="btn-line" style="flex-wrap:wrap;">
+                <button
+                  class="btn btn-primary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyEventReportRunAll)"
+                  @click="runMonthlyEventReport('all')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyEventReportRunAll) ? '提交中...' : '全部楼栋' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyEventReportRunBuildingPrefix + 'A楼')"
+                  @click="runMonthlyEventReport('building', 'A楼')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyEventReportRunBuildingPrefix + 'A楼') ? '提交中...' : 'A楼' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyEventReportRunBuildingPrefix + 'B楼')"
+                  @click="runMonthlyEventReport('building', 'B楼')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyEventReportRunBuildingPrefix + 'B楼') ? '提交中...' : 'B楼' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyEventReportRunBuildingPrefix + 'C楼')"
+                  @click="runMonthlyEventReport('building', 'C楼')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyEventReportRunBuildingPrefix + 'C楼') ? '提交中...' : 'C楼' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyEventReportRunBuildingPrefix + 'D楼')"
+                  @click="runMonthlyEventReport('building', 'D楼')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyEventReportRunBuildingPrefix + 'D楼') ? '提交中...' : 'D楼' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyEventReportRunBuildingPrefix + 'E楼')"
+                  @click="runMonthlyEventReport('building', 'E楼')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyEventReportRunBuildingPrefix + 'E楼') ? '提交中...' : 'E楼' }}
+                </button>
+              </div>
+            </article>
+
+            <article class="task-block">
+              <div class="task-block-head">
+                <div>
+                  <div class="task-block-kicker">文件发送</div>
+                  <h3 class="card-title">发送事件月度统计表到飞书</h3>
+                </div>
+                <span class="status-badge status-badge-soft" :class="'tone-' + monthlyEventReportDeliveryStatus.tone">
+                  {{ monthlyEventReportDeliveryStatus.statusText }}
+                </span>
+              </div>
+              <div class="hint">{{ monthlyEventReportDeliveryStatus.summaryText }}</div>
+              <div class="hint">当前只发送事件月度统计表；收件人来自工程师目录中职位包含“设施运维主管”的唯一记录。</div>
+              <div class="hint">已满足发送条件：{{ monthlyEventReportSendReadyCount }}/5</div>
+              <div class="task-grid two-col" style="margin-top:10px;">
+                <div class="form-row">
+                  <label class="label">测试 receive_id_type</label>
+                  <select v-model="monthlyReportTestReceiveIdType">
+                    <option value="open_id">open_id</option>
+                    <option value="user_id">user_id</option>
+                    <option value="email">email</option>
+                    <option value="mobile">mobile</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label class="label">测试接收人数</label>
+                  <div class="readonly-inline-card">{{ monthlyReportTestReceiveCount }} 人</div>
+                </div>
+              </div>
+              <div class="form-row" style="margin-top:10px;align-items:flex-start;">
+                <label class="label">新增测试接收人 ID</label>
+                <div style="display:flex;gap:8px;align-items:center;flex:1 1 auto;min-width:0;">
+                  <input
+                    type="text"
+                    v-model="monthlyReportTestReceiveIdDraft"
+                    placeholder="输入单个接收人 ID"
+                    @keydown.enter.prevent="addMonthlyReportTestReceiveId"
+                  />
+                  <button class="btn btn-secondary" type="button" @click="addMonthlyReportTestReceiveId">
+                    添加
+                  </button>
+                  <button
+                    class="btn btn-secondary"
+                    type="button"
+                    :disabled="isActionLocked(actionKeyConfigSave)"
+                    @click="saveConfig"
+                  >
+                    {{ isActionLocked(actionKeyConfigSave) ? '保存中...' : '保存测试配置' }}
+                  </button>
+                </div>
+              </div>
+              <div class="hint">测试接收人通过“添加”按钮维护；点击“保存测试配置”后会写入配置文件，下次启动仍可直接使用。</div>
+              <table class="site-table" style="margin-top:10px;" v-if="monthlyReportTestReceiveIds.length">
+                <thead>
+                  <tr>
+                    <th>测试接收人 ID</th>
+                    <th style="width:88px;">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="receiveId in monthlyReportTestReceiveIds" :key="'monthly-test-receiver-' + receiveId">
+                    <td style="word-break:break-all;">{{ receiveId }}</td>
+                    <td>
+                      <button class="btn btn-danger" type="button" @click="removeMonthlyReportTestReceiveId(receiveId)">
+                        删除
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="hint" v-else style="margin-top:10px;">暂未添加测试接收人 ID。</div>
+              <div class="hint">测试发送会复用一份已生成月报，同时向当前已添加的全部接收人发送同一个文件。</div>
+              <div class="btn-line" style="flex-wrap:wrap;margin-top:10px;">
+                <button
+                  class="btn btn-primary"
+                  :disabled="!canRun || !monthlyEventReportSendReadyCount || isActionLocked(monthlyEventReportSendAllActionKey)"
+                  @click="sendMonthlyReport('event', 'all')"
+                >
+                  {{ isActionLocked(monthlyEventReportSendAllActionKey) ? '提交中...' : '一键全部发送' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || !(monthlyEventReportLastRun.generated_files || 0) || !monthlyReportTestReceiveCount || isActionLocked(monthlyEventReportSendTestActionKey)"
+                  @click="sendMonthlyReportTest('event')"
+                >
+                  {{ isActionLocked(monthlyEventReportSendTestActionKey) ? '提交中...' : ('测试发送（' + (monthlyReportTestReceiveCount || 0) + '人）') }}
+                </button>
+                <button
+                  v-for="row in monthlyEventReportRecipientStatusByBuilding"
+                  :key="'monthly-send-' + row.building"
+                  class="btn btn-secondary"
+                  :title="row.detailText"
+                  :disabled="!canRun || !row.sendReady || isActionLocked(getMonthlyReportSendBuildingActionKey(row.building))"
+                  @click="sendMonthlyReport('event', 'building', row.building)"
+                >
+                  {{ isActionLocked(getMonthlyReportSendBuildingActionKey(row.building)) ? '提交中...' : row.building }}
+                </button>
+              </div>
+              <table class="site-table" style="margin-top:12px;">
+                <thead>
+                  <tr>
+                    <th style="width:72px;">楼栋</th>
+                    <th style="width:88px;">状态</th>
+                    <th style="width:120px;">主管</th>
+                    <th style="width:140px;">职位</th>
+                    <th style="width:110px;">ID 类型</th>
+                    <th>身份 ID</th>
+                    <th style="width:180px;">文件</th>
+                    <th>说明</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="row in monthlyEventReportRecipientStatusByBuilding"
+                    :key="'monthly-recipient-' + row.building"
+                  >
+                    <td>{{ row.building }}</td>
+                    <td>
+                      <span class="status-badge status-badge-soft" :class="'tone-' + row.tone">{{ row.statusText }}</span>
+                    </td>
+                    <td>{{ row.supervisor || '-' }}</td>
+                    <td>{{ row.position || '-' }}</td>
+                    <td>{{ row.receiveIdType || '-' }}</td>
+                    <td style="word-break:break-all;">{{ row.recipientId || '-' }}</td>
+                    <td style="word-break:break-all;">{{ row.fileName || '-' }}</td>
+                    <td>{{ row.detailText }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+
+            <article class="task-block">
+              <div class="task-block-head">
+                <div>
+                  <div class="task-block-kicker">最近结果卡</div>
+                  <h3 class="card-title">最近一次事件月度统计表处理</h3>
+                </div>
+                <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyEventReportLastRun.status === 'ok' ? 'success' : monthlyEventReportLastRun.status === 'partial_failed' ? 'warning' : monthlyEventReportLastRun.status === 'failed' ? 'danger' : 'neutral')">
+                  {{ monthlyEventReportLastRun.status || '尚未执行' }}
+                </span>
+              </div>
+              <div class="hint">最近运行：{{ monthlyEventReportLastRun.finished_at || monthlyEventReportLastRun.started_at || '-' }}</div>
+              <div class="hint">目标月份：{{ monthlyEventReportLastRun.target_month || '-' }}</div>
+              <div class="hint">生成文件数：{{ monthlyEventReportLastRun.generated_files || 0 }}</div>
+              <div class="hint">成功楼栋：{{ (monthlyEventReportLastRun.successful_buildings || []).join('、') || '-' }}</div>
+              <div class="hint">失败楼栋：{{ (monthlyEventReportLastRun.failed_buildings || []).join('、') || '-' }}</div>
+              <div class="hint">输出目录：{{ monthlyEventReportOutputDir }}</div>
+              <div class="hint" v-if="monthlyEventReportLastRun.error">错误：{{ monthlyEventReportLastRun.error }}</div>
+              <div class="hr" style="margin:10px 0;"></div>
+              <div class="hint">最近发送：{{ monthlyEventReportDeliveryLastRun.finished_at || monthlyEventReportDeliveryLastRun.started_at || '-' }}</div>
+              <div class="hint">发送目标月份：{{ monthlyEventReportDeliveryLastRun.target_month || '-' }}</div>
+              <div class="hint">发送成功楼栋：{{ (monthlyEventReportDeliveryLastRun.successful_buildings || []).join('、') || '-' }}</div>
+              <div class="hint">发送失败楼栋：{{ (monthlyEventReportDeliveryLastRun.failed_buildings || []).join('、') || '-' }}</div>
+              <div class="hint" v-if="monthlyEventReportDeliveryLastRun.test_mode">最近发送类型：测试发送（多接收人）</div>
+              <div class="hint" v-if="(monthlyEventReportDeliveryLastRun.test_receive_ids || []).length">
+                测试接收人：{{ (monthlyEventReportDeliveryLastRun.test_receive_ids || []).join('、') }} / {{ monthlyEventReportDeliveryLastRun.test_receive_id_type || '-' }}
+              </div>
+              <div class="hint" v-if="(monthlyEventReportDeliveryLastRun.test_successful_receivers || []).length">
+                测试发送成功：{{ (monthlyEventReportDeliveryLastRun.test_successful_receivers || []).join('、') }}
+              </div>
+              <div class="hint" v-if="(monthlyEventReportDeliveryLastRun.test_failed_receivers || []).length">
+                测试发送失败：{{ (monthlyEventReportDeliveryLastRun.test_failed_receivers || []).join('、') }}
+              </div>
+              <div class="hint" v-if="monthlyEventReportDeliveryLastRun.test_file_name">测试发送文件：{{ monthlyEventReportDeliveryLastRun.test_file_building || '-' }} / {{ monthlyEventReportDeliveryLastRun.test_file_name }}</div>
+              <div class="hint" v-if="monthlyEventReportDeliveryLastRun.error">发送错误：{{ monthlyEventReportDeliveryLastRun.error }}</div>
+            </article>
+          </div>
+
+          <div class="hr"></div>
+          <article class="task-block">
+            <div class="task-block-head">
+              <div>
+                <div class="task-block-kicker">预留项</div>
+                <h3 class="card-title">月度变更统计表</h3>
+              </div>
+              <span class="status-badge status-badge-soft tone-neutral">暂未启用</span>
+            </div>
+            <div class="hint">模板文件已预留，当前版本不执行变更月度统计表的数据查询和生成链路。</div>
+          </article>
+        </section>
+
         <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'alarm_event_upload'">
           <h3 class="card-title">告警信息上传</h3>
           <div class="hint">状态总览只保留告警文件只读状态，所有告警上传入口统一收在这个专项模块里。</div>

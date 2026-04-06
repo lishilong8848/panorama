@@ -38,6 +38,18 @@ function formatDateTimeFromEpoch(value) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+function normalizeReceiveIdsText(value) {
+  const sourceItems = Array.isArray(value) ? value : [value];
+  const values = [];
+  for (const item of sourceItems) {
+    const text = String(item || "").trim();
+    if (!text) continue;
+    const parts = text.split(/[\s,，;；\r\n]+/).map((segment) => String(segment || "").trim()).filter(Boolean);
+    values.push(...parts);
+  }
+  return values.filter((item, index, list) => list.indexOf(item) === index);
+}
+
 const STARTUP_BRIDGE_DEFAULTS = Object.freeze({
   root_dir: "",
   poll_interval_sec: 2,
@@ -342,6 +354,7 @@ createApp({
       schedulerQuickSaving,
       handoverSchedulerQuickSaving,
       wetBulbSchedulerQuickSaving,
+      monthlyEventReportSchedulerQuickSaving,
       configAutoSaveSuspendDepth,
       autoResumeState,
       buildingsText,
@@ -411,6 +424,8 @@ createApp({
       schedulerTriggerText,
       wetBulbSchedulerDecisionText,
       wetBulbSchedulerTriggerText,
+      monthlyEventReportSchedulerDecisionText,
+      monthlyEventReportSchedulerTriggerText,
       handoverMorningDecisionText,
       handoverAfternoonDecisionText,
       handoverReviewStatusItems,
@@ -507,6 +522,14 @@ createApp({
     const actionKeyWetBulbSchedulerStart = "wet_bulb_scheduler:start";
     const actionKeyWetBulbSchedulerStop = "wet_bulb_scheduler:stop";
     const actionKeyWetBulbSchedulerSave = "wet_bulb_scheduler:save";
+    const actionKeyMonthlyEventReportRunAll = "job:monthly_event_report:all";
+    const actionKeyMonthlyEventReportRunBuildingPrefix = "job:monthly_event_report:building:";
+    const actionKeyMonthlyEventReportSchedulerStart = "monthly_event_report_scheduler:start";
+    const actionKeyMonthlyEventReportSchedulerStop = "monthly_event_report_scheduler:stop";
+    const actionKeyMonthlyEventReportSchedulerSave = "monthly_event_report_scheduler:save";
+    const actionKeyMonthlyReportSendAllPrefix = "job:monthly_report_send:all:event:";
+    const actionKeyMonthlyReportSendBuildingPrefix = "job:monthly_report_send:building:event:";
+    const actionKeyMonthlyReportSendTestPrefix = "job:monthly_report_send:test:event:";
     const actionKeyConfigSave = "config:save";
     const actionKeyUpdaterCheck = "updater:check";
     const actionKeyUpdaterApply = "updater:apply";
@@ -532,6 +555,7 @@ createApp({
     const isSourceCacheRefreshAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshAlarmManual));
     const isSourceCacheDeleteAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheDeleteAlarmManual));
     const externalAlarmUploadBuilding = ref("A楼");
+    const monthlyReportTestReceiveIdDraft = ref("");
     const isAlarmSourceCacheUploadRunning = computed(() => Boolean(externalAlarmReadinessFamily.value?.uploadRunning));
     const isSourceCacheUploadAlarmFullLocked = computed(() =>
       isAlarmSourceCacheUploadRunning.value || isActionLocked(actionKeySourceCacheUploadAlarmFull),
@@ -617,6 +641,222 @@ createApp({
         tone: family.tone || "warning",
         statusText: "尚未上传",
         summaryText: "尚未执行告警信息上传。",
+      };
+    });
+    const monthlyEventReportLastRun = computed(() => health.monthly_event_report?.last_run || {});
+    const monthlyEventReportOutputDir = computed(() =>
+      String(config.value?.handover_log?.monthly_event_report?.template?.output_dir || "").trim()
+      || String(monthlyEventReportLastRun.value?.output_dir || "").trim()
+      || "-"
+    );
+    const monthlyEventReportDelivery = computed(() => health.monthly_event_report?.delivery || {});
+    const monthlyEventReportDeliveryLastRun = computed(() => monthlyEventReportDelivery.value?.last_run || {});
+    const monthlyEventReportDeliveryError = computed(() => String(monthlyEventReportDelivery.value?.error || "").trim());
+    const monthlyEventReportRecipientStatusByBuilding = computed(() => {
+      const rows = Array.isArray(monthlyEventReportDelivery.value?.recipient_status_by_building)
+        ? monthlyEventReportDelivery.value.recipient_status_by_building
+        : [];
+      const rowMap = new Map(
+        rows
+          .filter((item) => item && typeof item === "object" && String(item.building || "").trim())
+          .map((item) => [String(item.building || "").trim(), item]),
+      );
+      return ["A楼", "B楼", "C楼", "D楼", "E楼"].map((building) => {
+        const item = rowMap.get(building) || {};
+        const sendReady = Boolean(item.send_ready);
+        return {
+          building,
+          supervisor: String(item.supervisor || "").trim(),
+          position: String(item.position || "").trim(),
+          recipientId: String(item.recipient_id || "").trim(),
+          receiveIdType: String(item.receive_id_type || "").trim() || "user_id",
+          sendReady,
+          reason: String(item.reason || "").trim(),
+          fileName: String(item.file_name || "").trim(),
+          filePath: String(item.file_path || "").trim(),
+          fileExists: Boolean(item.file_exists),
+          tone: sendReady ? "success" : "warning",
+          statusText: sendReady ? "可发送" : "不可发送",
+          detailText: sendReady ? "已匹配设施运维主管并找到可发送文件。" : (String(item.reason || "").trim() || "当前楼栋不可发送。"),
+        };
+      });
+    });
+    const monthlyEventReportSendReadyCount = computed(() =>
+      monthlyEventReportRecipientStatusByBuilding.value.filter((item) => item.sendReady).length,
+    );
+    const monthlyEventReportSendAllActionKey = computed(() => {
+      const monthText = String(monthlyEventReportLastRun.value?.target_month || "").trim() || "latest";
+      return `${actionKeyMonthlyReportSendAllPrefix}${monthText}`;
+    });
+    const monthlyEventReportSendTestActionKey = computed(() => {
+      const monthText = String(monthlyEventReportLastRun.value?.target_month || "").trim() || "latest";
+      return `${actionKeyMonthlyReportSendTestPrefix}${monthText}`;
+    });
+    function getMonthlyReportTestDeliveryConfig() {
+      const handover = config.value?.handover_log;
+      if (!handover || typeof handover !== "object") return null;
+      const monthly = handover.monthly_event_report;
+      if (!monthly || typeof monthly !== "object") return null;
+      const delivery = monthly.test_delivery;
+      if (!delivery || typeof delivery !== "object") return null;
+      return delivery;
+    }
+    function ensureMonthlyReportTestDeliveryConfig() {
+      if (!config.value || typeof config.value !== "object") return null;
+      config.value.handover_log = config.value.handover_log && typeof config.value.handover_log === "object"
+        ? config.value.handover_log
+        : {};
+      const handover = config.value.handover_log;
+      handover.monthly_event_report = handover.monthly_event_report && typeof handover.monthly_event_report === "object"
+        ? handover.monthly_event_report
+        : {};
+      const monthly = handover.monthly_event_report;
+      monthly.test_delivery = monthly.test_delivery && typeof monthly.test_delivery === "object"
+        ? monthly.test_delivery
+        : {};
+      const delivery = monthly.test_delivery;
+      delivery.receive_id_type = String(delivery.receive_id_type || "open_id").trim() || "open_id";
+      delivery.receive_ids = normalizeReceiveIdsText(delivery.receive_ids || []);
+      return delivery;
+    }
+    const monthlyReportTestReceiveIdType = computed({
+      get() {
+        return String(getMonthlyReportTestDeliveryConfig()?.receive_id_type || "open_id").trim() || "open_id";
+      },
+      set(value) {
+        const delivery = ensureMonthlyReportTestDeliveryConfig();
+        if (!delivery) return;
+        delivery.receive_id_type = String(value || "open_id").trim() || "open_id";
+      },
+    });
+    const monthlyReportTestReceiveIds = computed(() =>
+      normalizeReceiveIdsText(getMonthlyReportTestDeliveryConfig()?.receive_ids || []),
+    );
+    const monthlyReportTestReceiveCount = computed(() => monthlyReportTestReceiveIds.value.length);
+    function addMonthlyReportTestReceiveId() {
+      const candidate = String(monthlyReportTestReceiveIdDraft.value || "").trim();
+      if (!candidate) {
+        message.value = "请先输入一个测试接收人 ID。";
+        return;
+      }
+      const delivery = ensureMonthlyReportTestDeliveryConfig();
+      if (!delivery) return;
+      const nextIds = normalizeReceiveIdsText([...(delivery.receive_ids || []), candidate]);
+      if (nextIds.length === delivery.receive_ids.length) {
+        message.value = "该测试接收人 ID 已存在。";
+        monthlyReportTestReceiveIdDraft.value = "";
+        return;
+      }
+      delivery.receive_ids = nextIds;
+      monthlyReportTestReceiveIdDraft.value = "";
+      message.value = "测试接收人 ID 已加入当前配置，请点击“保存测试配置”。";
+    }
+    function removeMonthlyReportTestReceiveId(targetId) {
+      const delivery = ensureMonthlyReportTestDeliveryConfig();
+      if (!delivery) return;
+      const target = String(targetId || "").trim();
+      delivery.receive_ids = (delivery.receive_ids || []).filter((item) => String(item || "").trim() !== target);
+      message.value = "测试接收人 ID 已从当前配置移除，请点击“保存测试配置”。";
+    }
+    function getMonthlyReportSendBuildingActionKey(building) {
+      const monthText = String(monthlyEventReportLastRun.value?.target_month || "").trim() || "latest";
+      return `${actionKeyMonthlyReportSendBuildingPrefix}${String(building || "").trim()}:${monthText}`;
+    }
+    const monthlyEventReportDeliveryStatus = computed(() => {
+      const lastRun = monthlyEventReportDeliveryLastRun.value || {};
+      const status = String(lastRun.status || "").trim().toLowerCase();
+      const isTestMode = Boolean(lastRun.test_mode);
+      if (monthlyEventReportDeliveryError.value) {
+        return {
+          tone: "danger",
+          statusText: "发送前置检查失败",
+          summaryText: monthlyEventReportDeliveryError.value,
+        };
+      }
+      if (status === "success") {
+        const successReceiverCount = Array.isArray(lastRun.test_successful_receivers)
+          ? lastRun.test_successful_receivers.length
+          : 0;
+        return {
+          tone: "success",
+          statusText: isTestMode ? "最近测试发送成功" : "最近发送成功",
+          summaryText: isTestMode
+            ? `最近测试发送：${lastRun.finished_at || lastRun.started_at || "-"}，成功发送 ${successReceiverCount} 人，文件 ${String(lastRun.test_file_building || "-")} / ${String(lastRun.test_file_name || "-")}`
+            : `最近发送：${lastRun.finished_at || lastRun.started_at || "-"}，成功 ${Array.isArray(lastRun.successful_buildings) ? lastRun.successful_buildings.length : 0} 楼。`,
+        };
+      }
+      if (status === "partial_failed") {
+        const successReceiverCount = Array.isArray(lastRun.test_successful_receivers)
+          ? lastRun.test_successful_receivers.length
+          : 0;
+        const failedReceiverCount = Array.isArray(lastRun.test_failed_receivers)
+          ? lastRun.test_failed_receivers.length
+          : 0;
+        return {
+          tone: "warning",
+          statusText: isTestMode ? "最近测试发送部分失败" : "最近发送部分失败",
+          summaryText: isTestMode
+            ? `最近测试发送：${lastRun.finished_at || lastRun.started_at || "-"}，成功 ${successReceiverCount} 人，失败 ${failedReceiverCount} 人。`
+            : `最近发送：${lastRun.finished_at || lastRun.started_at || "-"}，请查看失败楼栋并修正收件人或文件。`,
+        };
+      }
+      if (status === "failed") {
+        return {
+          tone: "danger",
+          statusText: isTestMode ? "最近测试发送失败" : "最近发送失败",
+          summaryText: String(lastRun.error || "").trim() || (isTestMode ? "最近一次测试发送失败，请查看运行日志。" : "最近一次发送失败，请查看运行日志。"),
+        };
+      }
+      if (!String(monthlyEventReportLastRun.value?.target_month || "").trim()) {
+        return {
+          tone: "neutral",
+          statusText: "待生成",
+          summaryText: "请先生成事件月度统计表，再执行文件发送。",
+        };
+      }
+      return {
+        tone: monthlyEventReportSendReadyCount.value > 0 ? "info" : "warning",
+        statusText: monthlyEventReportSendReadyCount.value > 0 ? "待发送" : "缺少收件人",
+        summaryText:
+          monthlyEventReportSendReadyCount.value > 0
+            ? `当前有 ${monthlyEventReportSendReadyCount.value}/5 个楼栋满足发送条件。`
+            : "当前没有楼栋满足发送条件，请先检查工程师目录和最近生成文件。",
+      };
+    });
+    const handoverEngineerDirectoryTarget = computed(() => {
+      const shiftRosterCfg = config.value?.handover_log?.shift_roster || {};
+      const source = shiftRosterCfg?.engineer_directory?.source && typeof shiftRosterCfg.engineer_directory.source === "object"
+        ? shiftRosterCfg.engineer_directory.source
+        : {};
+      const fallbackSource = shiftRosterCfg?.source && typeof shiftRosterCfg.source === "object"
+        ? shiftRosterCfg.source
+        : {};
+      const preview = health.handover?.engineer_directory?.target_preview || {};
+      const appToken = String(source.app_token || "").trim() || String(fallbackSource.app_token || "").trim();
+      const tableId = String(source.table_id || "").trim();
+      const displayUrl = String(preview?.display_url || preview?.bitable_url || "").trim();
+      const targetKind = String(preview?.target_kind || "").trim();
+      const hasConfiguredTokenPair = Boolean(appToken && tableId);
+      return {
+        appToken: String(preview?.configured_app_token || "").trim() || appToken,
+        operationAppToken: String(preview?.operation_app_token || "").trim(),
+        tableId: String(preview?.table_id || "").trim() || tableId,
+        displayUrl,
+        bitableUrl: displayUrl,
+        targetKind,
+        configured: hasConfiguredTokenPair,
+        statusText: displayUrl ? "已解析" : hasConfiguredTokenPair ? "待解析" : "未配置",
+        hintText:
+          String(preview?.message || "").trim()
+          || (
+            targetKind === "wiki_token_pair" || targetKind === "wiki_url"
+              ? "当前自动识别为 Wiki 多维表链接。"
+              : targetKind === "base_token_pair" || targetKind === "base_url"
+                ? "当前自动识别为 Base 多维表链接。"
+                : hasConfiguredTokenPair
+                  ? "保存配置后会自动解析工程师目录多维表链接。"
+                  : "请先填写工程师目录多维 App Token 和 Table ID。"
+          ),
       };
     });
     const alarmEventUploadTarget = computed(() => {
@@ -2750,6 +2990,9 @@ createApp({
       schedulerQuickSaving,
       handoverSchedulerQuickSaving,
       wetBulbSchedulerQuickSaving,
+      monthlyEventReportSchedulerQuickSaving,
+      monthlyReportTestReceiveIds,
+      monthlyReportTestReceiveIdType,
       selectedDates,
       manualBuilding,
       manualFile,
@@ -2779,6 +3022,9 @@ createApp({
     const {
       runAutoOnce,
       runWetBulbCollection,
+      runMonthlyEventReport,
+      sendMonthlyReport,
+      sendMonthlyReportTest,
       runMultiDate,
       runManualUpload,
       runSheetImport,
@@ -2791,6 +3037,9 @@ createApp({
       startWetBulbCollectionScheduler,
       stopWetBulbCollectionScheduler,
       saveWetBulbCollectionSchedulerQuickConfig,
+      startMonthlyEventReportScheduler,
+      stopMonthlyEventReportScheduler,
+      saveMonthlyEventReportSchedulerQuickConfig,
       runHandoverFromFile,
       runHandoverFromDownload,
       runDayMetricFromDownload,
@@ -2923,10 +3172,13 @@ createApp({
       schedulerQuickSaving,
       handoverSchedulerQuickSaving,
       wetBulbSchedulerQuickSaving,
+      monthlyEventReportSchedulerQuickSaving,
       schedulerDecisionText,
       schedulerTriggerText,
       wetBulbSchedulerDecisionText,
       wetBulbSchedulerTriggerText,
+      monthlyEventReportSchedulerDecisionText,
+      monthlyEventReportSchedulerTriggerText,
       logs,
       filteredLogs,
       logFilter,
@@ -3221,6 +3473,9 @@ createApp({
       uploadAlarmSourceCacheFull,
       uploadAlarmSourceCacheBuilding,
       openAlarmEventUploadTarget,
+      runMonthlyEventReport,
+      sendMonthlyReport,
+      sendMonthlyReportTest,
       addSheetRuleRow,
       removeSheetRuleRow,
       startScheduler,
@@ -3231,6 +3486,9 @@ createApp({
       startWetBulbCollectionScheduler,
       stopWetBulbCollectionScheduler,
       saveWetBulbCollectionSchedulerQuickConfig,
+      startMonthlyEventReportScheduler,
+      stopMonthlyEventReportScheduler,
+      saveMonthlyEventReportSchedulerQuickConfig,
       stopScheduler,
       onManualFileChange,
       onSheetFileChange,
@@ -3263,8 +3521,32 @@ createApp({
       externalAlarmUploadBuildingButtonText,
       externalAlarmReadinessFamily,
       externalAlarmUploadStatus,
+      monthlyEventReportLastRun,
+      monthlyEventReportOutputDir,
+      monthlyEventReportDeliveryLastRun,
+      monthlyEventReportRecipientStatusByBuilding,
+      monthlyEventReportSendReadyCount,
+      monthlyEventReportDeliveryStatus,
+      monthlyEventReportSendAllActionKey,
+      monthlyEventReportSendTestActionKey,
+      monthlyReportTestReceiveIdDraft,
+      monthlyReportTestReceiveIdType,
+      monthlyReportTestReceiveIds,
+      monthlyReportTestReceiveCount,
+      addMonthlyReportTestReceiveId,
+      removeMonthlyReportTestReceiveId,
+      getMonthlyReportSendBuildingActionKey,
+      handoverEngineerDirectoryTarget,
       alarmEventUploadTarget,
       dayMetricUploadTarget,
+      actionKeyMonthlyEventReportRunAll,
+      actionKeyMonthlyEventReportRunBuildingPrefix,
+      actionKeyMonthlyEventReportSchedulerStart,
+      actionKeyMonthlyEventReportSchedulerStop,
+      actionKeyMonthlyEventReportSchedulerSave,
+      actionKeyMonthlyReportSendAllPrefix,
+      actionKeyMonthlyReportSendBuildingPrefix,
+      actionKeyMonthlyReportSendTestPrefix,
     };
   },
   template: APP_TEMPLATE,

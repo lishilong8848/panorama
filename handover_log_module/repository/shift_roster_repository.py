@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Tuple
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from handover_log_module.core.shift_window import normalize_duty_shift, parse_duty_date
 from handover_log_module.repository.event_followup_cache_store import EventFollowupCacheStore
@@ -60,6 +61,46 @@ def _field_text(value: Any) -> str:
         parts = [_field_text(item) for item in value]
         return "、".join([x for x in parts if x])
     return str(value).strip()
+
+
+def _extract_contact_identity(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        for key in (
+            "user_id",
+            "userId",
+            "open_id",
+            "openId",
+            "id",
+            "union_id",
+            "unionId",
+            "email",
+            "mail",
+            "mobile",
+            "phone",
+        ):
+            text = str(value.get(key, "") or "").strip()
+            if text:
+                return text
+        for key in ("id", "value"):
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                resolved = _extract_contact_identity(nested)
+                if resolved:
+                    return resolved
+        for nested in value.values():
+            resolved = _extract_contact_identity(nested)
+            if resolved:
+                return resolved
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            resolved = _extract_contact_identity(item)
+            if resolved:
+                return resolved
+        return ""
+    return ""
 
 
 def _normalize_date_text(value: Any) -> str:
@@ -192,7 +233,13 @@ class ShiftRosterRepository:
                     "building": "楼栋/专业",
                     "specialty": "专业",
                     "supervisor_text": "主管（文本）",
+                    "supervisor_person": "主管",
                     "position": "职位",
+                    "recipient_id": "飞书用户ID",
+                },
+                "delivery": {
+                    "receive_id_type": "user_id",
+                    "position_keyword": "设施运维主管",
                 },
                 "match": {
                     "building_mode": "exact_then_code",
@@ -270,6 +317,71 @@ class ShiftRosterRepository:
             canonical_metric_name_fn=lambda x: str(x or "").strip(),
             dimension_mapping={},
         )
+
+    def build_engineer_directory_target_descriptor(self, *, force_refresh: bool = False) -> Dict[str, str]:
+        cfg = self._normalize_cfg()
+        engineer_cfg = cfg.get("engineer_directory", {})
+        if not isinstance(engineer_cfg, dict):
+            engineer_cfg = {}
+        source_cfg = engineer_cfg.get("source", {})
+        if not isinstance(source_cfg, dict):
+            source_cfg = {}
+        fallback_source = cfg.get("source", {})
+        if not isinstance(fallback_source, dict):
+            fallback_source = {}
+
+        configured_app_token = str(source_cfg.get("app_token", "")).strip() or str(
+            fallback_source.get("app_token", "")
+        ).strip()
+        table_id = str(source_cfg.get("table_id", "")).strip()
+
+        def _preview(target_kind: str, message: str = "") -> Dict[str, str]:
+            return {
+                "configured_app_token": configured_app_token,
+                "operation_app_token": "",
+                "app_token": "",
+                "table_id": table_id,
+                "target_kind": str(target_kind or "").strip(),
+                "resolved_from": str(target_kind or "").strip(),
+                "display_url": "",
+                "bitable_url": "",
+                "source_url": "",
+                "wiki_node_token": "",
+                "wiki_obj_type": "",
+                "message": str(message or "").strip(),
+                "resolved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+        if not bool(engineer_cfg.get("enabled", True)):
+            return _preview("invalid", "工程师目录未启用")
+        if not configured_app_token and not table_id:
+            return _preview("invalid", "请先填写工程师目录多维 App Token 和 Table ID")
+        if not configured_app_token:
+            return _preview("invalid", "请先填写工程师目录多维 App Token")
+        if not table_id:
+            return _preview("invalid", "请先填写工程师目录多维 Table ID")
+
+        global_feishu = self.handover_cfg.get("_global_feishu", {})
+        if not isinstance(global_feishu, dict):
+            global_feishu = {}
+
+        try:
+            resolver = BitableTargetResolver(
+                app_id=str(global_feishu.get("app_id", "")).strip(),
+                app_secret=str(global_feishu.get("app_secret", "")).strip(),
+                timeout=int(global_feishu.get("timeout", 30) or 30),
+                request_retry_count=int(global_feishu.get("request_retry_count", 3) or 3),
+                request_retry_interval_sec=float(global_feishu.get("request_retry_interval_sec", 2) or 2),
+            )
+            return dict(
+                resolver.resolve_token_pair_preview(
+                    configured_app_token=configured_app_token,
+                    table_id=table_id,
+                    force_refresh=force_refresh,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _preview("probe_error", str(exc))
 
     @staticmethod
     def _build_shift_alias_map(cfg: Dict[str, Any]) -> Dict[str, str]:
@@ -751,6 +863,17 @@ class ShiftRosterRepository:
                     return value
             return ""
 
+        def _pick_raw_field(fields: Dict[str, Any], keys: List[str]) -> Any:
+            for key in keys:
+                name = str(key or "").strip()
+                if not name or name not in fields:
+                    continue
+                value = fields.get(name)
+                if value in (None, "", []):
+                    continue
+                return value
+            return None
+
         rows: List[Dict[str, str]] = []
         dropped_empty = 0
         for item in records:
@@ -783,8 +906,21 @@ class ShiftRosterRepository:
                     "主管（文本）",
                     "主管",
                     "人员（文本）",
+                    "人员",
                 ],
             )
+            supervisor_person_raw = _pick_raw_field(
+                fields,
+                [
+                    str(fields_cfg.get("supervisor_person", "主管")),
+                    "主管",
+                    "主管（文本）",
+                    "人员",
+                    "人员（文本）",
+                ],
+            )
+            if not supervisor:
+                supervisor = _field_text(supervisor_person_raw).strip()
             position = _pick_field(
                 fields,
                 [
@@ -792,6 +928,22 @@ class ShiftRosterRepository:
                     "职位",
                 ],
             )
+            recipient_id = _pick_field(
+                fields,
+                [
+                    str(fields_cfg.get("recipient_id", "飞书用户ID")),
+                    "飞书用户ID",
+                    "user_id",
+                    "open_id",
+                    "open id",
+                    "邮箱",
+                    "email",
+                    "手机号",
+                    "mobile",
+                ],
+            )
+            if not recipient_id:
+                recipient_id = _extract_contact_identity(supervisor_person_raw)
 
             building_text = str(building or "").strip()
             if building_text and ("/" in building_text or "／" in building_text):
@@ -818,6 +970,7 @@ class ShiftRosterRepository:
                     "specialty": specialty,
                     "supervisor": supervisor,
                     "position": position,
+                    "recipient_id": recipient_id,
                 }
             )
 

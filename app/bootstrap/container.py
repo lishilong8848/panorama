@@ -23,6 +23,7 @@ from app.modules.report_pipeline.service.system_alert_log_upload_service import 
 from app.modules.scheduler.service.daily_scheduler_service import DailyAutoSchedulerService
 from app.modules.scheduler.service.handover_scheduler_manager import HandoverSchedulerManager
 from app.modules.scheduler.service.interval_scheduler_service import IntervalSchedulerService
+from app.modules.scheduler.service.monthly_scheduler_service import MonthlySchedulerService
 from app.modules.updater.service.updater_service import UpdaterService
 from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
@@ -59,6 +60,8 @@ class AppContainer:
     handover_scheduler_callback: Callable[[str, str], tuple[bool, str]] | None = None
     wet_bulb_collection_scheduler: IntervalSchedulerService | None = None
     wet_bulb_collection_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
+    monthly_event_report_scheduler: MonthlySchedulerService | None = None
+    monthly_event_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     updater_service: UpdaterService | None = None
     updater_restart_callback: Callable[[Dict[str, Any]], tuple[bool, str]] | None = None
     alert_log_uploader: SystemAlertLogUploadService | None = None
@@ -116,6 +119,8 @@ class AppContainer:
             self.handover_scheduler_manager = self._build_handover_scheduler_manager()
         if not self.wet_bulb_collection_scheduler:
             self.wet_bulb_collection_scheduler = self._build_wet_bulb_collection_scheduler()
+        if not self.monthly_event_report_scheduler:
+            self.monthly_event_report_scheduler = self._build_monthly_event_report_scheduler()
         if not self.updater_service:
             self.updater_service = self._build_updater_service()
         if not self.shared_bridge_service:
@@ -144,6 +149,8 @@ class AppContainer:
             self.handover_scheduler_manager.set_run_callback(self.handover_scheduler_callback)
         if self.wet_bulb_collection_scheduler_callback and self.wet_bulb_collection_scheduler:
             self.wet_bulb_collection_scheduler.run_callback = self.wet_bulb_collection_scheduler_callback
+        if self.monthly_event_report_scheduler_callback and self.monthly_event_report_scheduler:
+            self.monthly_event_report_scheduler.run_callback = self.monthly_event_report_scheduler_callback
         if self.updater_restart_callback and self.updater_service:
             self.updater_service.restart_callback = self.updater_restart_callback
 
@@ -276,6 +283,28 @@ class AppContainer:
             source_name="湿球温度定时采集",
         )
 
+    def _build_monthly_event_report_scheduler(self) -> MonthlySchedulerService:
+        handover_cfg = self.runtime_config.get("handover_log", {})
+        if not isinstance(handover_cfg, dict):
+            handover_cfg = {}
+        monthly_cfg = handover_cfg.get("monthly_event_report", {})
+        if not isinstance(monthly_cfg, dict):
+            monthly_cfg = {}
+        scheduler_cfg = monthly_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        paths_cfg = self.runtime_config.get("paths", {}) if isinstance(self.runtime_config, dict) else {}
+        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip() if isinstance(paths_cfg, dict) else ""
+        return MonthlySchedulerService(
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=runtime_state_root,
+            emit_log=self.add_system_log,
+            run_callback=self.monthly_event_report_scheduler_callback or self._monthly_event_report_scheduler_run_callback,
+            is_busy=self.job_service.has_incomplete_jobs,
+            thread_name="monthly-event-report-scheduler",
+            source_name="月度事件统计表处理",
+        )
+
     def _build_updater_service(self) -> UpdaterService:
         return UpdaterService(
             config=self.runtime_config,
@@ -299,6 +328,9 @@ class AppContainer:
 
     def _wet_bulb_collection_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"湿球温度定时采集调度回调尚未绑定执行器(source={source})"
+
+    def _monthly_event_report_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
+        return False, f"月度事件统计表调度回调尚未绑定执行器(source={source})"
 
     def _is_placeholder_callback(self, callback: Any) -> bool:
         if callback is None:
@@ -359,6 +391,19 @@ class AppContainer:
             name = getattr(getattr(callback, "__func__", None), "__name__", "")
         return str(name or "-")
 
+    def is_monthly_event_report_scheduler_executor_bound(self) -> bool:
+        callback = self.monthly_event_report_scheduler_callback
+        return callable(callback)
+
+    def monthly_event_report_scheduler_executor_name(self) -> str:
+        callback = self.monthly_event_report_scheduler_callback
+        if callback is None:
+            return "-"
+        name = getattr(callback, "__name__", "")
+        if not name:
+            name = getattr(getattr(callback, "__func__", None), "__name__", "")
+        return str(name or "-")
+
     @staticmethod
     def _runtime_action_reason_text(reason: Any) -> str:
         text = str(reason or "").strip().lower()
@@ -394,6 +439,11 @@ class AppContainer:
         self.wet_bulb_collection_scheduler_callback = callback
         if self.wet_bulb_collection_scheduler:
             self.wet_bulb_collection_scheduler.run_callback = callback
+
+    def set_monthly_event_report_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
+        self.monthly_event_report_scheduler_callback = callback
+        if self.monthly_event_report_scheduler:
+            self.monthly_event_report_scheduler.run_callback = callback
 
     def set_updater_restart_callback(self, callback: Callable[[Dict[str, Any]], tuple[bool, str]]) -> None:
         self.updater_restart_callback = callback
@@ -573,6 +623,30 @@ class AppContainer:
         else:
             self.add_system_log("[湿球温度定时采集调度] 已禁用")
 
+        self.add_system_log(
+            f"[月度事件统计表调度] 启动阶段执行器状态: executor_bound={self.is_monthly_event_report_scheduler_executor_bound()}, "
+            f"callback={self.monthly_event_report_scheduler_executor_name()}"
+        )
+        monthly_event_status = self.monthly_event_report_scheduler_status()
+        if role_mode == "internal":
+            self.add_system_log("[月度事件统计表调度] 当前为内网端，启动时不自动开启")
+        elif bool(monthly_event_status.get("enabled", False)):
+            handover_cfg = self.runtime_config.get("handover_log", {})
+            if not isinstance(handover_cfg, dict):
+                handover_cfg = {}
+            monthly_event_cfg = handover_cfg.get("monthly_event_report", {})
+            if not isinstance(monthly_event_cfg, dict):
+                monthly_event_cfg = {}
+            monthly_event_scheduler_cfg = monthly_event_cfg.get("scheduler", {})
+            if not isinstance(monthly_event_scheduler_cfg, dict):
+                monthly_event_scheduler_cfg = {}
+            if bool(monthly_event_scheduler_cfg.get("auto_start_in_gui", False)):
+                self.start_monthly_event_report_scheduler(source=source)
+            else:
+                self.add_system_log("[月度事件统计表调度] 启动时未自动开启")
+        else:
+            self.add_system_log("[月度事件统计表调度] 已禁用")
+
         if self.updater_service and self.updater_service.enabled:
             self.start_updater(source=source)
         else:
@@ -636,6 +710,29 @@ class AppContainer:
             result = {"stopped": False, "running": False, "reason": "not_initialized"}
         self.add_system_log(
             f"[湿球温度定时采集调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def start_monthly_event_report_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if not self.monthly_event_report_scheduler:
+            self.monthly_event_report_scheduler = self._build_monthly_event_report_scheduler()
+        result = self.monthly_event_report_scheduler.start()
+        self.add_system_log(
+            f"[月度事件统计表调度] {source}启动请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}, "
+            f"executor_bound={self.is_monthly_event_report_scheduler_executor_bound()}, "
+            f"callback={self.monthly_event_report_scheduler_executor_name()}"
+        )
+        return result
+
+    def stop_monthly_event_report_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if self.monthly_event_report_scheduler:
+            result = self.monthly_event_report_scheduler.stop()
+        else:
+            result = {"stopped": False, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            f"[月度事件统计表调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
             f"running={bool(result.get('running', False))}"
         )
         return result
@@ -876,6 +973,26 @@ class AppContainer:
             **runtime,
         }
 
+    def monthly_event_report_scheduler_status(self) -> Dict[str, Any]:
+        if not self.monthly_event_report_scheduler:
+            return {
+                "enabled": False,
+                "running": False,
+                "status": "未初始化",
+                "next_run_time": "",
+                "last_check_at": "",
+                "last_decision": "",
+                "last_trigger_at": "",
+                "last_trigger_result": "",
+                "state_path": "",
+                "state_exists": False,
+            }
+        runtime = self.monthly_event_report_scheduler.get_runtime_snapshot()
+        return {
+            "enabled": bool(self.monthly_event_report_scheduler.enabled),
+            **runtime,
+        }
+
     def record_wet_bulb_collection_external_run(
         self,
         *,
@@ -912,6 +1029,9 @@ class AppContainer:
         was_wet_bulb_running = (
             self.wet_bulb_collection_scheduler.is_running() if self.wet_bulb_collection_scheduler else False
         )
+        was_monthly_event_report_running = (
+            self.monthly_event_report_scheduler.is_running() if self.monthly_event_report_scheduler else False
+        )
         was_alert_log_uploader_running = self.alert_log_uploader.is_running() if self.alert_log_uploader else False
         was_shared_bridge_running = self.shared_bridge_service.is_running() if self.shared_bridge_service else False
         previous_role_mode = (
@@ -925,6 +1045,8 @@ class AppContainer:
             self.handover_scheduler_manager.stop()
         if self.wet_bulb_collection_scheduler:
             self.wet_bulb_collection_scheduler.stop()
+        if self.monthly_event_report_scheduler:
+            self.monthly_event_report_scheduler.stop()
         if self.updater_service:
             self.updater_service.stop()
         if self.alert_log_uploader:
@@ -934,6 +1056,7 @@ class AppContainer:
         self.scheduler = self._build_scheduler()
         self.handover_scheduler_manager = self._build_handover_scheduler_manager()
         self.wet_bulb_collection_scheduler = self._build_wet_bulb_collection_scheduler()
+        self.monthly_event_report_scheduler = self._build_monthly_event_report_scheduler()
         self.updater_service = self._build_updater_service()
         self.shared_bridge_service = self._build_shared_bridge_service()
         paths_cfg = self.runtime_config.get("paths", {}) if isinstance(self.runtime_config, dict) else {}
@@ -955,6 +1078,8 @@ class AppContainer:
             self.handover_scheduler_manager.set_run_callback(self.handover_scheduler_callback)
         if self.wet_bulb_collection_scheduler_callback:
             self.wet_bulb_collection_scheduler.run_callback = self.wet_bulb_collection_scheduler_callback
+        if self.monthly_event_report_scheduler_callback:
+            self.monthly_event_report_scheduler.run_callback = self.monthly_event_report_scheduler_callback
         if self.updater_restart_callback:
             self.updater_service.restart_callback = self.updater_restart_callback
         self.job_service.set_global_log_sink(
@@ -980,12 +1105,24 @@ class AppContainer:
         if not isinstance(wet_bulb_scheduler_cfg, dict):
             wet_bulb_scheduler_cfg = {}
         wet_bulb_auto_start = bool(wet_bulb_scheduler_cfg.get("auto_start_in_gui", False))
+        monthly_event_cfg = self.runtime_config.get("handover_log", {})
+        if not isinstance(monthly_event_cfg, dict):
+            monthly_event_cfg = {}
+        monthly_event_report_cfg = monthly_event_cfg.get("monthly_event_report", {})
+        if not isinstance(monthly_event_report_cfg, dict):
+            monthly_event_report_cfg = {}
+        monthly_event_scheduler_cfg = monthly_event_report_cfg.get("scheduler", {})
+        if not isinstance(monthly_event_scheduler_cfg, dict):
+            monthly_event_scheduler_cfg = {}
+        monthly_event_auto_start = bool(monthly_event_scheduler_cfg.get("auto_start_in_gui", False))
         if was_running or auto_start:
             self.scheduler.start()
         if was_handover_running or handover_auto_start:
             self.handover_scheduler_manager.start()
         if was_wet_bulb_running or wet_bulb_auto_start:
             self.wet_bulb_collection_scheduler.start()
+        if was_monthly_event_report_running or monthly_event_auto_start:
+            self.monthly_event_report_scheduler.start()
         updater_cfg = self.runtime_config.get("updater", {})
         if not isinstance(updater_cfg, dict):
             updater_cfg = {}

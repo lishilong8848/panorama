@@ -568,7 +568,13 @@
             "building": "楼栋/专业",
             "specialty": "专业",
             "supervisor_text": "主管（文本）",
-            "position": "职位"
+            "supervisor_person": "主管",
+            "position": "职位",
+            "recipient_id": ""
+          },
+          "delivery": {
+            "receive_id_type": "open_id",
+            "position_keyword": "设施运维主管"
           },
           "match": {
             "building_mode": "exact_then_code"
@@ -648,6 +654,30 @@
           "state_file": "handover_shared_cache.json",
           "max_pending": 20000,
           "max_last_query_ids": 5000
+        }
+      },
+      "monthly_event_report": {
+        "enabled": true,
+        "template": {
+          "source_path": "月度事件统计表空模板.xlsx",
+          "change_source_path": "月度变更统计表空模板.xlsx",
+          "output_dir": "D:\\QLDownload\\月度统计表输出\\事件月度统计表",
+          "file_name_pattern": "{building}_{month}_事件月度统计表.xlsx"
+        },
+        "scheduler": {
+          "enabled": false,
+          "auto_start_in_gui": false,
+          "day_of_month": 1,
+          "run_time": "01:00:00",
+          "check_interval_sec": 30,
+          "state_file": "monthly_event_report_scheduler_state.json"
+        },
+        "test_delivery": {
+          "receive_id_type": "open_id",
+          "receive_ids": [
+            "ou_902e364a6c2c6c20893c02abe505a7b2",
+            "ou_a6644e62a43b916c6bc26148cf74f208"
+          ]
         }
       },
       "change_management_section": {
@@ -899,75 +929,75 @@
         "missing_value_policy": "zero",
         "types": [
           {
-            "cell": "D6",
+            "source": "cell",
             "name": "总负荷（KW）",
-            "source": "cell",
+            "cell": "D6",
             "metric_id": ""
           },
           {
-            "cell": "F6",
+            "source": "cell",
             "name": "IT总负荷（KW）",
-            "source": "cell",
+            "cell": "F6",
             "metric_id": ""
           },
           {
-            "cell": "D7",
+            "source": "cell",
             "name": "室外湿球最高温度（℃）",
-            "source": "cell",
+            "cell": "D7",
             "metric_id": ""
           },
           {
-            "cell": "",
-            "name": "冷水系统供水最高温度（℃）",
             "source": "metric",
+            "name": "冷水系统供水最高温度（℃）",
+            "cell": "",
             "metric_id": "chilled_supply_temp_max"
           },
           {
-            "cell": "D8",
+            "source": "cell",
             "name": "蓄水池后备最短时间（H）",
-            "source": "cell",
+            "cell": "D8",
             "metric_id": ""
           },
           {
-            "cell": "F8",
-            "name": "蓄冷罐后备最短时间（min）",
             "source": "cell_min_pair",
+            "name": "蓄冷罐后备最短时间（min）",
+            "cell": "F8",
             "metric_id": ""
           },
           {
-            "cell": "H6",
-            "name": "供油可用时长（H）",
             "source": "cell",
+            "name": "供油可用时长（H）",
+            "cell": "H6",
             "metric_id": ""
           },
           {
-            "cell": "",
-            "name": "冷通道最高温度（℃）",
             "source": "metric",
+            "name": "冷通道最高温度（℃）",
+            "cell": "",
             "metric_id": "cold_temp_max"
           },
           {
-            "cell": "",
-            "name": "冷通道最高湿度（%）",
             "source": "metric",
+            "name": "冷通道最高湿度（%）",
+            "cell": "",
             "metric_id": "cold_humi_max"
           },
           {
-            "cell": "B10",
+            "source": "cell_percent",
             "name": "变压器负载率（MAX）",
-            "source": "cell_percent",
+            "cell": "B10",
             "metric_id": ""
           },
           {
-            "cell": "D10",
+            "source": "cell_percent",
             "name": "UPS负载率（MAX）",
-            "source": "cell_percent",
+            "cell": "D10",
             "metric_id": ""
           },
           {
-            "cell": "",
-            "name": "HVDC负载率（MAX）",
             "source": "metric",
+            "name": "HVDC负载率（MAX）",
+            "cell": "",
             "metric_id": "hvdc_load_max"
           }
         ]
@@ -1067,24 +1097,24 @@
         "enabled": true,
         "buildings": [
           {
-            "name": "A楼",
-            "code": "a"
+            "code": "a",
+            "name": "A楼"
           },
           {
-            "name": "B楼",
-            "code": "b"
+            "code": "b",
+            "name": "B楼"
           },
           {
-            "name": "C楼",
-            "code": "c"
+            "code": "c",
+            "name": "C楼"
           },
           {
-            "name": "D楼",
-            "code": "d"
+            "code": "d",
+            "name": "D楼"
           },
           {
-            "name": "E楼",
-            "code": "e"
+            "code": "e",
+            "name": "E楼"
           }
         ],
         "fixed_cells": {
@@ -1207,42 +1237,42 @@
             "rows": [
               {
                 "cells": {
+                  "E": "1",
+                  "F": "否",
+                  "H": "徐志远",
+                  "G": "无",
                   "B": "值班手机",
-                  "E": "1",
-                  "H": "徐志远",
-                  "C": "E-112值班室",
-                  "F": "否",
-                  "G": "无"
+                  "C": "E-112值班室"
                 }
               },
               {
                 "cells": {
-                  "B": "对讲机",
                   "E": "5",
-                  "H": "徐志远",
-                  "C": "E-112值班室",
                   "F": "否",
-                  "G": "无"
+                  "H": "徐志远",
+                  "G": "无",
+                  "B": "对讲机",
+                  "C": "E-112值班室"
                 }
               },
               {
                 "cells": {
-                  "B": "钥匙",
                   "E": "4",
-                  "H": "徐志远",
-                  "C": "E-112值班室钥匙箱",
                   "F": "否",
-                  "G": "无"
+                  "H": "徐志远",
+                  "G": "无",
+                  "B": "钥匙",
+                  "C": "E-112值班室钥匙箱"
                 }
               },
               {
                 "cells": {
-                  "B": "应急工具",
                   "E": "1",
-                  "H": "徐志远",
-                  "C": "E-112值班室",
                   "F": "否",
-                  "G": "无"
+                  "H": "徐志远",
+                  "G": "无",
+                  "B": "应急工具",
+                  "C": "E-112值班室"
                 }
               }
             ]
@@ -1251,42 +1281,42 @@
             "rows": [
               {
                 "cells": {
+                  "E": "1",
+                  "F": "否",
+                  "H": "韩珂岩",
+                  "G": "无",
                   "B": "值班手机",
-                  "E": "1",
-                  "H": "韩珂岩",
-                  "C": "E-112值班室",
-                  "F": "否",
-                  "G": "无"
+                  "C": "E-112值班室"
                 }
               },
               {
                 "cells": {
-                  "B": "对讲机",
                   "E": "5",
-                  "H": "韩珂岩",
-                  "C": "E-112值班室",
                   "F": "否",
-                  "G": "无"
+                  "H": "韩珂岩",
+                  "G": "无",
+                  "B": "对讲机",
+                  "C": "E-112值班室"
                 }
               },
               {
                 "cells": {
-                  "B": "钥匙",
                   "E": "4",
-                  "H": "韩珂岩",
-                  "C": "E-112值班室钥匙箱",
                   "F": "否",
-                  "G": "无"
+                  "H": "韩珂岩",
+                  "G": "无",
+                  "B": "钥匙",
+                  "C": "E-112值班室钥匙箱"
                 }
               },
               {
                 "cells": {
-                  "B": "应急工具",
                   "E": "1",
-                  "H": "韩珂岩",
-                  "C": "E-112值班室",
                   "F": "否",
-                  "G": "无"
+                  "H": "韩珂岩",
+                  "G": "无",
+                  "B": "应急工具",
+                  "C": "E-112值班室"
                 }
               }
             ]
@@ -1295,42 +1325,42 @@
             "rows": [
               {
                 "cells": {
+                  "E": "1",
+                  "F": "否",
+                  "H": "曲金璐",
+                  "G": "无",
                   "B": "值班手机",
-                  "E": "1",
-                  "H": "曲金璐",
-                  "C": "E-112值班室",
-                  "F": "否",
-                  "G": "无"
+                  "C": "E-112值班室"
                 }
               },
               {
                 "cells": {
-                  "B": "对讲机",
                   "E": "5",
-                  "H": "曲金璐",
-                  "C": "E-112值班室",
                   "F": "否",
-                  "G": "无"
+                  "H": "曲金璐",
+                  "G": "无",
+                  "B": "对讲机",
+                  "C": "E-112值班室"
                 }
               },
               {
                 "cells": {
-                  "B": "钥匙",
                   "E": "4",
-                  "H": "曲金璐",
-                  "C": "E-112值班室钥匙箱",
                   "F": "否",
-                  "G": "无"
+                  "H": "曲金璐",
+                  "G": "无",
+                  "B": "钥匙",
+                  "C": "E-112值班室钥匙箱"
                 }
               },
               {
                 "cells": {
-                  "B": "应急工具",
                   "E": "1",
-                  "H": "曲金璐",
-                  "C": "E-112值班室",
                   "F": "否",
-                  "G": "无"
+                  "H": "曲金璐",
+                  "G": "无",
+                  "B": "应急工具",
+                  "C": "E-112值班室"
                 }
               }
             ]
@@ -4383,67 +4413,67 @@
         "page_size": 500,
         "delete_batch_size": 500,
         "create_batch_size": 200,
+        "timeout": 30,
         "clear_before_upload": true,
-        "list_page_size": 500,
-        "timeout": 30
+        "list_page_size": 500
       },
       "shared_source_upload": {
         "replace_existing_on_full": true
       },
-      "snapshot_mode": "clear_and_rebuild",
-      "manual_button_enabled": true,
+      "level_mapping": {
+        "1": "紧急",
+        "2": "严重",
+        "4": "次要",
+        "3": "重要"
+      },
       "test_db": {
-        "time_field_mode": "auto",
-        "fixed_table": "event_2026_02",
-        "database": "e_event",
         "user": "root",
+        "database": "e_event",
+        "password": "123456",
+        "enabled": true,
         "building_label": "测试楼栋",
         "host": "127.0.0.1",
+        "fixed_table": "event_2026_02",
         "port": 3306,
-        "enabled": true,
-        "table_mode": "fixed",
-        "password": "123456"
+        "time_field_mode": "auto",
+        "table_mode": "fixed"
       },
+      "window_end_time": "00:00:00",
+      "enabled": true,
       "run_with_scheduler": true,
+      "snapshot_mode": "clear_and_rebuild",
       "resume": {
         "root_dir": "alarm_export_resume",
-        "reuse_extracted_rows": true,
-        "max_retry": 3,
         "retry_interval_sec": 2,
+        "max_retry": 3,
+        "reuse_extracted_rows": true,
         "state_file": "alarm_export_resume_state.json",
         "enabled": true
+      },
+      "fields": {
+        "accept_user": "accept_user",
+        "confirm_user": "confirm_user",
+        "trigger_value": "trigger_value",
+        "content": "content",
+        "event_level": "event_level",
+        "event_source": "event_source",
+        "confirm_time": "confirm_time",
+        "recover_status": "recover_status",
+        "confirm_description": "confirm_description",
+        "accept_description": "accept_description",
+        "recover_time": "recover_time",
+        "process_status": "process_status",
+        "accept_time": "accept_time",
+        "alarm_type": "alarm_type",
+        "process_suggestion": "process_suggestion",
+        "event_time": "event_time"
       },
       "skip_levels": [
         5
       ],
-      "fields": {
-        "process_suggestion": "process_suggestion",
-        "trigger_value": "trigger_value",
-        "confirm_time": "confirm_time",
-        "event_level": "event_level",
-        "process_status": "process_status",
-        "event_time": "event_time",
-        "accept_user": "accept_user",
-        "content": "content",
-        "recover_status": "recover_status",
-        "confirm_description": "confirm_description",
-        "confirm_user": "confirm_user",
-        "accept_description": "accept_description",
-        "recover_time": "recover_time",
-        "alarm_type": "alarm_type",
-        "accept_time": "accept_time",
-        "event_source": "event_source"
-      },
-      "enabled": true,
       "alarm_category_default": "真实告警",
-      "level_mapping": {
-        "2": "严重",
-        "3": "重要",
-        "1": "紧急",
-        "4": "次要"
-      },
-      "window_end_time": "00:00:00",
-      "window_days": 35
+      "window_days": 35,
+      "manual_button_enabled": true
     },
     "manual_upload_gui": {
       "enabled": true
