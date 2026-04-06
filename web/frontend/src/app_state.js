@@ -705,6 +705,63 @@ export function createAppState(vueApi) {
         recipient_status_by_building: [],
       },
     },
+    monthly_change_report: {
+      enabled: false,
+      scheduler: {
+        running: false,
+        status: "-",
+        next_run_time: "",
+        last_check_at: "",
+        last_decision: "",
+        last_trigger_at: "",
+        last_trigger_result: "",
+        state_path: "",
+        state_exists: false,
+        executor_bound: false,
+        callback_name: "-",
+      },
+      last_run: {
+        started_at: "",
+        finished_at: "",
+        status: "",
+        report_type: "",
+        scope: "",
+        building: "",
+        target_month: "",
+        generated_files: 0,
+        successful_buildings: [],
+        failed_buildings: [],
+        output_dir: "",
+        files_by_building: {},
+        error: "",
+      },
+      delivery: {
+        error: "",
+        last_run: {
+          started_at: "",
+          finished_at: "",
+          status: "",
+          report_type: "",
+          scope: "",
+          building: "",
+          target_month: "",
+          successful_buildings: [],
+          failed_buildings: [],
+          sent_count: 0,
+          message_ids: {},
+          error: "",
+          test_mode: false,
+          test_receive_id: "",
+          test_receive_id_type: "",
+          test_receive_ids: [],
+          test_successful_receivers: [],
+          test_failed_receivers: [],
+          test_file_building: "",
+          test_file_name: "",
+        },
+        recipient_status_by_building: [],
+      },
+    },
     day_metric_upload: {
       enabled: false,
       target_preview: {
@@ -891,6 +948,7 @@ export function createAppState(vueApi) {
   const handoverSchedulerQuickSaving = ref(false);
   const wetBulbSchedulerQuickSaving = ref(false);
   const monthlyEventReportSchedulerQuickSaving = ref(false);
+  const monthlyChangeReportSchedulerQuickSaving = ref(false);
   const configAutoSaveSuspendDepth = ref(0);
   const autoResumeState = reactive({
     inProgress: false,
@@ -2483,6 +2541,12 @@ function normalizeInternalDownloadPoolSlot(slot) {
   const monthlyEventReportSchedulerTriggerText = computed(() =>
     mapSchedulerTriggerText(health.monthly_event_report?.scheduler?.last_trigger_result),
   );
+  const monthlyChangeReportSchedulerDecisionText = computed(() =>
+    mapSchedulerDecisionText(health.monthly_change_report?.scheduler?.last_decision),
+  );
+  const monthlyChangeReportSchedulerTriggerText = computed(() =>
+    mapSchedulerTriggerText(health.monthly_change_report?.scheduler?.last_trigger_result),
+  );
   const handoverMorningDecisionText = computed(() =>
     mapSchedulerDecisionText(health.handover_scheduler?.morning?.last_decision),
   );
@@ -2857,11 +2921,20 @@ function normalizeInternalDownloadPoolSlot(slot) {
       monthly_event_report: {
         eyebrow: "月度本地生成",
         title: "月度统计表处理",
-        description: "读取上一个自然月的新事件处理数据，按楼栋生成事件月度统计表并输出到本地目录。",
+        description: "读取上一个自然月的事件与变更数据，按楼栋生成两类月度统计表并输出到本地目录。",
         metrics: [
-          { label: "调度状态", value: health.monthly_event_report?.scheduler?.status || "-" },
-          { label: "目标月份", value: health.monthly_event_report?.last_run?.target_month || "-" },
-          { label: "最近生成", value: `${health.monthly_event_report?.last_run?.generated_files || 0} 份` },
+          {
+            label: "事件调度",
+            value: health.monthly_event_report?.scheduler?.status || "-",
+          },
+          {
+            label: "变更调度",
+            value: health.monthly_change_report?.scheduler?.status || "-",
+          },
+          {
+            label: "最近生成",
+            value: `${(health.monthly_event_report?.last_run?.generated_files || 0) + (health.monthly_change_report?.last_run?.generated_files || 0)} 份`,
+          },
         ],
       },
       alarm_event_upload: (() => {
@@ -2952,6 +3025,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
     handoverSchedulerQuickSaving,
     wetBulbSchedulerQuickSaving,
     monthlyEventReportSchedulerQuickSaving,
+    monthlyChangeReportSchedulerQuickSaving,
     configAutoSaveSuspendDepth,
     autoResumeState,
     buildingsText,
@@ -3025,6 +3099,8 @@ function normalizeInternalDownloadPoolSlot(slot) {
     wetBulbSchedulerTriggerText,
     monthlyEventReportSchedulerDecisionText,
     monthlyEventReportSchedulerTriggerText,
+    monthlyChangeReportSchedulerDecisionText,
+    monthlyChangeReportSchedulerTriggerText,
     handoverMorningDecisionText,
     handoverAfternoonDecisionText,
       handoverReviewStatusItems,

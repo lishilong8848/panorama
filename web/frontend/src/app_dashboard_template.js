@@ -1546,11 +1546,11 @@
                 <div style="display:flex;gap:8px;align-items:center;flex:1 1 auto;min-width:0;">
                   <input
                     type="text"
-                    v-model="monthlyReportTestReceiveIdDraft"
+                    v-model="monthlyReportTestReceiveIdDraftEvent"
                     placeholder="输入单个接收人 ID"
-                    @keydown.enter.prevent="addMonthlyReportTestReceiveId"
+                    @keydown.enter.prevent="addMonthlyReportTestReceiveId('event')"
                   />
-                  <button class="btn btn-secondary" type="button" @click="addMonthlyReportTestReceiveId">
+                  <button class="btn btn-secondary" type="button" @click="addMonthlyReportTestReceiveId('event')">
                     添加
                   </button>
                   <button
@@ -1604,10 +1604,10 @@
                   :key="'monthly-send-' + row.building"
                   class="btn btn-secondary"
                   :title="row.detailText"
-                  :disabled="!canRun || !row.sendReady || isActionLocked(getMonthlyReportSendBuildingActionKey(row.building))"
+                  :disabled="!canRun || !row.sendReady || isActionLocked(getMonthlyReportSendBuildingActionKey('event', row.building))"
                   @click="sendMonthlyReport('event', 'building', row.building)"
                 >
-                  {{ isActionLocked(getMonthlyReportSendBuildingActionKey(row.building)) ? '提交中...' : row.building }}
+                  {{ isActionLocked(getMonthlyReportSendBuildingActionKey('event', row.building)) ? '提交中...' : row.building }}
                 </button>
               </div>
               <table class="site-table" style="margin-top:12px;">
@@ -1681,16 +1681,289 @@
           </div>
 
           <div class="hr"></div>
-          <article class="task-block">
-            <div class="task-block-head">
-              <div>
-                <div class="task-block-kicker">预留项</div>
-                <h3 class="card-title">月度变更统计表</h3>
+          <div class="day-metric-top-grid">
+            <article class="task-block">
+              <div class="task-block-head">
+                <div>
+                  <div class="task-block-kicker">调度卡</div>
+                  <h3 class="card-title">月度变更统计调度</h3>
+                </div>
+                <span class="status-badge status-badge-soft" :class="'tone-' + (health.monthly_change_report.scheduler.running ? 'success' : 'neutral')">
+                  {{ health.monthly_change_report.scheduler.status || '-' }}
+                </span>
               </div>
-              <span class="status-badge status-badge-soft tone-neutral">暂未启用</span>
-            </div>
-            <div class="hint">模板文件已预留，当前版本不执行变更月度统计表的数据查询和生成链路。</div>
-          </article>
+              <div class="hint">下次执行：{{ health.monthly_change_report.scheduler.next_run_time || '-' }}</div>
+              <div class="hint">最近触发：{{ health.monthly_change_report.scheduler.last_trigger_at || '-' }} / {{ monthlyChangeReportSchedulerTriggerText || '-' }}</div>
+              <div class="form-row">
+                <label><input type="checkbox" v-model="config.handover_log.monthly_change_report.scheduler.enabled" /> 启用调度</label>
+              </div>
+              <div class="form-row">
+                <label><input type="checkbox" v-model="config.handover_log.monthly_change_report.scheduler.auto_start_in_gui" /> 启动后自动开启</label>
+              </div>
+              <div class="task-grid two-col">
+                <div class="form-row">
+                  <label class="label">每月几号</label>
+                  <input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_change_report.scheduler.day_of_month" />
+                </div>
+                <div class="form-row">
+                  <label class="label">时间（HH:mm:ss）</label>
+                  <input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" />
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="label">检查间隔（秒）</label>
+                <input type="number" min="1" v-model.number="config.handover_log.monthly_change_report.scheduler.check_interval_sec" />
+              </div>
+              <div class="btn-line">
+                <button
+                  class="btn btn-success"
+                  :disabled="health.monthly_change_report.scheduler.running || isActionLocked(actionKeyMonthlyChangeReportSchedulerStart)"
+                  @click="startMonthlyChangeReportScheduler"
+                >
+                  {{
+                    isActionLocked(actionKeyMonthlyChangeReportSchedulerStart)
+                      ? '启动中...'
+                      : (health.monthly_change_report.scheduler.running ? '已启动调度' : '启动调度')
+                  }}
+                </button>
+                <button
+                  class="btn btn-danger"
+                  :disabled="!health.monthly_change_report.scheduler.running || isActionLocked(actionKeyMonthlyChangeReportSchedulerStop)"
+                  @click="stopMonthlyChangeReportScheduler"
+                >
+                  {{ isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) ? '停止中...' : '停止调度' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="monthlyChangeReportSchedulerQuickSaving || isActionLocked(actionKeyMonthlyChangeReportSchedulerSave)"
+                  @click="saveMonthlyChangeReportSchedulerQuickConfig"
+                >
+                  {{ monthlyChangeReportSchedulerQuickSaving || isActionLocked(actionKeyMonthlyChangeReportSchedulerSave) ? '保存中...' : '保存调度配置' }}
+                </button>
+              </div>
+            </article>
+
+            <article class="task-block task-block-accent">
+              <div class="task-block-head">
+                <div>
+                  <div class="task-block-kicker">手动触发卡</div>
+                  <h3 class="card-title">立即生成变更月度统计表</h3>
+                </div>
+                <span class="status-badge status-badge-soft tone-info">上月窗口</span>
+              </div>
+              <div class="hint">全部楼栋固定为 A楼、B楼、C楼、D楼、E楼；按“变更开始时间”统计上一个自然月，无数据楼栋也会生成空表。</div>
+              <div class="btn-line" style="flex-wrap:wrap;">
+                <button
+                  class="btn btn-primary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyChangeReportRunAll)"
+                  @click="runMonthlyChangeReport('all')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyChangeReportRunAll) ? '提交中...' : '全部楼栋' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyChangeReportRunBuildingPrefix + 'A楼')"
+                  @click="runMonthlyChangeReport('building', 'A楼')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyChangeReportRunBuildingPrefix + 'A楼') ? '提交中...' : 'A楼' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyChangeReportRunBuildingPrefix + 'B楼')"
+                  @click="runMonthlyChangeReport('building', 'B楼')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyChangeReportRunBuildingPrefix + 'B楼') ? '提交中...' : 'B楼' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyChangeReportRunBuildingPrefix + 'C楼')"
+                  @click="runMonthlyChangeReport('building', 'C楼')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyChangeReportRunBuildingPrefix + 'C楼') ? '提交中...' : 'C楼' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyChangeReportRunBuildingPrefix + 'D楼')"
+                  @click="runMonthlyChangeReport('building', 'D楼')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyChangeReportRunBuildingPrefix + 'D楼') ? '提交中...' : 'D楼' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || isActionLocked(actionKeyMonthlyChangeReportRunBuildingPrefix + 'E楼')"
+                  @click="runMonthlyChangeReport('building', 'E楼')"
+                >
+                  {{ isActionLocked(actionKeyMonthlyChangeReportRunBuildingPrefix + 'E楼') ? '提交中...' : 'E楼' }}
+                </button>
+              </div>
+            </article>
+
+            <article class="task-block">
+              <div class="task-block-head">
+                <div>
+                  <div class="task-block-kicker">文件发送</div>
+                  <h3 class="card-title">发送变更月度统计表到飞书</h3>
+                </div>
+                <span class="status-badge status-badge-soft" :class="'tone-' + monthlyChangeReportDeliveryStatus.tone">
+                  {{ monthlyChangeReportDeliveryStatus.statusText }}
+                </span>
+              </div>
+              <div class="hint">{{ monthlyChangeReportDeliveryStatus.summaryText }}</div>
+              <div class="hint">当前发送变更月度统计表；收件人来自工程师目录中职位包含“设施运维主管”的唯一记录。</div>
+              <div class="hint">已满足发送条件：{{ monthlyChangeReportSendReadyCount }}/5</div>
+              <div class="task-grid two-col" style="margin-top:10px;">
+                <div class="form-row">
+                  <label class="label">测试 receive_id_type</label>
+                  <select v-model="monthlyReportTestReceiveIdType">
+                    <option value="open_id">open_id</option>
+                    <option value="user_id">user_id</option>
+                    <option value="email">email</option>
+                    <option value="mobile">mobile</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label class="label">测试接收人数</label>
+                  <div class="readonly-inline-card">{{ monthlyReportTestReceiveCount }} 人</div>
+                </div>
+              </div>
+              <div class="form-row" style="margin-top:10px;align-items:flex-start;">
+                <label class="label">新增测试接收人 ID</label>
+                <div style="display:flex;gap:8px;align-items:center;flex:1 1 auto;min-width:0;">
+                  <input
+                    type="text"
+                    v-model="monthlyReportTestReceiveIdDraftChange"
+                    placeholder="输入单个接收人 ID"
+                    @keydown.enter.prevent="addMonthlyReportTestReceiveId('change')"
+                  />
+                  <button class="btn btn-secondary" type="button" @click="addMonthlyReportTestReceiveId('change')">
+                    添加
+                  </button>
+                  <button
+                    class="btn btn-secondary"
+                    type="button"
+                    :disabled="isActionLocked(actionKeyConfigSave)"
+                    @click="saveConfig"
+                  >
+                    {{ isActionLocked(actionKeyConfigSave) ? '保存中...' : '保存测试配置' }}
+                  </button>
+                </div>
+              </div>
+              <div class="hint">测试接收人通过“添加”按钮维护；点击“保存测试配置”后会写入配置文件，下次启动仍可直接使用。</div>
+              <table class="site-table" style="margin-top:10px;" v-if="monthlyReportTestReceiveIds.length">
+                <thead>
+                  <tr>
+                    <th>测试接收人 ID</th>
+                    <th style="width:88px;">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="receiveId in monthlyReportTestReceiveIds" :key="'monthly-change-test-receiver-' + receiveId">
+                    <td style="word-break:break-all;">{{ receiveId }}</td>
+                    <td>
+                      <button class="btn btn-danger" type="button" @click="removeMonthlyReportTestReceiveId(receiveId)">
+                        删除
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="hint" v-else style="margin-top:10px;">暂未添加测试接收人 ID。</div>
+              <div class="hint">测试发送会复用一份已生成月报，同时向当前已添加的全部接收人发送同一个文件。</div>
+              <div class="btn-line" style="flex-wrap:wrap;margin-top:10px;">
+                <button
+                  class="btn btn-primary"
+                  :disabled="!canRun || !monthlyChangeReportSendReadyCount || isActionLocked(monthlyChangeReportSendAllActionKey)"
+                  @click="sendMonthlyReport('change', 'all')"
+                >
+                  {{ isActionLocked(monthlyChangeReportSendAllActionKey) ? '提交中...' : '一键全部发送' }}
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!canRun || !(monthlyChangeReportLastRun.generated_files || 0) || !monthlyReportTestReceiveCount || isActionLocked(monthlyChangeReportSendTestActionKey)"
+                  @click="sendMonthlyReportTest('change')"
+                >
+                  {{ isActionLocked(monthlyChangeReportSendTestActionKey) ? '提交中...' : ('测试发送（' + (monthlyReportTestReceiveCount || 0) + '人）') }}
+                </button>
+                <button
+                  v-for="row in monthlyChangeReportRecipientStatusByBuilding"
+                  :key="'monthly-change-send-' + row.building"
+                  class="btn btn-secondary"
+                  :title="row.detailText"
+                  :disabled="!canRun || !row.sendReady || isActionLocked(getMonthlyReportSendBuildingActionKey('change', row.building))"
+                  @click="sendMonthlyReport('change', 'building', row.building)"
+                >
+                  {{ isActionLocked(getMonthlyReportSendBuildingActionKey('change', row.building)) ? '提交中...' : row.building }}
+                </button>
+              </div>
+              <table class="site-table" style="margin-top:12px;">
+                <thead>
+                  <tr>
+                    <th style="width:72px;">楼栋</th>
+                    <th style="width:88px;">状态</th>
+                    <th style="width:120px;">主管</th>
+                    <th style="width:140px;">职位</th>
+                    <th style="width:110px;">ID 类型</th>
+                    <th>身份 ID</th>
+                    <th style="width:180px;">文件</th>
+                    <th>说明</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="row in monthlyChangeReportRecipientStatusByBuilding"
+                    :key="'monthly-change-recipient-' + row.building"
+                  >
+                    <td>{{ row.building }}</td>
+                    <td>
+                      <span class="status-badge status-badge-soft" :class="'tone-' + row.tone">{{ row.statusText }}</span>
+                    </td>
+                    <td>{{ row.supervisor || '-' }}</td>
+                    <td>{{ row.position || '-' }}</td>
+                    <td>{{ row.receiveIdType || '-' }}</td>
+                    <td style="word-break:break-all;">{{ row.recipientId || '-' }}</td>
+                    <td style="word-break:break-all;">{{ row.fileName || '-' }}</td>
+                    <td>{{ row.detailText }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+
+            <article class="task-block">
+              <div class="task-block-head">
+                <div>
+                  <div class="task-block-kicker">最近结果卡</div>
+                  <h3 class="card-title">最近一次变更月度统计表处理</h3>
+                </div>
+                <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyChangeReportLastRun.status === 'ok' ? 'success' : monthlyChangeReportLastRun.status === 'partial_failed' ? 'warning' : monthlyChangeReportLastRun.status === 'failed' ? 'danger' : 'neutral')">
+                  {{ monthlyChangeReportLastRun.status || '尚未执行' }}
+                </span>
+              </div>
+              <div class="hint">最近运行：{{ monthlyChangeReportLastRun.finished_at || monthlyChangeReportLastRun.started_at || '-' }}</div>
+              <div class="hint">目标月份：{{ monthlyChangeReportLastRun.target_month || '-' }}</div>
+              <div class="hint">生成文件数：{{ monthlyChangeReportLastRun.generated_files || 0 }}</div>
+              <div class="hint">成功楼栋：{{ (monthlyChangeReportLastRun.successful_buildings || []).join('、') || '-' }}</div>
+              <div class="hint">失败楼栋：{{ (monthlyChangeReportLastRun.failed_buildings || []).join('、') || '-' }}</div>
+              <div class="hint">输出目录：{{ monthlyChangeReportOutputDir }}</div>
+              <div class="hint" v-if="monthlyChangeReportLastRun.error">错误：{{ monthlyChangeReportLastRun.error }}</div>
+              <div class="hr" style="margin:10px 0;"></div>
+              <div class="hint">最近发送：{{ monthlyChangeReportDeliveryLastRun.finished_at || monthlyChangeReportDeliveryLastRun.started_at || '-' }}</div>
+              <div class="hint">发送目标月份：{{ monthlyChangeReportDeliveryLastRun.target_month || '-' }}</div>
+              <div class="hint">发送成功楼栋：{{ (monthlyChangeReportDeliveryLastRun.successful_buildings || []).join('、') || '-' }}</div>
+              <div class="hint">发送失败楼栋：{{ (monthlyChangeReportDeliveryLastRun.failed_buildings || []).join('、') || '-' }}</div>
+              <div class="hint" v-if="monthlyChangeReportDeliveryLastRun.test_mode">最近发送类型：测试发送（多接收人）</div>
+              <div class="hint" v-if="(monthlyChangeReportDeliveryLastRun.test_receive_ids || []).length">
+                测试接收人：{{ (monthlyChangeReportDeliveryLastRun.test_receive_ids || []).join('、') }} / {{ monthlyChangeReportDeliveryLastRun.test_receive_id_type || '-' }}
+              </div>
+              <div class="hint" v-if="(monthlyChangeReportDeliveryLastRun.test_successful_receivers || []).length">
+                测试发送成功：{{ (monthlyChangeReportDeliveryLastRun.test_successful_receivers || []).join('、') }}
+              </div>
+              <div class="hint" v-if="(monthlyChangeReportDeliveryLastRun.test_failed_receivers || []).length">
+                测试发送失败：{{ (monthlyChangeReportDeliveryLastRun.test_failed_receivers || []).join('、') }}
+              </div>
+              <div class="hint" v-if="monthlyChangeReportDeliveryLastRun.test_file_name">测试发送文件：{{ monthlyChangeReportDeliveryLastRun.test_file_building || '-' }} / {{ monthlyChangeReportDeliveryLastRun.test_file_name }}</div>
+              <div class="hint" v-if="monthlyChangeReportDeliveryLastRun.error">发送错误：{{ monthlyChangeReportDeliveryLastRun.error }}</div>
+            </article>
+          </div>
         </section>
 
         <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'alarm_event_upload'">

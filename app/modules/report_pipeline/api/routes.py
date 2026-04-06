@@ -47,6 +47,7 @@ from handover_log_module.repository.event_followup_cache_store import EventFollo
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
 from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
+from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
 from handover_log_module.service.monthly_report_delivery_service import MonthlyReportDeliveryService
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
@@ -1439,16 +1440,31 @@ def health(
         else {}
     )
     monthly_event_report_service = MonthlyEventReportService(runtime_cfg)
+    monthly_change_report_service = MonthlyChangeReportService(runtime_cfg)
+    monthly_change_report_scheduler_snapshot = container.monthly_change_report_scheduler_status()
+    monthly_change_report_last_run = monthly_change_report_service.get_last_run_snapshot()
     monthly_event_report_scheduler_snapshot = container.monthly_event_report_scheduler_status()
     monthly_event_report_last_run = monthly_event_report_service.get_last_run_snapshot()
+    monthly_report_delivery_service = MonthlyReportDeliveryService(runtime_cfg)
     try:
-        monthly_report_delivery_snapshot = MonthlyReportDeliveryService(runtime_cfg).build_delivery_health_snapshot(
+        monthly_event_report_delivery_snapshot = monthly_report_delivery_service.build_delivery_health_snapshot(
             report_type="event",
             emit_log=lambda _text: None,
         )
     except Exception as exc:  # noqa: BLE001
-        monthly_report_delivery_snapshot = {
-            "last_run": MonthlyReportDeliveryService(runtime_cfg).get_last_run_snapshot(),
+        monthly_event_report_delivery_snapshot = {
+            "last_run": monthly_report_delivery_service.get_last_run_snapshot("event"),
+            "recipient_status_by_building": [],
+            "error": str(exc),
+        }
+    try:
+        monthly_change_report_delivery_snapshot = monthly_report_delivery_service.build_delivery_health_snapshot(
+            report_type="change",
+            emit_log=lambda _text: None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        monthly_change_report_delivery_snapshot = {
+            "last_run": monthly_report_delivery_service.get_last_run_snapshot("change"),
             "recipient_status_by_building": [],
             "error": str(exc),
         }
@@ -1722,7 +1738,25 @@ def health(
                 "callback_name": container.monthly_event_report_scheduler_executor_name(),
             },
             "last_run": monthly_event_report_last_run,
-            "delivery": monthly_report_delivery_snapshot,
+            "delivery": monthly_event_report_delivery_snapshot,
+        },
+        "monthly_change_report": {
+            "enabled": bool(monthly_change_report_service.is_enabled()),
+            "scheduler": {
+                "running": bool(monthly_change_report_scheduler_snapshot.get("running", False)),
+                "status": str(monthly_change_report_scheduler_snapshot.get("status", "未初始化")),
+                "next_run_time": str(monthly_change_report_scheduler_snapshot.get("next_run_time", "")),
+                "last_check_at": str(monthly_change_report_scheduler_snapshot.get("last_check_at", "")),
+                "last_decision": str(monthly_change_report_scheduler_snapshot.get("last_decision", "")),
+                "last_trigger_at": str(monthly_change_report_scheduler_snapshot.get("last_trigger_at", "")),
+                "last_trigger_result": str(monthly_change_report_scheduler_snapshot.get("last_trigger_result", "")),
+                "state_path": str(monthly_change_report_scheduler_snapshot.get("state_path", "")),
+                "state_exists": bool(monthly_change_report_scheduler_snapshot.get("state_exists", False)),
+                "executor_bound": bool(container.is_monthly_change_report_scheduler_executor_bound()),
+                "callback_name": container.monthly_change_report_scheduler_executor_name(),
+            },
+            "last_run": monthly_change_report_last_run,
+            "delivery": monthly_change_report_delivery_snapshot,
         },
         "day_metric_upload": {
             "enabled": bool(runtime_cfg.get("day_metric_upload", {}).get("enabled", True))
@@ -2217,6 +2251,51 @@ def job_monthly_event_report_run(payload: Dict[str, Any], request: Request) -> D
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/api/jobs/monthly-change-report/run")
+def job_monthly_change_report_run(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    config = _runtime_config(container)
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起月度变更统计表处理")
+
+    service = MonthlyChangeReportService(config)
+    raw_scope = payload.get("scope", "all") if isinstance(payload, dict) else "all"
+    raw_building = payload.get("building", "") if isinstance(payload, dict) else ""
+    try:
+        scope, building = service.normalize_scope(raw_scope, raw_building)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _, _, target_month = service.target_month_window(datetime.now())
+
+    def _run(emit_log):
+        return service.run(
+            scope=scope,
+            building=building,
+            emit_log=emit_log,
+            source="月度变更统计表处理",
+        )
+
+    try:
+        job = _start_background_job(
+            container,
+            name=service.job_name(scope, building),
+            run_func=_run,
+            worker_handler="",
+            worker_payload={},
+            resource_keys=_job_resource_keys("monthly_change_report:global"),
+            priority="manual",
+            feature="monthly_change_report",
+            dedupe_key=service.dedupe_key(scope, building, target_month=target_month),
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: {service.job_name(scope, building)} ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/api/jobs/monthly-report/send")
 def job_monthly_report_send(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     container = request.app.state.container
@@ -2240,7 +2319,11 @@ def job_monthly_report_send(payload: Dict[str, Any], request: Request) -> Dict[s
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    monthly_last_run = MonthlyEventReportService(config).get_last_run_snapshot()
+    if report_type == "change":
+        monthly_last_run = MonthlyChangeReportService(config).get_last_run_snapshot()
+    else:
+        monthly_last_run = MonthlyEventReportService(config).get_last_run_snapshot()
+    report_resource_key = "monthly_change_report:global" if report_type == "change" else "monthly_event_report:global"
     target_month = str(monthly_last_run.get("target_month", "") or "").strip()
     if not target_month:
         raise HTTPException(status_code=409, detail="缺少最近成功生成的月度统计表文件，请先生成后再发送")
@@ -2268,7 +2351,7 @@ def job_monthly_report_send(payload: Dict[str, Any], request: Request) -> Dict[s
                 run_func=_run,
                 worker_handler="",
                 worker_payload={},
-                resource_keys=_job_resource_keys("monthly_event_report:global"),
+                resource_keys=_job_resource_keys(report_resource_key),
                 priority="manual",
                 feature="monthly_report_send",
                 dedupe_key=service.test_dedupe_key(
@@ -2299,7 +2382,7 @@ def job_monthly_report_send(payload: Dict[str, Any], request: Request) -> Dict[s
             run_func=_run,
             worker_handler="",
             worker_payload={},
-            resource_keys=_job_resource_keys("monthly_event_report:global"),
+            resource_keys=_job_resource_keys(report_resource_key),
             priority="manual",
             feature="monthly_report_send",
             dedupe_key=service.dedupe_key(report_type, scope, building, target_month=target_month),

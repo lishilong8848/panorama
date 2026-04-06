@@ -784,6 +784,88 @@ export function createRuntimeHealthConfigActions(ctx) {
         health.monthly_event_report.delivery.recipient_status_by_building = [];
       }
     }
+    if (data.monthly_change_report && typeof data.monthly_change_report === "object") {
+      health.monthly_change_report.enabled = Boolean(data.monthly_change_report.enabled);
+      if (data.monthly_change_report.scheduler && typeof data.monthly_change_report.scheduler === "object") {
+        Object.assign(health.monthly_change_report.scheduler, data.monthly_change_report.scheduler);
+      }
+      if (data.monthly_change_report.last_run && typeof data.monthly_change_report.last_run === "object") {
+        Object.assign(health.monthly_change_report.last_run, data.monthly_change_report.last_run);
+      } else {
+        Object.assign(health.monthly_change_report.last_run, {
+          started_at: "",
+          finished_at: "",
+          status: "",
+          report_type: "",
+          scope: "",
+          building: "",
+          target_month: "",
+          generated_files: 0,
+          successful_buildings: [],
+          failed_buildings: [],
+          output_dir: "",
+          files_by_building: {},
+          error: "",
+        });
+      }
+      if (data.monthly_change_report.delivery && typeof data.monthly_change_report.delivery === "object") {
+        health.monthly_change_report.delivery.error = String(data.monthly_change_report.delivery.error || "");
+        if (data.monthly_change_report.delivery.last_run && typeof data.monthly_change_report.delivery.last_run === "object") {
+          Object.assign(health.monthly_change_report.delivery.last_run, data.monthly_change_report.delivery.last_run);
+        } else {
+          Object.assign(health.monthly_change_report.delivery.last_run, {
+            started_at: "",
+            finished_at: "",
+            status: "",
+            report_type: "",
+            scope: "",
+            building: "",
+            target_month: "",
+            successful_buildings: [],
+            failed_buildings: [],
+            sent_count: 0,
+            message_ids: {},
+            error: "",
+            test_mode: false,
+            test_receive_id: "",
+            test_receive_id_type: "",
+            test_receive_ids: [],
+            test_successful_receivers: [],
+            test_failed_receivers: [],
+            test_file_building: "",
+            test_file_name: "",
+          });
+        }
+        health.monthly_change_report.delivery.recipient_status_by_building = Array.isArray(data.monthly_change_report.delivery.recipient_status_by_building)
+          ? data.monthly_change_report.delivery.recipient_status_by_building
+          : [];
+      } else {
+        health.monthly_change_report.delivery.error = "";
+        Object.assign(health.monthly_change_report.delivery.last_run, {
+          started_at: "",
+          finished_at: "",
+          status: "",
+          report_type: "",
+          scope: "",
+          building: "",
+          target_month: "",
+          successful_buildings: [],
+          failed_buildings: [],
+          sent_count: 0,
+          message_ids: {},
+          error: "",
+          test_mode: false,
+          test_receive_id: "",
+          test_receive_id_type: "",
+          test_receive_ids: [],
+          test_successful_receivers: [],
+          test_failed_receivers: [],
+          test_file_building: "",
+          test_file_name: "",
+        });
+        health.monthly_change_report.delivery.recipient_status_by_building = [];
+      }
+    }
     if (data.day_metric_upload && typeof data.day_metric_upload === "object") {
       health.day_metric_upload.enabled = Boolean(data.day_metric_upload.enabled);
       if (data.day_metric_upload.target_preview && typeof data.day_metric_upload.target_preview === "object") {

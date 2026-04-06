@@ -687,6 +687,49 @@ def _validate_handover_monthly_event_report(cfg: Dict[str, Any]) -> None:
             )
 
 
+def _validate_handover_monthly_change_report(cfg: Dict[str, Any]) -> None:
+    handover = cfg.get("features", {}).get("handover_log", {})
+    if not isinstance(handover, dict):
+        return
+    monthly_cfg = handover.get("monthly_change_report", {})
+    if not isinstance(monthly_cfg, dict):
+        raise ValueError("配置错误: features.handover_log.monthly_change_report 缺失或格式错误")
+
+    template = monthly_cfg.get("template", {})
+    scheduler = monthly_cfg.get("scheduler", {})
+    if not isinstance(template, dict):
+        raise ValueError("配置错误: features.handover_log.monthly_change_report.template 必须是对象")
+    if not isinstance(scheduler, dict):
+        raise ValueError("配置错误: features.handover_log.monthly_change_report.scheduler 必须是对象")
+
+    if bool(monthly_cfg.get("enabled", True)):
+        if not str(template.get("source_path", "")).strip():
+            raise ValueError("配置错误: features.handover_log.monthly_change_report.template.source_path 不能为空")
+        if not str(template.get("output_dir", "")).strip():
+            raise ValueError("配置错误: features.handover_log.monthly_change_report.template.output_dir 不能为空")
+        if not str(template.get("file_name_pattern", "")).strip():
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_change_report.template.file_name_pattern 不能为空"
+            )
+        day_of_month = int(scheduler.get("day_of_month", 0) or 0)
+        if day_of_month < 1 or day_of_month > 31:
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_change_report.scheduler.day_of_month 必须在1到31之间"
+            )
+        if not _valid_time(str(scheduler.get("run_time", ""))):
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_change_report.scheduler.run_time 必须是 HH:MM:SS"
+            )
+        if int(scheduler.get("check_interval_sec", 0)) <= 0:
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_change_report.scheduler.check_interval_sec 必须大于0"
+            )
+        if not str(scheduler.get("state_file", "")).strip():
+            raise ValueError(
+                "配置错误: features.handover_log.monthly_change_report.scheduler.state_file 不能为空"
+            )
+
+
 def _validate_handover_change_management_section(cfg: Dict[str, Any]) -> None:
     handover = cfg.get("features", {}).get("handover_log", {})
     if not isinstance(handover, dict):
@@ -697,6 +740,7 @@ def _validate_handover_change_management_section(cfg: Dict[str, Any]) -> None:
 
     source = section_cfg.get("source", {})
     fields = section_cfg.get("fields", {})
+    monthly_report_fields = section_cfg.get("monthly_report_fields", {})
     sections = section_cfg.get("sections", {})
     column_mapping = section_cfg.get("column_mapping", {})
     work_window_text = section_cfg.get("work_window_text", {})
@@ -704,6 +748,8 @@ def _validate_handover_change_management_section(cfg: Dict[str, Any]) -> None:
         raise ValueError("配置错误: features.handover_log.change_management_section.source 必须是对象")
     if not isinstance(fields, dict):
         raise ValueError("配置错误: features.handover_log.change_management_section.fields 必须是对象")
+    if not isinstance(monthly_report_fields, dict):
+        raise ValueError("配置错误: features.handover_log.change_management_section.monthly_report_fields 必须是对象")
     if not isinstance(sections, dict):
         raise ValueError("配置错误: features.handover_log.change_management_section.sections 必须是对象")
     if not isinstance(column_mapping, dict):
@@ -726,6 +772,11 @@ def _validate_handover_change_management_section(cfg: Dict[str, Any]) -> None:
             if not str(fields.get(key, "")).strip():
                 raise ValueError(
                     f"配置错误: features.handover_log.change_management_section.fields.{key} 不能为空"
+                )
+        for key in ("building", "change_code", "name", "location", "change_level", "status", "start_time", "end_time"):
+            if not str(monthly_report_fields.get(key, "")).strip():
+                raise ValueError(
+                    f"配置错误: features.handover_log.change_management_section.monthly_report_fields.{key} 不能为空"
                 )
 
         if not str(sections.get("change_management", "")).strip():
@@ -1549,6 +1600,7 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _validate_handover_shift_roster(normalized_v3)
     _validate_handover_event_sections(normalized_v3)
     _validate_handover_monthly_event_report(normalized_v3)
+    _validate_handover_monthly_change_report(normalized_v3)
     _validate_handover_change_management_section(normalized_v3)
     _validate_handover_exercise_management_section(normalized_v3)
     _validate_handover_maintenance_management_section(normalized_v3)

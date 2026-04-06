@@ -228,6 +228,13 @@ export async function startMonthlyEventReportJobApi(payload = {}) {
   });
 }
 
+export async function startMonthlyChangeReportJobApi(payload = {}) {
+  return apiJson("/api/jobs/monthly-change-report/run", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export async function startMonthlyReportSendJobApi(payload = {}) {
   return apiJson("/api/jobs/monthly-report/send", {
     method: "POST",
@@ -256,6 +263,25 @@ export async function getMonthlyEventReportSchedulerStatusApi() {
 
 export async function saveMonthlyEventReportSchedulerConfigApi(payload) {
   return apiJson("/api/scheduler/monthly-event-report/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function startMonthlyChangeReportSchedulerApi() {
+  return apiJson("/api/scheduler/monthly-change-report/start", { method: "POST", body: "{}" });
+}
+
+export async function stopMonthlyChangeReportSchedulerApi() {
+  return apiJson("/api/scheduler/monthly-change-report/stop", { method: "POST", body: "{}" });
+}
+
+export async function getMonthlyChangeReportSchedulerStatusApi() {
+  return apiJson("/api/scheduler/monthly-change-report/status");
+}
+
+export async function saveMonthlyChangeReportSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/monthly-change-report/config", {
     method: "POST",
     body: JSON.stringify(payload),
   });

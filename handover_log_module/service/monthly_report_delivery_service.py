@@ -13,12 +13,14 @@ from app.shared.utils.atomic_file import atomic_write_text
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
+from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
 from pipeline_utils import get_app_dir
 
 
 _ALL_BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
-_LAST_RUN_FILE = "monthly_report_delivery_last_run.json"
+_LEGACY_LAST_RUN_FILE = "monthly_report_delivery_last_run.json"
+_LAST_RUN_FILE_PATTERN = "monthly_report_delivery_last_run_{report_type}.json"
 _SUPPORTED_REPORT_TYPES = {"event", "change"}
 _DEFAULT_TEST_OPEN_ID = "ou_902e364a6c2c6c20893c02abe505a7b2"
 _RECEIVE_ID_SPLIT_PATTERN = re.compile(r"[\s,，;；\r\n]+")
@@ -139,8 +141,13 @@ class MonthlyReportDeliveryService:
     def _runtime_state_root(self) -> Path:
         return resolve_runtime_state_root(runtime_config=self.runtime_config, app_dir=get_app_dir())
 
-    def _last_run_path(self) -> Path:
-        return self._runtime_state_root() / _LAST_RUN_FILE
+    def _last_run_path(self, report_type: str) -> Path:
+        normalized_report_type = self.normalize_report_type(report_type)
+        file_name = _LAST_RUN_FILE_PATTERN.format(report_type=normalized_report_type)
+        return self._runtime_state_root() / file_name
+
+    def _legacy_last_run_path(self) -> Path:
+        return self._runtime_state_root() / _LEGACY_LAST_RUN_FILE
 
     @staticmethod
     def _empty_last_run() -> Dict[str, Any]:
@@ -167,18 +174,30 @@ class MonthlyReportDeliveryService:
             "test_file_name": "",
         }
 
-    def get_last_run_snapshot(self) -> Dict[str, Any]:
-        path = self._last_run_path()
+    def get_last_run_snapshot(self, report_type: str = "event") -> Dict[str, Any]:
+        normalized_report_type = self.normalize_report_type(report_type)
+        path = self._last_run_path(normalized_report_type)
         if not path.exists():
-            return self._empty_last_run()
+            if normalized_report_type == "event":
+                legacy_path = self._legacy_last_run_path()
+                path = legacy_path if legacy_path.exists() else path
+            if not path.exists():
+                snapshot = self._empty_last_run()
+                snapshot["report_type"] = normalized_report_type
+                return snapshot
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
-            return self._empty_last_run()
+            snapshot = self._empty_last_run()
+            snapshot["report_type"] = normalized_report_type
+            return snapshot
         if not isinstance(payload, dict):
-            return self._empty_last_run()
+            snapshot = self._empty_last_run()
+            snapshot["report_type"] = normalized_report_type
+            return snapshot
         snapshot = self._empty_last_run()
         snapshot.update(payload)
+        snapshot["report_type"] = str(snapshot.get("report_type", "") or "").strip().lower() or normalized_report_type
         snapshot["sent_count"] = int(snapshot.get("sent_count", 0) or 0)
         snapshot["successful_buildings"] = [
             str(item or "").strip()
@@ -202,11 +221,13 @@ class MonthlyReportDeliveryService:
         snapshot["test_file_name"] = str(snapshot.get("test_file_name", "") or "").strip()
         return snapshot
 
-    def _save_last_run_snapshot(self, payload: Dict[str, Any]) -> None:
+    def _save_last_run_snapshot(self, report_type: str, payload: Dict[str, Any]) -> None:
+        normalized_report_type = self.normalize_report_type(report_type)
         snapshot = self._empty_last_run()
         snapshot.update(payload if isinstance(payload, dict) else {})
+        snapshot["report_type"] = normalized_report_type
         atomic_write_text(
-            self._last_run_path(),
+            self._last_run_path(normalized_report_type),
             json.dumps(snapshot, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -253,6 +274,8 @@ class MonthlyReportDeliveryService:
         normalized_report_type = self.normalize_report_type(report_type)
         if normalized_report_type == "event":
             snapshot = MonthlyEventReportService(self.runtime_config).get_last_run_snapshot()
+        elif normalized_report_type == "change":
+            snapshot = MonthlyChangeReportService(self.runtime_config).get_last_run_snapshot()
         else:
             snapshot = {}
         if not isinstance(snapshot, dict):
@@ -397,10 +420,11 @@ class MonthlyReportDeliveryService:
         report_type: str = "event",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
+        normalized_report_type = self.normalize_report_type(report_type)
         return {
-            "last_run": self.get_last_run_snapshot(),
+            "last_run": self.get_last_run_snapshot(normalized_report_type),
             "recipient_status_by_building": self.build_recipient_status_by_building(
-                report_type=report_type,
+                report_type=normalized_report_type,
                 emit_log=emit_log,
             ),
         }
@@ -549,7 +573,7 @@ class MonthlyReportDeliveryService:
             message_ids=message_ids,
             error="; ".join(failure_details),
         )
-        self._save_last_run_snapshot(result)
+        self._save_last_run_snapshot(normalized_report_type, result)
 
         emit_log(
             f"[月度统计表发送] 完成: report_type={normalized_report_type}, status={status}, "
@@ -586,7 +610,8 @@ class MonthlyReportDeliveryService:
 
         file_item = self._choose_test_file(files_by_building)
         if not file_item:
-            raise RuntimeError("当前没有可用于测试发送的事件月度统计表文件")
+            report_label = "事件" if normalized_report_type == "event" else "变更"
+            raise RuntimeError(f"当前没有可用于测试发送的{report_label}月度统计表文件")
 
         file_building = str(file_item.get("building", "") or "").strip()
         file_name = str(file_item.get("file_name", "") or "").strip()
@@ -669,7 +694,7 @@ class MonthlyReportDeliveryService:
             test_file_building=file_building,
             test_file_name=file_name,
         )
-        self._save_last_run_snapshot(result)
+        self._save_last_run_snapshot(normalized_report_type, result)
 
         emit_log(
             f"[月度统计表测试发送] 完成: report_type={normalized_report_type}, status={status}, target_month={target_month}, "

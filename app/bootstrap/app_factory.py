@@ -29,6 +29,7 @@ from app.modules.report_pipeline.api.routes import (
 )
 from app.modules.shared_bridge.api.routes import router as shared_bridge_router
 from app.modules.scheduler.api.handover_routes import router as handover_scheduler_router
+from app.modules.scheduler.api.monthly_change_report_routes import router as monthly_change_report_scheduler_router
 from app.modules.scheduler.api.monthly_event_report_routes import router as monthly_event_report_scheduler_router
 from app.modules.scheduler.api.routes import router as scheduler_router
 from app.modules.scheduler.api.wet_bulb_collection_routes import router as wet_bulb_collection_scheduler_router
@@ -45,6 +46,7 @@ from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.handover_daily_report_screenshot_service import (
     HandoverDailyReportScreenshotService,
 )
+from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
 from pipeline_utils import get_app_dir
 
@@ -134,6 +136,7 @@ def _register_external_role_routes(app: FastAPI) -> None:
     app.include_router(scheduler_router)
     app.include_router(handover_scheduler_router)
     app.include_router(wet_bulb_collection_scheduler_router)
+    app.include_router(monthly_change_report_scheduler_router)
     app.include_router(monthly_event_report_scheduler_router)
     app.include_router(feishu_router)
     app.include_router(notify_router)
@@ -199,6 +202,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_handover_scheduler(source="关闭自动")
             if container.wet_bulb_collection_scheduler:
                 container.stop_wet_bulb_collection_scheduler(source="关闭自动")
+            if container.monthly_change_report_scheduler:
+                container.stop_monthly_change_report_scheduler(source="关闭自动")
             if container.monthly_event_report_scheduler:
                 container.stop_monthly_event_report_scheduler(source="关闭自动")
             if container.updater_service:
@@ -301,6 +306,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(
                 f"[湿球温度定时采集调度] 执行器绑定完成: {container.wet_bulb_collection_scheduler_executor_name()}, "
                 f"executor_bound={container.is_wet_bulb_collection_scheduler_executor_bound()}"
+            )
+            container.add_system_log(
+                f"[月度变更统计表调度] 执行器绑定完成: {container.monthly_change_report_scheduler_executor_name()}, "
+                f"executor_bound={container.is_monthly_change_report_scheduler_executor_bound()}"
             )
             container.add_system_log(
                 f"[月度事件统计表调度] 执行器绑定完成: {container.monthly_event_report_scheduler_executor_name()}, "
@@ -874,6 +883,40 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
 
+    def monthly_change_report_scheduler_callback(source: str) -> tuple[bool, str]:
+        role_mode = _deployment_role_mode()
+        if role_mode == "internal":
+            container.add_system_log("[月度变更统计表调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+
+        runtime_config = container.runtime_config
+        service = MonthlyChangeReportService(runtime_config)
+        _, _, target_month = service.target_month_window(datetime.now())
+        dedupe_key = service.dedupe_key("all", target_month=target_month)
+
+        def _run(emit_log):
+            return service.run(
+                scope="all",
+                emit_log=emit_log,
+                source=source,
+            )
+
+        try:
+            job = container.job_service.start_job(
+                name="月度变更统计表处理-全部楼栋",
+                run_func=_run,
+                resource_keys=["monthly_change_report:global"],
+                priority="scheduler",
+                feature="monthly_change_report",
+                submitted_by="scheduler",
+                dedupe_key=dedupe_key,
+            )
+            detail = f"已提交月度变更统计表任务 job_id={job.job_id}, target_month={target_month}"
+            container.add_system_log(f"[月度变更统计表调度] {detail}")
+            return True, detail
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+
     def updater_restart_callback(context: dict) -> tuple[bool, str]:
         try:
             restart_exit_code = str(os.environ.get("QJPT_RESTART_EXIT_CODE", "") or "").strip()
@@ -930,6 +973,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     container.set_scheduler_callback(scheduler_callback)
     container.set_handover_scheduler_callback(handover_scheduler_callback)
     container.set_wet_bulb_collection_scheduler_callback(wet_bulb_collection_scheduler_callback)
+    container.set_monthly_change_report_scheduler_callback(monthly_change_report_scheduler_callback)
     container.set_monthly_event_report_scheduler_callback(monthly_event_report_scheduler_callback)
     container.set_updater_restart_callback(updater_restart_callback)
     @app.get("/", response_class=HTMLResponse)

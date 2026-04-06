@@ -443,6 +443,22 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "receive_ids": ["ou_902e364a6c2c6c20893c02abe505a7b2"],
                 },
             },
+            "monthly_change_report": {
+                "enabled": True,
+                "template": {
+                    "source_path": "月度变更统计表空模板.xlsx",
+                    "output_dir": "D:\\QLDownload\\月度统计表输出\\变更月度统计表",
+                    "file_name_pattern": "{building}_{month}_变更月度统计表.xlsx",
+                },
+                "scheduler": {
+                    "enabled": False,
+                    "auto_start_in_gui": False,
+                    "day_of_month": 1,
+                    "run_time": "01:00:00",
+                    "check_interval_sec": 30,
+                    "state_file": "monthly_change_report_scheduler_state.json",
+                },
+            },
             "change_management_section": {
                 "enabled": True,
                 "source": {
@@ -458,6 +474,16 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "process_updates": "过程更新时间",
                     "description": "名称",
                     "specialty": "专业",
+                },
+                "monthly_report_fields": {
+                    "building": "楼栋",
+                    "change_code": "变更编码",
+                    "name": "名称",
+                    "location": "位置",
+                    "change_level": "智航-变更等级",
+                    "status": "变更状态",
+                    "start_time": "变更开始时间",
+                    "end_time": "变更结束时间",
                 },
                 "sections": {
                     "change_management": "变更管理",

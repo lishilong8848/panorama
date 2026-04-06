@@ -1,21 +1,30 @@
 ﻿import {
+  saveMonthlyChangeReportSchedulerConfigApi,
   saveMonthlyEventReportSchedulerConfigApi,
+  startMonthlyChangeReportJobApi,
+  startMonthlyChangeReportSchedulerApi,
   startMonthlyEventReportJobApi,
   startMonthlyEventReportSchedulerApi,
   startMonthlyReportSendJobApi,
   startMonthlyReportSendTestJobApi,
+  stopMonthlyChangeReportSchedulerApi,
   stopMonthlyEventReportSchedulerApi,
 } from "./api_client.js";
 
 const ACTION_KEYS = {
   runAll: "job:monthly_event_report:all",
   runBuildingPrefix: "job:monthly_event_report:building:",
+  changeRunAll: "job:monthly_change_report:all",
+  changeRunBuildingPrefix: "job:monthly_change_report:building:",
   sendAllPrefix: "job:monthly_report_send:all:",
   sendBuildingPrefix: "job:monthly_report_send:building:",
   sendTestPrefix: "job:monthly_report_send:test:",
   schedulerStart: "monthly_event_report_scheduler:start",
   schedulerStop: "monthly_event_report_scheduler:stop",
   schedulerSave: "monthly_event_report_scheduler:save",
+  changeSchedulerStart: "monthly_change_report_scheduler:start",
+  changeSchedulerStop: "monthly_change_report_scheduler:stop",
+  changeSchedulerSave: "monthly_change_report_scheduler:save",
 };
 
 function formatSchedulerActionReason(reason) {
@@ -38,6 +47,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     selectedJobId,
     config,
     monthlyEventReportSchedulerQuickSaving,
+    monthlyChangeReportSchedulerQuickSaving,
     monthlyReportTestReceiveIds,
     monthlyReportTestReceiveIdType,
     streamController,
@@ -57,9 +67,9 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     return taskFn();
   }
 
-  function applySchedulerSnapshot(data) {
-    if (!data || typeof data !== "object" || !health?.monthly_event_report?.scheduler) return;
-    Object.assign(health.monthly_event_report.scheduler, {
+  function applySchedulerSnapshot(targetScheduler, data) {
+    if (!data || typeof data !== "object" || !targetScheduler || typeof targetScheduler !== "object") return;
+    Object.assign(targetScheduler, {
       running: Boolean(data.running),
       status: String(data.status || ""),
       next_run_time: String(data.next_run_time || ""),
@@ -88,6 +98,14 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   function formatError(err, actionLabel) {
     const text = String(err || "").trim();
     return `${actionLabel}失败: ${text || "未知错误"}`;
+  }
+
+  function resolveTargetMonth(reportType) {
+    const normalizedReportType = String(reportType || "event").trim().toLowerCase() || "event";
+    if (normalizedReportType === "change") {
+      return String(health?.monthly_change_report?.last_run?.target_month || "").trim() || "latest";
+    }
+    return String(health?.monthly_event_report?.last_run?.target_month || "").trim() || "latest";
   }
 
   async function runMonthlyEventReport(scope, building = "") {
@@ -128,6 +146,44 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     );
   }
 
+  async function runMonthlyChangeReport(scope, building = "") {
+    if (isInternalRole()) {
+      message.value = "当前为内网端，本地管理页不提供月度统计表处理入口，请在外网端发起。";
+      return;
+    }
+    if (!canRun.value) return;
+    const normalizedBuilding = String(building || "").trim();
+    const actionKey =
+      scope === "building"
+        ? `${ACTION_KEYS.changeRunBuildingPrefix}${normalizedBuilding}`
+        : ACTION_KEYS.changeRunAll;
+
+    return guardedRun(
+      actionKey,
+      async () => {
+        try {
+          const payload =
+            scope === "building"
+              ? { scope: "building", building: normalizedBuilding }
+              : { scope: "all" };
+          const job = await startMonthlyChangeReportJobApi(payload);
+          attachAcceptedJob(
+            job,
+            scope === "building"
+              ? `月度变更统计表处理已提交: ${normalizedBuilding}`
+              : "月度变更统计表处理已提交: 全部楼栋",
+          );
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+        } catch (err) {
+          message.value = formatError(err, "提交月度变更统计表处理任务");
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
   async function sendMonthlyReport(reportType, scope, building = "") {
     if (isInternalRole()) {
       message.value = "当前为内网端，本地管理页不提供月度统计表发送入口，请在外网端发起。";
@@ -136,7 +192,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     if (!canRun.value) return;
     const normalizedReportType = String(reportType || "event").trim().toLowerCase() || "event";
     const normalizedBuilding = String(building || "").trim();
-    const targetMonth = String(health?.monthly_event_report?.last_run?.target_month || "").trim() || "latest";
+    const targetMonth = resolveTargetMonth(normalizedReportType);
     const actionKey =
       scope === "building"
         ? `${ACTION_KEYS.sendBuildingPrefix}${normalizedReportType}:${normalizedBuilding}:${targetMonth}`
@@ -175,7 +231,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     }
     if (!canRun.value) return;
     const normalizedReportType = String(reportType || "event").trim().toLowerCase() || "event";
-    const targetMonth = String(health?.monthly_event_report?.last_run?.target_month || "").trim() || "latest";
+    const targetMonth = resolveTargetMonth(normalizedReportType);
     const actionKey = `${ACTION_KEYS.sendTestPrefix}${normalizedReportType}:${targetMonth}`;
     const receiveIds = Array.isArray(monthlyReportTestReceiveIds?.value) ? monthlyReportTestReceiveIds.value : [];
     const receiveIdType = String(monthlyReportTestReceiveIdType?.value || "open_id").trim() || "open_id";
@@ -215,7 +271,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
       async () => {
         try {
           const data = await startMonthlyEventReportSchedulerApi();
-          applySchedulerSnapshot(data);
+          applySchedulerSnapshot(health?.monthly_event_report?.scheduler, data);
           await fetchHealth();
           message.value = `月度事件统计表调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
@@ -236,7 +292,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
       async () => {
         try {
           const data = await stopMonthlyEventReportSchedulerApi();
-          applySchedulerSnapshot(data);
+          applySchedulerSnapshot(health?.monthly_event_report?.scheduler, data);
           await fetchHealth();
           message.value = `月度事件统计表调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
@@ -300,12 +356,111 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     );
   }
 
+  async function startMonthlyChangeReportScheduler() {
+    if (isInternalRole()) {
+      message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.changeSchedulerStart,
+      async () => {
+        try {
+          const data = await startMonthlyChangeReportSchedulerApi();
+          applySchedulerSnapshot(health?.monthly_change_report?.scheduler, data);
+          await fetchHealth();
+          message.value = `月度变更统计表调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          message.value = formatError(err, "启动月度变更统计表调度");
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function stopMonthlyChangeReportScheduler() {
+    if (isInternalRole()) {
+      message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.changeSchedulerStop,
+      async () => {
+        try {
+          const data = await stopMonthlyChangeReportSchedulerApi();
+          applySchedulerSnapshot(health?.monthly_change_report?.scheduler, data);
+          await fetchHealth();
+          message.value = `月度变更统计表调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          message.value = formatError(err, "停止月度变更统计表调度");
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function saveMonthlyChangeReportSchedulerQuickConfig() {
+    if (isInternalRole()) {
+      message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
+      return;
+    }
+    if (!config.value) return;
+    const monthly = config.value.handover_log?.monthly_change_report || {};
+    const scheduler = monthly.scheduler || {};
+    const payload = {
+      enabled: Boolean(scheduler.enabled),
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
+      day_of_month: Number.parseInt(String(scheduler.day_of_month ?? 1), 10) || 1,
+      run_time: String(scheduler.run_time || "").trim(),
+      check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
+      state_file: String(scheduler.state_file || "").trim(),
+    };
+    if (!payload.run_time) {
+      message.value = "月度变更统计表调度时间不能为空。";
+      return;
+    }
+    if (!payload.state_file) {
+      message.value = "月度变更统计表调度状态文件名不能为空。";
+      return;
+    }
+    if (!Number.isInteger(payload.day_of_month) || payload.day_of_month < 1 || payload.day_of_month > 31) {
+      message.value = "月度变更统计表调度日期必须在 1 到 31 之间。";
+      return;
+    }
+    if (!Number.isInteger(payload.check_interval_sec) || payload.check_interval_sec <= 0) {
+      message.value = "月度变更统计表调度检查间隔必须大于 0 秒。";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.changeSchedulerSave,
+      async () => {
+        try {
+          monthlyChangeReportSchedulerQuickSaving.value = true;
+          const data = await saveMonthlyChangeReportSchedulerConfigApi(payload);
+          if (config.value?.handover_log?.monthly_change_report?.scheduler && data?.scheduler_config) {
+            Object.assign(config.value.handover_log.monthly_change_report.scheduler, data.scheduler_config);
+          }
+          await fetchHealth();
+          message.value = data?.message || "月度变更统计表调度配置已更新";
+        } catch (err) {
+          message.value = formatError(err, "保存月度变更统计表调度配置");
+        } finally {
+          monthlyChangeReportSchedulerQuickSaving.value = false;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
   return {
     runMonthlyEventReport,
+    runMonthlyChangeReport,
     sendMonthlyReport,
     sendMonthlyReportTest,
     startMonthlyEventReportScheduler,
     stopMonthlyEventReportScheduler,
     saveMonthlyEventReportSchedulerQuickConfig,
+    startMonthlyChangeReportScheduler,
+    stopMonthlyChangeReportScheduler,
+    saveMonthlyChangeReportSchedulerQuickConfig,
   };
 }
