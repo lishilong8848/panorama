@@ -376,7 +376,7 @@ class BitableTargetResolver:
                 operation_app_token="",
                 table_id=table_text,
                 target_kind="invalid",
-                message="璇峰厛濉啓婀跨悆娓╁害鐩爣鐨?App Token 鍜?Table ID",
+                message="请先填写目标多维 App Token 和 Table ID",
             )
 
         cache_key = (

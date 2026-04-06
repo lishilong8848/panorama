@@ -191,7 +191,7 @@ class WifiSwitcher:
         # Penalize common mojibake fragments.
         negative_markers = (
             "\u951f",
-            "�",
+            "\uFFFD",
             "銆",
             "\u951b",
             "\u5bb8\u63d2",
