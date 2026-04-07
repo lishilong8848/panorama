@@ -585,7 +585,7 @@
             </div>
             <div class="status-metric">
               <div class="status-metric-label">后续上传</div>
-              <strong class="status-metric-value">{{ handoverFollowupProgress.pendingCount || handoverFollowupProgress.failedCount ? `待处理 ${handoverFollowupProgress.pendingCount} / 失败 ${handoverFollowupProgress.failedCount}` : "已清空" }}</strong>
+              <strong class="status-metric-value">{{ handoverFollowupProgress.pendingCount || handoverFollowupProgress.failedCount ? ('待处理 ' + handoverFollowupProgress.pendingCount + ' / 失败 ' + handoverFollowupProgress.failedCount) : '已清空' }}</strong>
             </div>
           </div>
           <div class="hint" v-if="health.handover.review_base_url_effective">
