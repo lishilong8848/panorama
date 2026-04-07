@@ -14,6 +14,7 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClien
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
 from app.shared.utils.atomic_file import atomic_save_workbook, atomic_write_text
+from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
@@ -229,7 +230,7 @@ class MonthlyChangeReportService:
     def _resolve_path(self, value: str) -> Path:
         path = Path(str(value or "").strip())
         if path.is_absolute():
-            return path
+            return fallback_missing_windows_drive_path(path, app_dir=self._app_dir())
         return self._app_dir() / path
 
     def resolve_template_path(self) -> Path:

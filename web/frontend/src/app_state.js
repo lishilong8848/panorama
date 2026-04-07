@@ -2877,7 +2877,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       },
       multi_date: {
         eyebrow: "批量补跑",
-        title: "多日期自动流程",
+        title: "多日用电明细自动流程",
         description: "适合补跑连续日期，保持统一下载与上传流程。",
         metrics: [
           { label: "已选日期", value: `${selectedDateCount.value} 天` },
@@ -2936,7 +2936,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       },
       monthly_event_report: {
         eyebrow: "月度本地生成",
-        title: "月度统计表处理",
+        title: "体系月度统计表",
         description: "读取上一个自然月的事件与变更数据，按楼栋生成两类月度统计表并输出到本地目录。",
         metrics: [
           {
@@ -3157,5 +3157,6 @@ function normalizeInternalDownloadPoolSlot(slot) {
     actionGuard,
   };
 }
+
 
 

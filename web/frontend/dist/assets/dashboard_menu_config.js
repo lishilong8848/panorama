@@ -8,12 +8,12 @@ const AUTO_GROUP = {
   items: [
     {
       id: 'auto_flow',
-      title: '立即自动流程',
+      title: '每日用电明细自动流程',
       desc: '单次执行整条月报主流程，并保留断点续传入口。',
     },
     {
       id: 'multi_date',
-      title: '多日期自动流程',
+      title: '多日用电明细自动流程',
       desc: '按日期区间批量补跑，适合回补连续日期。',
     },
   ],
@@ -57,7 +57,7 @@ const SPECIAL_GROUP = {
     },
     {
       id: 'monthly_event_report',
-      title: '月度统计表处理',
+      title: '体系月度统计表',
       desc: '读取上一个自然月的新事件处理数据，按楼栋生成事件月度统计表到本地目录。',
     },
     {
@@ -98,3 +98,4 @@ export function getDashboardMenuGroupsForRole(roleMode) {
     items: cloneItems(group.items),
   }));
 }
+

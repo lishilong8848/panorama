@@ -458,7 +458,7 @@
         </section>
 
         <section class="content-card" v-if="dashboardActiveModule === 'multi_date'">
-          <h3 class="card-title">多日期自动流程</h3>
+          <h3 class="card-title">多日用电明细自动流程</h3>
           <div class="range-card">
             <div class="range-head">区间选择</div>
             <div class="range-grid">
@@ -485,10 +485,10 @@
             <button class="btn btn-secondary" @click="addDate">添加单日</button>
             <button class="btn btn-ghost" @click="clearDates">清空已选</button>
             <button class="btn btn-primary" :disabled="isInternalDeploymentRole || !canRun || isActionLocked(actionKeyMultiDate)" @click="runMultiDate">
-              {{ isActionLocked(actionKeyMultiDate) ? '执行中...' : '执行多日期自动流程' }}
+              {{ isActionLocked(actionKeyMultiDate) ? '执行中...' : '执行多日用电明细自动流程' }}
             </button>
           </div>
-          <div class="hint" v-if="isInternalDeploymentRole">当前为内网端，多日期自动流程请在外网端发起。</div>
+          <div class="hint" v-if="isInternalDeploymentRole">当前为内网端，多日用电明细自动流程请在外网端发起。</div>
           <div class="form-row">
             <div class="label">已选日期（从左到右，共 {{ selectedDateCount }} 天）</div>
             <div class="chips">
@@ -1392,7 +1392,7 @@
         </section>
 
         <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'monthly_event_report'">
-          <h3 class="card-title">月度统计表处理</h3>
+          <h3 class="card-title">体系月度统计表</h3>
           <div class="hint">每次手动触发或调度执行时，固定读取上一个自然月的新事件处理数据，并生成本地 Excel 文件。</div>
           <div class="hint">本轮只实现“事件月度统计表”；“月度变更统计表”仅保留模板占位，不执行处理链路。</div>
 
@@ -1647,7 +1647,7 @@
               <div class="task-block-head">
                 <div>
                   <div class="task-block-kicker">最近结果卡</div>
-                  <h3 class="card-title">最近一次事件月度统计表处理</h3>
+                  <h3 class="card-title">最近一次事件体系月度统计表</h3>
                 </div>
                 <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyEventReportLastRun.status === 'ok' ? 'success' : monthlyEventReportLastRun.status === 'partial_failed' ? 'warning' : monthlyEventReportLastRun.status === 'failed' ? 'danger' : 'neutral')">
                   {{ monthlyEventReportLastRun.status || '尚未执行' }}
@@ -1932,7 +1932,7 @@
               <div class="task-block-head">
                 <div>
                   <div class="task-block-kicker">最近结果卡</div>
-                  <h3 class="card-title">最近一次变更月度统计表处理</h3>
+                  <h3 class="card-title">最近一次变更体系月度统计表</h3>
                 </div>
                 <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyChangeReportLastRun.status === 'ok' ? 'success' : monthlyChangeReportLastRun.status === 'partial_failed' ? 'warning' : monthlyChangeReportLastRun.status === 'failed' ? 'danger' : 'neutral')">
                   {{ monthlyChangeReportLastRun.status || '尚未执行' }}
@@ -2168,5 +2168,6 @@
         </div>
       </div>
     </section>`;
+
 
 

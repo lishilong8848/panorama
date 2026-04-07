@@ -289,11 +289,20 @@ class SharedBridgeRuntimeService:
                 "alarm_event_family": {},
             }
         )
-        internal_alert_status = (
-            self._build_external_internal_alert_status(self._store.list_external_alert_projections())
-            if self._store is not None and normalized_mode != "internal_light"
-            else self._empty_internal_alert_status()
-        )
+        if self._store is not None and normalized_mode != "internal_light":
+            try:
+                internal_alert_status = self._build_external_internal_alert_status(
+                    self._store.list_external_alert_projections()
+                )
+            except Exception as exc:  # noqa: BLE001
+                if self._is_recoverable_store_error(exc):
+                    self._db_status = "busy"
+                    self._last_error = "共享桥接数据库暂时忙碌，告警摘要已降级为空结果"
+                    internal_alert_status = self._empty_internal_alert_status()
+                else:
+                    raise
+        else:
+            internal_alert_status = self._empty_internal_alert_status()
         return {
             "enabled": self.shared_bridge_enabled,
             "role_mode": self.role_mode,
@@ -322,14 +331,28 @@ class SharedBridgeRuntimeService:
     def list_tasks(self, *, limit: int = 100) -> list[Dict[str, Any]]:
         if not self._store:
             return []
-        self._store.ensure_ready()
-        return self._store.list_tasks(limit=limit)
+        try:
+            self._store.ensure_ready()
+            return self._store.list_tasks(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            if self._is_recoverable_store_error(exc):
+                self._db_status = "busy"
+                self._last_error = "共享桥接数据库暂时忙碌，共享任务列表已降级为空结果"
+                return []
+            raise
 
     def get_task(self, task_id: str) -> Dict[str, Any] | None:
         if not self._store:
             return None
-        self._store.ensure_ready()
-        return self._store.get_task(task_id)
+        try:
+            self._store.ensure_ready()
+            return self._store.get_task(task_id)
+        except Exception as exc:  # noqa: BLE001
+            if self._is_recoverable_store_error(exc):
+                self._db_status = "busy"
+                self._last_error = "共享桥接数据库暂时忙碌，共享任务详情暂时不可用"
+                return None
+            raise
 
     def cancel_task(self, task_id: str) -> bool:
         if not self._store:

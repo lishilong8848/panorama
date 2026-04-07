@@ -12,6 +12,7 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClien
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
 from app.shared.utils.atomic_file import atomic_save_workbook
+from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.shift_window import build_duty_window, parse_duty_date
 from handover_log_module.core.normalizers import format_number
 from handover_log_module.repository.excel_reader import load_rows
@@ -184,6 +185,11 @@ class HandoverCapacityReportService:
             raise ValueError("handover_log.capacity_report.template.output_dir 未配置")
         if not output_dir.is_absolute():
             output_dir = get_app_dir() / output_dir
+        output_dir = fallback_missing_windows_drive_path(
+            output_dir,
+            app_dir=get_app_dir(),
+            label="交接班容量报表输出目录",
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
 

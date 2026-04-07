@@ -101,7 +101,7 @@
   <div class="form-row"><label class="label">最近查询ID上限</label><input type="number" v-model.number="config.handover_log.event_sections.cache.max_last_query_ids" /></div>
   <div class="hint">历史事件跟进来源 = 非当班“事件闭环转检修中” + 缓存闭环回写；同时应用于“从已有数据表生成”和“使用共享文件生成”。</div>
 
-  <div class="section-title">月度统计表处理（事件月度统计表）</div>
+  <div class="section-title">体系月度统计表（事件月度统计表）</div>
   <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_event_report.enabled" /> 启用月度事件统计表处理</label></div>
   <div class="form-row"><label class="label">事件模板文件</label><input type="text" v-model="config.handover_log.monthly_event_report.template.source_path" /></div>
   <div class="form-row"><label class="label">输出目录</label><input type="text" v-model="config.handover_log.monthly_event_report.template.output_dir" /></div>
@@ -114,7 +114,7 @@
   <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_event_report.scheduler.state_file" /></div>
   <div class="hint">数据源固定复用“新事件处理”同一张多维表。</div>
 
-  <div class="section-title">月度统计表处理（变更月度统计表）</div>
+  <div class="section-title">体系月度统计表（变更月度统计表）</div>
   <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_change_report.enabled" /> 启用月度变更统计表处理</label></div>
   <div class="form-row"><label class="label">变更模板文件</label><input type="text" v-model="config.handover_log.monthly_change_report.template.source_path" /></div>
   <div class="form-row"><label class="label">输出目录</label><input type="text" v-model="config.handover_log.monthly_change_report.template.output_dir" /></div>
@@ -602,4 +602,5 @@
   </table>
 </div>
 `;
+
 

@@ -4,7 +4,9 @@ import copy
 from typing import Any, Dict, List
 
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3, deep_merge_defaults
+from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.cell_rule_compiler import migrate_legacy_rule_structures, normalize_cell_rules
+from pipeline_utils import get_app_dir
 
 
 def _dict(value: Any) -> Dict[str, Any]:
@@ -75,9 +77,21 @@ def _resolve_business_root(common_paths: Dict[str, Any]) -> str:
     legacy_download_root = str(common_paths.get("download_save_dir", "") or "").strip()
     legacy_excel_root = str(common_paths.get("excel_dir", "") or "").strip()
     if explicit_root and (explicit_root != default_root or (not legacy_download_root and not legacy_excel_root)):
-        return explicit_root
+        return str(
+            fallback_missing_windows_drive_path(
+                explicit_root,
+                app_dir=get_app_dir(),
+                label="业务根目录",
+            )
+        )
     root = legacy_download_root or legacy_excel_root or explicit_root or default_root
-    return root
+    return str(
+        fallback_missing_windows_drive_path(
+            root,
+            app_dir=get_app_dir(),
+            label="业务根目录",
+        )
+    )
 
 
 def _resolve_runtime_state_root(common_paths: Dict[str, Any]) -> str:

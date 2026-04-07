@@ -228,15 +228,25 @@ class SharedBridgeStore:
 
     @contextmanager
     def connect(self, *, read_only: bool = False) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.db_path), timeout=self.busy_timeout_ms / 1000.0, check_same_thread=False)
+        if read_only:
+            db_uri = f"file:{self.db_path.as_posix()}?mode=ro"
+            conn = sqlite3.connect(
+                db_uri,
+                timeout=self.busy_timeout_ms / 1000.0,
+                check_same_thread=False,
+                uri=True,
+            )
+        else:
+            conn = sqlite3.connect(str(self.db_path), timeout=self.busy_timeout_ms / 1000.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
-            conn.execute("PRAGMA foreign_keys=ON")
             if read_only:
                 conn.execute("PRAGMA query_only=ON")
+            else:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA foreign_keys=ON")
             yield conn
             if not read_only and conn.in_transaction:
                 conn.commit()

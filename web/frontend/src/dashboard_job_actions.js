@@ -107,7 +107,7 @@ export function createDashboardJobActions(ctx) {
     await startJobByJson(
       "/api/jobs/multi-date",
       { dates: selectedDates.value },
-      "多日期自动流程",
+      "多日用电明细自动流程",
       ACTION_KEYS.multiDate,
     );
   }
@@ -621,3 +621,4 @@ export function createDashboardJobActions(ctx) {
     getJobRetryActionKey,
   };
 }
+

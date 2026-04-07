@@ -7,8 +7,10 @@ from typing import Any, Dict, List
 
 from openpyxl import load_workbook
 
+from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.repository.review_session_state_store import ReviewSessionStateStore
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
+from pipeline_utils import get_app_dir
 
 
 class ReviewSessionConflictError(RuntimeError):
@@ -67,7 +69,7 @@ class ReviewSessionService:
                 output_dir = runtime_root.parent / output_dir
         if not output_dir.is_absolute():
             output_dir = Path(__file__).resolve().parents[2] / output_dir
-        return output_dir
+        return fallback_missing_windows_drive_path(output_dir, app_dir=get_app_dir())
 
     @staticmethod
     def _is_path_under(child: Path, parent: Path) -> bool:

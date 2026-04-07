@@ -110,7 +110,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
 
   async function runMonthlyEventReport(scope, building = "") {
     if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表处理入口，请在外网端发起。";
+      message.value = "当前为内网端，本地管理页不提供体系月度统计表入口，请在外网端发起。";
       return;
     }
     if (!canRun.value) return;
@@ -148,7 +148,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
 
   async function runMonthlyChangeReport(scope, building = "") {
     if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表处理入口，请在外网端发起。";
+      message.value = "当前为内网端，本地管理页不提供体系月度统计表入口，请在外网端发起。";
       return;
     }
     if (!canRun.value) return;
@@ -464,3 +464,4 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     saveMonthlyChangeReportSchedulerQuickConfig,
   };
 }
+

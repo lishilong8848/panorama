@@ -1168,7 +1168,7 @@ createApp({
       let tone = "success";
       let statusText = "可以继续外网主流程";
       let summaryText = "共享文件已就绪，当前可以直接进入自动流程、交接班或告警上传。";
-      let nextActionText = "优先从“立即自动流程”开始；需要专项处理时再进入交接班日志或告警信息上传。";
+      let nextActionText = "优先从“每日用电明细自动流程”开始；需要专项处理时再进入交接班日志或告警信息上传。";
       if (!cache.canProceedLatest) {
         tone = cache.tone || "warning";
         statusText = cache.statusText || "等待共享文件就绪";
@@ -1202,7 +1202,7 @@ createApp({
           { label: "当前任务", value: currentTaskOverview.value.statusText, tone: currentTaskOverview.value.tone },
         ],
         actions: [
-          { id: "open_auto_flow", label: "立即自动流程", desc: "从共享文件主链开始执行外网默认流程" },
+          { id: "open_auto_flow", label: "每日用电明细自动流程", desc: "从共享文件主链开始执行外网默认流程" },
           { id: "open_handover_log", label: "交接班处理", desc: "处理审核、回补和交接班后续上传" },
           { id: "open_alarm_upload", label: "告警上传", desc: "检查今天最新告警文件并执行 60 天上传" },
         ],
@@ -3652,3 +3652,4 @@ createApp({
 }).mount("#app");
 finishAppBoot();
 }
+

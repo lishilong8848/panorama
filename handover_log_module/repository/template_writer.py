@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict
 import openpyxl
 
 from app.shared.utils.atomic_file import atomic_write_file, validate_excel_workbook_file
+from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.footer_layout import find_footer_inventory_layout, trim_rows_below_footer
 from handover_log_module.core.footer_snapshot import (
     capture_footer_block_snapshot,
@@ -18,6 +19,7 @@ from handover_log_module.repository.section_writer import (
     resolve_section_target_row_count,
     write_category_sections,
 )
+from pipeline_utils import get_app_dir
 
 
 def _safe_filename(building: str) -> str:
@@ -185,6 +187,14 @@ def copy_template_and_fill(
     output_dir = Path(str(template_cfg.get("output_dir", "")).strip())
     if not str(output_dir):
         raise ValueError("template.output_dir is required")
+    if not output_dir.is_absolute():
+        output_dir = get_app_dir() / output_dir
+    output_dir = fallback_missing_windows_drive_path(
+        output_dir,
+        app_dir=get_app_dir(),
+        emit_log=emit_log,
+        label="交接班日志输出目录",
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     file_name_pattern = str(template_cfg.get("file_name_pattern", "{building}_{date}_交接班日志.xlsx")).strip()
