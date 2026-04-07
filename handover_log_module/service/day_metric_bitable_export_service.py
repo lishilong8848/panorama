@@ -305,12 +305,14 @@ class DayMetricBitableExportService:
     def _serialize_hit_payload(metric_key: str, hit: MetricHit | Dict[str, Any] | Any) -> Dict[str, Any]:
         if isinstance(hit, dict):
             row_index = int(hit.get("row_index", 0) or 0)
+            d_name = str(hit.get("d_name", "")).strip()
             b_norm = str(hit.get("b_norm", "")).strip()
             c_norm = str(hit.get("c_norm", "")).strip()
             b_text = str(hit.get("b_text", "")).strip()
             c_text = str(hit.get("c_text", "")).strip()
         else:
             row_index = int(getattr(hit, "row_index", 0) or 0)
+            d_name = str(getattr(hit, "d_name", "")).strip()
             b_norm = str(getattr(hit, "b_norm", "")).strip()
             c_norm = str(getattr(hit, "c_norm", "")).strip()
             b_text = str(getattr(hit, "b_text", "")).strip()
@@ -318,6 +320,7 @@ class DayMetricBitableExportService:
         return {
             "metric_key": str(metric_key or "").strip(),
             "row_index": row_index,
+            "d_name": d_name,
             "b_norm": b_norm,
             "c_norm": c_norm,
             "b_text": b_text,
@@ -330,6 +333,7 @@ class DayMetricBitableExportService:
         return {
             "metric_key": str(data.get("metric_key", "")).strip(),
             "row_index": int(data.get("row_index", 0) or 0),
+            "d_name": str(data.get("d_name", "")).strip(),
             "b_norm": str(data.get("b_norm", "")).strip(),
             "c_norm": str(data.get("c_norm", "")).strip(),
             "b_text": str(data.get("b_text", "")).strip(),

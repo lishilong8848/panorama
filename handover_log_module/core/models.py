@@ -41,6 +41,10 @@ class BuildingResult:
     building: str
     data_file: str
     output_file: str = ""
+    capacity_output_file: str = ""
+    capacity_status: str = ""
+    capacity_error: str = ""
+    capacity_warnings: List[str] = field(default_factory=list)
     success: bool = False
     fills: List[FillValue] = field(default_factory=list)
     missing_metrics: List[str] = field(default_factory=list)
@@ -57,6 +61,10 @@ class BuildingResult:
             "building": self.building,
             "data_file": self.data_file,
             "output_file": self.output_file,
+            "capacity_output_file": self.capacity_output_file,
+            "capacity_status": self.capacity_status,
+            "capacity_error": self.capacity_error,
+            "capacity_warnings": list(self.capacity_warnings or []),
             "success": self.success,
             "fills": [asdict(x) for x in self.fills],
             "missing_metrics": self.missing_metrics,

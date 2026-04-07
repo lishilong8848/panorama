@@ -2750,6 +2750,19 @@ async def job_handover_from_file(
     temp_path = temp_dir / f"input{suffix}"
     with temp_path.open("wb") as f:
         f.write(file.file.read())
+    capacity_source_file = ""
+    if duty_date_text and duty_shift_text:
+        bridge_service = getattr(container, "shared_bridge_service", None)
+        if bridge_service is not None:
+            matched_capacity = _filter_accessible_cached_entries(
+                bridge_service.get_handover_capacity_by_date_cache_entries(
+                    duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
+                    buildings=[building],
+                )
+            )
+            if matched_capacity:
+                capacity_source_file = str(matched_capacity[0].get("file_path", "") or "").strip()
 
     def _run(emit_log):
         notify = WebhookNotifyService(config)
@@ -2758,6 +2771,7 @@ async def job_handover_from_file(
             return orchestrator.run_handover_from_file(
                 building=building,
                 file_path=str(temp_path),
+                capacity_source_file=capacity_source_file or None,
                 end_time=end_time_text,
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
@@ -2778,6 +2792,7 @@ async def job_handover_from_file(
             worker_payload={
                 "building": building,
                 "file_path": str(temp_path),
+                "capacity_source_file": capacity_source_file or None,
                 "end_time": end_time_text,
                 "duty_date": duty_date_text,
                 "duty_shift": duty_shift_text,
@@ -2847,6 +2862,22 @@ async def job_handover_from_files(
         with temp_path.open("wb") as handle:
             handle.write(upload.file.read())
         building_files.append((building, str(temp_path)))
+    capacity_building_files: list[tuple[str, str]] = []
+    if duty_date_text and duty_shift_text:
+        bridge_service = getattr(container, "shared_bridge_service", None)
+        if bridge_service is not None:
+            matched_capacity = _filter_accessible_cached_entries(
+                bridge_service.get_handover_capacity_by_date_cache_entries(
+                    duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
+                    buildings=building_list,
+                )
+            )
+            capacity_building_files = [
+                (str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip())
+                for item in matched_capacity
+                if str(item.get("building", "") or "").strip() and str(item.get("file_path", "") or "").strip()
+            ]
 
     def _run(emit_log):
         notify = WebhookNotifyService(config)
@@ -2854,6 +2885,7 @@ async def job_handover_from_files(
             orchestrator = OrchestratorService(config)
             return orchestrator.run_handover_from_files(
                 building_files=building_files,
+                capacity_building_files=capacity_building_files or None,
                 end_time=end_time_text,
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
@@ -2880,6 +2912,10 @@ async def job_handover_from_files(
                 "building_files": [
                     {"building": item_building, "file_path": item_path}
                     for item_building, item_path in building_files
+                ],
+                "capacity_building_files": [
+                    {"building": item_building, "file_path": item_path}
+                    for item_building, item_path in capacity_building_files
                 ],
                 "end_time": end_time_text,
                 "duty_date": duty_date_text,
@@ -2940,7 +2976,14 @@ def job_handover_from_download(payload: Dict[str, Any], request: Request) -> Dic
                 duty_shift=duty_shift_text,
                 buildings=target_buildings,
             ))
-            if len(cached_entries) < len(target_buildings):
+            capacity_cached_entries = _filter_accessible_cached_entries(
+                bridge_service.get_handover_capacity_by_date_cache_entries(
+                    duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
+                    buildings=target_buildings,
+                )
+            )
+            if len(cached_entries) < len(target_buildings) or len(capacity_cached_entries) < len(target_buildings):
                 task = _get_or_create_bridge_task(
                     bridge_service,
                     get_or_create_name="get_or_create_handover_cache_fill_task",
@@ -2970,13 +3013,43 @@ def job_handover_from_download(payload: Dict[str, Any], request: Request) -> Dic
                     ),
                 }
             building_files = [(str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip()) for item in cached_entries]
+            capacity_building_files = [
+                (str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip())
+                for item in capacity_cached_entries
+            ]
         else:
             selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
                 source_family="handover_log_family",
                 buildings=target_buildings,
             ))
             cached_entries = selection["selected_entries"]
-            if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
+            capacity_building_files = []
+            for item in cached_entries:
+                building = str(item.get("building", "") or "").strip()
+                duty_date_value = str(item.get("duty_date", "") or "").strip()
+                duty_shift_value = str(item.get("duty_shift", "") or "").strip().lower()
+                if not building or not duty_date_value or duty_shift_value not in {"day", "night"}:
+                    continue
+                matched = _filter_accessible_cached_entries(
+                    bridge_service.get_handover_capacity_by_date_cache_entries(
+                        duty_date=duty_date_value,
+                        duty_shift=duty_shift_value,
+                        buildings=[building],
+                    )
+                )
+                if not matched:
+                    continue
+                capacity_building_files.append(
+                    (
+                        str(matched[0].get("building", "") or "").strip(),
+                        str(matched[0].get("file_path", "") or "").strip(),
+                    )
+                )
+            if (
+                not selection["can_proceed"]
+                or len(cached_entries) < len(target_buildings)
+                or len(capacity_building_files) < len(target_buildings)
+            ):
                 task = _get_or_create_bridge_task(
                     bridge_service,
                     get_or_create_name="get_or_create_handover_from_download_task",
@@ -3003,6 +3076,7 @@ def job_handover_from_download(payload: Dict[str, Any], request: Request) -> Dic
             orchestrator = OrchestratorService(config)
             return orchestrator.run_handover_from_files(
                 building_files=building_files,
+                capacity_building_files=capacity_building_files,
                 end_time=end_time_text,
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,

@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
@@ -35,11 +36,179 @@ class HandoverDownloadService:
     ) -> None:
         self.config = config
         self.did_switch_internal_this_run = False
+        self._business_root_override = Path(business_root_override) if business_root_override else None
         self._source_file_cache_service = HandoverSourceFileCacheService(
             config,
             business_root_override=business_root_override,
         )
         self._download_browser_pool = download_browser_pool
+
+    def _clone_with_download_config(self, download_cfg: Dict[str, Any]) -> "HandoverDownloadService":
+        cloned_config = copy.deepcopy(self.config if isinstance(self.config, dict) else {})
+        cloned_config["download"] = copy.deepcopy(download_cfg if isinstance(download_cfg, dict) else {})
+        return HandoverDownloadService(
+            cloned_config,
+            self._download_browser_pool,
+            business_root_override=self._business_root_override,
+        )
+
+    def _capacity_download_config(self, *, template_name_override: str | None = None) -> Dict[str, Any]:
+        base_cfg = copy.deepcopy(
+            self.config.get("download", {}) if isinstance(self.config.get("download", {}), dict) else {}
+        )
+        capacity_root_cfg = (
+            self.config.get("capacity_report", {})
+            if isinstance(self.config.get("capacity_report", {}), dict)
+            else {}
+        )
+        capacity_download_cfg = (
+            capacity_root_cfg.get("download", {})
+            if isinstance(capacity_root_cfg.get("download", {}), dict)
+            else {}
+        )
+        base_cfg.update(copy.deepcopy(capacity_download_cfg))
+        template_name = str(template_name_override or base_cfg.get("template_name", "")).strip()
+        if template_name:
+            base_cfg["template_name"] = template_name
+        return base_cfg
+
+    @staticmethod
+    def _merge_multi_download_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        merged_results: List[Dict[str, Any]] = []
+        merged_success_files: List[Dict[str, Any]] = []
+        merged_failed: List[Dict[str, Any]] = []
+        start_time = ""
+        end_time = ""
+        duty_date = ""
+        duty_shift = ""
+        is_shift_window = False
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            if not start_time:
+                start_time = str(item.get("start_time", "") or "").strip()
+            if not end_time:
+                end_time = str(item.get("end_time", "") or "").strip()
+            if not duty_date:
+                duty_date = str(item.get("duty_date", "") or "").strip()
+            if not duty_shift:
+                duty_shift = str(item.get("duty_shift", "") or "").strip()
+            is_shift_window = bool(is_shift_window or item.get("is_shift_window", False))
+            merged_results.extend([row for row in item.get("results", []) if isinstance(row, dict)])
+            merged_success_files.extend([row for row in item.get("success_files", []) if isinstance(row, dict)])
+            merged_failed.extend([row for row in item.get("failed", []) if isinstance(row, dict)])
+        return {
+            "start_time": start_time,
+            "end_time": end_time,
+            "duty_date": duty_date,
+            "duty_shift": duty_shift,
+            "is_shift_window": is_shift_window,
+            "results": merged_results,
+            "success_files": merged_success_files,
+            "failed": merged_failed,
+        }
+
+    def run_capacity_only(
+        self,
+        buildings: List[str] | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        duty_date: str | None = None,
+        duty_shift: str | None = None,
+        switch_network: bool = True,
+        reuse_cached: bool = True,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        target_buildings = buildings[:] if buildings else self._enabled_buildings()
+        target_buildings = [str(item or "").strip() for item in target_buildings if str(item or "").strip()]
+        if not target_buildings:
+            raise ValueError("没有可下载的楼栋，请检查 handover_log.sites 或传入 buildings 参数")
+
+        capacity_root_cfg = (
+            self.config.get("capacity_report", {})
+            if isinstance(self.config.get("capacity_report", {}), dict)
+            else {}
+        )
+        capacity_download_cfg = (
+            capacity_root_cfg.get("download", {})
+            if isinstance(capacity_root_cfg.get("download", {}), dict)
+            else {}
+        )
+        normal_template_name = str(capacity_download_cfg.get("template_name", "") or "").strip()
+        e_template_name = str(capacity_download_cfg.get("e_template_name", "") or "").strip() or normal_template_name
+        if not normal_template_name:
+            raise ValueError("配置错误: handover_log.capacity_report.download.template_name 不能为空")
+
+        grouped_buildings: List[tuple[List[str], str]] = []
+        normal_buildings = [building for building in target_buildings if building != "E楼"]
+        e_buildings = [building for building in target_buildings if building == "E楼"]
+        if normal_buildings:
+            grouped_buildings.append((normal_buildings, normal_template_name))
+        if e_buildings:
+            grouped_buildings.append((e_buildings, e_template_name))
+
+        results: List[Dict[str, Any]] = []
+        switched = False
+        for group_buildings, template_name in grouped_buildings:
+            cloned_service = self._clone_with_download_config(
+                self._capacity_download_config(template_name_override=template_name)
+            )
+            results.append(
+                cloned_service.run(
+                    buildings=group_buildings,
+                    start_time=start_time,
+                    end_time=end_time,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    switch_network=bool(switch_network and not switched),
+                    reuse_cached=reuse_cached,
+                    emit_log=emit_log,
+                )
+            )
+            switched = True
+        merged = self._merge_multi_download_results(results)
+        merged["report_kind"] = "capacity"
+        return merged
+
+    def run_with_capacity_report(
+        self,
+        buildings: List[str] | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        duty_date: str | None = None,
+        duty_shift: str | None = None,
+        switch_network: bool = True,
+        reuse_cached: bool = True,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        handover_result = self.run(
+            buildings=buildings,
+            start_time=start_time,
+            end_time=end_time,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            switch_network=switch_network,
+            reuse_cached=reuse_cached,
+            emit_log=emit_log,
+        )
+        capacity_result = self.run_capacity_only(
+            buildings=buildings,
+            start_time=str(handover_result.get("start_time", "") or "").strip() or start_time,
+            end_time=str(handover_result.get("end_time", "") or "").strip() or end_time,
+            duty_date=str(handover_result.get("duty_date", "") or "").strip() or duty_date,
+            duty_shift=str(handover_result.get("duty_shift", "") or "").strip() or duty_shift,
+            switch_network=False,
+            reuse_cached=reuse_cached,
+            emit_log=emit_log,
+        )
+        return {
+            "start_time": str(handover_result.get("start_time", "") or "").strip(),
+            "end_time": str(handover_result.get("end_time", "") or "").strip(),
+            "duty_date": str(handover_result.get("duty_date", "") or "").strip(),
+            "duty_shift": str(handover_result.get("duty_shift", "") or "").strip(),
+            "handover": handover_result,
+            "capacity": capacity_result,
+        }
 
     def _enabled_buildings(self) -> List[str]:
         sites = self.config.get("sites", [])

@@ -652,7 +652,16 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     buildings=target_buildings,
                 )
                 cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
-                if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                capacity_entries = bridge_service.get_handover_capacity_by_date_cache_entries(
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    buildings=target_buildings,
+                )
+                if (
+                    not bool(selection.get("can_proceed", False))
+                    or len(cached_entries) < len(target_buildings)
+                    or len(capacity_entries) < len(target_buildings)
+                ):
                     bridge_task = _get_or_create_bridge_task(
                         bridge_service,
                         get_or_create_name="get_or_create_handover_from_download_task",
@@ -679,8 +688,16 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         )
                         for item in cached_entries
                     ]
+                    capacity_building_files = [
+                        (
+                            str(item.get("building", "") or "").strip(),
+                            str(item.get("file_path", "") or "").strip(),
+                        )
+                        for item in capacity_entries
+                    ]
                     return orchestrator.run_handover_from_files(
                         building_files=building_files,
+                        capacity_building_files=capacity_building_files,
                         end_time=None,
                         duty_date=duty_date,
                         duty_shift=duty_shift,

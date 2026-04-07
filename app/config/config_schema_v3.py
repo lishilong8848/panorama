@@ -244,6 +244,37 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "debug_step_log": True,
                 "export_button_text": "原样导出",
             },
+            "capacity_report": {
+                "download": {
+                    "template_name": "交接班容量报表",
+                    "e_template_name": "每日报表合集",
+                    "lookback_minutes": 20,
+                    "scale_label": "5分钟",
+                    "menu_path": ["报表报告", "数据查询", "即时报表"],
+                    "export_button_text": "原样导出",
+                },
+                "template": {
+                    "source_path": "交接班容量报表空模板.xlsx",
+                    "sheet_name": "本班组",
+                    "output_dir": "D:\\QLDownload\\交接班容量报表输出",
+                    "file_name_pattern": "{building}_{date}_交接班容量报表.xlsx",
+                    "date_format": "%Y%m%d",
+                },
+                "parsing": {
+                    "sheet_index": 0,
+                    "start_row": 4,
+                    "col_b": 2,
+                    "col_c": 3,
+                    "col_d": 4,
+                    "col_e": 5,
+                    "forward_fill_b": True,
+                    "forward_fill_c": True,
+                    "value_source": "col_e",
+                },
+                "oil_cache": {
+                    "state_file": "handover_capacity_oil_cache.json",
+                },
+            },
             "template": {
                 "source_path": "交接班日志空模板.xlsx",
                 "sheet_name": "交接班日志",

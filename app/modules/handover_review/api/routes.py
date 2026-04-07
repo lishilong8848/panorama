@@ -460,6 +460,13 @@ def _shift_label(shift_code: str) -> str:
     return normalized or "-"
 
 
+def _parse_base_revision_or_400(payload: Dict[str, Any]) -> int:
+    try:
+        return int((payload or {}).get("base_revision", 0) or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="base_revision 参数错误") from exc
+
+
 HISTORY_CLOUD_SUCCESS_LIMIT = 10
 HISTORY_CLOUD_SUCCESS_RULE = "cloud_success_only"
 
@@ -1113,6 +1120,7 @@ def handover_review_data(
     duty_date: str = "",
     duty_shift: str = "",
     session_id: str = "",
+    client_id: str = "",
 ) -> Dict[str, Any]:
     container = request.app.state.container
     service, parser, _, _ = _build_review_services(container)
@@ -1133,6 +1141,11 @@ def handover_review_data(
         "session": session,
         "document": document,
         "batch_status": batch_status,
+        "concurrency": service.get_session_concurrency(
+            building=building,
+            session_id=str(session.get("session_id", "")).strip(),
+            client_id=str(client_id or "").strip(),
+        ),
         "review_ui": review_ui if isinstance(review_ui, dict) else {},
         "history": _build_history_payload_safe(
             service,
@@ -1160,6 +1173,33 @@ def handover_review_download(building_code: str, request: Request, session_id: s
 
     container.add_system_log(
         f"[交接班][下载成品] building={building}, session_id={session_id_text}, file={output_file}"
+    )
+    return FileResponse(
+        path=output_file,
+        filename=output_file.name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@router.get("/api/handover/review/{building_code}/capacity-download")
+def handover_review_capacity_download(building_code: str, request: Request, session_id: str = "") -> FileResponse:
+    container = request.app.state.container
+    service, _, _, _ = _build_review_services(container)
+    building = _resolve_building_or_404(service, building_code)
+
+    session_id_text = str(session_id or "").strip()
+    if not session_id_text:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+
+    output_file = Path(str(target.get("capacity_output_file", "")).strip())
+    if not str(output_file).strip():
+        raise HTTPException(status_code=404, detail="当前交接班容量报表尚未生成")
+    if not output_file.exists():
+        raise HTTPException(status_code=404, detail="交接班容量报表文件不存在，请重新生成")
+
+    container.add_system_log(
+        f"[交接班][下载容量报表] building={building}, session_id={session_id_text}, file={output_file}"
     )
     return FileResponse(
         path=output_file,
@@ -1250,6 +1290,11 @@ def handover_review_save(
         "revision": int(session.get("revision", 0) or 0),
         "updated_at": str(session.get("updated_at", "")).strip(),
         "output_file": str(session.get("output_file", "")).strip(),
+        "concurrency": service.get_session_concurrency(
+            building=building,
+            session_id=str(session.get("session_id", "")).strip(),
+            client_id=str(payload.get("client_id", "")).strip(),
+        ),
         "batch_status": batch_status,
         "history": _build_history_payload_safe(
             service,
@@ -1270,6 +1315,7 @@ def handover_review_confirm(
     service, _, _, followup = _build_review_services(container)
     building = _resolve_building_or_404(service, building_code)
     session_id = str(payload.get("session_id", "")).strip()
+    base_revision = _parse_base_revision_or_400(payload)
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     _load_target_session_or_404(service, building=building, session_id=session_id)
@@ -1285,7 +1331,10 @@ def handover_review_confirm(
                 building=building,
                 session_id=session_id,
                 confirmed=True,
+                base_revision=base_revision,
             )
+        except ReviewSessionConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1312,6 +1361,11 @@ def handover_review_confirm(
         return {
             "ok": True,
             "session": latest_session,
+            "concurrency": service.get_session_concurrency(
+                building=building,
+                session_id=str(latest_session.get("session_id", "")).strip(),
+                client_id=str(payload.get("client_id", "")).strip(),
+            ),
             "batch_status": latest_batch_status or _attach_followup_progress(followup, batch_status),
             "followup_result": followup_result,
             "history": _build_history_payload_safe(
@@ -1333,6 +1387,7 @@ def handover_review_unconfirm(
     service, _, _, _ = _build_review_services(container)
     building = _resolve_building_or_404(service, building_code)
     session_id = str(payload.get("session_id", "")).strip()
+    base_revision = _parse_base_revision_or_400(payload)
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     _load_target_session_or_404(service, building=building, session_id=session_id)
@@ -1348,7 +1403,10 @@ def handover_review_unconfirm(
                 building=building,
                 session_id=session_id,
                 confirmed=False,
+                base_revision=base_revision,
             )
+        except ReviewSessionConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         container.add_system_log(
@@ -1357,6 +1415,11 @@ def handover_review_unconfirm(
         return {
             "ok": True,
             "session": session,
+            "concurrency": service.get_session_concurrency(
+                building=building,
+                session_id=str(session.get("session_id", "")).strip(),
+                client_id=str(payload.get("client_id", "")).strip(),
+            ),
             "batch_status": batch_status,
             "history": _build_history_payload_safe(
                 service,
@@ -1365,6 +1428,77 @@ def handover_review_unconfirm(
                 emit_log=container.add_system_log,
             ),
         }
+
+
+@router.post("/api/handover/review/{building_code}/lock/claim")
+def handover_review_lock_claim(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service, _, _, _ = _build_review_services(container)
+    building = _resolve_building_or_404(service, building_code)
+    session_id = str(payload.get("session_id", "")).strip()
+    client_id = str(payload.get("client_id", "")).strip()
+    holder_label = str(payload.get("holder_label", "")).strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id 不能为空")
+    _load_target_session_or_404(service, building=building, session_id=session_id)
+    concurrency = service.claim_session_lock(
+        building=building,
+        session_id=session_id,
+        client_id=client_id,
+        holder_label=holder_label,
+    )
+    return {"ok": True, "concurrency": concurrency, "accepted": bool(concurrency.get("acquired", False))}
+
+
+@router.post("/api/handover/review/{building_code}/lock/heartbeat")
+def handover_review_lock_heartbeat(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service, _, _, _ = _build_review_services(container)
+    building = _resolve_building_or_404(service, building_code)
+    session_id = str(payload.get("session_id", "")).strip()
+    client_id = str(payload.get("client_id", "")).strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id 不能为空")
+    _load_target_session_or_404(service, building=building, session_id=session_id)
+    concurrency = service.heartbeat_session_lock(
+        building=building,
+        session_id=session_id,
+        client_id=client_id,
+    )
+    return {"ok": True, "concurrency": concurrency, "accepted": bool(concurrency.get("renewed", False))}
+
+
+@router.post("/api/handover/review/{building_code}/lock/release")
+def handover_review_lock_release(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service, _, _, _ = _build_review_services(container)
+    building = _resolve_building_or_404(service, building_code)
+    session_id = str(payload.get("session_id", "")).strip()
+    client_id = str(payload.get("client_id", "")).strip()
+    if not session_id or not client_id:
+        return {"ok": True, "concurrency": {"current_revision": 0, "active_editor": None, "lease_expires_at": "", "is_editing_elsewhere": False, "client_holds_lock": False}, "released": False}
+    concurrency = service.release_session_lock(
+        building=building,
+        session_id=session_id,
+        client_id=client_id,
+    )
+    return {"ok": True, "concurrency": concurrency, "released": bool(concurrency.get("released", False))}
 
 
 @router.post("/api/handover/review/{building_code}/cloud-sync/retry")

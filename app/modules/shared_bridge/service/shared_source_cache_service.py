@@ -37,6 +37,7 @@ from pipeline_utils import load_download_module
 
 _DEFAULT_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"]
 FAMILY_HANDOVER_LOG = "handover_log_family"
+FAMILY_HANDOVER_CAPACITY_REPORT = "handover_capacity_report_family"
 FAMILY_MONTHLY_REPORT = "monthly_report_family"
 FAMILY_ALARM_EVENT = "alarm_event_family"
 LEGACY_FAMILY_ALIASES = {
@@ -45,11 +46,13 @@ LEGACY_FAMILY_ALIASES = {
 }
 FAMILY_DIR_NAMES = {
     FAMILY_HANDOVER_LOG: "handover_log",
+    FAMILY_HANDOVER_CAPACITY_REPORT: "handover_capacity_report",
     FAMILY_MONTHLY_REPORT: "monthly_report",
     FAMILY_ALARM_EVENT: "alarm_event",
 }
 FAMILY_LABELS = {
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
+    FAMILY_HANDOVER_CAPACITY_REPORT: "交接班容量报表源文件",
     FAMILY_MONTHLY_REPORT: "全景平台月报源文件",
     FAMILY_ALARM_EVENT: "告警信息源文件",
 }
@@ -185,6 +188,7 @@ class SharedSourceCacheService:
         self._last_success_at = ""
         self._current_hour_bucket = ""
         self._active_latest_downloads: Dict[tuple[str, str, str, str], str] = {}
+        self._building_latest_refresh_threads: Dict[tuple[str, str, str, str], threading.Thread] = {}
         self._manual_alarm_refresh_thread: threading.Thread | None = None
         self._manual_alarm_refresh: Dict[str, Any] = {
             "running": False,
@@ -204,11 +208,13 @@ class SharedSourceCacheService:
         self._monthly_download_module_lock = threading.Lock()
         self._family_status: Dict[str, Dict[str, Any]] = {
             FAMILY_HANDOVER_LOG: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+            FAMILY_HANDOVER_CAPACITY_REPORT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_MONTHLY_REPORT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_ALARM_EVENT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
         }
         self._light_building_status: Dict[str, Dict[str, Dict[str, Any]]] = {
             FAMILY_HANDOVER_LOG: {},
+            FAMILY_HANDOVER_CAPACITY_REPORT: {},
             FAMILY_MONTHLY_REPORT: {},
             FAMILY_ALARM_EVENT: {},
         }
@@ -275,10 +281,12 @@ class SharedSourceCacheService:
             or self.current_alarm_bucket()
         )
         self._family_status.setdefault(FAMILY_HANDOVER_LOG, {})["current_bucket"] = current_bucket
+        self._family_status.setdefault(FAMILY_HANDOVER_CAPACITY_REPORT, {})["current_bucket"] = current_bucket
         self._family_status.setdefault(FAMILY_MONTHLY_REPORT, {})["current_bucket"] = current_bucket
         self._family_status.setdefault(FAMILY_ALARM_EVENT, {})["current_bucket"] = alarm_bucket
         for family_name, bucket_key in (
             (FAMILY_HANDOVER_LOG, current_bucket),
+            (FAMILY_HANDOVER_CAPACITY_REPORT, current_bucket),
             (FAMILY_MONTHLY_REPORT, current_bucket),
             (FAMILY_ALARM_EVENT, alarm_bucket),
         ):
@@ -331,6 +339,58 @@ class SharedSourceCacheService:
         base["ready"] = bool(base.get("ready", False) or status_text == "ready")
         self._light_building_status.setdefault(normalized_family, {})[building_name] = base
         self._family_status.setdefault(normalized_family, {})["current_bucket"] = effective_bucket
+
+    def _recompute_family_status_from_light_unlocked(
+        self,
+        *,
+        source_family: str,
+        bucket_key: str = "",
+    ) -> Dict[str, Any]:
+        normalized_family = self._normalize_source_family(source_family)
+        effective_bucket = str(
+            bucket_key
+            or self._family_status.get(normalized_family, {}).get("current_bucket", "")
+            or ""
+        ).strip()
+        family_cache = self._light_building_status.setdefault(normalized_family, {})
+        rows: List[Dict[str, Any]] = []
+        for building in self.get_enabled_buildings():
+            row = family_cache.get(building)
+            if not isinstance(row, dict):
+                row = self._default_light_building_status(building=building, bucket_key=effective_bucket)
+                family_cache[building] = row
+            rows.append(row)
+        ready_count = sum(
+            1
+            for item in rows
+            if str(item.get("status", "") or "").strip().lower() == "ready" and bool(item.get("ready", False))
+        )
+        failed_buildings = [
+            str(item.get("building", "") or "").strip()
+            for item in rows
+            if str(item.get("status", "") or "").strip().lower() == "failed"
+        ]
+        blocked_buildings = [
+            str(item.get("building", "") or "").strip()
+            for item in rows
+            if bool(item.get("blocked", False))
+        ]
+        last_success_candidates = [
+            str(item.get("downloaded_at", "") or "").strip()
+            for item in rows
+            if str(item.get("downloaded_at", "") or "").strip()
+        ]
+        family_status = self._family_status.setdefault(normalized_family, {})
+        family_status["ready_count"] = ready_count
+        family_status["failed_buildings"] = failed_buildings
+        family_status["blocked_buildings"] = blocked_buildings
+        family_status["last_success_at"] = (
+            max(last_success_candidates)
+            if last_success_candidates
+            else str(family_status.get("last_success_at", "") or "").strip()
+        )
+        family_status["current_bucket"] = effective_bucket
+        return family_status
 
     def _set_light_building_status_from_entry_unlocked(
         self,
@@ -444,6 +504,15 @@ class SharedSourceCacheService:
             handover_family = {"current_bucket": current_bucket, "buildings": []}
             snapshot_error = str(exc)
         try:
+            handover_capacity_family = self._build_family_health_snapshot(
+                source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+                current_bucket=current_bucket,
+                include_latest_selection=include_latest_selection,
+            )
+        except Exception as exc:  # noqa: BLE001
+            handover_capacity_family = {"current_bucket": current_bucket, "buildings": []}
+            snapshot_error = snapshot_error or str(exc)
+        try:
             monthly_family = self._build_family_health_snapshot(
                 source_family=FAMILY_MONTHLY_REPORT,
                 current_bucket=current_bucket,
@@ -458,6 +527,10 @@ class SharedSourceCacheService:
             alarm_family = {"current_bucket": alarm_bucket, "buildings": []}
             snapshot_error = snapshot_error or str(exc)
         families[FAMILY_HANDOVER_LOG] = {**families.get(FAMILY_HANDOVER_LOG, {}), **handover_family}
+        families[FAMILY_HANDOVER_CAPACITY_REPORT] = {
+            **families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
+            **handover_capacity_family,
+        }
         families[FAMILY_MONTHLY_REPORT] = {**families.get(FAMILY_MONTHLY_REPORT, {}), **monthly_family}
         families[FAMILY_ALARM_EVENT] = {
             **families.get(FAMILY_ALARM_EVENT, {}),
@@ -474,6 +547,7 @@ class SharedSourceCacheService:
             "cache_root": str(self.shared_root) if self.shared_root else "",
             "current_hour_refresh": current_hour_refresh,
             FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
+            FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
             FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
             FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
         }
@@ -552,6 +626,7 @@ class SharedSourceCacheService:
         self.latest_required = bool(source_cache.get("latest_required", True))
         self.history_fill_timeout_sec = max(60, int(source_cache.get("history_fill_timeout_sec", 1800) or 1800))
         self._handover_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_HANDOVER_LOG] if self.shared_root else None
+        self._handover_capacity_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_HANDOVER_CAPACITY_REPORT] if self.shared_root else None
         self._monthly_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_MONTHLY_REPORT] if self.shared_root else None
         self._alarm_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_ALARM_EVENT] if self.shared_root else None
         self._tmp_root = self.shared_root / "tmp" / "source_cache" if self.shared_root else None
@@ -575,6 +650,8 @@ class SharedSourceCacheService:
         text = str(source_family or "").strip().lower()
         if text in {FAMILY_HANDOVER_LOG, "handover_family"}:
             return FAMILY_HANDOVER_LOG
+        if text == FAMILY_HANDOVER_CAPACITY_REPORT:
+            return FAMILY_HANDOVER_CAPACITY_REPORT
         if text in {FAMILY_MONTHLY_REPORT, "monthly_family"}:
             return FAMILY_MONTHLY_REPORT
         return text
@@ -682,6 +759,12 @@ class SharedSourceCacheService:
                 cached_rows=light_building_status.get(FAMILY_HANDOVER_LOG, {}),
                 active_downloads=active_downloads,
             )
+            handover_capacity_family = self._build_internal_light_family_snapshot(
+                source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+                current_bucket=current_bucket,
+                cached_rows=light_building_status.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
+                active_downloads=active_downloads,
+            )
             monthly_family = self._build_internal_light_family_snapshot(
                 source_family=FAMILY_MONTHLY_REPORT,
                 current_bucket=current_bucket,
@@ -695,6 +778,10 @@ class SharedSourceCacheService:
                 active_downloads=active_downloads,
             )
             families[FAMILY_HANDOVER_LOG] = {**families.get(FAMILY_HANDOVER_LOG, {}), **handover_family}
+            families[FAMILY_HANDOVER_CAPACITY_REPORT] = {
+                **families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
+                **handover_capacity_family,
+            }
             families[FAMILY_MONTHLY_REPORT] = {**families.get(FAMILY_MONTHLY_REPORT, {}), **monthly_family}
             families[FAMILY_ALARM_EVENT] = {
                 **families.get(FAMILY_ALARM_EVENT, {}),
@@ -712,6 +799,7 @@ class SharedSourceCacheService:
                 "cache_root": str(self.shared_root) if self.shared_root else "",
                 "current_hour_refresh": current_hour_refresh,
                 FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
+                FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
                 FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
                 FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
             }
@@ -920,6 +1008,8 @@ class SharedSourceCacheService:
             raise RuntimeError("共享缓存根目录未配置")
         if self._handover_cache_root is not None:
             self._handover_cache_root.mkdir(parents=True, exist_ok=True)
+        if self._handover_capacity_cache_root is not None:
+            self._handover_capacity_cache_root.mkdir(parents=True, exist_ok=True)
         if self._monthly_cache_root is not None:
             self._monthly_cache_root.mkdir(parents=True, exist_ok=True)
         if self._alarm_cache_root is not None:
@@ -961,6 +1051,8 @@ class SharedSourceCacheService:
         normalized_family = self._normalize_source_family(source_family)
         if normalized_family == FAMILY_HANDOVER_LOG and self._handover_cache_root is not None:
             return self._handover_cache_root
+        if normalized_family == FAMILY_HANDOVER_CAPACITY_REPORT and self._handover_capacity_cache_root is not None:
+            return self._handover_capacity_cache_root
         if normalized_family == FAMILY_MONTHLY_REPORT and self._monthly_cache_root is not None:
             return self._monthly_cache_root
         if normalized_family == FAMILY_ALARM_EVENT and self._alarm_cache_root is not None:
@@ -1062,6 +1154,10 @@ class SharedSourceCacheService:
         month_segment = duty_digits[:6]
         normalized_family = self._normalize_source_family(source_family)
         if normalized_family == FAMILY_HANDOVER_LOG:
+            period_text = self._handover_shift_text(duty_shift)
+            folder_name = f"{duty_digits}--{period_text}"
+            file_name = f"{duty_digits}--{period_text}--{FAMILY_LABELS[normalized_family]}--{str(building or '').strip()}{self._file_suffix(source_path)}"
+        elif normalized_family == FAMILY_HANDOVER_CAPACITY_REPORT:
             period_text = self._handover_shift_text(duty_shift)
             folder_name = f"{duty_digits}--{period_text}"
             file_name = f"{duty_digits}--{period_text}--{FAMILY_LABELS[normalized_family]}--{str(building or '').strip()}{self._file_suffix(source_path)}"
@@ -1366,6 +1462,63 @@ class SharedSourceCacheService:
                 return normalized_entry
         return None
 
+    def _get_latest_ready_entry_for_date_shift(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+    ) -> Dict[str, Any] | None:
+        normalized_family = self._normalize_source_family(source_family)
+        if normalized_family == FAMILY_HANDOVER_LOG:
+            return self._get_latest_ready_handover_entry_for_date_shift(
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+            )
+        if self.store is None:
+            return None
+        candidates: List[Dict[str, Any]] = []
+        for family_name in self._source_family_candidates(normalized_family):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                status="ready",
+                limit=20,
+            )
+            candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in candidates:
+            file_path = self._resolve_entry_file_path(entry)
+            if file_path is None:
+                continue
+            normalized_entry = dict(entry)
+            normalized_entry["file_path"] = str(file_path)
+            return normalized_entry
+        for family_name in self._source_family_candidates(normalized_family):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                bucket_kind="latest",
+                status="ready",
+                limit=50,
+            )
+            candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in candidates:
+            file_path = self._resolve_entry_file_path(entry)
+            if file_path is None:
+                continue
+            if (
+                _normalize_nullable_text(entry.get("duty_date")) == duty_date
+                and _normalize_nullable_text(entry.get("duty_shift")).lower() == duty_shift
+            ):
+                normalized_entry = dict(entry)
+                normalized_entry["file_path"] = str(file_path)
+                return normalized_entry
+        return None
+
     def _get_latest_ready_handover_entry_for_date(
         self,
         *,
@@ -1614,6 +1767,23 @@ class SharedSourceCacheService:
             and len(selected_entries) == len(target_buildings),
         }
 
+    @staticmethod
+    def _should_retry_failed_latest_entry(entry: Dict[str, Any] | None) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+        error_text = str(metadata.get("error", "") or "").strip()
+        if not error_text:
+            return False
+        return any(
+            marker in error_text
+            for marker in (
+                "共享缓存根目录未配置",
+                "共享缓存临时目录未配置",
+                "共享缓存存储未初始化",
+            )
+        )
+
     def get_latest_ready_entries(self, *, source_family: str, buildings: List[str] | None = None, bucket_key: str | None = None) -> List[Dict[str, Any]]:
         if self.store is None:
             return []
@@ -1645,6 +1815,26 @@ class SharedSourceCacheService:
         output: List[Dict[str, Any]] = []
         for building in requested:
             entry = self._get_latest_ready_handover_entry_for_date_shift(
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+            )
+            if not entry:
+                continue
+            file_path = self._resolve_entry_file_path(entry)
+            if file_path is None:
+                continue
+            output.append({**entry, "file_path": str(file_path)})
+        return output
+
+    def get_handover_capacity_by_date_entries(self, *, duty_date: str, duty_shift: str, buildings: List[str] | None = None) -> List[Dict[str, Any]]:
+        if self.store is None:
+            return []
+        requested = [str(item or "").strip() for item in (buildings or self.get_enabled_buildings()) if str(item or "").strip()]
+        output: List[Dict[str, Any]] = []
+        for building in requested:
+            entry = self._get_latest_ready_entry_for_date_shift(
+                source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
                 building=building,
                 duty_date=duty_date,
                 duty_shift=duty_shift,
@@ -1740,6 +1930,22 @@ class SharedSourceCacheService:
         shift_segment = str(duty_shift or "all").strip().lower() or "all"
         return self._tmp_root / "handover_by_date" / str(duty_date or "manual").strip() / shift_segment
 
+    def _handover_capacity_temp_root(
+        self,
+        *,
+        bucket_kind: str,
+        bucket_key: str,
+        duty_date: str = "",
+        duty_shift: str = "",
+        building: str = "",
+    ) -> Path:
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存临时目录未配置")
+        if bucket_kind == "latest":
+            return self._tmp_root / "handover_capacity_latest" / bucket_key / building
+        shift_segment = str(duty_shift or "all").strip().lower() or "all"
+        return self._tmp_root / "handover_capacity_by_date" / str(duty_date or "manual").strip() / shift_segment
+
     def fill_handover_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
         cfg = load_handover_config(self.runtime_config)
         temp_root = self._handover_temp_root(
@@ -1784,6 +1990,50 @@ class SharedSourceCacheService:
             },
         )
 
+    def fill_handover_capacity_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._handover_capacity_temp_root(
+            bucket_kind="latest",
+            bucket_key=bucket_key,
+            building=building,
+        )
+        service = HandoverDownloadService(
+            cfg,
+            download_browser_pool=self.download_browser_pool,
+            business_root_override=temp_root,
+        )
+        result = service.run_capacity_only(buildings=[building], switch_network=False, reuse_cached=False, emit_log=emit_log)
+        success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
+        if not success_files:
+            raise RuntimeError(f"本小时容量缓存下载失败: {building}")
+        item = success_files[0]
+        source_path = Path(str(item.get("file_path", "") or "").strip())
+        if not source_path.exists():
+            raise FileNotFoundError(f"下载完成后的容量源文件不存在: {source_path}")
+        normalized_result_context = self._resolve_handover_entry_duty_context(
+            {
+                "bucket_key": bucket_key,
+                "duty_date": result.get("duty_date"),
+                "duty_shift": result.get("duty_shift"),
+            }
+        )
+        return self._store_entry(
+            source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+            building=building,
+            bucket_kind="latest",
+            bucket_key=bucket_key,
+            duty_date=normalized_result_context["duty_date"],
+            duty_shift=normalized_result_context["duty_shift"],
+            source_path=source_path,
+            status="ready",
+            metadata={
+                "family": FAMILY_HANDOVER_CAPACITY_REPORT,
+                "building": building,
+                "duty_date": normalized_result_context["duty_date"],
+                "duty_shift": normalized_result_context["duty_shift"],
+            },
+        )
+
     def fill_handover_history(self, *, buildings: List[str], duty_date: str, duty_shift: str, emit_log: Callable[[str], None]) -> List[Dict[str, Any]]:
         cfg = load_handover_config(self.runtime_config)
         temp_root = self._handover_temp_root(
@@ -1816,6 +2066,54 @@ class SharedSourceCacheService:
                     source_path=source_path,
                     status="ready",
                     metadata={"family": FAMILY_HANDOVER_LOG, "building": building, "duty_date": duty_date, "duty_shift": duty_shift},
+                )
+            )
+        return output
+
+    def fill_handover_capacity_history(self, *, buildings: List[str], duty_date: str, duty_shift: str, emit_log: Callable[[str], None]) -> List[Dict[str, Any]]:
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._handover_capacity_temp_root(
+            bucket_kind="date",
+            bucket_key=duty_date,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+        )
+        service = HandoverDownloadService(
+            cfg,
+            download_browser_pool=self.download_browser_pool,
+            business_root_override=temp_root,
+        )
+        result = service.run_capacity_only(
+            buildings=buildings,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            switch_network=False,
+            reuse_cached=False,
+            emit_log=emit_log,
+        )
+        success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
+        output: List[Dict[str, Any]] = []
+        for item in success_files:
+            building = str(item.get("building", "") or "").strip()
+            source_path = Path(str(item.get("file_path", "") or "").strip())
+            if not building or not source_path.exists():
+                continue
+            output.append(
+                self._store_entry(
+                    source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+                    building=building,
+                    bucket_kind="date",
+                    bucket_key=duty_date,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    source_path=source_path,
+                    status="ready",
+                    metadata={
+                        "family": FAMILY_HANDOVER_CAPACITY_REPORT,
+                        "building": building,
+                        "duty_date": duty_date,
+                        "duty_shift": duty_shift,
+                    },
                 )
             )
         return output
@@ -3316,8 +3614,16 @@ class SharedSourceCacheService:
         bucket_key: str,
         fill_func: Callable[..., Any],
         force_retry_failed: bool = False,
+        buildings: List[str] | None = None,
+        force_refresh_existing: bool = False,
     ) -> Dict[str, Any]:
-        buildings = self.get_enabled_buildings()
+        enabled_buildings = set(self.get_enabled_buildings())
+        requested_buildings = buildings if isinstance(buildings, list) and buildings else self.get_enabled_buildings()
+        buildings = []
+        for item in requested_buildings:
+            building_name = str(item or "").strip()
+            if building_name and building_name in enabled_buildings and building_name not in buildings:
+                buildings.append(building_name)
         normalized_family = self._normalize_source_family(source_family)
         ready_count = 0
         failed_buildings: List[str] = []
@@ -3345,7 +3651,7 @@ class SharedSourceCacheService:
                 bucket_key=bucket_key,
             )
             ready_file_path = self._resolve_entry_file_path(ready_entry) if ready_entry else None
-            if ready_entry and ready_file_path is not None:
+            if ready_entry and ready_file_path is not None and not force_refresh_existing:
                 with self._lock:
                     self._set_light_building_status_from_entry_unlocked(
                         source_family=normalized_family,
@@ -3360,6 +3666,13 @@ class SharedSourceCacheService:
                 self.download_browser_pool.get_building_pause_info(building)
                 if self.download_browser_pool is not None and hasattr(self.download_browser_pool, "get_building_pause_info")
                 else {}
+            )
+            failed_entry = self._get_source_cache_entry(
+                source_family=normalized_family,
+                building=building,
+                bucket_kind="latest",
+                bucket_key=bucket_key,
+                status="failed",
             )
             if bool(pause_info.get("suspended", False)):
                 blocked_buildings.append(building)
@@ -3385,15 +3698,8 @@ class SharedSourceCacheService:
                         },
                     )
                 continue
-            if entry_exists and not force_retry_failed:
+            if entry_exists and not force_retry_failed and not self._should_retry_failed_latest_entry(failed_entry):
                 failed_buildings.append(building)
-                failed_entry = self._get_source_cache_entry(
-                    source_family=normalized_family,
-                    building=building,
-                    bucket_kind="latest",
-                    bucket_key=bucket_key,
-                    status="failed",
-                )
                 with self._lock:
                     if failed_entry:
                         self._set_light_building_status_from_entry_unlocked(
@@ -3523,14 +3829,12 @@ class SharedSourceCacheService:
                         with self._lock:
                             self._active_latest_downloads.pop(active_key, None)
         with self._lock:
-            family_status = self._family_status.setdefault(normalized_family, {})
-            family_status["ready_count"] = ready_count
-            family_status["failed_buildings"] = failed_buildings
-            family_status["blocked_buildings"] = blocked_buildings
-            family_status["last_success_at"] = self._last_success_at if ready_count > 0 else family_status.get("last_success_at", "")
-            family_status["current_bucket"] = bucket_key
+            family_status = self._recompute_family_status_from_light_unlocked(
+                source_family=normalized_family,
+                bucket_key=bucket_key,
+            )
         return {
-            "ready_count": ready_count,
+            "ready_count": int(family_status.get("ready_count", ready_count) or 0),
             "failed_buildings": failed_buildings,
             "blocked_buildings": blocked_buildings,
             "running_buildings": running_buildings,
@@ -3544,12 +3848,20 @@ class SharedSourceCacheService:
         with self._lock:
             self._current_hour_bucket = current_bucket
         self._refresh_family_bucket(source_family=FAMILY_HANDOVER_LOG, bucket_key=current_bucket, fill_func=self.fill_handover_latest)
+        self._refresh_family_bucket(
+            source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+            bucket_key=current_bucket,
+            fill_func=self.fill_handover_capacity_latest,
+        )
         self._refresh_family_bucket(source_family=FAMILY_MONTHLY_REPORT, bucket_key=current_bucket, fill_func=self.fill_monthly_latest)
         with self._lock:
             self._last_run_at = _now_text()
             handover_failed = list(self._family_status.get(FAMILY_HANDOVER_LOG, {}).get("failed_buildings", []) or [])
+            handover_capacity_failed = list(
+                self._family_status.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}).get("failed_buildings", []) or []
+            )
             monthly_failed = list(self._family_status.get(FAMILY_MONTHLY_REPORT, {}).get("failed_buildings", []) or [])
-            if not handover_failed and not monthly_failed:
+            if not handover_failed and not handover_capacity_failed and not monthly_failed:
                 self._last_error = ""
 
     def _run_alarm_bucket_if_due(self, when: datetime | None = None) -> None:
@@ -3597,6 +3909,12 @@ class SharedSourceCacheService:
             fill_func=self.fill_handover_latest,
             force_retry_failed=True,
         ) or {}
+        handover_capacity_result = self._refresh_family_bucket(
+            source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+            bucket_key=bucket_key,
+            fill_func=self.fill_handover_capacity_latest,
+            force_retry_failed=True,
+        ) or {}
         monthly_result = self._refresh_family_bucket(
             source_family=FAMILY_MONTHLY_REPORT,
             bucket_key=bucket_key,
@@ -3619,6 +3937,7 @@ class SharedSourceCacheService:
             ) or {}
         for family_key, result in (
             (FAMILY_HANDOVER_LOG, handover_result),
+            (FAMILY_HANDOVER_CAPACITY_REPORT, handover_capacity_result),
             (FAMILY_MONTHLY_REPORT, monthly_result),
             (FAMILY_ALARM_EVENT, alarm_result),
         ):
@@ -3684,6 +4003,195 @@ class SharedSourceCacheService:
 
     def start_today_full_refresh(self) -> Dict[str, Any]:
         return self.start_current_hour_refresh()
+
+    def _resolve_latest_refresh_target(self, *, source_family: str) -> Dict[str, Any]:
+        normalized_family = self._normalize_source_family(source_family)
+        if normalized_family == FAMILY_HANDOVER_LOG:
+            return {
+                "source_family": normalized_family,
+                "bucket_key": self.current_hour_bucket(),
+                "fill_func": self.fill_handover_latest,
+            }
+        if normalized_family == FAMILY_HANDOVER_CAPACITY_REPORT:
+            return {
+                "source_family": normalized_family,
+                "bucket_key": self.current_hour_bucket(),
+                "fill_func": self.fill_handover_capacity_latest,
+            }
+        if normalized_family == FAMILY_MONTHLY_REPORT:
+            return {
+                "source_family": normalized_family,
+                "bucket_key": self.current_hour_bucket(),
+                "fill_func": self.fill_monthly_latest,
+            }
+        if normalized_family == FAMILY_ALARM_EVENT:
+            bucket_key = self._auto_alarm_bucket()
+            if not bucket_key:
+                return {
+                    "accepted": False,
+                    "source_family": normalized_family,
+                    "bucket_key": "",
+                    "fill_func": None,
+                    "reason": "bucket_unavailable",
+                }
+            return {
+                "source_family": normalized_family,
+                "bucket_key": bucket_key,
+                "fill_func": self.fill_alarm_event_latest,
+            }
+        return {
+            "accepted": False,
+            "source_family": normalized_family,
+            "bucket_key": "",
+            "fill_func": None,
+            "reason": "unsupported_family",
+        }
+
+    def _run_building_latest_refresh_background(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+        fill_func: Callable[..., Any],
+        thread_key: tuple[str, str, str, str],
+    ) -> None:
+        try:
+            self._refresh_family_bucket(
+                source_family=source_family,
+                bucket_key=bucket_key,
+                fill_func=fill_func,
+                force_retry_failed=True,
+                buildings=[building],
+                force_refresh_existing=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            with self._lock:
+                self._last_error = error_text
+                self._set_light_building_status_unlocked(
+                    source_family=source_family,
+                    building=building,
+                    bucket_key=bucket_key,
+                    payload={
+                        "status": "failed",
+                        "ready": False,
+                        "downloaded_at": "",
+                        "last_error": error_text,
+                        "relative_path": self._failed_marker_relative_path(
+                            source_family=source_family,
+                            bucket_kind="latest",
+                            bucket_key=bucket_key,
+                            building=building,
+                        ),
+                        "resolved_file_path": "",
+                        "started_at": "",
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "next_probe_at": "",
+                    },
+                )
+                self._recompute_family_status_from_light_unlocked(
+                    source_family=source_family,
+                    bucket_key=bucket_key,
+                )
+            self._record_failed_entry(
+                source_family=source_family,
+                building=building,
+                bucket_kind="latest",
+                bucket_key=bucket_key,
+                error_text=error_text,
+                metadata={"family": source_family, "building": building},
+            )
+            self._emit(f"[共享缓存] 单楼 latest 拉取失败 family={source_family} building={building}: {exc}")
+        finally:
+            with self._lock:
+                self._building_latest_refresh_threads.pop(thread_key, None)
+
+    def start_building_latest_refresh(self, *, source_family: str, building: str) -> Dict[str, Any]:
+        if not self.enabled or self.role_mode != "internal" or self.store is None:
+            return {"accepted": False, "running": False, "reason": "disabled"}
+        building_name = str(building or "").strip()
+        if not building_name or building_name not in self.get_enabled_buildings():
+            return {"accepted": False, "running": False, "reason": "invalid_building"}
+        target = self._resolve_latest_refresh_target(source_family=source_family)
+        normalized_family = str(target.get("source_family", "") or "").strip()
+        bucket_key = str(target.get("bucket_key", "") or "").strip()
+        fill_func = target.get("fill_func")
+        if not fill_func:
+            return {
+                "accepted": False,
+                "running": False,
+                "reason": str(target.get("reason", "") or "unsupported_family").strip() or "unsupported_family",
+                "scope": "single_building_family",
+                "source_family": normalized_family,
+                "building": building_name,
+                "bucket_key": bucket_key,
+            }
+        thread_key = (normalized_family, building_name, "latest", bucket_key)
+        with self._lock:
+            active_started_at = str(self._active_latest_downloads.get(thread_key, "") or "").strip()
+            active_thread = self._building_latest_refresh_threads.get(thread_key)
+            if active_started_at or (active_thread and active_thread.is_alive()):
+                return {
+                    "accepted": False,
+                    "running": True,
+                    "reason": "already_running",
+                    "scope": "single_building_family",
+                    "source_family": normalized_family,
+                    "building": building_name,
+                    "bucket_key": bucket_key,
+                }
+            started_at = _now_text()
+            self._ensure_light_family_cache_unlocked(
+                source_family=normalized_family,
+                bucket_key=bucket_key,
+                buildings=[building_name],
+            )
+            self._set_light_building_status_unlocked(
+                source_family=normalized_family,
+                building=building_name,
+                bucket_key=bucket_key,
+                payload={
+                    "status": "downloading",
+                    "ready": False,
+                    "downloaded_at": "",
+                    "last_error": "",
+                    "relative_path": "",
+                    "resolved_file_path": "",
+                    "started_at": started_at,
+                    "blocked": False,
+                    "blocked_reason": "",
+                    "next_probe_at": "",
+                },
+            )
+            self._recompute_family_status_from_light_unlocked(
+                source_family=normalized_family,
+                bucket_key=bucket_key,
+            )
+            thread = threading.Thread(
+                target=self._run_building_latest_refresh_background,
+                kwargs={
+                    "source_family": normalized_family,
+                    "building": building_name,
+                    "bucket_key": bucket_key,
+                    "fill_func": fill_func,
+                    "thread_key": thread_key,
+                },
+                name=f"shared-source-cache-{normalized_family}-{building_name}",
+                daemon=True,
+            )
+            self._building_latest_refresh_threads[thread_key] = thread
+            thread.start()
+        return {
+            "accepted": True,
+            "running": True,
+            "reason": "started",
+            "scope": "single_building_family",
+            "source_family": normalized_family,
+            "building": building_name,
+            "bucket_key": bucket_key,
+        }
 
     def _loop(self) -> None:
         startup_done = False

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -15,7 +16,19 @@ from PIL import Image
 PathValidator = Callable[[Path], None]
 PathWriter = Callable[[Path], None]
 
-_WINDOWS_REPLACE_RETRY_DELAYS_SEC = (0.05, 0.1, 0.2, 0.35, 0.5)
+_WINDOWS_REPLACE_RETRY_DELAYS_SEC = (0.05, 0.1, 0.2, 0.35, 0.5, 0.8, 1.2)
+_ATOMIC_WRITE_LOCKS_GUARD = threading.Lock()
+_ATOMIC_WRITE_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _target_lock_for_path(path: Path) -> threading.RLock:
+    normalized = str(path.resolve(strict=False)).casefold()
+    with _ATOMIC_WRITE_LOCKS_GUARD:
+        lock = _ATOMIC_WRITE_LOCKS.get(normalized)
+        if lock is None:
+            lock = threading.RLock()
+            _ATOMIC_WRITE_LOCKS[normalized] = lock
+        return lock
 
 
 def _build_temp_path(target: Path, *, temp_suffix: str) -> Path:
@@ -44,6 +57,25 @@ def _replace_with_retry(temp_path: Path, target: Path) -> None:
             return
         except Exception as exc:
             if index >= attempts - 1 or not _is_retryable_replace_error(exc):
+                if index >= attempts - 1 and _is_retryable_replace_error(exc):
+                    _overwrite_from_temp_with_retry(temp_path, target)
+                    return
+                raise
+            time.sleep(_WINDOWS_REPLACE_RETRY_DELAYS_SEC[index])
+
+
+def _overwrite_from_temp_with_retry(temp_path: Path, target: Path) -> None:
+    attempts = len(_WINDOWS_REPLACE_RETRY_DELAYS_SEC) + 1
+    for index in range(attempts):
+        try:
+            data = temp_path.read_bytes()
+            with target.open("wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            return
+        except Exception as exc:
+            if index >= attempts - 1 or not _is_retryable_replace_error(exc):
                 raise
             time.sleep(_WINDOWS_REPLACE_RETRY_DELAYS_SEC[index])
 
@@ -58,21 +90,23 @@ def atomic_write_file(
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_path = _build_temp_path(target, temp_suffix=temp_suffix)
-    try:
-        writer(temp_path)
-        if not temp_path.exists():
-            raise FileNotFoundError(f"atomic writer did not create temp file: {temp_path}")
-        if validator is not None:
-            validator(temp_path)
-        _replace_with_retry(temp_path, target)
-        return target
-    except Exception:
+    target_lock = _target_lock_for_path(target)
+    with target_lock:
         try:
-            if temp_path.exists():
-                temp_path.unlink()
+            writer(temp_path)
+            if not temp_path.exists():
+                raise FileNotFoundError(f"atomic writer did not create temp file: {temp_path}")
+            if validator is not None:
+                validator(temp_path)
+            _replace_with_retry(temp_path, target)
+            return target
         except Exception:
-            pass
-        raise
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            raise
 
 
 def atomic_write_bytes(

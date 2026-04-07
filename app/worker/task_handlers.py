@@ -195,6 +195,7 @@ def handle_handover_from_file(
         return orchestrator.run_handover_from_file(
             building=str(payload.get("building", "") or "").strip(),
             file_path=str(payload.get("file_path", "") or "").strip(),
+            capacity_source_file=str(payload.get("capacity_source_file", "") or "").strip() or None,
             end_time=str(payload.get("end_time", "") or "").strip() or None,
             duty_date=str(payload.get("duty_date", "") or "").strip() or None,
             duty_shift=str(payload.get("duty_shift", "") or "").strip().lower() or None,
@@ -227,10 +228,20 @@ def handle_handover_from_files(
         file_path = str(item.get("file_path", "") or "").strip()
         if building and file_path:
             building_files.append((building, file_path))
+    raw_capacity_items = list(payload.get("capacity_building_files") or [])
+    capacity_building_files: List[Tuple[str, str]] = []
+    for item in raw_capacity_items:
+        if not isinstance(item, dict):
+            continue
+        building = str(item.get("building", "") or "").strip()
+        file_path = str(item.get("file_path", "") or "").strip()
+        if building and file_path:
+            capacity_building_files.append((building, file_path))
     try:
         orchestrator = OrchestratorService(config)
         return orchestrator.run_handover_from_files(
             building_files=building_files,
+            capacity_building_files=capacity_building_files,
             end_time=str(payload.get("end_time", "") or "").strip() or None,
             duty_date=str(payload.get("duty_date", "") or "").strip() or None,
             duty_shift=str(payload.get("duty_shift", "") or "").strip().lower() or None,

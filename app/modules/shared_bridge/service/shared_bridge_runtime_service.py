@@ -1049,6 +1049,21 @@ class SharedBridgeRuntimeService:
             buildings=buildings,
         )
 
+    def get_handover_capacity_by_date_cache_entries(
+        self,
+        *,
+        duty_date: str,
+        duty_shift: str,
+        buildings: List[str] | None = None,
+    ) -> List[Dict[str, Any]]:
+        if self._source_cache_service is None:
+            return []
+        return self._source_cache_service.get_handover_capacity_by_date_entries(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            buildings=buildings,
+        )
+
     def get_day_metric_by_date_cache_entries(self, *, selected_dates: List[str], buildings: List[str]) -> List[Dict[str, Any]]:
         if self._source_cache_service is None:
             return []
@@ -1082,6 +1097,14 @@ class SharedBridgeRuntimeService:
         if self._source_cache_service is None:
             return {"accepted": False, "running": False, "reason": "disabled"}
         return self._source_cache_service.start_manual_alarm_refresh()
+
+    def start_building_latest_source_cache_refresh(self, *, source_family: str, building: str) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            return {"accepted": False, "running": False, "reason": "disabled"}
+        return self._source_cache_service.start_building_latest_refresh(
+            source_family=source_family,
+            building=building,
+        )
 
     def delete_manual_alarm_source_cache_files(self) -> Dict[str, Any]:
         if self._source_cache_service is None:
@@ -1345,6 +1368,17 @@ class SharedBridgeRuntimeService:
             / source_path.name
         )
 
+    def _handover_capacity_artifact_target(self, task_id: str, building: str, source_path: Path) -> Path:
+        return (
+            Path(self.shared_bridge_root)
+            / "artifacts"
+            / "handover"
+            / task_id
+            / "capacity_source_files"
+            / str(building or "").strip()
+            / source_path.name
+        )
+
     def _day_metric_artifact_target(self, task_id: str, duty_date: str, building: str, source_path: Path) -> Path:
         return (
             Path(self.shared_bridge_root)
@@ -1400,6 +1434,37 @@ class SharedBridgeRuntimeService:
             metadata=metadata,
         )
         emit_log(f"[共享桥接][交接班][内网] 已写入共享源文件 楼栋={building}, 路径={target_path}")
+        return {"building": str(building or "").strip(), "relative_path": relative_path, "file_path": str(target_path)}
+
+    def _copy_handover_capacity_source_artifact(
+        self,
+        *,
+        task_id: str,
+        building: str,
+        source_file: str,
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接存储尚未初始化")
+        source_path = Path(str(source_file or "").strip())
+        if not source_path.exists():
+            raise FileNotFoundError(f"写入共享目录前找不到交接班容量源文件: {source_path}")
+        target_path = self._handover_capacity_artifact_target(task_id, building, source_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_copy_file(source_path, target_path, validator=validate_excel_workbook_file, temp_suffix=".downloading")
+        relative_path = target_path.relative_to(Path(self.shared_bridge_root)).as_posix()
+        metadata = {"original_path": str(source_path), "file_name": source_path.name}
+        self._store.upsert_artifact(
+            task_id=task_id,
+            stage_id="internal_download",
+            artifact_kind="capacity_source_file",
+            building=str(building or "").strip(),
+            relative_path=relative_path,
+            status="ready",
+            size_bytes=target_path.stat().st_size,
+            metadata=metadata,
+        )
+        emit_log(f"[共享桥接][交接班容量][内网] 已写入共享源文件 楼栋={building}, 路径={target_path}")
         return {"building": str(building or "").strip(), "relative_path": relative_path, "file_path": str(target_path)}
 
     def _copy_day_metric_source_artifact(
@@ -1598,7 +1663,7 @@ class SharedBridgeRuntimeService:
         try:
             emit_log("[共享桥接][交接班][内网] 开始下载阶段")
             service.ensure_internal_ready(emit_log)
-            result = service.run(
+            result = service.run_with_capacity_report(
                 buildings=request.get("buildings") if isinstance(request.get("buildings"), list) else None,
                 end_time=str(request.get("end_time", "") or "").strip() or None,
                 duty_date=str(request.get("duty_date", "") or "").strip() or None,
@@ -1607,7 +1672,9 @@ class SharedBridgeRuntimeService:
                 emit_log=emit_log,
             )
             artifacts: List[Dict[str, Any]] = []
-            for item in result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []:
+            handover_result = result.get("handover", {}) if isinstance(result.get("handover", {}), dict) else {}
+            capacity_result = result.get("capacity", {}) if isinstance(result.get("capacity", {}), dict) else {}
+            for item in handover_result.get("success_files", []) if isinstance(handover_result.get("success_files", []), list) else []:
                 if not isinstance(item, dict):
                     continue
                 building = str(item.get("building", "") or "").strip()
@@ -1615,10 +1682,38 @@ class SharedBridgeRuntimeService:
                 if not building or not file_path:
                     continue
                 artifacts.append(self._copy_handover_source_artifact(task_id=task_id, building=building, source_file=file_path, emit_log=emit_log))
+            capacity_artifacts: List[Dict[str, Any]] = []
+            for item in capacity_result.get("success_files", []) if isinstance(capacity_result.get("success_files", []), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                building = str(item.get("building", "") or "").strip()
+                file_path = str(item.get("file_path", "") or "").strip()
+                if not building or not file_path:
+                    continue
+                capacity_artifacts.append(
+                    self._copy_handover_capacity_source_artifact(
+                        task_id=task_id,
+                        building=building,
+                        source_file=file_path,
+                        emit_log=emit_log,
+                    )
+                )
             stage_result = dict(result)
             stage_result["artifacts"] = list(artifacts)
+            stage_result["capacity_artifacts"] = list(capacity_artifacts)
             stage_result["artifact_count"] = len(artifacts)
-            if artifacts:
+            stage_result["capacity_artifact_count"] = len(capacity_artifacts)
+            handover_artifact_buildings = {
+                str(item.get("building", "") or "").strip()
+                for item in artifacts
+                if str(item.get("building", "") or "").strip()
+            }
+            capacity_artifact_buildings = {
+                str(item.get("building", "") or "").strip()
+                for item in capacity_artifacts
+                if str(item.get("building", "") or "").strip()
+            }
+            if handover_artifact_buildings and handover_artifact_buildings.issubset(capacity_artifact_buildings):
                 self._store.complete_stage(
                     task_id=task_id,
                     stage_id=stage_id,
@@ -1630,7 +1725,11 @@ class SharedBridgeRuntimeService:
                 )
                 self._store.append_event(task_id=task_id, stage_id=stage_id, side="internal", level="info", event_type="await_external", payload={"message": "内网下载完成，等待外网继续处理"})
             else:
-                error_text = str(result.get("error", "") or "").strip() or "内网下载未产生任何共享源文件"
+                error_text = (
+                    str(handover_result.get("error", "") or "").strip()
+                    or str(capacity_result.get("error", "") or "").strip()
+                    or "内网下载未产生完整且可匹配的交接班共享源文件"
+                )
                 self._store.complete_stage(
                     task_id=task_id,
                     stage_id=stage_id,
@@ -1681,11 +1780,27 @@ class SharedBridgeRuntimeService:
                 if file_path is None:
                     raise FileNotFoundError(f"共享目录中的交接班源文件不存在或不可访问: {relative_path}")
                 building_files.append((building, str(file_path)))
+            capacity_artifacts = self._store.get_artifacts(task_id, artifact_kind="capacity_source_file", status="ready")
+            capacity_building_files: List[tuple[str, str]] = []
+            for item in capacity_artifacts:
+                relative_path = str(item.get("relative_path", "") or "").strip()
+                building = str(item.get("building", "") or "").strip()
+                if not relative_path or not building:
+                    continue
+                file_path = self._resolve_shared_artifact_file_path(relative_path)
+                if file_path is None:
+                    raise FileNotFoundError(f"共享目录中的交接班容量源文件不存在或不可访问: {relative_path}")
+                capacity_building_files.append((building, str(file_path)))
             if not building_files:
                 raise RuntimeError("共享目录中没有可继续处理的交接班源文件")
+            handover_buildings = {building for building, _ in building_files if building}
+            capacity_building_map = {building: file_path for building, file_path in capacity_building_files if building and file_path}
+            if not handover_buildings or not handover_buildings.issubset(set(capacity_building_map)):
+                raise RuntimeError("共享目录中没有完整可继续处理的交接班容量源文件")
             emit_log("[共享桥接][交接班][外网] 开始继续生成")
             result = OrchestratorService(self.runtime_config).run_handover_from_files(
                 building_files=building_files,
+                capacity_building_files=[(building, capacity_building_map[building]) for building, _ in building_files if building in capacity_building_map],
                 end_time=str(request.get("end_time", "") or "").strip() or None,
                 duty_date=str(request.get("duty_date", "") or "").strip() or None,
                 duty_shift=str(request.get("duty_shift", "") or "").strip() or None,
@@ -2080,12 +2195,19 @@ class SharedBridgeRuntimeService:
                 duty_shift = str(request.get("duty_shift", "") or "").strip().lower()
                 if not duty_date or not duty_shift:
                     raise RuntimeError("交接班历史缓存补采缺少日期或班次")
-                cached_entries = self._source_cache_service.fill_handover_history(
+                handover_entries = self._source_cache_service.fill_handover_history(
                     buildings=buildings,
                     duty_date=duty_date,
                     duty_shift=duty_shift,
                     emit_log=emit_log,
                 )
+                capacity_entries = self._source_cache_service.fill_handover_capacity_history(
+                    buildings=buildings,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    emit_log=emit_log,
+                )
+                cached_entries = list(handover_entries) + list(capacity_entries)
             elif continuation_kind == "day_metric":
                 selected_dates = [
                     str(item or "").strip()
@@ -2163,11 +2285,21 @@ class SharedBridgeRuntimeService:
                     duty_shift=duty_shift,
                     buildings=buildings,
                 )
-                if len(cached_entries) < len(buildings):
+                capacity_entries = self._source_cache_service.get_handover_capacity_by_date_entries(
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    buildings=buildings,
+                )
+                if len(cached_entries) < len(buildings) or len(capacity_entries) < len(buildings):
                     raise RuntimeError("等待历史日期缓存补采完成")
                 building_files = [(str(item.get("building", "")).strip(), str(item.get("file_path", "")).strip()) for item in cached_entries]
+                capacity_building_files = [
+                    (str(item.get("building", "")).strip(), str(item.get("file_path", "")).strip())
+                    for item in capacity_entries
+                ]
                 external_result = OrchestratorService(self.runtime_config).run_handover_from_files(
                     building_files=building_files,
+                    capacity_building_files=capacity_building_files,
                     end_time=None,
                     duty_date=duty_date,
                     duty_shift=duty_shift,

@@ -25,6 +25,7 @@ from handover_log_module.service.event_category_payload_builder import EventCate
 from handover_log_module.service.exercise_management_payload_builder import ExerciseManagementPayloadBuilder
 from handover_log_module.service.handover_download_service import HandoverDownloadService
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
+from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
 from handover_log_module.service.handover_extract_service import HandoverExtractService
 from handover_log_module.service.handover_fill_service import HandoverFillService
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
@@ -87,6 +88,7 @@ class HandoverOrchestrator:
         self.config = config
         self._download_service = HandoverDownloadService(config)
         self._cloud_sheet_sync_service = HandoverCloudSheetSyncService(config)
+        self._capacity_report_service = HandoverCapacityReportService(config)
         self._extract_service = HandoverExtractService(config)
         self._fill_service = HandoverFillService(config)
         self._alarm_repo = AlarmRepository(config)
@@ -574,6 +576,109 @@ class HandoverOrchestrator:
             and str(duty_shift or "").strip().lower() == current_duty_shift
         )
 
+    @staticmethod
+    def _previous_duty_context(*, duty_date: str, duty_shift: str) -> tuple[str, str]:
+        duty_day = parse_duty_date(duty_date)
+        shift_text = str(duty_shift or "").strip().lower()
+        if shift_text == "day":
+            return (duty_day - timedelta(days=1)).strftime("%Y-%m-%d"), "night"
+        return duty_day.strftime("%Y-%m-%d"), "day"
+
+    def _build_alarm_summary_for_window(
+        self,
+        *,
+        building: str,
+        start_time: str,
+        end_time: str,
+        emit_log: Callable[[str], None],
+        alarm_selection_snapshot: Dict[str, Any] | None = None,
+        alarm_document_cache: Dict[str, Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
+        fallback = self._build_alarm_fallback()
+        total_text = fallback["total"]
+        unrecovered_text = fallback["unrecovered"]
+        accept_desc_text = fallback["accept_desc"]
+        if self._deployment_role_mode() == "external":
+            try:
+                alarm_summary = self._alarm_json_repo.query_alarm_summary(
+                    building=building,
+                    start_time=start_time,
+                    end_time=end_time,
+                    emit_log=emit_log,
+                    selection_snapshot=alarm_selection_snapshot,
+                    document_cache=alarm_document_cache,
+                )
+                total_text = str(alarm_summary.total_count)
+                unrecovered_text = str(alarm_summary.unrecovered_count)
+                accept_desc_text = str(alarm_summary.accept_description or "").strip() or fallback["accept_desc"]
+                return self._build_alarm_summary_payload(
+                    source="alarm_json",
+                    building=building,
+                    start_time=start_time,
+                    end_time=end_time,
+                    fallback=fallback,
+                    total_text=total_text,
+                    unrecovered_text=unrecovered_text,
+                    accept_desc_text=accept_desc_text,
+                    alarm_summary=alarm_summary,
+                    coverage_ok=bool(getattr(alarm_summary, "coverage_ok", True)),
+                    fallback_used=bool(getattr(alarm_summary, "fallback_used", False)),
+                    error=str(getattr(alarm_summary, "error", "") or "").strip(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][告警JSON] building={building} 读取失败，按兜底填充: {exc}")
+                return self._build_alarm_summary_payload(
+                    source="alarm_json",
+                    building=building,
+                    start_time=start_time,
+                    end_time=end_time,
+                    fallback=fallback,
+                    total_text=total_text,
+                    unrecovered_text=unrecovered_text,
+                    accept_desc_text=accept_desc_text,
+                    coverage_ok=False,
+                    fallback_used=True,
+                    error=str(exc),
+                )
+        try:
+            alarm_summary = self._alarm_repo.query_alarm_summary(
+                building=building,
+                start_time=start_time,
+                end_time=end_time,
+                emit_log=emit_log,
+            )
+            total_text = str(alarm_summary.total_count)
+            unrecovered_text = str(alarm_summary.unrecovered_count)
+            accept_desc_text = str(alarm_summary.accept_description or "").strip() or fallback["accept_desc"]
+            return self._build_alarm_summary_payload(
+                source="alarm_db",
+                building=building,
+                start_time=start_time,
+                end_time=end_time,
+                fallback=fallback,
+                total_text=total_text,
+                unrecovered_text=unrecovered_text,
+                accept_desc_text=accept_desc_text,
+                alarm_summary=alarm_summary,
+                coverage_ok=True,
+                fallback_used=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][告警查询] building={building} 查询失败，按兜底填充: {exc}")
+            return self._build_alarm_summary_payload(
+                source="alarm_db",
+                building=building,
+                start_time=start_time,
+                end_time=end_time,
+                fallback=fallback,
+                total_text=total_text,
+                unrecovered_text=unrecovered_text,
+                accept_desc_text=accept_desc_text,
+                coverage_ok=False,
+                fallback_used=True,
+                error=str(exc),
+            )
+
     def run_from_existing_file(
         self,
         *,
@@ -595,6 +700,7 @@ class HandoverOrchestrator:
         alarm_selection_snapshot: Dict[str, Any] | None = None,
         alarm_document_cache: Dict[str, Dict[str, Any]] | None = None,
         alarm_summary_payload: Dict[str, Any] | None = None,
+        capacity_source_file: str | None = None,
         source_mode: str = "from_file",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
@@ -768,6 +874,18 @@ class HandoverOrchestrator:
             result.output_file = filled["output_file"]
             result.fills = filled["fills"]
             result.missing_metrics = sorted(list(filled["missing_metric_to_cell"].keys()))
+            metric_origin_context = self._day_metric_export_service.serialize_metric_origin_context(
+                hits=extracted.get("hits", {}),
+                effective_config=extracted.get("effective_config", {}),
+            )
+            hvdc_source_d_name = str(
+                getattr(
+                    (extracted.get("hits", {}) or {}).get("hvdc_load_max"),
+                    "d_name",
+                    "",
+                )
+                or ""
+            ).strip()
             session_day_metric_export = {
                 "status": "skipped",
                 "reason": "missing_duty_context",
@@ -790,10 +908,7 @@ class HandoverOrchestrator:
                 session_day_metric_export = self._day_metric_export_service.build_deferred_state(
                     duty_shift=duty_shift_text,
                     resolved_values_by_id=filled.get("resolved_values_by_id", {}),
-                    metric_origin_context=self._day_metric_export_service.serialize_metric_origin_context(
-                        hits=extracted.get("hits", {}),
-                        effective_config=extracted.get("effective_config", {}),
-                    ),
+                    metric_origin_context=metric_origin_context,
                 )
                 session_source_data_attachment_export = (
                     self._source_data_attachment_export_service.build_deferred_state(
@@ -819,6 +934,66 @@ class HandoverOrchestrator:
                     "[交接班][源数据附件] 跳过: 缺少班次上下文 "
                     f"building={building}, duty_date={duty_date_text or '-'}, duty_shift={duty_shift_text or '-'}"
                 )
+            capacity_output_file = ""
+            capacity_status = "skipped"
+            capacity_error = ""
+            capacity_warnings: List[str] = []
+            capacity_source_file_text = str(capacity_source_file or "").strip()
+            if duty_date_text and duty_shift_text and result.output_file:
+                if capacity_source_file_text:
+                    try:
+                        download_cfg = self.config.get("download", {}) if isinstance(self.config.get("download", {}), dict) else {}
+                        shift_windows = (
+                            download_cfg.get("shift_windows", {})
+                            if isinstance(download_cfg.get("shift_windows", {}), dict)
+                            else {}
+                        )
+                        previous_date, previous_shift = self._previous_duty_context(
+                            duty_date=duty_date_text,
+                            duty_shift=duty_shift_text,
+                        )
+                        previous_window = build_duty_window(
+                            duty_date=previous_date,
+                            duty_shift=previous_shift,
+                            shift_windows=shift_windows,
+                        )
+                        previous_alarm_summary = self._build_alarm_summary_for_window(
+                            building=building,
+                            start_time=previous_window.start_time,
+                            end_time=previous_window.end_time,
+                            emit_log=emit_log,
+                            alarm_selection_snapshot=alarm_selection_snapshot,
+                            alarm_document_cache=alarm_document_cache,
+                        )
+                        capacity_result = self._capacity_report_service.generate(
+                            building=building,
+                            duty_date=duty_date_text,
+                            duty_shift=duty_shift_text,
+                            handover_output_file=result.output_file,
+                            capacity_source_file=capacity_source_file_text,
+                            roster_assignment=roster_assignment,
+                            current_alarm_summary=resolved_alarm_summary,
+                            previous_alarm_summary=previous_alarm_summary,
+                            resolved_values_by_id=filled.get("resolved_values_by_id", {}),
+                            metric_origin_context=metric_origin_context,
+                            hvdc_source_d_name=hvdc_source_d_name,
+                            emit_log=emit_log,
+                        )
+                        capacity_output_file = str(capacity_result.get("output_file", "") or "").strip()
+                        capacity_status = str(capacity_result.get("status", "") or "success").strip() or "success"
+                        capacity_error = str(capacity_result.get("error", "") or "").strip()
+                        capacity_warnings = list(capacity_result.get("warnings", []) or [])
+                    except Exception as exc:  # noqa: BLE001
+                        capacity_status = "failed"
+                        capacity_error = str(exc)
+                        emit_log(f"[交接班][容量报表] 生成失败 building={building}: {exc}")
+                else:
+                    capacity_status = "skipped"
+                    capacity_error = "缺少交接班容量报表源文件"
+            result.capacity_output_file = capacity_output_file
+            result.capacity_status = capacity_status
+            result.capacity_error = capacity_error
+            result.capacity_warnings = list(capacity_warnings)
             result.day_metric_export = {
                 "status": str(session_day_metric_export.get("status", "")).strip(),
                 "reason": str(session_day_metric_export.get("reason", "")).strip(),
@@ -861,6 +1036,10 @@ class HandoverOrchestrator:
                         day_metric_export=session_day_metric_export,
                         source_file_cache=managed_source_file_cache,
                         source_data_attachment_export=session_source_data_attachment_export,
+                        capacity_output_file=result.capacity_output_file,
+                        capacity_status=result.capacity_status,
+                        capacity_error=result.capacity_error,
+                        capacity_warnings=result.capacity_warnings,
                     )
                     result.review_session = review_session
                     result.batch_key = str(review_session.get("batch_key", "")).strip()
@@ -919,6 +1098,7 @@ class HandoverOrchestrator:
         self,
         *,
         building_files: List[tuple[str, str]],
+        capacity_building_files: List[tuple[str, str]] | None = None,
         configured_buildings: List[str] | None = None,
         end_time: str | None = None,
         duty_date: str | None = None,
@@ -928,6 +1108,7 @@ class HandoverOrchestrator:
         summary = RunSummary(mode="from_existing_files")
         selected_buildings: List[str] = []
         normalized_files: List[tuple[str, str]] = []
+        capacity_file_map: Dict[str, str] = {}
         for building, data_file in building_files or []:
             building_text = str(building or "").strip()
             data_file_text = str(data_file or "").strip()
@@ -936,6 +1117,11 @@ class HandoverOrchestrator:
             normalized_files.append((building_text, data_file_text))
             if building_text not in selected_buildings:
                 selected_buildings.append(building_text)
+        for building, data_file in capacity_building_files or []:
+            building_text = str(building or "").strip()
+            data_file_text = str(data_file or "").strip()
+            if building_text and data_file_text:
+                capacity_file_map[building_text] = data_file_text
 
         configured = [
             str(item or "").strip()
@@ -980,6 +1166,7 @@ class HandoverOrchestrator:
                     other_important_work_rows_by_building=query_context.other_important_work_rows_by_building,
                     alarm_selection_snapshot=alarm_selection_snapshot,
                     alarm_document_cache=alarm_document_cache,
+                    capacity_source_file=capacity_file_map.get(building),
                     source_mode="from_file",
                     emit_log=emit_log,
                 )
@@ -1008,6 +1195,10 @@ class HandoverOrchestrator:
                     review_session=dict(row.get("review_session", {}))
                     if isinstance(row.get("review_session", {}), dict)
                     else {},
+                    capacity_output_file=str(row.get("capacity_output_file", "")),
+                    capacity_status=str(row.get("capacity_status", "")),
+                    capacity_error=str(row.get("capacity_error", "")),
+                    capacity_warnings=list(row.get("capacity_warnings", [])),
                     alarm_summary=dict(row.get("alarm_summary", {}))
                     if isinstance(row.get("alarm_summary", {}), dict)
                     else {},
@@ -1056,13 +1247,15 @@ class HandoverOrchestrator:
                     emit_log(f"[交接班][排班查询] 预取失败，后续按单楼兜底查询: {exc}")
 
         try:
-            download_result = self._download_service.run(
+            combined_download_result = self._download_service.run_with_capacity_report(
                 buildings=buildings,
                 end_time=end_time,
                 duty_date=duty_date,
                 duty_shift=duty_shift,
                 emit_log=emit_log,
             )
+            download_result = combined_download_result.get("handover", {}) if isinstance(combined_download_result.get("handover", {}), dict) else {}
+            capacity_download_result = combined_download_result.get("capacity", {}) if isinstance(combined_download_result.get("capacity", {}), dict) else {}
             summary.start_time = str(download_result.get("start_time", ""))
             summary.end_time = str(download_result.get("end_time", ""))
             duty_date_text = str(download_result.get("duty_date", "")).strip() or duty_date_text
@@ -1092,6 +1285,11 @@ class HandoverOrchestrator:
                 )
 
             success_items = download_result.get("success_files", [])
+            capacity_success_map = {
+                str(item.get("building", "")).strip(): str(item.get("file_path", "")).strip()
+                for item in (capacity_download_result.get("success_files", []) if isinstance(capacity_download_result.get("success_files", []), list) else [])
+                if isinstance(item, dict) and str(item.get("building", "")).strip() and str(item.get("file_path", "")).strip()
+            }
             success_buildings = [
                 str(item.get("building", "")).strip()
                 for item in success_items
@@ -1236,6 +1434,7 @@ class HandoverOrchestrator:
                     alarm_selection_snapshot=alarm_selection_snapshot,
                     alarm_document_cache=alarm_document_cache,
                     alarm_summary_payload=alarm_summary_payload,
+                    capacity_source_file=capacity_success_map.get(building),
                     source_mode="from_download",
                     emit_log=emit_log,
                 )
@@ -1256,6 +1455,10 @@ class HandoverOrchestrator:
                         review_session=dict(row.get("review_session", {}))
                         if isinstance(row.get("review_session", {}), dict)
                         else {},
+                        capacity_output_file=str(row.get("capacity_output_file", "")),
+                        capacity_status=str(row.get("capacity_status", "")),
+                        capacity_error=str(row.get("capacity_error", "")),
+                        capacity_warnings=list(row.get("capacity_warnings", [])),
                         alarm_summary=dict(row.get("alarm_summary", {}))
                         if isinstance(row.get("alarm_summary", {}), dict)
                         else {},

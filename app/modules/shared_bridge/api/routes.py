@@ -46,6 +46,13 @@ _BRIDGE_ERROR_TEXTS = {
     "cannot operate on a closed database.": "共享桥接数据库连接已关闭",
 }
 
+_LATEST_REFRESHABLE_SOURCE_FAMILIES = {
+    "handover_log_family": "交接班日志源文件",
+    "handover_capacity_report_family": "交接班容量报表源文件",
+    "monthly_report_family": "全景平台月报源文件",
+    "alarm_event_family": "告警信息源文件",
+}
+
 
 def _deployment_role_mode(request: Request) -> str:
     container = request.app.state.container
@@ -344,6 +351,66 @@ def bridge_source_cache_refresh_current_hour(request: Request) -> Dict[str, Any]
         "running": True,
         "scope": "current_hour",
         "message": "已开始下载当前小时全部文件",
+        **result,
+    }
+
+
+@router.post("/api/bridge/source-cache/refresh-building-latest")
+def bridge_source_cache_refresh_building_latest(
+    request: Request,
+    source_family: str = Query("", description="共享文件 family"),
+    building: str = Query("", description="楼栋名称"),
+) -> Dict[str, Any]:
+    if _deployment_role_mode(request) != "internal":
+        raise HTTPException(status_code=409, detail="当前仅内网端允许手动触发单楼共享文件拉取")
+    normalized_family = str(source_family or "").strip()
+    building_text = str(building or "").strip()
+    if normalized_family not in _LATEST_REFRESHABLE_SOURCE_FAMILIES:
+        raise HTTPException(status_code=400, detail="不支持的共享文件类型")
+    if not building_text:
+        raise HTTPException(status_code=400, detail="缺少楼栋参数")
+    container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
+    if service is None:
+        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    result = service.start_building_latest_source_cache_refresh(
+        source_family=normalized_family,
+        building=building_text,
+    )
+    reason = str(result.get("reason", "") or "").strip()
+    family_label = _LATEST_REFRESHABLE_SOURCE_FAMILIES.get(normalized_family, normalized_family)
+    if not bool(result.get("accepted")) and reason == "already_running":
+        return {
+            "ok": True,
+            "accepted": False,
+            "running": True,
+            "scope": "single_building_family",
+            "source_family": normalized_family,
+            "building": building_text,
+            "bucket_key": str(result.get("bucket_key", "") or "").strip(),
+            "message": f"{building_text} {family_label}已在拉取中",
+            **result,
+        }
+    if not bool(result.get("accepted")):
+        detail_map = {
+            "disabled": "当前未启用内网共享缓存下载",
+            "invalid_building": "楼栋参数无效或当前楼栋未启用",
+            "bucket_unavailable": "当前不在告警定时窗口，请使用一键拉取告警文件",
+            "unsupported_family": "不支持的共享文件类型",
+        }
+        raise HTTPException(status_code=409, detail=detail_map.get(reason, "单楼共享文件拉取未被接受"))
+    container.add_system_log(
+        f"[共享缓存] 已手动触发单楼 latest 拉取 family={normalized_family} building={building_text}"
+    )
+    return {
+        "ok": True,
+        "accepted": True,
+        "running": True,
+        "scope": "single_building_family",
+        "source_family": normalized_family,
+        "building": building_text,
+        "bucket_key": str(result.get("bucket_key", "") or "").strip(),
+        "message": f"已开始重新拉取 {building_text} {family_label}",
         **result,
     }
 

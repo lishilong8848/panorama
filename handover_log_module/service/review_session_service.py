@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 from openpyxl import load_workbook
 
-from handover_log_module.repository.event_followup_cache_store import EventFollowupCacheStore
+from handover_log_module.repository.review_session_state_store import ReviewSessionStateStore
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
 
 
@@ -37,8 +37,8 @@ class ReviewSessionService:
         event_sections = self.config.get("event_sections", {})
         cache_cfg = event_sections.get("cache", {}) if isinstance(event_sections, dict) else {}
         global_paths = self.config.get("_global_paths", {})
-        self._cache_store = EventFollowupCacheStore(
-            cache_state_file=str(cache_cfg.get("state_file", "") or EventFollowupCacheStore.SHARED_STATE_FILE),
+        self._review_state_store = ReviewSessionStateStore(
+            cache_state_file=str(cache_cfg.get("state_file", "") or ""),
             global_paths=global_paths if isinstance(global_paths, dict) else None,
         )
         self._source_file_cache_service = HandoverSourceFileCacheService(self.config)
@@ -571,6 +571,14 @@ class ReviewSessionService:
             "duty_shift": duty_shift,
             "batch_key": batch_key,
             "output_file": str(raw.get("output_file", "")).strip(),
+            "capacity_output_file": str(raw.get("capacity_output_file", "")).strip(),
+            "capacity_status": str(raw.get("capacity_status", "")).strip().lower(),
+            "capacity_error": str(raw.get("capacity_error", "")).strip(),
+            "capacity_warnings": [
+                str(item or "").strip()
+                for item in (raw.get("capacity_warnings", []) if isinstance(raw.get("capacity_warnings", []), list) else [])
+                if str(item or "").strip()
+            ],
             "data_file": str(raw.get("data_file", "")).strip(),
             "source_mode": str(raw.get("source_mode", "")).strip(),
             "revision": int(raw.get("revision", 1) or 1),
@@ -675,7 +683,7 @@ class ReviewSessionService:
         }
 
     def _load_state(self) -> Dict[str, Any]:
-        state = self._cache_store.load_state()
+        state = self._review_state_store.load_state()
         if not isinstance(state.get("review_cloud_batches", {}), dict):
             state["review_cloud_batches"] = {}
         sessions = state.get("review_sessions", {})
@@ -790,7 +798,7 @@ class ReviewSessionService:
     def _save_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
         self._rebuild_latest_by_building(state)
         self._rebuild_batch_status(state)
-        return self._cache_store.save_state(state)
+        return self._review_state_store.save_state(state)
 
     def get_building_by_code(self, building_code: str) -> str:
         code = str(building_code or "").strip().lower()
@@ -885,6 +893,91 @@ class ReviewSessionService:
         if not isinstance(raw_session, dict):
             return None
         return self._normalize_session(raw_session)
+
+    def get_session_concurrency(
+        self,
+        *,
+        building: str,
+        session_id: str,
+        client_id: str = "",
+    ) -> Dict[str, Any]:
+        session = self.get_session_by_id(session_id)
+        building_name = str(building or "").strip()
+        if not isinstance(session, dict) or str(session.get("building", "")).strip() != building_name:
+            raise ReviewSessionNotFoundError("review session not found")
+        return self._review_state_store.get_concurrency(
+            building=building_name,
+            session_id=str(session.get("session_id", "")).strip(),
+            current_revision=int(session.get("revision", 0) or 0),
+            client_id=str(client_id or "").strip(),
+        )
+
+    def claim_session_lock(
+        self,
+        *,
+        building: str,
+        session_id: str,
+        client_id: str,
+        holder_label: str = "",
+        lease_ttl_sec: int = 60,
+    ) -> Dict[str, Any]:
+        session = self.get_session_by_id(session_id)
+        building_name = str(building or "").strip()
+        if not isinstance(session, dict) or str(session.get("building", "")).strip() != building_name:
+            raise ReviewSessionNotFoundError("review session not found")
+        return self._review_state_store.claim_lock(
+            building=building_name,
+            session_id=str(session.get("session_id", "")).strip(),
+            current_revision=int(session.get("revision", 0) or 0),
+            client_id=str(client_id or "").strip(),
+            holder_label=str(holder_label or "").strip(),
+            lease_ttl_sec=lease_ttl_sec,
+        )
+
+    def heartbeat_session_lock(
+        self,
+        *,
+        building: str,
+        session_id: str,
+        client_id: str,
+        lease_ttl_sec: int = 60,
+    ) -> Dict[str, Any]:
+        session = self.get_session_by_id(session_id)
+        building_name = str(building or "").strip()
+        if not isinstance(session, dict) or str(session.get("building", "")).strip() != building_name:
+            raise ReviewSessionNotFoundError("review session not found")
+        return self._review_state_store.heartbeat_lock(
+            building=building_name,
+            session_id=str(session.get("session_id", "")).strip(),
+            current_revision=int(session.get("revision", 0) or 0),
+            client_id=str(client_id or "").strip(),
+            lease_ttl_sec=lease_ttl_sec,
+        )
+
+    def release_session_lock(
+        self,
+        *,
+        building: str,
+        session_id: str,
+        client_id: str,
+    ) -> Dict[str, Any]:
+        session = self.get_session_by_id(session_id)
+        building_name = str(building or "").strip()
+        if not isinstance(session, dict) or str(session.get("building", "")).strip() != building_name:
+            return {
+                "current_revision": 0,
+                "active_editor": None,
+                "lease_expires_at": "",
+                "is_editing_elsewhere": False,
+                "client_holds_lock": False,
+                "released": False,
+            }
+        return self._review_state_store.release_lock(
+            building=building_name,
+            session_id=str(session.get("session_id", "")).strip(),
+            current_revision=int(session.get("revision", 0) or 0),
+            client_id=str(client_id or "").strip(),
+        )
 
     def get_session_for_building_duty(self, building: str, duty_date: str, duty_shift: str) -> Dict[str, Any] | None:
         building_name = str(building or "").strip()
@@ -1088,6 +1181,10 @@ class ReviewSessionService:
         duty_shift: str,
         data_file: str,
         output_file: str,
+        capacity_output_file: str = "",
+        capacity_status: str = "",
+        capacity_error: str = "",
+        capacity_warnings: List[str] | None = None,
         source_mode: str,
         day_metric_export: Dict[str, Any] | None = None,
         source_file_cache: Dict[str, Any] | None = None,
@@ -1125,6 +1222,14 @@ class ReviewSessionService:
             "batch_key": batch_key,
             "data_file": str(data_file or "").strip(),
             "output_file": str(output_file or "").strip(),
+            "capacity_output_file": str(capacity_output_file or "").strip(),
+            "capacity_status": str(capacity_status or "").strip().lower(),
+            "capacity_error": str(capacity_error or "").strip(),
+            "capacity_warnings": [
+                str(item or "").strip()
+                for item in (capacity_warnings if isinstance(capacity_warnings, list) else [])
+                if str(item or "").strip()
+            ],
             "source_mode": str(source_mode or "").strip(),
             "revision": previous_revision + 1 if previous_revision > 0 else 1,
             "confirmed": False,
@@ -1156,6 +1261,7 @@ class ReviewSessionService:
         building: str,
         session_id: str,
         confirmed: bool,
+        base_revision: int,
         confirmed_by: str = "",
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
         building_name = str(building or "").strip()
@@ -1168,10 +1274,14 @@ class ReviewSessionService:
         session = self._normalize_session(sessions[target_session_id])
         if session["building"] != building_name:
             raise ReviewSessionNotFoundError("review session building mismatch")
+        current_revision = int(session.get("revision", 1) or 1)
+        if int(base_revision) != current_revision:
+            raise ReviewSessionConflictError("review session revision conflict")
 
         session["confirmed"] = bool(confirmed)
         session["confirmed_at"] = _now_text() if confirmed else ""
         session["confirmed_by"] = str(confirmed_by or "").strip() if confirmed else ""
+        session["revision"] = current_revision + 1
         session["updated_at"] = _now_text()
         sessions[target_session_id] = session
         state["review_sessions"] = sessions
@@ -1194,9 +1304,11 @@ class ReviewSessionService:
             session = self._normalize_session(raw_session)
             if str(session.get("batch_key", "")).strip() != target_batch:
                 continue
+            current_revision = int(session.get("revision", 1) or 1)
             session["confirmed"] = True
             session["confirmed_at"] = _now_text()
             session["confirmed_by"] = str(confirmed_by or "").strip()
+            session["revision"] = current_revision + 1
             session["updated_at"] = _now_text()
             sessions[session_id] = session
             updated_sessions.append(dict(session))

@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -30,14 +31,21 @@ class SharedBridgeStore:
         self.root_dir = Path(root_dir)
         self.db_path = self.root_dir / "bridge.db"
         self.busy_timeout_ms = max(1000, int(busy_timeout_ms or 5000))
+        self._ready_lock = threading.Lock()
+        self._ready = False
 
     def ensure_ready(self) -> None:
-        self.root_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("artifacts", "logs", "tmp"):
-            (self.root_dir / name).mkdir(parents=True, exist_ok=True)
-        with self.connect() as conn:
-            conn.executescript(
-                """
+        if self._ready:
+            return
+        with self._ready_lock:
+            if self._ready:
+                return
+            self.root_dir.mkdir(parents=True, exist_ok=True)
+            for name in ("artifacts", "logs", "tmp"):
+                (self.root_dir / name).mkdir(parents=True, exist_ok=True)
+            with self.connect() as conn:
+                conn.executescript(
+                    """
                 CREATE TABLE IF NOT EXISTS bridge_settings (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     shared_schema_version INTEGER NOT NULL,
@@ -169,44 +177,45 @@ class SharedBridgeStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_bridge_external_alert_projection_building
                     ON bridge_external_alert_projection(building, still_unresolved, updated_at);
-                """
-            )
-            self._ensure_column(
-                conn,
-                table_name="bridge_internal_issue_alerts",
-                column_name="status_key",
-                ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN status_key TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                conn,
-                table_name="bridge_internal_issue_alerts",
-                column_name="resolved_at",
-                ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN resolved_at TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                conn,
-                table_name="bridge_internal_issue_alerts",
-                column_name="last_recovery_task_id",
-                ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN last_recovery_task_id TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                conn,
-                table_name="bridge_internal_issue_alerts",
-                column_name="last_recovery_pushed_at",
-                ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN last_recovery_pushed_at TEXT NOT NULL DEFAULT ''",
-            )
-            row = conn.execute("SELECT COUNT(1) AS cnt FROM bridge_settings").fetchone()
-            if not row or int(row["cnt"] or 0) <= 0:
-                now_text = _now_text()
-                conn.execute(
                     """
-                    INSERT INTO bridge_settings(id, shared_schema_version, created_at, updated_at)
-                    VALUES(1, 2, ?, ?)
-                    """,
-                    (now_text, now_text),
                 )
-            else:
-                conn.execute("UPDATE bridge_settings SET shared_schema_version=2, updated_at=? WHERE id=1", (_now_text(),))
+                self._ensure_column(
+                    conn,
+                    table_name="bridge_internal_issue_alerts",
+                    column_name="status_key",
+                    ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN status_key TEXT NOT NULL DEFAULT ''",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="bridge_internal_issue_alerts",
+                    column_name="resolved_at",
+                    ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN resolved_at TEXT NOT NULL DEFAULT ''",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="bridge_internal_issue_alerts",
+                    column_name="last_recovery_task_id",
+                    ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN last_recovery_task_id TEXT NOT NULL DEFAULT ''",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="bridge_internal_issue_alerts",
+                    column_name="last_recovery_pushed_at",
+                    ddl="ALTER TABLE bridge_internal_issue_alerts ADD COLUMN last_recovery_pushed_at TEXT NOT NULL DEFAULT ''",
+                )
+                row = conn.execute("SELECT COUNT(1) AS cnt FROM bridge_settings").fetchone()
+                if not row or int(row["cnt"] or 0) <= 0:
+                    now_text = _now_text()
+                    conn.execute(
+                        """
+                        INSERT INTO bridge_settings(id, shared_schema_version, created_at, updated_at)
+                        VALUES(1, 2, ?, ?)
+                        """,
+                        (now_text, now_text),
+                    )
+                else:
+                    conn.execute("UPDATE bridge_settings SET shared_schema_version=2, updated_at=? WHERE id=1", (_now_text(),))
+            self._ready = True
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, *, table_name: str, column_name: str, ddl: str) -> None:
@@ -218,18 +227,22 @@ class SharedBridgeStore:
             conn.execute(ddl)
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def connect(self, *, read_only: bool = False) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(str(self.db_path), timeout=self.busy_timeout_ms / 1000.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         try:
-            conn.execute("PRAGMA journal_mode=DELETE")
-            conn.execute("PRAGMA synchronous=FULL")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
             conn.execute("PRAGMA foreign_keys=ON")
+            if read_only:
+                conn.execute("PRAGMA query_only=ON")
             yield conn
-            conn.commit()
+            if not read_only and conn.in_transaction:
+                conn.commit()
         except Exception:
-            conn.rollback()
+            if conn.in_transaction:
+                conn.rollback()
             raise
         finally:
             conn.close()
@@ -261,7 +274,7 @@ class SharedBridgeStore:
             )
 
     def get_task_counts(self) -> Dict[str, int]:
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             task_row = conn.execute(
                 """
                 SELECT
@@ -282,7 +295,7 @@ class SharedBridgeStore:
         }
 
     def list_tasks(self, *, limit: int = 100) -> List[Dict[str, Any]]:
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             rows = conn.execute(
                 """
                 SELECT task_id, feature, mode, created_by_role, created_by_node_id, requested_by,
@@ -299,7 +312,7 @@ class SharedBridgeStore:
         task_text = str(task_id or "").strip()
         if not task_text:
             return None
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             task_row = conn.execute(
                 """
                 SELECT task_id, feature, mode, created_by_role, created_by_node_id, requested_by,
@@ -352,7 +365,7 @@ class SharedBridgeStore:
         if not dedupe_text:
             return None
         placeholders = ", ".join("?" for _ in _TERMINAL_TASK_STATUSES)
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             row = conn.execute(
                 f"""
                 SELECT task_id
@@ -499,7 +512,7 @@ class SharedBridgeStore:
         alert_key_text = str(alert_key or "").strip()
         if not alert_key_text:
             return None
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             row = conn.execute(
                 """
                 SELECT alert_key, building, failure_kind, summary, latest_detail,
@@ -524,7 +537,7 @@ class SharedBridgeStore:
         now_dt = datetime.now()
         quiet_before = (now_dt - timedelta(seconds=max(60, int(quiet_window_sec or 600)))).strftime("%Y-%m-%d %H:%M:%S")
         dedupe_before = (now_dt - timedelta(seconds=max(60, int(dedupe_window_sec or 3600)))).strftime("%Y-%m-%d %H:%M:%S")
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             rows = conn.execute(
                 """
                 SELECT alert_key, building, failure_kind, summary, latest_detail,
@@ -542,7 +555,7 @@ class SharedBridgeStore:
         return [self._row_to_internal_issue_alert_dict(row) for row in rows]
 
     def list_active_internal_issue_alerts(self) -> List[Dict[str, Any]]:
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             rows = conn.execute(
                 """
                 SELECT alert_key, building, failure_kind, summary, latest_detail,
@@ -557,7 +570,7 @@ class SharedBridgeStore:
         return [self._row_to_internal_issue_alert_dict(row) for row in rows]
 
     def list_due_internal_issue_recoveries(self) -> List[Dict[str, Any]]:
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             rows = conn.execute(
                 """
                 SELECT alert_key, building, failure_kind, summary, latest_detail,
@@ -696,7 +709,7 @@ class SharedBridgeStore:
 
     def list_external_alert_projections(self) -> List[Dict[str, Any]]:
         self.ensure_ready()
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             rows = conn.execute(
                 """
                 SELECT projection_key, building, failure_kind, alert_state, status_key, summary, latest_detail,
@@ -1933,7 +1946,7 @@ class SharedBridgeStore:
             clauses.append("status=?")
             params.append(status_text)
         where_sql = " AND ".join(clauses)
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             rows = conn.execute(
                 f"""
                 SELECT artifact_id, task_id, stage_id, artifact_kind, building, relative_path, status,
@@ -2054,7 +2067,7 @@ class SharedBridgeStore:
             clauses.append("status=?")
             params.append(str(status or "").strip())
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             rows = conn.execute(
                 f"""
                 SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,
@@ -2135,7 +2148,7 @@ class SharedBridgeStore:
         return bool(int(deleted.rowcount or 0) > 0)
 
     def list_cleanup_candidate_source_cache_entries(self, *, limit: int = 20000) -> List[Dict[str, Any]]:
-        with self.connect() as conn:
+        with self.connect(read_only=True) as conn:
             rows = conn.execute(
                 """
                 SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,

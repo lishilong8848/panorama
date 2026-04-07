@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,20 @@ def _resolve_runtime_state_root(*, global_paths: Dict[str, Any] | None) -> Path:
     return root
 
 
+_STATE_LOCKS_GUARD = threading.Lock()
+_STATE_LOCKS: Dict[str, threading.RLock] = {}
+
+
+def _state_lock_for_path(path: Path) -> threading.RLock:
+    normalized = str(path.resolve(strict=False)).casefold()
+    with _STATE_LOCKS_GUARD:
+        lock = _STATE_LOCKS.get(normalized)
+        if lock is None:
+            lock = threading.RLock()
+            _STATE_LOCKS[normalized] = lock
+        return lock
+
+
 class EventFollowupCacheStore:
     SHARED_STATE_FILE = "handover_shared_cache.json"
     DEFAULT_STATE: Dict[str, Any] = {
@@ -78,6 +93,7 @@ class EventFollowupCacheStore:
             runtime_root = _resolve_runtime_state_root(global_paths=global_paths)
             state_path = runtime_root / state_path
         self.state_path = state_path
+        self._state_lock = _state_lock_for_path(self.state_path)
 
     @staticmethod
     def _cache_key(building: str, record_id: str) -> str:
@@ -103,14 +119,16 @@ class EventFollowupCacheStore:
         return payload
 
     def load_state(self) -> Dict[str, Any]:
-        state = _safe_load_json(self.state_path, self.DEFAULT_STATE)
-        return self._normalize_state(state)
+        with self._state_lock:
+            state = _safe_load_json(self.state_path, self.DEFAULT_STATE)
+            return self._normalize_state(state)
 
     def save_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        state = self._normalize_state(payload)
-        state["updated_at"] = _now_text()
-        _safe_save_json(self.state_path, state)
-        return state
+        with self._state_lock:
+            state = self._normalize_state(payload)
+            state["updated_at"] = _now_text()
+            _safe_save_json(self.state_path, state)
+            return state
 
     def list_pending_for_building(self, building: str) -> List[Dict[str, Any]]:
         state = self.load_state()

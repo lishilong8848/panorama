@@ -144,6 +144,7 @@ def run_from_existing_file(
     config: Dict[str, Any],
     building: str,
     data_file: str,
+    capacity_source_file: str | None = None,
     end_time: str | None = None,
     duty_date: str | None = None,
     duty_shift: str | None = None,
@@ -154,6 +155,7 @@ def run_from_existing_file(
     return orchestrator.run_from_existing_file(
         building=str(building).strip(),
         data_file=str(data_file).strip(),
+        capacity_source_file=str(capacity_source_file or "").strip() or None,
         end_time=end_time,
         duty_date=str(duty_date or "").strip() or None,
         duty_shift=str(duty_shift or "").strip().lower() or None,
@@ -164,6 +166,7 @@ def run_from_existing_file(
 def run_from_existing_files(
     config: Dict[str, Any],
     building_files: List[tuple[str, str]],
+    capacity_building_files: List[tuple[str, str]] | None = None,
     configured_buildings: List[str] | None = None,
     end_time: str | None = None,
     duty_date: str | None = None,
@@ -177,9 +180,15 @@ def run_from_existing_files(
         for building, data_file in (building_files or [])
         if str(building).strip() and str(data_file).strip()
     ]
+    capacity_target = [
+        (str(building).strip(), str(data_file).strip())
+        for building, data_file in (capacity_building_files or [])
+        if str(building).strip() and str(data_file).strip()
+    ]
     buildings = [str(item).strip() for item in (configured_buildings or []) if str(item).strip()]
     return orchestrator.run_from_existing_files(
         building_files=target,
+        capacity_building_files=capacity_target or None,
         configured_buildings=buildings or None,
         end_time=end_time,
         duty_date=str(duty_date or "").strip() or None,

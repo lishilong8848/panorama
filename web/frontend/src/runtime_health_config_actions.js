@@ -32,6 +32,7 @@ import {
   openHandoverDailyReportScreenshotAuthApi,
   recaptureHandoverDailyReportAssetApi,
   refreshCurrentHourSourceCacheApi,
+  refreshBuildingLatestSourceCacheApi,
   restoreHandoverDailyReportManualAssetApi,
   retryBridgeTaskApi,
   rewriteHandoverDailyReportRecordApi,
@@ -64,10 +65,17 @@ const ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE = "handover_review:access_reprob
 const ACTION_KEY_BRIDGE_CANCEL_PREFIX = "bridge:cancel:";
 const ACTION_KEY_BRIDGE_RETRY_PREFIX = "bridge:retry:";
 const ACTION_KEY_SOURCE_CACHE_REFRESH_CURRENT_HOUR = "bridge:source_cache_refresh_current_hour";
+const ACTION_KEY_SOURCE_CACHE_REFRESH_BUILDING_LATEST_PREFIX = "bridge:source_cache_refresh_building_latest:";
 const ACTION_KEY_SOURCE_CACHE_REFRESH_ALARM_MANUAL = "bridge:source_cache_refresh_alarm_manual";
 const ACTION_KEY_SOURCE_CACHE_DELETE_ALARM_MANUAL = "bridge:source_cache_delete_alarm_manual";
 const ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_FULL = "bridge:source_cache_upload_alarm_full";
 const ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_BUILDING = "bridge:source_cache_upload_alarm_building";
+const SOURCE_CACHE_FAMILY_LABELS = {
+  handover_log_family: "交接班日志源文件",
+  handover_capacity_report_family: "交接班容量报表源文件",
+  monthly_report_family: "全景平台月报源文件",
+  alarm_event_family: "告警信息源文件",
+};
 const ENGINEER_DIRECTORY_CACHE_KEY = "handover_engineer_directory_daily_cache_v1";
 
 export function createRuntimeHealthConfigActions(ctx) {
@@ -1239,6 +1247,36 @@ export function createRuntimeHealthConfigActions(ctx) {
     return runner();
   }
 
+  function getSourceCacheRefreshBuildingActionKey(sourceFamily, building) {
+    return `${ACTION_KEY_SOURCE_CACHE_REFRESH_BUILDING_LATEST_PREFIX}${String(sourceFamily || "").trim()}:${String(building || "").trim()}`;
+  }
+
+  async function refreshBuildingLatestSourceCache(sourceFamily, building) {
+    const sourceFamilyText = String(sourceFamily || "").trim();
+    const buildingText = String(building || "").trim();
+    if (!sourceFamilyText || !buildingText) {
+      message.value = "缺少楼栋或文件类型，无法执行单楼拉取。";
+      return { ok: false, error: "missing_source_family_or_building" };
+    }
+    const runner = async () => {
+      try {
+        const data = await refreshBuildingLatestSourceCacheApi(sourceFamilyText, buildingText);
+        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        const familyLabel = SOURCE_CACHE_FAMILY_LABELS[sourceFamilyText] || sourceFamilyText;
+        message.value = String(data?.message || "").trim() || `已开始重新拉取 ${buildingText} ${familyLabel}`;
+        return data;
+      } catch (err) {
+        const familyLabel = SOURCE_CACHE_FAMILY_LABELS[sourceFamilyText] || sourceFamilyText;
+        message.value = `${buildingText} ${familyLabel}拉取失败: ${err}`;
+        return { ok: false, error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(getSourceCacheRefreshBuildingActionKey(sourceFamilyText, buildingText), runner, { cooldownMs: 0 });
+    }
+    return runner();
+  }
+
   async function refreshManualAlarmSourceCache() {
     const runner = async () => {
       try {
@@ -2351,6 +2389,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     cancelBridgeTask,
     retryBridgeTask,
     refreshCurrentHourSourceCache,
+    refreshBuildingLatestSourceCache,
     refreshManualAlarmSourceCache,
     deleteManualAlarmSourceCacheFiles,
     uploadAlarmSourceCacheFull,
@@ -2385,6 +2424,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     buildHandoverDailyReportCaptureAssetUrl,
     getBridgeTaskCancelActionKey,
     getBridgeTaskRetryActionKey,
+    getSourceCacheRefreshBuildingActionKey,
     getHandoverDailyReportRecaptureActionKey,
     getHandoverDailyReportUploadActionKey,
     getHandoverDailyReportRestoreActionKey,
