@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 from openpyxl import load_workbook
 
+from app.shared.utils.artifact_naming import handover_log_output_patterns
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.repository.review_session_state_store import ReviewSessionStateStore
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
@@ -109,23 +110,26 @@ class ReviewSessionService:
         except Exception:  # noqa: BLE001
             return 0.0
 
-    def _formal_output_pattern(self, building: str) -> re.Pattern[str]:
-        building_name = re.escape(str(building or "").strip())
-        return re.compile(
-            rf"^{building_name}_(?P<date>\d{{8}})_交接班日志(?:_(?P<seq>\d+))?\.xlsx$",
-            re.IGNORECASE,
-        )
+    def _formal_output_patterns(self, building: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
+        return handover_log_output_patterns(building)
+
+    def _match_formal_output_name(self, building: str, file_name: str) -> re.Match[str] | None:
+        legacy_pattern, canonical_pattern = self._formal_output_patterns(building)
+        for pattern in (canonical_pattern, legacy_pattern):
+            matched = pattern.match(str(file_name or "").strip())
+            if matched:
+                return matched
+        return None
 
     def _list_formal_output_files(self, building: str) -> List[Path]:
         output_dir = self._template_output_dir()
         if output_dir is None or not output_dir.exists():
             return []
-        pattern = self._formal_output_pattern(building)
         candidates: List[tuple[str, int, float, Path]] = []
-        for path in output_dir.glob("*.xlsx"):
+        for path in output_dir.rglob("*.xlsx"):
             if not path.is_file():
                 continue
-            match = pattern.match(path.name)
+            match = self._match_formal_output_name(building, path.name)
             if not match:
                 continue
             duty_date = str(match.group("date") or "").strip()
@@ -165,13 +169,18 @@ class ReviewSessionService:
         return lookup
 
     def _infer_duty_context_from_output(self, building: str, output_path: Path) -> tuple[str, str] | None:
-        match = self._formal_output_pattern(building).match(output_path.name)
+        match = self._match_formal_output_name(building, output_path.name)
         if not match:
             return None
         raw_date = str(match.group("date") or "").strip()
         if len(raw_date) != 8:
             return None
         duty_date = f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+        shift_text = str(match.groupdict().get("shift", "") or "").strip()
+        if shift_text == "白班":
+            return duty_date, "day"
+        if shift_text == "夜班":
+            return duty_date, "night"
         workbook = None
         try:
             workbook = load_workbook(output_path, read_only=True, data_only=False)

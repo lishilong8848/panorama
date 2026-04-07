@@ -15,6 +15,12 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClien
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
 from app.shared.utils.atomic_file import atomic_save_workbook, atomic_write_text
+from app.shared.utils.artifact_naming import (
+    OUTPUT_TYPE_MONTHLY_EVENT,
+    build_output_base_path,
+    monthly_output_patterns,
+    with_index,
+)
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
@@ -223,6 +229,58 @@ class MonthlyEventReportService:
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
 
+    def _build_output_path(self, *, building: str, target_month: str) -> Path:
+        return build_output_base_path(
+            output_root=self.resolve_output_dir(),
+            output_type=OUTPUT_TYPE_MONTHLY_EVENT,
+            building=building,
+            suffix=".xlsx",
+            target_month=target_month,
+        )
+
+    def _next_available_output_path(self, *, building: str, target_month: str) -> Path:
+        base_path = self._build_output_path(building=building, target_month=target_month)
+        for idx in range(1, 1000):
+            candidate = with_index(base_path, idx)
+            if not candidate.exists():
+                return candidate
+        raise RuntimeError(f"月度事件统计表输出文件序号已用尽: {base_path}")
+
+    def _resolve_existing_output_path(self, *, building: str, target_month: str, output_dir: str) -> Path | None:
+        output_root = Path(str(output_dir or "").strip())
+        if not str(output_root).strip():
+            return None
+        try:
+            legacy_pattern, canonical_pattern = monthly_output_patterns(OUTPUT_TYPE_MONTHLY_EVENT, building)
+        except Exception:
+            return None
+        bucket_dir = output_root / "".join(ch for ch in str(target_month or "").strip() if ch.isdigit())[:6]
+        bucket_dir = bucket_dir / f"{''.join(ch for ch in str(target_month or '').strip() if ch.isdigit())[:6]}--月度"
+        candidate_dirs: List[Path] = [bucket_dir, output_root]
+        seen_dirs: set[str] = set()
+        candidates: List[tuple[int, float, Path]] = []
+        for directory in candidate_dirs:
+            key = str(directory)
+            if key in seen_dirs or not directory.exists():
+                continue
+            seen_dirs.add(key)
+            for path in directory.glob("*.xlsx"):
+                if not path.is_file():
+                    continue
+                match = canonical_pattern.match(path.name) or legacy_pattern.match(path.name)
+                if not match:
+                    continue
+                seq = int(match.groupdict().get("seq") or 0)
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                candidates.append((seq, mtime, path))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
+
     def _runtime_state_root(self) -> Path:
         return resolve_runtime_state_root(runtime_config=self.runtime_config, app_dir=self._app_dir())
 
@@ -289,20 +347,21 @@ class MonthlyEventReportService:
             target_month = str(snapshot.get("target_month", "") or "").strip()
             output_dir = str(snapshot.get("output_dir", "") or "").strip()
             successful_buildings = snapshot.get("successful_buildings", [])
-            file_name_pattern = self.get_config().get("template", {}).get("file_name_pattern", "")
             if target_month and output_dir and isinstance(successful_buildings, list):
-                output_dir_path = Path(output_dir)
                 for building in successful_buildings:
                     building_text = str(building or "").strip()
                     if not building_text:
                         continue
-                    file_name = self._safe_output_name(file_name_pattern, building=building_text, month=target_month)
-                    file_path = output_dir_path / file_name
+                    file_path = self._resolve_existing_output_path(
+                        building=building_text,
+                        target_month=target_month,
+                        output_dir=output_dir,
+                    )
                     normalized_files_by_building[building_text] = {
                         "building": building_text,
-                        "file_path": str(file_path),
-                        "file_name": file_name,
-                        "exists": file_path.exists(),
+                        "file_path": str(file_path or ""),
+                        "file_name": file_path.name if file_path else "",
+                        "exists": bool(file_path) and file_path.exists(),
                     }
         snapshot["files_by_building"] = normalized_files_by_building
         return snapshot
@@ -614,8 +673,7 @@ class MonthlyEventReportService:
         template_path = self.resolve_template_path()
         if not template_path.exists():
             raise FileNotFoundError(f"月度事件统计表模板不存在: {template_path}")
-        output_dir = self.resolve_output_dir()
-        file_name_pattern = self.get_config()["template"]["file_name_pattern"]
+        output_root = self.resolve_output_dir()
 
         started_at = datetime.now()
         emit_log(
@@ -639,12 +697,11 @@ class MonthlyEventReportService:
 
         for current_building in selected_buildings:
             try:
-                file_name = self._safe_output_name(
-                    file_name_pattern,
+                output_path = self._next_available_output_path(
                     building=current_building,
-                    month=target_month,
+                    target_month=target_month,
                 )
-                output_path = output_dir / file_name
+                output_path.parent.mkdir(parents=True, exist_ok=True)
                 self._write_building_workbook(
                     building=current_building,
                     month=target_month,
@@ -660,6 +717,7 @@ class MonthlyEventReportService:
                     "file_path": str(output_path),
                     "file_name": output_path.name,
                     "exists": output_path.exists(),
+                    "naming_version": 2,
                 }
             except Exception as exc:
                 failed_buildings.append(current_building)
@@ -687,7 +745,7 @@ class MonthlyEventReportService:
             "generated_files": generated_files,
             "successful_buildings": successful_buildings,
             "failed_buildings": failed_buildings,
-            "output_dir": str(output_dir),
+            "output_dir": str(output_root),
             "files_by_building": files_by_building,
             "error": error_text,
         }

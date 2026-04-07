@@ -8,6 +8,11 @@ from typing import Any, Callable, Dict
 import openpyxl
 
 from app.shared.utils.atomic_file import atomic_write_file, validate_excel_workbook_file
+from app.shared.utils.artifact_naming import (
+    OUTPUT_TYPE_HANDOVER_LOG,
+    build_output_base_path,
+    with_index,
+)
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.footer_layout import find_footer_inventory_layout, trim_rows_below_footer
 from handover_log_module.core.footer_snapshot import (
@@ -48,12 +53,6 @@ def build_output_filename(
     building_text = _safe_filename(building)
     date_text = date_ref.strftime(date_format)
     return file_name_pattern.format(building=building_text, date=date_text)
-
-
-def _with_index(path: Path, idx: int) -> Path:
-    if idx <= 1:
-        return path
-    return path.with_name(f"{path.stem}_{idx}{path.suffix}")
 
 
 def _is_file_in_use(exc: BaseException) -> bool:
@@ -173,6 +172,8 @@ def copy_template_and_fill(
     template_cfg: Dict[str, str],
     cell_values: Dict[str, str],
     date_ref: datetime,
+    duty_date: str = "",
+    duty_shift: str = "",
     category_payloads: Dict[str, Any] | None = None,
     emit_log: Callable[[str], None] = print,
 ) -> Path:
@@ -197,19 +198,30 @@ def copy_template_and_fill(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    file_name_pattern = str(template_cfg.get("file_name_pattern", "{building}_{date}_交接班日志.xlsx")).strip()
-    date_format = str(template_cfg.get("date_format", "%Y%m%d")).strip()
-    base_name = build_output_filename(
-        building=building,
-        file_name_pattern=file_name_pattern,
-        date_format=date_format,
-        date_ref=date_ref,
-    )
-    base_path = output_dir / base_name
+    if str(duty_date or "").strip() and str(duty_shift or "").strip():
+        base_path = build_output_base_path(
+            output_root=output_dir,
+            output_type=OUTPUT_TYPE_HANDOVER_LOG,
+            building=building,
+            suffix=".xlsx",
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+        )
+    else:
+        file_name_pattern = str(template_cfg.get("file_name_pattern", "{building}_{date}_交接班日志.xlsx")).strip()
+        date_format = str(template_cfg.get("date_format", "%Y%m%d")).strip()
+        base_name = build_output_filename(
+            building=building,
+            file_name_pattern=file_name_pattern,
+            date_format=date_format,
+            date_ref=date_ref,
+        )
+        base_path = output_dir / base_name
 
     last_err: BaseException | None = None
     for idx in range(1, 1000):
-        out_path = _with_index(base_path, idx)
+        out_path = with_index(base_path, idx)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         if out_path.exists():
             continue
         try:

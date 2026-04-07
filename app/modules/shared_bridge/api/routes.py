@@ -498,7 +498,7 @@ def bridge_source_cache_alarm_upload_full(request: Request) -> Dict[str, Any]:
 
     job_result = _start_local_background_job(
         container,
-        name="告警信息全量上传（60天）",
+        name="使用共享文件上传60天-全部楼栋",
         feature="alarm_event_upload",
         dedupe_key=dedupe_key,
         resource_keys=["alarm_upload:global"],
@@ -510,19 +510,19 @@ def bridge_source_cache_alarm_upload_full(request: Request) -> Dict[str, Any]:
             "ok": True,
             "accepted": False,
             "running": True,
-            "message": "告警信息文件上传已在执行中，已聚焦到现有任务",
+            "message": "使用共享文件上传60天-全部楼栋已在执行中，已聚焦到现有任务",
             "job": job,
             "reason": "already_running",
             "mode": "full",
             "scope": "all",
             "started_at": str(job.get("started_at") or job.get("created_at") or "").strip(),
         }
-    container.add_system_log(f"[任务] 已提交: 告警信息全量上传（60天） ({job.get('job_id', '')})")
+    container.add_system_log(f"[任务] 已提交: 使用共享文件上传60天-全部楼栋 ({job.get('job_id', '')})")
     return {
         "ok": True,
         "accepted": True,
         "running": True,
-        "message": "已提交告警信息全量上传任务（60天内）",
+        "message": "已提交 使用共享文件上传60天-全部楼栋",
         "job": job,
         "mode": "full",
         "scope": "all",
@@ -566,7 +566,7 @@ def bridge_source_cache_alarm_upload_building(
 
     job_result = _start_local_background_job(
         container,
-        name=f"告警信息单楼刷新上传（60天）- {building_text}",
+        name=f"使用共享文件上传60天-{building_text}",
         feature="alarm_event_upload",
         dedupe_key=f"alarm_event_upload:building:{building_text}",
         resource_keys=["alarm_upload:global"],
@@ -578,19 +578,19 @@ def bridge_source_cache_alarm_upload_building(
             "ok": True,
             "accepted": False,
             "running": True,
-            "message": f"告警信息文件上传已在执行中：{building_text} 请求已复用现有任务",
+            "message": f"使用共享文件上传60天-{building_text} 已在执行中，请求已复用现有任务",
             "job": job,
             "reason": "already_running",
             "mode": "single_building",
             "scope": building_text,
             "started_at": str(job.get("started_at") or job.get("created_at") or "").strip(),
         }
-    container.add_system_log(f"[任务] 已提交: 告警信息单楼刷新上传（60天）- {building_text} ({job.get('job_id', '')})")
+    container.add_system_log(f"[任务] 已提交: 使用共享文件上传60天-{building_text} ({job.get('job_id', '')})")
     return {
         "ok": True,
         "accepted": True,
         "running": True,
-        "message": f"已提交 {building_text} 告警信息文件刷新上传任务（60天内）",
+        "message": f"已提交 使用共享文件上传60天-{building_text}",
         "job": job,
         "mode": "single_building",
         "scope": building_text,

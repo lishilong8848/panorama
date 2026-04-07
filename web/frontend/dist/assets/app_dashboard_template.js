@@ -1982,12 +1982,13 @@
                   {{ externalAlarmUploadStatus.statusText }}
                 </span>
               </div>
-              <div class="hint">全量上传会遍历当前每楼可消费的最新告警文件；单楼刷新上传会覆盖选中楼栋最近 60 天的数据。</div>
+              <div class="hint">当前按下拉选择决定上传范围；选择“全部楼栋”会上传全部楼栋最近 60 天数据，选择单楼则只上传该楼最近 60 天数据。</div>
               <div class="hint">{{ externalAlarmUploadStatus.summaryText }}</div>
               <div class="task-grid two-col" style="margin-top:10px;">
                 <div class="form-row">
                   <label class="label">刷新楼栋</label>
                   <select v-model="externalAlarmUploadBuilding">
+                    <option value="全部楼栋">全部楼栋</option>
                     <option value="A楼">A楼</option>
                     <option value="B楼">B楼</option>
                     <option value="C楼">C楼</option>
@@ -1998,24 +1999,17 @@
                 <div class="form-row">
                   <label class="label">执行策略</label>
                 <div class="readonly-inline-card">
-                  {{ alarmEventUploadTarget.replaceExistingOnFull ? '全量清表重传 / 单楼覆盖刷新' : '全量增量写入 / 单楼覆盖刷新' }}
+                  {{ alarmEventUploadTarget.replaceExistingOnFull ? '全部楼栋清表重传 / 单楼覆盖刷新' : '全部楼栋增量写入 / 单楼覆盖刷新' }}
                 </div>
               </div>
               </div>
               <div class="btn-line" style="margin-top:10px;">
                 <button
                   class="btn btn-primary"
-                  :disabled="!canRun || isSourceCacheUploadAlarmFullLocked"
-                  @click="uploadAlarmSourceCacheFull"
+                  :disabled="!canRun || isSourceCacheUploadAlarmSelectedLocked"
+                  @click="uploadSelectedAlarmSourceCache"
                 >
-                  {{ externalAlarmUploadFullButtonText }}
-                </button>
-                <button
-                  class="btn btn-secondary"
-                  :disabled="!canRun || isSourceCacheUploadAlarmBuildingLocked"
-                  @click="uploadAlarmSourceCacheBuilding(externalAlarmUploadBuilding)"
-                >
-                  {{ externalAlarmUploadBuildingButtonText }}
+                  {{ externalAlarmUploadActionButtonText }}
                 </button>
               </div>
             </article>

@@ -12,11 +12,11 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClien
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
 from app.shared.utils.atomic_file import atomic_save_workbook
+from app.shared.utils.artifact_naming import OUTPUT_TYPE_HANDOVER_CAPACITY, build_output_base_path
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.shift_window import build_duty_window, parse_duty_date
 from handover_log_module.core.normalizers import format_number
 from handover_log_module.repository.excel_reader import load_rows
-from handover_log_module.repository.template_writer import build_output_filename
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
 from handover_log_module.service.capacity_report_common import build_capacity_template_snapshot
 from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
@@ -193,21 +193,22 @@ class HandoverCapacityReportService:
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
 
-    def _build_output_path(self, *, building: str, duty_date: str) -> Path:
-        template_cfg = self._template_cfg()
-        pattern = _text(template_cfg.get("file_name_pattern")) or "{building}_{date}_交接班容量报表.xlsx"
-        date_format = _text(template_cfg.get("date_format")) or "%Y%m%d"
-        duty_day = parse_duty_date(duty_date)
-        file_name = build_output_filename(
+    def _build_output_path(self, *, building: str, duty_date: str, duty_shift: str) -> Path:
+        return build_output_base_path(
+            output_root=self.resolve_output_dir(),
+            output_type=OUTPUT_TYPE_HANDOVER_CAPACITY,
             building=building,
-            file_name_pattern=pattern,
-            date_format=date_format,
-            date_ref=datetime(duty_day.year, duty_day.month, duty_day.day, 0, 0, 0),
+            suffix=".xlsx",
+            duty_date=duty_date,
+            duty_shift=duty_shift,
         )
-        return self.resolve_output_dir() / file_name
 
-    def _next_available_output_path(self, *, building: str, duty_date: str) -> Path:
-        base_path = self._build_output_path(building=building, duty_date=duty_date)
+    def _next_available_output_path(self, *, building: str, duty_date: str, duty_shift: str) -> Path:
+        base_path = self._build_output_path(
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+        )
         for idx in range(1, 1000):
             candidate = _with_index(base_path, idx)
             if not candidate.exists():
@@ -248,13 +249,13 @@ class HandoverCapacityReportService:
         )
 
     def _extract_oil_values(self, rows: List[Any]) -> Dict[str, str]:
-        first_candidates = ["1#油罐容积", "油罐1液位", "1#油罐体积"]
-        second_candidates = ["2#油罐容积", "油罐2液位", "2#油罐体积"]
+        first_candidates = ["1#娌圭綈瀹圭Н", "娌圭綈1娑蹭綅", "1#娌圭綈浣撶Н"]
+        second_candidates = ["2#娌圭綈瀹圭Н", "娌圭綈2娑蹭綅", "2#娌圭綈浣撶Н"]
 
         def _find_value(candidates: List[str]) -> str:
             for candidate in candidates:
                 for row in rows:
-                    if _text(getattr(row, "c_text", "")) != "燃油自控系统":
+                    if _text(getattr(row, "c_text", "")) != "鐕冩补鑷帶绯荤粺":
                         continue
                     if _text(getattr(row, "d_name", "")) != candidate:
                         continue
@@ -343,11 +344,11 @@ class HandoverCapacityReportService:
     def _resolve_running_units(self, resolved_values_by_id: Dict[str, Any] | None) -> Dict[str, List[Dict[str, Any]]]:
         resolved = resolved_values_by_id if isinstance(resolved_values_by_id, dict) else {}
         chiller_cfg = self._chiller_mode_cfg()
-        raw_value_map = chiller_cfg.get("value_map", {"1": "制冷", "2": "预冷", "3": "板换", "4": "停机"})
+        raw_value_map = chiller_cfg.get("value_map", {"1": "鍒跺喎", "2": "棰勫喎", "3": "鏉挎崲", "4": "鍋滄満"})
         value_map = (
             {str(key).strip(): str(value).strip() for key, value in raw_value_map.items() if _text(key)}
             if isinstance(raw_value_map, dict)
-            else {"1": "制冷", "2": "预冷", "3": "板换", "4": "停机"}
+            else {"1": "鍒跺喎", "2": "棰勫喎", "3": "鏉挎崲", "4": "鍋滄満"}
         )
         running: Dict[str, List[Dict[str, Any]]] = {"west": [], "east": []}
         for unit_number in range(1, 7):
@@ -409,7 +410,7 @@ class HandoverCapacityReportService:
         try:
             field_defs = client.list_fields(table_id=table_id, page_size=200)
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][容量报表][夜班耗水] 字段定义读取失败 building=全局, error={exc}")
+            emit_log(f"[浜ゆ帴鐝璢[瀹归噺鎶ヨ〃][澶滅彮鑰楁按] 瀛楁瀹氫箟璇诲彇澶辫触 building=鍏ㄥ眬, error={exc}")
             return {}
         output: Dict[str, Dict[str, str]] = {}
         for field_def in field_defs:
@@ -433,11 +434,11 @@ class HandoverCapacityReportService:
         app_id = str(global_feishu.get("app_id", "") or "").strip()
         app_secret = str(global_feishu.get("app_secret", "") or "").strip()
         if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+            raise ValueError("椋炰功閰嶇疆缂哄け: common.feishu_auth.app_id/app_secret")
         app_token = str(_NIGHT_WATER_SOURCE.get("app_token", "") or "").strip()
         table_id = str(_NIGHT_WATER_SOURCE.get("table_id", "") or "").strip()
         if not app_token or not table_id:
-            raise ValueError("夜班耗水多维配置缺失: app_token/table_id")
+            raise ValueError("澶滅彮鑰楁按澶氱淮閰嶇疆缂哄け: app_token/table_id")
         return FeishuBitableClient(
             app_id=app_id,
             app_secret=app_secret,
@@ -510,7 +511,7 @@ class HandoverCapacityReportService:
             )
         except Exception as exc:  # noqa: BLE001
             emit_log(
-                "[交接班][容量报表][夜班耗水] 查询失败 "
+                "[浜ゆ帴鐝璢[瀹归噺鎶ヨ〃][澶滅彮鑰楁按] 鏌ヨ澶辫触 "
                 f"building={building}, duty={duty_date}/{duty_shift}, error={exc}"
             )
             return {}
@@ -546,7 +547,7 @@ class HandoverCapacityReportService:
             "latest_daily_total": format_number(latest_daily_total),
         }
         emit_log(
-            "[交接班][容量报表][夜班耗水] 查询完成 "
+            "[浜ゆ帴鐝璢[瀹归噺鎶ヨ〃][澶滅彮鑰楁按] 鏌ヨ瀹屾垚 "
             f"building={building}, window={month_start_dt.strftime('%Y-%m-%d %H:%M:%S')}~{duty_end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
             f"matched={matched_records}, O57={summary.get('latest_daily_total', '') or '-'}, R57={summary.get('month_total', '') or '-'}"
         )
@@ -574,10 +575,15 @@ class HandoverCapacityReportService:
         if not building_text or not duty_date_text or duty_shift_text not in {"day", "night"}:
             raise ValueError("生成交接班容量报表缺少楼栋或班次上下文")
 
-        output_file = self._next_available_output_path(building=building_text, duty_date=duty_date_text)
+        output_file = self._next_available_output_path(
+            building=building_text,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+        )
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         template_path = self.resolve_template_path()
         if not template_path.exists():
-            raise FileNotFoundError(f"交接班容量报表模板不存在: {template_path}")
+            raise FileNotFoundError(f"浜ゆ帴鐝閲忔姤琛ㄦā鏉夸笉瀛樺湪: {template_path}")
 
         handover_sheet_name = _text(
             (
@@ -600,7 +606,7 @@ class HandoverCapacityReportService:
         )
         warnings: List[str] = []
         if not oil_previous.get("first") and not oil_previous.get("second"):
-            warnings.append("上一班燃油自控系统缓存不存在")
+            warnings.append("涓婁竴鐝噧娌硅嚜鎺х郴缁熺紦瀛樹笉瀛樺湪")
 
         current_alarm = self._normalize_alarm_summary(current_alarm_summary)
         previous_alarm = self._normalize_alarm_summary(previous_alarm_summary)
@@ -612,7 +618,7 @@ class HandoverCapacityReportService:
         )
         builder = _BUILDER_BY_BUILDING.get(building_text)
         if builder is None:
-            raise ValueError(f"不支持的容量报表楼栋: {building_text}")
+            raise ValueError(f"涓嶆敮鎸佺殑瀹归噺鎶ヨ〃妤兼爧: {building_text}")
 
         hvdc_debug = self._resolve_hvdc_text(
             resolved_values_by_id=resolved_values_by_id,
@@ -620,7 +626,7 @@ class HandoverCapacityReportService:
             hvdc_source_d_name=hvdc_source_d_name,
         )
         emit_log(
-            "[交接班][容量报表][HVDC] "
+            "[浜ゆ帴鐝璢[瀹归噺鎶ヨ〃][HVDC] "
             f"building={building_text}, raw_value={hvdc_debug.get('raw_value', '') or '-'}, "
             f"source_d_name={hvdc_debug.get('source_d_name', '') or '-'}, "
             f"position_code={hvdc_debug.get('position_code', '') or '-'}, "
@@ -669,7 +675,7 @@ class HandoverCapacityReportService:
             )
 
         emit_log(
-            "[交接班][容量报表] 生成完成 "
+            "[浜ゆ帴鐝璢[瀹归噺鎶ヨ〃] 鐢熸垚瀹屾垚 "
             f"building={building_text}, duty_date={duty_date_text}, duty_shift={duty_shift_text}, output={output_file}"
         )
         return {
@@ -678,3 +684,5 @@ class HandoverCapacityReportService:
             "warnings": warnings,
             "error": "",
         }
+
+

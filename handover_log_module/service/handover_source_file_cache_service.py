@@ -13,6 +13,11 @@ from app.shared.utils.atomic_file import (
     validate_excel_workbook_file,
     validate_non_empty_file,
 )
+from app.shared.utils.artifact_naming import (
+    FAMILY_HANDOVER_CAPACITY_REPORT,
+    FAMILY_HANDOVER_LOG,
+    build_source_artifact_path,
+)
 
 
 def _now_text() -> str:
@@ -185,17 +190,40 @@ class HandoverSourceFileCacheService:
         file_text = str(file_path or "").strip()
         if not identity_text or not file_text:
             return
-        file_path_obj = Path(file_text)
-        if not file_path_obj.exists():
+        source_path = Path(file_text)
+        if not source_path.exists():
             return
-        self._validate_cached_source(file_path_obj)
+        self._validate_cached_source(source_path)
+        target_path = self._canonical_downloaded_source_path(
+            identity=identity_text,
+            original_path=source_path,
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if source_path.resolve() != target_path.resolve():
+                atomic_copy_file(
+                    source_path,
+                    target_path,
+                    validator=self._validate_cached_source,
+                    temp_suffix=".downloading",
+                )
+                try:
+                    source_path.resolve().relative_to(self.download_cache_root().resolve())
+                    source_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            else:
+                self._validate_cached_source(target_path)
+        except Exception:
+            target_path = source_path
         payload = self._load_download_index()
         payload[identity_text] = {
-            "file_path": file_text,
+            "file_path": str(target_path),
             "updated_at": _now_text(),
+            "naming_version": 2,
         }
         self._save_download_index(payload)
-        emit_log(f"[交接班][源文件缓存] 已登记共享源文件 identity={identity_text}, file={file_text}")
+        emit_log(f"[交接班][源文件缓存] 已登记共享源文件 identity={identity_text}, file={str(target_path)}")
 
     @staticmethod
     def _parse_download_identity(identity: str) -> Dict[str, str] | None:
@@ -315,14 +343,40 @@ class HandoverSourceFileCacheService:
         original_name: str,
     ) -> Path:
         suffix = Path(str(original_name or "").strip() or "source.xlsx").suffix or ".xlsx"
-        duty_folder = f"{str(duty_date or '').strip()}_{str(duty_shift or '').strip().lower()}"
-        return (
-            self.cache_root()
-            / self._sanitize_path_part(duty_folder)
-            / self._sanitize_path_part(building)
-            / self._sanitize_path_part(session_id)
-            / f"source{suffix}"
+        info = build_source_artifact_path(
+            source_family=FAMILY_HANDOVER_LOG,
+            building=building,
+            suffix=suffix,
+            bucket_kind="date",
+            duty_date=duty_date,
+            duty_shift=duty_shift,
         )
+        return self.cache_root() / info.relative_path
+
+    @staticmethod
+    def _source_family_for_template_name(template_name: str) -> str:
+        text = str(template_name or "").strip()
+        if "容量" in text or "每日报表合集" in text:
+            return FAMILY_HANDOVER_CAPACITY_REPORT
+        return FAMILY_HANDOVER_LOG
+
+    def _canonical_downloaded_source_path(self, *, identity: str, original_path: Path) -> Path:
+        parsed = self._parse_download_identity(identity)
+        if not parsed:
+            return original_path
+        source_family = self._source_family_for_template_name(parsed.get("template_name", ""))
+        bucket_kind = "date" if parsed.get("duty_date") and parsed.get("duty_shift") else "latest"
+        bucket_key = parsed.get("end_time") or parsed.get("start_time") or _now_text()
+        info = build_source_artifact_path(
+            source_family=source_family,
+            building=parsed.get("building", ""),
+            suffix=original_path.suffix or ".xlsx",
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            duty_date=parsed.get("duty_date", ""),
+            duty_shift=parsed.get("duty_shift", ""),
+        )
+        return self.cache_root() / info.relative_path
 
     def persist_uploaded_source(
         self,
@@ -384,14 +438,14 @@ class HandoverSourceFileCacheService:
                         previous_path.unlink()
                     self._cleanup_empty_parents(previous_path)
                     emit_log(
-                        f"[交接班][源文件缓存] 已替换旧缓存 building={building}, "
+                        f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 宸叉浛鎹㈡棫缂撳瓨 building={building}, "
                         f"old={previous_text}, new={str(target)}"
                     )
                 except Exception as exc:  # noqa: BLE001
-                    emit_log(f"[交接班][源文件缓存] 旧缓存清理失败 building={building}: {exc}")
+                    emit_log(f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 鏃х紦瀛樻竻鐞嗗け璐?building={building}: {exc}")
 
         emit_log(
-            f"[交接班][源文件缓存] 已持久化 building={building}, session={session_id}, path={str(target)}"
+            f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 宸叉寔涔呭寲 building={building}, session={session_id}, path={str(target)}"
         )
         return {
             "managed": True,
@@ -400,6 +454,7 @@ class HandoverSourceFileCacheService:
             "stored_at": stored_at,
             "cleanup_status": "active",
             "cleanup_at": "",
+            "naming_version": 2,
         }
 
     def remove_managed_source(
@@ -421,10 +476,10 @@ class HandoverSourceFileCacheService:
         try:
             path.unlink()
             self._cleanup_empty_parents(path)
-            emit_log(f"[交接班][源文件缓存] 已移除缓存 path={raw}")
+            emit_log(f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 宸茬Щ闄ょ紦瀛?path={raw}")
             return True
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][源文件缓存] 缓存移除失败 path={raw}, error={exc}")
+            emit_log(f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 缂撳瓨绉婚櫎澶辫触 path={raw}, error={exc}")
             return False
 
     def cleanup_orphan_sources(
@@ -450,8 +505,10 @@ class HandoverSourceFileCacheService:
 
         cutoff = datetime.now() - timedelta(days=self.CACHE_RETENTION_DAYS)
         removed = 0
-        for candidate in cache_root.rglob("source*"):
+        for candidate in cache_root.rglob("*"):
             if not candidate.is_file():
+                continue
+            if candidate.name == self.DOWNLOAD_INDEX_FILE:
                 continue
             try:
                 resolved = candidate.resolve()
@@ -472,5 +529,6 @@ class HandoverSourceFileCacheService:
             except Exception:  # noqa: BLE001
                 continue
         if removed:
-            emit_log(f"[交接班][源文件缓存] 清理孤儿缓存 count={removed}")
+            emit_log(f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 娓呯悊瀛ゅ効缂撳瓨 count={removed}")
         return removed
+

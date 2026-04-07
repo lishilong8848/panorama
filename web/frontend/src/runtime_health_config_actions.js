@@ -1320,11 +1320,11 @@ export function createRuntimeHealthConfigActions(ctx) {
         patchAlarmUploadRunningState(data, "full", "all");
         await focusAcceptedJob(
           data,
-          String(data?.message || "").trim() || "已提交告警信息文件全量上传任务",
+          String(data?.message || "").trim() || "已提交 使用共享文件上传60天-全部楼栋",
         );
         return data;
       } catch (err) {
-        message.value = `告警信息文件全量上传失败: ${err}`;
+        message.value = `使用共享文件上传60天失败（全部楼栋）: ${err}`;
         return { ok: false, error: String(err) };
       }
     };
@@ -1346,11 +1346,11 @@ export function createRuntimeHealthConfigActions(ctx) {
         patchAlarmUploadRunningState(data, "single_building", buildingText);
         await focusAcceptedJob(
           data,
-          String(data?.message || "").trim() || `已提交 ${buildingText} 告警信息文件刷新上传任务`,
+          String(data?.message || "").trim() || `已提交 使用共享文件上传60天-${buildingText}`,
         );
         return data;
       } catch (err) {
-        message.value = `${buildingText} 告警信息文件刷新上传失败: ${err}`;
+        message.value = `使用共享文件上传60天失败（${buildingText}）: ${err}`;
         return { ok: false, error: String(err) };
       }
     };

@@ -128,6 +128,8 @@ class HandoverFillService:
         data_file: str,
         hits: Dict[str, MetricHit],
         effective_config: Dict[str, Any],
+        duty_date: str | None = None,
+        duty_shift: str | None = None,
         end_time: str | None = None,
         fixed_cell_values: Optional[Dict[str, Any]] = None,
         date_ref_override: datetime | None = None,
@@ -190,6 +192,8 @@ class HandoverFillService:
                 template_cfg=template_cfg,
                 cell_values=cell_values,
                 date_ref=date_ref,
+                duty_date=str(duty_date or "").strip(),
+                duty_shift=str(duty_shift or "").strip(),
                 category_payloads=category_payloads,
                 emit_log=emit_log,
             )

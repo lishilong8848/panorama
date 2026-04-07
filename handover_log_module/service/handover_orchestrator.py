@@ -865,6 +865,8 @@ class HandoverOrchestrator:
                 data_file=data_file,
                 hits=extracted["hits"],
                 effective_config=extracted["effective_config"],
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
                 end_time=end_time_text or None,
                 fixed_cell_values=fixed_cell_values,
                 date_ref_override=date_ref_override,

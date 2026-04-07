@@ -563,7 +563,7 @@ createApp({
     const isSourceCacheRefreshCurrentHourLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshCurrentHour));
     const isSourceCacheRefreshAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshAlarmManual));
     const isSourceCacheDeleteAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheDeleteAlarmManual));
-    const externalAlarmUploadBuilding = ref("A楼");
+    const externalAlarmUploadBuilding = ref("全部楼栋");
     const monthlyReportTestReceiveIdDraftEvent = ref("");
     const monthlyReportTestReceiveIdDraftChange = ref("");
     const isAlarmSourceCacheUploadRunning = computed(() => Boolean(externalAlarmReadinessFamily.value?.uploadRunning));
@@ -574,6 +574,14 @@ createApp({
       isAlarmSourceCacheUploadRunning.value ||
       isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${String(externalAlarmUploadBuilding.value || "").trim()}`),
     );
+    const isSourceCacheUploadAlarmSelectedLocked = computed(() => {
+      const buildingText = String(externalAlarmUploadBuilding.value || "").trim();
+      if (buildingText === "全部楼栋") {
+        return isSourceCacheUploadAlarmFullLocked.value;
+      }
+      return isAlarmSourceCacheUploadRunning.value
+        || isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${buildingText}`);
+    });
     const currentHourRefreshButtonText = computed(() =>
       isSourceCacheRefreshCurrentHourLocked.value ? "下载中..." : "立即下载当前小时全部文件",
     );
@@ -617,16 +625,23 @@ createApp({
       }
       return "重新拉取";
     }
-    const externalAlarmUploadFullButtonText = computed(() => {
+    const externalAlarmUploadActionButtonText = computed(() => {
       if (isAlarmSourceCacheUploadRunning.value) return "上传进行中...";
-      return isActionLocked(actionKeySourceCacheUploadAlarmFull) ? "上传中..." : "告警全量上传（60天）";
+      const buildingText = String(externalAlarmUploadBuilding.value || "").trim();
+      if (buildingText === "全部楼栋") {
+        return isActionLocked(actionKeySourceCacheUploadAlarmFull) ? "上传中..." : "使用共享文件上传60天";
+      }
+      return isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${buildingText}`)
+        ? "上传中..."
+        : "使用共享文件上传60天";
     });
-    const externalAlarmUploadBuildingButtonText = computed(() => {
-      if (isAlarmSourceCacheUploadRunning.value) return "上传进行中...";
-      return isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${String(externalAlarmUploadBuilding.value || "").trim()}`)
-        ? "刷新中..."
-        : "单楼刷新上传";
-    });
+    async function uploadSelectedAlarmSourceCache() {
+      const buildingText = String(externalAlarmUploadBuilding.value || "").trim();
+      if (!buildingText || buildingText === "全部楼栋") {
+        return uploadAlarmSourceCacheFull();
+      }
+      return uploadAlarmSourceCacheBuilding(buildingText);
+    }
     const externalAlarmReadinessFamily = computed(() => {
       const families = Array.isArray(sharedSourceCacheReadinessOverview.value?.families)
         ? sharedSourceCacheReadinessOverview.value.families
@@ -3600,10 +3615,9 @@ createApp({
       isSourceCacheDeleteAlarmManualLocked,
       manualAlarmDeleteButtonText,
       externalAlarmUploadBuilding,
-      isSourceCacheUploadAlarmFullLocked,
-      isSourceCacheUploadAlarmBuildingLocked,
-      externalAlarmUploadFullButtonText,
-      externalAlarmUploadBuildingButtonText,
+      isSourceCacheUploadAlarmSelectedLocked,
+      externalAlarmUploadActionButtonText,
+      uploadSelectedAlarmSourceCache,
       externalAlarmReadinessFamily,
       externalAlarmUploadStatus,
       monthlyEventReportLastRun,

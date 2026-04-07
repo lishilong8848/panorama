@@ -1141,6 +1141,12 @@ a {
   color: var(--text-1);
 }
 
+.source-cache-family-card .hint,
+.source-cache-building-card .hint {
+  margin: 0;
+  word-break: break-word;
+}
+
 .source-cache-building-actions {
   display: flex;
   justify-content: flex-end;

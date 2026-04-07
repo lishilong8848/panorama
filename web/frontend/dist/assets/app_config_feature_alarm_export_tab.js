@@ -18,7 +18,7 @@ export const CONFIG_FEATURE_ALARM_EXPORT_TAB_TEMPLATE = `
   <div class="form-row">
     <label><input type="checkbox" v-model="config.alarm_export.shared_source_upload.replace_existing_on_full" /> 全量上传前清空旧记录</label>
   </div>
-  <div class="hint">该开关只影响“告警全量上传（60天）”；单楼刷新上传始终按覆盖该楼最近 60 天数据的方式处理。</div>
+  <div class="hint">该开关只影响“使用共享文件上传60天（全部楼栋）”；选择单楼时始终按覆盖该楼最近 60 天数据的方式处理。</div>
 
   <div class="section-title" style="margin-top:14px">批量参数</div>
   <div class="form-row">

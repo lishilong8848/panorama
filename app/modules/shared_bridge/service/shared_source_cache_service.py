@@ -30,6 +30,7 @@ from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeSt
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
 from app.shared.utils.atomic_file import atomic_copy_file, validate_excel_workbook_file
+from app.shared.utils.artifact_naming import build_source_artifact_path
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.handover_download_service import HandoverDownloadService
 from pipeline_utils import load_download_module
@@ -1140,47 +1141,30 @@ class SharedSourceCacheService:
             return "夜班"
         return "交接班"
 
-    def _latest_target_path(self, *, source_family: str, building: str, bucket_key: str, source_path: Path) -> Path:
-        folder_name = self._latest_folder_name(bucket_key)
-        month_segment = self._month_segment(folder_name)
-        label = FAMILY_LABELS[self._normalize_source_family(source_family)]
-        file_name = f"{folder_name}--{label}--{str(building or '').strip()}{self._file_suffix(source_path)}"
-        return self._family_root(source_family) / month_segment / folder_name / file_name
-
-    def _date_target_path(self, *, source_family: str, duty_date: str, duty_shift: str, building: str, source_path: Path) -> Path:
-        duty_digits = "".join(ch for ch in str(duty_date or "").strip() if ch.isdigit())[:8]
-        if len(duty_digits) != 8:
-            duty_digits = datetime.now().strftime("%Y%m%d")
-        month_segment = duty_digits[:6]
-        normalized_family = self._normalize_source_family(source_family)
-        if normalized_family == FAMILY_HANDOVER_LOG:
-            period_text = self._handover_shift_text(duty_shift)
-            folder_name = f"{duty_digits}--{period_text}"
-            file_name = f"{duty_digits}--{period_text}--{FAMILY_LABELS[normalized_family]}--{str(building or '').strip()}{self._file_suffix(source_path)}"
-        elif normalized_family == FAMILY_HANDOVER_CAPACITY_REPORT:
-            period_text = self._handover_shift_text(duty_shift)
-            folder_name = f"{duty_digits}--{period_text}"
-            file_name = f"{duty_digits}--{period_text}--{FAMILY_LABELS[normalized_family]}--{str(building or '').strip()}{self._file_suffix(source_path)}"
-        elif normalized_family == FAMILY_ALARM_EVENT:
-            folder_name = duty_digits
-            file_name = f"{duty_digits}--{FAMILY_LABELS[normalized_family]}--{str(building or '').strip()}{self._file_suffix(source_path)}"
-        else:
-            folder_name = f"{duty_digits}--月报"
-            file_name = f"{duty_digits}--月报--{str(building or '').strip()}{self._file_suffix(source_path)}"
-        return self._family_root(source_family) / month_segment / folder_name / file_name
-
-    def _manual_alarm_target_path(self, *, bucket_key: str, building: str, source_path: Path) -> Path:
-        digits = "".join(ch for ch in str(bucket_key or "").strip() if ch.isdigit())
-        if len(digits) >= 14:
-            month_segment = digits[:6]
-            folder_name = f"{digits[:8]}--{digits[8:14]}--manual"
-        else:
-            now_text = datetime.now().strftime("%Y%m%d%H%M%S")
-            month_segment = now_text[:6]
-            folder_name = f"{now_text[:8]}--{now_text[8:14]}--manual"
-        label = FAMILY_LABELS[FAMILY_ALARM_EVENT]
-        file_name = f"{folder_name}--{label}--{str(building or '').strip()}{self._file_suffix(source_path)}"
-        return self._family_root(FAMILY_ALARM_EVENT) / month_segment / folder_name / file_name
+    def _source_target_path(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_kind: str,
+        bucket_key: str,
+        duty_date: str,
+        duty_shift: str,
+        source_path: Path,
+    ) -> Path:
+        info = build_source_artifact_path(
+            source_family=self._normalize_source_family(source_family),
+            building=building,
+            suffix=self._file_suffix(source_path),
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+        )
+        base_root = self.shared_root
+        if base_root is None:
+            base_root = self._family_root(source_family).parent
+        return base_root / info.relative_path
 
     def current_alarm_bucket(self, when: datetime | None = None) -> str:
         return scheduled_bucket_for_time(when)
@@ -1211,29 +1195,19 @@ class SharedSourceCacheService:
         if self.store is None:
             raise RuntimeError("共享缓存存储未初始化")
         normalized_family = self._normalize_source_family(source_family)
-        if bucket_kind == "latest":
-            target_path = self._latest_target_path(
-                source_family=normalized_family,
-                building=building,
-                bucket_key=bucket_key,
-                source_path=source_path,
-            )
-        elif bucket_kind == "manual" and normalized_family == FAMILY_ALARM_EVENT:
-            target_path = self._manual_alarm_target_path(
-                bucket_key=bucket_key,
-                building=building,
-                source_path=source_path,
-            )
-        else:
-            target_path = self._date_target_path(
-                source_family=normalized_family,
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                building=building,
-                source_path=source_path,
-            )
+        target_path = self._source_target_path(
+            source_family=normalized_family,
+            building=building,
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            source_path=source_path,
+        )
         cached = self._cache_file(source_path=source_path, target_path=target_path)
         downloaded_at = _now_text()
+        entry_metadata = dict(metadata or {})
+        entry_metadata.setdefault("naming_version", 2)
         self.store.upsert_source_cache_entry(
             source_family=normalized_family,
             building=building,
@@ -1246,7 +1220,7 @@ class SharedSourceCacheService:
             status=status,
             file_hash=str(cached["file_hash"]),
             size_bytes=int(cached["size_bytes"]),
-            metadata=metadata or {},
+            metadata=entry_metadata,
         )
         if normalized_family == FAMILY_ALARM_EVENT:
             try:
@@ -1291,7 +1265,7 @@ class SharedSourceCacheService:
             "downloaded_at": downloaded_at,
             "file_hash": str(cached["file_hash"]),
             "size_bytes": int(cached["size_bytes"]),
-            "metadata": metadata or {},
+            "metadata": entry_metadata,
         }
 
     def _record_failed_entry(
