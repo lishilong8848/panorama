@@ -70,6 +70,15 @@ class HandoverDownloadService:
         template_name = str(template_name_override or base_cfg.get("template_name", "")).strip()
         if template_name:
             base_cfg["template_name"] = template_name
+        e_template_name = str(capacity_download_cfg.get("e_template_name", "") or "").strip()
+        if e_template_name and template_name == e_template_name:
+            default_e_query_timeout_ms = 90000
+            query_timeout_ms = _as_int(base_cfg.get("query_result_timeout_ms", 20000), 20000)
+            e_query_timeout_ms = _as_int(
+                capacity_download_cfg.get("e_query_result_timeout_ms", default_e_query_timeout_ms),
+                default_e_query_timeout_ms,
+            )
+            base_cfg["query_result_timeout_ms"] = max(query_timeout_ms, e_query_timeout_ms)
         return base_cfg
 
     @staticmethod

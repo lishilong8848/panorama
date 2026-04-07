@@ -445,7 +445,8 @@
             "数据查询",
             "即时报表"
           ],
-          "export_button_text": "原样导出"
+          "export_button_text": "原样导出",
+          "e_query_result_timeout_ms": 90000
         },
         "template": {
           "source_path": "交接班容量报表空模板.xlsx",

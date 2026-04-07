@@ -844,6 +844,13 @@ export function createAppState(vueApi) {
           current_bucket: "",
           buildings: [],
         },
+        handover_capacity_report_family: {
+          ready_count: 0,
+          failed_buildings: [],
+          last_success_at: "",
+          current_bucket: "",
+          buildings: [],
+        },
         monthly_report_family: {
           ready_count: 0,
           failed_buildings: [],
@@ -1946,6 +1953,9 @@ function normalizeInternalDownloadPoolSlot(slot) {
       : rawCache.handover_family && typeof rawCache.handover_family === "object"
         ? rawCache.handover_family
         : {};
+    const handoverCapacityFamily = rawCache.handover_capacity_report_family && typeof rawCache.handover_capacity_report_family === "object"
+      ? rawCache.handover_capacity_report_family
+      : {};
     const monthlyFamily = rawCache.monthly_report_family && typeof rawCache.monthly_report_family === "object"
       ? rawCache.monthly_report_family
       : rawCache.monthly_family && typeof rawCache.monthly_family === "object"
@@ -1959,6 +1969,12 @@ function normalizeInternalDownloadPoolSlot(slot) {
         key: "handover_log_family",
         title: "交接班日志源文件",
         payload: handoverFamily,
+        fallbackBucket: currentHourBucket,
+      }),
+      normalizeSourceCacheFamilyOverview({
+        key: "handover_capacity_report_family",
+        title: "交接班容量报表源文件",
+        payload: handoverCapacityFamily,
         fallbackBucket: currentHourBucket,
       }),
       normalizeSourceCacheFamilyOverview({
@@ -1976,7 +1992,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
     ];
     let tone = "warning";
     let statusText = "准备中";
-    let summaryText = "内网端会维护三组共享源文件：交接班日志源文件、全景平台月报源文件，以及每天 08:00 / 16:00 的告警信息源文件。";
+    let summaryText = "内网端会维护四组共享源文件：交接班日志源文件、交接班容量报表源文件、全景平台月报源文件，以及按策略拉取的告警信息源文件。";
     if (!enabled) {
       tone = "warning";
       statusText = "未启用";
@@ -1988,11 +2004,11 @@ function normalizeInternalDownloadPoolSlot(slot) {
     } else if (families.every((family) => family.allReady && family.buildings.length > 0)) {
       tone = "success";
       statusText = "本轮共享文件已全部就绪";
-      summaryText = "交接班、月报和告警信息三组共享文件都已就绪。";
+      summaryText = "交接班、容量报表、月报和告警信息四组共享文件都已就绪。";
     } else if (running) {
       tone = "warning";
       statusText = "运行中";
-      summaryText = "共享缓存仓正在维护交接班、月报和最近应执行的告警信息文件。";
+      summaryText = "共享缓存仓正在维护交接班、容量报表、月报和最近应执行的告警信息文件。";
     }
     return {
       tone,

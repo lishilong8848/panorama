@@ -1,4 +1,4 @@
-{
+﻿{
   "version": 3,
   "common": {
     "paths": {
@@ -1083,6 +1083,11 @@
           }
         ],
         "building_rows": {}
+      },
+      "capacity_report": {
+        "download": {
+          "e_query_result_timeout_ms": 90000
+        }
       }
     },
     "manual_upload_gui": {

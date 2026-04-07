@@ -135,6 +135,21 @@ export async function refreshManualAlarmSourceCacheApi() {
   });
 }
 
+export async function refreshBuildingLatestSourceCacheApi(sourceFamily, building) {
+  const sourceFamilyText = String(sourceFamily || "").trim();
+  const buildingText = String(building || "").trim();
+  return apiJson(
+    appendQuery("/api/bridge/source-cache/refresh-building-latest", {
+      source_family: sourceFamilyText,
+      building: buildingText,
+    }),
+    {
+      method: "POST",
+      body: "{}",
+    },
+  );
+}
+
 export async function deleteManualAlarmSourceCacheFilesApi() {
   return apiJson("/api/bridge/source-cache/delete-manual-alarm-files", {
     method: "POST",
@@ -325,8 +340,33 @@ export async function getHandoverReviewApi(buildingCode, params = {}) {
   return apiJson(appendQuery(`/api/handover/review/${buildingCode}`, params));
 }
 
+export async function claimHandoverReviewLockApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/lock/claim`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function heartbeatHandoverReviewLockApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/lock/heartbeat`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function releaseHandoverReviewLockApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/lock/release`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export function buildHandoverReviewDownloadUrl(buildingCode, sessionId) {
   return `/api/handover/review/${encodeURIComponent(buildingCode)}/download?session_id=${encodeURIComponent(sessionId)}`;
+}
+
+export function buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId) {
+  return `/api/handover/review/${encodeURIComponent(buildingCode)}/capacity-download?session_id=${encodeURIComponent(sessionId)}`;
 }
 
 export async function getHandoverReviewBatchStatusApi(batchKey) {

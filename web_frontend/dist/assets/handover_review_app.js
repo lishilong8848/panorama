@@ -1,8 +1,12 @@
-﻿import {
+import {
+  buildHandoverReviewCapacityDownloadUrl,
   buildHandoverReviewDownloadUrl,
+  claimHandoverReviewLockApi,
   confirmHandoverReviewApi,
   getJobApi,
   getHandoverReviewApi,
+  heartbeatHandoverReviewLockApi,
+  releaseHandoverReviewLockApi,
   retryHandoverReviewCloudSyncApi,
   saveHandoverReviewApi,
   updateHandoverReviewCloudSyncApi,
@@ -24,6 +28,9 @@ const REVIEW_IDLE_AUTOSAVE_DELAY_MS = 8000;
 const REVIEW_SAVE_FAILURE_RETRY_DELAY_MS = 30000;
 const REVIEW_SAVE_MAX_IDLE_RETRY_AFTER_FAILURE = 1;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
+const REVIEW_LOCK_HEARTBEAT_MS = 15000;
+const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
+const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
 
 function shiftTextFromCode(shift) {
   const normalized = String(shift || "").trim().toLowerCase();
@@ -58,6 +65,43 @@ function badgeVm(text, tone = "neutral", emphasis = "soft", icon = "dot") {
     emphasis,
     icon,
   };
+}
+
+function randomHex(size = 8) {
+  let output = "";
+  while (output.length < size) {
+    output += Math.random().toString(16).slice(2);
+  }
+  return output.slice(0, size);
+}
+
+function ensureReviewClientIdentity() {
+  const fallbackId = `review-${randomHex(8)}`;
+  const buildLabel = (id) => `终端-${String(id || "").trim().slice(-4).toUpperCase() || "----"}`;
+  if (typeof window === "undefined" || !window.sessionStorage) {
+    return {
+      clientId: fallbackId,
+      holderLabel: buildLabel(fallbackId),
+    };
+  }
+  try {
+    let clientId = String(window.sessionStorage.getItem(REVIEW_CLIENT_ID_STORAGE_KEY) || "").trim();
+    if (!clientId) {
+      clientId = fallbackId;
+      window.sessionStorage.setItem(REVIEW_CLIENT_ID_STORAGE_KEY, clientId);
+    }
+    let holderLabel = String(window.sessionStorage.getItem(REVIEW_CLIENT_LABEL_STORAGE_KEY) || "").trim();
+    if (!holderLabel) {
+      holderLabel = buildLabel(clientId);
+      window.sessionStorage.setItem(REVIEW_CLIENT_LABEL_STORAGE_KEY, holderLabel);
+    }
+    return { clientId, holderLabel };
+  } catch (_error) {
+    return {
+      clientId: fallbackId,
+      holderLabel: buildLabel(fallbackId),
+    };
+  }
 }
 
 function mapReviewCloudSheetSync(raw) {
@@ -378,6 +422,33 @@ function normalizeHistoryPayload(raw, fallbackSession = null) {
   };
 }
 
+function emptyConcurrencyState(revision = 0) {
+  return {
+    current_revision: Number.parseInt(String(revision || 0), 10) || 0,
+    active_editor: null,
+    lease_expires_at: "",
+    is_editing_elsewhere: false,
+    client_holds_lock: false,
+  };
+}
+
+function normalizeConcurrencyPayload(raw, fallbackRevision = 0) {
+  const activeEditor = raw?.active_editor && typeof raw.active_editor === "object"
+    ? {
+        holder_label: String(raw.active_editor.holder_label || "").trim(),
+        claimed_at: String(raw.active_editor.claimed_at || "").trim(),
+        last_heartbeat_at: String(raw.active_editor.last_heartbeat_at || "").trim(),
+      }
+    : null;
+  return {
+    current_revision: Number.parseInt(String(raw?.current_revision ?? fallbackRevision ?? 0), 10) || 0,
+    active_editor: activeEditor && activeEditor.holder_label ? activeEditor : null,
+    lease_expires_at: String(raw?.lease_expires_at || "").trim(),
+    is_editing_elsewhere: Boolean(raw?.is_editing_elsewhere),
+    client_holds_lock: Boolean(raw?.client_holds_lock),
+  };
+}
+
 export function mountHandoverReviewApp(Vue) {
   const { createApp, ref, computed, onMounted, onBeforeUnmount, watch } = Vue;
 
@@ -393,6 +464,7 @@ export function mountHandoverReviewApp(Vue) {
       const loading = ref(true);
       const saving = ref(false);
       const downloading = ref(false);
+      const capacityDownloading = ref(false);
       const confirming = ref(false);
       const retryingCloudSync = ref(false);
       const updatingHistoryCloudSync = ref(false);
@@ -417,8 +489,15 @@ export function mountHandoverReviewApp(Vue) {
       const saveFailureRetryTimer = ref(null);
       const pendingFailureRetryCount = ref(0);
       const pollTimer = ref(null);
+      const heartbeatTimer = ref(null);
       const lastSavedSnapshot = ref("");
       const pollIntervalMs = ref(DEFAULT_POLL_INTERVAL_MS);
+      const reviewClientIdentity = ensureReviewClientIdentity();
+      const reviewClientId = String(reviewClientIdentity.clientId || "").trim();
+      const reviewHolderLabel = String(reviewClientIdentity.holderLabel || "").trim();
+      const concurrency = ref(emptyConcurrencyState(0));
+      const staleRevisionConflict = ref(false);
+      const heldLockSessionId = ref("");
 
       const cloudSyncBusy = computed(() => retryingCloudSync.value || updatingHistoryCloudSync.value);
       const selectedSessionId = computed(() => String(historyState.value?.selected_session_id || session.value?.session_id || "").trim());
@@ -467,6 +546,8 @@ export function mountHandoverReviewApp(Vue) {
         && !cloudSyncBusy.value
         && !needsRefresh.value
       ));
+      const activeEditorLabel = computed(() => String(concurrency.value?.active_editor?.holder_label || "").trim());
+      const remoteRevision = computed(() => Number.parseInt(String(concurrency.value?.current_revision || 0), 10) || 0);
 
       const reviewSaveBadge = computed(() => {
         if (errorText.value) return badgeVm("保存异常", "danger", "soft", "error");
@@ -503,6 +584,11 @@ export function mountHandoverReviewApp(Vue) {
         }
         badges.push(badgeVm(`模式 ${currentModeText.value}`, isHistoryMode.value ? "warning" : "info", "outline", "clock"));
         badges.push(badgeVm(`审核版本 ${session.value?.revision || "-"}`, "neutral", "outline", "clock"));
+        if (concurrency.value?.client_holds_lock) {
+          badges.push(badgeVm("当前终端正在编辑", "info", "outline", "warn"));
+        } else if (activeEditorLabel.value) {
+          badges.push(badgeVm(`编辑中 ${activeEditorLabel.value}`, "warning", "outline", "warn"));
+        }
         badges.push(reviewConfirmBadge.value);
         badges.push(badgeVm(reviewCloudSheetVm.value.text, reviewCloudSheetVm.value.tone, "outline", "link"));
         badges.push(reviewSaveBadge.value);
@@ -517,7 +603,19 @@ export function mountHandoverReviewApp(Vue) {
             tone: "info",
           });
         }
-        if (statusText.value && !saving.value && !dirty.value && !errorText.value) {
+        if (staleRevisionConflict.value) {
+          rows.push({
+            text: "当前页面内容已过期，保存或确认会与最新版本冲突。请先刷新页面后再继续处理。",
+            tone: "warning",
+          });
+        }
+        if (concurrency.value?.is_editing_elsewhere && activeEditorLabel.value) {
+          rows.push({
+            text: `当前有其他终端正在编辑：${activeEditorLabel.value}。你仍可继续本地编辑，但提交时可能发生冲突。`,
+            tone: "warning",
+          });
+        }
+        if (statusText.value && !saving.value && !dirty.value && !errorText.value && !staleRevisionConflict.value) {
           rows.push({ text: statusText.value, tone: "info" });
         }
         if (needsRefresh.value) {
@@ -536,7 +634,7 @@ export function mountHandoverReviewApp(Vue) {
       });
 
       const confirmActionVm = computed(() => {
-        const disabled = !session.value || saving.value || confirming.value || cloudSyncBusy.value || needsRefresh.value;
+        const disabled = !session.value || saving.value || confirming.value || cloudSyncBusy.value || needsRefresh.value || staleRevisionConflict.value;
         if (!session.value) {
           return { text: "暂无会话", variant: "secondary", disabled: true };
         }
@@ -576,17 +674,146 @@ export function mountHandoverReviewApp(Vue) {
         clearSaveFailureRetryTimer();
       }
 
+      function clearHeartbeatTimer() {
+        if (heartbeatTimer.value) {
+          window.clearInterval(heartbeatTimer.value);
+          heartbeatTimer.value = null;
+        }
+      }
+
+      function applyConcurrencyState(raw, fallbackRevision = 0, sessionId = "") {
+        const normalized = normalizeConcurrencyPayload(raw, fallbackRevision);
+        const resolvedSessionId = String(sessionId || session.value?.session_id || "").trim();
+        concurrency.value = normalized;
+        if (normalized.client_holds_lock && resolvedSessionId) {
+          heldLockSessionId.value = resolvedSessionId;
+          restartHeartbeat();
+          return;
+        }
+        heldLockSessionId.value = "";
+        clearHeartbeatTimer();
+      }
+
+      function buildLockPayload(sessionId = "") {
+        return {
+          session_id: String(sessionId || session.value?.session_id || "").trim(),
+          client_id: reviewClientId,
+          holder_label: reviewHolderLabel,
+        };
+      }
+
+      async function ensureEditingLock() {
+        const sessionId = String(session.value?.session_id || "").trim();
+        if (!buildingCode || !sessionId || !reviewClientId) return false;
+        if (concurrency.value?.client_holds_lock && heldLockSessionId.value === sessionId) {
+          restartHeartbeat();
+          return true;
+        }
+        try {
+          const response = await claimHandoverReviewLockApi(buildingCode, buildLockPayload(sessionId));
+          applyConcurrencyState(response?.concurrency, session.value?.revision || 0, sessionId);
+          return Boolean(concurrency.value?.client_holds_lock);
+        } catch (_error) {
+          return false;
+        }
+      }
+
+      async function sendLockHeartbeat() {
+        const sessionId = String(heldLockSessionId.value || session.value?.session_id || "").trim();
+        if (!buildingCode || !sessionId || !reviewClientId) return;
+        try {
+          const response = await heartbeatHandoverReviewLockApi(buildingCode, {
+            session_id: sessionId,
+            client_id: reviewClientId,
+          });
+          applyConcurrencyState(response?.concurrency, session.value?.revision || 0, sessionId);
+        } catch (_error) {
+          clearHeartbeatTimer();
+        }
+      }
+
+      function restartHeartbeat() {
+        clearHeartbeatTimer();
+        const sessionId = String(heldLockSessionId.value || "").trim();
+        if (!sessionId || !concurrency.value?.client_holds_lock) return;
+        heartbeatTimer.value = window.setInterval(() => {
+          void sendLockHeartbeat();
+        }, REVIEW_LOCK_HEARTBEAT_MS);
+      }
+
+      async function releaseCurrentLock({ keepalive = false } = {}) {
+        const sessionId = String(heldLockSessionId.value || session.value?.session_id || "").trim();
+        clearHeartbeatTimer();
+        heldLockSessionId.value = "";
+        if (!buildingCode || !sessionId || !reviewClientId) {
+          applyConcurrencyState(null, session.value?.revision || 0, "");
+          return;
+        }
+        const body = JSON.stringify({
+          session_id: sessionId,
+          client_id: reviewClientId,
+        });
+        if (keepalive && typeof window !== "undefined" && typeof window.fetch === "function") {
+          try {
+            void window.fetch(`/api/handover/review/${buildingCode}/lock/release`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body,
+              keepalive: true,
+            }).catch(() => {});
+          } catch (_error) {
+            // Ignore best-effort release failures during unload.
+          }
+          applyConcurrencyState(null, session.value?.revision || 0, "");
+          return;
+        }
+        try {
+          const response = await releaseHandoverReviewLockApi(buildingCode, {
+            session_id: sessionId,
+            client_id: reviewClientId,
+          });
+          applyConcurrencyState(response?.concurrency, session.value?.revision || 0, "");
+        } catch (_error) {
+          applyConcurrencyState(null, session.value?.revision || 0, "");
+        }
+      }
+
+      function markRevisionConflict(message = "") {
+        staleRevisionConflict.value = true;
+        needsRefresh.value = true;
+        clearSaveTimers();
+        if (message) {
+          errorText.value = String(message || "");
+        }
+        statusText.value = "审核内容已被其他人更新，请刷新后再继续处理。";
+      }
+
+      function isRevisionConflictError(error) {
+        return Number.parseInt(String(error?.httpStatus || 0), 10) === 409;
+      }
+
+      function touchEditingIntent() {
+        if (!session.value) return;
+        void ensureEditingLock();
+      }
+
+      function handleWindowBeforeUnload() {
+        void releaseCurrentLock({ keepalive: true });
+      }
+
       function buildLoadParams() {
+        const params = {
+          client_id: reviewClientId,
+        };
         if (activeRouteSelection.value.sessionId) {
-          return { session_id: activeRouteSelection.value.sessionId };
+          params.session_id = activeRouteSelection.value.sessionId;
+          return params;
         }
         if (activeRouteSelection.value.dutyDate && activeRouteSelection.value.dutyShift) {
-          return {
-            duty_date: activeRouteSelection.value.dutyDate,
-            duty_shift: activeRouteSelection.value.dutyShift,
-          };
+          params.duty_date = activeRouteSelection.value.dutyDate;
+          params.duty_shift = activeRouteSelection.value.dutyShift;
         }
-        return {};
+        return params;
       }
 
       function syncRouteToCurrentSelection(nextHistory = historyState.value) {
@@ -613,6 +840,11 @@ export function mountHandoverReviewApp(Vue) {
           dutyShift: "",
         };
         syncRouteToCurrentSelection(historyState.value);
+        applyConcurrencyState(
+          payload?.concurrency,
+          nextSession?.revision ?? session.value?.revision ?? 0,
+          nextSession?.session_id || session.value?.session_id || "",
+        );
       }
 
       function isIncompleteJobStatus(status) {
@@ -657,6 +889,7 @@ export function mountHandoverReviewApp(Vue) {
         documentRef.value = nextDocument;
         applyPayloadMeta(payload);
         dirty.value = false;
+        staleRevisionConflict.value = false;
         errorText.value = "";
         if (!fromBackground) {
           needsRefresh.value = false;
@@ -689,35 +922,48 @@ export function mountHandoverReviewApp(Vue) {
             return;
           }
 
-          const incomingSession = payload?.session || {};
-          const currentSessionId = String(session.value?.session_id || "");
-          const incomingSessionId = String(incomingSession.session_id || "");
+          const incomingSession = payload?.session && typeof payload.session === "object" ? payload.session : {};
+          const currentSessionId = String(session.value?.session_id || "").trim();
+          const incomingSessionId = String(incomingSession.session_id || "").trim();
+          const incomingRevision = Number(incomingSession.revision || 0);
+          const currentRevision = Number(session.value?.revision || 0);
+
+          batchStatus.value = payload?.batch_status && typeof payload.batch_status === "object"
+            ? cloneDeep(payload.batch_status)
+            : batchStatus.value;
+          historyState.value = normalizeHistoryPayload(payload?.history || {}, incomingSession || session.value);
+          syncRouteToCurrentSelection(historyState.value);
+          applyConcurrencyState(payload?.concurrency, incomingRevision || currentRevision, incomingSessionId || currentSessionId);
 
           if (incomingSessionId && currentSessionId && incomingSessionId !== currentSessionId) {
-            historyState.value = normalizeHistoryPayload(payload?.history || {}, incomingSession);
-            batchStatus.value = cloneDeep(payload.batch_status || batchStatus.value);
             needsRefresh.value = true;
-            statusText.value = "检测到该楼有新生成的交接班版本，请刷新查看";
+            statusText.value = "检测到该楼有新生成的交接班版本，请刷新页面查看。";
             return;
           }
 
-          batchStatus.value = cloneDeep(payload.batch_status || batchStatus.value);
-          historyState.value = normalizeHistoryPayload(payload?.history || {}, incomingSession || session.value);
-          syncRouteToCurrentSelection(historyState.value);
-          if (!dirty.value && !saving.value) {
-            const incomingRevision = Number(incomingSession.revision || 0);
-            const currentRevision = Number(session.value?.revision || 0);
-            if (incomingRevision !== currentRevision) {
-              hydrateFromPayload(payload, { fromBackground: true });
-              statusText.value = "已同步最新审核内容";
+          if (incomingRevision !== currentRevision) {
+            if (saving.value) {
               return;
             }
+            if (dirty.value) {
+              staleRevisionConflict.value = true;
+              needsRefresh.value = true;
+              clearSaveTimers();
+              statusText.value = "审核内容已被其他人更新，请刷新后再继续处理。";
+              return;
+            }
+            hydrateFromPayload(payload, { fromBackground: true });
+            statusText.value = "已同步最新审核内容";
+            return;
           }
 
-          session.value = {
-            ...(session.value || {}),
-            ...(incomingSession || {}),
-          };
+          if (!dirty.value && !saving.value) {
+            session.value = {
+              ...(session.value || {}),
+              ...(incomingSession || {}),
+            };
+            staleRevisionConflict.value = false;
+          }
         } catch (error) {
           if (!background) {
             errorText.value = String(error?.message || error || "加载失败");
@@ -752,6 +998,10 @@ export function mountHandoverReviewApp(Vue) {
       async function saveDocument(options = {}) {
         const { reason = "autosave" } = options || {};
         if (saving.value || confirming.value || cloudSyncBusy.value || suspendAutoSave.value || !session.value) return false;
+        if (staleRevisionConflict.value) {
+          statusText.value = "审核内容已被其他人更新，请先刷新再保存。";
+          return false;
+        }
         const payloadSnapshot = serializeDocument(documentRef.value);
         if (payloadSnapshot === lastSavedSnapshot.value) {
           clearSaveTimers();
@@ -762,6 +1012,7 @@ export function mountHandoverReviewApp(Vue) {
         clearSaveTimers();
         saving.value = true;
         errorText.value = "";
+        await ensureEditingLock();
         if (reason === "confirm") {
           statusText.value = "正在保存最新改动...";
         } else if (reason === "retry") {
@@ -777,6 +1028,7 @@ export function mountHandoverReviewApp(Vue) {
           const response = await saveHandoverReviewApi(buildingCode, {
             session_id: session.value.session_id,
             base_revision: session.value.revision,
+            client_id: reviewClientId,
             document: cloneDeep(documentRef.value),
           });
           applyPayloadMeta(response || {});
@@ -784,18 +1036,19 @@ export function mountHandoverReviewApp(Vue) {
           dirty.value = serializeDocument(documentRef.value) !== lastSavedSnapshot.value;
           pendingFailureRetryCount.value = 0;
           clearSaveFailureRetryTimer();
+          staleRevisionConflict.value = false;
+          needsRefresh.value = false;
           statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已自动保存";
           if (dirty.value) {
             scheduleAutosave();
           }
           return true;
         } catch (error) {
-          errorText.value = String(error?.message || error || "保存失败");
-          if (String(errorText.value).includes("409")) {
-            needsRefresh.value = true;
-            statusText.value = "检测到该楼有新生成版本，请刷新页面。";
+          if (isRevisionConflictError(error)) {
+            markRevisionConflict(String(error?.message || error || "审核内容已被其他人更新"));
             return false;
           }
+          errorText.value = String(error?.message || error || "保存失败");
           if (reason === "autosave") {
             scheduleSaveRetryAfterFailure();
           } else {
@@ -814,8 +1067,10 @@ export function mountHandoverReviewApp(Vue) {
           const saved = await saveDocument({ reason: "switch" });
           if (!saved) return;
         }
+        await releaseCurrentLock();
         clearSaveTimers();
         needsRefresh.value = false;
+        staleRevisionConflict.value = false;
         errorText.value = "";
         activeRouteSelection.value = {
           sessionId: toLatest ? "" : nextSessionId,
@@ -843,7 +1098,7 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       async function toggleConfirm() {
-        if (isHistoryMode.value || !session.value || saving.value || confirming.value || cloudSyncBusy.value || needsRefresh.value) return;
+        if (isHistoryMode.value || !session.value || saving.value || confirming.value || cloudSyncBusy.value || needsRefresh.value || staleRevisionConflict.value) return;
         if (dirty.value) {
           const saved = await saveDocument({ reason: "confirm" });
           if (!saved) return;
@@ -851,14 +1106,24 @@ export function mountHandoverReviewApp(Vue) {
         confirming.value = true;
         errorText.value = "";
         try {
-          const request = { session_id: session.value.session_id };
+          const request = {
+            session_id: session.value.session_id,
+            base_revision: session.value.revision,
+            client_id: reviewClientId,
+          };
           const response = session.value.confirmed
             ? await unconfirmHandoverReviewApi(buildingCode, request)
             : await confirmHandoverReviewApi(buildingCode, request);
           applyPayloadMeta(response || {});
+          staleRevisionConflict.value = false;
+          needsRefresh.value = false;
           statusText.value = session.value?.confirmed ? "已确认当前楼栋" : "已撤销确认";
         } catch (error) {
-          errorText.value = String(error?.message || error || "确认失败");
+          if (isRevisionConflictError(error)) {
+            markRevisionConflict(String(error?.message || error || "审核状态已被其他人更新"));
+          } else {
+            errorText.value = String(error?.message || error || "确认失败");
+          }
         } finally {
           confirming.value = false;
         }
@@ -979,10 +1244,46 @@ export function mountHandoverReviewApp(Vue) {
         }
       }
 
+      async function downloadCurrentCapacityReviewFile() {
+        const sessionId = String(session.value?.session_id || "").trim();
+        const capacityOutputFile = String(session.value?.capacity_output_file || "").trim();
+        if (!buildingCode || !sessionId || !capacityOutputFile) {
+          statusText.value = "当前没有可下载的交接班容量报表";
+          return;
+        }
+        capacityDownloading.value = true;
+        errorText.value = "";
+        try {
+          const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId);
+          const response = await fetch(url, { method: "GET" });
+          if (!response.ok) {
+            const payload = await response.json().catch(() => null);
+            throw new Error(payload?.detail || `下载失败: HTTP ${response.status}`);
+          }
+          const blob = await response.blob();
+          const objectUrl = window.URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = objectUrl;
+          anchor.download =
+            basenameFromPath(capacityOutputFile) ||
+            `${String(building.value || buildingCode || "handover_capacity").trim()}.xlsx`;
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 0);
+          statusText.value = "交接班容量报表下载已开始";
+        } catch (error) {
+          errorText.value = String(error?.message || error || "下载失败");
+        } finally {
+          capacityDownloading.value = false;
+        }
+      }
+
       function updateFixedField(blockIndex, fieldIndex, value) {
         const block = documentRef.value.fixed_blocks?.[blockIndex];
         const field = block?.fields?.[fieldIndex];
         if (!field) return;
+        touchEditingIntent();
         field.value = String(value ?? "");
       }
 
@@ -990,6 +1291,7 @@ export function mountHandoverReviewApp(Vue) {
         const section = documentRef.value.sections?.[sectionIndex];
         const row = section?.rows?.[rowIndex];
         if (!section || !row || !row.cells) return;
+        touchEditingIntent();
         row.cells[column] = String(value ?? "");
         row.is_placeholder_row = !hasSectionRowContent(row, section.columns);
       }
@@ -997,12 +1299,14 @@ export function mountHandoverReviewApp(Vue) {
       function addSectionRow(sectionIndex) {
         const section = documentRef.value.sections?.[sectionIndex];
         if (!section || !Array.isArray(section.rows)) return;
+        touchEditingIntent();
         section.rows.push(blankRow(section.columns));
       }
 
       function removeSectionRow(sectionIndex, rowIndex) {
         const section = documentRef.value.sections?.[sectionIndex];
         if (!section || !Array.isArray(section.rows)) return;
+        touchEditingIntent();
         section.rows.splice(rowIndex, 1);
         if (!section.rows.length) {
           section.rows.push(blankRow(section.columns));
@@ -1014,6 +1318,7 @@ export function mountHandoverReviewApp(Vue) {
         if (!block || block.type !== "inventory_table") return;
         const row = block.rows?.[rowIndex];
         if (!row || !row.cells) return;
+        touchEditingIntent();
         row.cells[column] = String(value ?? "");
         row.is_placeholder_row = !footerRowHasContent(row, block.columns);
       }
@@ -1021,12 +1326,14 @@ export function mountHandoverReviewApp(Vue) {
       function addFooterRow(blockIndex) {
         const block = documentRef.value.footer_blocks?.[blockIndex];
         if (!block || block.type !== "inventory_table" || !Array.isArray(block.rows)) return;
+        touchEditingIntent();
         block.rows.push(blankFooterInventoryRowWithDefaults(block.columns, resolveFooterAutoFillCells(block)));
       }
 
       function removeFooterRow(blockIndex, rowIndex) {
         const block = documentRef.value.footer_blocks?.[blockIndex];
         if (!block || block.type !== "inventory_table" || !Array.isArray(block.rows)) return;
+        touchEditingIntent();
         if (block.rows.length <= 1) {
           const placeholder = blankFooterInventoryRow(block.columns);
           block.rows[0].cells = placeholder.cells;
@@ -1051,6 +1358,11 @@ export function mountHandoverReviewApp(Vue) {
           dirty.value = true;
           pendingFailureRetryCount.value = 0;
           clearSaveFailureRetryTimer();
+          if (staleRevisionConflict.value) {
+            clearSaveTimers();
+            statusText.value = "审核内容已被其他人更新，请刷新后再继续处理。";
+            return;
+          }
           if (!isHistoryMode.value && session.value?.confirmed) {
             statusText.value = "内容已变更，保存后需重新确认";
           } else if (isHistoryMode.value) {
@@ -1064,6 +1376,9 @@ export function mountHandoverReviewApp(Vue) {
       );
 
       onMounted(async () => {
+        if (typeof window !== "undefined") {
+          window.addEventListener("beforeunload", handleWindowBeforeUnload);
+        }
         syncReviewSelectionToUrl({
           sessionId: activeRouteSelection.value.sessionId,
           isLatest: !activeRouteSelection.value.sessionId,
@@ -1073,16 +1388,22 @@ export function mountHandoverReviewApp(Vue) {
 
       onBeforeUnmount(() => {
         clearSaveTimers();
+        clearHeartbeatTimer();
         if (pollTimer.value) {
           window.clearInterval(pollTimer.value);
           pollTimer.value = null;
         }
+        if (typeof window !== "undefined") {
+          window.removeEventListener("beforeunload", handleWindowBeforeUnload);
+        }
+        void releaseCurrentLock();
       });
 
       return {
         loading,
         saving,
         downloading,
+        capacityDownloading,
         confirming,
         retryingCloudSync,
         updatingHistoryCloudSync,
@@ -1131,6 +1452,7 @@ export function mountHandoverReviewApp(Vue) {
         toggleConfirm,
         retryCloudSheetSync,
         downloadCurrentReviewFile,
+        downloadCurrentCapacityReviewFile,
         refreshData,
       };
     },

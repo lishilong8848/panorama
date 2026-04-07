@@ -543,6 +543,7 @@ createApp({
     const actionKeyUpdaterApply = "updater:apply";
     const actionKeyUpdaterRestart = "updater:restart";
     const actionKeySourceCacheRefreshCurrentHour = "bridge:source_cache_refresh_current_hour";
+    const actionKeySourceCacheRefreshBuildingLatestPrefix = "bridge:source_cache_refresh_building_latest:";
     const actionKeySourceCacheRefreshAlarmManual = "bridge:source_cache_refresh_alarm_manual";
     const actionKeySourceCacheDeleteAlarmManual = "bridge:source_cache_delete_alarm_manual";
     const actionKeySourceCacheUploadAlarmFull = "bridge:source_cache_upload_alarm_full";
@@ -582,6 +583,40 @@ createApp({
     const manualAlarmDeleteButtonText = computed(() =>
       isSourceCacheDeleteAlarmManualLocked.value ? "删除中..." : "删除手动告警文件",
     );
+    function getInternalSourceCacheRefreshActionKey(sourceFamily, building) {
+      const sourceFamilyText = String(sourceFamily || "").trim();
+      const buildingText = String(building || "").trim();
+      if (typeof getSourceCacheRefreshBuildingActionKey === "function") {
+        return getSourceCacheRefreshBuildingActionKey(sourceFamilyText, buildingText);
+      }
+      return `${actionKeySourceCacheRefreshBuildingLatestPrefix}${sourceFamilyText}:${buildingText}`;
+    }
+    function getInternalSourceCacheRefreshDisabledReason(family, building) {
+      const familyKey = String(family?.key || "").trim();
+      const buildingName = String(building?.building || "").trim();
+      if (!familyKey || !buildingName) return "缺少楼栋或文件类型";
+      if (String(building?.statusKey || "").trim().toLowerCase() === "downloading") return "";
+      if (
+        familyKey === "alarm_event_family"
+        && Number.parseInt(String(new Date().getHours()), 10) < 8
+      ) {
+        return "当前不在告警定时窗口，请使用一键拉取告警文件";
+      }
+      return "";
+    }
+    function isInternalSourceCacheRefreshLocked(family, building) {
+      const actionKey = getInternalSourceCacheRefreshActionKey(family?.key, building?.building);
+      if (String(building?.statusKey || "").trim().toLowerCase() === "downloading") return true;
+      if (getInternalSourceCacheRefreshDisabledReason(family, building)) return true;
+      return isActionLocked(actionKey);
+    }
+    function getInternalSourceCacheRefreshButtonText(family, building) {
+      const actionKey = getInternalSourceCacheRefreshActionKey(family?.key, building?.building);
+      if (String(building?.statusKey || "").trim().toLowerCase() === "downloading" || isActionLocked(actionKey)) {
+        return "拉取中...";
+      }
+      return "重新拉取";
+    }
     const externalAlarmUploadFullButtonText = computed(() => {
       if (isAlarmSourceCacheUploadRunning.value) return "上传进行中...";
       return isActionLocked(actionKeySourceCacheUploadAlarmFull) ? "上传中..." : "告警全量上传（60天）";
@@ -1121,7 +1156,7 @@ createApp({
             { label: "当前任务", value: currentTaskOverview.value.statusText, tone: currentTaskOverview.value.tone },
           ],
           actions: [
-            { id: "refresh_current_hour", label: currentHourRefreshButtonText.value, desc: "立即刷新当前小时三组共享文件" },
+            { id: "refresh_current_hour", label: currentHourRefreshButtonText.value, desc: "立即刷新当前小时四组共享文件" },
             { id: "refresh_manual_alarm", label: manualAlarmRefreshButtonText.value, desc: "单独拉取近 60 天告警 JSON" },
             { id: "open_config", label: "打开本地配置", desc: "检查共享目录、浏览器池和桥接参数" },
           ],
@@ -1787,6 +1822,7 @@ createApp({
       cancelBridgeTask,
       retryBridgeTask,
       refreshCurrentHourSourceCache,
+      refreshBuildingLatestSourceCache,
       refreshManualAlarmSourceCache,
       deleteManualAlarmSourceCacheFiles,
       uploadAlarmSourceCacheFull,
@@ -1820,6 +1856,7 @@ createApp({
       reprobeHandoverReviewAccess,
       getBridgeTaskCancelActionKey,
       getBridgeTaskRetryActionKey,
+      getSourceCacheRefreshBuildingActionKey,
       getHandoverDailyReportRecaptureActionKey,
       getHandoverDailyReportUploadActionKey,
       getHandoverDailyReportRestoreActionKey,
@@ -3507,6 +3544,7 @@ createApp({
       getHandoverDailyReportRestoreActionKey,
       runUpdaterMainAction,
       refreshCurrentHourSourceCache,
+      refreshBuildingLatestSourceCache,
       refreshManualAlarmSourceCache,
       deleteManualAlarmSourceCacheFiles,
       uploadAlarmSourceCacheFull,
@@ -3551,6 +3589,10 @@ createApp({
       clearCurrentBuildingOverrides,
       restoreDefaultRuleForCurrentBuilding,
       fetchHandoverEngineerDirectory,
+      getInternalSourceCacheRefreshActionKey,
+      getInternalSourceCacheRefreshDisabledReason,
+      isInternalSourceCacheRefreshLocked,
+      getInternalSourceCacheRefreshButtonText,
       isSourceCacheRefreshCurrentHourLocked,
       currentHourRefreshButtonText,
       isSourceCacheRefreshAlarmManualLocked,

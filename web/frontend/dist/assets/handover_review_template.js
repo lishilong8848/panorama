@@ -17,6 +17,13 @@
           >
             {{ downloading ? "下载中..." : "下载交接班日志" }}
           </button>
+          <button
+            class="btn btn-secondary btn-mini"
+            @click="downloadCurrentCapacityReviewFile"
+            :disabled="loading || saving || capacityDownloading || cloudSyncBusy || !session || !session.session_id || !session.capacity_output_file"
+          >
+            {{ capacityDownloading ? "下载中..." : "下载交接班容量报表" }}
+          </button>
           <a
             v-if="reviewCloudSheetUrl"
             class="btn btn-secondary btn-mini"

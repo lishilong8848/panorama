@@ -248,6 +248,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "download": {
                     "template_name": "交接班容量报表",
                     "e_template_name": "每日报表合集",
+                    "e_query_result_timeout_ms": 90000,
                     "lookback_minutes": 20,
                     "scale_label": "5分钟",
                     "menu_path": ["报表报告", "数据查询", "即时报表"],

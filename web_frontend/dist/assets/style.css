@@ -1079,16 +1079,78 @@ a {
 .internal-download-slot-head,
 .internal-download-slot-meta {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.internal-download-slot-head .status-badge,
+.internal-download-slot-meta .status-badge {
+  align-self: flex-start;
 }
 
 .internal-download-slot-title {
   font-size: 14px;
   font-weight: 800;
   color: var(--text-1);
+}
+
+.internal-runtime-slot,
+.source-cache-family-card,
+.source-cache-building-card {
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: rgba(255, 255, 255, 0.08);
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.source-cache-family-card {
+  gap: 10px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.82) 0%, rgba(242, 247, 251, 0.92) 100%);
+}
+
+.internal-runtime-slot-head,
+.internal-runtime-slot-meta,
+.source-cache-family-card-head,
+.source-cache-family-card-meta,
+.source-cache-building-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.internal-runtime-slot-head .status-badge,
+.internal-runtime-slot-meta .status-badge,
+.source-cache-family-card-head .status-badge,
+.source-cache-family-card-meta .status-badge,
+.source-cache-building-card-head .status-badge {
+  align-self: flex-start;
+}
+
+.internal-runtime-slot-title,
+.source-cache-family-card-title,
+.source-cache-building-card-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text-1);
+}
+
+.source-cache-building-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.source-cache-building-btn {
+  min-height: 34px;
+  padding: 0 12px;
+  box-shadow: none;
 }
 
 .status-subsection-head {
