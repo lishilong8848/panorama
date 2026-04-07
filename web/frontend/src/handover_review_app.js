@@ -578,16 +578,16 @@ export function mountHandoverReviewApp(Vue) {
       const reviewHeaderBadges = computed(() => {
         const badges = [];
         if (reviewFileSummary.value) {
-          badges.push(badgeVm(`鏂囦欢 ${reviewFileSummary.value}`, "neutral", "outline", "file"));
+          badges.push(badgeVm(`文件 ${reviewFileSummary.value}`, "neutral", "outline", "file"));
         } else {
-          badges.push(badgeVm("鏆傛棤杈撳嚭鏂囦欢", "neutral", "outline", "file"));
+          badges.push(badgeVm("暂无输出文件", "neutral", "outline", "file"));
         }
-        badges.push(badgeVm(`妯″紡 ${currentModeText.value}`, isHistoryMode.value ? "warning" : "info", "outline", "clock"));
-        badges.push(badgeVm(`瀹℃牳鐗堟湰 ${session.value?.revision || "-"}`, "neutral", "outline", "clock"));
+        badges.push(badgeVm(`模式 ${currentModeText.value}`, isHistoryMode.value ? "warning" : "info", "outline", "clock"));
+        badges.push(badgeVm(`审核版本 ${session.value?.revision || "-"}`, "neutral", "outline", "clock"));
         if (concurrency.value?.client_holds_lock) {
-          badges.push(badgeVm("褰撳墠缁堢姝ｅ湪缂栬緫", "info", "outline", "warn"));
+          badges.push(badgeVm("当前终端正在编辑", "info", "outline", "warn"));
         } else if (activeEditorLabel.value) {
-          badges.push(badgeVm(`缂栬緫涓� ${activeEditorLabel.value}`, "warning", "outline", "warn"));
+          badges.push(badgeVm(`编辑中 ${activeEditorLabel.value}`, "warning", "outline", "warn"));
         }
         badges.push(reviewConfirmBadge.value);
         badges.push(badgeVm(reviewCloudSheetVm.value.text, reviewCloudSheetVm.value.tone, "outline", "link"));
@@ -599,19 +599,19 @@ export function mountHandoverReviewApp(Vue) {
         const rows = [];
         if (isHistoryMode.value) {
           rows.push({
-            text: "褰撳墠涓哄巻鍙叉ā寮忥細鍏佽缂栬緫骞朵繚瀛樺巻鍙蹭氦鎺ョ彮鏃ュ織锛屼絾涓嶄細鏇存柊璇ユゼ妯℃澘榛樿鍊硷紱濡傞渶鍚屾浜戞枃妗ｏ紝璇锋墜鍔ㄧ偣鍑烩€滄洿鏂颁簯鏂囨。鈥濄€?",
+            text: "当前为历史模式：允许编辑并保存历史交接班日志，但不会更新该楼模板默认值；如需同步云文档，请手动点击“更新云文档”。",
             tone: "info",
           });
         }
         if (staleRevisionConflict.value) {
           rows.push({
-            text: "褰撳墠椤甸潰鍐呭宸茶繃鏈燂紝淇濆瓨鎴栫‘璁や細涓庢渶鏂扮増鏈啿绐併€傝鍏堝埛鏂伴〉闈㈠悗鍐嶇户缁鐞嗐€?",
+            text: "当前页面内容已过期，保存或确认会与最新版本冲突。请先刷新页面后再继续处理。",
             tone: "warning",
           });
         }
         if (concurrency.value?.is_editing_elsewhere && activeEditorLabel.value) {
           rows.push({
-            text: `褰撳墠鏈夊叾浠栫粓绔鍦ㄧ紪杈戯細${activeEditorLabel.value}銆備綘浠嶅彲缁х画鏈湴缂栬緫锛屼絾鎻愪氦鏃跺彲鑳藉彂鐢熷啿绐併€?`,
+            text: `当前有其他终端正在编辑：${activeEditorLabel.value}。你仍可继续本地编辑，但提交时可能发生冲突。`,
             tone: "warning",
           });
         }
@@ -620,7 +620,7 @@ export function mountHandoverReviewApp(Vue) {
         }
         if (needsRefresh.value) {
           rows.push({
-            text: "妫€娴嬪埌璇ユゼ鏈夋柊鐢熸垚鐨勪氦鎺ョ彮鐗堟湰锛岃鍏堝埛鏂伴〉闈㈡煡鐪嬨€?",
+            text: "检测到该楼有新生成的交接班版本，请先刷新页面查看。",
             tone: "warning",
           });
         }
@@ -628,7 +628,7 @@ export function mountHandoverReviewApp(Vue) {
           rows.push({ text: errorText.value, tone: "danger" });
         }
         if (reviewCloudSheetVm.value.error) {
-          rows.push({ text: `浜戣〃鍚屾澶辫触: ${reviewCloudSheetVm.value.error}`, tone: "danger" });
+          rows.push({ text: `云表同步失败: ${reviewCloudSheetVm.value.error}`, tone: "danger" });
         }
         return rows;
       });
@@ -636,19 +636,19 @@ export function mountHandoverReviewApp(Vue) {
       const confirmActionVm = computed(() => {
         const disabled = !session.value || saving.value || confirming.value || cloudSyncBusy.value || needsRefresh.value || staleRevisionConflict.value;
         if (!session.value) {
-          return { text: "鏆傛棤浼氳瘽", variant: "secondary", disabled: true };
+          return { text: "暂无会话", variant: "secondary", disabled: true };
         }
         if (confirming.value) {
           return {
-            text: "澶勭悊涓?..",
+            text: "处理中...",
             variant: session.value?.confirmed ? "success" : "warning",
             disabled: true,
           };
         }
         if (session.value?.confirmed) {
-          return { text: "宸茬‘璁わ紙鍙彇娑堬級", variant: "success", disabled };
+          return { text: "已确认（可取消）", variant: "success", disabled };
         }
-        return { text: "纭褰撳墠妤兼爧", variant: "warning", disabled };
+        return { text: "确认当前楼栋", variant: "warning", disabled };
       });
 
       function serializeDocument(document) {
@@ -785,7 +785,7 @@ export function mountHandoverReviewApp(Vue) {
         if (message) {
           errorText.value = String(message || "");
         }
-        statusText.value = "瀹℃牳鍐呭宸茶鍏朵粬浜烘洿鏂帮紝璇峰埛鏂板悗鍐嶇户缁鐞嗐€?";
+        statusText.value = "审核内容已被其他人更新，请刷新后再继续处理。";
       }
 
       function isRevisionConflictError(error) {
@@ -904,7 +904,7 @@ export function mountHandoverReviewApp(Vue) {
       async function loadReviewData({ background = false } = {}) {
         if (!buildingCode) {
           loading.value = false;
-          errorText.value = "鏃犳晥鐨勬ゼ鏍嬪鏍搁〉闈㈠湴鍧€";
+          errorText.value = "无效的楼栋审核页面地址";
           return;
         }
         try {
@@ -937,7 +937,7 @@ export function mountHandoverReviewApp(Vue) {
 
           if (incomingSessionId && currentSessionId && incomingSessionId !== currentSessionId) {
             needsRefresh.value = true;
-            statusText.value = "妫€娴嬪埌璇ユゼ鏈夋柊鐢熸垚鐨勪氦鎺ョ彮鐗堟湰锛岃鍒锋柊鏌ョ湅";
+            statusText.value = "检测到该楼有新生成的交接班版本，请刷新页面查看。";
             return;
           }
 
@@ -949,11 +949,11 @@ export function mountHandoverReviewApp(Vue) {
               staleRevisionConflict.value = true;
               needsRefresh.value = true;
               clearSaveTimers();
-              statusText.value = "瀹℃牳鍐呭宸茶鍏朵粬浜烘洿鏂帮紝璇峰埛鏂板悗鍐嶇户缁鐞嗐€?";
+              statusText.value = "审核内容已被其他人更新，请刷新后再继续处理。";
               return;
             }
             hydrateFromPayload(payload, { fromBackground: true });
-            statusText.value = "宸插悓姝ユ渶鏂板鏍稿唴瀹?";
+            statusText.value = "已同步最新审核内容";
             return;
           }
 
@@ -966,7 +966,7 @@ export function mountHandoverReviewApp(Vue) {
           }
         } catch (error) {
           if (!background) {
-            errorText.value = String(error?.message || error || "鍔犺浇澶辫触");
+            errorText.value = String(error?.message || error || "加载失败");
           }
         } finally {
           if (!background) loading.value = false;
@@ -999,7 +999,7 @@ export function mountHandoverReviewApp(Vue) {
         const { reason = "autosave" } = options || {};
         if (saving.value || confirming.value || cloudSyncBusy.value || suspendAutoSave.value || !session.value) return false;
         if (staleRevisionConflict.value) {
-          statusText.value = "瀹℃牳鍐呭宸茶鍏朵粬浜烘洿鏂帮紝璇峰厛鍒锋柊鍐嶄繚瀛樸€?";
+          statusText.value = "审核内容已被其他人更新，请先刷新再保存。";
           return false;
         }
         const payloadSnapshot = serializeDocument(documentRef.value);
@@ -1014,15 +1014,15 @@ export function mountHandoverReviewApp(Vue) {
         errorText.value = "";
         await ensureEditingLock();
         if (reason === "confirm") {
-          statusText.value = "姝ｅ湪淇濆瓨鏈€鏂版敼鍔?..";
+          statusText.value = "正在保存最新改动...";
         } else if (reason === "retry") {
-          statusText.value = "姝ｅ湪閲嶈瘯淇濆瓨...";
+          statusText.value = "正在重试保存...";
         } else if (reason === "switch") {
-          statusText.value = "姝ｅ湪淇濆瓨褰撳墠浜ゆ帴鐝棩蹇楀悗鍒囨崲...";
+          statusText.value = "正在保存当前交接班日志后切换...";
         } else if (reason === "cloud_update") {
-          statusText.value = "姝ｅ湪淇濆瓨鍚庢洿鏂颁簯鏂囨。...";
+          statusText.value = "正在保存后更新云文档...";
         } else {
-          statusText.value = "姝ｅ湪鑷姩淇濆瓨...";
+          statusText.value = "正在自动保存...";
         }
         try {
           const response = await saveHandoverReviewApi(buildingCode, {
@@ -1038,21 +1038,21 @@ export function mountHandoverReviewApp(Vue) {
           clearSaveFailureRetryTimer();
           staleRevisionConflict.value = false;
           needsRefresh.value = false;
-          statusText.value = isHistoryMode.value ? "鍘嗗彶浜ゆ帴鐝棩蹇楀凡淇濆瓨" : "宸茶嚜鍔ㄤ繚瀛?";
+          statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已自动保存";
           if (dirty.value) {
             scheduleAutosave();
           }
           return true;
         } catch (error) {
           if (isRevisionConflictError(error)) {
-            markRevisionConflict(String(error?.message || error || "瀹℃牳鍐呭宸茶鍏朵粬浜烘洿鏂?"));
+            markRevisionConflict(String(error?.message || error || "审核内容已被其他人更新"));
             return false;
           }
-          errorText.value = String(error?.message || error || "淇濆瓨澶辫触");
+          errorText.value = String(error?.message || error || "保存失败");
           if (reason === "autosave") {
             scheduleSaveRetryAfterFailure();
           } else {
-            statusText.value = "淇濆瓨澶辫触锛岃澶勭悊鍚庨噸璇曘€?";
+            statusText.value = "保存失败，请处理后重试。";
           }
           return false;
         } finally {
@@ -1078,7 +1078,7 @@ export function mountHandoverReviewApp(Vue) {
           dutyShift: "",
         };
         syncReviewSelectionToUrl({ sessionId: toLatest ? "" : nextSessionId, isLatest: toLatest });
-        statusText.value = toLatest ? "姝ｅ湪鍒囨崲鍒版渶鏂颁氦鎺ョ彮鏃ュ織..." : "姝ｅ湪鍒囨崲鍘嗗彶浜ゆ帴鐝棩蹇?..";
+        statusText.value = toLatest ? "正在切换到最新交接班日志..." : "正在切换历史交接班日志...";
         await loadReviewData({ background: false });
       }
 
@@ -1117,12 +1117,12 @@ export function mountHandoverReviewApp(Vue) {
           applyPayloadMeta(response || {});
           staleRevisionConflict.value = false;
           needsRefresh.value = false;
-          statusText.value = session.value?.confirmed ? "宸茬‘璁ゅ綋鍓嶆ゼ鏍?" : "宸叉挙閿€纭";
+          statusText.value = session.value?.confirmed ? "已确认当前楼栋" : "已撤销确认";
         } catch (error) {
           if (isRevisionConflictError(error)) {
-            markRevisionConflict(String(error?.message || error || "瀹℃牳鐘舵€佸凡琚叾浠栦汉鏇存柊"));
+            markRevisionConflict(String(error?.message || error || "审核状态已被其他人更新"));
           } else {
-            errorText.value = String(error?.message || error || "纭澶辫触");
+            errorText.value = String(error?.message || error || "确认失败");
           }
         } finally {
           confirming.value = false;
@@ -1360,15 +1360,15 @@ export function mountHandoverReviewApp(Vue) {
           clearSaveFailureRetryTimer();
           if (staleRevisionConflict.value) {
             clearSaveTimers();
-            statusText.value = "瀹℃牳鍐呭宸茶鍏朵粬浜烘洿鏂帮紝璇峰埛鏂板悗鍐嶇户缁鐞嗐€?";
+            statusText.value = "审核内容已被其他人更新，请刷新后再继续处理。";
             return;
           }
           if (!isHistoryMode.value && session.value?.confirmed) {
-            statusText.value = "鍐呭宸插彉鏇达紝淇濆瓨鍚庨渶閲嶆柊纭";
+            statusText.value = "内容已变更，保存后需重新确认";
           } else if (isHistoryMode.value) {
-            statusText.value = "鍘嗗彶浜ゆ帴鐝棩蹇楀緟淇濆瓨";
+            statusText.value = "历史交接班日志待保存";
           } else {
-            statusText.value = "寰呰嚜鍔ㄤ繚瀛橈紙绌洪棽鍚庝繚瀛橈級";
+            statusText.value = "待自动保存（空闲后保存）";
           }
           scheduleAutosave();
         },
