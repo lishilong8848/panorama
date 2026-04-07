@@ -36,7 +36,7 @@
       </section>
 
       <section class="status-page-grid">
-        <article :class="['status-card', isInternalDeploymentRole ? 'status-card-wide' : '']">
+        <article :class="['status-card', isInternalDeploymentRole ? 'status-card-wide' : 'status-card-featured']">
           <div class="status-card-head">
             <div>
               <span class="status-panel-kicker">诊断优先</span>
@@ -344,14 +344,14 @@
               <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
             </div>
           </div>
-          <div class="internal-download-pool-grid">
+          <div class="status-building-grid">
             <div
-              class="internal-download-slot"
+              class="status-building-card"
               v-for="slot in externalInternalAlertOverview.buildings"
               :key="'status-external-internal-alert-' + slot.building"
             >
-              <div class="internal-download-slot-head">
-                <span class="internal-download-slot-title">{{ slot.building }}</span>
+              <div class="status-building-card-head">
+                <span class="status-building-card-title">{{ slot.building }}</span>
                 <span class="status-badge status-badge-soft" :class="'tone-' + slot.tone">{{ slot.statusText }}</span>
               </div>
               <div class="hint">{{ slot.summaryText }}</div>
@@ -376,6 +376,20 @@
             {{ sharedSourceCacheReadinessOverview.displayNoteText }}
           </div>
           <div class="hint">本次最新时间桶：{{ sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
+          <div class="status-metric-grid status-metric-grid-compact">
+            <div class="status-metric">
+              <div class="status-metric-label">主流程判断</div>
+              <strong class="status-metric-value">{{ sharedSourceCacheReadinessOverview.canProceed ? "可继续" : "需等待" }}</strong>
+            </div>
+            <div class="status-metric">
+              <div class="status-metric-label">显示文件类型</div>
+              <strong class="status-metric-value">{{ sharedSourceCacheReadinessOverview.families.length }}</strong>
+            </div>
+            <div class="status-metric">
+              <div class="status-metric-label">最新时间桶</div>
+              <strong class="status-metric-value">{{ sharedSourceCacheReadinessOverview.referenceBucketKey || "-" }}</strong>
+            </div>
+          </div>
           <div class="source-cache-family-grid" v-if="sharedSourceCacheReadinessOverview.families && sharedSourceCacheReadinessOverview.families.length">
             <div
               class="source-cache-family-card"
@@ -559,6 +573,20 @@
           </div>
           <div class="hint" v-if="handoverFollowupProgress.pendingCount || handoverFollowupProgress.failedCount">
             后续上传待处理 {{ handoverFollowupProgress.pendingCount }} 项，失败 {{ handoverFollowupProgress.failedCount }} 项
+          </div>
+          <div class="status-metric-grid status-metric-grid-compact">
+            <div class="status-metric">
+              <div class="status-metric-label">已确认</div>
+              <strong class="status-metric-value">{{ handoverReviewOverview.confirmed }}</strong>
+            </div>
+            <div class="status-metric">
+              <div class="status-metric-label">待确认</div>
+              <strong class="status-metric-value">{{ handoverReviewOverview.pending }}</strong>
+            </div>
+            <div class="status-metric">
+              <div class="status-metric-label">后续上传</div>
+              <strong class="status-metric-value">{{ handoverFollowupProgress.pendingCount || handoverFollowupProgress.failedCount ? `待处理 ${handoverFollowupProgress.pendingCount} / 失败 ${handoverFollowupProgress.failedCount}` : "已清空" }}</strong>
+            </div>
           </div>
           <div class="hint" v-if="health.handover.review_base_url_effective">
             当前生效地址（{{ health.handover.review_base_url_effective_source === 'manual' ? '手工指定' : '已缓存自动诊断结果' }}）：{{ health.handover.review_base_url_effective }}
