@@ -278,7 +278,7 @@
                 >
                   <span class="ops-job-list-title">{{ task.feature_label || formatBridgeFeature(task.feature) }}</span>
                   <span class="ops-job-list-meta">
-                    #{{ task.task_id }} | {{ formatBridgeTaskStatus(task.status) }} | {{ task.updated_at || '-' }}
+                    #{{ task.task_id }} | {{ formatBridgeTaskStatus(task) }} | {{ task.updated_at || '-' }}
                   </span>
                   <span class="ops-job-list-meta">
                     {{ task.current_stage_name || formatBridgeStageSummary(task) }}
@@ -311,7 +311,7 @@
                   :class="{ 'is-selected': selectedBridgeTaskId === task.task_id }"
                   @click="focusBridgeTask(task)"
                 >
-                  {{ task.feature_label || formatBridgeFeature(task.feature) }} / {{ formatBridgeTaskStatus(task.status) }}
+                  {{ task.feature_label || formatBridgeFeature(task.feature) }} / {{ formatBridgeTaskStatus(task) }}
                 </button>
               </div>
             </div>

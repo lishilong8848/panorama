@@ -2314,7 +2314,14 @@ class SharedBridgeRuntimeService:
                     buildings=buildings,
                 )
                 if len(cached_entries) < len(buildings) or len(capacity_entries) < len(buildings):
-                    raise RuntimeError("等待历史日期缓存补采完成")
+                    self._requeue_external_waiting_task(
+                        task_id=task_id,
+                        stage_id=stage_id,
+                        side="external",
+                        wait_message="等待内网补采同步",
+                        detail=f"交接班历史缓存未齐全，等待内网补采同步后自动继续。日期={duty_date} 班次={duty_shift}",
+                    )
+                    return
                 building_files = [(str(item.get("building", "")).strip(), str(item.get("file_path", "")).strip()) for item in cached_entries]
                 capacity_building_files = [
                     (str(item.get("building", "")).strip(), str(item.get("file_path", "")).strip())
@@ -2345,7 +2352,14 @@ class SharedBridgeRuntimeService:
                     buildings=target_buildings,
                 )
                 if len(cached_entries) < len(selected_dates) * max(1, len(target_buildings)):
-                    raise RuntimeError("等待历史日期缓存补采完成")
+                    self._requeue_external_waiting_task(
+                        task_id=task_id,
+                        stage_id=stage_id,
+                        side="external",
+                        wait_message="等待内网补采同步",
+                        detail=f"12项历史缓存未齐全，等待内网补采同步后自动继续。日期={','.join(selected_dates)}",
+                    )
+                    return
                 source_units = [
                     {
                         "duty_date": str(item.get("duty_date", "") or "").strip(),
@@ -2472,7 +2486,14 @@ class SharedBridgeRuntimeService:
             cached_entries = self._source_cache_service.get_monthly_by_date_entries(selected_dates=selected_dates)
             expected = len(selected_dates) * len(self._source_cache_service.get_enabled_buildings())
             if len(cached_entries) < expected:
-                raise RuntimeError("等待历史日期缓存补采完成")
+                self._requeue_external_waiting_task(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    side="external",
+                    wait_message="等待内网补采同步",
+                    detail=f"月报历史缓存未齐全，等待内网补采同步后自动继续。日期={','.join(selected_dates)}",
+                )
+                return
             file_items = [
                 {
                     "building": str(item.get("building", "") or "").strip(),
@@ -2687,6 +2708,38 @@ class SharedBridgeRuntimeService:
                 task_result={"status": "failed", "error": error_text, "internal": internal_result},
             )
             self._emit_system_log(f"[共享桥接][外网端] 任务={task_id} 月报外网阶段失败: {error_text}")
+
+    def _requeue_external_waiting_task(
+        self,
+        *,
+        task_id: str,
+        stage_id: str,
+        side: str,
+        wait_message: str,
+        detail: str,
+    ) -> None:
+        if not self._store:
+            return
+        task_text = str(task_id or "").strip()
+        stage_text = str(stage_id or "").strip()
+        if not task_text or not stage_text:
+            return
+        retried = self._store.retry_task(task_text)
+        payload = {
+            "message": wait_message,
+            "detail": detail,
+            "next_status": "ready_for_external",
+        }
+        self._store.append_event(
+            task_id=task_text,
+            stage_id=stage_text,
+            side=str(side or "").strip() or "external",
+            level="info",
+            event_type="waiting_source_sync",
+            payload=payload,
+        )
+        if retried:
+            self._emit_system_log(f"[共享桥接][外网端] 任务={task_text} {detail}")
 
     def _process_one_task_if_needed(self) -> None:
         if not self._store:

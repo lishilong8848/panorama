@@ -1858,6 +1858,13 @@ class SharedSourceCacheService:
                     duty_date=duty_date,
                 )
                 if not entry:
+                    entry = self._get_ready_entry(
+                        source_family=FAMILY_MONTHLY_REPORT,
+                        building=building,
+                        bucket_kind="latest",
+                        duty_date=duty_date,
+                    )
+                if not entry:
                     continue
                 file_path = self._resolve_entry_file_path(entry)
                 if file_path is None:

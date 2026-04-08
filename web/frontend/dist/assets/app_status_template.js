@@ -375,7 +375,7 @@
           <div class="hint" v-if="sharedSourceCacheReadinessOverview.displayNoteText">
             {{ sharedSourceCacheReadinessOverview.displayNoteText }}
           </div>
-          <div class="hint">本次最新时间桶：{{ sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
+          <div class="hint">当前共享参考标识：{{ sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
           <div class="status-metric-grid status-metric-grid-compact">
             <div class="status-metric">
               <div class="status-metric-label">主流程判断</div>
@@ -386,7 +386,7 @@
               <strong class="status-metric-value">{{ sharedSourceCacheReadinessOverview.families.length }}</strong>
             </div>
             <div class="status-metric">
-              <div class="status-metric-label">最新时间桶</div>
+              <div class="status-metric-label">共享参考标识</div>
               <strong class="status-metric-value">{{ sharedSourceCacheReadinessOverview.referenceBucketKey || "-" }}</strong>
             </div>
           </div>
@@ -401,12 +401,12 @@
                 <span class="status-badge status-badge-soft" :class="'tone-' + family.tone">{{ family.statusText }}</span>
               </div>
               <div class="hint" v-if="family.key === 'alarm_event_family'">选择策略：当天最新一份，缺失则回退昨天最新</div>
-              <div class="hint" v-else>最新时间桶：{{ family.bestBucketKey || sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
+              <div class="hint" v-else>{{ family.referenceLabel || '最新时间桶' }}：{{ family.bestBucketKey || sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
               <div class="hint" v-if="family.key === 'alarm_event_family' && family.selectionReferenceDate">参考日期：{{ family.selectionReferenceDate }}</div>
-              <div class="hint" v-else-if="family.bestBucketAgeText">距当前约 {{ family.bestBucketAgeText }}</div>
+              <div class="hint" v-else-if="family.bestBucketAgeText">{{ family.ageLabel || '距当前约' }} {{ family.bestBucketAgeText }}</div>
               <div class="hint">{{ family.summaryText }}</div>
-              <div class="hint" v-if="family.backfillRunning && family.backfillText">当前补采：{{ family.backfillText }}</div>
-              <div class="hint" v-if="family.backfillRunning && family.backfillScopeText">补采范围：{{ family.backfillScopeText }}</div>
+              <div class="hint" v-if="family.backfillRunning && family.backfillText">{{ family.backfillLabel || '当前补采' }}：{{ family.backfillText }}</div>
+              <div class="hint" v-if="family.backfillRunning && family.backfillScopeText">{{ family.backfillScopeLabel || '补采范围' }}：{{ family.backfillScopeText }}</div>
               <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadLastRunAt">
                 最近上传：{{ family.uploadLastRunAt }} / 记录 {{ family.uploadRecordCount || 0 }} 条 / 文件 {{ family.uploadFileCount || 0 }} 份 / 源文件保留
               </div>
@@ -429,10 +429,12 @@
                   <div class="hint" v-if="family.key === 'alarm_event_family'">来源：{{ building.sourceKindText || '-' }}</div>
                   <div class="hint" v-if="family.key === 'alarm_event_family'">选择：{{ building.selectionScopeText || '-' }}</div>
                   <div class="hint" v-if="family.key === 'alarm_event_family'">选中文件时间：{{ building.selectedDownloadedAt || '-' }}</div>
-                  <div class="hint" v-else>时间桶：{{ building.bucketKey || family.bestBucketKey || sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
-                  <div class="hint" v-if="building.backfillRunning && building.backfillText">当前补采：{{ building.backfillText }}</div>
-                  <div class="hint" v-if="building.backfillRunning && building.backfillScopeText">补采范围：{{ building.backfillScopeText }}</div>
-                  <div class="hint" v-if="building.usingFallback && building.versionGap !== null">较最新版本落后 {{ building.versionGap }} 桶</div>
+                  <div class="hint" v-else>{{ family.buildingReferenceLabel || '时间桶' }}：{{ building.bucketKey || family.bestBucketKey || sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
+                  <div class="hint" v-if="building.backfillRunning && building.backfillText">{{ family.backfillLabel || '当前补采' }}：{{ building.backfillText }}</div>
+                  <div class="hint" v-if="building.backfillRunning && building.backfillScopeText">{{ family.backfillScopeLabel || '补采范围' }}：{{ building.backfillScopeText }}</div>
+                  <div class="hint" v-if="building.usingFallback && building.versionGap !== null">
+                    {{ family.dateSemantic ? '较当前日期文件落后 ' + building.versionGap + ' 桶' : '较最新版本落后 ' + building.versionGap + ' 桶' }}
+                  </div>
                   <div class="hint">{{ building.lastError ? ("最近错误：" + building.lastError) : ("最近成功：" + (building.downloadedAt || "-")) }}</div>
                   <div class="hint" v-if="building.resolvedFilePath">共享路径：{{ building.resolvedFilePath }}</div>
                   <div class="hint" v-else-if="building.relativePath">缓存文件：{{ building.relativePath }}</div>
@@ -482,12 +484,12 @@
             >
               <span class="status-list-label">{{ formatBridgeFeature(task.feature) }}</span>
               <span class="status-badge status-badge-soft" :class="'tone-' + formatBridgeTaskTone(task.status)">
-                {{ formatBridgeTaskStatus(task.status) }}
+                {{ formatBridgeTaskStatus(task) }}
               </span>
             </div>
           </div>
           <div class="hint" v-if="activeBridgeTasks && activeBridgeTasks.length">
-            等待中的任务会在当前楼栋页签释放后自动接续，不需要重新发起。
+            等待中的任务会在条件满足后自动继续；如状态显示“等待内网补采同步”，表示外网正在等待内网历史文件到位。
           </div>
         </article>
 

@@ -25,6 +25,7 @@ _BRIDGE_EVENT_TYPE_LABELS = {
     "claimed": "已认领",
     "completed": "已完成",
     "log": "日志",
+    "waiting_source_sync": "等待内网补采同步",
     "retired_feature": "停用功能已拦截",
 }
 

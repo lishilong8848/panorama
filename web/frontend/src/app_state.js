@@ -1686,8 +1686,27 @@ function normalizeInternalDownloadPoolSlot(slot) {
       summaryText,
     };
   }
-  function formatBridgeProgressStatusText(status) {
-    const normalized = String(status || "").trim().toLowerCase();
+  function getLatestSharedSourceCacheTaskEvent(task) {
+    const events = Array.isArray(task?.events) ? task.events : [];
+    return events.length ? events[0] : null;
+  }
+  function isSharedSourceCacheBackfillWaitingSync(task) {
+    if (!task || typeof task !== "object") return false;
+    const normalizedStatus = String(task?.status || "").trim().toLowerCase();
+    if (!["ready_for_external", "waiting_next_side"].includes(normalizedStatus)) {
+      return false;
+    }
+    const latestEvent = getLatestSharedSourceCacheTaskEvent(task);
+    const latestEventType = String(latestEvent?.event_type || "").trim().toLowerCase();
+    if (latestEventType === "waiting_source_sync") return true;
+    const latestEventText = String(latestEvent?.event_text || latestEvent?.payload?.message || "").trim();
+    return latestEventText.includes("等待内网补采同步");
+  }
+  function formatBridgeProgressStatusText(statusOrTask, taskLike = null) {
+    const task = statusOrTask && typeof statusOrTask === "object"
+      ? statusOrTask
+      : (taskLike && typeof taskLike === "object" ? taskLike : null);
+    const normalized = String(task ? task.status : statusOrTask || "").trim().toLowerCase();
     if (!normalized) return "执行中";
     if (["internal_running", "external_running", "running", "claimed", "internal_claimed", "external_claimed"].includes(normalized)) {
       return "执行中";
@@ -1696,17 +1715,17 @@ function normalizeInternalDownloadPoolSlot(slot) {
       return "等待执行";
     }
     if (["ready_for_external", "waiting_next_side"].includes(normalized)) {
-      return "等待接续";
+      return isSharedSourceCacheBackfillWaitingSync(task) ? "等待内网补采同步" : "等待接续";
     }
     if (normalized === "success") return "已完成";
     if (normalized === "failed") return "失败";
     if (normalized === "partial_failed") return "部分失败";
-    return String(status || "").trim() || "执行中";
+    return String(task ? task.status : statusOrTask || "").trim() || "执行中";
   }
   function formatSharedSourceCacheBackfillStageText(task) {
     const stageName = String(task?.current_stage_name || "").trim();
     const featureLabel = String(task?.feature_label || "").trim() || "共享桥接任务";
-    const statusText = formatBridgeProgressStatusText(task?.current_stage_status || task?.status || "");
+    const statusText = formatBridgeProgressStatusText(task?.current_stage_status || task?.status || "", task);
     return stageName ? `${stageName} / ${statusText}` : `${featureLabel} / ${statusText}`;
   }
   function normalizeSharedSourceCacheTaskBuildings(requestPayload) {
@@ -1789,6 +1808,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
         backfillTaskId: "",
       };
     }
+    const isMonthlyDateFileFamily = String(family?.key || "").trim().toLowerCase() === "monthly_report_family";
     const familyBuildings = Array.isArray(family.buildings) ? family.buildings : [];
     let runningBuildingCount = 0;
     const buildings = familyBuildings.map((building) => {
@@ -1854,8 +1874,43 @@ function normalizeInternalDownloadPoolSlot(slot) {
       backfillScopeText: familyOverlays[0].scopeText,
       backfillTaskId: familyOverlays[0].taskId,
       tone: "warning",
-      statusText: "补采中",
-      summaryText: "历史共享文件补采中，文件到位后会自动回切为已就绪。",
+      statusText: isMonthlyDateFileFamily ? "同步中" : "补采中",
+      summaryText: isMonthlyDateFileFamily
+        ? "月报日期文件同步中；如外网任务显示“等待内网补采同步”，文件到位后会自动继续并回切为已就绪。"
+        : "历史共享文件补采中；如外网任务显示“等待内网补采同步”，文件到位后会自动继续并回切为已就绪。",
+    };
+  }
+  function normalizeMonthlyDateFileFamilyOverview(family) {
+    const payload = family && typeof family === "object" ? family : {};
+    const buildings = Array.isArray(payload.buildings) ? payload.buildings : [];
+    let summaryText = String(payload.summaryText || "").trim();
+    if (payload.isBestBucketTooOld) {
+      summaryText = payload.bestBucketKey
+        ? `当前月报日期文件 ${payload.bestBucketKey} 距现在较久，等待内网同步到目标日期后会自动重试。`
+        : "当前月报日期文件尚未同步到目标日期，等待内网更新后会自动重试。";
+    } else if (payload.staleBuildings && payload.staleBuildings.length) {
+      summaryText = `以下楼栋月报日期文件相对目标日期落后：${payload.staleBuildings.join(" / ")}`;
+    } else if (payload.missingBuildings && payload.missingBuildings.length) {
+      summaryText = `以下楼栋尚未登记对应日期的月报文件：${payload.missingBuildings.join(" / ")}`;
+    } else if (payload.fallbackBuildings && payload.fallbackBuildings.length) {
+      summaryText = `以下楼栋正在使用上一版日期文件：${payload.fallbackBuildings.join(" / ")}`;
+    } else if (payload.canProceed && buildings.length) {
+      summaryText = "当前月报日期文件已齐套，外网按业务日期处理时会直接读取对应日期文件。";
+    } else if (!summaryText) {
+      summaryText = "月报源文件统一按业务日期展示；外网处理哪一天，就读取哪一天的日期文件。";
+    }
+    return {
+      ...payload,
+      dateSemantic: true,
+      referenceLabel: "当前日期文件",
+      ageLabel: "距当前约",
+      backfillLabel: "当前同步",
+      backfillScopeLabel: "同步日期",
+      buildingReferenceLabel: "日期文件",
+      summaryText,
+      statusText: payload.canProceed && buildings.length
+        ? "日期文件已齐套"
+        : String(payload.statusText || "").trim() || "等待日期文件就绪",
     };
   }
   function normalizeAlarmEventReadinessBuilding(raw, fallbackBucket) {
@@ -2557,13 +2612,18 @@ function normalizeInternalDownloadPoolSlot(slot) {
       }),
     ];
     const displayFamilies = displayLatestFamilies.map((family) => {
-      if (family.key !== "handover_capacity_report_family") return family;
-      return {
-        ...family,
-        summaryText: family.canProceed && family.buildings.length
-          ? "当前容量共享源文件已齐套，仅同步展示供外网状态页与容量报表链路参考。"
-          : family.summaryText || "容量共享源文件状态仅用于同步展示。",
-      };
+      if (family.key === "handover_capacity_report_family") {
+        return {
+          ...family,
+          summaryText: family.canProceed && family.buildings.length
+            ? "当前容量共享源文件已齐套，仅同步展示供外网状态页与容量报表链路参考。"
+            : family.summaryText || "容量共享源文件状态仅用于同步展示。",
+        };
+      }
+      if (family.key === "monthly_report_family") {
+        return normalizeMonthlyDateFileFamilyOverview(family);
+      }
+      return family;
     });
     const alarmFamily = normalizeAlarmEventReadinessOverview({
       key: "alarm_event_family",
@@ -2639,13 +2699,13 @@ function normalizeInternalDownloadPoolSlot(slot) {
     });
     return {
       tone: hasTooOld || hasStale ? "danger" : allReady ? "success" : "warning",
-      statusText: hasTooOld ? "等待最新共享文件更新" : hasStale ? "等待共享文件就绪" : allReady ? "最新共享文件已就绪" : "等待共享文件就绪",
+      statusText: hasTooOld ? "等待共享文件更新" : hasStale ? "等待共享文件就绪" : allReady ? "共享文件已就绪" : "等待共享文件就绪",
       summaryText: hasTooOld
-        ? "当前最新共享文件整体已超过 3 小时，等待内网更新后会自动重试默认入口。"
+        ? "当前共享参考文件整体已超过 3 小时，等待内网更新后会自动重试默认入口。"
         : hasStale
-        ? "部分楼栋共享文件版本过旧，等待更新后会自动重试默认入口。"
-        : hasMissing
-          ? "部分楼栋共享文件缺失，等待补齐后会自动重试默认入口。"
+          ? "部分楼栋共享文件版本过旧，等待更新后会自动重试默认入口。"
+          : hasMissing
+            ? "部分楼栋共享文件缺失，等待补齐后会自动重试默认入口。"
           : hasFallback
             ? "当前允许部分楼栋回退到不超过 3 桶的上一版共享文件。"
             : "外网默认入口继续只依赖交接班日志源文件与全景平台月报源文件。",

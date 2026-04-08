@@ -2424,18 +2424,43 @@ createApp({
       return String(feature || "").trim() || "-";
     }
 
-    function formatBridgeTaskStatus(status) {
-      const normalized = String(status || "").trim().toLowerCase();
+    function getLatestBridgeEvent(task) {
+      const events = Array.isArray(task?.events) ? task.events : [];
+      return events.length ? events[0] : null;
+    }
+
+    function isBridgeWaitingSourceSyncTask(task) {
+      if (!task || typeof task !== "object") return false;
+      const normalizedStatus = String(task?.status || "").trim().toLowerCase();
+      if (!["ready_for_external", "waiting_next_side"].includes(normalizedStatus)) {
+        return false;
+      }
+      const latestEvent = getLatestBridgeEvent(task);
+      const latestEventType = String(latestEvent?.event_type || "").trim().toLowerCase();
+      if (latestEventType === "waiting_source_sync") return true;
+      const latestEventText = String(latestEvent?.event_text || latestEvent?.payload?.message || "").trim();
+      return latestEventText.includes("等待内网补采同步");
+    }
+
+    function formatBridgeTaskStatus(statusOrTask, taskLike = null) {
+      const task = statusOrTask && typeof statusOrTask === "object"
+        ? statusOrTask
+        : (taskLike && typeof taskLike === "object" ? taskLike : null);
+      const normalized = String(task ? task.status : statusOrTask || "").trim().toLowerCase();
       if (normalized === "pending") return "待执行";
       if (normalized === "claimed") return "已认领";
       if (normalized === "running") return "执行中";
       if (normalized === "blocked") return "已阻塞";
       if (normalized === "expired") return "已过期";
-      if (normalized === "waiting_next_side") return "等待下一侧";
+      if (normalized === "waiting_next_side") {
+        return isBridgeWaitingSourceSyncTask(task) ? "等待内网补采同步" : "等待下一侧";
+      }
       if (normalized === "queued_for_internal") return "等待共享文件";
       if (normalized === "internal_claimed") return "共享文件已认领";
       if (normalized === "internal_running") return "共享文件准备中";
-      if (normalized === "ready_for_external") return "等待外网继续";
+      if (normalized === "ready_for_external") {
+        return isBridgeWaitingSourceSyncTask(task) ? "等待内网补采同步" : "等待外网继续";
+      }
       if (normalized === "external_claimed") return "外网已认领";
       if (normalized === "external_running") return "外网处理中";
       if (normalized === "success") return "成功";
@@ -2550,6 +2575,7 @@ createApp({
       if (lowered === "external_continue_failed") return "外网继续处理失败";
       if (lowered === "missing_source_file") return "缺少共享文件";
       if (lowered === "await_external") return "等待外网继续处理";
+      if (lowered === "waiting_source_sync") return "等待内网补采同步";
       if (lowered === "shared_bridge_disabled") return "共享桥接未启用";
       if (lowered === "shared_bridge_service_unavailable") return "共享桥接服务不可用";
       if (lowered === "disabled_or_switching" || lowered === "disabled_or_unselected") return "当前未启用共享桥接";
@@ -2592,6 +2618,7 @@ createApp({
     function isBridgeWaitingResourceTask(task) {
       if (!task || typeof task !== "object") return false;
       if (isBridgeTerminalStatusLocal(task?.status)) return false;
+      if (isBridgeWaitingSourceSyncTask(task)) return true;
       const combined = `${formatBridgeTaskError(task)} ${formatBridgeStageSummary(task)}`.trim();
       return (
         combined.includes("等待最新共享文件更新")
@@ -2661,7 +2688,7 @@ createApp({
       const currentStageRole = String(task?.current_stage_role || "").trim();
       const currentStageStatus = String(task?.current_stage_status || "").trim();
       if (currentStageName) {
-        return `${formatBridgeRole(currentStageRole)} / ${currentStageName} / ${formatBridgeTaskStatus(currentStageStatus || task?.status)}`;
+        return `${formatBridgeRole(currentStageRole)} / ${currentStageName} / ${formatBridgeTaskStatus(currentStageStatus || task?.status, task)}`;
       }
       const stages = Array.isArray(task?.stages) ? task.stages : [];
       if (!stages.length) return "阶段信息待同步";
@@ -2670,7 +2697,7 @@ createApp({
           const status = String(item?.status || "").trim().toLowerCase();
           return status === "running" || status === "claimed" || status === "pending" || status === "waiting_next_side";
         }) || stages.find((item) => String(item?.error || "").trim()) || stages[stages.length - 1];
-      return `${formatBridgeRole(current?.role_target)} / ${formatBridgeStageName(current, task?.feature, task?.mode)} / ${formatBridgeTaskStatus(current?.status)}`;
+      return `${formatBridgeRole(current?.role_target)} / ${formatBridgeStageName(current, task?.feature, task?.mode)} / ${formatBridgeTaskStatus(current?.status, task)}`;
     }
 
     function formatBridgeArtifactSummary(task) {
