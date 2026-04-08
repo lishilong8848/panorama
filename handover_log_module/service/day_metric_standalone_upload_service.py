@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from app.config.config_compat_cleanup import sanitize_day_metric_upload_config
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
 from app.shared.utils.atomic_file import atomic_write_text
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
@@ -55,30 +56,17 @@ class DayMetricStandaloneUploadService:
     @staticmethod
     def _defaults() -> Dict[str, Any]:
         return {
-            "enabled": True,
-            "manual_button_enabled": True,
-            "source": {
-                "reuse_handover_download": True,
-                "reuse_handover_rule_engine": True,
-            },
             "behavior": {
-                "only_day_shift": True,
-                "failure_policy": "continue",
-                "rewrite_existing": True,
                 "basic_retry_attempts": 3,
                 "basic_retry_backoff_sec": 2,
                 "network_retry_attempts": 5,
                 "network_retry_backoff_sec": 2,
                 "alert_after_attempts": 5,
-                "local_import_enabled": True,
-                "local_import_scope": "single_date_single_building",
             },
         }
 
     def _normalize_cfg(self) -> Dict[str, Any]:
-        raw = self.runtime_config.get("day_metric_upload", {})
-        if not isinstance(raw, dict):
-            raw = {}
+        raw = sanitize_day_metric_upload_config(self.runtime_config.get("day_metric_upload", {}))
         cfg = _deep_merge(self._defaults(), raw)
         behavior = cfg.get("behavior", {})
         if not isinstance(behavior, dict):
@@ -89,8 +77,6 @@ class DayMetricStandaloneUploadService:
         behavior["network_retry_backoff_sec"] = max(0, _safe_int(behavior.get("network_retry_backoff_sec", 2), 2))
         behavior["alert_after_attempts"] = max(1, _safe_int(behavior.get("alert_after_attempts", 5), 5))
         cfg["behavior"] = behavior
-        cfg["enabled"] = bool(cfg.get("enabled", True))
-        cfg["manual_button_enabled"] = bool(cfg.get("manual_button_enabled", True))
         return cfg
 
     def _runtime_state_root(self) -> Path:
@@ -169,8 +155,7 @@ class DayMetricStandaloneUploadService:
         return int(self._cfg.get("behavior", {}).get("alert_after_attempts", 5) or 5)
 
     def _source_reuse_enabled(self) -> bool:
-        source_cfg = self._cfg.get("source", {})
-        return bool(source_cfg.get("reuse_handover_download", True)) if isinstance(source_cfg, dict) else True
+        return True
 
     def _selected_buildings(self, *, building_scope: str, building: str | None) -> List[str]:
         if str(building_scope or "").strip() == "single":
@@ -298,10 +283,19 @@ class DayMetricStandaloneUploadService:
             )
 
     def _new_download_service(self) -> HandoverDownloadService:
-        return HandoverDownloadService(
-            self.handover_cfg,
-            download_browser_pool=self._download_browser_pool,
-        )
+        if self._download_browser_pool is None:
+            return HandoverDownloadService(self.handover_cfg)
+        try:
+            return HandoverDownloadService(
+                self.handover_cfg,
+                download_browser_pool=self._download_browser_pool,
+            )
+        except TypeError as exc:
+            # Compatibility fallback: some test doubles / legacy constructors
+            # still only accept (cfg), without download_browser_pool.
+            if "download_browser_pool" not in str(exc):
+                raise
+            return HandoverDownloadService(self.handover_cfg)
 
     def _new_extract_service(self) -> HandoverExtractService:
         return HandoverExtractService(self.handover_cfg)
@@ -313,7 +307,7 @@ class DayMetricStandaloneUploadService:
         return SourceDataAttachmentBitableExportService(self.handover_cfg)
 
     def _new_export_service(self) -> DayMetricBitableExportService:
-        return DayMetricBitableExportService(self.handover_cfg)
+        return DayMetricBitableExportService(self.runtime_config)
 
     def _sleep_between_attempts(self) -> None:
         backoff = self._network_retry_backoff_sec()
@@ -1336,4 +1330,3 @@ class DayMetricStandaloneUploadService:
             "results": grouped_rows,
             **summary,
         }
-

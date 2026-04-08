@@ -296,8 +296,9 @@ def test_run_from_download_switches_network_once_and_downloads_before_processing
 
     assert result["status"] == "ok"
     assert result["success_units"] == 2
-    assert _FakeDownloadService.prepare_internal_calls == 1
-    assert _FakeDownloadService.ensure_external_calls == 5
+    # 当前版本已取消切网流程；仅保留网络侧就绪检查。
+    assert _FakeDownloadService.prepare_internal_calls == 0
+    assert _FakeDownloadService.ensure_external_calls == 4
     assert len(_FakeDownloadService.run_calls) == 2
     assert all(call["switch_network"] is False for call in _FakeDownloadService.run_calls)
     assert all(call["reuse_cached"] is True for call in _FakeDownloadService.run_calls)

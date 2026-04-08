@@ -112,7 +112,7 @@ def test_register_generated_output_persists_source_file_cache(tmp_path: Path) ->
 
 def test_load_state_marks_missing_managed_source_file_cache(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
-    state = service._cache_store.load_state()
+    state = service._review_state_store.load_state()
     missing_path = tmp_path / "handover" / "source_files" / "2026-03-24_day" / "A楼" / "A楼_2026-03-24_day" / "source.xlsx"
     state["review_sessions"] = {
         "A楼|2026-03-24|day": {
@@ -143,7 +143,7 @@ def test_load_state_marks_missing_managed_source_file_cache(tmp_path: Path) -> N
             "source_data_attachment_export": {},
         }
     }
-    service._cache_store.save_state(state)
+    service._review_state_store.save_state(state)
 
     session = service.get_session_by_id("A楼|2026-03-24|day")
 
@@ -155,7 +155,7 @@ def test_load_state_marks_missing_managed_source_file_cache(tmp_path: Path) -> N
 
 def test_load_state_filters_pytest_legacy_handover_outputs(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
-    state = service._cache_store.load_state()
+    state = service._review_state_store.load_state()
     state["review_sessions"] = {
         "C楼|2026-03-22|day": {
             "session_id": "C楼|2026-03-22|day",
@@ -178,7 +178,7 @@ def test_load_state_filters_pytest_legacy_handover_outputs(tmp_path: Path) -> No
         }
     }
     state["review_latest_by_building"] = {"C楼": "C楼|2026-03-22|day"}
-    service._cache_store.save_state(state)
+    service._review_state_store.save_state(state)
 
     latest_batch = service.get_latest_batch_status()
 
@@ -186,14 +186,14 @@ def test_load_state_filters_pytest_legacy_handover_outputs(tmp_path: Path) -> No
     assert latest_batch["confirmed_count"] == 0
     assert all(not bool(item["has_session"]) for item in latest_batch["buildings"])
 
-    reloaded = service._cache_store.load_state()
+    reloaded = service._review_state_store.load_state()
     assert reloaded["review_sessions"] == {}
     assert reloaded["review_latest_by_building"] == {}
 
 
 def test_load_state_rebuilds_latest_by_building_from_valid_sessions(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
-    state = service._cache_store.load_state()
+    state = service._review_state_store.load_state()
     state["review_sessions"] = {
         "C楼|2026-03-22|night": {
             "session_id": "C楼|2026-03-22|night",
@@ -235,7 +235,7 @@ def test_load_state_rebuilds_latest_by_building_from_valid_sessions(tmp_path: Pa
         },
     }
     state["review_latest_by_building"] = {"C楼": "C楼|2026-03-22|day"}
-    service._cache_store.save_state(state)
+    service._review_state_store.save_state(state)
 
     latest = service.get_latest_session("C楼")
 
@@ -243,7 +243,7 @@ def test_load_state_rebuilds_latest_by_building_from_valid_sessions(tmp_path: Pa
     assert latest["session_id"] == "C楼|2026-03-22|night"
     assert latest["output_file"] == r"D:\QLDownload\交接班日志输出\C楼_20260322_交接班日志.xlsx"
 
-    reloaded = service._cache_store.load_state()
+    reloaded = service._review_state_store.load_state()
     assert reloaded["review_latest_by_building"]["C楼"] == "C楼|2026-03-22|night"
     assert "C楼|2026-03-22|day" not in reloaded["review_sessions"]
 
@@ -396,17 +396,9 @@ def test_touch_session_after_history_save_only_resets_cloud_sync(tmp_path: Path,
     service.mark_confirmed(
         building="A楼",
         session_id=registered["session_id"],
+        base_revision=int(registered.get("revision", 0)),
         confirmed=True,
         confirmed_by="tester",
-    )
-    service.update_day_metric_export(
-        session_id=registered["session_id"],
-        day_metric_export={
-            "status": "success",
-            "uploaded_count": 12,
-            "uploaded_revision": 1,
-            "reason": "",
-        },
     )
     service.update_source_data_attachment_export(
         session_id=registered["session_id"],
@@ -440,7 +432,6 @@ def test_touch_session_after_history_save_only_resets_cloud_sync(tmp_path: Path,
     assert updated["revision"] == int(current["revision"]) + 1
     assert updated["confirmed"] is True
     assert updated["confirmed_by"] == "tester"
-    assert updated["day_metric_export"]["status"] == "success"
     assert updated["source_data_attachment_export"]["status"] == "success"
     assert updated["cloud_sheet_sync"]["status"] == "pending_upload"
     assert updated["cloud_sheet_sync"]["attempted"] is False

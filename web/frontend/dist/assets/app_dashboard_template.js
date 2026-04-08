@@ -35,66 +35,7 @@
           </div>
         </section>
 
-        <section class="ops-job-grid dashboard-overview-grid" style="margin-bottom:12px;">
-          <article class="task-block task-block-compact task-block-featured">
-            <div class="task-block-head">
-              <div>
-                <div class="task-block-kicker">首页判断</div>
-                <h4 class="card-title">当前应该先做什么</h4>
-              </div>
-              <span class="status-badge status-badge-soft" :class="'tone-' + homeOverview.tone">
-                {{ homeOverview.statusText }}
-              </span>
-            </div>
-            <div class="hint">{{ homeOverview.summaryText }}</div>
-            <div class="hint" v-if="homeOverview.nextActionText">{{ homeOverview.nextActionText }}</div>
-            <div class="status-metric-grid status-metric-grid-compact">
-              <div class="status-metric">
-                <div class="status-metric-label">当前模块</div>
-                <strong class="status-metric-value">{{ dashboardActiveModuleHero.title || dashboardActiveModuleTitle }}</strong>
-              </div>
-              <div class="status-metric">
-                <div class="status-metric-label">快捷动作</div>
-                <strong class="status-metric-value">{{ homeOverview.actions && homeOverview.actions.length ? homeOverview.actions.length + ' 项' : '无' }}</strong>
-              </div>
-              <div class="status-metric">
-                <div class="status-metric-label">当前判断</div>
-                <strong class="status-metric-value">{{ homeOverview.statusText }}</strong>
-              </div>
-            </div>
-            <div class="status-list" v-if="homeOverview.items && homeOverview.items.length" style="margin-top:10px;">
-              <div
-                class="status-list-row"
-                v-for="item in homeOverview.items"
-                :key="'dashboard-home-item-' + item.label"
-              >
-                <span class="status-list-label">{{ item.label }}</span>
-                <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
-              </div>
-            </div>
-          </article>
-
-          <article class="task-block task-block-compact">
-            <div class="task-block-head">
-              <div>
-                <div class="task-block-kicker">主动作</div>
-                <h4 class="card-title">常用入口</h4>
-              </div>
-            </div>
-            <div class="ops-quick-action-grid" v-if="homeOverview.actions && homeOverview.actions.length">
-              <button
-                v-for="action in homeOverview.actions"
-                :key="'dashboard-home-action-' + action.id"
-                class="btn btn-ghost ops-quick-action-card"
-                @click="runHomeQuickAction(action.id)"
-              >
-                <span class="ops-quick-action-title">{{ action.label }}</span>
-                <span class="ops-quick-action-desc">{{ action.desc || '' }}</span>
-              </button>
-            </div>
-            <div class="hint" v-else>当前没有可显示的快捷入口。</div>
-          </article>
-
+        <section class="content-card" style="margin-bottom:12px;">
           <article class="task-block task-block-compact">
             <div class="task-block-head">
               <div>
@@ -106,20 +47,21 @@
               </span>
             </div>
             <div class="hint">{{ currentTaskOverview.summaryText }}</div>
-            <div class="ops-focus-card">
-              <div class="ops-focus-card-label">当前聚焦</div>
-              <div class="ops-focus-card-title">{{ currentTaskOverview.focusTitle }}</div>
-              <div class="ops-focus-card-meta">{{ currentTaskOverview.focusMeta }}</div>
+            <div class="hint" v-if="currentTaskOverview.focusTitle && currentTaskOverview.focusTitle !== '当前没有选中任务'">
+              当前重点：{{ currentTaskOverview.focusTitle }}
+            </div>
+            <div class="hint" v-if="currentTaskOverview.focusMeta && currentTaskOverview.focusTitle && currentTaskOverview.focusTitle !== '当前没有选中任务'">
+              {{ currentTaskOverview.focusMeta }}
             </div>
             <div class="hint" v-if="currentTaskOverview.nextActionText">{{ currentTaskOverview.nextActionText }}</div>
-            <div class="status-list" v-if="currentTaskOverview.items && currentTaskOverview.items.length" style="margin-top:10px;">
+            <div class="status-metric-grid status-metric-grid-compact" v-if="currentTaskOverview.items && currentTaskOverview.items.length">
               <div
-                class="status-list-row"
-                v-for="item in currentTaskOverview.items"
+                class="status-metric"
+                v-for="item in currentTaskOverview.items.slice(0, 3)"
                 :key="'dashboard-task-overview-' + item.label"
               >
-                <span class="status-list-label">{{ item.label }}</span>
-                <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
+                <div class="status-metric-label">{{ item.label }}</div>
+                <strong class="status-metric-value">{{ item.value }}</strong>
               </div>
             </div>
           </article>
@@ -145,8 +87,8 @@
               <strong class="status-metric-value">{{ waitingResourceJobs.length }}</strong>
             </div>
             <div class="status-metric">
-              <div class="status-metric-label">共享桥接历史</div>
-              <strong class="status-metric-value">{{ totalBridgeHistoryCount }}</strong>
+              <div class="status-metric-label">共享协同</div>
+              <strong class="status-metric-value">{{ activeBridgeTasks.length }}</strong>
             </div>
           </div>
           <div class="ops-job-grid">
@@ -156,18 +98,38 @@
                   <div class="task-block-kicker">运行中</div>
                   <h4 class="card-title">运行中任务</h4>
                 </div>
+                <span class="status-badge status-badge-soft" :class="runningJobs.length ? 'tone-info' : 'tone-neutral'">
+                  {{ runningJobs.length ? (runningJobs.length + ' 项') : '无' }}
+                </span>
               </div>
               <div class="ops-job-list" v-if="runningJobs.length">
-                <button
+                <div
                   v-for="job in runningJobs"
                   :key="'running-' + job.job_id"
-                  class="btn btn-ghost ops-job-list-item"
+                  class="ops-job-list-item ops-job-list-row"
                   :class="{ 'is-selected': selectedJobId === job.job_id }"
-                  @click="focusJob(job)"
                 >
-                  <span class="ops-job-list-title">{{ job.name || job.feature || job.job_id }}</span>
-                  <span class="ops-job-list-meta">{{ formatJobKind(job) }} | #{{ job.job_id }} | {{ formatJobStatus(job.status || 'running') }}</span>
-                </button>
+                  <button
+                    class="btn btn-ghost ops-job-list-main"
+                    type="button"
+                    @click="focusJobInRuntimeLogs(job)"
+                  >
+                    <span class="ops-job-list-title">{{ job.name || job.feature || job.job_id }}</span>
+                    <span class="ops-job-list-meta">{{ formatJobCompactMeta(job) }}</span>
+                    <span class="ops-job-list-meta" v-if="formatJobCompactDetail(job)">{{ formatJobCompactDetail(job) }}</span>
+                  </button>
+                  <div class="ops-job-inline-action-slot">
+                    <button
+                      v-if="canCancelJob(job)"
+                      class="btn btn-secondary btn-mini ops-job-inline-action"
+                      type="button"
+                      :disabled="isActionLocked(getJobCancelActionKey(job.job_id))"
+                      @click="cancelJobItem(job)"
+                    >
+                      {{ isActionLocked(getJobCancelActionKey(job.job_id)) ? '取消中...' : '取消任务' }}
+                    </button>
+                  </div>
+                </div>
               </div>
               <div class="hint" v-else>当前没有运行中的任务。</div>
             </article>
@@ -178,20 +140,47 @@
                   <div class="task-block-kicker">等待资源</div>
                   <h4 class="card-title">等待资源任务</h4>
                 </div>
+                <span class="status-badge status-badge-soft" :class="waitingResourceJobs.length ? 'tone-warning' : 'tone-neutral'">
+                  {{ waitingResourceJobs.length ? (waitingResourceJobs.length + ' 项') : '无' }}
+                </span>
               </div>
               <div class="ops-job-list" v-if="waitingResourceJobs.length">
-                <button
+                <div
                   v-for="job in waitingResourceJobs"
                   :key="'waiting-' + (job.__waiting_id || job.job_id || job.task_id)"
-                  class="btn btn-ghost ops-job-list-item"
+                  class="ops-job-list-item ops-job-list-row"
                   :class="{ 'is-selected': isWaitingResourceItemSelected(job) }"
-                  @click="focusWaitingResourceItem(job)"
                 >
-                  <span class="ops-job-list-title">{{ formatWaitingResourceItemTitle(job) }}</span>
-                  <span class="ops-job-list-meta">
-                    {{ formatWaitingResourceItemMeta(job) }}
-                  </span>
-                </button>
+                  <button
+                    class="btn btn-ghost ops-job-list-main"
+                    type="button"
+                    @click="focusWaitingResourceItemInRuntimeLogs(job)"
+                  >
+                    <span class="ops-job-list-title">{{ formatWaitingResourceItemTitle(job) }}</span>
+                    <span class="ops-job-list-meta">{{ formatWaitingResourceItemMeta(job) }}</span>
+                    <span class="ops-job-list-meta" v-if="formatWaitingResourceItemDetail(job)">{{ formatWaitingResourceItemDetail(job) }}</span>
+                  </button>
+                  <div class="ops-job-inline-action-slot">
+                    <button
+                      v-if="job.__waiting_kind === 'bridge' && canCancelBridgeTask(job)"
+                      class="btn btn-secondary btn-mini ops-job-inline-action"
+                      type="button"
+                      :disabled="isActionLocked(getBridgeTaskCancelActionKey(job.task_id))"
+                      @click="cancelBridgeTask(job.task_id)"
+                    >
+                      {{ isActionLocked(getBridgeTaskCancelActionKey(job.task_id)) ? '取消中...' : '取消任务' }}
+                    </button>
+                    <button
+                      v-else-if="job.__waiting_kind !== 'bridge' && canCancelJob(job)"
+                      class="btn btn-secondary btn-mini ops-job-inline-action"
+                      type="button"
+                      :disabled="isActionLocked(getJobCancelActionKey(job.job_id))"
+                      @click="cancelJobItem(job)"
+                    >
+                      {{ isActionLocked(getJobCancelActionKey(job.job_id)) ? '取消中...' : '取消任务' }}
+                    </button>
+                  </div>
+                </div>
               </div>
               <div class="hint" v-else>当前没有等待资源的任务。</div>
             </article>
@@ -237,19 +226,6 @@
               </div>
             </article>
           </div>
-          <div class="ops-job-history" v-if="recentFinishedJobs.length">
-            <div class="label">最近完成任务</div>
-            <div class="chips">
-              <button
-                v-for="job in recentFinishedJobs"
-                :key="'recent-' + job.job_id"
-                class="btn btn-ghost chip-button"
-                @click="focusJob(job)"
-              >
-                {{ job.name || job.feature || job.job_id }} / {{ formatJobKind(job) }} / {{ formatJobStatus(job.status) }}
-              </button>
-            </div>
-          </div>
           <article class="task-block task-block-compact" v-if="bridgeTasksEnabled" style="margin-top:12px;">
             <div class="task-block-head">
               <div>
@@ -257,13 +233,11 @@
                 <h4 class="card-title">共享协同任务</h4>
               </div>
               <span class="status-badge status-badge-soft" :class="activeBridgeTasks.length ? 'tone-warning' : 'tone-neutral'">
-                处理中 {{ activeBridgeTasks.length }} / 历史 {{ totalBridgeHistoryCount }}
+                {{ activeBridgeTasks.length ? ('处理中 ' + activeBridgeTasks.length + ' 项') : '当前空闲' }}
               </span>
             </div>
-            <div class="hint">仅内网端 / 外网端角色显示。外网发起后，内网执行前段，完成后再回到外网继续后段。</div>
-            <div class="hint" v-if="hiddenBridgeHistoryCount > 0">
-              历史任务仅显示最近 {{ bridgeTaskHistoryDisplayLimit }} 条，另有 {{ hiddenBridgeHistoryCount }} 条已折叠。
-            </div>
+            <div class="hint">跨机任务会先由内网准备文件，再由外网继续处理。</div>
+            <div class="hint">这里只保留任务摘要和操作入口，详细排障信息不再占用首页区域。</div>
             <div class="ops-job-list" v-if="displayedBridgeTasks.length">
               <div
                 v-for="task in displayedBridgeTasks"
@@ -274,18 +248,11 @@
                 <button
                   class="btn btn-ghost ops-job-list-main"
                   type="button"
-                  @click="focusBridgeTask(task)"
+                  @click="focusBridgeTaskInRuntimeLogs(task)"
                 >
                   <span class="ops-job-list-title">{{ task.feature_label || formatBridgeFeature(task.feature) }}</span>
-                  <span class="ops-job-list-meta">
-                    #{{ task.task_id }} | {{ formatBridgeTaskStatus(task) }} | {{ task.updated_at || '-' }}
-                  </span>
-                  <span class="ops-job-list-meta">
-                    {{ task.current_stage_name || formatBridgeStageSummary(task) }}
-                  </span>
-                  <span class="ops-job-list-meta" v-if="formatBridgeTaskError(task) !== '-'">
-                    错误：{{ formatBridgeTaskError(task) }}
-                  </span>
+                  <span class="ops-job-list-meta">{{ formatBridgeTaskCompactMeta(task) }}</span>
+                  <span class="ops-job-list-meta" v-if="formatBridgeTaskCompactDetail(task)">{{ formatBridgeTaskCompactDetail(task) }}</span>
                 </button>
                 <div v-if="isExternalDeploymentRole" class="ops-job-inline-action-slot">
                   <button
@@ -301,105 +268,8 @@
               </div>
             </div>
             <div class="hint" v-else>当前还没有共享协同任务。</div>
-            <div class="ops-job-history" v-if="recentFinishedBridgeTasks.length" style="margin-top:10px;">
-              <div class="label">最近完成的共享任务</div>
-              <div class="chips">
-                <button
-                  v-for="task in recentFinishedBridgeTasks"
-                  :key="'bridge-recent-' + task.task_id"
-                  class="btn btn-ghost chip-button"
-                  :class="{ 'is-selected': selectedBridgeTaskId === task.task_id }"
-                  @click="focusBridgeTask(task)"
-                >
-                  {{ task.feature_label || formatBridgeFeature(task.feature) }} / {{ formatBridgeTaskStatus(task) }}
-                </button>
-              </div>
-            </div>
           </article>
-          <article class="task-block task-block-compact ops-job-detail" v-if="currentJob">
-            <div class="task-block-head">
-              <div>
-                <div class="task-block-kicker">任务详情</div>
-                <h4 class="card-title">当前选中任务</h4>
-              </div>
-              <span
-                class="status-badge status-badge-soft"
-                :class="'tone-' + formatJobTone(currentJob.status)"
-              >
-                {{ formatJobStatus(currentJob.status) }}
-              </span>
-            </div>
-            <div class="btn-line" style="margin-bottom:8px;">
-              <button
-                class="btn btn-secondary"
-                :disabled="!currentJob || !['queued', 'waiting_resource', 'running'].includes(String(currentJob.status || '').trim().toLowerCase()) || Boolean(currentJob.cancel_requested) || isActionLocked(getJobCancelActionKey(currentJob.job_id))"
-                @click="cancelCurrentJob"
-              >
-                {{
-                  Boolean(currentJob?.cancel_requested)
-                    ? '取消请求中...'
-                    : isActionLocked(getJobCancelActionKey(currentJob?.job_id))
-                      ? '取消中...'
-                      : '取消任务'
-                }}
-              </button>
-              <button
-                class="btn btn-ghost"
-                :disabled="!currentJob || !['failed', 'cancelled', 'interrupted'].includes(String(currentJob.status || '').trim().toLowerCase()) || !Array.isArray(currentJob.stages) || !String(currentJob.stages[0]?.worker_handler || '').trim() || isActionLocked(getJobRetryActionKey(currentJob.job_id))"
-                @click="retryCurrentJob"
-              >
-                {{ isActionLocked(getJobRetryActionKey(currentJob?.job_id)) ? '重试提交中...' : '重试任务' }}
-              </button>
-            </div>
-            <div class="ops-resource-grid">
-              <div class="readonly-inline-card">名称：{{ currentJob.name || currentJob.feature || '-' }}</div>
-              <div class="readonly-inline-card">类型：{{ formatJobKind(currentJob) }}</div>
-              <div class="readonly-inline-card">编号：{{ currentJob.job_id || '-' }}</div>
-              <div class="readonly-inline-card">来源：{{ formatJobSubmittedBy(currentJob.submitted_by) }}</div>
-              <div class="readonly-inline-card">优先级：{{ formatJobPriority(currentJob.priority) }}</div>
-              <div class="readonly-inline-card">等待原因：{{ currentJob.wait_reason ? formatJobWaitReason(currentJob) : '-' }}</div>
-              <div class="readonly-inline-card">提交时间：{{ currentJob.created_at || '-' }}</div>
-              <div class="readonly-inline-card">开始时间：{{ currentJob.started_at || '-' }}</div>
-              <div class="readonly-inline-card">结束时间：{{ currentJob.finished_at || '-' }}</div>
-              <div class="readonly-inline-card">
-                资源：{{ Array.isArray(currentJob.resource_keys) && currentJob.resource_keys.length ? currentJob.resource_keys.join(' / ') : '-' }}
-              </div>
-            </div>
-            <div class="hint" v-if="currentJob.summary" style="margin-top:8px;">摘要：{{ currentJob.summary }}</div>
-            <div class="hint" v-if="currentJob.error">错误：{{ currentJob.error }}</div>
-            <div class="ops-stage-table-wrap" v-if="Array.isArray(currentJob.stages) && currentJob.stages.length">
-              <table class="ops-stage-table">
-                <thead>
-                  <tr>
-                    <th>阶段</th>
-                    <th>状态</th>
-                    <th>资源</th>
-                    <th>恢复策略</th>
-                    <th>心跳</th>
-                    <th>开始</th>
-                    <th>结束</th>
-                    <th>摘要/错误</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="stage in currentJob.stages" :key="'stage-' + currentJob.job_id + '-' + stage.stage_id">
-                    <td>{{ stage.name || stage.stage_id || '-' }}</td>
-                    <td>
-                      <span class="status-badge status-badge-soft" :class="'tone-' + formatJobStageTone(stage)">
-                        {{ formatJobStageStatus(stage) }}
-                      </span>
-                    </td>
-                    <td>{{ Array.isArray(stage.resource_keys) && stage.resource_keys.length ? stage.resource_keys.join(' / ') : '-' }}</td>
-                    <td>{{ stage.resume_policy || '-' }}</td>
-                    <td>{{ stage.last_heartbeat_at || '-' }}</td>
-                    <td>{{ stage.started_at || '-' }}</td>
-                    <td>{{ stage.finished_at || '-' }}</td>
-                    <td>{{ stage.error || stage.summary || '-' }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </article>
+          <div class="hint" style="margin-top:10px;">这里只保留任务摘要和操作入口。</div>
         </section>
 
         <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'auto_flow'">
@@ -470,8 +340,8 @@
                     <div class="task-block-kicker">定时执行</div>
                     <h3 class="card-title">调度设置</h3>
                   </div>
-                  <span class="status-badge status-badge-soft" :class="config.scheduler.enabled ? 'tone-success' : 'tone-neutral'">
-                    {{ config.scheduler.enabled ? '已启用' : '未启用' }}
+                  <span class="status-badge status-badge-soft" :class="health.scheduler.running ? 'tone-success' : 'tone-neutral'">
+                    {{ health.scheduler.status || '未启动' }}
                   </span>
                 </div>
                 <div class="status-metric-grid status-metric-grid-compact">
@@ -480,82 +350,74 @@
                     <strong class="status-metric-value">{{ config.scheduler.run_time || '-' }}</strong>
                   </div>
                   <div class="status-metric">
-                    <div class="status-metric-label">启动后自动开启</div>
-                    <strong class="status-metric-value">{{ config.scheduler.auto_start_in_gui ? '是' : '否' }}</strong>
+                    <div class="status-metric-label">最近决策</div>
+                    <strong class="status-metric-value">{{ schedulerDecisionText || '-' }}</strong>
                   </div>
                   <div class="status-metric">
                     <div class="status-metric-label">当前状态</div>
                     <strong class="status-metric-value">{{ health.scheduler.status || '-' }}</strong>
                   </div>
                 </div>
-                <div class="form-row">
-                  <label><input type="checkbox" v-model="config.scheduler.enabled" /> 启用调度</label>
-                  <label><input type="checkbox" v-model="config.scheduler.auto_start_in_gui" /> 启动后自动开启</label>
-                </div>
                 <div class="btn-line">
                   <label class="label" style="min-width:unset;">每日执行时间</label>
-                  <input style="width:120px" type="time" step="1" v-model="config.scheduler.run_time" />
+                  <input style="width:120px" type="time" step="1" v-model="config.scheduler.run_time" @change="saveSchedulerQuickConfig" />
                 </div>
                 <div class="btn-line">
-                  <button class="btn btn-success" :disabled="isActionLocked(actionKeySchedulerStart)" @click="startScheduler">
-                    {{ isActionLocked(actionKeySchedulerStart) ? '启动中...' : '启动调度' }}
+                  <button class="btn btn-success" :disabled="health.scheduler.running || isActionLocked(actionKeySchedulerStart)" @click="startScheduler">
+                    {{ isActionLocked(actionKeySchedulerStart) ? '启动中...' : (health.scheduler.running ? '已启动调度' : '启动调度') }}
                   </button>
-                  <button class="btn btn-danger" :disabled="isActionLocked(actionKeySchedulerStop)" @click="stopScheduler">
+                  <button class="btn btn-danger" :disabled="!health.scheduler.running || isActionLocked(actionKeySchedulerStop)" @click="stopScheduler">
                     {{ isActionLocked(actionKeySchedulerStop) ? '停止中...' : '停止调度' }}
                   </button>
-                  <button class="btn btn-secondary" :disabled="schedulerQuickSaving || isActionLocked(actionKeySchedulerSave)" @click="saveSchedulerQuickConfig">
-                    {{ schedulerQuickSaving || isActionLocked(actionKeySchedulerSave) ? '保存中...' : '保存调度配置' }}
-                  </button>
                 </div>
+                <div class="hint">{{ schedulerQuickSaving ? '调度配置保存中...' : '修改每日执行时间后自动保存。' }}</div>
               </article>
             </div>
           </div>
 
-          <article class="task-block task-block-compact" style="margin-top:16px;" v-if="pendingResumeCount > 0">
-            <div class="task-block-head">
-              <div>
-                <div class="task-block-kicker">待续传列表</div>
-                <h3 class="card-title">断点续传任务明细</h3>
-              </div>
-              <span class="status-badge status-badge-soft tone-info">{{ pendingResumeCount }} 项</span>
+          <details class="module-advanced-section" v-if="pendingResumeCount > 0">
+            <summary>查看待续传任务明细（{{ pendingResumeCount }} 项）</summary>
+            <div class="module-advanced-section-body">
+              <article class="task-block task-block-compact">
+                <div class="resume-list">
+                  <div class="resume-item" v-for="run in pendingResumeRuns" :key="'auto_' + ((run.run_id || '-') + '_' + (run.run_save_dir || '-'))">
+                    <div class="resume-row">
+                      <span class="resume-key">run_id</span>
+                      <span class="resume-val">{{ getResumeRunId(run) || '-' }}</span>
+                    </div>
+                    <div class="resume-row">
+                      <span class="resume-key">待上传</span>
+                      <span class="resume-val">{{ run.pending_upload_count }} 项</span>
+                    </div>
+                    <div class="resume-row">
+                      <span class="resume-key">日期范围</span>
+                      <span class="resume-val" :title="formatResumeDateFull(run)">{{ formatResumeDateSummary(run) }}</span>
+                    </div>
+                    <div class="resume-row">
+                      <span class="resume-key">更新时间</span>
+                      <span class="resume-val">{{ run.updated_at || '-' }}</span>
+                    </div>
+                    <div class="btn-line" style="margin-top:6px;">
+                      <button
+                        class="btn btn-secondary"
+                        :disabled="!canRun || !getResumeRunId(run) || isActionLocked(getResumeRunActionKey(getResumeRunId(run)))"
+                        @click="runResumeUpload(getResumeRunId(run), false)"
+                      >
+                        {{ isActionLocked(getResumeRunActionKey(getResumeRunId(run))) ? '处理中...' : '继续该任务' }}
+                      </button>
+                      <button
+                        class="btn btn-danger"
+                        :disabled="!canRun || !getResumeRunId(run) || isActionLocked(getResumeDeleteActionKey(getResumeRunId(run)))"
+                        @click="deleteResumeRun(getResumeRunId(run))"
+                      >
+                        {{ isActionLocked(getResumeDeleteActionKey(getResumeRunId(run))) ? '删除中...' : '删除任务' }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </article>
             </div>
-            <div class="resume-list">
-              <div class="resume-item" v-for="run in pendingResumeRuns" :key="'auto_' + ((run.run_id || '-') + '_' + (run.run_save_dir || '-'))">
-                <div class="resume-row">
-                  <span class="resume-key">run_id</span>
-                  <span class="resume-val">{{ getResumeRunId(run) || '-' }}</span>
-                </div>
-                <div class="resume-row">
-                  <span class="resume-key">待上传</span>
-                  <span class="resume-val">{{ run.pending_upload_count }} 项</span>
-                </div>
-                <div class="resume-row">
-                  <span class="resume-key">日期范围</span>
-                  <span class="resume-val" :title="formatResumeDateFull(run)">{{ formatResumeDateSummary(run) }}</span>
-                </div>
-                <div class="resume-row">
-                  <span class="resume-key">更新时间</span>
-                  <span class="resume-val">{{ run.updated_at || '-' }}</span>
-                </div>
-                <div class="btn-line" style="margin-top:6px;">
-                  <button
-                    class="btn btn-secondary"
-                    :disabled="!canRun || !getResumeRunId(run) || isActionLocked(getResumeRunActionKey(getResumeRunId(run)))"
-                    @click="runResumeUpload(getResumeRunId(run), false)"
-                  >
-                    {{ isActionLocked(getResumeRunActionKey(getResumeRunId(run))) ? '处理中...' : '继续该任务' }}
-                  </button>
-                  <button
-                    class="btn btn-danger"
-                    :disabled="!canRun || !getResumeRunId(run) || isActionLocked(getResumeDeleteActionKey(getResumeRunId(run)))"
-                    @click="deleteResumeRun(getResumeRunId(run))"
-                  >
-                    {{ isActionLocked(getResumeDeleteActionKey(getResumeRunId(run))) ? '删除中...' : '删除任务' }}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </article>
+          </details>
         </section>
 
         <section class="content-card" v-if="dashboardActiveModule === 'multi_date'">
@@ -673,51 +535,49 @@
             </div>
           </div>
 
-          <article class="task-block task-block-compact" style="margin-top:16px;" v-if="pendingResumeCount > 0">
-            <div class="task-block-head">
-              <div>
-                <div class="task-block-kicker">待续传列表</div>
-                <h3 class="card-title">断点续传任务明细</h3>
-              </div>
-              <span class="status-badge status-badge-soft tone-info">{{ pendingResumeCount }} 项</span>
+          <details class="module-advanced-section" v-if="pendingResumeCount > 0">
+            <summary>查看待续传任务明细（{{ pendingResumeCount }} 项）</summary>
+            <div class="module-advanced-section-body">
+              <article class="task-block task-block-compact">
+                <div class="resume-list">
+                  <div class="resume-item" v-for="run in pendingResumeRuns" :key="'multi_' + ((run.run_id || '-') + '_' + (run.run_save_dir || '-'))">
+                    <div class="resume-row">
+                      <span class="resume-key">run_id</span>
+                      <span class="resume-val">{{ getResumeRunId(run) || '-' }}</span>
+                    </div>
+                    <div class="resume-row">
+                      <span class="resume-key">待上传</span>
+                      <span class="resume-val">{{ run.pending_upload_count }} 项</span>
+                    </div>
+                    <div class="resume-row">
+                      <span class="resume-key">日期范围</span>
+                      <span class="resume-val" :title="formatResumeDateFull(run)">{{ formatResumeDateSummary(run) }}</span>
+                    </div>
+                    <div class="resume-row">
+                      <span class="resume-key">更新时间</span>
+                      <span class="resume-val">{{ run.updated_at || '-' }}</span>
+                    </div>
+                    <div class="btn-line" style="margin-top:6px;">
+                      <button
+                        class="btn btn-secondary"
+                        :disabled="isInternalDeploymentRole || !canRun || !getResumeRunId(run) || isActionLocked(getResumeRunActionKey(getResumeRunId(run)))"
+                        @click="runResumeUpload(getResumeRunId(run), false)"
+                      >
+                        {{ isActionLocked(getResumeRunActionKey(getResumeRunId(run))) ? '处理中...' : '继续该任务' }}
+                      </button>
+                      <button
+                        class="btn btn-danger"
+                        :disabled="isInternalDeploymentRole || !canRun || !getResumeRunId(run) || isActionLocked(getResumeDeleteActionKey(getResumeRunId(run)))"
+                        @click="deleteResumeRun(getResumeRunId(run))"
+                      >
+                        {{ isActionLocked(getResumeDeleteActionKey(getResumeRunId(run))) ? '删除中...' : '删除任务' }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </article>
             </div>
-            <div class="resume-list">
-              <div class="resume-item" v-for="run in pendingResumeRuns" :key="'multi_' + ((run.run_id || '-') + '_' + (run.run_save_dir || '-'))">
-                <div class="resume-row">
-                  <span class="resume-key">run_id</span>
-                  <span class="resume-val">{{ getResumeRunId(run) || '-' }}</span>
-                </div>
-                <div class="resume-row">
-                  <span class="resume-key">待上传</span>
-                  <span class="resume-val">{{ run.pending_upload_count }} 项</span>
-                </div>
-                <div class="resume-row">
-                  <span class="resume-key">日期范围</span>
-                  <span class="resume-val" :title="formatResumeDateFull(run)">{{ formatResumeDateSummary(run) }}</span>
-                </div>
-                <div class="resume-row">
-                  <span class="resume-key">更新时间</span>
-                  <span class="resume-val">{{ run.updated_at || '-' }}</span>
-                </div>
-                <div class="btn-line" style="margin-top:6px;">
-                  <button
-                    class="btn btn-secondary"
-                    :disabled="isInternalDeploymentRole || !canRun || !getResumeRunId(run) || isActionLocked(getResumeRunActionKey(getResumeRunId(run)))"
-                    @click="runResumeUpload(getResumeRunId(run), false)"
-                  >
-                    {{ isActionLocked(getResumeRunActionKey(getResumeRunId(run))) ? '处理中...' : '继续该任务' }}
-                  </button>
-                  <button
-                    class="btn btn-danger"
-                    :disabled="isInternalDeploymentRole || !canRun || !getResumeRunId(run) || isActionLocked(getResumeDeleteActionKey(getResumeRunId(run)))"
-                    @click="deleteResumeRun(getResumeRunId(run))"
-                  >
-                    {{ isActionLocked(getResumeDeleteActionKey(getResumeRunId(run))) ? '删除中...' : '删除任务' }}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </article>
+          </details>
         </section>
 
         <section class="content-card" v-if="dashboardActiveModule === 'manual_upload'">
@@ -758,6 +618,66 @@
         </section>
 
         <section class="content-card" v-if="dashboardActiveModule === 'handover_log'">
+          <article class="task-block" style="margin-bottom:16px;">
+            <div class="task-block-head">
+              <div>
+                <div class="task-block-kicker">调度卡</div>
+                <h3 class="card-title">交接班调度</h3>
+              </div>
+              <span
+                class="status-badge status-badge-soft"
+                :class="health.handover_scheduler.running ? 'tone-success' : 'tone-neutral'"
+              >
+                {{ health.handover_scheduler.status || '-' }}
+              </span>
+            </div>
+            <div class="status-metric-grid status-metric-grid-compact">
+              <div class="status-metric">
+                <div class="status-metric-label">上午下次执行</div>
+                <strong class="status-metric-value">{{ (health.handover_scheduler.morning && health.handover_scheduler.morning.next_run_time) || '-' }}</strong>
+              </div>
+              <div class="status-metric">
+                <div class="status-metric-label">下午下次执行</div>
+                <strong class="status-metric-value">{{ (health.handover_scheduler.afternoon && health.handover_scheduler.afternoon.next_run_time) || '-' }}</strong>
+              </div>
+              <div class="status-metric">
+                <div class="status-metric-label">最近决策</div>
+                <strong class="status-metric-value">{{ handoverMorningDecisionText || handoverAfternoonDecisionText || '-' }}</strong>
+              </div>
+            </div>
+            <div class="hint">上午时间点用于补跑前一天夜班，下午时间点用于执行当天白班。</div>
+            <div class="task-grid two-col">
+              <div class="form-row">
+                <label class="label">上午时间</label>
+                <input type="time" step="1" v-model="config.handover_log.scheduler.morning_time" @change="saveHandoverSchedulerQuickConfig" />
+              </div>
+              <div class="form-row">
+                <label class="label">下午时间</label>
+                <input type="time" step="1" v-model="config.handover_log.scheduler.afternoon_time" @change="saveHandoverSchedulerQuickConfig" />
+              </div>
+            </div>
+            <div class="btn-line" style="margin-top:10px;">
+              <button
+                class="btn btn-success"
+                :disabled="isInternalDeploymentRole || health.handover_scheduler.running || isActionLocked(actionKeyHandoverSchedulerStart)"
+                @click="startHandoverScheduler"
+              >
+                {{
+                  isActionLocked(actionKeyHandoverSchedulerStart)
+                    ? '启动中...'
+                    : (health.handover_scheduler.running ? '已启动调度' : '启动调度')
+                }}
+              </button>
+              <button
+                class="btn btn-danger"
+                :disabled="isInternalDeploymentRole || !health.handover_scheduler.running || isActionLocked(actionKeyHandoverSchedulerStop)"
+                @click="stopHandoverScheduler"
+              >
+                {{ isActionLocked(actionKeyHandoverSchedulerStop) ? '停止中...' : '停止调度' }}
+              </button>
+            </div>
+            <div class="hint">{{ handoverSchedulerQuickSaving ? '交接班调度配置保存中...' : '修改上午或下午时间后自动保存。' }}</div>
+          </article>
           <div class="handover-task-shell-redesign">
             <div class="handover-top-grid">
               <article class="task-block">
@@ -934,8 +854,11 @@
                 </div>
               </article>
 
-              <article class="task-block handover-daily-report-panel">
-                <div class="task-block-head">
+              <details class="module-advanced-section">
+                <summary>查看日报截图与日报记录</summary>
+                <div class="module-advanced-section-body">
+                  <article class="task-block handover-daily-report-panel">
+                    <div class="task-block-head">
                   <div>
                     <div class="task-block-kicker">日报多维</div>
                     <h3 class="card-title">自动截图与日报记录</h3>
@@ -1150,10 +1073,15 @@
                 <div class="hint" v-if="!canRewriteHandoverDailyReportRecord">
                   需要当前批次已有云文档链接，且两张截图都存在，才能重写日报多维表记录。
                 </div>
-              </article>
-            </div>
+                  </article>
+                </div>
+              </details>
 
-            <div class="handover-bottom-grid">
+            <details class="module-advanced-section">
+              <summary>查看审核访问与调度</summary>
+              <div class="module-advanced-section-body">
+                <div class="handover-bottom-grid">
+
               <article class="handover-access-panel review-board-panel">
                 <div class="task-block-head">
                   <div>
@@ -1214,91 +1142,70 @@
                   </div>
                 </div>
               </article>
-
-              <article class="task-block">
-                <div class="task-block-head">
-                  <div>
-                    <div class="task-block-kicker">调度入口</div>
-                    <h3 class="card-title">交接班调度</h3>
-                  </div>
-                  <span
-                    class="status-badge status-badge-soft"
-                    :class="health.handover_scheduler.running ? 'tone-success' : 'tone-neutral'"
-                  >
-                    {{ health.handover_scheduler.status || '-' }}
-                  </span>
                 </div>
-                <div class="hint">上午时间点用于补跑前一天夜班，下午时间点用于执行当天白班。</div>
-                <div class="hint" v-if="!health.handover_scheduler.executor_bound">
-                  当前调度执行器未绑定，保存配置后也不会自动执行。
-                </div>
-
-                <div class="task-grid two-col" style="margin-top:10px;">
-                  <div class="form-row">
-                    <label><input type="checkbox" v-model="config.handover_log.scheduler.enabled" /> 启用调度</label>
-                  </div>
-                  <div class="form-row">
-                    <label><input type="checkbox" v-model="config.handover_log.scheduler.auto_start_in_gui" /> 启动后自动开启</label>
-                  </div>
-                  <div class="form-row">
-                    <label class="label">上午时间</label>
-                    <input type="time" step="1" v-model="config.handover_log.scheduler.morning_time" />
-                  </div>
-                  <div class="form-row">
-                    <label class="label">下午时间</label>
-                    <input type="time" step="1" v-model="config.handover_log.scheduler.afternoon_time" />
-                  </div>
-                </div>
-
-                <div class="form-row" style="margin-top:6px;">
-                  <label class="label">上午下次执行</label>
-                  <div class="readonly-inline-card">
-                    {{ (health.handover_scheduler.morning && health.handover_scheduler.morning.next_run_time) || '-' }}
-                  </div>
-                </div>
-                <div class="form-row">
-                  <label class="label">下午下次执行</label>
-                  <div class="readonly-inline-card">
-                    {{ (health.handover_scheduler.afternoon && health.handover_scheduler.afternoon.next_run_time) || '-' }}
-                  </div>
-                </div>
-
-                <div class="btn-line" style="margin-top:10px;">
-                  <button
-                    class="btn btn-success"
-                    :disabled="isInternalDeploymentRole || health.handover_scheduler.running || isActionLocked(actionKeyHandoverSchedulerStart)"
-                    @click="startHandoverScheduler"
-                  >
-                    {{
-                      isActionLocked(actionKeyHandoverSchedulerStart)
-                        ? '启动中...'
-                        : (health.handover_scheduler.running ? '已启动调度' : '启动调度')
-                    }}
-                  </button>
-                  <button
-                    class="btn btn-danger"
-                    :disabled="isInternalDeploymentRole || !health.handover_scheduler.running || isActionLocked(actionKeyHandoverSchedulerStop)"
-                    @click="stopHandoverScheduler"
-                  >
-                    {{ isActionLocked(actionKeyHandoverSchedulerStop) ? '停止中...' : '停止调度' }}
-                  </button>
-                  <button
-                    class="btn btn-secondary"
-                    :disabled="handoverSchedulerQuickSaving || isActionLocked(actionKeyHandoverSchedulerSave)"
-                    @click="saveHandoverSchedulerQuickConfig"
-                  >
-                    {{ handoverSchedulerQuickSaving || isActionLocked(actionKeyHandoverSchedulerSave) ? '保存中...' : '保存调度配置' }}
-                  </button>
-                </div>
-                <div class="hint" v-if="isInternalDeploymentRole" style="margin-top:8px;">
-                  当前为内网端，交接班调度请在外网端启用；内网端只负责共享桥接下载阶段。
-                </div>
-              </article>
-            </div>
+              </div>
+            </details>
           </div>
         </section>
 
         <section class="content-card" v-if="dashboardActiveModule === 'day_metric_upload'">
+          <article class="task-block" style="margin-bottom:16px;">
+            <div class="task-block-head">
+              <div>
+                <div class="task-block-kicker">调度卡</div>
+                <h3 class="card-title">12项独立上传调度</h3>
+              </div>
+              <span class="status-badge status-badge-soft" :class="health.day_metric_upload.scheduler.running ? 'tone-success' : 'tone-neutral'">
+                {{ health.day_metric_upload.scheduler.status || '-' }}
+              </span>
+            </div>
+            <div class="status-metric-grid status-metric-grid-compact">
+              <div class="status-metric">
+                <div class="status-metric-label">下次执行</div>
+                <strong class="status-metric-value">{{ health.day_metric_upload.scheduler.next_run_time || '-' }}</strong>
+              </div>
+              <div class="status-metric">
+                <div class="status-metric-label">最近触发</div>
+                <strong class="status-metric-value">{{ health.day_metric_upload.scheduler.last_trigger_at || '-' }}</strong>
+              </div>
+              <div class="status-metric">
+                <div class="status-metric-label">最近决策</div>
+                <strong class="status-metric-value">{{ dayMetricUploadSchedulerDecisionText || '-' }}</strong>
+              </div>
+            </div>
+            <div class="hint">调度固定处理当天、全部启用楼栋；缺共享文件时会显示等待内网补采同步。</div>
+            <div class="task-grid two-col">
+              <div class="form-row">
+                <label class="label">每日执行时间</label>
+                <input type="time" step="1" v-model="config.day_metric_upload.scheduler.run_time" @change="saveDayMetricUploadSchedulerQuickConfig" />
+              </div>
+              <div class="form-row">
+                <label class="label">最近结果</label>
+                <div class="readonly-inline-card">{{ dayMetricUploadSchedulerTriggerText || '-' }}</div>
+              </div>
+            </div>
+            <div class="btn-line">
+              <button
+                class="btn btn-success"
+                :disabled="isInternalDeploymentRole || health.day_metric_upload.scheduler.running || isActionLocked(actionKeyDayMetricUploadSchedulerStart)"
+                @click="startDayMetricUploadScheduler"
+              >
+                {{
+                  isActionLocked(actionKeyDayMetricUploadSchedulerStart)
+                    ? '启动中...'
+                    : (health.day_metric_upload.scheduler.running ? '已启动调度' : '启动调度')
+                }}
+              </button>
+              <button
+                class="btn btn-danger"
+                :disabled="isInternalDeploymentRole || !health.day_metric_upload.scheduler.running || isActionLocked(actionKeyDayMetricUploadSchedulerStop)"
+                @click="stopDayMetricUploadScheduler"
+              >
+                {{ isActionLocked(actionKeyDayMetricUploadSchedulerStop) ? '停止中...' : '停止调度' }}
+              </button>
+            </div>
+            <div class="hint">{{ dayMetricUploadSchedulerQuickSaving ? '12项独立上传调度配置保存中...' : '修改每日执行时间后自动保存。' }}</div>
+          </article>
           <div class="day-metric-shell">
             <div class="day-metric-top-grid">
               <article class="task-block">
@@ -1307,8 +1214,8 @@
                     <div class="task-block-kicker">独立执行</div>
                     <h3 class="card-title">12项执行参数</h3>
                   </div>
-                  <div class="btn-line">
-                    <span class="status-badge status-badge-soft tone-info">固定白班</span>
+                <div class="btn-line">
+                    <span class="status-badge status-badge-soft tone-info">不区分班次</span>
                     <span
                       class="status-badge status-badge-soft"
                       :class="deploymentRoleMode === 'external' ? 'tone-success' : 'tone-neutral'"
@@ -1342,7 +1249,6 @@
                       : '当前为外网端，默认优先读取共享文件；缺失时再等待内网端补采。'
                   }}
                 </div>
-                <div class="hint" v-if="!dayMetricUploadEnabled">当前配置已禁用 12 项独立上传，可在配置中心开启。</div>
 
                 <div class="task-grid two-col" style="margin-top:8px;">
                   <div class="form-row">
@@ -1427,7 +1333,7 @@
                 </div>
                 <div class="ops-focus-card">
                   <div class="ops-focus-card-label">执行说明</div>
-                  <div class="ops-focus-card-title">优先使用共享文件上传 12 项，适合白班独立修复与重写</div>
+                  <div class="ops-focus-card-title">优先使用共享文件上传 12 项，按同楼同日先删后写</div>
                   <div class="ops-focus-card-meta">会按日期升序、楼栋配置顺序逐个执行；失败单元不会阻断其余日期或楼栋。</div>
                 </div>
                 <div class="hint">执行顺序：按日期升序、楼栋配置顺序逐个执行。失败单元不会中断其他日期或楼栋。</div>
@@ -1450,7 +1356,7 @@
                 <div class="btn-stack" style="margin-top:8px;">
                   <button
                     class="btn btn-primary"
-                    :disabled="isInternalDeploymentRole || !dayMetricUploadEnabled || !canRun || isActionLocked(actionKeyDayMetricFromDownload)"
+                    :disabled="isInternalDeploymentRole || !canRun || isActionLocked(actionKeyDayMetricFromDownload)"
                     @click="runDayMetricFromDownload"
                   >
                     {{ isActionLocked(actionKeyDayMetricFromDownload) ? '执行中...' : '使用共享文件上传12项' }}
@@ -1461,15 +1367,16 @@
               </article>
             </div>
 
+            <details class="module-advanced-section">
+              <summary>查看本地文件补录</summary>
+              <div class="module-advanced-section-body">
             <article class="task-block">
               <div class="task-block-head">
                 <div>
                   <div class="task-block-kicker">补录入口</div>
                   <h3 class="card-title">本地文件补录</h3>
                 </div>
-                <span class="status-badge status-badge-soft" :class="dayMetricLocalImportEnabled ? 'tone-info' : 'tone-neutral'">
-                  {{ dayMetricLocalImportEnabled ? '已启用' : '已禁用' }}
-                </span>
+                <span class="status-badge status-badge-soft tone-info">默认启用</span>
               </div>
               <div class="status-metric-grid status-metric-grid-compact">
                 <div class="status-metric">
@@ -1482,7 +1389,7 @@
                 </div>
                 <div class="status-metric">
                   <div class="status-metric-label">功能状态</div>
-                  <strong class="status-metric-value">{{ dayMetricLocalImportEnabled ? '已启用' : '已禁用' }}</strong>
+                  <strong class="status-metric-value">默认启用</strong>
                 </div>
               </div>
               <div class="hint">仅用于单日期单楼补救，不走内网下载。{{ externalExecutionHint }}</div>
@@ -1505,7 +1412,7 @@
               <div class="btn-line">
                 <button
                   class="btn btn-secondary"
-                  :disabled="isInternalDeploymentRole || !dayMetricLocalImportEnabled || !canRun || isActionLocked(actionKeyDayMetricFromFile)"
+                  :disabled="isInternalDeploymentRole || !canRun || isActionLocked(actionKeyDayMetricFromFile)"
                   @click="runDayMetricFromFile"
                 >
                   {{ isActionLocked(actionKeyDayMetricFromFile) ? '补录中...' : '开始补录12项' }}
@@ -1513,8 +1420,13 @@
               </div>
               <div class="hint" v-if="isInternalDeploymentRole">当前为内网端，本地文件补录也请在外网端执行。</div>
             </article>
+              </div>
+            </details>
 
-            <article class="task-block" v-if="dayMetricCurrentPayload">
+            <details class="module-advanced-section" v-if="dayMetricCurrentPayload">
+              <summary>查看执行结果汇总</summary>
+              <div class="module-advanced-section-body">
+            <article class="task-block">
               <div class="task-block-head">
                 <div>
                   <div class="task-block-kicker">执行结果</div>
@@ -1592,9 +1504,67 @@
                 </table>
               </div>
             </article>
+              </div>
+            </details>
           </div>
         </section>
         <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'wet_bulb_collection'">
+          <article class="task-block" style="margin-bottom:16px;">
+            <div class="task-block-head">
+              <div>
+                <div class="task-block-kicker">调度卡</div>
+                <h3 class="card-title">湿球温度定时采集调度</h3>
+              </div>
+              <span class="status-badge status-badge-soft" :class="health.wet_bulb_collection.scheduler.running ? 'tone-success' : 'tone-neutral'">
+                {{ health.wet_bulb_collection.scheduler.status || '-' }}
+              </span>
+            </div>
+            <div class="status-metric-grid status-metric-grid-compact">
+              <div class="status-metric">
+                <div class="status-metric-label">运行间隔</div>
+                <strong class="status-metric-value">{{ config.wet_bulb_collection.scheduler.interval_minutes || '-' }} 分钟</strong>
+              </div>
+              <div class="status-metric">
+                <div class="status-metric-label">下次执行</div>
+                <strong class="status-metric-value">{{ health.wet_bulb_collection.scheduler.next_run_time || '-' }}</strong>
+              </div>
+              <div class="status-metric">
+                <div class="status-metric-label">最近结果</div>
+                <strong class="status-metric-value">{{ wetBulbSchedulerTriggerText || '-' }}</strong>
+              </div>
+            </div>
+            <div class="task-grid two-col">
+              <div class="form-row">
+                <label class="label">每 N 分钟运行一次</label>
+                <input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.interval_minutes" @change="saveWetBulbCollectionSchedulerQuickConfig" />
+              </div>
+              <div class="form-row">
+                <label class="label">检查间隔（秒）</label>
+                <input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.check_interval_sec" @change="saveWetBulbCollectionSchedulerQuickConfig" />
+              </div>
+            </div>
+            <div class="btn-line">
+              <button
+                class="btn btn-success"
+                :disabled="health.wet_bulb_collection.scheduler.running || isActionLocked(actionKeyWetBulbSchedulerStart)"
+                @click="startWetBulbCollectionScheduler"
+              >
+                {{
+                  isActionLocked(actionKeyWetBulbSchedulerStart)
+                    ? '启动中...'
+                    : (health.wet_bulb_collection.scheduler.running ? '已启动调度' : '启动调度')
+                }}
+              </button>
+              <button
+                class="btn btn-danger"
+                :disabled="!health.wet_bulb_collection.scheduler.running || isActionLocked(actionKeyWetBulbSchedulerStop)"
+                @click="stopWetBulbCollectionScheduler"
+              >
+                {{ isActionLocked(actionKeyWetBulbSchedulerStop) ? '停止中...' : '停止调度' }}
+              </button>
+            </div>
+            <div class="hint">{{ wetBulbSchedulerQuickSaving ? '湿球温度定时采集调度配置保存中...' : '修改执行间隔后自动保存。' }}</div>
+          </article>
           <div class="module-section-grid">
             <article class="task-block task-block-accent">
               <div class="task-block-head">
@@ -1703,64 +1673,6 @@
             </div>
           </div>
 
-          <article class="task-block task-block-compact" style="margin-top:16px;">
-            <div class="task-block-head">
-              <div>
-                <div class="task-block-kicker">调度参数</div>
-                <h3 class="card-title">定时执行设置</h3>
-              </div>
-              <span class="status-badge status-badge-soft" :class="health.wet_bulb_collection.scheduler.running ? 'tone-success' : 'tone-neutral'">
-                {{ health.wet_bulb_collection.scheduler.status || '-' }}
-              </span>
-            </div>
-            <div class="status-metric-grid status-metric-grid-compact">
-              <div class="status-metric">
-                <div class="status-metric-label">运行间隔</div>
-                <strong class="status-metric-value">{{ config.wet_bulb_collection.scheduler.interval_minutes || '-' }} 分钟</strong>
-              </div>
-              <div class="status-metric">
-                <div class="status-metric-label">检查间隔</div>
-                <strong class="status-metric-value">{{ config.wet_bulb_collection.scheduler.check_interval_sec || '-' }} 秒</strong>
-              </div>
-              <div class="status-metric">
-                <div class="status-metric-label">当前状态</div>
-                <strong class="status-metric-value">{{ health.wet_bulb_collection.scheduler.status || '-' }}</strong>
-              </div>
-            </div>
-            <div class="task-grid two-col">
-              <div class="form-row">
-                <label class="label">每 N 分钟运行一次</label>
-                <input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.interval_minutes" />
-              </div>
-              <div class="form-row">
-                <label class="label">检查间隔（秒）</label>
-                <input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.check_interval_sec" />
-              </div>
-            </div>
-            <div class="btn-line">
-              <button
-                class="btn btn-success"
-                :disabled="health.wet_bulb_collection.scheduler.running || isActionLocked(actionKeyWetBulbSchedulerStart)"
-                @click="startWetBulbCollectionScheduler"
-              >
-                {{
-                  isActionLocked(actionKeyWetBulbSchedulerStart)
-                    ? '启动中...'
-                    : (health.wet_bulb_collection.scheduler.running ? '已启动调度' : '启动调度')
-                }}
-              </button>
-              <button
-                class="btn btn-danger"
-                :disabled="!health.wet_bulb_collection.scheduler.running || isActionLocked(actionKeyWetBulbSchedulerStop)"
-                @click="stopWetBulbCollectionScheduler"
-              >
-                {{ isActionLocked(actionKeyWetBulbSchedulerStop) ? '停止中...' : '停止调度' }}
-              </button>
-              <button class="btn btn-secondary" :disabled="wetBulbSchedulerQuickSaving || isActionLocked(actionKeyWetBulbSchedulerSave)" @click="saveWetBulbCollectionSchedulerQuickConfig">
-                {{ wetBulbSchedulerQuickSaving || isActionLocked(actionKeyWetBulbSchedulerSave) ? '保存中...' : '保存调度配置' }}
-              </button>
-            </div>
-          </article>
         </section>
 
         <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'monthly_event_report'">
@@ -1800,25 +1712,19 @@
               </div>
               <div class="hint">下次执行：{{ health.monthly_event_report.scheduler.next_run_time || '-' }}</div>
               <div class="hint">最近触发：{{ health.monthly_event_report.scheduler.last_trigger_at || '-' }} / {{ monthlyEventReportSchedulerTriggerText || '-' }}</div>
-              <div class="form-row">
-                <label><input type="checkbox" v-model="config.handover_log.monthly_event_report.scheduler.enabled" /> 启用调度</label>
-              </div>
-              <div class="form-row">
-                <label><input type="checkbox" v-model="config.handover_log.monthly_event_report.scheduler.auto_start_in_gui" /> 启动后自动开启</label>
-              </div>
               <div class="task-grid two-col">
                 <div class="form-row">
                   <label class="label">每月几号</label>
-                  <input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_event_report.scheduler.day_of_month" />
+                  <input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_event_report.scheduler.day_of_month" @change="saveMonthlyEventReportSchedulerQuickConfig" />
                 </div>
                 <div class="form-row">
                   <label class="label">时间（HH:mm:ss）</label>
-                  <input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" />
+                  <input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" @change="saveMonthlyEventReportSchedulerQuickConfig" />
                 </div>
               </div>
               <div class="form-row">
                 <label class="label">检查间隔（秒）</label>
-                <input type="number" min="1" v-model.number="config.handover_log.monthly_event_report.scheduler.check_interval_sec" />
+                <input type="number" min="1" v-model.number="config.handover_log.monthly_event_report.scheduler.check_interval_sec" @change="saveMonthlyEventReportSchedulerQuickConfig" />
               </div>
               <div class="btn-line">
                 <button
@@ -1839,14 +1745,8 @@
                 >
                   {{ isActionLocked(actionKeyMonthlyEventReportSchedulerStop) ? '停止中...' : '停止调度' }}
                 </button>
-                <button
-                  class="btn btn-secondary"
-                  :disabled="monthlyEventReportSchedulerQuickSaving || isActionLocked(actionKeyMonthlyEventReportSchedulerSave)"
-                  @click="saveMonthlyEventReportSchedulerQuickConfig"
-                >
-                  {{ monthlyEventReportSchedulerQuickSaving || isActionLocked(actionKeyMonthlyEventReportSchedulerSave) ? '保存中...' : '保存调度配置' }}
-                </button>
               </div>
+              <div class="hint">{{ monthlyEventReportSchedulerQuickSaving ? '事件月报调度配置保存中...' : '修改日期、时间或检查间隔后自动保存。' }}</div>
             </article>
 
             <article class="task-block task-block-accent">
@@ -1923,6 +1823,9 @@
               </div>
             </article>
 
+            <details class="module-advanced-section">
+              <summary>查看事件月报发送设置</summary>
+              <div class="module-advanced-section-body">
             <article class="task-block">
               <div class="task-block-head">
                 <div>
@@ -2066,7 +1969,12 @@
                 </tbody>
               </table>
             </article>
+              </div>
+            </details>
 
+            <details class="module-advanced-section">
+              <summary>查看事件月报最近结果</summary>
+              <div class="module-advanced-section-body">
             <article class="task-block">
               <div class="task-block-head">
                 <div>
@@ -2116,6 +2024,8 @@
               <div class="hint" v-if="monthlyEventReportDeliveryLastRun.test_file_name">测试发送文件：{{ monthlyEventReportDeliveryLastRun.test_file_building || '-' }} / {{ monthlyEventReportDeliveryLastRun.test_file_name }}</div>
               <div class="hint" v-if="monthlyEventReportDeliveryLastRun.error">发送错误：{{ monthlyEventReportDeliveryLastRun.error }}</div>
             </article>
+              </div>
+            </details>
           </div>
 
           <div class="hr"></div>
@@ -2151,25 +2061,19 @@
               </div>
               <div class="hint">下次执行：{{ health.monthly_change_report.scheduler.next_run_time || '-' }}</div>
               <div class="hint">最近触发：{{ health.monthly_change_report.scheduler.last_trigger_at || '-' }} / {{ monthlyChangeReportSchedulerTriggerText || '-' }}</div>
-              <div class="form-row">
-                <label><input type="checkbox" v-model="config.handover_log.monthly_change_report.scheduler.enabled" /> 启用调度</label>
-              </div>
-              <div class="form-row">
-                <label><input type="checkbox" v-model="config.handover_log.monthly_change_report.scheduler.auto_start_in_gui" /> 启动后自动开启</label>
-              </div>
               <div class="task-grid two-col">
                 <div class="form-row">
                   <label class="label">每月几号</label>
-                  <input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_change_report.scheduler.day_of_month" />
+                  <input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_change_report.scheduler.day_of_month" @change="saveMonthlyChangeReportSchedulerQuickConfig" />
                 </div>
                 <div class="form-row">
                   <label class="label">时间（HH:mm:ss）</label>
-                  <input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" />
+                  <input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" @change="saveMonthlyChangeReportSchedulerQuickConfig" />
                 </div>
               </div>
               <div class="form-row">
                 <label class="label">检查间隔（秒）</label>
-                <input type="number" min="1" v-model.number="config.handover_log.monthly_change_report.scheduler.check_interval_sec" />
+                <input type="number" min="1" v-model.number="config.handover_log.monthly_change_report.scheduler.check_interval_sec" @change="saveMonthlyChangeReportSchedulerQuickConfig" />
               </div>
               <div class="btn-line">
                 <button
@@ -2190,14 +2094,8 @@
                 >
                   {{ isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) ? '停止中...' : '停止调度' }}
                 </button>
-                <button
-                  class="btn btn-secondary"
-                  :disabled="monthlyChangeReportSchedulerQuickSaving || isActionLocked(actionKeyMonthlyChangeReportSchedulerSave)"
-                  @click="saveMonthlyChangeReportSchedulerQuickConfig"
-                >
-                  {{ monthlyChangeReportSchedulerQuickSaving || isActionLocked(actionKeyMonthlyChangeReportSchedulerSave) ? '保存中...' : '保存调度配置' }}
-                </button>
               </div>
+              <div class="hint">{{ monthlyChangeReportSchedulerQuickSaving ? '变更月报调度配置保存中...' : '修改日期、时间或检查间隔后自动保存。' }}</div>
             </article>
 
             <article class="task-block task-block-accent">
@@ -2274,6 +2172,9 @@
               </div>
             </article>
 
+            <details class="module-advanced-section">
+              <summary>查看变更月报发送设置</summary>
+              <div class="module-advanced-section-body">
             <article class="task-block">
               <div class="task-block-head">
                 <div>
@@ -2417,7 +2318,12 @@
                 </tbody>
               </table>
             </article>
+              </div>
+            </details>
 
+            <details class="module-advanced-section">
+              <summary>查看变更月报最近结果</summary>
+              <div class="module-advanced-section-body">
             <article class="task-block">
               <div class="task-block-head">
                 <div>
@@ -2467,10 +2373,69 @@
               <div class="hint" v-if="monthlyChangeReportDeliveryLastRun.test_file_name">测试发送文件：{{ monthlyChangeReportDeliveryLastRun.test_file_building || '-' }} / {{ monthlyChangeReportDeliveryLastRun.test_file_name }}</div>
               <div class="hint" v-if="monthlyChangeReportDeliveryLastRun.error">发送错误：{{ monthlyChangeReportDeliveryLastRun.error }}</div>
             </article>
+              </div>
+            </details>
           </div>
         </section>
 
         <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'alarm_event_upload'">
+          <article class="task-block" style="margin-bottom:16px;">
+            <div class="task-block-head">
+              <div>
+                <div class="task-block-kicker">调度卡</div>
+                <h3 class="card-title">告警信息上传调度</h3>
+              </div>
+              <span class="status-badge status-badge-soft" :class="health.alarm_event_upload.scheduler.running ? 'tone-success' : 'tone-neutral'">
+                {{ health.alarm_event_upload.scheduler.status || '-' }}
+              </span>
+            </div>
+            <div class="status-metric-grid status-metric-grid-compact">
+              <div class="status-metric">
+                <div class="status-metric-label">下次执行</div>
+                <strong class="status-metric-value">{{ health.alarm_event_upload.scheduler.next_run_time || '-' }}</strong>
+              </div>
+              <div class="status-metric">
+                <div class="status-metric-label">最近触发</div>
+                <strong class="status-metric-value">{{ health.alarm_event_upload.scheduler.last_trigger_at || '-' }}</strong>
+              </div>
+              <div class="status-metric">
+                <div class="status-metric-label">最近结果</div>
+                <strong class="status-metric-value">{{ alarmEventUploadSchedulerTriggerText || '-' }}</strong>
+              </div>
+            </div>
+            <div class="hint">调度固定执行“使用共享文件上传60天（全部楼栋）”，不提供单楼调度。</div>
+            <div class="task-grid two-col">
+              <div class="form-row">
+                <label class="label">每日执行时间</label>
+                <input type="time" step="1" v-model="config.alarm_export.scheduler.run_time" @change="saveAlarmEventUploadSchedulerQuickConfig" />
+              </div>
+              <div class="form-row">
+                <label class="label">最近决策</label>
+                <div class="readonly-inline-card">{{ alarmEventUploadSchedulerDecisionText || '-' }}</div>
+              </div>
+            </div>
+            <div class="btn-line">
+              <button
+                class="btn btn-success"
+                :disabled="health.alarm_event_upload.scheduler.running || isActionLocked(actionKeyAlarmEventUploadSchedulerStart)"
+                @click="startAlarmEventUploadScheduler"
+              >
+                {{
+                  isActionLocked(actionKeyAlarmEventUploadSchedulerStart)
+                    ? '启动中...'
+                    : (health.alarm_event_upload.scheduler.running ? '已启动调度' : '启动调度')
+                }}
+              </button>
+              <button
+                class="btn btn-danger"
+                :disabled="!health.alarm_event_upload.scheduler.running || isActionLocked(actionKeyAlarmEventUploadSchedulerStop)"
+                @click="stopAlarmEventUploadScheduler"
+              >
+                {{ isActionLocked(actionKeyAlarmEventUploadSchedulerStop) ? '停止中...' : '停止调度' }}
+              </button>
+            </div>
+            <div class="hint">{{ alarmEventUploadSchedulerQuickSaving ? '告警信息上传调度配置保存中...' : '修改每日执行时间后自动保存。' }}</div>
+          </article>
           <h3 class="card-title">告警信息上传</h3>
           <div class="hint">状态总览只保留告警文件只读状态，所有告警上传入口统一收在这个专项模块里。</div>
           <div class="hint">外网端按楼读取当天最新一份告警文件，缺失则回退昨天最新，并只上传 60 天内的告警记录。</div>
@@ -2537,6 +2502,9 @@
               </div>
             </article>
 
+            <details class="module-advanced-section">
+              <summary>查看目标多维表与上传记录</summary>
+              <div class="module-advanced-section-body">
             <article class="task-block">
               <div class="task-block-head">
                 <div>
@@ -2595,6 +2563,8 @@
                 最近上传异常：{{ externalAlarmReadinessFamily.uploadLastError }}
               </div>
             </article>
+              </div>
+            </details>
           </div>
 
           <article class="task-block" style="margin-top:16px;">
@@ -2621,30 +2591,15 @@
                   <span class="source-cache-building-card-title">{{ building.building }}</span>
                   <span class="status-badge status-badge-soft" :class="'tone-' + building.tone">{{ building.stateText }}</span>
                 </div>
-                <div class="hint">来源：{{ building.sourceKindText || '-' }}</div>
-                <div class="hint">选择：{{ building.selectionScopeText || '-' }}</div>
-                <div class="hint">选中文件时间：{{ building.selectedDownloadedAt || '-' }}</div>
-                <div class="hint">{{ building.detailText || '-' }}</div>
+                <div class="hint">同步日期：{{ building.selectionReferenceDate || externalAlarmReadinessFamily.selectionReferenceDate || '-' }}</div>
+                <div class="hint">选择文件时间：{{ building.selectedDownloadedAt || '-' }}</div>
+                <div class="hint">{{ building.detailText || building.selectionScopeText || building.sourceKindText || '-' }}</div>
                 <div class="hint" v-if="building.resolvedFilePath">共享路径：{{ building.resolvedFilePath }}</div>
                 <div class="hint" v-else-if="building.relativePath">缓存文件：{{ building.relativePath }}</div>
               </div>
             </div>
             <div class="hint" v-else style="margin-top:10px;">当前没有可展示的楼栋告警文件状态。</div>
           </article>
-        </section>
-
-        <section class="content-card log-wrap" v-if="dashboardActiveModule === 'runtime_logs'">
-          <div class="log-toolbar">
-            <div>
-              <h3 class="card-title" style="margin-bottom:4px;">运行日志</h3>
-              <div class="hint">任务状态: {{ currentJob ? currentJob.status : '-' }} {{ currentJob ? ('| 任务编号=' + currentJob.job_id) : '' }}</div>
-            </div>
-            <div class="btn-line">
-              <input type="text" v-model="logFilter" placeholder="关键字过滤日志" style="width:220px" />
-              <button class="btn btn-secondary" @click="clearLogs">清空日志</button>
-            </div>
-          </div>
-          <div id="logBox" class="log-box">{{ filteredLogs.join('\\n') }}</div>
         </section>
 
         <div

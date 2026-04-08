@@ -60,6 +60,10 @@ class AppContainer:
     handover_scheduler_callback: Callable[[str, str], tuple[bool, str]] | None = None
     wet_bulb_collection_scheduler: IntervalSchedulerService | None = None
     wet_bulb_collection_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
+    day_metric_upload_scheduler: DailyAutoSchedulerService | None = None
+    day_metric_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
+    alarm_event_upload_scheduler: DailyAutoSchedulerService | None = None
+    alarm_event_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     monthly_change_report_scheduler: MonthlySchedulerService | None = None
     monthly_change_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     monthly_event_report_scheduler: MonthlySchedulerService | None = None
@@ -121,6 +125,10 @@ class AppContainer:
             self.handover_scheduler_manager = self._build_handover_scheduler_manager()
         if not self.wet_bulb_collection_scheduler:
             self.wet_bulb_collection_scheduler = self._build_wet_bulb_collection_scheduler()
+        if not self.day_metric_upload_scheduler:
+            self.day_metric_upload_scheduler = self._build_day_metric_upload_scheduler()
+        if not self.alarm_event_upload_scheduler:
+            self.alarm_event_upload_scheduler = self._build_alarm_event_upload_scheduler()
         if not self.monthly_change_report_scheduler:
             self.monthly_change_report_scheduler = self._build_monthly_change_report_scheduler()
         if not self.monthly_event_report_scheduler:
@@ -153,6 +161,10 @@ class AppContainer:
             self.handover_scheduler_manager.set_run_callback(self.handover_scheduler_callback)
         if self.wet_bulb_collection_scheduler_callback and self.wet_bulb_collection_scheduler:
             self.wet_bulb_collection_scheduler.run_callback = self.wet_bulb_collection_scheduler_callback
+        if self.day_metric_upload_scheduler_callback and self.day_metric_upload_scheduler:
+            self.day_metric_upload_scheduler.run_callback = self.day_metric_upload_scheduler_callback
+        if self.alarm_event_upload_scheduler_callback and self.alarm_event_upload_scheduler:
+            self.alarm_event_upload_scheduler.run_callback = self.alarm_event_upload_scheduler_callback
         if self.monthly_change_report_scheduler_callback and self.monthly_change_report_scheduler:
             self.monthly_change_report_scheduler.run_callback = self.monthly_change_report_scheduler_callback
         if self.monthly_event_report_scheduler_callback and self.monthly_event_report_scheduler:
@@ -289,6 +301,40 @@ class AppContainer:
             source_name="湿球温度定时采集",
         )
 
+    def _build_day_metric_upload_scheduler(self) -> DailyAutoSchedulerService:
+        day_metric_cfg = self.runtime_config.get("day_metric_upload", {})
+        if not isinstance(day_metric_cfg, dict):
+            day_metric_cfg = {}
+        paths_cfg = self.runtime_config.get("paths", {})
+        if not isinstance(paths_cfg, dict):
+            paths_cfg = {}
+        return DailyAutoSchedulerService(
+            config={
+                "scheduler": day_metric_cfg.get("scheduler", {}),
+                "paths": paths_cfg,
+            },
+            emit_log=self.add_system_log,
+            run_callback=self.day_metric_upload_scheduler_callback or self._day_metric_upload_scheduler_run_callback,
+            is_busy=self.job_service.has_incomplete_jobs,
+        )
+
+    def _build_alarm_event_upload_scheduler(self) -> DailyAutoSchedulerService:
+        alarm_cfg = self.runtime_config.get("alarm_export", {})
+        if not isinstance(alarm_cfg, dict):
+            alarm_cfg = {}
+        paths_cfg = self.runtime_config.get("paths", {})
+        if not isinstance(paths_cfg, dict):
+            paths_cfg = {}
+        return DailyAutoSchedulerService(
+            config={
+                "scheduler": alarm_cfg.get("scheduler", {}),
+                "paths": paths_cfg,
+            },
+            emit_log=self.add_system_log,
+            run_callback=self.alarm_event_upload_scheduler_callback or self._alarm_event_upload_scheduler_run_callback,
+            is_busy=self.job_service.has_incomplete_jobs,
+        )
+
     def _build_monthly_change_report_scheduler(self) -> MonthlySchedulerService:
         handover_cfg = self.runtime_config.get("handover_log", {})
         if not isinstance(handover_cfg, dict):
@@ -357,16 +403,22 @@ class AppContainer:
     def _wet_bulb_collection_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"湿球温度定时采集调度回调尚未绑定执行器(source={source})"
 
+    def _day_metric_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
+        return False, f"12项独立上传调度回调尚未绑定执行器(source={source})"
+
+    def _alarm_event_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
+        return False, f"告警信息上传调度回调尚未绑定执行器(source={source})"
+
     def _monthly_change_report_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"月度变更统计表调度回调尚未绑定执行器(source={source})"
 
     def _monthly_event_report_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"月度事件统计表调度回调尚未绑定执行器(source={source})"
 
-    def _is_placeholder_callback(self, callback: Any) -> bool:
+    def _is_placeholder_callback(self, callback: Any, placeholder: Any | None = None) -> bool:
         if callback is None:
             return True
-        placeholder = self._scheduler_run_callback
+        placeholder = placeholder or self._scheduler_run_callback
         cb_func = getattr(callback, "__func__", None)
         cb_self = getattr(callback, "__self__", None)
         ph_func = getattr(placeholder, "__func__", None)
@@ -417,6 +469,48 @@ class AppContainer:
         callback = self.wet_bulb_collection_scheduler_callback
         if callback is None:
             return "-"
+        name = getattr(callback, "__name__", "")
+        if not name:
+            name = getattr(getattr(callback, "__func__", None), "__name__", "")
+        return str(name or "-")
+
+    def is_day_metric_upload_scheduler_executor_bound(self) -> bool:
+        callback = None
+        if self.day_metric_upload_scheduler:
+            callback = getattr(self.day_metric_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.day_metric_upload_scheduler_callback
+        return not self._is_placeholder_callback(callback, self._day_metric_upload_scheduler_run_callback)
+
+    def day_metric_upload_scheduler_executor_name(self) -> str:
+        callback = None
+        if self.day_metric_upload_scheduler:
+            callback = getattr(self.day_metric_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.day_metric_upload_scheduler_callback
+        if callback is None:
+            callback = self._day_metric_upload_scheduler_run_callback
+        name = getattr(callback, "__name__", "")
+        if not name:
+            name = getattr(getattr(callback, "__func__", None), "__name__", "")
+        return str(name or "-")
+
+    def is_alarm_event_upload_scheduler_executor_bound(self) -> bool:
+        callback = None
+        if self.alarm_event_upload_scheduler:
+            callback = getattr(self.alarm_event_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.alarm_event_upload_scheduler_callback
+        return not self._is_placeholder_callback(callback, self._alarm_event_upload_scheduler_run_callback)
+
+    def alarm_event_upload_scheduler_executor_name(self) -> str:
+        callback = None
+        if self.alarm_event_upload_scheduler:
+            callback = getattr(self.alarm_event_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.alarm_event_upload_scheduler_callback
+        if callback is None:
+            callback = self._alarm_event_upload_scheduler_run_callback
         name = getattr(callback, "__name__", "")
         if not name:
             name = getattr(getattr(callback, "__func__", None), "__name__", "")
@@ -483,6 +577,16 @@ class AppContainer:
         self.wet_bulb_collection_scheduler_callback = callback
         if self.wet_bulb_collection_scheduler:
             self.wet_bulb_collection_scheduler.run_callback = callback
+
+    def set_day_metric_upload_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
+        self.day_metric_upload_scheduler_callback = callback
+        if self.day_metric_upload_scheduler:
+            self.day_metric_upload_scheduler.run_callback = callback
+
+    def set_alarm_event_upload_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
+        self.alarm_event_upload_scheduler_callback = callback
+        if self.alarm_event_upload_scheduler:
+            self.alarm_event_upload_scheduler.run_callback = callback
 
     def set_monthly_change_report_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
         self.monthly_change_report_scheduler_callback = callback
@@ -673,6 +777,48 @@ class AppContainer:
             self.add_system_log("[湿球温度定时采集调度] 已禁用")
 
         self.add_system_log(
+            f"[12项独立上传调度] 启动阶段执行器状态: executor_bound={self.is_day_metric_upload_scheduler_executor_bound()}, "
+            f"callback={self.day_metric_upload_scheduler_executor_name()}"
+        )
+        day_metric_scheduler_status = self.day_metric_upload_scheduler_status()
+        if role_mode == "internal":
+            self.add_system_log("[12项独立上传调度] 当前为内网端，启动时不自动开启")
+        elif bool(day_metric_scheduler_status.get("enabled", False)):
+            day_metric_cfg = self.runtime_config.get("day_metric_upload", {})
+            if not isinstance(day_metric_cfg, dict):
+                day_metric_cfg = {}
+            day_metric_scheduler_cfg = day_metric_cfg.get("scheduler", {})
+            if not isinstance(day_metric_scheduler_cfg, dict):
+                day_metric_scheduler_cfg = {}
+            if bool(day_metric_scheduler_cfg.get("auto_start_in_gui", False)):
+                self.start_day_metric_upload_scheduler(source=source)
+            else:
+                self.add_system_log("[12项独立上传调度] 启动时未自动开启")
+        else:
+            self.add_system_log("[12项独立上传调度] 已禁用")
+
+        self.add_system_log(
+            f"[告警信息上传调度] 启动阶段执行器状态: executor_bound={self.is_alarm_event_upload_scheduler_executor_bound()}, "
+            f"callback={self.alarm_event_upload_scheduler_executor_name()}"
+        )
+        alarm_scheduler_status = self.alarm_event_upload_scheduler_status()
+        if role_mode == "internal":
+            self.add_system_log("[告警信息上传调度] 当前为内网端，启动时不自动开启")
+        elif bool(alarm_scheduler_status.get("enabled", False)):
+            alarm_cfg = self.runtime_config.get("alarm_export", {})
+            if not isinstance(alarm_cfg, dict):
+                alarm_cfg = {}
+            alarm_scheduler_cfg = alarm_cfg.get("scheduler", {})
+            if not isinstance(alarm_scheduler_cfg, dict):
+                alarm_scheduler_cfg = {}
+            if bool(alarm_scheduler_cfg.get("auto_start_in_gui", False)):
+                self.start_alarm_event_upload_scheduler(source=source)
+            else:
+                self.add_system_log("[告警信息上传调度] 启动时未自动开启")
+        else:
+            self.add_system_log("[告警信息上传调度] 已禁用")
+
+        self.add_system_log(
             f"[月度变更统计表调度] 启动阶段执行器状态: executor_bound={self.is_monthly_change_report_scheduler_executor_bound()}, "
             f"callback={self.monthly_change_report_scheduler_executor_name()}"
         )
@@ -783,6 +929,52 @@ class AppContainer:
             result = {"stopped": False, "running": False, "reason": "not_initialized"}
         self.add_system_log(
             f"[湿球温度定时采集调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def start_day_metric_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if not self.day_metric_upload_scheduler:
+            self.day_metric_upload_scheduler = self._build_day_metric_upload_scheduler()
+        result = self.day_metric_upload_scheduler.start()
+        self.add_system_log(
+            f"[12项独立上传调度] {source}启动请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}, "
+            f"executor_bound={self.is_day_metric_upload_scheduler_executor_bound()}, "
+            f"callback={self.day_metric_upload_scheduler_executor_name()}"
+        )
+        return result
+
+    def stop_day_metric_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if self.day_metric_upload_scheduler:
+            result = self.day_metric_upload_scheduler.stop()
+        else:
+            result = {"stopped": False, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            f"[12项独立上传调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def start_alarm_event_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if not self.alarm_event_upload_scheduler:
+            self.alarm_event_upload_scheduler = self._build_alarm_event_upload_scheduler()
+        result = self.alarm_event_upload_scheduler.start()
+        self.add_system_log(
+            f"[告警信息上传调度] {source}启动请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}, "
+            f"executor_bound={self.is_alarm_event_upload_scheduler_executor_bound()}, "
+            f"callback={self.alarm_event_upload_scheduler_executor_name()}"
+        )
+        return result
+
+    def stop_alarm_event_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if self.alarm_event_upload_scheduler:
+            result = self.alarm_event_upload_scheduler.stop()
+        else:
+            result = {"stopped": False, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            f"[告警信息上传调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
             f"running={bool(result.get('running', False))}"
         )
         return result
@@ -1069,6 +1261,50 @@ class AppContainer:
             **runtime,
         }
 
+    def day_metric_upload_scheduler_status(self) -> Dict[str, Any]:
+        if not self.day_metric_upload_scheduler:
+            return {
+                "enabled": False,
+                "running": False,
+                "status": "未初始化",
+                "next_run_time": "",
+                "last_check_at": "",
+                "last_decision": "",
+                "last_trigger_at": "",
+                "last_trigger_result": "",
+                "state_path": "",
+                "state_exists": False,
+            }
+        runtime = self.day_metric_upload_scheduler.get_runtime_snapshot()
+        return {
+            "enabled": bool(self.day_metric_upload_scheduler.enabled),
+            "status": self.day_metric_upload_scheduler.status_text(),
+            "next_run_time": self.day_metric_upload_scheduler.next_run_text(),
+            **runtime,
+        }
+
+    def alarm_event_upload_scheduler_status(self) -> Dict[str, Any]:
+        if not self.alarm_event_upload_scheduler:
+            return {
+                "enabled": False,
+                "running": False,
+                "status": "未初始化",
+                "next_run_time": "",
+                "last_check_at": "",
+                "last_decision": "",
+                "last_trigger_at": "",
+                "last_trigger_result": "",
+                "state_path": "",
+                "state_exists": False,
+            }
+        runtime = self.alarm_event_upload_scheduler.get_runtime_snapshot()
+        return {
+            "enabled": bool(self.alarm_event_upload_scheduler.enabled),
+            "status": self.alarm_event_upload_scheduler.status_text(),
+            "next_run_time": self.alarm_event_upload_scheduler.next_run_text(),
+            **runtime,
+        }
+
     def monthly_event_report_scheduler_status(self) -> Dict[str, Any]:
         if not self.monthly_event_report_scheduler:
             return {
@@ -1145,6 +1381,12 @@ class AppContainer:
         was_wet_bulb_running = (
             self.wet_bulb_collection_scheduler.is_running() if self.wet_bulb_collection_scheduler else False
         )
+        was_day_metric_upload_running = (
+            self.day_metric_upload_scheduler.is_running() if self.day_metric_upload_scheduler else False
+        )
+        was_alarm_event_upload_running = (
+            self.alarm_event_upload_scheduler.is_running() if self.alarm_event_upload_scheduler else False
+        )
         was_monthly_change_report_running = (
             self.monthly_change_report_scheduler.is_running() if self.monthly_change_report_scheduler else False
         )
@@ -1164,6 +1406,10 @@ class AppContainer:
             self.handover_scheduler_manager.stop()
         if self.wet_bulb_collection_scheduler:
             self.wet_bulb_collection_scheduler.stop()
+        if self.day_metric_upload_scheduler:
+            self.day_metric_upload_scheduler.stop()
+        if self.alarm_event_upload_scheduler:
+            self.alarm_event_upload_scheduler.stop()
         if self.monthly_change_report_scheduler:
             self.monthly_change_report_scheduler.stop()
         if self.monthly_event_report_scheduler:
@@ -1177,6 +1423,8 @@ class AppContainer:
         self.scheduler = self._build_scheduler()
         self.handover_scheduler_manager = self._build_handover_scheduler_manager()
         self.wet_bulb_collection_scheduler = self._build_wet_bulb_collection_scheduler()
+        self.day_metric_upload_scheduler = self._build_day_metric_upload_scheduler()
+        self.alarm_event_upload_scheduler = self._build_alarm_event_upload_scheduler()
         self.monthly_change_report_scheduler = self._build_monthly_change_report_scheduler()
         self.monthly_event_report_scheduler = self._build_monthly_event_report_scheduler()
         self.updater_service = self._build_updater_service()
@@ -1200,6 +1448,10 @@ class AppContainer:
             self.handover_scheduler_manager.set_run_callback(self.handover_scheduler_callback)
         if self.wet_bulb_collection_scheduler_callback:
             self.wet_bulb_collection_scheduler.run_callback = self.wet_bulb_collection_scheduler_callback
+        if self.day_metric_upload_scheduler_callback:
+            self.day_metric_upload_scheduler.run_callback = self.day_metric_upload_scheduler_callback
+        if self.alarm_event_upload_scheduler_callback:
+            self.alarm_event_upload_scheduler.run_callback = self.alarm_event_upload_scheduler_callback
         if self.monthly_change_report_scheduler_callback:
             self.monthly_change_report_scheduler.run_callback = self.monthly_change_report_scheduler_callback
         if self.monthly_event_report_scheduler_callback:
@@ -1229,6 +1481,20 @@ class AppContainer:
         if not isinstance(wet_bulb_scheduler_cfg, dict):
             wet_bulb_scheduler_cfg = {}
         wet_bulb_auto_start = bool(wet_bulb_scheduler_cfg.get("auto_start_in_gui", False))
+        day_metric_cfg = self.runtime_config.get("day_metric_upload", {})
+        if not isinstance(day_metric_cfg, dict):
+            day_metric_cfg = {}
+        day_metric_scheduler_cfg = day_metric_cfg.get("scheduler", {})
+        if not isinstance(day_metric_scheduler_cfg, dict):
+            day_metric_scheduler_cfg = {}
+        day_metric_auto_start = bool(day_metric_scheduler_cfg.get("auto_start_in_gui", False))
+        alarm_event_cfg = self.runtime_config.get("alarm_export", {})
+        if not isinstance(alarm_event_cfg, dict):
+            alarm_event_cfg = {}
+        alarm_event_scheduler_cfg = alarm_event_cfg.get("scheduler", {})
+        if not isinstance(alarm_event_scheduler_cfg, dict):
+            alarm_event_scheduler_cfg = {}
+        alarm_event_auto_start = bool(alarm_event_scheduler_cfg.get("auto_start_in_gui", False))
         monthly_change_cfg = self.runtime_config.get("handover_log", {})
         if not isinstance(monthly_change_cfg, dict):
             monthly_change_cfg = {}
@@ -1255,6 +1521,10 @@ class AppContainer:
             self.handover_scheduler_manager.start()
         if was_wet_bulb_running or wet_bulb_auto_start:
             self.wet_bulb_collection_scheduler.start()
+        if was_day_metric_upload_running or day_metric_auto_start:
+            self.day_metric_upload_scheduler.start()
+        if was_alarm_event_upload_running or alarm_event_auto_start:
+            self.alarm_event_upload_scheduler.start()
         if was_monthly_change_report_running or monthly_change_auto_start:
             self.monthly_change_report_scheduler.start()
         if was_monthly_event_report_running or monthly_event_auto_start:

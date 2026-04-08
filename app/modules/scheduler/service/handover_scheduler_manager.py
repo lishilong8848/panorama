@@ -94,14 +94,17 @@ class HandoverSchedulerManager:
         return any(s.is_running() for s in self.schedulers.values())
 
     def status_text(self) -> str:
-        if not bool(self._cfg.get("enabled", True)):
-            return "已禁用"
         return "运行中" if self.is_running() else "未启动"
 
     def start(self) -> Dict[str, Any]:
-        action: Dict[str, Any] = {"running": False, "reason": "disabled", "slots": {}}
         if not bool(self._cfg.get("enabled", True)):
-            return action
+            self._cfg["enabled"] = True
+            self._emit_log("[交接班调度] 启动请求已接管: enabled=false，按手动启动自动启用调度")
+            for scheduler in self.schedulers.values():
+                scheduler.enabled = True
+                scheduler.cfg["enabled"] = True
+
+        action: Dict[str, Any] = {"running": False, "reason": "disabled", "slots": {}}
 
         any_running = False
         all_started = True

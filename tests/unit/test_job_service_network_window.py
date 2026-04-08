@@ -57,16 +57,17 @@ def test_network_window_drains_and_switches_to_opposite_side(tmp_path: Path) -> 
     third = service.start_job("external-2", _external_second, resource_keys=["network:external"])
 
     _wait_until(lambda: service.get_job_state(second.job_id).status == "waiting_resource")
-    _wait_until(lambda: service.get_job_state(third.job_id).status == "waiting_resource")
+    _wait_until(lambda: service.get_job_state(third.job_id).status == "success")
 
     waiting_snapshot = service.get_resource_snapshot()
     assert waiting_snapshot["network"]["current_side"] == "external"
-    assert waiting_snapshot["network"]["window_draining"] is True
-    assert waiting_snapshot["network"]["pending_side"] == "internal"
+    assert waiting_snapshot["network"]["window_draining"] is False
+    assert waiting_snapshot["network"]["pending_side"] == ""
+    assert waiting_snapshot["network"]["running_external"] == 1
 
     release_external.set()
     _wait_until(lambda: service.get_job_state(second.job_id).status == "running")
-    assert service.get_job_state(third.job_id).status == "waiting_resource"
+    assert service.get_job_state(third.job_id).status == "success"
 
     release_internal.set()
     service.wait_job(first.job_id, timeout_sec=3)

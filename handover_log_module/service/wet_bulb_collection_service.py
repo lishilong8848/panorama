@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 from typing import Any, Callable, Dict, List
 
+from app.config.config_compat_cleanup import sanitize_wet_bulb_collection_config
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from handover_log_module.api.facade import load_handover_config
@@ -79,8 +80,8 @@ class WetBulbCollectionService:
         return merged
 
     def _normalize_cfg(self) -> Dict[str, Any]:
-        raw = self.runtime_config.get("wet_bulb_collection", {})
-        cfg = self._deep_merge(self._defaults(), raw if isinstance(raw, dict) else {})
+        raw = sanitize_wet_bulb_collection_config(self.runtime_config.get("wet_bulb_collection", {}))
+        cfg = self._deep_merge(self._defaults(), raw)
 
         scheduler = cfg.get("scheduler", {}) if isinstance(cfg.get("scheduler", {}), dict) else {}
         source = cfg.get("source", {}) if isinstance(cfg.get("source", {}), dict) else {}
@@ -89,7 +90,6 @@ class WetBulbCollectionService:
         cooling_mode = cfg.get("cooling_mode", {}) if isinstance(cfg.get("cooling_mode", {}), dict) else {}
 
         cfg["enabled"] = bool(cfg.get("enabled", True))
-        cfg.pop("manual_button_enabled", None)
 
         scheduler["enabled"] = bool(scheduler.get("enabled", True))
         scheduler["auto_start_in_gui"] = bool(scheduler.get("auto_start_in_gui", False))
@@ -105,8 +105,6 @@ class WetBulbCollectionService:
 
         target["app_token"] = str(target.get("app_token", "")).strip()
         target["table_id"] = str(target.get("table_id", "")).strip()
-        target.pop("base_url", None)
-        target.pop("wiki_url", None)
         target["page_size"] = max(1, int(target.get("page_size", 500) or 500))
         target["max_records"] = max(1, int(target.get("max_records", 5000) or 5000))
         target["delete_batch_size"] = max(1, int(target.get("delete_batch_size", 200) or 200))

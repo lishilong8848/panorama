@@ -152,22 +152,19 @@ class MonthlySchedulerService:
         return self._scheduled_datetime_for_month(next_year, next_month)
 
     def next_run_text(self) -> str:
-        if not self.enabled:
-            return ""
         return self.next_run_time().strftime("%Y-%m-%d %H:%M:%S")
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
     def status_text(self) -> str:
-        if not self.enabled:
-            return "已禁用"
         return "运行中" if self.is_running() else "未启动"
 
     def start(self) -> Dict[str, Any]:
         if not self.enabled:
-            self.runtime["last_decision"] = "skip:disabled"
-            return {"started": False, "running": False, "reason": "disabled"}
+            self.enabled = True
+            self.cfg["enabled"] = True
+            self._log("启动请求已接管: enabled=false，按手动启动自动启用调度")
         if self.is_running():
             return {"started": False, "running": True, "reason": "already_running"}
         self.started_at = datetime.now()

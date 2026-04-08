@@ -63,25 +63,13 @@ const SPECIAL_GROUP = {
     {
       id: 'alarm_event_upload',
       title: '告警信息上传',
-      desc: '读取 08/16 共享告警文件，筛选 60 天内记录并写入多维表。',
-    },
-  ],
-};
-
-const MONITOR_GROUP = {
-  id: 'monitor',
-  title: '系统监控',
-  items: [
-    {
-      id: 'runtime_logs',
-      title: '运行日志',
-      desc: '查看任务执行、共享桥接推进和系统日志。',
+      desc: '读取每小时共享告警文件，筛选 60 天内记录并写入多维表。',
     },
   ],
 };
 
 const ROLE_MENU_GROUPS = {
-  external: [AUTO_GROUP, MANUAL_GROUP, SPECIAL_GROUP, MONITOR_GROUP],
+  external: [AUTO_GROUP, MANUAL_GROUP, SPECIAL_GROUP],
   internal: [],
 };
 

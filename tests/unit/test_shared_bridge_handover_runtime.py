@@ -46,14 +46,22 @@ def test_internal_handover_bridge_stage_moves_task_to_ready_for_external(monkeyp
         def ensure_internal_ready(self, emit_log):  # noqa: ANN001
             emit_log("internal ready")
 
-        def run(self, **kwargs):  # noqa: ANN003
+        def run_with_capacity_report(self, **kwargs):  # noqa: ANN003
             emit_log = kwargs["emit_log"]
             emit_log("download ok")
             return {
-                "success_files": [{"building": "A楼", "file_path": str(source_file)}],
-                "failed": [{"building": "B楼", "error": "下载失败"}],
-                "duty_date": "2026-03-26",
-                "duty_shift": "day",
+                "handover": {
+                    "success_files": [{"building": "A楼", "file_path": str(source_file)}],
+                    "failed": [{"building": "B楼", "error": "下载失败"}],
+                    "duty_date": "2026-03-26",
+                    "duty_shift": "day",
+                },
+                "capacity": {
+                    "success_files": [{"building": "A楼", "file_path": str(source_file)}],
+                    "failed": [{"building": "B楼", "error": "下载失败"}],
+                    "duty_date": "2026-03-26",
+                    "duty_shift": "day",
+                },
             }
 
     monkeypatch.setattr(runtime_module, "load_handover_config", lambda cfg: cfg)
@@ -79,11 +87,15 @@ def test_internal_handover_bridge_stage_moves_task_to_ready_for_external(monkeyp
     assert updated is not None
     assert updated["status"] == "ready_for_external"
     artifacts = updated["artifacts"]
-    assert len(artifacts) == 1
-    assert artifacts[0]["artifact_kind"] == "source_file"
-    assert (tmp_path / artifacts[0]["relative_path"]).exists()
+    source_artifacts = [item for item in artifacts if item.get("artifact_kind") == "source_file"]
+    capacity_artifacts = [item for item in artifacts if item.get("artifact_kind") == "capacity_source_file"]
+    assert len(source_artifacts) == 1
+    assert len(capacity_artifacts) == 1
+    assert (tmp_path / source_artifacts[0]["relative_path"]).exists()
+    assert (tmp_path / capacity_artifacts[0]["relative_path"]).exists()
     assert updated["result"]["internal"]["artifact_count"] == 1
-    assert updated["result"]["internal"]["failed"][0]["building"] == "B楼"
+    assert updated["result"]["internal"]["capacity_artifact_count"] == 1
+    assert updated["result"]["internal"]["handover"]["failed"][0]["building"] == "B楼"
 
 
 def test_external_handover_bridge_stage_merges_internal_and_external_results(monkeypatch, tmp_path: Path) -> None:
@@ -97,14 +109,22 @@ def test_external_handover_bridge_stage_merges_internal_and_external_results(mon
         def ensure_internal_ready(self, emit_log):  # noqa: ANN001
             emit_log("internal ready")
 
-        def run(self, **kwargs):  # noqa: ANN003
+        def run_with_capacity_report(self, **kwargs):  # noqa: ANN003
             emit_log = kwargs["emit_log"]
             emit_log("download ok")
             return {
-                "success_files": [{"building": "A楼", "file_path": str(source_file)}],
-                "failed": [{"building": "B楼", "error": "下载失败"}],
-                "duty_date": "2026-03-26",
-                "duty_shift": "day",
+                "handover": {
+                    "success_files": [{"building": "A楼", "file_path": str(source_file)}],
+                    "failed": [{"building": "B楼", "error": "下载失败"}],
+                    "duty_date": "2026-03-26",
+                    "duty_shift": "day",
+                },
+                "capacity": {
+                    "success_files": [{"building": "A楼", "file_path": str(source_file)}],
+                    "failed": [{"building": "B楼", "error": "下载失败"}],
+                    "duty_date": "2026-03-26",
+                    "duty_shift": "day",
+                },
             }
 
     task_id = ""
@@ -115,8 +135,11 @@ def test_external_handover_bridge_stage_merges_internal_and_external_results(mon
 
         def run_handover_from_files(self, **kwargs):  # noqa: ANN003
             building_files = kwargs["building_files"]
+            capacity_building_files = kwargs["capacity_building_files"]
             expected_path = tmp_path / "artifacts" / "handover" / task_id / "source_files" / "A楼" / "A楼.xlsx"
+            expected_capacity_path = tmp_path / "artifacts" / "handover" / task_id / "capacity_source_files" / "A楼" / "A楼.xlsx"
             assert building_files == [("A楼", str(expected_path))]
+            assert capacity_building_files == [("A楼", str(expected_capacity_path))]
             return {
                 "success_count": 1,
                 "failed_count": 1,
@@ -196,12 +219,20 @@ def test_external_handover_bridge_stage_fails_when_artifact_file_missing(monkeyp
         def ensure_internal_ready(self, emit_log):  # noqa: ANN001
             emit_log("internal ready")
 
-        def run(self, **kwargs):  # noqa: ANN003
+        def run_with_capacity_report(self, **kwargs):  # noqa: ANN003
             return {
-                "success_files": [{"building": "A楼", "file_path": str(source_file)}],
-                "failed": [],
-                "duty_date": "2026-03-26",
-                "duty_shift": "day",
+                "handover": {
+                    "success_files": [{"building": "A楼", "file_path": str(source_file)}],
+                    "failed": [],
+                    "duty_date": "2026-03-26",
+                    "duty_shift": "day",
+                },
+                "capacity": {
+                    "success_files": [{"building": "A楼", "file_path": str(source_file)}],
+                    "failed": [],
+                    "duty_date": "2026-03-26",
+                    "duty_shift": "day",
+                },
             }
 
     class _UnexpectedOrchestratorService:
@@ -232,7 +263,12 @@ def test_external_handover_bridge_stage_fails_when_artifact_file_missing(monkeyp
 
     updated_after_internal = internal_service.get_task(task["task_id"])
     assert updated_after_internal is not None
-    artifact_relative_path = str(updated_after_internal["artifacts"][0]["relative_path"])
+    source_artifact = next(
+        item
+        for item in updated_after_internal["artifacts"]
+        if str(item.get("artifact_kind", "")).strip() == "source_file"
+    )
+    artifact_relative_path = str(source_artifact["relative_path"])
     artifact_path = tmp_path / artifact_relative_path
     artifact_path.unlink()
 

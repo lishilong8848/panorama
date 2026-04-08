@@ -1,4 +1,9 @@
 ﻿import { clone } from "./config_common_utils.js";
+import {
+  cleanupAlarmExportCompat,
+  cleanupDayMetricUploadCompat,
+  cleanupWetBulbCollectionCompat,
+} from "./config_compat_cleanup.js";
 
 function setStringDefault(obj, key, value) {
   if (!String(obj?.[key] || "").trim()) obj[key] = value;
@@ -146,7 +151,6 @@ function ensureRoot(cfg) {
   cfg.handover_log.event_sections = cfg.handover_log.event_sections || {};
   cfg.handover_log.monthly_event_report = cfg.handover_log.monthly_event_report || {};
   cfg.handover_log.monthly_change_report = cfg.handover_log.monthly_change_report || {};
-  cfg.handover_log.day_metric_export = cfg.handover_log.day_metric_export || {};
   cfg.handover_log.source_data_attachment_export = cfg.handover_log.source_data_attachment_export || {};
   cfg.handover_log.cloud_sheet_sync = cfg.handover_log.cloud_sheet_sync || {};
   cfg.handover_log.daily_report_bitable_export = cfg.handover_log.daily_report_bitable_export || {};
@@ -170,8 +174,6 @@ function ensureRoot(cfg) {
   cfg.handover_log.monthly_event_report.test_delivery = cfg.handover_log.monthly_event_report.test_delivery || {};
   cfg.handover_log.monthly_change_report.template = cfg.handover_log.monthly_change_report.template || {};
   cfg.handover_log.monthly_change_report.scheduler = cfg.handover_log.monthly_change_report.scheduler || {};
-  cfg.handover_log.day_metric_export.source = cfg.handover_log.day_metric_export.source || {};
-  cfg.handover_log.day_metric_export.fields = cfg.handover_log.day_metric_export.fields || {};
   cfg.handover_log.source_data_attachment_export.source = cfg.handover_log.source_data_attachment_export.source || {};
   cfg.handover_log.source_data_attachment_export.fields = cfg.handover_log.source_data_attachment_export.fields || {};
   cfg.handover_log.source_data_attachment_export.fixed_values = cfg.handover_log.source_data_attachment_export.fixed_values || {};
@@ -191,13 +193,17 @@ function ensureRoot(cfg) {
   cfg.wet_bulb_collection.target = cfg.wet_bulb_collection.target || {};
   cfg.wet_bulb_collection.fields = cfg.wet_bulb_collection.fields || {};
   cfg.wet_bulb_collection.cooling_mode = cfg.wet_bulb_collection.cooling_mode || {};
+  cfg.alarm_export.scheduler = cfg.alarm_export.scheduler || {};
   cfg.alarm_export.feishu = cfg.alarm_export.feishu || {};
   cfg.alarm_export.shared_source_upload =
     cfg.alarm_export.shared_source_upload && typeof cfg.alarm_export.shared_source_upload === "object"
       ? cfg.alarm_export.shared_source_upload
       : {};
-  cfg.day_metric_upload.source = cfg.day_metric_upload.source || {};
+  cfg.day_metric_upload.scheduler = cfg.day_metric_upload.scheduler || {};
   cfg.day_metric_upload.behavior = cfg.day_metric_upload.behavior || {};
+  cfg.day_metric_upload.target = cfg.day_metric_upload.target || {};
+  cfg.day_metric_upload.target.source = cfg.day_metric_upload.target.source || {};
+  cfg.day_metric_upload.target.fields = cfg.day_metric_upload.target.fields || {};
 }
 
 function defaultInternalSourceSites() {
@@ -540,7 +546,7 @@ function applyHandoverDefaults(cfg) {
     "file_name_pattern",
     "{building}_{month}_事件月度统计表.xlsx",
   );
-  setBooleanDefault(monthlyEventReport.scheduler, "enabled", false);
+  setBooleanDefault(monthlyEventReport.scheduler, "enabled", true);
   setBooleanDefault(monthlyEventReport.scheduler, "auto_start_in_gui", false);
   setNumberDefault(monthlyEventReport.scheduler, "day_of_month", 1);
   setStringDefault(monthlyEventReport.scheduler, "run_time", "01:00:00");
@@ -575,7 +581,7 @@ function applyHandoverDefaults(cfg) {
     "file_name_pattern",
     "{building}_{month}_变更月度统计表.xlsx",
   );
-  setBooleanDefault(monthlyChangeReport.scheduler, "enabled", false);
+  setBooleanDefault(monthlyChangeReport.scheduler, "enabled", true);
   setBooleanDefault(monthlyChangeReport.scheduler, "auto_start_in_gui", false);
   setNumberDefault(monthlyChangeReport.scheduler, "day_of_month", 1);
   setStringDefault(monthlyChangeReport.scheduler, "run_time", "01:00:00");
@@ -729,7 +735,8 @@ function applyHandoverDefaults(cfg) {
   ensureOtherSource("device_patrol", "设备轮巡", "tbl0XK1iQ1P6VY5Y", "内容", "进度");
   ensureOtherSource("device_repair", "设备检修", "tblpaHktT0mn0hwg", "维修故障", "进度（完成情况）");
 
-  const dayMetricExport = cfg.handover_log.day_metric_export;
+  const legacyDayMetricExport = cfg.handover_log.day_metric_export || {};
+  const dayMetricTarget = cfg.day_metric_upload.target;
   const sourceDataAttachmentExport = cfg.handover_log.source_data_attachment_export;
   const dailyReportExport = cfg.handover_log.daily_report_bitable_export;
   const reviewUi = cfg.handover_log.review_ui;
@@ -745,18 +752,48 @@ function applyHandoverDefaults(cfg) {
     !Array.isArray(reviewUi.footer_inventory_defaults_by_building)
       ? reviewUi.footer_inventory_defaults_by_building
       : {};
-  setBooleanDefault(dayMetricExport, "enabled", true);
-  setBooleanDefault(dayMetricExport, "only_day_shift", true);
-  setStringDefault(dayMetricExport, "missing_value_policy", "zero");
-  setStringDefault(dayMetricExport.source, "app_token", "ASLxbfESPahdTKs0A9NccgbrnXc");
-  setStringDefault(dayMetricExport.source, "table_id", "tblAHGF8mV6U9jid");
-  setNumberDefault(dayMetricExport.source, "create_batch_size", 200);
-  setStringDefault(dayMetricExport.fields, "type", "类型");
-  setStringDefault(dayMetricExport.fields, "building", "楼栋");
-  setStringDefault(dayMetricExport.fields, "date", "日期");
-  setStringDefault(dayMetricExport.fields, "value", "数值");
-  if (!Array.isArray(dayMetricExport.types) || !dayMetricExport.types.length) {
-    dayMetricExport.types = [
+  if (
+    (!Array.isArray(dayMetricTarget.types) || !dayMetricTarget.types.length)
+    && legacyDayMetricExport
+    && typeof legacyDayMetricExport === "object"
+    && Array.isArray(legacyDayMetricExport.types)
+    && legacyDayMetricExport.types.length
+  ) {
+    dayMetricTarget.types = legacyDayMetricExport.types.map((item) => ({ ...(item || {}) }));
+  }
+  if (
+    !(dayMetricTarget.source && (dayMetricTarget.source.app_token || dayMetricTarget.source.table_id))
+    && legacyDayMetricExport
+    && typeof legacyDayMetricExport === "object"
+    && legacyDayMetricExport.source
+    && typeof legacyDayMetricExport.source === "object"
+  ) {
+    dayMetricTarget.source = { ...legacyDayMetricExport.source };
+  }
+  if (
+    !(dayMetricTarget.fields && Object.keys(dayMetricTarget.fields).length)
+    && legacyDayMetricExport
+    && typeof legacyDayMetricExport === "object"
+    && legacyDayMetricExport.fields
+    && typeof legacyDayMetricExport.fields === "object"
+  ) {
+    dayMetricTarget.fields = { ...legacyDayMetricExport.fields };
+  }
+  if (!dayMetricTarget.missing_value_policy && legacyDayMetricExport?.missing_value_policy) {
+    dayMetricTarget.missing_value_policy = legacyDayMetricExport.missing_value_policy;
+  }
+
+  setStringDefault(dayMetricTarget, "missing_value_policy", "zero");
+  setStringDefault(dayMetricTarget.source, "app_token", "ASLxbfESPahdTKs0A9NccgbrnXc");
+  setStringDefault(dayMetricTarget.source, "table_id", "tblAHGF8mV6U9jid");
+  setNumberDefault(dayMetricTarget.source, "create_batch_size", 200);
+  setStringDefault(dayMetricTarget.fields, "type", "类型");
+  setStringDefault(dayMetricTarget.fields, "building", "楼栋");
+  setStringDefault(dayMetricTarget.fields, "date", "日期");
+  setStringDefault(dayMetricTarget.fields, "value", "数值");
+  setStringDefault(dayMetricTarget.fields, "position_code", "位置/编号");
+  if (!Array.isArray(dayMetricTarget.types) || !dayMetricTarget.types.length) {
+    dayMetricTarget.types = [
       { name: "总负荷（KW）", source: "cell", cell: "D6" },
       { name: "IT总负荷（KW）", source: "cell", cell: "F6" },
       { name: "室外湿球最高温度（℃）", source: "cell", cell: "D7" },
@@ -975,6 +1012,7 @@ function applyAlarmCommonDbDefaults(cfg) {
 
 function applyAlarmExportDefaults(cfg) {
   const alarmExport = cfg.alarm_export;
+  const scheduler = alarmExport.scheduler;
   const feishu = alarmExport.feishu;
   const sharedSourceUpload = alarmExport.shared_source_upload;
   const legacyTarget =
@@ -1003,8 +1041,15 @@ function applyAlarmExportDefaults(cfg) {
   setNumberDefault(feishu, "page_size", 500);
   setNumberDefault(feishu, "delete_batch_size", 500);
   setNumberDefault(feishu, "create_batch_size", 200);
+  cleanupAlarmExportCompat(alarmExport);
+  setBooleanDefault(scheduler, "enabled", true);
+  setBooleanDefault(scheduler, "auto_start_in_gui", false);
+  setStringDefault(scheduler, "run_time", "08:10:00");
+  setNumberDefault(scheduler, "check_interval_sec", 30);
+  setBooleanDefault(scheduler, "catch_up_if_missed", false);
+  setBooleanDefault(scheduler, "retry_failed_in_same_period", true);
+  setStringDefault(scheduler, "state_file", "alarm_event_upload_scheduler_state.json");
   setBooleanDefault(sharedSourceUpload, "replace_existing_on_full", true);
-  delete sharedSourceUpload.target;
 }
 
 function applyNetworkDefaults(cfg) {
@@ -1039,7 +1084,7 @@ function applyNetworkDefaults(cfg) {
 }
 
 function applyWetBulbCollectionDefaults(cfg) {
-  const wet = cfg.wet_bulb_collection;
+  const wet = cleanupWetBulbCollectionCompat(cfg.wet_bulb_collection);
   const scheduler = wet.scheduler;
   const source = wet.source;
   const target = wet.target;
@@ -1047,7 +1092,6 @@ function applyWetBulbCollectionDefaults(cfg) {
   const coolingMode = wet.cooling_mode;
 
   setBooleanDefault(wet, "enabled", true);
-  delete wet.manual_button_enabled;
 
   setBooleanDefault(scheduler, "enabled", true);
   setBooleanDefault(scheduler, "auto_start_in_gui", false);
@@ -1061,8 +1105,6 @@ function applyWetBulbCollectionDefaults(cfg) {
 
   setStringDefault(target, "app_token", "JbZywYBfgiltYpksj2bc1HvCnPd");
   setStringDefault(target, "table_id", "tblm3MOOxKCW3ZPd");
-  delete target.base_url;
-  delete target.wiki_url;
   setNumberDefault(target, "page_size", 500);
   setNumberDefault(target, "max_records", 5000);
   setNumberDefault(target, "delete_batch_size", 200);
@@ -1094,26 +1136,54 @@ function applyWetBulbCollectionDefaults(cfg) {
 }
 
 function applyDayMetricUploadDefaults(cfg) {
-  const upload = cfg.day_metric_upload;
-  const source = upload.source;
+  const upload = cleanupDayMetricUploadCompat(cfg.day_metric_upload);
+  const scheduler = upload.scheduler;
   const behavior = upload.behavior;
+  const target = upload.target;
+  const targetSource = target.source;
+  const targetFields = target.fields;
 
-  setBooleanDefault(upload, "enabled", true);
-  setBooleanDefault(upload, "manual_button_enabled", true);
+  setBooleanDefault(scheduler, "enabled", true);
+  setBooleanDefault(scheduler, "auto_start_in_gui", false);
+  setStringDefault(scheduler, "run_time", "08:00:00");
+  setNumberDefault(scheduler, "check_interval_sec", 30);
+  setBooleanDefault(scheduler, "catch_up_if_missed", false);
+  setBooleanDefault(scheduler, "retry_failed_in_same_period", true);
+  setStringDefault(scheduler, "state_file", "day_metric_upload_scheduler_state.json");
 
-  setBooleanDefault(source, "reuse_handover_download", true);
-  setBooleanDefault(source, "reuse_handover_rule_engine", true);
-
-  setBooleanDefault(behavior, "only_day_shift", true);
-  setStringDefault(behavior, "failure_policy", "continue");
-  setBooleanDefault(behavior, "rewrite_existing", true);
   setNumberDefault(behavior, "basic_retry_attempts", 3);
   setNumberDefault(behavior, "basic_retry_backoff_sec", 2);
   setNumberDefault(behavior, "network_retry_attempts", 5);
   setNumberDefault(behavior, "network_retry_backoff_sec", 2);
   setNumberDefault(behavior, "alert_after_attempts", 5);
-  setBooleanDefault(behavior, "local_import_enabled", true);
-  setStringDefault(behavior, "local_import_scope", "single_date_single_building");
+
+  setStringDefault(target, "missing_value_policy", "zero");
+  setStringDefault(targetSource, "app_token", "ASLxbfESPahdTKs0A9NccgbrnXc");
+  setStringDefault(targetSource, "table_id", "tblAHGF8mV6U9jid");
+  setNumberDefault(targetSource, "create_batch_size", 200);
+
+  setStringDefault(targetFields, "type", "类型");
+  setStringDefault(targetFields, "building", "楼栋");
+  setStringDefault(targetFields, "date", "日期");
+  setStringDefault(targetFields, "value", "数值");
+  setStringDefault(targetFields, "position_code", "位置/编号");
+
+  if (!Array.isArray(target.types) || !target.types.length) {
+    target.types = [
+      { name: "总负荷（KW）", source: "cell", cell: "D6" },
+      { name: "IT总负荷（KW）", source: "cell", cell: "F6" },
+      { name: "室外湿球最高温度（℃）", source: "cell", cell: "D7" },
+      { name: "冷水系统供水最高温度（℃）", source: "metric", metric_id: "chilled_supply_temp_max" },
+      { name: "蓄水池后备最短时间（H）", source: "cell", cell: "D8" },
+      { name: "蓄冷罐后备最短时间（min）", source: "cell_min_pair", cell: "F8" },
+      { name: "供油可用时长（H）", source: "cell", cell: "H6" },
+      { name: "冷通道最高温度（℃）", source: "metric", metric_id: "cold_temp_max" },
+      { name: "冷通道最高湿度（%）", source: "metric", metric_id: "cold_humi_max" },
+      { name: "变压器负载率（MAX）", source: "cell_percent", cell: "B10" },
+      { name: "UPS负载率（MAX）", source: "cell_percent", cell: "D10" },
+      { name: "HVDC负载率（MAX）", source: "metric", metric_id: "hvdc_load_max" },
+    ];
+  }
 }
 
 function applySchedulerDefaults(cfg) {

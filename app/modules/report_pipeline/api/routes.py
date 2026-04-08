@@ -19,6 +19,7 @@ from urllib.parse import urlsplit, urlunsplit
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
 
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
+from app.config.config_compat_cleanup import sanitize_wet_bulb_collection_config
 from app.config.config_merge_guard import ConfigValueLossError, merge_user_config_payload
 from app.config.secret_masking import mask_settings
 from app.config.settings_loader import save_settings
@@ -464,7 +465,6 @@ def _empty_followup_progress() -> Dict[str, Any]:
         "can_resume_followup": False,
         "pending_count": 0,
         "failed_count": 0,
-        "day_metric_pending_count": 0,
         "attachment_pending_count": 0,
         "cloud_pending_count": 0,
         "daily_report_status": "idle",
@@ -605,14 +605,13 @@ def _review_access_state_template() -> Dict[str, Any]:
 def _strip_retired_wet_bulb_fields(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(cfg, dict):
         return cfg
-    wet_cfg = cfg.get("features", {}).get("wet_bulb_collection", {})
+    features = cfg.get("features", {})
+    if not isinstance(features, dict):
+        return cfg
+    wet_cfg = features.get("wet_bulb_collection", {})
     if not isinstance(wet_cfg, dict):
         return cfg
-    wet_cfg.pop("manual_button_enabled", None)
-    target = wet_cfg.get("target", {})
-    if isinstance(target, dict):
-        target.pop("base_url", None)
-        target.pop("wiki_url", None)
+    features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(wet_cfg)
     return cfg
 
 
@@ -1428,6 +1427,37 @@ def health(
     scheduler = container.scheduler
     scheduler_runtime = scheduler.get_runtime_snapshot() if scheduler else {}
     updater_runtime = container.updater_snapshot()
+
+    def _safe_scheduler_snapshot(method_name: str) -> Dict[str, Any]:
+        method = getattr(container, method_name, None)
+        if not callable(method):
+            return {}
+        try:
+            snapshot = method()
+            return snapshot if isinstance(snapshot, dict) else {}
+        except Exception:
+            return {}
+
+    def _safe_bool_method(method_name: str) -> bool:
+        method = getattr(container, method_name, None)
+        if not callable(method):
+            return False
+        try:
+            return bool(method())
+        except Exception:
+            return False
+
+    def _safe_text_method(method_name: str, default: str = "-") -> str:
+        method = getattr(container, method_name, None)
+        if not callable(method):
+            return str(default)
+        try:
+            value = method()
+        except Exception:
+            return str(default)
+        text = str(value or "").strip()
+        return text if text else str(default)
+
     handover_scheduler_snapshot = container.handover_scheduler_status()
     wet_bulb_cfg = runtime_cfg.get("wet_bulb_collection", {}) if isinstance(runtime_cfg, dict) else {}
     if not isinstance(wet_bulb_cfg, dict):
@@ -1441,10 +1471,12 @@ def health(
     )
     monthly_event_report_service = MonthlyEventReportService(runtime_cfg)
     monthly_change_report_service = MonthlyChangeReportService(runtime_cfg)
-    monthly_change_report_scheduler_snapshot = container.monthly_change_report_scheduler_status()
+    monthly_change_report_scheduler_snapshot = _safe_scheduler_snapshot("monthly_change_report_scheduler_status")
     monthly_change_report_last_run = monthly_change_report_service.get_last_run_snapshot()
-    monthly_event_report_scheduler_snapshot = container.monthly_event_report_scheduler_status()
+    monthly_event_report_scheduler_snapshot = _safe_scheduler_snapshot("monthly_event_report_scheduler_status")
     monthly_event_report_last_run = monthly_event_report_service.get_last_run_snapshot()
+    day_metric_upload_scheduler_snapshot = _safe_scheduler_snapshot("day_metric_upload_scheduler_status")
+    alarm_event_upload_scheduler_snapshot = _safe_scheduler_snapshot("alarm_event_upload_scheduler_status")
     monthly_report_delivery_service = MonthlyReportDeliveryService(runtime_cfg)
     try:
         monthly_event_report_delivery_snapshot = monthly_report_delivery_service.build_delivery_health_snapshot(
@@ -1469,7 +1501,7 @@ def health(
             "error": str(exc),
         }
     day_metric_target_preview = (
-        DayMetricBitableExportService(handover_loaded_cfg).build_target_descriptor(force_refresh=False)
+        DayMetricBitableExportService(runtime_cfg).build_target_descriptor(force_refresh=False)
         if include_day_metric_target_preview
         else {}
     )
@@ -1634,13 +1666,13 @@ def health(
         "job_counts": container.job_service.job_counts(),
         "task_engine": task_engine_snapshot,
         "system_alert_log_queue": alert_log_queue_snapshot,
-        "scheduler": {
-            "enabled": bool(scheduler.enabled) if scheduler else False,
-                "status": scheduler.status_text() if scheduler else "未初始化",
-            "next_run_time": scheduler.next_run_text() if scheduler else "",
-            "executor_bound": bool(container.is_scheduler_executor_bound()),
-            "callback_name": container.scheduler_executor_name(),
-            "running": bool(scheduler_runtime.get("running", False)),
+            "scheduler": {
+                "enabled": bool(scheduler.enabled) if scheduler else False,
+                    "status": scheduler.status_text() if scheduler else "未初始化",
+                "next_run_time": scheduler.next_run_text() if scheduler else "",
+                "executor_bound": _safe_bool_method("is_scheduler_executor_bound"),
+                "callback_name": _safe_text_method("scheduler_executor_name"),
+                "running": bool(scheduler_runtime.get("running", False)),
             "started_at": str(scheduler_runtime.get("started_at", "")),
             "last_check_at": str(scheduler_runtime.get("last_check_at", "")),
             "last_decision": str(scheduler_runtime.get("last_decision", "")),
@@ -1649,12 +1681,12 @@ def health(
             "state_path": str(scheduler_runtime.get("state_path", "")),
             "state_exists": bool(scheduler_runtime.get("state_exists", False)),
         },
-        "handover_scheduler": {
-            "enabled": bool(handover_scheduler_snapshot.get("enabled", False)),
-            "running": bool(handover_scheduler_snapshot.get("running", False)),
-                "status": str(handover_scheduler_snapshot.get("status", "未初始化")),
-            "executor_bound": bool(container.is_handover_scheduler_executor_bound()),
-            "callback_name": container.handover_scheduler_executor_name(),
+            "handover_scheduler": {
+                "enabled": bool(handover_scheduler_snapshot.get("enabled", False)),
+                "running": bool(handover_scheduler_snapshot.get("running", False)),
+                    "status": str(handover_scheduler_snapshot.get("status", "未初始化")),
+                "executor_bound": _safe_bool_method("is_handover_scheduler_executor_bound"),
+                "callback_name": _safe_text_method("handover_scheduler_executor_name"),
             "morning": {
                 "next_run_time": str(handover_morning.get("next_run_time", "")),
                 "last_decision": str(handover_morning.get("last_decision", "")),
@@ -1707,9 +1739,9 @@ def health(
         },
         "wet_bulb_collection": {
             "enabled": bool(wet_bulb_cfg.get("enabled", True)),
-            "scheduler": {
-                "running": bool(wet_bulb_scheduler_snapshot.get("running", False)),
-                "status": str(wet_bulb_scheduler_snapshot.get("status", "未初始化")),
+                "scheduler": {
+                    "running": bool(wet_bulb_scheduler_snapshot.get("running", False)),
+                    "status": str(wet_bulb_scheduler_snapshot.get("status", "未初始化")),
                 "next_run_time": str(wet_bulb_scheduler_snapshot.get("next_run_time", "")),
                 "last_check_at": str(wet_bulb_scheduler_snapshot.get("last_check_at", "")),
                 "last_decision": str(wet_bulb_scheduler_snapshot.get("last_decision", "")),
@@ -1717,13 +1749,13 @@ def health(
                 "last_trigger_result": str(wet_bulb_scheduler_snapshot.get("last_trigger_result", "")),
                 "state_path": str(wet_bulb_scheduler_snapshot.get("state_path", "")),
                 "state_exists": bool(wet_bulb_scheduler_snapshot.get("state_exists", False)),
-                "executor_bound": bool(container.is_wet_bulb_collection_scheduler_executor_bound()),
-                "callback_name": container.wet_bulb_collection_scheduler_executor_name(),
+                    "executor_bound": _safe_bool_method("is_wet_bulb_collection_scheduler_executor_bound"),
+                    "callback_name": _safe_text_method("wet_bulb_collection_scheduler_executor_name"),
+                },
+                "target_preview": wet_bulb_target_preview,
             },
-            "target_preview": wet_bulb_target_preview,
-        },
-        "monthly_event_report": {
-            "enabled": bool(monthly_event_report_service.is_enabled()),
+            "monthly_event_report": {
+                "enabled": bool(monthly_event_report_service.is_enabled()),
             "scheduler": {
                 "running": bool(monthly_event_report_scheduler_snapshot.get("running", False)),
                 "status": str(monthly_event_report_scheduler_snapshot.get("status", "未初始化")),
@@ -1734,13 +1766,13 @@ def health(
                 "last_trigger_result": str(monthly_event_report_scheduler_snapshot.get("last_trigger_result", "")),
                 "state_path": str(monthly_event_report_scheduler_snapshot.get("state_path", "")),
                 "state_exists": bool(monthly_event_report_scheduler_snapshot.get("state_exists", False)),
-                "executor_bound": bool(container.is_monthly_event_report_scheduler_executor_bound()),
-                "callback_name": container.monthly_event_report_scheduler_executor_name(),
+                    "executor_bound": _safe_bool_method("is_monthly_event_report_scheduler_executor_bound"),
+                    "callback_name": _safe_text_method("monthly_event_report_scheduler_executor_name"),
+                },
+                "last_run": monthly_event_report_last_run,
+                "delivery": monthly_event_report_delivery_snapshot,
             },
-            "last_run": monthly_event_report_last_run,
-            "delivery": monthly_event_report_delivery_snapshot,
-        },
-        "monthly_change_report": {
+            "monthly_change_report": {
             "enabled": bool(monthly_change_report_service.is_enabled()),
             "scheduler": {
                 "running": bool(monthly_change_report_scheduler_snapshot.get("running", False)),
@@ -1752,21 +1784,49 @@ def health(
                 "last_trigger_result": str(monthly_change_report_scheduler_snapshot.get("last_trigger_result", "")),
                 "state_path": str(monthly_change_report_scheduler_snapshot.get("state_path", "")),
                 "state_exists": bool(monthly_change_report_scheduler_snapshot.get("state_exists", False)),
-                "executor_bound": bool(container.is_monthly_change_report_scheduler_executor_bound()),
-                "callback_name": container.monthly_change_report_scheduler_executor_name(),
+                    "executor_bound": _safe_bool_method("is_monthly_change_report_scheduler_executor_bound"),
+                    "callback_name": _safe_text_method("monthly_change_report_scheduler_executor_name"),
+                },
+                "last_run": monthly_change_report_last_run,
+                "delivery": monthly_change_report_delivery_snapshot,
             },
-            "last_run": monthly_change_report_last_run,
-            "delivery": monthly_change_report_delivery_snapshot,
-        },
-        "day_metric_upload": {
-            "enabled": bool(runtime_cfg.get("day_metric_upload", {}).get("enabled", True))
-            if isinstance(runtime_cfg.get("day_metric_upload", {}), dict)
+            "day_metric_upload": {
+            "scheduler": {
+                "enabled": bool(day_metric_upload_scheduler_snapshot.get("enabled", False)),
+                "running": bool(day_metric_upload_scheduler_snapshot.get("running", False)),
+                "status": str(day_metric_upload_scheduler_snapshot.get("status", "未初始化")),
+                "next_run_time": str(day_metric_upload_scheduler_snapshot.get("next_run_time", "")),
+                "last_check_at": str(day_metric_upload_scheduler_snapshot.get("last_check_at", "")),
+                "last_decision": str(day_metric_upload_scheduler_snapshot.get("last_decision", "")),
+                "last_trigger_at": str(day_metric_upload_scheduler_snapshot.get("last_trigger_at", "")),
+                "last_trigger_result": str(day_metric_upload_scheduler_snapshot.get("last_trigger_result", "")),
+                "state_path": str(day_metric_upload_scheduler_snapshot.get("state_path", "")),
+                "state_exists": bool(day_metric_upload_scheduler_snapshot.get("state_exists", False)),
+                    "executor_bound": _safe_bool_method("is_day_metric_upload_scheduler_executor_bound"),
+                    "callback_name": _safe_text_method("day_metric_upload_scheduler_executor_name"),
+                },
+                "target_preview": day_metric_target_preview,
+            },
+            "alarm_event_upload": {
+            "enabled": bool(runtime_cfg.get("alarm_export", {}).get("enabled", True))
+            if isinstance(runtime_cfg.get("alarm_export", {}), dict)
             else True,
-            "target_preview": day_metric_target_preview,
-        },
-        "alarm_event_upload": {
-            "target_preview": alarm_event_target_preview,
-        },
+            "scheduler": {
+                "enabled": bool(alarm_event_upload_scheduler_snapshot.get("enabled", False)),
+                "running": bool(alarm_event_upload_scheduler_snapshot.get("running", False)),
+                "status": str(alarm_event_upload_scheduler_snapshot.get("status", "未初始化")),
+                "next_run_time": str(alarm_event_upload_scheduler_snapshot.get("next_run_time", "")),
+                "last_check_at": str(alarm_event_upload_scheduler_snapshot.get("last_check_at", "")),
+                "last_decision": str(alarm_event_upload_scheduler_snapshot.get("last_decision", "")),
+                "last_trigger_at": str(alarm_event_upload_scheduler_snapshot.get("last_trigger_at", "")),
+                "last_trigger_result": str(alarm_event_upload_scheduler_snapshot.get("last_trigger_result", "")),
+                "state_path": str(alarm_event_upload_scheduler_snapshot.get("state_path", "")),
+                "state_exists": bool(alarm_event_upload_scheduler_snapshot.get("state_exists", False)),
+                    "executor_bound": _safe_bool_method("is_alarm_event_upload_scheduler_executor_bound"),
+                    "callback_name": _safe_text_method("alarm_event_upload_scheduler_executor_name"),
+                },
+                "target_preview": alarm_event_target_preview,
+            },
         "updater": {
             "enabled": bool(runtime_cfg.get("updater", {}).get("enabled", True))
             if isinstance(runtime_cfg.get("updater", {}), dict)

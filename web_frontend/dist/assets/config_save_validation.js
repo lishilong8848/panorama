@@ -7,6 +7,11 @@
   normalizeSiteHost,
   normalizeSheetRules,
 } from "./config_helpers.js";
+import {
+  cleanupAlarmExportCompat,
+  cleanupDayMetricUploadCompat,
+  cleanupWetBulbCollectionCompat,
+} from "./config_compat_cleanup.js";
 
 function joinPathText(base, child) {
   const baseText = String(base || "").trim().replace(/[\\/]+$/, "");
@@ -988,27 +993,33 @@ function validateAndNormalizeHandoverOtherImportantWorkSection(payload) {
   return { ok: true };
 }
 
-function validateAndNormalizeHandoverDayMetricExport(payload) {
-  payload.handover_log = payload.handover_log || {};
-  payload.handover_log.day_metric_export = payload.handover_log.day_metric_export || {};
-  const exportCfg = payload.handover_log.day_metric_export;
-  exportCfg.enabled = Boolean(exportCfg.enabled);
-  exportCfg.only_day_shift = Boolean(exportCfg.only_day_shift);
+function validateAndNormalizeDayMetricUploadTarget(payload) {
+  payload.day_metric_upload = payload.day_metric_upload || {};
+  payload.day_metric_upload.target =
+    payload.day_metric_upload.target && typeof payload.day_metric_upload.target === "object"
+      ? payload.day_metric_upload.target
+      : {};
+  payload.day_metric_upload.behavior =
+    payload.day_metric_upload.behavior && typeof payload.day_metric_upload.behavior === "object"
+      ? payload.day_metric_upload.behavior
+      : {};
+  const exportCfg = payload.day_metric_upload.target;
   exportCfg.source = exportCfg.source && typeof exportCfg.source === "object" ? exportCfg.source : {};
   exportCfg.fields = exportCfg.fields && typeof exportCfg.fields === "object" ? exportCfg.fields : {};
   exportCfg.missing_value_policy = String(exportCfg.missing_value_policy || "zero").trim().toLowerCase() || "zero";
   exportCfg.types = Array.isArray(exportCfg.types) ? exportCfg.types : [];
 
+  cleanupDayMetricUploadCompat(payload.day_metric_upload);
+
   exportCfg.source.app_token = String(exportCfg.source.app_token || "").trim();
   exportCfg.source.table_id = String(exportCfg.source.table_id || "").trim();
-  exportCfg.source.base_url = "";
-  exportCfg.source.wiki_url = "";
   exportCfg.source.create_batch_size = Number.parseInt(exportCfg.source.create_batch_size ?? 200, 10);
 
   exportCfg.fields.type = String(exportCfg.fields.type || "").trim();
   exportCfg.fields.building = String(exportCfg.fields.building || "").trim();
   exportCfg.fields.date = String(exportCfg.fields.date || "").trim();
   exportCfg.fields.value = String(exportCfg.fields.value || "").trim();
+  exportCfg.fields.position_code = String(exportCfg.fields.position_code || "").trim();
 
   const validSource = new Set(["cell", "metric", "cell_percent", "cell_min_pair"]);
   const cellPattern = /^[A-Z]+[1-9]\d*$/;
@@ -1023,35 +1034,40 @@ function validateAndNormalizeHandoverDayMetricExport(payload) {
     }));
 
   if (exportCfg.missing_value_policy !== "zero") {
-    return { ok: false, error: "白班指标上报缺失值策略仅支持 zero" };
+    return { ok: false, error: "12项目标缺失值策略仅支持 zero" };
   }
 
   for (let i = 0; i < exportCfg.types.length; i += 1) {
     const row = exportCfg.types[i];
-    if (!row.name) return { ok: false, error: `白班指标上报第${i + 1}项类型名称不能为空` };
+    if (!row.name) return { ok: false, error: `12项目标第${i + 1}项类型名称不能为空` };
     if (!validSource.has(row.source)) {
-      return { ok: false, error: `白班指标上报第${i + 1}项来源类型非法` };
+      return { ok: false, error: `12项目标第${i + 1}项来源类型非法` };
     }
     if ((row.source === "cell" || row.source === "cell_percent" || row.source === "cell_min_pair") && !cellPattern.test(row.cell)) {
-      return { ok: false, error: `白班指标上报第${i + 1}项单元格格式错误（示例 D6）` };
+      return { ok: false, error: `12项目标第${i + 1}项单元格格式错误（示例 D6）` };
     }
     if (row.source === "metric" && !row.metric_id) {
-      return { ok: false, error: `白班指标上报第${i + 1}项 metric_id 不能为空` };
+      return { ok: false, error: `12项目标第${i + 1}项 metric_id 不能为空` };
     }
   }
 
-  if (!exportCfg.enabled) return { ok: true };
   if (!exportCfg.types.length) {
-    return { ok: false, error: "白班指标上报“类型列表”不能为空" };
+    return { ok: false, error: "12项目标“类型列表”不能为空" };
   }
   if (!exportCfg.source.app_token || !exportCfg.source.table_id) {
-    return { ok: false, error: "白班指标上报目标配置不能为空，请填写 app_token 和 table_id" };
+    return { ok: false, error: "12项目标配置不能为空，请填写 app_token 和 table_id" };
   }
   if (!Number.isInteger(exportCfg.source.create_batch_size) || exportCfg.source.create_batch_size <= 0) {
-    return { ok: false, error: "白班指标上报批次大小必须大于0" };
+    return { ok: false, error: "12项目标批次大小必须大于0" };
   }
-  if (!exportCfg.fields.type || !exportCfg.fields.building || !exportCfg.fields.date || !exportCfg.fields.value) {
-    return { ok: false, error: "白班指标上报字段映射（类型/楼栋/日期/数值）不能为空" };
+  if (
+    !exportCfg.fields.type
+    || !exportCfg.fields.building
+    || !exportCfg.fields.date
+    || !exportCfg.fields.value
+    || !exportCfg.fields.position_code
+  ) {
+    return { ok: false, error: "12项目标字段映射（类型/楼栋/日期/数值/位置编号）不能为空" };
   }
   return { ok: true };
 }
@@ -1284,6 +1300,7 @@ function validateAndNormalizeHandoverReviewUi(payload) {
 function validateAndNormalizeAlarmExport(payload) {
   payload.alarm_export = payload.alarm_export || {};
   const alarmExport = payload.alarm_export;
+  alarmExport.scheduler = alarmExport.scheduler && typeof alarmExport.scheduler === "object" ? alarmExport.scheduler : {};
   alarmExport.feishu = alarmExport.feishu && typeof alarmExport.feishu === "object" ? alarmExport.feishu : {};
   alarmExport.shared_source_upload =
     alarmExport.shared_source_upload && typeof alarmExport.shared_source_upload === "object"
@@ -1301,8 +1318,19 @@ function validateAndNormalizeAlarmExport(payload) {
     alarmExport.feishu.table_id = String(legacyTarget.table_id || "").trim();
   }
 
+  cleanupAlarmExportCompat(alarmExport);
   alarmExport.feishu.app_token = String(alarmExport.feishu.app_token || "").trim();
   alarmExport.feishu.table_id = String(alarmExport.feishu.table_id || "").trim();
+  alarmExport.scheduler.enabled = true;
+  alarmExport.scheduler.auto_start_in_gui = false;
+  alarmExport.scheduler.run_time = normalizeRunTimeText(alarmExport.scheduler.run_time) || "08:10:00";
+  alarmExport.scheduler.check_interval_sec = Number.parseInt(alarmExport.scheduler.check_interval_sec ?? 30, 10);
+  alarmExport.scheduler.catch_up_if_missed = Boolean(alarmExport.scheduler.catch_up_if_missed);
+  alarmExport.scheduler.retry_failed_in_same_period =
+    alarmExport.scheduler.retry_failed_in_same_period !== false;
+  alarmExport.scheduler.state_file = String(
+    alarmExport.scheduler.state_file || "alarm_event_upload_scheduler_state.json",
+  ).trim();
   alarmExport.feishu.page_size = Number.parseInt(alarmExport.feishu.page_size ?? legacyTarget.page_size ?? 500, 10);
   alarmExport.feishu.delete_batch_size = Number.parseInt(
     alarmExport.feishu.delete_batch_size ?? legacyTarget.delete_batch_size ?? 500,
@@ -1314,13 +1342,21 @@ function validateAndNormalizeAlarmExport(payload) {
   );
   alarmExport.shared_source_upload.replace_existing_on_full =
     alarmExport.shared_source_upload.replace_existing_on_full !== false;
-  delete alarmExport.shared_source_upload.target;
 
   if (!alarmExport.feishu.app_token) {
     return { ok: false, error: "告警信息上传配置不能为空：请填写告警多维 App Token" };
   }
   if (!alarmExport.feishu.table_id) {
     return { ok: false, error: "告警信息上传配置不能为空：请填写告警多维 Table ID" };
+  }
+  if (!alarmExport.scheduler.run_time) {
+    return { ok: false, error: "告警信息上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS" };
+  }
+  if (!Number.isInteger(alarmExport.scheduler.check_interval_sec) || alarmExport.scheduler.check_interval_sec <= 0) {
+    return { ok: false, error: "告警信息上传调度检查间隔必须大于0" };
+  }
+  if (!alarmExport.scheduler.state_file) {
+    return { ok: false, error: "告警信息上传调度状态文件不能为空" };
   }
   if (!Number.isInteger(alarmExport.feishu.page_size) || alarmExport.feishu.page_size <= 0) {
     return { ok: false, error: "告警信息上传配置错误：清表分页大小必须大于0" };
@@ -1351,8 +1387,8 @@ function validateAndNormalizeMonthlyEventReport(payload) {
   monthly.template.change_source_path = String(monthly.template.change_source_path || "").trim();
   monthly.template.output_dir = String(monthly.template.output_dir || "").trim();
   monthly.template.file_name_pattern = String(monthly.template.file_name_pattern || "").trim();
-  monthly.scheduler.enabled = Boolean(monthly.scheduler.enabled);
-  monthly.scheduler.auto_start_in_gui = Boolean(monthly.scheduler.auto_start_in_gui);
+  monthly.scheduler.enabled = true;
+  monthly.scheduler.auto_start_in_gui = false;
   monthly.scheduler.day_of_month = Number.parseInt(monthly.scheduler.day_of_month ?? 1, 10);
   monthly.scheduler.run_time = String(monthly.scheduler.run_time || "").trim();
   monthly.scheduler.check_interval_sec = Number.parseInt(monthly.scheduler.check_interval_sec ?? 30, 10);
@@ -1408,8 +1444,8 @@ function validateAndNormalizeMonthlyChangeReport(payload) {
   monthly.template.source_path = String(monthly.template.source_path || "").trim();
   monthly.template.output_dir = String(monthly.template.output_dir || "").trim();
   monthly.template.file_name_pattern = String(monthly.template.file_name_pattern || "").trim();
-  monthly.scheduler.enabled = Boolean(monthly.scheduler.enabled);
-  monthly.scheduler.auto_start_in_gui = Boolean(monthly.scheduler.auto_start_in_gui);
+  monthly.scheduler.enabled = true;
+  monthly.scheduler.auto_start_in_gui = false;
   monthly.scheduler.day_of_month = Number.parseInt(monthly.scheduler.day_of_month ?? 1, 10);
   monthly.scheduler.run_time = String(monthly.scheduler.run_time || "").trim();
   monthly.scheduler.check_interval_sec = Number.parseInt(monthly.scheduler.check_interval_sec ?? 30, 10);
@@ -1442,7 +1478,7 @@ function validateAndNormalizeMonthlyChangeReport(payload) {
 
 function validateAndNormalizeWetBulbCollection(payload) {
   payload.wet_bulb_collection = payload.wet_bulb_collection || {};
-  const wet = payload.wet_bulb_collection;
+  const wet = cleanupWetBulbCollectionCompat(payload.wet_bulb_collection);
   wet.scheduler = wet.scheduler && typeof wet.scheduler === "object" ? wet.scheduler : {};
   wet.source = wet.source && typeof wet.source === "object" ? wet.source : {};
   wet.target = wet.target && typeof wet.target === "object" ? wet.target : {};
@@ -1450,10 +1486,9 @@ function validateAndNormalizeWetBulbCollection(payload) {
   wet.cooling_mode = wet.cooling_mode && typeof wet.cooling_mode === "object" ? wet.cooling_mode : {};
 
   wet.enabled = Boolean(wet.enabled);
-  delete wet.manual_button_enabled;
 
-  wet.scheduler.enabled = Boolean(wet.scheduler.enabled);
-  wet.scheduler.auto_start_in_gui = Boolean(wet.scheduler.auto_start_in_gui);
+  wet.scheduler.enabled = true;
+  wet.scheduler.auto_start_in_gui = false;
   wet.scheduler.interval_minutes = Number.parseInt(wet.scheduler.interval_minutes ?? 60, 10);
   wet.scheduler.check_interval_sec = Number.parseInt(wet.scheduler.check_interval_sec ?? 30, 10);
   wet.scheduler.retry_failed_on_next_tick = Boolean(wet.scheduler.retry_failed_on_next_tick);
@@ -1461,12 +1496,9 @@ function validateAndNormalizeWetBulbCollection(payload) {
 
   wet.source.reuse_handover_download = Boolean(wet.source.reuse_handover_download ?? true);
   wet.source.reuse_handover_rule_engine = Boolean(wet.source.reuse_handover_rule_engine ?? true);
-  delete wet.source.switch_to_internal_before_download;
 
   wet.target.app_token = String(wet.target.app_token || "").trim();
   wet.target.table_id = String(wet.target.table_id || "").trim();
-  delete wet.target.base_url;
-  delete wet.target.wiki_url;
   wet.target.page_size = Number.parseInt(wet.target.page_size ?? 500, 10);
   wet.target.max_records = Number.parseInt(wet.target.max_records ?? 5000, 10);
   wet.target.delete_batch_size = Number.parseInt(wet.target.delete_batch_size ?? 200, 10);
@@ -1584,11 +1616,48 @@ export function prepareConfigPayloadForSave({
     return { ok: false, error: "每日执行时间格式错误，必须是 HH:MM 或 HH:MM:SS" };
   }
   payload.scheduler.run_time = normalizedSchedulerRunTime;
+  payload.scheduler.enabled = true;
+  payload.scheduler.auto_start_in_gui = false;
+  payload.scheduler.check_interval_sec = Number.parseInt(payload.scheduler.check_interval_sec ?? 30, 10);
 
   // 路径收敛：调度状态/续传/告警恢复统一使用内部固定 .runtime 子路径
   payload.scheduler.state_file = "daily_scheduler_state.json";
   payload.download.resume.root_dir = "pipeline_resume";
   payload.download.resume.index_file = "index.json";
+
+  payload.day_metric_upload = payload.day_metric_upload || {};
+  payload.day_metric_upload.scheduler =
+    payload.day_metric_upload.scheduler && typeof payload.day_metric_upload.scheduler === "object"
+      ? payload.day_metric_upload.scheduler
+      : {};
+  payload.day_metric_upload.scheduler.enabled = true;
+  payload.day_metric_upload.scheduler.auto_start_in_gui = false;
+  payload.day_metric_upload.scheduler.run_time =
+    normalizeRunTimeText(payload.day_metric_upload.scheduler.run_time) || "08:00:00";
+  payload.day_metric_upload.scheduler.check_interval_sec = Number.parseInt(
+    payload.day_metric_upload.scheduler.check_interval_sec ?? 30,
+    10,
+  );
+  payload.day_metric_upload.scheduler.catch_up_if_missed = Boolean(
+    payload.day_metric_upload.scheduler.catch_up_if_missed,
+  );
+  payload.day_metric_upload.scheduler.retry_failed_in_same_period =
+    payload.day_metric_upload.scheduler.retry_failed_in_same_period !== false;
+  payload.day_metric_upload.scheduler.state_file = String(
+    payload.day_metric_upload.scheduler.state_file || "day_metric_upload_scheduler_state.json",
+  ).trim();
+  if (!payload.day_metric_upload.scheduler.run_time) {
+    return { ok: false, error: "12项独立上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS" };
+  }
+  if (
+    !Number.isInteger(payload.day_metric_upload.scheduler.check_interval_sec) ||
+    payload.day_metric_upload.scheduler.check_interval_sec <= 0
+  ) {
+    return { ok: false, error: "12项独立上传调度检查间隔必须大于0" };
+  }
+  if (!payload.day_metric_upload.scheduler.state_file) {
+    return { ok: false, error: "12项独立上传调度状态文件不能为空" };
+  }
 
   if (Array.isArray(payload.download.sites)) {
     payload.download.sites = payload.download.sites.map((site) => {
@@ -1719,8 +1788,8 @@ export function prepareConfigPayloadForSave({
   if (!payload.handover_log.template.source_path) {
     return { ok: false, error: "交接班模板文件不能为空" };
   }
-  payload.handover_log.scheduler.enabled = Boolean(payload.handover_log.scheduler.enabled);
-  payload.handover_log.scheduler.auto_start_in_gui = Boolean(payload.handover_log.scheduler.auto_start_in_gui);
+  payload.handover_log.scheduler.enabled = true;
+  payload.handover_log.scheduler.auto_start_in_gui = false;
   payload.handover_log.scheduler.catch_up_if_missed = Boolean(payload.handover_log.scheduler.catch_up_if_missed);
   payload.handover_log.scheduler.retry_failed_in_same_period = Boolean(
     payload.handover_log.scheduler.retry_failed_in_same_period,
@@ -1842,9 +1911,9 @@ export function prepareConfigPayloadForSave({
   if (!handoverOtherImportantWorkValidation.ok) {
     return handoverOtherImportantWorkValidation;
   }
-  const handoverDayMetricValidation = validateAndNormalizeHandoverDayMetricExport(payload);
-  if (!handoverDayMetricValidation.ok) {
-    return handoverDayMetricValidation;
+  const dayMetricTargetValidation = validateAndNormalizeDayMetricUploadTarget(payload);
+  if (!dayMetricTargetValidation.ok) {
+    return dayMetricTargetValidation;
   }
   const handoverSourceDataAttachmentValidation = validateAndNormalizeHandoverSourceDataAttachmentExport(payload);
   if (!handoverSourceDataAttachmentValidation.ok) {

@@ -4,8 +4,8 @@
     <div class="section-title">交接班日志</div>
     <div class="status-metric-grid-compact">
       <div class="status-metric-card compact">
-        <div class="status-metric-label">模板名称</div>
-        <div class="status-metric-value">{{ config.handover_log.download.template_name || '未设置' }}</div>
+        <div class="status-metric-label">模板文件</div>
+        <div class="status-metric-value">{{ config.handover_log.template.source_path || '未设置' }}</div>
       </div>
       <div class="status-metric-card compact">
         <div class="status-metric-label">规则数量</div>
@@ -17,39 +17,15 @@
       </div>
     </div>
     <div class="config-quick-tab-grid">
-      <a class="btn btn-secondary" href="#handover-config-basic">下载与基础班次</a>
       <a class="btn btn-secondary" href="#handover-config-sources">来源、分类与目录</a>
       <a class="btn btn-secondary" href="#handover-config-output">上报与同步</a>
       <a class="btn btn-secondary" href="#handover-config-review">审核与模板规则</a>
     </div>
     <div class="hint-stack">
-      <div class="hint">交接班配置项较多，已按下载、来源、上报和审核模板拆成内部大分组。</div>
+      <div class="hint">外网端只保留交接班日志本身的来源、同步和审核配置，不再维护内网下载楼栋与班次下载参数。</div>
       <div class="hint">组内仍保留原有字段顺序，方便沿用现有配置经验和历史说明。</div>
     </div>
   </div>
-  <details id="handover-config-basic" class="config-group-panel" open>
-    <summary class="config-group-summary">下载与基础班次</summary>
-    <div class="config-group-body">
-      <div class="config-panel-grid two-col">
-      <section class="content-card config-panel-card config-subgroup-card">
-        <div class="section-title">下载与班次时间窗</div>
-        
-          <div class="form-row"><label class="label">交接班报表模板名称</label><input type="text" v-model="config.handover_log.download.template_name" /></div>
-          <div class="form-row"><label class="label">查询刻度</label><input type="text" v-model="config.handover_log.download.scale_label" /></div>
-          <div class="form-row"><label class="label">白班开始</label><input type="text" v-model="config.handover_log.download.shift_windows.day.start" /></div>
-          <div class="form-row"><label class="label">白班结束</label><input type="text" v-model="config.handover_log.download.shift_windows.day.end" /></div>
-          <div class="form-row"><label class="label">夜班开始</label><input type="text" v-model="config.handover_log.download.shift_windows.night.start" /></div>
-          <div class="form-row"><label class="label">夜班结束（次日）</label><input type="text" v-model="config.handover_log.download.shift_windows.night.end_next_day" /></div>
-          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.download.parallel_by_building" /> 并发下载楼栋</label></div>
-          <div class="form-row"><label class="label">查询结果等待(ms)</label><input type="number" v-model.number="config.handover_log.download.query_result_timeout_ms" /></div>
-          <div class="form-row"><label class="label">菜单等待(ms)</label><input type="number" v-model.number="config.handover_log.download.menu_visible_timeout_ms" /></div>
-          <div class="form-row"><label class="label">iframe等待(ms)</label><input type="number" v-model.number="config.handover_log.download.iframe_timeout_ms" /></div>
-          <div class="form-row"><label class="label">时间输入框等待(ms)</label><input type="number" v-model.number="config.handover_log.download.start_end_visible_timeout_ms" /></div>
-          <div class="hint">默认串行更稳定；内网页面查询时间窗默认使用最近20分钟，只有内网页面负载较低时再开启并发。</div>
-      </section>
-      </div>
-    </div>
-  </details>
   <details id="handover-config-sources" class="config-group-panel" open>
     <summary class="config-group-summary">来源、分类与目录</summary>
     <div class="config-group-body">
@@ -150,12 +126,11 @@
           <div class="form-row"><label class="label">事件模板文件</label><input type="text" v-model="config.handover_log.monthly_event_report.template.source_path" /></div>
           <div class="form-row"><label class="label">输出目录</label><input type="text" v-model="config.handover_log.monthly_event_report.template.output_dir" /></div>
           <div class="form-row"><label class="label">文件命名规则</label><input type="text" v-model="config.handover_log.monthly_event_report.template.file_name_pattern" /></div>
-          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_event_report.scheduler.enabled" /> 启用月度调度</label></div>
-          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_event_report.scheduler.auto_start_in_gui" /> 启动后自动开启调度</label></div>
-          <div class="form-row"><label class="label">每月几号</label><input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_event_report.scheduler.day_of_month" /></div>
-          <div class="form-row"><label class="label">调度时间</label><input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" /></div>
-          <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.handover_log.monthly_event_report.scheduler.check_interval_sec" /></div>
-          <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_event_report.scheduler.state_file" /></div>
+          <div class="form-row"><label class="label">每月几号</label><input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_event_report.scheduler.day_of_month" @change="saveMonthlyEventReportSchedulerQuickConfig" /></div>
+          <div class="form-row"><label class="label">调度时间</label><input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" @change="saveMonthlyEventReportSchedulerQuickConfig" /></div>
+          <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.handover_log.monthly_event_report.scheduler.check_interval_sec" @change="saveMonthlyEventReportSchedulerQuickConfig" /></div>
+          <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_event_report.scheduler.state_file" @change="saveMonthlyEventReportSchedulerQuickConfig" /></div>
+          <div class="hint">{{ monthlyEventReportSchedulerQuickSaving ? '事件月报调度配置保存中...' : '修改后自动保存。' }}</div>
           <div class="hint">数据源固定复用“新事件处理”同一张多维表。</div>
       </section>
 
@@ -165,12 +140,11 @@
           <div class="form-row"><label class="label">变更模板文件</label><input type="text" v-model="config.handover_log.monthly_change_report.template.source_path" /></div>
           <div class="form-row"><label class="label">输出目录</label><input type="text" v-model="config.handover_log.monthly_change_report.template.output_dir" /></div>
           <div class="form-row"><label class="label">文件命名规则</label><input type="text" v-model="config.handover_log.monthly_change_report.template.file_name_pattern" /></div>
-          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_change_report.scheduler.enabled" /> 启用月度调度</label></div>
-          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.monthly_change_report.scheduler.auto_start_in_gui" /> 启动后自动开启调度</label></div>
-          <div class="form-row"><label class="label">每月几号</label><input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_change_report.scheduler.day_of_month" /></div>
-          <div class="form-row"><label class="label">调度时间</label><input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" /></div>
-          <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.handover_log.monthly_change_report.scheduler.check_interval_sec" /></div>
-          <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_change_report.scheduler.state_file" /></div>
+          <div class="form-row"><label class="label">每月几号</label><input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_change_report.scheduler.day_of_month" @change="saveMonthlyChangeReportSchedulerQuickConfig" /></div>
+          <div class="form-row"><label class="label">调度时间</label><input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" @change="saveMonthlyChangeReportSchedulerQuickConfig" /></div>
+          <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.handover_log.monthly_change_report.scheduler.check_interval_sec" @change="saveMonthlyChangeReportSchedulerQuickConfig" /></div>
+          <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_change_report.scheduler.state_file" @change="saveMonthlyChangeReportSchedulerQuickConfig" /></div>
+          <div class="hint">{{ monthlyChangeReportSchedulerQuickSaving ? '变更月报调度配置保存中...' : '修改后自动保存。' }}</div>
           <div class="hint">变更月报按“变更开始时间”归属到上一个自然月，输出只写本地文件，不上传飞书。</div>
       </section>
 
@@ -419,70 +393,6 @@
     <summary class="config-group-summary">上报与同步</summary>
     <div class="config-group-body">
       <div class="config-panel-grid two-col">
-      <section class="content-card config-panel-card config-subgroup-card config-panel-card-wide config-editor-card">
-        <div class="section-title">白班指标上报多维</div>
-          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.day_metric_export.enabled" /> 启用白班指标上报</label></div>
-          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.day_metric_export.only_day_shift" /> 仅白班执行</label></div>
-          <div class="form-row"><label class="label">多维 App Token</label><input type="text" v-model="config.handover_log.day_metric_export.source.app_token" /></div>
-          <div class="form-row"><label class="label">多维 Table ID</label><input type="text" v-model="config.handover_log.day_metric_export.source.table_id" /></div>
-          <div class="form-row"><label class="label">批量写入大小</label><input type="number" v-model.number="config.handover_log.day_metric_export.source.create_batch_size" /></div>
-          <div class="form-row"><label class="label">字段：类型</label><input type="text" v-model="config.handover_log.day_metric_export.fields.type" /></div>
-          <div class="form-row"><label class="label">字段：楼栋</label><input type="text" v-model="config.handover_log.day_metric_export.fields.building" /></div>
-          <div class="form-row"><label class="label">字段：日期</label><input type="text" v-model="config.handover_log.day_metric_export.fields.date" /></div>
-          <div class="form-row"><label class="label">字段：数值</label><input type="text" v-model="config.handover_log.day_metric_export.fields.value" /></div>
-          <div class="form-row"><label class="label">缺失值策略</label><input type="text" v-model="config.handover_log.day_metric_export.missing_value_policy" /></div>
-          <div class="btn-line" style="margin:8px 0;">
-            <button class="btn btn-secondary" @click="config.handover_log.day_metric_export.types.push({ name: '', source: 'cell', cell: '', metric_id: '' })">新增指标类型</button>
-          </div>
-          <div class="config-editor-scroll">
-            <table class="site-table config-editor-table" style="margin-bottom:0;">
-              <thead>
-                <tr>
-                  <th style="width:220px;">类型名称</th>
-                  <th style="width:140px;">来源</th>
-                  <th style="width:140px;">单元格</th>
-                  <th style="width:200px;">规则ID(metric_id)</th>
-                  <th style="width:90px;">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(row, idx) in (config.handover_log.day_metric_export.types || [])" :key="'day-metric-type-' + idx">
-                  <td><input type="text" v-model="row.name" /></td>
-                  <td>
-                    <select v-model="row.source">
-                      <option value="cell">cell</option>
-                      <option value="metric">metric</option>
-                      <option value="cell_percent">cell_percent</option>
-                      <option value="cell_min_pair">cell_min_pair</option>
-                    </select>
-                  </td>
-                  <td>
-                    <input
-                      type="text"
-                      v-model="row.cell"
-                      :disabled="row.source === 'metric'"
-                      placeholder="如 D6"
-                    />
-                  </td>
-                  <td>
-                    <input
-                      type="text"
-                      v-model="row.metric_id"
-                      :disabled="row.source !== 'metric'"
-                      placeholder="如 cold_temp_max"
-                    />
-                  </td>
-                  <td><button class="btn btn-danger" @click="config.handover_log.day_metric_export.types.splice(idx, 1)">删除</button></td>
-                </tr>
-                <tr v-if="!(config.handover_log.day_metric_export.types || []).length" class="config-editor-empty-row">
-                  <td colspan="5" class="hint">暂无指标类型，请点击“新增指标类型”。</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div class="hint" style="margin-bottom:8px;">仅白班交接班生成成功后追加写入，不删旧记录；数值缺失按 0 写入。</div>
-      </section>
-
       <section class="content-card config-panel-card config-subgroup-card">
         <div class="section-title">确认后源数据附件上传</div>
           <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.source_data_attachment_export.enabled" /> 启用源数据附件上传</label></div>
@@ -501,7 +411,7 @@
           <div class="form-row"><label class="label">固定类型文案</label><input type="text" v-model="config.handover_log.source_data_attachment_export.fixed_values.type" /></div>
           <div class="form-row"><label class="label">白班文案</label><input type="text" v-model="config.handover_log.source_data_attachment_export.fixed_values.shift_text.day" /></div>
           <div class="form-row"><label class="label">夜班文案</label><input type="text" v-model="config.handover_log.source_data_attachment_export.fixed_values.shift_text.night" /></div>
-          <div class="hint" style="margin-bottom:8px;">五楼全部确认后上传各楼用于生成交接班的源数据表附件；该上传独立于12项数值上传，支持白班和夜班。</div>
+          <div class="hint" style="margin-bottom:8px;">五楼全部确认后上传各楼用于生成交接班的源数据表附件，支持白班和夜班。</div>
       </section>
 
       <section class="content-card config-panel-card config-subgroup-card">

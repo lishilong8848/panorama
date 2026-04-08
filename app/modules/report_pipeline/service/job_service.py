@@ -1039,13 +1039,16 @@ class JobService:
                 current_ssid=current_ssid,
             )
         else:
+            # When no SSID getter is configured, do not hard-block the task engine.
+            # Treat the current side as unknown but reachable, so resource sequencing
+            # still works in tests, worker sandboxes, and lightweight runtime contexts.
             snapshot = {
                 "current_ssid": "",
                 "ssid_side": "none",
-                "internal_reachable": False,
-                "external_reachable": False,
-                "reachable_sides": [],
-                "mode": "none_reachable",
+                "internal_reachable": True,
+                "external_reachable": True,
+                "reachable_sides": ["internal", "external"],
+                "mode": "switching_ready",
                 "last_checked_at": self._now_text(),
             }
         with self._network_status_lock:
@@ -1161,14 +1164,16 @@ class JobService:
                 ssid_side = str(current_state.get("ssid_side", "") or "").strip().lower()
                 if ssid_side in {"internal", "external"}:
                     current_side = ssid_side
-                elif self._network_window_current_side in {"internal", "external"}:
-                    current_side = self._network_window_current_side
-                elif queued_internal and not queued_external:
-                    current_side = "internal"
-                elif queued_external and not queued_internal:
-                    current_side = "external"
                 else:
-                    current_side = "internal"
+                    if running_internal and not running_external:
+                        current_side = "internal"
+                    elif running_external and not running_internal:
+                        current_side = "external"
+                    elif queued_internal or queued_external:
+                        chosen_side = self._choose_next_network_side_locked()
+                        current_side = chosen_side if chosen_side in {"internal", "external"} else "none"
+                    else:
+                        current_side = "none"
             elif mode == "internal_only":
                 current_side = "internal"
             elif mode == "external_only":

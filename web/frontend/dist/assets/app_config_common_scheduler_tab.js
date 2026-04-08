@@ -5,7 +5,7 @@
     <div class="status-metric-grid-compact">
       <div class="status-metric-card compact">
         <div class="status-metric-label">调度状态</div>
-        <div class="status-metric-value">{{ config.scheduler.enabled ? '已启用' : '未启用' }}</div>
+        <div class="status-metric-value">{{ health.scheduler.status || '未启动' }}</div>
       </div>
       <div class="status-metric-card compact">
         <div class="status-metric-label">每日执行时间</div>
@@ -17,16 +17,14 @@
       </div>
     </div>
     <div class="hint-stack">
-      <div class="hint">这里只配置全局基础调度开关，具体业务模块仍可在各自模块内设置独立调度。</div>
+      <div class="hint">这里只配置全局基础调度参数，具体业务模块仍可在各自模块内设置独立调度。</div>
       <div class="hint">若错过运行时间点，可按补跑策略在下一次检查时补执行。</div>
     </div>
   </div>
 
   <div class="config-panel-grid two-col">
     <div class="content-card config-panel-card">
-      <div class="section-title">调度总开关</div>
-      <div class="form-row"><label><input type="checkbox" v-model="config.scheduler.enabled" /> 启用调度</label></div>
-      <div class="form-row"><label><input type="checkbox" v-model="config.scheduler.auto_start_in_gui" /> 启动后自动运行调度</label></div>
+      <div class="section-title">调度策略</div>
       <div class="form-row"><label><input type="checkbox" v-model="config.scheduler.catch_up_if_missed" /> 错过时点后补跑</label></div>
     </div>
 

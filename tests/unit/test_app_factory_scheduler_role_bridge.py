@@ -102,6 +102,37 @@ class _FakeBridgeService:
         self.calls.append(("create_handover_from_download_task", dict(kwargs)))
         return {"task_id": "bridge-handover-latest-1", "feature": "handover_from_download", "status": "queued_for_internal"}
 
+    def get_or_create_handover_from_download_task(self, **kwargs):  # noqa: ANN003
+        return self.create_handover_from_download_task(**kwargs)
+
+    def get_handover_capacity_by_date_cache_entries(self, *, duty_date, duty_shift, buildings):  # noqa: ANN001
+        self.calls.append(
+            (
+                "get_handover_capacity_by_date_cache_entries",
+                {"duty_date": duty_date, "duty_shift": duty_shift, "buildings": list(buildings)},
+            )
+        )
+        if not self.ready:
+            return []
+        if self.stale:
+            return [
+                {
+                    "building": "A楼",
+                    "file_path": "D:/QJPT_Shared/handover_capacity_report_family/A楼.xlsx",
+                    "duty_date": duty_date,
+                    "duty_shift": duty_shift,
+                }
+            ]
+        return [
+            {
+                "building": building,
+                "file_path": f"D:/QJPT_Shared/handover_capacity_report_family/{building}.xlsx",
+                "duty_date": duty_date,
+                "duty_shift": duty_shift,
+            }
+            for building in buildings
+        ]
+
     def create_wet_bulb_collection_task(self, **kwargs):  # noqa: ANN003
         self.calls.append(("create_wet_bulb_collection_task", dict(kwargs)))
         return {"task_id": "bridge-wet-bulb-1", "feature": "wet_bulb_collection", "status": "queued_for_internal"}

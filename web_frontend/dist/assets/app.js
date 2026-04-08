@@ -354,6 +354,8 @@ createApp({
       schedulerQuickSaving,
       handoverSchedulerQuickSaving,
       wetBulbSchedulerQuickSaving,
+      dayMetricUploadSchedulerQuickSaving,
+      alarmEventUploadSchedulerQuickSaving,
       monthlyEventReportSchedulerQuickSaving,
       monthlyChangeReportSchedulerQuickSaving,
       configAutoSaveSuspendDepth,
@@ -401,8 +403,6 @@ createApp({
       selectedDateCount,
       dayMetricSelectedDateCount,
       pendingResumeCount,
-      dayMetricUploadEnabled,
-      dayMetricLocalImportEnabled,
       dayMetricCurrentPayload,
       dayMetricCurrentResultRows,
       dayMetricRetryableFailedCount,
@@ -425,6 +425,10 @@ createApp({
       schedulerTriggerText,
       wetBulbSchedulerDecisionText,
       wetBulbSchedulerTriggerText,
+      dayMetricUploadSchedulerDecisionText,
+      dayMetricUploadSchedulerTriggerText,
+      alarmEventUploadSchedulerDecisionText,
+      alarmEventUploadSchedulerTriggerText,
       monthlyEventReportSchedulerDecisionText,
       monthlyEventReportSchedulerTriggerText,
       monthlyChangeReportSchedulerDecisionText,
@@ -525,6 +529,12 @@ createApp({
     const actionKeyWetBulbSchedulerStart = "wet_bulb_scheduler:start";
     const actionKeyWetBulbSchedulerStop = "wet_bulb_scheduler:stop";
     const actionKeyWetBulbSchedulerSave = "wet_bulb_scheduler:save";
+    const actionKeyDayMetricUploadSchedulerStart = "day_metric_upload_scheduler:start";
+    const actionKeyDayMetricUploadSchedulerStop = "day_metric_upload_scheduler:stop";
+    const actionKeyDayMetricUploadSchedulerSave = "day_metric_upload_scheduler:save";
+    const actionKeyAlarmEventUploadSchedulerStart = "alarm_event_upload_scheduler:start";
+    const actionKeyAlarmEventUploadSchedulerStop = "alarm_event_upload_scheduler:stop";
+    const actionKeyAlarmEventUploadSchedulerSave = "alarm_event_upload_scheduler:save";
     const actionKeyMonthlyEventReportRunAll = "job:monthly_event_report:all";
     const actionKeyMonthlyEventReportRunBuildingPrefix = "job:monthly_event_report:building:";
     const actionKeyMonthlyChangeReportRunAll = "job:monthly_change_report:all";
@@ -604,12 +614,6 @@ createApp({
       const buildingName = String(building?.building || "").trim();
       if (!familyKey || !buildingName) return "缺少楼栋或文件类型";
       if (String(building?.statusKey || "").trim().toLowerCase() === "downloading") return "";
-      if (
-        familyKey === "alarm_event_family"
-        && Number.parseInt(String(new Date().getHours()), 10) < 8
-      ) {
-        return "当前不在告警定时窗口，请使用一键拉取告警文件";
-      }
       return "";
     }
     function isInternalSourceCacheRefreshLocked(family, building) {
@@ -894,7 +898,7 @@ createApp({
         return {
           tone: "danger",
           statusText: isTestMode ? "最近测试发送失败" : "最近发送失败",
-          summaryText: String(lastRun.error || "").trim() || (isTestMode ? "最近一次测试发送失败，请查看运行日志。" : "最近一次发送失败，请查看运行日志。"),
+          summaryText: String(lastRun.error || "").trim() || (isTestMode ? "最近一次测试发送失败，请查看最近结果。" : "最近一次发送失败，请查看最近结果。"),
         };
       }
       if (!String(reportLastRun?.target_month || "").trim()) {
@@ -1023,9 +1027,9 @@ createApp({
       };
     });
     const dayMetricUploadTarget = computed(() => {
-      const exportCfg = config.value?.handover_log?.day_metric_export || {};
-      const source = exportCfg?.source && typeof exportCfg.source === "object"
-        ? exportCfg.source
+      const targetCfg = config.value?.day_metric_upload?.target || {};
+      const source = targetCfg?.source && typeof targetCfg.source === "object"
+        ? targetCfg.source
         : {};
       const preview = health.day_metric_upload?.target_preview || {};
       const appToken = String(source.app_token || "").trim();
@@ -1087,6 +1091,7 @@ createApp({
     const showConsoleConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureMonthlyConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureHandoverConfigTab = computed(() => configRoleMode.value !== "internal");
+    const showFeatureDayMetricUploadConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureWetBulbCollectionConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureAlarmExportConfigTab = computed(() => configRoleMode.value !== "internal");
     const showSheetImportConfigTab = computed(() => configRoleMode.value !== "internal");
@@ -1126,7 +1131,7 @@ createApp({
         tone = "danger";
         statusText = "最近有失败任务";
         summaryText = `最近失败任务：${recentFailure.name || recentFailure.feature || recentFailure.job_id || "-"}`;
-        nextActionText = "先看失败摘要和任务详情，再决定是否重试。";
+        nextActionText = "先看失败摘要，再决定是否重试。";
       }
       return {
         tone,
@@ -1197,7 +1202,7 @@ createApp({
         tone = "warning";
         statusText = "最近专项上传有异常";
         summaryText = alarmUpload.summaryText || "最近专项上传失败，但共享源文件仍保留。";
-        nextActionText = "进入告警信息上传模块看任务摘要和运行日志，不要只盯卡片提示。";
+        nextActionText = "进入告警信息上传模块看任务摘要，不要只盯卡片提示。";
       } else if (currentTaskOverview.value.tone === "info" || currentTaskOverview.value.tone === "warning") {
         tone = currentTaskOverview.value.tone;
         statusText = currentTaskOverview.value.statusText;
@@ -1304,7 +1309,7 @@ createApp({
         tone = "warning";
         statusText = "最近告警上传异常";
         reasonText = alarmUpload.summaryText || "最近一次告警上传失败。";
-        actionText = "进入告警上传模块查看任务和运行日志，文件状态本身仍以 ready 为准。";
+        actionText = "进入告警上传模块查看任务摘要，文件状态本身仍以 ready 为准。";
       }
       return {
         tone,
@@ -1382,7 +1387,7 @@ createApp({
             hint: handoverCloudRoot || "未配置根 Wiki 地址时，交接班后续云表链路无法完整执行。",
           },
           {
-            id: "feature_handover",
+            id: "feature_day_metric_upload",
             label: "12项目标",
             ready: Boolean(dayMetricUploadTarget.value?.configured),
             value: dayMetricUploadTarget.value?.statusText || "未配置",
@@ -1422,6 +1427,7 @@ createApp({
         { id: "common_deployment", label: "角色与共享目录" },
         ...(showFeishuAuthConfigTab.value ? [{ id: "common_feishu_auth", label: "飞书鉴权" }] : []),
         ...(showFeatureHandoverConfigTab.value ? [{ id: "feature_handover", label: "交接班" }] : []),
+        ...(showFeatureDayMetricUploadConfigTab.value ? [{ id: "feature_day_metric_upload", label: "12项独立上传" }] : []),
         ...(showFeatureAlarmExportConfigTab.value ? [{ id: "feature_alarm_export", label: "告警上传" }] : []),
       ];
       return {
@@ -1903,11 +1909,6 @@ createApp({
       if (action === "open_alarm_upload") {
         openDashboardPage();
         setDashboardActiveModule("alarm_event_upload");
-        return;
-      }
-      if (action === "open_runtime_logs") {
-        openDashboardPage();
-        setDashboardActiveModule("runtime_logs");
         return;
       }
       if (action === "refresh_current_hour") {
@@ -2665,6 +2666,23 @@ createApp({
       await focusJob(item);
     }
 
+    async function focusJobInRuntimeLogs(jobLike) {
+      await focusJob(jobLike);
+    }
+
+    async function focusBridgeTaskInRuntimeLogs(taskLike) {
+      await focusBridgeTask(taskLike);
+    }
+
+    async function focusWaitingResourceItemInRuntimeLogs(item) {
+      const kind = String(item?.__waiting_kind || "job").trim().toLowerCase();
+      if (kind === "bridge") {
+        await focusBridgeTaskInRuntimeLogs(item);
+        return;
+      }
+      await focusJobInRuntimeLogs(item);
+    }
+
     function formatWaitingResourceItemTitle(item) {
       const kind = String(item?.__waiting_kind || "job").trim().toLowerCase();
       if (kind === "bridge") {
@@ -2673,14 +2691,169 @@ createApp({
       return item?.name || item?.feature || item?.job_id || "-";
     }
 
+    function formatJobCompactMeta(job) {
+      if (!job || typeof job !== "object") return "-";
+      const parts = [`状态：${formatJobStatus(job?.status || "running")}`];
+      const timeText = String(job?.started_at || "").trim() || String(job?.created_at || "").trim();
+      if (timeText) parts.push(`时间：${timeText}`);
+      return parts.join(" | ");
+    }
+
+    function formatJobCompactDetail(job) {
+      if (!job || typeof job !== "object") return "";
+      const errorText = String(job?.error || "").trim();
+      if (errorText) return `说明：${errorText}`;
+      const summaryText = String(job?.summary || "").trim();
+      if (summaryText) return `说明：${summaryText}`;
+      const waitReason = String(job?.wait_reason || "").trim();
+      if (waitReason) return `说明：${formatJobWaitReason(job)}`;
+      return "";
+    }
+
     function formatWaitingResourceItemMeta(item) {
       const kind = String(item?.__waiting_kind || "job").trim().toLowerCase();
       if (kind === "bridge") {
-        const reason = formatBridgeTaskError(item);
-        const summary = reason !== "-" ? reason : formatBridgeStageSummary(item);
-        return `共享桥接 | #${String(item?.task_id || "").trim() || "-"} | ${summary || "-"}`;
+        const parts = [`状态：${formatBridgeTaskStatus(item)}`];
+        const timeText = String(item?.updated_at || "").trim() || String(item?.created_at || "").trim();
+        if (timeText) parts.push(`时间：${timeText}`);
+        return parts.join(" | ");
       }
-      return `${formatJobKind(item)} | #${String(item?.job_id || "").trim() || "-"} | ${formatJobWaitReason(item)}`;
+      return formatJobCompactMeta({ ...item, status: item?.status || "waiting_resource" });
+    }
+
+    function formatWaitingResourceItemDetail(item) {
+      const kind = String(item?.__waiting_kind || "job").trim().toLowerCase();
+      if (kind === "bridge") {
+        const errorText = formatBridgeTaskError(item);
+        if (errorText && errorText !== "-") return `说明：${errorText}`;
+        const summaryText = String(item?.summary || "").trim();
+        if (summaryText) return `说明：${summaryText}`;
+        const stageText = formatBridgeStageSummary(item);
+        if (stageText && stageText !== "-") return `说明：${stageText}`;
+        return "";
+      }
+      return formatJobCompactDetail({ ...item, status: item?.status || "waiting_resource" });
+    }
+
+    function canCancelJob(job) {
+      if (!job || typeof job !== "object") return false;
+      const jobId = String(job?.job_id || "").trim();
+      if (!jobId) return false;
+      const status = String(job?.status || "").trim().toLowerCase();
+      return ["queued", "waiting_resource", "running"].includes(status) && !Boolean(job?.cancel_requested);
+    }
+
+    function canRetryJob(job) {
+      if (!job || typeof job !== "object") return false;
+      const jobId = String(job?.job_id || "").trim();
+      if (!jobId) return false;
+      const status = String(job?.status || "").trim().toLowerCase();
+      if (!["failed", "cancelled", "interrupted"].includes(status)) return false;
+      const stages = Array.isArray(job?.stages) ? job.stages : [];
+      return Boolean(String(stages[0]?.worker_handler || "").trim());
+    }
+
+    function formatJobListHint(job) {
+      if (!job || typeof job !== "object") return "-";
+      const errorText = String(job?.error || "").trim();
+      if (errorText) return `错误：${errorText}`;
+      const summaryText = String(job?.summary || "").trim();
+      if (summaryText) return summaryText;
+      const waitReason = String(job?.wait_reason || "").trim();
+      if (waitReason) return `等待：${formatJobWaitReason(job)}`;
+      const finishedAt = String(job?.finished_at || "").trim();
+      if (finishedAt) return `结束：${finishedAt}`;
+      const startedAt = String(job?.started_at || "").trim();
+      if (startedAt) return `开始：${startedAt}`;
+      const createdAt = String(job?.created_at || "").trim();
+      if (createdAt) return `提交：${createdAt}`;
+      return "-";
+    }
+
+    function formatRecentJobMeta(job) {
+      if (!job || typeof job !== "object") return "-";
+      const parts = [`状态：${formatJobStatus(job?.status)}`];
+      const finishedAt = String(job?.finished_at || "").trim();
+      const startedAt = String(job?.started_at || "").trim();
+      const createdAt = String(job?.created_at || "").trim();
+      const timeText = finishedAt || startedAt || createdAt;
+      if (timeText) parts.push(`时间：${timeText}`);
+      return parts.join(" | ");
+    }
+
+    function formatRecentJobDetail(job) {
+      if (!job || typeof job !== "object") return "";
+      const errorText = String(job?.error || "").trim();
+      if (errorText) return `说明：${errorText}`;
+      const summaryText = String(job?.summary || "").trim();
+      if (summaryText) return `说明：${summaryText}`;
+      return "";
+    }
+
+    function formatRecentBridgeTaskMeta(task) {
+      if (!task || typeof task !== "object") return "-";
+      const parts = [`状态：${formatBridgeTaskStatus(task)}`];
+      const updatedAt = String(task?.updated_at || "").trim();
+      if (updatedAt) parts.push(`时间：${updatedAt}`);
+      return parts.join(" | ");
+    }
+
+    function formatRecentBridgeTaskDetail(task) {
+      if (!task || typeof task !== "object") return "";
+      const errorText = formatBridgeTaskError(task);
+      if (errorText && errorText !== "-") return `说明：${errorText}`;
+      const summaryText = String(task?.summary || "").trim();
+      if (summaryText) return `说明：${summaryText}`;
+      return "";
+    }
+
+    function formatBridgeTaskCompactMeta(task) {
+      if (!task || typeof task !== "object") return "-";
+      const parts = [`状态：${formatBridgeTaskStatus(task)}`];
+      const updatedAt = String(task?.updated_at || "").trim();
+      if (updatedAt) parts.push(`时间：${updatedAt}`);
+      return parts.join(" | ");
+    }
+
+    function formatBridgeTaskCompactDetail(task) {
+      if (!task || typeof task !== "object") return "";
+      const errorText = formatBridgeTaskError(task);
+      if (errorText && errorText !== "-") return `说明：${errorText}`;
+      const summaryText = String(task?.summary || "").trim();
+      if (summaryText) return `说明：${summaryText}`;
+      const currentStageName = String(task?.current_stage_name || "").trim();
+      if (currentStageName) return `说明：${currentStageName}`;
+      return "";
+    }
+
+    async function cancelJobItem(jobLike) {
+      const job =
+        jobLike && typeof jobLike === "object"
+          ? jobLike
+          : jobsList.value.find((item) => String(item?.job_id || "").trim() === String(jobLike || "").trim());
+      const jobId = String(job?.job_id || "").trim();
+      if (!jobId) {
+        message.value = "当前没有可取消的任务";
+        return;
+      }
+      currentJob.value = { ...(currentJob.value || {}), ...job };
+      selectedJobId.value = jobId;
+      await cancelCurrentJob();
+    }
+
+    async function retryJobItem(jobLike) {
+      const job =
+        jobLike && typeof jobLike === "object"
+          ? jobLike
+          : jobsList.value.find((item) => String(item?.job_id || "").trim() === String(jobLike || "").trim());
+      const jobId = String(job?.job_id || "").trim();
+      if (!jobId) {
+        message.value = "当前没有可重试的任务";
+        return;
+      }
+      currentJob.value = { ...(currentJob.value || {}), ...job };
+      selectedJobId.value = jobId;
+      await retryCurrentJob();
     }
 
     function formatBridgeStageSummary(task) {
@@ -2789,6 +2962,24 @@ createApp({
         autoSaveConfig();
       }, 1200);
     };
+
+    async function runSchedulerConfigAutoSave(taskFn) {
+      if (typeof taskFn !== "function") return;
+      if (configAutoSaveTimer) {
+        window.clearTimeout(configAutoSaveTimer);
+        configAutoSaveTimer = null;
+      }
+      if (configAutoSaveSuspendDepth) {
+        configAutoSaveSuspendDepth.value += 1;
+      }
+      try {
+        return await taskFn();
+      } finally {
+        if (configAutoSaveSuspendDepth) {
+          configAutoSaveSuspendDepth.value = Math.max(0, configAutoSaveSuspendDepth.value - 1);
+        }
+      }
+    }
 
     const shouldPauseRuntimeRequests = computed(() => {
       return Boolean(
@@ -3022,6 +3213,7 @@ createApp({
         if (roleMode === "internal") {
           hiddenFeatureTabs.add("feature_monthly");
           hiddenFeatureTabs.add("feature_handover");
+          hiddenFeatureTabs.add("feature_day_metric_upload");
           hiddenFeatureTabs.add("feature_wet_bulb_collection");
           hiddenFeatureTabs.add("feature_alarm_export");
           hiddenFeatureTabs.add("feature_sheet");
@@ -3077,6 +3269,7 @@ createApp({
     );
 
     const dashboardActions = createDashboardActions({
+      health,
       canRun,
       busy,
       message,
@@ -3088,6 +3281,8 @@ createApp({
       schedulerQuickSaving,
       handoverSchedulerQuickSaving,
       wetBulbSchedulerQuickSaving,
+      dayMetricUploadSchedulerQuickSaving,
+      alarmEventUploadSchedulerQuickSaving,
       monthlyEventReportSchedulerQuickSaving,
       monthlyChangeReportSchedulerQuickSaving,
       monthlyReportTestReceiveIds,
@@ -3130,19 +3325,25 @@ createApp({
       runSheetImport,
       fetchJob,
       startScheduler,
-      saveSchedulerQuickConfig,
+      saveSchedulerQuickConfig: saveSchedulerQuickConfigImmediate,
       startHandoverScheduler,
       stopHandoverScheduler,
-      saveHandoverSchedulerQuickConfig,
+      saveHandoverSchedulerQuickConfig: saveHandoverSchedulerQuickConfigImmediate,
       startWetBulbCollectionScheduler,
       stopWetBulbCollectionScheduler,
-      saveWetBulbCollectionSchedulerQuickConfig,
+      saveWetBulbCollectionSchedulerQuickConfig: saveWetBulbCollectionSchedulerQuickConfigImmediate,
+      startDayMetricUploadScheduler,
+      stopDayMetricUploadScheduler,
+      saveDayMetricUploadSchedulerQuickConfig: saveDayMetricUploadSchedulerQuickConfigImmediate,
+      startAlarmEventUploadScheduler,
+      stopAlarmEventUploadScheduler,
+      saveAlarmEventUploadSchedulerQuickConfig: saveAlarmEventUploadSchedulerQuickConfigImmediate,
       startMonthlyEventReportScheduler,
       stopMonthlyEventReportScheduler,
-      saveMonthlyEventReportSchedulerQuickConfig,
+      saveMonthlyEventReportSchedulerQuickConfig: saveMonthlyEventReportSchedulerQuickConfigImmediate,
       startMonthlyChangeReportScheduler,
       stopMonthlyChangeReportScheduler,
-      saveMonthlyChangeReportSchedulerQuickConfig,
+      saveMonthlyChangeReportSchedulerQuickConfig: saveMonthlyChangeReportSchedulerQuickConfigImmediate,
       runHandoverFromFile,
       runHandoverFromDownload,
       runDayMetricFromDownload,
@@ -3156,6 +3357,19 @@ createApp({
       getJobRetryActionKey,
       stopScheduler,
     } = dashboardActions;
+
+    const saveSchedulerQuickConfig = () => runSchedulerConfigAutoSave(saveSchedulerQuickConfigImmediate);
+    const saveHandoverSchedulerQuickConfig = () => runSchedulerConfigAutoSave(saveHandoverSchedulerQuickConfigImmediate);
+    const saveWetBulbCollectionSchedulerQuickConfig = () =>
+      runSchedulerConfigAutoSave(saveWetBulbCollectionSchedulerQuickConfigImmediate);
+    const saveDayMetricUploadSchedulerQuickConfig = () =>
+      runSchedulerConfigAutoSave(saveDayMetricUploadSchedulerQuickConfigImmediate);
+    const saveAlarmEventUploadSchedulerQuickConfig = () =>
+      runSchedulerConfigAutoSave(saveAlarmEventUploadSchedulerQuickConfigImmediate);
+    const saveMonthlyEventReportSchedulerQuickConfig = () =>
+      runSchedulerConfigAutoSave(saveMonthlyEventReportSchedulerQuickConfigImmediate);
+    const saveMonthlyChangeReportSchedulerQuickConfig = () =>
+      runSchedulerConfigAutoSave(saveMonthlyChangeReportSchedulerQuickConfigImmediate);
 
     const realStreamController = createLogStreamController({
       appendLog,
@@ -3338,9 +3552,7 @@ createApp({
       internalSourceCacheHistoryOverview,
       sharedSourceCacheReadinessOverview,
       updaterMirrorOverview,
-      dayMetricUploadEnabled,
-      dayMetricLocalImportEnabled,
-      dayMetricCurrentPayload,
+    dayMetricCurrentPayload,
       dayMetricCurrentResultRows,
       dayMetricRetryableFailedCount,
       dayMetricRetryAllMode,
@@ -3372,6 +3584,7 @@ createApp({
       showConsoleConfigTab,
       showFeatureMonthlyConfigTab,
       showFeatureHandoverConfigTab,
+      showFeatureDayMetricUploadConfigTab,
       showFeatureWetBulbCollectionConfigTab,
       showFeatureAlarmExportConfigTab,
       showSheetImportConfigTab,
@@ -3445,6 +3658,12 @@ createApp({
       actionKeyWetBulbSchedulerStart,
       actionKeyWetBulbSchedulerStop,
       actionKeyWetBulbSchedulerSave,
+      actionKeyDayMetricUploadSchedulerStart,
+      actionKeyDayMetricUploadSchedulerStop,
+      actionKeyDayMetricUploadSchedulerSave,
+      actionKeyAlarmEventUploadSchedulerStart,
+      actionKeyAlarmEventUploadSchedulerStop,
+      actionKeyAlarmEventUploadSchedulerSave,
       actionKeyConfigSave,
       actionKeyUpdaterCheck,
       actionKeyUpdaterApply,
@@ -3544,14 +3763,31 @@ createApp({
       formatBridgeArtifactSummary,
       formatBridgeTaskError,
       canCancelBridgeTask,
+      canCancelJob,
+      canRetryJob,
       isWaitingResourceItemSelected,
       focusWaitingResourceItem,
+      focusWaitingResourceItemInRuntimeLogs,
+      formatJobCompactMeta,
+      formatJobCompactDetail,
       formatWaitingResourceItemTitle,
       formatWaitingResourceItemMeta,
+      formatWaitingResourceItemDetail,
+      formatJobListHint,
+      formatRecentJobMeta,
+      formatRecentJobDetail,
+      formatRecentBridgeTaskMeta,
+      formatRecentBridgeTaskDetail,
+      formatBridgeTaskCompactMeta,
+      formatBridgeTaskCompactDetail,
       formatBridgeEventLevel,
       formatBridgeEventText,
       focusJob,
+      focusJobInRuntimeLogs,
       focusBridgeTask,
+      focusBridgeTaskInRuntimeLogs,
+      cancelJobItem,
+      retryJobItem,
       cancelBridgeTask,
       retryBridgeTask,
       getBridgeTaskCancelActionKey,
@@ -3593,6 +3829,12 @@ createApp({
       startWetBulbCollectionScheduler,
       stopWetBulbCollectionScheduler,
       saveWetBulbCollectionSchedulerQuickConfig,
+      startDayMetricUploadScheduler,
+      stopDayMetricUploadScheduler,
+      saveDayMetricUploadSchedulerQuickConfig,
+      startAlarmEventUploadScheduler,
+      stopAlarmEventUploadScheduler,
+      saveAlarmEventUploadSchedulerQuickConfig,
       startMonthlyEventReportScheduler,
       stopMonthlyEventReportScheduler,
       saveMonthlyEventReportSchedulerQuickConfig,
@@ -3665,6 +3907,12 @@ createApp({
       actionKeyMonthlyEventReportRunBuildingPrefix,
       actionKeyMonthlyChangeReportRunAll,
       actionKeyMonthlyChangeReportRunBuildingPrefix,
+      dayMetricUploadSchedulerQuickSaving,
+      alarmEventUploadSchedulerQuickSaving,
+      dayMetricUploadSchedulerDecisionText,
+      dayMetricUploadSchedulerTriggerText,
+      alarmEventUploadSchedulerDecisionText,
+      alarmEventUploadSchedulerTriggerText,
       actionKeyMonthlyEventReportSchedulerStart,
       actionKeyMonthlyEventReportSchedulerStop,
       actionKeyMonthlyEventReportSchedulerSave,

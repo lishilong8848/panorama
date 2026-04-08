@@ -44,7 +44,7 @@ function buildRoleDashboardState(roleMode, preferredId = "") {
   const defaultId = normalized === "internal" ? "runtime_logs" : "auto_flow";
   const activeModule = modules.some((item) => item.id === preferredId)
     ? preferredId
-    : (modules.some((item) => item.id === defaultId) ? defaultId : (modules[0]?.id || "runtime_logs"));
+    : (modules.some((item) => item.id === defaultId) ? defaultId : (modules[0]?.id || "auto_flow"));
   return { menuGroups, modules, activeModule };
 }
 
@@ -601,7 +601,6 @@ export function createAppState(vueApi) {
           can_resume_followup: false,
           pending_count: 0,
           failed_count: 0,
-          day_metric_pending_count: 0,
           attachment_pending_count: 0,
           cloud_pending_count: 0,
           daily_report_status: "idle",
@@ -763,7 +762,20 @@ export function createAppState(vueApi) {
       },
     },
     day_metric_upload: {
-      enabled: false,
+      scheduler: {
+        enabled: false,
+        running: false,
+        status: "未初始化",
+        next_run_time: "",
+        last_check_at: "",
+        last_decision: "",
+        last_trigger_at: "",
+        last_trigger_result: "",
+        state_path: "",
+        state_exists: false,
+        executor_bound: false,
+        callback_name: "",
+      },
       target_preview: {
         configured_app_token: "",
         operation_app_token: "",
@@ -778,6 +790,20 @@ export function createAppState(vueApi) {
     },
     alarm_event_upload: {
       enabled: false,
+      scheduler: {
+        enabled: false,
+        running: false,
+        status: "未初始化",
+        next_run_time: "",
+        last_check_at: "",
+        last_decision: "",
+        last_trigger_at: "",
+        last_trigger_result: "",
+        state_path: "",
+        state_exists: false,
+        executor_bound: false,
+        callback_name: "",
+      },
       target_preview: {
         configured_app_token: "",
         operation_app_token: "",
@@ -954,6 +980,8 @@ export function createAppState(vueApi) {
   const schedulerQuickSaving = ref(false);
   const handoverSchedulerQuickSaving = ref(false);
   const wetBulbSchedulerQuickSaving = ref(false);
+  const dayMetricUploadSchedulerQuickSaving = ref(false);
+  const alarmEventUploadSchedulerQuickSaving = ref(false);
   const monthlyEventReportSchedulerQuickSaving = ref(false);
   const monthlyChangeReportSchedulerQuickSaving = ref(false);
   const configAutoSaveSuspendDepth = ref(0);
@@ -1160,8 +1188,6 @@ export function createAppState(vueApi) {
   const selectedDateCount = computed(() => selectedDates.value.length);
   const dayMetricSelectedDateCount = computed(() => dayMetricSelectedDates.value.length);
   const pendingResumeCount = computed(() => pendingResumeRuns.value.length);
-  const dayMetricUploadEnabled = computed(() => Boolean(config.value?.day_metric_upload?.enabled));
-  const dayMetricLocalImportEnabled = computed(() => Boolean(config.value?.day_metric_upload?.behavior?.local_import_enabled));
   const dayMetricCurrentPayload = computed(() => {
     const payload = currentJob.value?.payload;
     const mode = String(payload?.mode || "").trim().toLowerCase();
@@ -1279,12 +1305,7 @@ export function createAppState(vueApi) {
   const totalBridgeHistoryCount = computed(() =>
     bridgeTasks.value.filter((item) => isBridgeTerminalStatus(item?.status)).length,
   );
-  const displayedBridgeTasks = computed(() => {
-    const historyTasks = bridgeTasks.value
-      .filter((item) => isBridgeTerminalStatus(item?.status))
-      .slice(0, BRIDGE_HISTORY_DISPLAY_LIMIT);
-    return [...activeBridgeTasks.value, ...historyTasks];
-  });
+  const displayedBridgeTasks = computed(() => activeBridgeTasks.value);
   const hiddenBridgeHistoryCount = computed(() =>
     Math.max(0, totalBridgeHistoryCount.value - BRIDGE_HISTORY_DISPLAY_LIMIT),
   );
@@ -2827,6 +2848,18 @@ function normalizeInternalDownloadPoolSlot(slot) {
   const monthlyChangeReportSchedulerTriggerText = computed(() =>
     mapSchedulerTriggerText(health.monthly_change_report?.scheduler?.last_trigger_result),
   );
+  const dayMetricUploadSchedulerDecisionText = computed(() =>
+    mapSchedulerDecisionText(health.day_metric_upload?.scheduler?.last_decision),
+  );
+  const dayMetricUploadSchedulerTriggerText = computed(() =>
+    mapSchedulerTriggerText(health.day_metric_upload?.scheduler?.last_trigger_result),
+  );
+  const alarmEventUploadSchedulerDecisionText = computed(() =>
+    mapSchedulerDecisionText(health.alarm_event_upload?.scheduler?.last_decision),
+  );
+  const alarmEventUploadSchedulerTriggerText = computed(() =>
+    mapSchedulerTriggerText(health.alarm_event_upload?.scheduler?.last_trigger_result),
+  );
   const handoverMorningDecisionText = computed(() =>
     mapSchedulerDecisionText(health.handover_scheduler?.morning?.last_decision),
   );
@@ -3001,7 +3034,6 @@ function normalizeInternalDownloadPoolSlot(slot) {
       canResumeFollowup: Boolean(raw.can_resume_followup),
       pendingCount: Number.parseInt(String(raw.pending_count || 0), 10) || 0,
       failedCount: Number.parseInt(String(raw.failed_count || 0), 10) || 0,
-      dayMetricPendingCount: Number.parseInt(String(raw.day_metric_pending_count || 0), 10) || 0,
       attachmentPendingCount: Number.parseInt(String(raw.attachment_pending_count || 0), 10) || 0,
       cloudPendingCount: Number.parseInt(String(raw.cloud_pending_count || 0), 10) || 0,
       dailyReportStatus: String(raw.daily_report_status || "").trim().toLowerCase() || "idle",
@@ -3233,16 +3265,6 @@ function normalizeInternalDownloadPoolSlot(slot) {
           ],
         };
       })(),
-      runtime_logs: {
-        eyebrow: "运行追踪",
-        title: "运行日志与任务状态",
-        description: "观察任务执行、错误和断点续传情况，作为问题定位的主视图。",
-        metrics: [
-          { label: "任务状态", value: currentJob.value?.status || "-" },
-          { label: "任务编号", value: currentJob.value?.job_id || "-" },
-          { label: "日志条数", value: String(logs.value.length) },
-        ],
-      },
     };
     return map[dashboardActiveModule.value] || {
       eyebrow: active.group_title || "业务模块",
@@ -3304,6 +3326,8 @@ function normalizeInternalDownloadPoolSlot(slot) {
     schedulerQuickSaving,
     handoverSchedulerQuickSaving,
     wetBulbSchedulerQuickSaving,
+    dayMetricUploadSchedulerQuickSaving,
+    alarmEventUploadSchedulerQuickSaving,
     monthlyEventReportSchedulerQuickSaving,
     monthlyChangeReportSchedulerQuickSaving,
     configAutoSaveSuspendDepth,
@@ -3352,8 +3376,6 @@ function normalizeInternalDownloadPoolSlot(slot) {
     selectedDateCount,
     dayMetricSelectedDateCount,
     pendingResumeCount,
-    dayMetricUploadEnabled,
-    dayMetricLocalImportEnabled,
     dayMetricCurrentPayload,
     dayMetricCurrentResultRows,
     dayMetricRetryableRows,
@@ -3377,6 +3399,10 @@ function normalizeInternalDownloadPoolSlot(slot) {
     schedulerTriggerText,
     wetBulbSchedulerDecisionText,
     wetBulbSchedulerTriggerText,
+    dayMetricUploadSchedulerDecisionText,
+    dayMetricUploadSchedulerTriggerText,
+    alarmEventUploadSchedulerDecisionText,
+    alarmEventUploadSchedulerTriggerText,
     monthlyEventReportSchedulerDecisionText,
     monthlyEventReportSchedulerTriggerText,
     monthlyChangeReportSchedulerDecisionText,

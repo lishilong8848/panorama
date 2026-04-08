@@ -1442,6 +1442,48 @@ a {
   gap: 16px;
 }
 
+.module-advanced-section {
+  margin-top: 16px;
+  border: 1px solid var(--border-soft);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(244, 248, 252, 0.96) 100%);
+  overflow: hidden;
+}
+
+.module-advanced-section > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text-1);
+}
+
+.module-advanced-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.module-advanced-section > summary::after {
+  content: "展开";
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-3);
+}
+
+.module-advanced-section[open] > summary::after {
+  content: "收起";
+}
+
+.module-advanced-section-body {
+  display: grid;
+  gap: 16px;
+  padding: 0 14px 14px;
+}
+
 .hint-stack {
   display: grid;
   gap: 6px;
@@ -1538,7 +1580,7 @@ a {
 }
 
 .ops-job-inline-action-slot {
-  min-width: 112px;
+  min-width: 96px;
   display: flex;
   justify-content: flex-end;
   align-self: center;
@@ -1566,6 +1608,7 @@ a {
 .ops-job-list-meta {
   font-size: 12px;
   color: var(--text-3);
+  line-height: 1.45;
   word-break: break-word;
 }
 
@@ -2849,6 +2892,20 @@ button:disabled,
   }
 
   .review-history-return {
+    width: 100%;
+  }
+
+  .ops-job-list-row {
+    grid-template-columns: 1fr;
+  }
+
+  .ops-job-inline-action-slot {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  .ops-job-inline-action {
     width: 100%;
   }
 }

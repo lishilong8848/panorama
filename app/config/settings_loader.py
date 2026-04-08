@@ -273,6 +273,29 @@ def _validate_alarm_export(cfg: Dict[str, Any]) -> None:
     for key in ("page_size", "delete_batch_size", "create_batch_size"):
         if int(feishu.get(key, 0) or 0) <= 0:
             raise ValueError(f"配置错误: features.alarm_export.feishu.{key} 必须大于0")
+    _validate_feature_daily_scheduler(
+        "features.alarm_export.scheduler",
+        alarm_export.get("scheduler", {}),
+    )
+
+
+def _validate_feature_daily_scheduler(section_name: str, scheduler_cfg: Any) -> None:
+    if not isinstance(scheduler_cfg, dict):
+        raise ValueError(f"配置错误: {section_name} 缺失或格式错误")
+    if not isinstance(scheduler_cfg.get("enabled", False), bool):
+        raise ValueError(f"配置错误: {section_name}.enabled 必须是布尔值")
+    if not isinstance(scheduler_cfg.get("auto_start_in_gui", False), bool):
+        raise ValueError(f"配置错误: {section_name}.auto_start_in_gui 必须是布尔值")
+    if not _valid_time(str(scheduler_cfg.get("run_time", ""))):
+        raise ValueError(f"配置错误: {section_name}.run_time 必须是 HH:MM:SS")
+    if int(scheduler_cfg.get("check_interval_sec", 0) or 0) <= 0:
+        raise ValueError(f"配置错误: {section_name}.check_interval_sec 必须大于0")
+    if not isinstance(scheduler_cfg.get("catch_up_if_missed", False), bool):
+        raise ValueError(f"配置错误: {section_name}.catch_up_if_missed 必须是布尔值")
+    if not isinstance(scheduler_cfg.get("retry_failed_in_same_period", True), bool):
+        raise ValueError(f"配置错误: {section_name}.retry_failed_in_same_period 必须是布尔值")
+    if not str(scheduler_cfg.get("state_file", "") or "").strip():
+        raise ValueError(f"配置错误: {section_name}.state_file 不能为空")
 
 
 def _validate_resume(cfg: Dict[str, Any]) -> None:
@@ -1068,99 +1091,18 @@ def _validate_handover_other_important_work_section(cfg: Dict[str, Any]) -> None
                     )
 
 
-def _validate_handover_day_metric_export(cfg: Dict[str, Any]) -> None:
-    handover = cfg.get("features", {}).get("handover_log", {})
-    if not isinstance(handover, dict):
-        return
-    export_cfg = handover.get("day_metric_export", {})
-    if not isinstance(export_cfg, dict):
-        raise ValueError("配置错误: features.handover_log.day_metric_export 缺失或格式错误")
-
-    source = export_cfg.get("source", {})
-    fields = export_cfg.get("fields", {})
-    types = export_cfg.get("types", [])
-    if not isinstance(source, dict):
-        raise ValueError("配置错误: features.handover_log.day_metric_export.source 必须是对象")
-    if not isinstance(fields, dict):
-        raise ValueError("配置错误: features.handover_log.day_metric_export.fields 必须是对象")
-    if not isinstance(types, list):
-        raise ValueError("配置错误: features.handover_log.day_metric_export.types 必须是数组")
-
-    missing_policy = str(export_cfg.get("missing_value_policy", "zero")).strip().lower()
-    if missing_policy != "zero":
-        raise ValueError("配置错误: features.handover_log.day_metric_export.missing_value_policy 仅支持 zero")
-
-    enabled = bool(export_cfg.get("enabled", True))
-    if enabled:
-        if not types:
-            raise ValueError("配置错误: features.handover_log.day_metric_export.types 不能为空")
-        if not str(source.get("app_token", "")).strip():
-            raise ValueError("配置错误: features.handover_log.day_metric_export.source.app_token 不能为空")
-        if not str(source.get("table_id", "")).strip():
-            raise ValueError("配置错误: features.handover_log.day_metric_export.source.table_id 不能为空")
-        if int(source.get("create_batch_size", 0)) <= 0:
-            raise ValueError("配置错误: features.handover_log.day_metric_export.source.create_batch_size 必须大于0")
-
-        for key in ("type", "building", "date", "value", "position_code"):
-            if not str(fields.get(key, "")).strip():
-                raise ValueError(f"配置错误: features.handover_log.day_metric_export.fields.{key} 不能为空")
-
-    valid_source = {"cell", "metric", "cell_percent", "cell_min_pair"}
-    cell_pattern = re.compile(r"^[A-Z]+[1-9]\d*$")
-    for idx, raw_item in enumerate(types, 1):
-        if not isinstance(raw_item, dict):
-            raise ValueError(f"配置错误: features.handover_log.day_metric_export.types 第{idx}项必须是对象")
-        name = str(raw_item.get("name", "")).strip()
-        source_type = str(raw_item.get("source", "")).strip().lower()
-        if not name:
-            raise ValueError(f"配置错误: features.handover_log.day_metric_export.types 第{idx}项 name 不能为空")
-        if source_type not in valid_source:
-            raise ValueError(
-                "配置错误: features.handover_log.day_metric_export.types "
-                f"第{idx}项 source 仅支持 cell/metric/cell_percent/cell_min_pair"
-            )
-        if source_type in {"cell", "cell_percent", "cell_min_pair"}:
-            cell_text = str(raw_item.get("cell", "")).strip().upper()
-            if not cell_pattern.fullmatch(cell_text):
-                raise ValueError(
-                    "配置错误: features.handover_log.day_metric_export.types "
-                    f"第{idx}项 cell 必须是合法单元格（如 D6）"
-                )
-        if source_type == "metric":
-            metric_id = str(raw_item.get("metric_id", "")).strip()
-            if not metric_id:
-                raise ValueError(
-                    "配置错误: features.handover_log.day_metric_export.types "
-                    f"第{idx}项 metric_id 不能为空"
-                )
-
-
 def _validate_day_metric_upload(cfg: Dict[str, Any]) -> None:
     upload_cfg = cfg.get("features", {}).get("day_metric_upload", {})
     if not isinstance(upload_cfg, dict):
         raise ValueError("配置错误: features.day_metric_upload 缺失或格式错误")
-    if not isinstance(upload_cfg.get("enabled", True), bool):
-        raise ValueError("配置错误: features.day_metric_upload.enabled 必须是布尔值")
-    if not isinstance(upload_cfg.get("manual_button_enabled", True), bool):
-        raise ValueError("配置错误: features.day_metric_upload.manual_button_enabled 必须是布尔值")
 
-    source = upload_cfg.get("source", {})
     behavior = upload_cfg.get("behavior", {})
-    if not isinstance(source, dict):
-        raise ValueError("配置错误: features.day_metric_upload.source 必须是对象")
+    target = upload_cfg.get("target", {})
     if not isinstance(behavior, dict):
         raise ValueError("配置错误: features.day_metric_upload.behavior 必须是对象")
+    if not isinstance(target, dict):
+        raise ValueError("配置错误: features.day_metric_upload.target 必须是对象")
 
-    for key in ("reuse_handover_download", "reuse_handover_rule_engine"):
-        if not isinstance(source.get(key, True), bool):
-            raise ValueError(f"配置错误: features.day_metric_upload.source.{key} 必须是布尔值")
-
-    if not isinstance(behavior.get("only_day_shift", True), bool):
-        raise ValueError("配置错误: features.day_metric_upload.behavior.only_day_shift 必须是布尔值")
-    if str(behavior.get("failure_policy", "")).strip() != "continue":
-        raise ValueError("配置错误: features.day_metric_upload.behavior.failure_policy 仅支持 continue")
-    if not isinstance(behavior.get("rewrite_existing", True), bool):
-        raise ValueError("配置错误: features.day_metric_upload.behavior.rewrite_existing 必须是布尔值")
     for key in (
         "basic_retry_attempts",
         "basic_retry_backoff_sec",
@@ -1173,12 +1115,65 @@ def _validate_day_metric_upload(cfg: Dict[str, Any]) -> None:
                 raise ValueError
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"配置错误: features.day_metric_upload.behavior.{key} 必须大于等于0") from exc
-    if not isinstance(behavior.get("local_import_enabled", True), bool):
-        raise ValueError("配置错误: features.day_metric_upload.behavior.local_import_enabled 必须是布尔值")
-    if str(behavior.get("local_import_scope", "")).strip() != "single_date_single_building":
-        raise ValueError(
-            "配置错误: features.day_metric_upload.behavior.local_import_scope 仅支持 single_date_single_building"
-        )
+
+    source = target.get("source", {})
+    fields = target.get("fields", {})
+    types = target.get("types", [])
+    if not isinstance(source, dict):
+        raise ValueError("配置错误: features.day_metric_upload.target.source 必须是对象")
+    if not isinstance(fields, dict):
+        raise ValueError("配置错误: features.day_metric_upload.target.fields 必须是对象")
+    if not isinstance(types, list):
+        raise ValueError("配置错误: features.day_metric_upload.target.types 必须是数组")
+
+    missing_policy = str(target.get("missing_value_policy", "zero")).strip().lower()
+    if missing_policy != "zero":
+        raise ValueError("配置错误: features.day_metric_upload.target.missing_value_policy 仅支持 zero")
+
+    if not types:
+        raise ValueError("配置错误: features.day_metric_upload.target.types 不能为空")
+    if not str(source.get("app_token", "")).strip():
+        raise ValueError("配置错误: features.day_metric_upload.target.source.app_token 不能为空")
+    if not str(source.get("table_id", "")).strip():
+        raise ValueError("配置错误: features.day_metric_upload.target.source.table_id 不能为空")
+    if int(source.get("create_batch_size", 0)) <= 0:
+        raise ValueError("配置错误: features.day_metric_upload.target.source.create_batch_size 必须大于0")
+    for key in ("type", "building", "date", "value", "position_code"):
+        if not str(fields.get(key, "")).strip():
+            raise ValueError(f"配置错误: features.day_metric_upload.target.fields.{key} 不能为空")
+
+    valid_source = {"cell", "metric", "cell_percent", "cell_min_pair"}
+    cell_pattern = re.compile(r"^[A-Z]+[1-9]\d*$")
+    for idx, raw_item in enumerate(types, 1):
+        if not isinstance(raw_item, dict):
+            raise ValueError(f"配置错误: features.day_metric_upload.target.types 第{idx}项必须是对象")
+        name = str(raw_item.get("name", "")).strip()
+        source_type = str(raw_item.get("source", "")).strip().lower()
+        if not name:
+            raise ValueError(f"配置错误: features.day_metric_upload.target.types 第{idx}项 name 不能为空")
+        if source_type not in valid_source:
+            raise ValueError(
+                "配置错误: features.day_metric_upload.target.types "
+                f"第{idx}项 source 仅支持 cell/metric/cell_percent/cell_min_pair"
+            )
+        if source_type in {"cell", "cell_percent", "cell_min_pair"}:
+            cell_text = str(raw_item.get("cell", "")).strip().upper()
+            if not cell_pattern.fullmatch(cell_text):
+                raise ValueError(
+                    "配置错误: features.day_metric_upload.target.types "
+                    f"第{idx}项 cell 必须是合法单元格（如 D6）"
+                )
+        if source_type == "metric":
+            metric_id = str(raw_item.get("metric_id", "")).strip()
+            if not metric_id:
+                raise ValueError(
+                    "配置错误: features.day_metric_upload.target.types "
+                    f"第{idx}项 metric_id 不能为空"
+                )
+    _validate_feature_daily_scheduler(
+        "features.day_metric_upload.scheduler",
+        upload_cfg.get("scheduler", {}),
+    )
 
 
 def _validate_handover_source_data_attachment_export(cfg: Dict[str, Any]) -> None:
@@ -1605,7 +1600,6 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _validate_handover_exercise_management_section(normalized_v3)
     _validate_handover_maintenance_management_section(normalized_v3)
     _validate_handover_other_important_work_section(normalized_v3)
-    _validate_handover_day_metric_export(normalized_v3)
     _validate_day_metric_upload(normalized_v3)
     _validate_handover_source_data_attachment_export(normalized_v3)
     _validate_handover_cloud_sheet_sync(normalized_v3)

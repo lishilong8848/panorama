@@ -476,10 +476,10 @@ class HandoverSourceFileCacheService:
         try:
             path.unlink()
             self._cleanup_empty_parents(path)
-            emit_log(f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 宸茬Щ闄ょ紦瀛?path={raw}")
+            emit_log(f"[交接班][源文件缓存] 已移除缓存 path={raw}")
             return True
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 缂撳瓨绉婚櫎澶辫触 path={raw}, error={exc}")
+            emit_log(f"[交接班][源文件缓存] 缓存移除失败 path={raw}, error={exc}")
             return False
 
     def cleanup_orphan_sources(

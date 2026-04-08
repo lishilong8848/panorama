@@ -1,4 +1,9 @@
 import { clone } from "./config_common_utils.js";
+import {
+  cleanupAlarmExportCompat,
+  cleanupDayMetricUploadCompat,
+  cleanupWetBulbCollectionCompat,
+} from "./config_compat_cleanup.js";
 
 export function convertV3ConfigToLegacy(v3) {
   const raw = clone(v3 || {});
@@ -78,9 +83,9 @@ export function convertV3ConfigToLegacy(v3) {
     },
     feishu_sheet_import: clone(features.sheet_import || {}),
     handover_log: clone(features.handover_log || {}),
-    day_metric_upload: clone(features.day_metric_upload || {}),
-    wet_bulb_collection: clone(features.wet_bulb_collection || {}),
-    alarm_export: clone(features.alarm_export || {}),
+    day_metric_upload: cleanupDayMetricUploadCompat(features.day_metric_upload || {}, { cloneInput: true }),
+    wet_bulb_collection: cleanupWetBulbCollectionCompat(features.wet_bulb_collection || {}, { cloneInput: true }),
+    alarm_export: cleanupAlarmExportCompat(features.alarm_export || {}, { cloneInput: true }),
     manual_upload_gui: clone(features.manual_upload_gui || {}),
     web: clone(common.console || {}),
     alarm_common_db: clone(common.alarm_db || {}),
@@ -157,9 +162,9 @@ export function convertLegacyConfigToV3(legacy) {
       },
       sheet_import: clone(src.feishu_sheet_import || {}),
       handover_log: clone(src.handover_log || {}),
-      day_metric_upload: clone(src.day_metric_upload || {}),
-      wet_bulb_collection: clone(src.wet_bulb_collection || {}),
-      alarm_export: clone(src.alarm_export || {}),
+      day_metric_upload: cleanupDayMetricUploadCompat(src.day_metric_upload || {}, { cloneInput: true }),
+      wet_bulb_collection: cleanupWetBulbCollectionCompat(src.wet_bulb_collection || {}, { cloneInput: true }),
+      alarm_export: cleanupAlarmExportCompat(src.alarm_export || {}, { cloneInput: true }),
       manual_upload_gui: clone(src.manual_upload_gui || {}),
     },
   };

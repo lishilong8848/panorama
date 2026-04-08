@@ -396,7 +396,7 @@ def bridge_source_cache_refresh_building_latest(
         detail_map = {
             "disabled": "当前未启用内网共享缓存下载",
             "invalid_building": "楼栋参数无效或当前楼栋未启用",
-            "bucket_unavailable": "当前不在告警定时窗口，请使用一键拉取告警文件",
+            "bucket_unavailable": "当前小时告警桶不可用，请稍后重试或使用一键拉取告警文件",
             "unsupported_family": "不支持的共享文件类型",
         }
         raise HTTPException(status_code=409, detail=detail_map.get(reason, "单楼共享文件拉取未被接受"))

@@ -1,8 +1,14 @@
 import {
+  saveAlarmEventUploadSchedulerConfigApi,
+  saveDayMetricUploadSchedulerConfigApi,
   saveHandoverSchedulerConfigApi,
   saveSchedulerConfigApi,
+  startAlarmEventUploadSchedulerApi,
+  startDayMetricUploadSchedulerApi,
   startHandoverSchedulerApi,
   startSchedulerApi,
+  stopAlarmEventUploadSchedulerApi,
+  stopDayMetricUploadSchedulerApi,
   stopHandoverSchedulerApi,
   stopSchedulerApi,
 } from "./api_client.js";
@@ -15,6 +21,12 @@ const ACTION_KEYS = {
   handoverSchedulerStart: "handover_scheduler:start",
   handoverSchedulerStop: "handover_scheduler:stop",
   handoverSchedulerSave: "handover_scheduler:save",
+  dayMetricUploadSchedulerStart: "day_metric_upload_scheduler:start",
+  dayMetricUploadSchedulerStop: "day_metric_upload_scheduler:stop",
+  dayMetricUploadSchedulerSave: "day_metric_upload_scheduler:save",
+  alarmEventUploadSchedulerStart: "alarm_event_upload_scheduler:start",
+  alarmEventUploadSchedulerStop: "alarm_event_upload_scheduler:stop",
+  alarmEventUploadSchedulerSave: "alarm_event_upload_scheduler:save",
 };
 
 function formatSchedulerActionReason(reason) {
@@ -31,10 +43,13 @@ function formatSchedulerActionReason(reason) {
 
 export function createDashboardSchedulerActions(ctx) {
   const {
+    health,
     config,
     message,
     schedulerQuickSaving,
     handoverSchedulerQuickSaving,
+    dayMetricUploadSchedulerQuickSaving,
+    alarmEventUploadSchedulerQuickSaving,
     fetchHealth,
     runSingleFlight,
   } = ctx;
@@ -67,8 +82,8 @@ export function createDashboardSchedulerActions(ctx) {
     const scheduler = config.value.scheduler || {};
     const runTime = normalizeRunTimeText(scheduler.run_time);
     const payload = {
-      enabled: Boolean(scheduler.enabled),
-      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
+      enabled: true,
+      auto_start_in_gui: false,
       run_time: runTime,
       catch_up_if_missed: Boolean(scheduler.catch_up_if_missed),
       retry_failed_in_same_period: Boolean(scheduler.retry_failed_in_same_period),
@@ -98,7 +113,7 @@ export function createDashboardSchedulerActions(ctx) {
             message.value = data?.message || "调度配置已更新";
           }
         } catch (err) {
-          message.value = `保存调度配置失败: ${err}`;
+          message.value = `调度自动更新失败: ${err}`;
         } finally {
           schedulerQuickSaving.value = false;
         }
@@ -165,8 +180,8 @@ export function createDashboardSchedulerActions(ctx) {
       return;
     }
     const payload = {
-      enabled: Boolean(handoverScheduler.enabled),
-      auto_start_in_gui: Boolean(handoverScheduler.auto_start_in_gui),
+      enabled: true,
+      auto_start_in_gui: false,
       morning_time: morningTime,
       afternoon_time: afternoonTime,
       check_interval_sec: Number.parseInt(String(handoverScheduler.check_interval_sec ?? 30), 10) || 30,
@@ -198,9 +213,175 @@ export function createDashboardSchedulerActions(ctx) {
             ? "交接班调度配置已更新，已重置对应时段今日状态"
             : data?.message || "交接班调度配置已更新";
         } catch (err) {
-          message.value = `保存交接班调度配置失败: ${err}`;
+          message.value = `交接班调度自动更新失败: ${err}`;
         } finally {
           handoverSchedulerQuickSaving.value = false;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  function applySchedulerSnapshot(targetScheduler, data) {
+    if (!targetScheduler || typeof targetScheduler !== "object" || !data || typeof data !== "object") return;
+    Object.assign(targetScheduler, {
+      enabled: Boolean(data.enabled),
+      running: Boolean(data.running),
+      status: String(data.status || ""),
+      next_run_time: String(data.next_run_time || ""),
+      last_check_at: String(data.last_check_at || ""),
+      last_decision: String(data.last_decision || ""),
+      last_trigger_at: String(data.last_trigger_at || ""),
+      last_trigger_result: String(data.last_trigger_result || ""),
+      state_path: String(data.state_path || ""),
+      state_exists: Boolean(data.state_exists),
+      executor_bound: Boolean(data.executor_bound),
+      callback_name: String(data.callback_name || ""),
+    });
+  }
+
+  async function startDayMetricUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.dayMetricUploadSchedulerStart,
+      async () => {
+        try {
+          const data = await startDayMetricUploadSchedulerApi();
+          applySchedulerSnapshot(health?.day_metric_upload?.scheduler, data);
+          await fetchHealth();
+          message.value = `12项独立上传调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          message.value = `启动12项独立上传调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function stopDayMetricUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.dayMetricUploadSchedulerStop,
+      async () => {
+        try {
+          const data = await stopDayMetricUploadSchedulerApi();
+          applySchedulerSnapshot(health?.day_metric_upload?.scheduler, data);
+          await fetchHealth();
+          message.value = `12项独立上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          message.value = `停止12项独立上传调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function saveDayMetricUploadSchedulerQuickConfig() {
+    if (!config.value) return;
+    const scheduler = config.value?.day_metric_upload?.scheduler || {};
+    const runTime = normalizeRunTimeText(scheduler.run_time);
+    const payload = {
+      enabled: true,
+      auto_start_in_gui: false,
+      run_time: runTime,
+      state_file: String(scheduler.state_file || "").trim(),
+    };
+    if (!payload.run_time) {
+      message.value = "12项独立上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS";
+      return;
+    }
+    if (!payload.state_file) {
+      message.value = "12项独立上传调度状态文件不能为空";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.dayMetricUploadSchedulerSave,
+      async () => {
+        try {
+          dayMetricUploadSchedulerQuickSaving.value = true;
+          const data = await saveDayMetricUploadSchedulerConfigApi(payload);
+          if (data?.scheduler_config && config.value?.day_metric_upload?.scheduler) {
+            Object.assign(config.value.day_metric_upload.scheduler, data.scheduler_config);
+          }
+          applySchedulerSnapshot(health?.day_metric_upload?.scheduler, data);
+          await fetchHealth();
+          message.value = data?.message || "12项独立上传调度配置已更新";
+        } catch (err) {
+          message.value = `12项独立上传调度自动更新失败: ${err}`;
+        } finally {
+          dayMetricUploadSchedulerQuickSaving.value = false;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function startAlarmEventUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.alarmEventUploadSchedulerStart,
+      async () => {
+        try {
+          const data = await startAlarmEventUploadSchedulerApi();
+          applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, data);
+          await fetchHealth();
+          message.value = `告警信息上传调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          message.value = `启动告警信息上传调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function stopAlarmEventUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.alarmEventUploadSchedulerStop,
+      async () => {
+        try {
+          const data = await stopAlarmEventUploadSchedulerApi();
+          applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, data);
+          await fetchHealth();
+          message.value = `告警信息上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          message.value = `停止告警信息上传调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function saveAlarmEventUploadSchedulerQuickConfig() {
+    if (!config.value) return;
+    const scheduler = config.value?.alarm_export?.scheduler || {};
+    const runTime = normalizeRunTimeText(scheduler.run_time);
+    const payload = {
+      enabled: true,
+      auto_start_in_gui: false,
+      run_time: runTime,
+      state_file: String(scheduler.state_file || "").trim(),
+    };
+    if (!payload.run_time) {
+      message.value = "告警信息上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS";
+      return;
+    }
+    if (!payload.state_file) {
+      message.value = "告警信息上传调度状态文件不能为空";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.alarmEventUploadSchedulerSave,
+      async () => {
+        try {
+          alarmEventUploadSchedulerQuickSaving.value = true;
+          const data = await saveAlarmEventUploadSchedulerConfigApi(payload);
+          if (data?.scheduler_config && config.value?.alarm_export?.scheduler) {
+            Object.assign(config.value.alarm_export.scheduler, data.scheduler_config);
+          }
+          applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, data);
+          await fetchHealth();
+          message.value = data?.message || "告警信息上传调度配置已更新";
+        } catch (err) {
+          message.value = `告警信息上传调度自动更新失败: ${err}`;
+        } finally {
+          alarmEventUploadSchedulerQuickSaving.value = false;
         }
       },
       { cooldownMs: 500 },
@@ -214,5 +395,11 @@ export function createDashboardSchedulerActions(ctx) {
     startHandoverScheduler,
     stopHandoverScheduler,
     saveHandoverSchedulerQuickConfig,
+    startDayMetricUploadScheduler,
+    stopDayMetricUploadScheduler,
+    saveDayMetricUploadSchedulerQuickConfig,
+    startAlarmEventUploadScheduler,
+    stopAlarmEventUploadScheduler,
+    saveAlarmEventUploadSchedulerQuickConfig,
   };
 }

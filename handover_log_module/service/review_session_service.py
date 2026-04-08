@@ -342,7 +342,6 @@ class ReviewSessionService:
                 "confirmed_at": "",
                 "confirmed_by": "",
                 "updated_at": _now_text(),
-                "day_metric_export": {},
                 "cloud_sheet_sync": {},
                 "source_file_cache": {},
                 "source_data_attachment_export": {},
@@ -516,26 +515,6 @@ class ReviewSessionService:
         )
 
     @staticmethod
-    def _normalize_day_metric_export(raw: Dict[str, Any] | None) -> Dict[str, Any]:
-        payload = raw if isinstance(raw, dict) else {}
-        metric_values = payload.get("metric_values_by_id", {})
-        normalized_metric_values: Dict[str, Any] = {}
-        if isinstance(metric_values, dict):
-            for metric_id, value in metric_values.items():
-                key = str(metric_id or "").strip()
-                if key:
-                    normalized_metric_values[key] = value
-        return {
-            "status": str(payload.get("status", "pending_review")).strip() or "pending_review",
-            "reason": str(payload.get("reason", "await_all_confirmed")).strip(),
-            "uploaded_count": int(payload.get("uploaded_count", 0) or 0),
-            "error": str(payload.get("error", "")).strip(),
-            "uploaded_at": str(payload.get("uploaded_at", "")).strip(),
-            "uploaded_revision": int(payload.get("uploaded_revision", 0) or 0),
-            "metric_values_by_id": normalized_metric_values,
-        }
-
-    @staticmethod
     def _normalize_source_data_attachment_export(raw: Dict[str, Any] | None) -> Dict[str, Any]:
         payload = raw if isinstance(raw, dict) else {}
         return {
@@ -597,7 +576,6 @@ class ReviewSessionService:
             "confirmed_at": str(raw.get("confirmed_at", "")).strip(),
             "confirmed_by": str(raw.get("confirmed_by", "")).strip(),
             "updated_at": str(raw.get("updated_at", "")).strip(),
-            "day_metric_export": self._normalize_day_metric_export(raw.get("day_metric_export", {})),
             "cloud_sheet_sync": self._normalize_cloud_sheet_sync(raw.get("cloud_sheet_sync", {})),
             "source_file_cache": self._normalize_source_file_cache(raw.get("source_file_cache", {})),
             "source_data_attachment_export": self._normalize_source_data_attachment_export(
@@ -1197,7 +1175,6 @@ class ReviewSessionService:
         capacity_error: str = "",
         capacity_warnings: List[str] | None = None,
         source_mode: str,
-        day_metric_export: Dict[str, Any] | None = None,
         source_file_cache: Dict[str, Any] | None = None,
         source_data_attachment_export: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
@@ -1247,7 +1224,6 @@ class ReviewSessionService:
             "confirmed_at": "",
             "confirmed_by": "",
             "updated_at": _now_text(),
-            "day_metric_export": self._normalize_day_metric_export(day_metric_export),
             "cloud_sheet_sync": self._build_pending_cloud_sync(
                 building=building_name,
                 revision=previous_revision + 1 if previous_revision > 0 else 1,
@@ -1328,21 +1304,6 @@ class ReviewSessionService:
         self._save_state(state)
         return updated_sessions, self.get_batch_status(target_batch)
 
-    def update_day_metric_export(self, *, session_id: str, day_metric_export: Dict[str, Any]) -> Dict[str, Any]:
-        target_session_id = str(session_id or "").strip()
-        state = self._load_state()
-        sessions = state.get("review_sessions", {})
-        if not isinstance(sessions, dict) or target_session_id not in sessions:
-            raise ReviewSessionNotFoundError("review session not found")
-
-        session = self._normalize_session(sessions[target_session_id])
-        session["day_metric_export"] = self._normalize_day_metric_export(day_metric_export)
-        session["updated_at"] = _now_text()
-        sessions[target_session_id] = session
-        state["review_sessions"] = sessions
-        self._save_state(state)
-        return dict(session)
-
     def update_cloud_sheet_sync(self, *, session_id: str, cloud_sheet_sync: Dict[str, Any]) -> Dict[str, Any]:
         target_session_id = str(session_id or "").strip()
         state = self._load_state()
@@ -1406,16 +1367,6 @@ class ReviewSessionService:
         session["confirmed_at"] = ""
         session["confirmed_by"] = ""
         session["updated_at"] = _now_text()
-
-        export_state = self._normalize_day_metric_export(session.get("day_metric_export", {}))
-        if export_state.get("reason") not in {"disabled", "missing_duty_context"}:
-            export_state["status"] = "pending_review"
-            export_state["reason"] = "await_all_confirmed"
-            export_state["uploaded_count"] = 0
-            export_state["error"] = ""
-            export_state["uploaded_at"] = ""
-            export_state["uploaded_revision"] = 0
-        session["day_metric_export"] = export_state
 
         attachment_state = self._normalize_source_data_attachment_export(
             session.get("source_data_attachment_export", {})

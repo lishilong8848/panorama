@@ -4,6 +4,7 @@
   startWetBulbCollectionSchedulerApi,
   stopWetBulbCollectionSchedulerApi,
 } from "./api_client.js";
+import { cleanupWetBulbCollectionCompat } from "./config_compat_cleanup.js";
 
 const ACTION_KEYS = {
   run: "job:wet_bulb_collection",
@@ -198,8 +199,8 @@ export function createDashboardWetBulbCollectionActions(ctx) {
     const wet = config.value.wet_bulb_collection || {};
     const scheduler = wet.scheduler || {};
     const payload = {
-      enabled: Boolean(scheduler.enabled),
-      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
+      enabled: true,
+      auto_start_in_gui: false,
       interval_minutes: Number.parseInt(String(scheduler.interval_minutes ?? 60), 10) || 60,
       check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
       retry_failed_on_next_tick: Boolean(scheduler.retry_failed_on_next_tick),
@@ -224,14 +225,13 @@ export function createDashboardWetBulbCollectionActions(ctx) {
           wetBulbSchedulerQuickSaving.value = true;
           const data = await saveWetBulbCollectionSchedulerConfigApi(payload);
           if (config.value?.wet_bulb_collection?.scheduler && data?.scheduler_config) {
-            const next = { ...data.scheduler_config };
-            delete next.switch_to_internal_before_download;
-            Object.assign(config.value.wet_bulb_collection.scheduler, next);
+            const next = cleanupWetBulbCollectionCompat({ scheduler: data.scheduler_config }).scheduler;
+            Object.assign(config.value.wet_bulb_collection.scheduler, next || {});
           }
           await fetchHealth();
           message.value = data?.message || "湿球温度定时采集调度配置已更新";
         } catch (err) {
-          message.value = formatWetBulbCollectionError(err, "保存湿球温度定时采集调度配置");
+          message.value = formatWetBulbCollectionError(err, "湿球温度定时采集调度自动更新");
         } finally {
           wetBulbSchedulerQuickSaving.value = false;
         }

@@ -78,4 +78,4 @@ def test_alarm_export_legacy_bridge_task_is_failed_without_db_access(tmp_path: P
     updated = service.get_task(task_id)
     assert updated is not None
     assert updated["status"] == "failed"
-    assert "已暂时停用" in str(updated.get("error", ""))
+    assert "已退役" in str(updated.get("error", ""))

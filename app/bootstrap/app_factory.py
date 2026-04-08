@@ -29,6 +29,8 @@ from app.modules.report_pipeline.api.routes import (
 )
 from app.modules.shared_bridge.api.routes import router as shared_bridge_router
 from app.modules.scheduler.api.handover_routes import router as handover_scheduler_router
+from app.modules.scheduler.api.day_metric_upload_routes import router as day_metric_upload_scheduler_router
+from app.modules.scheduler.api.alarm_event_upload_routes import router as alarm_event_upload_scheduler_router
 from app.modules.scheduler.api.monthly_change_report_routes import router as monthly_change_report_scheduler_router
 from app.modules.scheduler.api.monthly_event_report_routes import router as monthly_event_report_scheduler_router
 from app.modules.scheduler.api.routes import router as scheduler_router
@@ -135,6 +137,8 @@ def _register_external_role_routes(app: FastAPI) -> None:
     app.include_router(handover_review_router)
     app.include_router(scheduler_router)
     app.include_router(handover_scheduler_router)
+    app.include_router(day_metric_upload_scheduler_router)
+    app.include_router(alarm_event_upload_scheduler_router)
     app.include_router(wet_bulb_collection_scheduler_router)
     app.include_router(monthly_change_report_scheduler_router)
     app.include_router(monthly_event_report_scheduler_router)
@@ -228,6 +232,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_handover_scheduler(source="关闭自动")
             if container.wet_bulb_collection_scheduler:
                 container.stop_wet_bulb_collection_scheduler(source="关闭自动")
+            if container.day_metric_upload_scheduler:
+                container.stop_day_metric_upload_scheduler(source="关闭自动")
+            if container.alarm_event_upload_scheduler:
+                container.stop_alarm_event_upload_scheduler(source="关闭自动")
             if container.monthly_change_report_scheduler:
                 container.stop_monthly_change_report_scheduler(source="关闭自动")
             if container.monthly_event_report_scheduler:
@@ -332,6 +340,14 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(
                 f"[湿球温度定时采集调度] 执行器绑定完成: {container.wet_bulb_collection_scheduler_executor_name()}, "
                 f"executor_bound={container.is_wet_bulb_collection_scheduler_executor_bound()}"
+            )
+            container.add_system_log(
+                f"[12项独立上传调度] 执行器绑定完成: {container.day_metric_upload_scheduler_executor_name()}, "
+                f"executor_bound={container.is_day_metric_upload_scheduler_executor_bound()}"
+            )
+            container.add_system_log(
+                f"[告警信息上传调度] 执行器绑定完成: {container.alarm_event_upload_scheduler_executor_name()}, "
+                f"executor_bound={container.is_alarm_event_upload_scheduler_executor_bound()}"
             )
             container.add_system_log(
                 f"[月度变更统计表调度] 执行器绑定完成: {container.monthly_change_report_scheduler_executor_name()}, "
@@ -503,15 +519,26 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             )
         return _source_cache_wait_text(feature_name)
 
-    def _start_external_cache_job(*, name: str, feature: str, resource_key: str, run_func):
-        return container.job_service.start_job(
-            name=name,
-            run_func=run_func,
-            resource_keys=[resource_key],
-            priority="scheduler",
-            feature=feature,
-            submitted_by="scheduler",
-        )
+    def _start_external_cache_job(
+        *,
+        name: str,
+        feature: str,
+        resource_key: str,
+        run_func,
+        dedupe_key: str = "",
+    ):
+        job_kwargs = {
+            "name": name,
+            "run_func": run_func,
+            "resource_keys": [resource_key],
+            "priority": "scheduler",
+            "feature": feature,
+            "submitted_by": "scheduler",
+        }
+        dedupe_text = str(dedupe_key or "").strip()
+        if dedupe_text:
+            job_kwargs["dedupe_key"] = dedupe_text
+        return container.job_service.start_job(**job_kwargs)
 
     def scheduler_callback(source: str) -> tuple[bool, str]:
         from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
@@ -892,6 +919,150 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             return True, "ok"
         return False, done.error or done.summary or "任务失败"
 
+    def day_metric_upload_scheduler_callback(source: str) -> tuple[bool, str]:
+        from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
+
+        role_mode = _deployment_role_mode()
+        if role_mode == "internal":
+            container.add_system_log("[12项独立上传调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+        if role_mode != "external":
+            detail = "当前未确认有效角色，无法执行12项独立上传调度"
+            container.add_system_log(f"[12项独立上传调度] {detail}")
+            return False, detail
+
+        bridge_service, bridge_error = _resolve_bridge_runtime()
+        if bridge_service is None:
+            detail = f"共享桥接未就绪，外网端无法执行12项独立上传调度：{_bridge_runtime_error_text(bridge_error)}"
+            container.add_system_log(f"[12项独立上传调度] {detail}")
+            return False, detail
+
+        target_date = datetime.now().strftime("%Y-%m-%d")
+        target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
+        if not target_buildings:
+            detail = "共享桥接未配置可用楼栋，无法执行12项独立上传调度"
+            container.add_system_log(f"[12项独立上传调度] {detail}")
+            return False, detail
+
+        try:
+            cached_entries = [
+                item
+                for item in bridge_service.get_day_metric_by_date_cache_entries(
+                    selected_dates=[target_date],
+                    buildings=target_buildings,
+                )
+                if str(item.get("file_path", "") or "").strip()
+                and os.path.exists(str(item.get("file_path", "") or "").strip())
+            ]
+            expected_count = len(target_buildings)
+            if len(cached_entries) < expected_count:
+                bridge_task = _get_or_create_bridge_task(
+                    bridge_service,
+                    get_or_create_name="get_or_create_handover_cache_fill_task",
+                    create_name="create_handover_cache_fill_task",
+                    continuation_kind="day_metric",
+                    buildings=None,
+                    duty_date=None,
+                    duty_shift=None,
+                    selected_dates=[target_date],
+                    building_scope="all_enabled",
+                    building=None,
+                    requested_by="scheduler",
+                )
+                accepted_detail = (
+                    "等待内网补采同步：12项当日源文件尚未全部到位。"
+                    f" 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'},"
+                    f" date={target_date}"
+                )
+                container.add_system_log(f"[12项独立上传调度] {accepted_detail}")
+                return True, accepted_detail
+
+            def _run_from_cache(emit_log):
+                source_units = [
+                    {
+                        "duty_date": str(item.get("duty_date", "") or "").strip(),
+                        "building": str(item.get("building", "") or "").strip(),
+                        "source_file": str(item.get("file_path", "") or "").strip(),
+                    }
+                    for item in cached_entries
+                ]
+                service = DayMetricStandaloneUploadService(container.runtime_config)
+                return service.continue_from_source_files(
+                    selected_dates=[target_date],
+                    buildings=target_buildings,
+                    source_units=source_units,
+                    building_scope="all_enabled",
+                    building=None,
+                    emit_log=emit_log,
+                )
+
+            dedupe_key = f"day_metric_cache_by_date:scheduler:{target_date}:{'|'.join(sorted(target_buildings))}"
+            job = _start_external_cache_job(
+                name="12项独立上传-使用共享文件",
+                feature="day_metric_cache_by_date",
+                resource_key="shared_bridge:day_metric",
+                run_func=_run_from_cache,
+                dedupe_key=dedupe_key,
+            )
+            detail = f"已提交12项独立上传共享文件处理任务 job_id={job.job_id}, date={target_date}"
+            container.add_system_log(f"[12项独立上传调度] {detail}")
+            return True, detail
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            container.add_system_log(f"[12项独立上传调度] 提交失败：{error_text}")
+            return False, error_text
+
+    def alarm_event_upload_scheduler_callback(source: str) -> tuple[bool, str]:
+        role_mode = _deployment_role_mode()
+        if role_mode == "internal":
+            container.add_system_log("[告警信息上传调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+        if role_mode != "external":
+            detail = "当前未确认有效角色，无法执行告警信息上传调度"
+            container.add_system_log(f"[告警信息上传调度] {detail}")
+            return False, detail
+
+        bridge_service, bridge_error = _resolve_bridge_runtime()
+        if bridge_service is None:
+            detail = f"共享桥接未就绪，外网端无法执行告警信息上传调度：{_bridge_runtime_error_text(bridge_error)}"
+            container.add_system_log(f"[告警信息上传调度] {detail}")
+            return False, detail
+
+        def _run(emit_log):
+            def _combined_log(line: str) -> None:
+                text = str(line or "").strip()
+                if text:
+                    emit_log(text)
+
+            result = bridge_service.upload_alarm_event_source_cache_full_to_bitable(emit_log=_combined_log)
+            accepted = bool(result.get("accepted"))
+            reason = str(result.get("reason", "") or "").strip()
+            if not accepted:
+                error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
+                raise RuntimeError(error_text)
+            if reason == "partial_completed":
+                failed_entries = ", ".join(
+                    str(item or "").strip() for item in result.get("failed_entries", []) or [] if str(item or "").strip()
+                )
+                raise RuntimeError(f"存在失败楼栋，请查看日志{f'：{failed_entries}' if failed_entries else ''}")
+            return result
+
+        try:
+            job = _start_external_cache_job(
+                name="使用共享文件上传60天-全部楼栋",
+                feature="alarm_event_upload",
+                resource_key="alarm_upload:global",
+                run_func=_run,
+                dedupe_key="alarm_event_upload:full",
+            )
+            detail = f"已提交告警信息共享文件上传任务 job_id={job.job_id}, scope=全部楼栋"
+            container.add_system_log(f"[告警信息上传调度] {detail}")
+            return True, detail
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            container.add_system_log(f"[告警信息上传调度] 提交失败：{error_text}")
+            return False, error_text
+
     def monthly_event_report_scheduler_callback(source: str) -> tuple[bool, str]:
         role_mode = _deployment_role_mode()
         if role_mode == "internal":
@@ -1013,12 +1184,30 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             return True, "restart_scheduled"
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
-    container.set_scheduler_callback(scheduler_callback)
-    container.set_handover_scheduler_callback(handover_scheduler_callback)
-    container.set_wet_bulb_collection_scheduler_callback(wet_bulb_collection_scheduler_callback)
-    container.set_monthly_change_report_scheduler_callback(monthly_change_report_scheduler_callback)
-    container.set_monthly_event_report_scheduler_callback(monthly_event_report_scheduler_callback)
-    container.set_updater_restart_callback(updater_restart_callback)
+    setter = getattr(container, "set_scheduler_callback", None)
+    if callable(setter):
+        setter(scheduler_callback)
+    setter = getattr(container, "set_handover_scheduler_callback", None)
+    if callable(setter):
+        setter(handover_scheduler_callback)
+    setter = getattr(container, "set_wet_bulb_collection_scheduler_callback", None)
+    if callable(setter):
+        setter(wet_bulb_collection_scheduler_callback)
+    setter = getattr(container, "set_day_metric_upload_scheduler_callback", None)
+    if callable(setter):
+        setter(day_metric_upload_scheduler_callback)
+    setter = getattr(container, "set_alarm_event_upload_scheduler_callback", None)
+    if callable(setter):
+        setter(alarm_event_upload_scheduler_callback)
+    setter = getattr(container, "set_monthly_change_report_scheduler_callback", None)
+    if callable(setter):
+        setter(monthly_change_report_scheduler_callback)
+    setter = getattr(container, "set_monthly_event_report_scheduler_callback", None)
+    if callable(setter):
+        setter(monthly_event_report_scheduler_callback)
+    setter = getattr(container, "set_updater_restart_callback", None)
+    if callable(setter):
+        setter(updater_restart_callback)
     @app.get("/", response_class=HTMLResponse)
     @app.get("/index.html", response_class=HTMLResponse)
     def index() -> Response:

@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List
 
+from app.config.config_compat_cleanup import sanitize_alarm_export_config
 from app.modules.alarm_export.core.field_type_converter import (
     build_field_meta_map,
     convert_alarm_row_by_field_meta,
@@ -28,7 +29,6 @@ class AlarmExportService:
         return {
             "enabled": True,
             "run_with_scheduler": True,
-            "manual_button_enabled": True,
             "snapshot_mode": "clear_and_rebuild",
             "window_days": 35,
             "window_end_time": "00:00:00",
@@ -105,15 +105,12 @@ class AlarmExportService:
 
     def _normalize_export_config(self) -> Dict[str, Any]:
         defaults = self._build_default_config()
-        raw = self.config.get("alarm_bitable_export", {})
-        if not isinstance(raw, dict):
-            raw = {}
+        raw = sanitize_alarm_export_config(self.config.get("alarm_bitable_export", {}))
 
         merged = copy.deepcopy(defaults)
         for key in (
             "enabled",
             "run_with_scheduler",
-            "manual_button_enabled",
             "snapshot_mode",
             "window_days",
             "window_end_time",

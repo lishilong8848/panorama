@@ -236,6 +236,44 @@ export async function saveWetBulbCollectionSchedulerConfigApi(payload) {
   });
 }
 
+export async function startDayMetricUploadSchedulerApi() {
+  return apiJson("/api/scheduler/day-metric-upload/start", { method: "POST", body: "{}" });
+}
+
+export async function stopDayMetricUploadSchedulerApi() {
+  return apiJson("/api/scheduler/day-metric-upload/stop", { method: "POST", body: "{}" });
+}
+
+export async function getDayMetricUploadSchedulerStatusApi() {
+  return apiJson("/api/scheduler/day-metric-upload/status");
+}
+
+export async function saveDayMetricUploadSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/day-metric-upload/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function startAlarmEventUploadSchedulerApi() {
+  return apiJson("/api/scheduler/alarm-event-upload/start", { method: "POST", body: "{}" });
+}
+
+export async function stopAlarmEventUploadSchedulerApi() {
+  return apiJson("/api/scheduler/alarm-event-upload/stop", { method: "POST", body: "{}" });
+}
+
+export async function getAlarmEventUploadSchedulerStatusApi() {
+  return apiJson("/api/scheduler/alarm-event-upload/status");
+}
+
+export async function saveAlarmEventUploadSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/alarm-event-upload/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function startMonthlyEventReportJobApi(payload = {}) {
   return apiJson("/api/jobs/monthly-event-report/run", {
     method: "POST",

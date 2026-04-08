@@ -48,7 +48,6 @@ class BuildingResult:
     success: bool = False
     fills: List[FillValue] = field(default_factory=list)
     missing_metrics: List[str] = field(default_factory=list)
-    day_metric_export: Dict[str, Any] = field(default_factory=dict)
     cloud_sheet_sync: Dict[str, Any] = field(default_factory=dict)
     review_session: Dict[str, Any] = field(default_factory=dict)
     alarm_summary: Dict[str, Any] = field(default_factory=dict)
@@ -68,7 +67,6 @@ class BuildingResult:
             "success": self.success,
             "fills": [asdict(x) for x in self.fills],
             "missing_metrics": self.missing_metrics,
-            "day_metric_export": dict(self.day_metric_export or {}),
             "cloud_sheet_sync": dict(self.cloud_sheet_sync or {}),
             "review_session": dict(self.review_session or {}),
             "alarm_summary": dict(self.alarm_summary or {}),

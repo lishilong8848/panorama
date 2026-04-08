@@ -73,49 +73,6 @@
         "url": null
       }
     ],
-    "network_switch": {
-      "internal_ssid": "H-DH",
-      "external_ssid": "ALBB-EA118-2F",
-      "switch_timeout_sec": 30,
-      "retry_count": 3,
-      "retry_interval_sec": 2,
-      "connect_poll_interval_sec": 1,
-      "scan_before_connect": true,
-      "scan_attempts": 3,
-      "scan_wait_sec": 2,
-      "strict_target_visible_before_connect": true,
-      "connect_with_ssid_param": true,
-      "preferred_interface": "",
-      "auto_disconnect_before_connect": true,
-      "hard_recovery_enabled": true,
-      "hard_recovery_after_scan_failures": 2,
-      "hard_recovery_steps": [
-        "toggle_adapter",
-        "restart_wlansvc"
-      ],
-      "hard_recovery_cooldown_sec": 20,
-      "require_admin_for_hard_recovery": true,
-      "internal_profile_name": "",
-      "external_profile_name": "",
-      "require_saved_profiles": true,
-      "switch_back_to_original": false,
-      "fail_fast_on_netsh_error": true,
-      "post_switch_stabilize_sec": 3,
-      "post_switch_probe_enabled": false,
-      "post_switch_probe_internal_host": "",
-      "post_switch_probe_internal_port": 80,
-      "post_switch_probe_external_host": "open.feishu.cn",
-      "post_switch_probe_external_port": 443,
-      "post_switch_probe_timeout_sec": 2,
-      "post_switch_probe_retries": 3,
-      "post_switch_probe_interval_sec": 1,
-      "external_probe_cache_ttl_sec": 2,
-      "internal_probe_cache_ttl_sec": 2,
-      "internal_probe_count": 1,
-      "internal_probe_parallelism": 5,
-      "internal_probe_timeout_ms": 1200,
-      "role_mode": "external"
-    },
     "scheduler": {
       "enabled": true,
       "auto_start_in_gui": true,
@@ -184,6 +141,49 @@
       "ui_theme": "light",
       "log_buffer_size": 5000,
       "enable_sse": true
+    },
+    "network_switch": {
+      "post_switch_stabilize_sec": 3,
+      "internal_probe_cache_ttl_sec": 2,
+      "preferred_interface": "",
+      "internal_ssid": "H-DH",
+      "scan_before_connect": true,
+      "require_admin_for_hard_recovery": true,
+      "post_switch_probe_enabled": false,
+      "require_saved_profiles": true,
+      "post_switch_probe_internal_port": 80,
+      "external_probe_cache_ttl_sec": 2,
+      "internal_probe_timeout_ms": 1200,
+      "role_mode": "external",
+      "retry_count": 3,
+      "strict_target_visible_before_connect": true,
+      "hard_recovery_enabled": true,
+      "hard_recovery_after_scan_failures": 2,
+      "connect_with_ssid_param": true,
+      "scan_attempts": 3,
+      "internal_probe_parallelism": 5,
+      "auto_disconnect_before_connect": true,
+      "scan_wait_sec": 2,
+      "switch_back_to_original": false,
+      "post_switch_probe_external_port": 443,
+      "external_profile_name": "",
+      "connect_poll_interval_sec": 1,
+      "internal_profile_name": "",
+      "hard_recovery_steps": [
+        "toggle_adapter",
+        "restart_wlansvc"
+      ],
+      "internal_probe_count": 1,
+      "fail_fast_on_netsh_error": true,
+      "post_switch_probe_external_host": "open.feishu.cn",
+      "post_switch_probe_internal_host": "",
+      "post_switch_probe_retries": 3,
+      "hard_recovery_cooldown_sec": 20,
+      "external_ssid": "ALBB-EA118-2F",
+      "post_switch_probe_interval_sec": 1,
+      "switch_timeout_sec": 30,
+      "retry_interval_sec": 2,
+      "post_switch_probe_timeout_sec": 2
     }
   },
   "features": {
@@ -438,6 +438,7 @@
         "download": {
           "template_name": "交接班容量报表",
           "e_template_name": "每日报表合集",
+          "e_query_result_timeout_ms": 90000,
           "lookback_minutes": 20,
           "scale_label": "5分钟",
           "menu_path": [
@@ -445,8 +446,7 @@
             "数据查询",
             "即时报表"
           ],
-          "export_button_text": "原样导出",
-          "e_query_result_timeout_ms": 90000
+          "export_button_text": "原样导出"
         },
         "template": {
           "source_path": "交接班容量报表空模板.xlsx",
@@ -971,99 +971,6 @@
           }
         }
       },
-      "day_metric_export": {
-        "enabled": true,
-        "only_day_shift": true,
-        "source": {
-          "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
-          "table_id": "tblAHGF8mV6U9jid",
-          "create_batch_size": 200,
-          "base_url": "",
-          "wiki_url": ""
-        },
-        "fields": {
-          "type": "类型",
-          "building": "楼栋",
-          "date": "日期",
-          "value": "数值",
-          "position_code": "位置/编号"
-        },
-        "missing_value_policy": "zero",
-        "types": [
-          {
-            "metric_id": "",
-            "cell": "D6",
-            "name": "总负荷（KW）",
-            "source": "cell"
-          },
-          {
-            "metric_id": "",
-            "cell": "F6",
-            "name": "IT总负荷（KW）",
-            "source": "cell"
-          },
-          {
-            "metric_id": "",
-            "cell": "D7",
-            "name": "室外湿球最高温度（℃）",
-            "source": "cell"
-          },
-          {
-            "metric_id": "chilled_supply_temp_max",
-            "cell": "",
-            "name": "冷水系统供水最高温度（℃）",
-            "source": "metric"
-          },
-          {
-            "metric_id": "",
-            "cell": "D8",
-            "name": "蓄水池后备最短时间（H）",
-            "source": "cell"
-          },
-          {
-            "metric_id": "",
-            "cell": "F8",
-            "name": "蓄冷罐后备最短时间（min）",
-            "source": "cell_min_pair"
-          },
-          {
-            "metric_id": "",
-            "cell": "H6",
-            "name": "供油可用时长（H）",
-            "source": "cell"
-          },
-          {
-            "metric_id": "cold_temp_max",
-            "cell": "",
-            "name": "冷通道最高温度（℃）",
-            "source": "metric"
-          },
-          {
-            "metric_id": "cold_humi_max",
-            "cell": "",
-            "name": "冷通道最高湿度（%）",
-            "source": "metric"
-          },
-          {
-            "metric_id": "",
-            "cell": "B10",
-            "name": "变压器负载率（MAX）",
-            "source": "cell_percent"
-          },
-          {
-            "metric_id": "",
-            "cell": "D10",
-            "name": "UPS负载率（MAX）",
-            "source": "cell_percent"
-          },
-          {
-            "metric_id": "hvdc_load_max",
-            "cell": "",
-            "name": "HVDC负载率（MAX）",
-            "source": "metric"
-          }
-        ]
-      },
       "source_data_attachment_export": {
         "enabled": true,
         "source": {
@@ -1308,41 +1215,41 @@
               {
                 "cells": {
                   "B": "值班手机",
-                  "C": "E-112值班室",
-                  "E": "1",
                   "F": "否",
+                  "C": "E-112值班室",
+                  "H": "徐志远",
                   "G": "无",
-                  "H": "徐志远"
+                  "E": "1"
                 }
               },
               {
                 "cells": {
                   "B": "对讲机",
-                  "C": "E-112值班室",
-                  "E": "5",
                   "F": "否",
+                  "C": "E-112值班室",
+                  "H": "徐志远",
                   "G": "无",
-                  "H": "徐志远"
+                  "E": "5"
                 }
               },
               {
                 "cells": {
                   "B": "钥匙",
-                  "C": "E-112值班室钥匙箱",
-                  "E": "4",
                   "F": "否",
+                  "C": "E-112值班室钥匙箱",
+                  "H": "徐志远",
                   "G": "无",
-                  "H": "徐志远"
+                  "E": "4"
                 }
               },
               {
                 "cells": {
                   "B": "应急工具",
-                  "C": "E-112值班室",
-                  "E": "1",
                   "F": "否",
+                  "C": "E-112值班室",
+                  "H": "徐志远",
                   "G": "无",
-                  "H": "徐志远"
+                  "E": "1"
                 }
               }
             ]
@@ -1352,8 +1259,8 @@
               {
                 "cells": {
                   "B": "值班手机",
-                  "C": "E-112值班室",
                   "F": "否",
+                  "C": "E-112值班室",
                   "H": "韩珂岩",
                   "G": "无",
                   "E": "1"
@@ -1362,8 +1269,8 @@
               {
                 "cells": {
                   "B": "对讲机",
-                  "C": "E-112值班室",
                   "F": "否",
+                  "C": "E-112值班室",
                   "H": "韩珂岩",
                   "G": "无",
                   "E": "5"
@@ -1372,8 +1279,8 @@
               {
                 "cells": {
                   "B": "钥匙",
-                  "C": "E-112值班室钥匙箱",
                   "F": "否",
+                  "C": "E-112值班室钥匙箱",
                   "H": "韩珂岩",
                   "G": "无",
                   "E": "4"
@@ -1382,8 +1289,8 @@
               {
                 "cells": {
                   "B": "应急工具",
-                  "C": "E-112值班室",
                   "F": "否",
+                  "C": "E-112值班室",
                   "H": "韩珂岩",
                   "G": "无",
                   "E": "1"
@@ -1396,41 +1303,41 @@
               {
                 "cells": {
                   "B": "值班手机",
-                  "C": "E-112值班室",
-                  "E": "1",
                   "F": "否",
+                  "C": "E-112值班室",
+                  "H": "曲金璐",
                   "G": "无",
-                  "H": "曲金璐"
+                  "E": "1"
                 }
               },
               {
                 "cells": {
                   "B": "对讲机",
-                  "C": "E-112值班室",
-                  "E": "5",
                   "F": "否",
+                  "C": "E-112值班室",
+                  "H": "曲金璐",
                   "G": "无",
-                  "H": "曲金璐"
+                  "E": "5"
                 }
               },
               {
                 "cells": {
                   "B": "钥匙",
-                  "C": "E-112值班室钥匙箱",
-                  "E": "4",
                   "F": "否",
+                  "C": "E-112值班室钥匙箱",
+                  "H": "曲金璐",
                   "G": "无",
-                  "H": "曲金璐"
+                  "E": "4"
                 }
               },
               {
                 "cells": {
                   "B": "应急工具",
-                  "C": "E-112值班室",
-                  "E": "1",
                   "F": "否",
+                  "C": "E-112值班室",
+                  "H": "曲金璐",
                   "G": "无",
-                  "H": "曲金璐"
+                  "E": "1"
                 }
               }
             ]
@@ -4457,93 +4364,190 @@
       ]
     },
     "day_metric_upload": {
-      "enabled": true,
-      "manual_button_enabled": true,
-      "source": {
-        "reuse_handover_download": true,
-        "reuse_handover_rule_engine": true
+      "scheduler": {
+        "enabled": true,
+        "auto_start_in_gui": false,
+        "run_time": "08:00:00",
+        "check_interval_sec": 30,
+        "catch_up_if_missed": false,
+        "retry_failed_in_same_period": true,
+        "state_file": "day_metric_upload_scheduler_state.json"
       },
       "behavior": {
-        "only_day_shift": true,
-        "failure_policy": "continue",
-        "rewrite_existing": true,
         "basic_retry_attempts": 3,
         "basic_retry_backoff_sec": 2,
         "network_retry_attempts": 5,
         "network_retry_backoff_sec": 2,
-        "alert_after_attempts": 5,
-        "local_import_enabled": true,
-        "local_import_scope": "single_date_single_building"
+        "alert_after_attempts": 5
+      },
+      "target": {
+        "source": {
+          "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+          "table_id": "tblAHGF8mV6U9jid",
+          "create_batch_size": 200,
+          "base_url": "",
+          "wiki_url": ""
+        },
+        "fields": {
+          "type": "类型",
+          "building": "楼栋",
+          "date": "日期",
+          "value": "数值",
+          "position_code": "位置/编号"
+        },
+        "missing_value_policy": "zero",
+        "types": [
+          {
+            "cell": "D6",
+            "source": "cell",
+            "metric_id": "",
+            "name": "总负荷（KW）"
+          },
+          {
+            "cell": "F6",
+            "source": "cell",
+            "metric_id": "",
+            "name": "IT总负荷（KW）"
+          },
+          {
+            "cell": "D7",
+            "source": "cell",
+            "metric_id": "",
+            "name": "室外湿球最高温度（℃）"
+          },
+          {
+            "cell": "",
+            "source": "metric",
+            "metric_id": "chilled_supply_temp_max",
+            "name": "冷水系统供水最高温度（℃）"
+          },
+          {
+            "cell": "D8",
+            "source": "cell",
+            "metric_id": "",
+            "name": "蓄水池后备最短时间（H）"
+          },
+          {
+            "cell": "F8",
+            "source": "cell_min_pair",
+            "metric_id": "",
+            "name": "蓄冷罐后备最短时间（min）"
+          },
+          {
+            "cell": "H6",
+            "source": "cell",
+            "metric_id": "",
+            "name": "供油可用时长（H）"
+          },
+          {
+            "cell": "",
+            "source": "metric",
+            "metric_id": "cold_temp_max",
+            "name": "冷通道最高温度（℃）"
+          },
+          {
+            "cell": "",
+            "source": "metric",
+            "metric_id": "cold_humi_max",
+            "name": "冷通道最高湿度（%）"
+          },
+          {
+            "cell": "B10",
+            "source": "cell_percent",
+            "metric_id": "",
+            "name": "变压器负载率（MAX）"
+          },
+          {
+            "cell": "D10",
+            "source": "cell_percent",
+            "metric_id": "",
+            "name": "UPS负载率（MAX）"
+          },
+          {
+            "cell": "",
+            "source": "metric",
+            "metric_id": "hvdc_load_max",
+            "name": "HVDC负载率（MAX）"
+          }
+        ]
       }
     },
     "alarm_export": {
+      "scheduler": {
+        "enabled": false,
+        "auto_start_in_gui": false,
+        "run_time": "08:10:00",
+        "check_interval_sec": 30,
+        "catch_up_if_missed": false,
+        "retry_failed_in_same_period": true,
+        "state_file": "alarm_event_upload_scheduler_state.json"
+      },
       "feishu": {
         "app_token": "SOwsw315aiBJjgkl48ccoxIPntc",
         "table_id": "tblD7hi70s6U6rlU",
         "page_size": 500,
         "delete_batch_size": 500,
         "create_batch_size": 200,
+        "clear_before_upload": true,
         "list_page_size": 500,
-        "timeout": 30,
-        "clear_before_upload": true
+        "timeout": 30
       },
       "shared_source_upload": {
         "replace_existing_on_full": true
       },
-      "enabled": true,
+      "test_db": {
+        "user": "root",
+        "fixed_table": "event_2026_02",
+        "host": "127.0.0.1",
+        "time_field_mode": "auto",
+        "password": "123456",
+        "building_label": "测试楼栋",
+        "port": 3306,
+        "table_mode": "fixed",
+        "enabled": true,
+        "database": "e_event"
+      },
+      "window_days": 35,
+      "snapshot_mode": "clear_and_rebuild",
+      "window_end_time": "00:00:00",
+      "run_with_scheduler": true,
+      "level_mapping": {
+        "2": "严重",
+        "3": "重要",
+        "1": "紧急",
+        "4": "次要"
+      },
+      "resume": {
+        "reuse_extracted_rows": true,
+        "root_dir": "alarm_export_resume",
+        "enabled": true,
+        "state_file": "alarm_export_resume_state.json",
+        "retry_interval_sec": 2,
+        "max_retry": 3
+      },
+      "alarm_category_default": "真实告警",
       "skip_levels": [
         5
       ],
-      "alarm_category_default": "真实告警",
-      "level_mapping": {
-        "3": "重要",
-        "4": "次要",
-        "1": "紧急",
-        "2": "严重"
-      },
-      "window_days": 35,
+      "enabled": true,
       "fields": {
-        "accept_user": "accept_user",
-        "event_level": "event_level",
-        "content": "content",
-        "trigger_value": "trigger_value",
-        "confirm_description": "confirm_description",
         "process_status": "process_status",
+        "event_level": "event_level",
+        "confirm_time": "confirm_time",
         "accept_time": "accept_time",
         "recover_time": "recover_time",
-        "confirm_user": "confirm_user",
+        "content": "content",
         "event_time": "event_time",
         "process_suggestion": "process_suggestion",
-        "recover_status": "recover_status",
-        "confirm_time": "confirm_time",
-        "event_source": "event_source",
         "accept_description": "accept_description",
-        "alarm_type": "alarm_type"
-      },
-      "resume": {
-        "enabled": true,
-        "max_retry": 3,
-        "retry_interval_sec": 2,
-        "state_file": "alarm_export_resume_state.json",
-        "reuse_extracted_rows": true,
-        "root_dir": "alarm_export_resume"
-      },
-      "window_end_time": "00:00:00",
-      "manual_button_enabled": true,
-      "snapshot_mode": "clear_and_rebuild",
-      "test_db": {
-        "enabled": true,
-        "fixed_table": "event_2026_02",
-        "database": "e_event",
-        "time_field_mode": "auto",
-        "port": 3306,
-        "password": "123456",
-        "host": "127.0.0.1",
-        "user": "root",
-        "table_mode": "fixed",
-        "building_label": "测试楼栋"
-      },
-      "run_with_scheduler": true
+        "trigger_value": "trigger_value",
+        "alarm_type": "alarm_type",
+        "recover_status": "recover_status",
+        "confirm_description": "confirm_description",
+        "event_source": "event_source",
+        "confirm_user": "confirm_user",
+        "accept_user": "accept_user"
+      }
     },
     "manual_upload_gui": {
       "enabled": true

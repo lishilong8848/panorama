@@ -220,8 +220,6 @@ class DailyAutoSchedulerService:
         return self.next_run_time().strftime("%Y-%m-%d %H:%M:%S")
 
     def status_text(self) -> str:
-        if not self.enabled:
-            return "已禁用"
         return "运行中" if self.is_running() else "未启动"
 
     def is_running(self) -> bool:
@@ -229,9 +227,9 @@ class DailyAutoSchedulerService:
 
     def start(self) -> Dict[str, Any]:
         if not self.enabled:
-            self.runtime["last_decision"] = "skip:disabled"
-            self._diag("启动请求被忽略: enabled=false")
-            return {"started": False, "running": False, "reason": "disabled"}
+            self.enabled = True
+            self.cfg["enabled"] = True
+            self._diag("启动请求已接管: enabled=false，按手动启动自动启用调度")
         if self.is_running():
             self._diag("启动请求被忽略: already_running")
             return {"started": False, "running": True, "reason": "already_running"}

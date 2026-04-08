@@ -3,6 +3,11 @@
 import copy
 from typing import Any, Dict, List
 
+from app.config.config_compat_cleanup import (
+    sanitize_alarm_export_config,
+    sanitize_day_metric_upload_config,
+    sanitize_wet_bulb_collection_config,
+)
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3, deep_merge_defaults
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.cell_rule_compiler import migrate_legacy_rule_structures, normalize_cell_rules
@@ -400,6 +405,11 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     features["sheet_import"] = deep_merge_defaults(_dict(legacy_cfg.get("feishu_sheet_import")), _dict(features.get("sheet_import")))
     features["handover_log"] = deep_merge_defaults(_dict(legacy_cfg.get("handover_log")), _dict(features.get("handover_log")))
     features["manual_upload_gui"] = deep_merge_defaults(_dict(legacy_cfg.get("manual_upload_gui")), _dict(features.get("manual_upload_gui")))
+    features["day_metric_upload"] = sanitize_day_metric_upload_config(_dict(features.get("day_metric_upload")))
+    features["alarm_export"] = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
+    features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
+        _dict(features.get("wet_bulb_collection"))
+    )
     common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
 
     _apply_shared_alarm_db(common, features, legacy_alarm_db=legacy_alarm_db)
@@ -433,6 +443,11 @@ def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
         common["deployment"] = deployment
         common["shared_bridge"] = _resolve_shared_bridge_paths(common, deployment)
         common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
+        features["day_metric_upload"] = sanitize_day_metric_upload_config(_dict(features.get("day_metric_upload")))
+        features["alarm_export"] = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
+        features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
+            _dict(features.get("wet_bulb_collection"))
+        )
         _apply_shared_alarm_db(common, features)
         _normalize_handover_rules(features)
         _apply_single_root_paths(common, features)
@@ -505,6 +520,36 @@ def _resolve_internal_source_sites(common: Dict[str, Any], features: Dict[str, A
     return _default_internal_source_sites()
 
 
+def _has_day_metric_target_config(target: Dict[str, Any]) -> bool:
+    source = _dict(target.get("source"))
+    types = _list(target.get("types"))
+    return bool(
+        str(source.get("app_token", "") or "").strip()
+        or str(source.get("table_id", "") or "").strip()
+        or types
+    )
+
+
+def _migrate_legacy_day_metric_upload_config(
+    handover_log: Dict[str, Any],
+    day_metric_upload: Dict[str, Any],
+) -> Dict[str, Any]:
+    legacy_export = _dict(handover_log.get("day_metric_export"))
+    if not legacy_export:
+        return day_metric_upload
+
+    migrated = copy.deepcopy(day_metric_upload)
+    target = _dict(migrated.get("target"))
+    if not _has_day_metric_target_config(target):
+        migrated["target"] = {
+            "source": copy.deepcopy(_dict(legacy_export.get("source"))),
+            "fields": copy.deepcopy(_dict(legacy_export.get("fields"))),
+            "missing_value_policy": str(legacy_export.get("missing_value_policy", "") or "").strip() or "zero",
+            "types": copy.deepcopy(_list(legacy_export.get("types"))),
+        }
+    return migrated
+
+
 def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg = ensure_v3_config(v3_cfg)
     common = _dict(cfg.get("common"))
@@ -534,8 +579,13 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
     monthly = _dict(features.get("monthly_report"))
     sheet_import = _dict(features.get("sheet_import"))
     handover_log = _dict(features.get("handover_log"))
-    day_metric_upload = _dict(features.get("day_metric_upload"))
-    alarm_export = _dict(features.get("alarm_export"))
+    day_metric_upload = sanitize_day_metric_upload_config(
+        _migrate_legacy_day_metric_upload_config(
+            handover_log,
+            _dict(features.get("day_metric_upload")),
+        )
+    )
+    alarm_export = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
     manual_upload_gui = _dict(features.get("manual_upload_gui"))
     common_alarm_db = copy.deepcopy(_dict(common.get("alarm_db")))
 
@@ -613,7 +663,38 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "internal_source_cache": copy.deepcopy(internal_source_cache),
         "internal_source_sites": copy.deepcopy(internal_source_sites),
         "network": {
+            "connect_poll_interval_sec": 1,
             "enable_auto_switch_wifi": False,
+            "role_mode": normalize_role_mode(deployment.get("role_mode")),
+            "fail_fast_on_netsh_error": True,
+            "scan_before_connect": True,
+            "scan_attempts": 3,
+            "scan_wait_sec": 2,
+            "strict_target_visible_before_connect": True,
+            "connect_with_ssid_param": True,
+            "preferred_interface": "",
+            "auto_disconnect_before_connect": True,
+            "hard_recovery_enabled": True,
+            "hard_recovery_after_scan_failures": 2,
+            "hard_recovery_steps": ["toggle_adapter", "restart_wlansvc"],
+            "hard_recovery_cooldown_sec": 20,
+            "require_admin_for_hard_recovery": True,
+            "internal_profile_name": "",
+            "external_profile_name": "",
+            "post_switch_stabilize_sec": 3,
+            "post_switch_probe_enabled": False,
+            "post_switch_probe_internal_host": "",
+            "post_switch_probe_internal_port": 80,
+            "post_switch_probe_external_host": "open.feishu.cn",
+            "post_switch_probe_external_port": 443,
+            "post_switch_probe_timeout_sec": 2,
+            "post_switch_probe_retries": 3,
+            "post_switch_probe_interval_sec": 1,
+            "internal_probe_timeout_ms": 1200,
+            "internal_probe_count": 1,
+            "internal_probe_parallelism": 5,
+            "internal_probe_cache_ttl_sec": 2,
+            "external_probe_cache_ttl_sec": 2,
         },
         "scheduler": copy.deepcopy(scheduler),
         "updater": copy.deepcopy(updater),
@@ -710,19 +791,30 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
     common["feishu_auth"] = feishu_auth
 
     handover = _dict(features.get("handover_log"))
-    day_metric_upload = _dict(features.get("day_metric_upload"))
+    day_metric_upload = sanitize_day_metric_upload_config(
+        _migrate_legacy_day_metric_upload_config(
+            handover,
+            _dict(features.get("day_metric_upload")),
+        )
+    )
     handover.pop("alarm_db", None)
+    handover.pop("day_metric_export", None)
     handover["sites"] = copy.deepcopy(runtime_internal_source_sites)
     handover["download"] = _dict(handover.get("download"))
     handover["download"]["sites"] = copy.deepcopy(runtime_internal_source_sites)
     features["handover_log"] = handover
-    features["day_metric_upload"] = deep_merge_defaults(
-        _dict(runtime.get("day_metric_upload")),
-        day_metric_upload,
+    features["day_metric_upload"] = sanitize_day_metric_upload_config(
+        deep_merge_defaults(
+            _dict(runtime.get("day_metric_upload")),
+            day_metric_upload,
+        )
     )
-    features["alarm_export"] = deep_merge_defaults(
+    features["alarm_export"] = sanitize_alarm_export_config(deep_merge_defaults(
         _dict(runtime.get("alarm_export")),
         _dict(features.get("alarm_export")),
+    ))
+    features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
+        _dict(features.get("wet_bulb_collection"))
     )
     _apply_single_root_paths(common, features)
 

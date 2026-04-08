@@ -80,12 +80,7 @@ def query_window_start_text(when: datetime | None = None) -> str:
 
 def scheduled_bucket_for_time(when: datetime | None = None) -> str:
     now = when or datetime.now()
-    if now.hour >= 16:
-        return now.strftime("%Y-%m-%d 16")
-    if now.hour >= 8:
-        return now.strftime("%Y-%m-%d 08")
-    previous_day = now - timedelta(days=1)
-    return previous_day.strftime("%Y-%m-%d 16")
+    return now.strftime("%Y-%m-%d %H")
 
 
 def _seconds_to_text(value: Any) -> str:

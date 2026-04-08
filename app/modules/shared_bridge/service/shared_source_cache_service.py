@@ -1170,12 +1170,7 @@ class SharedSourceCacheService:
         return scheduled_bucket_for_time(when)
 
     def _auto_alarm_bucket(self, when: datetime | None = None) -> str:
-        now = when or datetime.now()
-        if now.hour >= 16:
-            return now.strftime("%Y-%m-%d 16")
-        if now.hour >= 8:
-            return now.strftime("%Y-%m-%d 08")
-        return ""
+        return self.current_alarm_bucket(when)
 
     def _alarm_temp_root(self, *, bucket_key: str, building: str, bucket_kind: str = "latest") -> Path:
         if self._tmp_root is None:
@@ -1186,7 +1181,7 @@ class SharedSourceCacheService:
 
     def _is_alarm_scheduled_bucket_key(self, bucket_key: str) -> bool:
         bucket_dt = _parse_hour_bucket(bucket_key)
-        return bool(bucket_dt and bucket_dt.hour in {8, 16})
+        return bool(bucket_dt)
 
     def _alarm_manual_bucket(self, when: datetime | None = None) -> str:
         return (when or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")

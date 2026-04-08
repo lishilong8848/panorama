@@ -401,7 +401,7 @@ def test_bridge_source_cache_alarm_upload_building_accepts_external_role() -> No
     assert response["running"] is True
     assert response["scope"] == "C楼"
     assert response["job"]["dedupe_key"] == "alarm_event_upload:building:C楼"
-    assert "刷新上传" in response["message"]
+    assert "使用共享文件上传60天" in response["message"]
 
 
 def test_bridge_source_cache_alarm_upload_full_returns_running_state_when_already_running() -> None:

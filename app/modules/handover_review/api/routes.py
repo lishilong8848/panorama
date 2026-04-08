@@ -51,7 +51,6 @@ def _empty_followup_progress() -> Dict[str, Any]:
         "can_resume_followup": False,
         "pending_count": 0,
         "failed_count": 0,
-        "day_metric_pending_count": 0,
         "attachment_pending_count": 0,
         "cloud_pending_count": 0,
         "daily_report_status": "idle",

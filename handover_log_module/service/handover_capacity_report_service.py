@@ -19,7 +19,6 @@ from handover_log_module.core.normalizers import format_number
 from handover_log_module.repository.excel_reader import load_rows
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
 from handover_log_module.service.capacity_report_common import build_capacity_template_snapshot
-from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
 from handover_log_module.service.handover_capacity_oil_cache_service import HandoverCapacityOilCacheService
 from pipeline_utils import get_app_dir
 
@@ -148,7 +147,6 @@ class HandoverCapacityReportService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
         self._oil_cache_service = HandoverCapacityOilCacheService(self.config)
-        self._day_metric_export_service = DayMetricBitableExportService(self.config)
 
     def _capacity_cfg(self) -> Dict[str, Any]:
         raw = self.config.get("capacity_report", {})
@@ -249,13 +247,13 @@ class HandoverCapacityReportService:
         )
 
     def _extract_oil_values(self, rows: List[Any]) -> Dict[str, str]:
-        first_candidates = ["1#娌圭綈瀹圭Н", "娌圭綈1娑蹭綅", "1#娌圭綈浣撶Н"]
-        second_candidates = ["2#娌圭綈瀹圭Н", "娌圭綈2娑蹭綅", "2#娌圭綈浣撶Н"]
+        first_candidates = ["1#油罐容积", "油罐1液位", "1#油罐体积"]
+        second_candidates = ["2#油罐容积", "油罐2液位", "2#油罐体积"]
 
         def _find_value(candidates: List[str]) -> str:
             for candidate in candidates:
                 for row in rows:
-                    if _text(getattr(row, "c_text", "")) != "鐕冩补鑷帶绯荤粺":
+                    if _text(getattr(row, "c_text", "")) != "燃油自控系统":
                         continue
                     if _text(getattr(row, "d_name", "")) != candidate:
                         continue
@@ -410,7 +408,7 @@ class HandoverCapacityReportService:
         try:
             field_defs = client.list_fields(table_id=table_id, page_size=200)
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[浜ゆ帴鐝璢[瀹归噺鎶ヨ〃][澶滅彮鑰楁按] 瀛楁瀹氫箟璇诲彇澶辫触 building=鍏ㄥ眬, error={exc}")
+            emit_log(f"[交接班][容量报表][夜班耗水] 字段定义读取失败 building=全局, error={exc}")
             return {}
         output: Dict[str, Dict[str, str]] = {}
         for field_def in field_defs:
@@ -434,11 +432,11 @@ class HandoverCapacityReportService:
         app_id = str(global_feishu.get("app_id", "") or "").strip()
         app_secret = str(global_feishu.get("app_secret", "") or "").strip()
         if not app_id or not app_secret:
-            raise ValueError("椋炰功閰嶇疆缂哄け: common.feishu_auth.app_id/app_secret")
+            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
         app_token = str(_NIGHT_WATER_SOURCE.get("app_token", "") or "").strip()
         table_id = str(_NIGHT_WATER_SOURCE.get("table_id", "") or "").strip()
         if not app_token or not table_id:
-            raise ValueError("澶滅彮鑰楁按澶氱淮閰嶇疆缂哄け: app_token/table_id")
+            raise ValueError("夜班耗水多维配置缺失: app_token/table_id")
         return FeishuBitableClient(
             app_id=app_id,
             app_secret=app_secret,
@@ -511,7 +509,7 @@ class HandoverCapacityReportService:
             )
         except Exception as exc:  # noqa: BLE001
             emit_log(
-                "[浜ゆ帴鐝璢[瀹归噺鎶ヨ〃][澶滅彮鑰楁按] 鏌ヨ澶辫触 "
+                "[交接班][容量报表][夜班耗水] 查询失败 "
                 f"building={building}, duty={duty_date}/{duty_shift}, error={exc}"
             )
             return {}

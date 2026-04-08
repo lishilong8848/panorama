@@ -8,12 +8,12 @@ const AUTO_GROUP = {
   items: [
     {
       id: 'auto_flow',
-      title: '立即自动流程',
+      title: '每日用电明细自动流程',
       desc: '单次执行整条月报主流程，并保留断点续传入口。',
     },
     {
       id: 'multi_date',
-      title: '多日期自动流程',
+      title: '多日用电明细自动流程',
       desc: '按日期区间批量补跑，适合回补连续日期。',
     },
   ],
@@ -57,31 +57,19 @@ const SPECIAL_GROUP = {
     },
     {
       id: 'monthly_event_report',
-      title: '月度统计表处理',
+      title: '体系月度统计表',
       desc: '读取上一个自然月的新事件处理数据，按楼栋生成事件月度统计表到本地目录。',
     },
     {
       id: 'alarm_event_upload',
       title: '告警信息上传',
-      desc: '读取 08/16 共享告警文件，筛选 60 天内记录并写入多维表。',
-    },
-  ],
-};
-
-const MONITOR_GROUP = {
-  id: 'monitor',
-  title: '系统监控',
-  items: [
-    {
-      id: 'runtime_logs',
-      title: '运行日志',
-      desc: '查看任务执行、共享桥接推进和系统日志。',
+      desc: '读取每小时共享告警文件，筛选 60 天内记录并写入多维表。',
     },
   ],
 };
 
 const ROLE_MENU_GROUPS = {
-  external: [AUTO_GROUP, MANUAL_GROUP, SPECIAL_GROUP, MONITOR_GROUP],
+  external: [AUTO_GROUP, MANUAL_GROUP, SPECIAL_GROUP],
   internal: [],
 };
 
@@ -98,3 +86,4 @@ export function getDashboardMenuGroupsForRole(roleMode) {
     items: cloneItems(group.items),
   }));
 }
+

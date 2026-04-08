@@ -20,7 +20,6 @@ from handover_log_module.repository.shift_roster_repository import (
     ShiftRosterRepository,
 )
 from handover_log_module.service.change_management_payload_builder import ChangeManagementPayloadBuilder
-from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
 from handover_log_module.service.event_category_payload_builder import EventCategoryPayloadBuilder
 from handover_log_module.service.exercise_management_payload_builder import ExerciseManagementPayloadBuilder
 from handover_log_module.service.handover_download_service import HandoverDownloadService
@@ -40,18 +39,6 @@ from handover_log_module.service.source_data_attachment_bitable_export_service i
 def _norm(value: Any, default: str = "-") -> str:
     text = str(value or "").strip()
     return text if text else default
-
-
-def _followup_status_text(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    mapping = {
-        "pending_review": "待确认后上传",
-        "ok": "成功",
-        "success": "成功",
-        "skipped": "已跳过",
-        "failed": "失败",
-    }
-    return mapping.get(text, text or "-")
 
 
 def _followup_reason_text(value: Any) -> str:
@@ -108,7 +95,6 @@ class HandoverOrchestrator:
             config,
             shift_roster_repo=self._shift_roster_repo,
         )
-        self._day_metric_export_service = DayMetricBitableExportService(config)
         self._source_data_attachment_export_service = SourceDataAttachmentBitableExportService(config)
         self._source_file_cache_service = HandoverSourceFileCacheService(config)
         self._review_session_service = ReviewSessionService(config)
@@ -126,6 +112,61 @@ class HandoverOrchestrator:
         service = HandoverSourceFileCacheService(self.config)
         self._source_file_cache_service = service
         return service
+
+    @staticmethod
+    def _serialize_metric_origin_payload(metric_key: str, hit: Any) -> Dict[str, Any]:
+        payload = hit if isinstance(hit, dict) else {}
+
+        def _value(name: str, default: Any = "") -> Any:
+            if isinstance(payload, dict):
+                return payload.get(name, default)
+            return getattr(hit, name, default)
+
+        return {
+            "metric_key": str(metric_key or "").strip(),
+            "row_index": int(_value("row_index", 0) or 0),
+            "d_name": str(_value("d_name", "") or "").strip(),
+            "b_norm": str(_value("b_norm", "") or "").strip(),
+            "c_norm": str(_value("c_norm", "") or "").strip(),
+            "b_text": str(_value("b_text", "") or "").strip(),
+            "c_text": str(_value("c_text", "") or "").strip(),
+        }
+
+    @classmethod
+    def _build_metric_origin_context(
+        cls,
+        *,
+        hits: Dict[str, Any] | None,
+        effective_config: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        hits_map = hits if isinstance(hits, dict) else {}
+        by_metric_id: Dict[str, Dict[str, Any]] = {}
+        for metric_key, hit in hits_map.items():
+            metric_id = str(metric_key or "").strip()
+            if not metric_id:
+                continue
+            by_metric_id[metric_id] = cls._serialize_metric_origin_payload(metric_id, hit)
+
+        by_target_cell: Dict[str, Dict[str, Any]] = {}
+        effective = effective_config if isinstance(effective_config, dict) else {}
+        cell_mapping = effective.get("cell_mapping", {})
+        if isinstance(cell_mapping, dict):
+            for metric_key, cell_name in cell_mapping.items():
+                metric_id = str(metric_key or "").strip()
+                target_cell = str(cell_name or "").strip().upper()
+                if not metric_id or not target_cell:
+                    continue
+                payload = by_metric_id.get(metric_id)
+                if not isinstance(payload, dict):
+                    continue
+                by_target_cell[target_cell] = {
+                    **payload,
+                    "metric_key": metric_id,
+                }
+        return {
+            "by_metric_id": by_metric_id,
+            "by_target_cell": by_target_cell,
+        }
 
     @staticmethod
     def _assignment_has_people(assignment: ShiftRosterAssignment | None) -> bool:
@@ -713,8 +754,7 @@ class HandoverOrchestrator:
         roster_applied = False
         resolved_alarm_summary = dict(alarm_summary_payload or {})
 
-        # 无论是否传入 fixed_cell_values，只要班次上下文不完整，都先自动推断，
-        # 保证 from-file / from-download / 手动 / 自动路径都能走统一的白班多维上报判定。
+        # 无论是否传入 fixed_cell_values，只要班次上下文不完整，都先自动推断。
         if not duty_date_text or not duty_shift_text:
             inferred_date, inferred_shift = self._infer_duty_by_now()
             duty_date_text = duty_date_text or inferred_date
@@ -876,7 +916,7 @@ class HandoverOrchestrator:
             result.output_file = filled["output_file"]
             result.fills = filled["fills"]
             result.missing_metrics = sorted(list(filled["missing_metric_to_cell"].keys()))
-            metric_origin_context = self._day_metric_export_service.serialize_metric_origin_context(
+            metric_origin_context = self._build_metric_origin_context(
                 hits=extracted.get("hits", {}),
                 effective_config=extracted.get("effective_config", {}),
             )
@@ -888,16 +928,6 @@ class HandoverOrchestrator:
                 )
                 or ""
             ).strip()
-            session_day_metric_export = {
-                "status": "skipped",
-                "reason": "missing_duty_context",
-                "uploaded_count": 0,
-                "error": "",
-                "uploaded_at": "",
-                "uploaded_revision": 0,
-                "metric_values_by_id": {},
-                "metric_origin_context": {"by_metric_id": {}, "by_target_cell": {}},
-            }
             session_source_data_attachment_export = {
                 "status": "skipped",
                 "reason": "missing_duty_context",
@@ -907,20 +937,10 @@ class HandoverOrchestrator:
                 "uploaded_revision": 0,
             }
             if duty_date_text and duty_shift_text:
-                session_day_metric_export = self._day_metric_export_service.build_deferred_state(
-                    duty_shift=duty_shift_text,
-                    resolved_values_by_id=filled.get("resolved_values_by_id", {}),
-                    metric_origin_context=metric_origin_context,
-                )
                 session_source_data_attachment_export = (
                     self._source_data_attachment_export_service.build_deferred_state(
                         duty_shift=duty_shift_text,
                     )
-                )
-                emit_log(
-                    "[交接班][白班多维] 延后上传: "
-                    f"building={building}, duty_date={duty_date_text}, duty_shift={duty_shift_text}, "
-                    f"原因={_followup_reason_text(session_day_metric_export.get('reason'))}"
                 )
                 emit_log(
                     "[交接班][源数据附件] 延后上传: "
@@ -928,10 +948,6 @@ class HandoverOrchestrator:
                     f"原因={_followup_reason_text(session_source_data_attachment_export.get('reason'))}"
                 )
             else:
-                emit_log(
-                    "[交接班][白班多维] 跳过: 缺少班次上下文 "
-                    f"building={building}, duty_date={duty_date_text or '-'}, duty_shift={duty_shift_text or '-'}"
-                )
                 emit_log(
                     "[交接班][源数据附件] 跳过: 缺少班次上下文 "
                     f"building={building}, duty_date={duty_date_text or '-'}, duty_shift={duty_shift_text or '-'}"
@@ -996,12 +1012,6 @@ class HandoverOrchestrator:
             result.capacity_status = capacity_status
             result.capacity_error = capacity_error
             result.capacity_warnings = list(capacity_warnings)
-            result.day_metric_export = {
-                "status": str(session_day_metric_export.get("status", "")).strip(),
-                "reason": str(session_day_metric_export.get("reason", "")).strip(),
-                "uploaded_count": int(session_day_metric_export.get("uploaded_count", 0) or 0),
-                "error": str(session_day_metric_export.get("error", "")).strip(),
-            }
             review_session: Dict[str, Any] = {}
             if duty_date_text and duty_shift_text and result.output_file:
                 managed_source_file_cache: Dict[str, Any] = {}
@@ -1035,7 +1045,6 @@ class HandoverOrchestrator:
                         data_file=result.data_file,
                         output_file=result.output_file,
                         source_mode=source_mode,
-                        day_metric_export=session_day_metric_export,
                         source_file_cache=managed_source_file_cache,
                         source_data_attachment_export=session_source_data_attachment_export,
                         capacity_output_file=result.capacity_output_file,
@@ -1188,9 +1197,6 @@ class HandoverOrchestrator:
                     success=bool(row.get("success", False)),
                     fills=[],
                     missing_metrics=list(row.get("missing_metrics", [])),
-                    day_metric_export=dict(row.get("day_metric_export", {}))
-                    if isinstance(row.get("day_metric_export", {}), dict)
-                    else {},
                     cloud_sheet_sync=dict(row.get("cloud_sheet_sync", {}))
                     if isinstance(row.get("cloud_sheet_sync", {}), dict)
                     else {},
@@ -1448,9 +1454,6 @@ class HandoverOrchestrator:
                         output_file=str(row.get("output_file", "")),
                         success=bool(row.get("success", False)),
                         missing_metrics=list(row.get("missing_metrics", [])),
-                        day_metric_export=dict(row.get("day_metric_export", {}))
-                        if isinstance(row.get("day_metric_export", {}), dict)
-                        else {},
                         cloud_sheet_sync=dict(row.get("cloud_sheet_sync", {}))
                         if isinstance(row.get("cloud_sheet_sync", {}), dict)
                         else {},
@@ -1473,14 +1476,6 @@ class HandoverOrchestrator:
                         summary.success_count += 1
                     else:
                         summary.failed_count += 1
-                    day_export = result.day_metric_export if isinstance(result.day_metric_export, dict) else {}
-                    if day_export:
-                        emit_log(
-                            "[交接班][白班多维] 楼栋="
-                            f"{_norm(result.building)} 状态={_followup_status_text(day_export.get('status'))} "
-                            f"已上传={int(day_export.get('uploaded_count', 0) or 0)} "
-                            f"原因={_followup_reason_text(day_export.get('reason'))}"
-                        )
         finally:
             if not switched_external:
                 try:

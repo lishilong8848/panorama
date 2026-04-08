@@ -453,30 +453,30 @@ export function createRuntimeHealthConfigActions(ctx) {
       : [];
     if (followupStatus === "ok") {
       if (cloudStatus === "ok") {
-        return "已一键全确认，并自动完成 12 项上传和云文档上传";
+        return "已一键全确认，并自动完成后续上传和云文档同步";
       }
       if (cloudStatus === "skipped") {
         const reasonText = cloudSkippedReasons.length
           ? `，云文档已跳过（${cloudSkippedReasons.join(" / ")}）`
           : "，但云文档已跳过";
-        return `已一键全确认，并自动完成 12 项上传${reasonText}`;
+        return `已一键全确认，并自动完成后续上传${reasonText}`;
       }
       if (cloudStatus === "failed" || cloudStatus === "partial_failed") {
-        return "已一键全确认，12 项上传成功，但云文档上传失败，请查看系统日志";
+        return "已一键全确认，后续上传成功，但云文档同步失败，请查看系统日志";
       }
       return "已一键全确认，并自动完成后续上传";
     }
     if (followupStatus === "partial_failed") {
       if (cloudStatus === "failed" || cloudStatus === "partial_failed") {
-        return "已一键全确认，但 12 项或云文档上传存在部分失败，请查看系统日志";
+        return "已一键全确认，但后续上传或云文档同步存在部分失败，请查看系统日志";
       }
-      return "已一键全确认，但 12 项上传存在部分失败，请查看系统日志";
+      return "已一键全确认，但后续上传存在部分失败，请查看系统日志";
     }
     if (followupStatus === "failed") {
       if (cloudStatus === "failed" || cloudStatus === "partial_failed") {
-        return "已一键全确认，但 12 项和云文档上传失败，请查看系统日志";
+        return "已一键全确认，但后续上传和云文档同步失败，请查看系统日志";
       }
-      return "已一键全确认，但 12 项上传失败，请查看系统日志";
+      return "已一键全确认，但后续上传失败，请查看系统日志";
     }
     if (cloudStatus === "blocked") {
       const blockedReason = String(data?.followup_result?.cloud_sheet_sync?.blocked_reason || "").trim();
@@ -875,7 +875,37 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
     }
     if (data.day_metric_upload && typeof data.day_metric_upload === "object") {
-      health.day_metric_upload.enabled = Boolean(data.day_metric_upload.enabled);
+      if (data.day_metric_upload.scheduler && typeof data.day_metric_upload.scheduler === "object") {
+        Object.assign(health.day_metric_upload.scheduler, {
+          enabled: Boolean(data.day_metric_upload.scheduler.enabled),
+          running: Boolean(data.day_metric_upload.scheduler.running),
+          status: String(data.day_metric_upload.scheduler.status || ""),
+          next_run_time: String(data.day_metric_upload.scheduler.next_run_time || ""),
+          last_check_at: String(data.day_metric_upload.scheduler.last_check_at || ""),
+          last_decision: String(data.day_metric_upload.scheduler.last_decision || ""),
+          last_trigger_at: String(data.day_metric_upload.scheduler.last_trigger_at || ""),
+          last_trigger_result: String(data.day_metric_upload.scheduler.last_trigger_result || ""),
+          state_path: String(data.day_metric_upload.scheduler.state_path || ""),
+          state_exists: Boolean(data.day_metric_upload.scheduler.state_exists),
+          executor_bound: Boolean(data.day_metric_upload.scheduler.executor_bound),
+          callback_name: String(data.day_metric_upload.scheduler.callback_name || ""),
+        });
+      } else {
+        Object.assign(health.day_metric_upload.scheduler, {
+          enabled: false,
+          running: false,
+          status: "未初始化",
+          next_run_time: "",
+          last_check_at: "",
+          last_decision: "",
+          last_trigger_at: "",
+          last_trigger_result: "",
+          state_path: "",
+          state_exists: false,
+          executor_bound: false,
+          callback_name: "",
+        });
+      }
       if (data.day_metric_upload.target_preview && typeof data.day_metric_upload.target_preview === "object") {
         Object.assign(health.day_metric_upload.target_preview, data.day_metric_upload.target_preview);
       } else {
@@ -894,6 +924,37 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
     if (data.alarm_event_upload && typeof data.alarm_event_upload === "object") {
       health.alarm_event_upload.enabled = Boolean(data.alarm_event_upload.enabled);
+      if (data.alarm_event_upload.scheduler && typeof data.alarm_event_upload.scheduler === "object") {
+        Object.assign(health.alarm_event_upload.scheduler, {
+          enabled: Boolean(data.alarm_event_upload.scheduler.enabled),
+          running: Boolean(data.alarm_event_upload.scheduler.running),
+          status: String(data.alarm_event_upload.scheduler.status || ""),
+          next_run_time: String(data.alarm_event_upload.scheduler.next_run_time || ""),
+          last_check_at: String(data.alarm_event_upload.scheduler.last_check_at || ""),
+          last_decision: String(data.alarm_event_upload.scheduler.last_decision || ""),
+          last_trigger_at: String(data.alarm_event_upload.scheduler.last_trigger_at || ""),
+          last_trigger_result: String(data.alarm_event_upload.scheduler.last_trigger_result || ""),
+          state_path: String(data.alarm_event_upload.scheduler.state_path || ""),
+          state_exists: Boolean(data.alarm_event_upload.scheduler.state_exists),
+          executor_bound: Boolean(data.alarm_event_upload.scheduler.executor_bound),
+          callback_name: String(data.alarm_event_upload.scheduler.callback_name || ""),
+        });
+      } else {
+        Object.assign(health.alarm_event_upload.scheduler, {
+          enabled: false,
+          running: false,
+          status: "未初始化",
+          next_run_time: "",
+          last_check_at: "",
+          last_decision: "",
+          last_trigger_at: "",
+          last_trigger_result: "",
+          state_path: "",
+          state_exists: false,
+          executor_bound: false,
+          callback_name: "",
+        });
+      }
       if (data.alarm_event_upload.target_preview && typeof data.alarm_event_upload.target_preview === "object") {
         Object.assign(health.alarm_event_upload.target_preview, data.alarm_event_upload.target_preview);
       } else {
@@ -1320,11 +1381,11 @@ export function createRuntimeHealthConfigActions(ctx) {
         patchAlarmUploadRunningState(data, "full", "all");
         await focusAcceptedJob(
           data,
-          String(data?.message || "").trim() || "已提交告警信息文件全量上传任务",
+          String(data?.message || "").trim() || "已提交 使用共享文件上传60天-全部楼栋",
         );
         return data;
       } catch (err) {
-        message.value = `告警信息文件全量上传失败: ${err}`;
+        message.value = `使用共享文件上传60天失败（全部楼栋）: ${err}`;
         return { ok: false, error: String(err) };
       }
     };
@@ -1346,11 +1407,11 @@ export function createRuntimeHealthConfigActions(ctx) {
         patchAlarmUploadRunningState(data, "single_building", buildingText);
         await focusAcceptedJob(
           data,
-          String(data?.message || "").trim() || `已提交 ${buildingText} 告警信息文件刷新上传任务`,
+          String(data?.message || "").trim() || `已提交 使用共享文件上传60天-${buildingText}`,
         );
         return data;
       } catch (err) {
-        message.value = `${buildingText} 告警信息文件刷新上传失败: ${err}`;
+        message.value = `使用共享文件上传60天失败（${buildingText}）: ${err}`;
         return { ok: false, error: String(err) };
       }
     };

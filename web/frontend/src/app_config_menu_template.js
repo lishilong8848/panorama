@@ -36,7 +36,7 @@ export const CONFIG_MENU_TEMPLATE = `<aside class="config-menu">
             >控制台</button>
 
             <div
-              v-if="showFeatureMonthlyConfigTab || showFeatureHandoverConfigTab || showFeatureWetBulbCollectionConfigTab || showFeatureAlarmExportConfigTab || showSheetImportConfigTab || showManualFeatureConfigTab"
+              v-if="showFeatureMonthlyConfigTab || showFeatureHandoverConfigTab || showFeatureDayMetricUploadConfigTab || showFeatureWetBulbCollectionConfigTab || showFeatureAlarmExportConfigTab || showSheetImportConfigTab || showManualFeatureConfigTab"
               class="config-menu-title"
               style="margin-top:10px;"
             >功能配置</div>
@@ -55,6 +55,11 @@ export const CONFIG_MENU_TEMPLATE = `<aside class="config-menu">
               :class="['btn', activeConfigTab==='feature_handover' ? 'btn-primary is-active' : 'btn-ghost']"
               @click="switchConfigTab('feature_handover')"
             >交接班日志</button>
+            <button
+              v-if="showFeatureDayMetricUploadConfigTab"
+              :class="['btn', activeConfigTab==='feature_day_metric_upload' ? 'btn-primary is-active' : 'btn-ghost']"
+              @click="switchConfigTab('feature_day_metric_upload')"
+            >12项独立上传</button>
             <button
               v-if="showFeatureWetBulbCollectionConfigTab"
               :class="['btn', activeConfigTab==='feature_wet_bulb_collection' ? 'btn-primary is-active' : 'btn-ghost']"

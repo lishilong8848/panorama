@@ -86,6 +86,8 @@ class _FakeSharedBridgeService:
                 "building": building,
                 "file_path": str(_touch_file(base_dir / "source_cache" / "handover" / "latest" / building / "latest.xlsx")),
                 "bucket_key": "2026-03-29 10",
+                "duty_date": "2026-03-29",
+                "duty_shift": "day",
             }
             for building in requested_buildings
         ]
@@ -112,6 +114,35 @@ class _FakeSharedBridgeService:
             for building in buildings
         ]
 
+    def get_handover_capacity_by_date_cache_entries(self, *, duty_date, duty_shift, buildings):  # noqa: ANN001
+        self.calls.append(
+            (
+                "get_handover_capacity_by_date_cache_entries",
+                {"duty_date": duty_date, "duty_shift": duty_shift, "buildings": list(buildings)},
+            )
+        )
+        base_dir = self.base_dir or (Path.cwd() / ".tmp_subprocess_worker_job_routes" / "shared")
+        if self.latest_ready or self.by_date_ready:
+            return [
+                {
+                    "building": building,
+                    "file_path": str(
+                        _touch_file(
+                            base_dir
+                            / "source_cache"
+                            / "handover_capacity"
+                            / "by_date"
+                            / duty_date
+                            / duty_shift
+                            / building
+                            / "capacity.xlsx"
+                        )
+                    ),
+                }
+                for building in buildings
+            ]
+        return []
+
     def get_day_metric_by_date_cache_entries(self, *, selected_dates, buildings):  # noqa: ANN001
         self.calls.append(("get_day_metric_by_date_cache_entries", {"selected_dates": list(selected_dates), "buildings": list(buildings)}))
         if not self.day_metric_ready:
@@ -137,6 +168,18 @@ class _FakeSharedBridgeService:
             "status": "queued_for_internal",
             "request": dict(kwargs),
         }
+
+    def create_handover_from_download_task(self, **kwargs):  # noqa: ANN003
+        self.calls.append(("create_handover_from_download_task", dict(kwargs)))
+        return {
+            "task_id": "bridge-handover-latest-1",
+            "feature": "handover_from_download",
+            "status": "queued_for_internal",
+            "request": dict(kwargs),
+        }
+
+    def get_or_create_handover_from_download_task(self, **kwargs):  # noqa: ANN003
+        return self.create_handover_from_download_task(**kwargs)
 
 
 def _fake_request(*, role_mode: str = "switching", bridge_enabled: bool = False, base_dir: Path | None = None):
@@ -199,10 +242,11 @@ def test_handover_from_download_route_starts_from_latest_cache_on_external_role(
 
 def test_handover_from_download_route_uses_cached_file_path_verbatim_on_external_role(monkeypatch) -> None:
     request = _fake_request(role_mode="external", bridge_enabled=True)
+    request.app.state.container.shared_bridge_service.latest_ready = True
     actual_file = _touch_file(Path.cwd() / ".tmp_subprocess_worker_job_routes" / "indexed" / "handover" / "actual-A.xlsx")
     request.app.state.container.shared_bridge_service.get_latest_source_cache_selection = lambda **_kwargs: {  # noqa: E731
         "best_bucket_key": "2026-03-29 10",
-        "selected_entries": [{"building": "A楼", "file_path": str(actual_file), "bucket_key": "2026-03-29 10"}],
+        "selected_entries": [{"building": "A楼", "file_path": str(actual_file), "bucket_key": "2026-03-29 10", "duty_date": "2026-03-29", "duty_shift": "day"}],
         "fallback_buildings": [],
         "missing_buildings": [],
         "stale_buildings": [],
@@ -216,8 +260,9 @@ def test_handover_from_download_route_uses_cached_file_path_verbatim_on_external
         def __init__(self, _config):  # noqa: D401, ANN001
             pass
 
-        def run_handover_from_files(self, *, building_files, end_time, duty_date, duty_shift, emit_log):  # noqa: ANN001
+        def run_handover_from_files(self, *, building_files, capacity_building_files, end_time, duty_date, duty_shift, emit_log):  # noqa: ANN001
             captured["building_files"] = building_files
+            captured["capacity_building_files"] = capacity_building_files
             captured["end_time"] = end_time
             captured["duty_date"] = duty_date
             captured["duty_shift"] = duty_shift
@@ -233,6 +278,7 @@ def test_handover_from_download_route_uses_cached_file_path_verbatim_on_external
     assert response["job_id"] == "job-cache-1"
     assert result == {"ok": True}
     assert captured["building_files"] == [("A楼", str(actual_file))]
+    assert captured["capacity_building_files"][0][0] == "A楼"
 
 
 def test_handover_from_download_route_creates_cache_fill_on_external_role_for_history() -> None:
@@ -287,7 +333,7 @@ def test_alarm_export_route_is_retired() -> None:
     with pytest.raises(HTTPException) as excinfo:
         routes.job_alarm_export_run(request)
     assert excinfo.value.status_code == 410
-    assert excinfo.value.detail == "告警导出功能已暂时停用，当前版本不再提供该入口"
+    assert excinfo.value.detail == "旧告警导出入口已退役，当前主链为“内网 API 拉取 -> 共享 JSON -> 外网上传”"
 
 
 def test_multi_date_route_prefers_worker_job() -> None:

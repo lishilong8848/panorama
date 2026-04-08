@@ -5,7 +5,7 @@
     <div class="status-metric-grid-compact">
       <div class="status-metric-card compact">
         <div class="status-metric-label">定时调度</div>
-        <div class="status-metric-value">{{ config.wet_bulb_collection.scheduler.enabled ? '已启用' : '未启用' }}</div>
+        <div class="status-metric-value">{{ health.wet_bulb_collection.scheduler.status || '未启动' }}</div>
       </div>
       <div class="status-metric-card compact">
         <div class="status-metric-label">目标多维表</div>
@@ -25,12 +25,11 @@
   <div class="config-panel-grid two-col">
     <div class="content-card config-panel-card">
       <div class="section-title">调度</div>
-      <div class="form-row"><label><input type="checkbox" v-model="config.wet_bulb_collection.scheduler.enabled" /> 启用定时调度</label></div>
-      <div class="form-row"><label><input type="checkbox" v-model="config.wet_bulb_collection.scheduler.auto_start_in_gui" /> 控制台启动后自动开启</label></div>
-      <div class="form-row"><label class="label">每 N 分钟运行一次</label><input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.interval_minutes" /></div>
-      <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.check_interval_sec" /></div>
-      <div class="form-row"><label><input type="checkbox" v-model="config.wet_bulb_collection.scheduler.retry_failed_on_next_tick" /> 失败后下一个周期继续重试</label></div>
-      <div class="form-row"><label class="label">状态文件名</label><input type="text" v-model="config.wet_bulb_collection.scheduler.state_file" /></div>
+      <div class="form-row"><label class="label">每 N 分钟运行一次</label><input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.interval_minutes" @change="saveWetBulbCollectionSchedulerQuickConfig" /></div>
+      <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.check_interval_sec" @change="saveWetBulbCollectionSchedulerQuickConfig" /></div>
+      <div class="form-row"><label><input type="checkbox" v-model="config.wet_bulb_collection.scheduler.retry_failed_on_next_tick" @change="saveWetBulbCollectionSchedulerQuickConfig" /> 失败后下一个周期继续重试</label></div>
+      <div class="form-row"><label class="label">状态文件名</label><input type="text" v-model="config.wet_bulb_collection.scheduler.state_file" @change="saveWetBulbCollectionSchedulerQuickConfig" /></div>
+      <div class="hint">{{ wetBulbSchedulerQuickSaving ? '调度配置保存中...' : '修改后自动保存。' }}</div>
     </div>
 
     <div class="content-card config-panel-card">

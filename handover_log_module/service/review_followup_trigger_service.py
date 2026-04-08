@@ -12,7 +12,6 @@ from handover_log_module.service.handover_daily_report_screenshot_service import
     HandoverDailyReportScreenshotService,
 )
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
-from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 from handover_log_module.service.review_session_service import ReviewSessionNotFoundError, ReviewSessionService
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
@@ -133,7 +132,6 @@ class ReviewFollowupTriggerService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
         self._review_service = ReviewSessionService(self.config)
-        self._day_metric_export_service = DayMetricBitableExportService(self.config)
         self._source_data_attachment_export_service = SourceDataAttachmentBitableExportService(self.config)
         self._cloud_sheet_sync_service = HandoverCloudSheetSyncService(self.config)
         self._daily_report_state_service = HandoverDailyReportStateService(self.config)
@@ -320,22 +318,11 @@ class ReviewFollowupTriggerService:
             if daily_report_status in {"failed", "capture_failed", "login_required"}:
                 daily_report_failed = 1
 
-        day_metric_pending_count = 0
         attachment_pending_count = 0
         cloud_pending_count = 0
         failed_count = daily_report_failed
         for session in sessions:
             revision = int(session.get("revision", 0) or 0)
-            day_metric_state = _normalize_export_state(session.get("day_metric_export", {}))
-            if not self._is_export_complete_for_revision(
-                day_metric_state,
-                revision,
-                static_skip_reasons={"disabled", "missing_duty_context"},
-            ):
-                day_metric_pending_count += 1
-            if str(day_metric_state.get("status", "")).strip().lower() == "failed":
-                failed_count += 1
-
             attachment_state = _normalize_export_state(session.get("source_data_attachment_export", {}))
             if not self._is_export_complete_for_revision(
                 attachment_state,
@@ -352,7 +339,7 @@ class ReviewFollowupTriggerService:
             if self._is_cloud_sync_failed(cloud_state):
                 failed_count += 1
 
-        pending_count = day_metric_pending_count + attachment_pending_count + cloud_pending_count + daily_report_pending
+        pending_count = attachment_pending_count + cloud_pending_count + daily_report_pending
         if pending_count <= 0 and failed_count <= 0:
             status = "complete"
         elif pending_count > 0 and failed_count > 0:
@@ -371,7 +358,6 @@ class ReviewFollowupTriggerService:
             "can_resume_followup": can_resume_followup,
             "pending_count": pending_count,
             "failed_count": failed_count,
-            "day_metric_pending_count": day_metric_pending_count,
             "attachment_pending_count": attachment_pending_count,
             "cloud_pending_count": cloud_pending_count,
             "daily_report_status": daily_report_status,
@@ -1273,37 +1259,12 @@ class ReviewFollowupTriggerService:
         for session in sessions:
             building = str(session.get("building", "")).strip() or "-"
             session_id = str(session.get("session_id", "")).strip()
-            output_file = str(session.get("output_file", "")).strip()
             data_file = self._resolve_session_source_data_file(session)
             duty_date = str(session.get("duty_date", "")).strip()
             duty_shift = str(session.get("duty_shift", "")).strip().lower()
             revision = int(session.get("revision", 0) or 0)
 
-            export_state = _normalize_export_state(session.get("day_metric_export", {}))
-            metric_values_by_id = (
-                session.get("day_metric_export", {}).get("metric_values_by_id", {})
-                if isinstance(session.get("day_metric_export", {}), dict)
-                and isinstance(session.get("day_metric_export", {}).get("metric_values_by_id", {}), dict)
-                else {}
-            )
-            metric_origin_context = (
-                session.get("day_metric_export", {}).get("metric_origin_context", {})
-                if isinstance(session.get("day_metric_export", {}), dict)
-                and isinstance(session.get("day_metric_export", {}).get("metric_origin_context", {}), dict)
-                else {}
-            )
             attachment_state = _normalize_export_state(session.get("source_data_attachment_export", {}))
-
-            next_day_metric_state = {
-                "status": export_state["status"] or "failed",
-                "reason": export_state["reason"],
-                "uploaded_count": export_state["uploaded_count"],
-                "error": export_state["error"],
-                "uploaded_at": export_state["uploaded_at"],
-                "uploaded_revision": export_state["uploaded_revision"],
-                "metric_values_by_id": metric_values_by_id,
-                "metric_origin_context": metric_origin_context,
-            }
             next_attachment_state = {
                 "status": attachment_state["status"] or "failed",
                 "reason": attachment_state["reason"],
@@ -1312,65 +1273,6 @@ class ReviewFollowupTriggerService:
                 "uploaded_at": attachment_state["uploaded_at"],
                 "uploaded_revision": attachment_state["uploaded_revision"],
             }
-
-            if export_state["uploaded_revision"] == revision and export_state["status"] in {"ok", "skipped"}:
-                day_metric_result = {
-                    "status": "skipped",
-                    "reason": "already_uploaded",
-                    "uploaded_count": export_state["uploaded_count"],
-                    "error": "",
-                }
-            elif export_state["status"] == "skipped" and export_state["reason"].lower() in {"disabled", "missing_duty_context"}:
-                next_day_metric_state["uploaded_revision"] = revision
-                next_day_metric_state["uploaded_at"] = next_day_metric_state["uploaded_at"] or self._now_text()
-                self._review_service.update_day_metric_export(
-                    session_id=session_id,
-                    day_metric_export=next_day_metric_state,
-                )
-                day_metric_result = {
-                    "status": "skipped",
-                    "reason": export_state["reason"],
-                    "uploaded_count": export_state["uploaded_count"],
-                    "error": "",
-                }
-            else:
-                emit_log(
-                    f"[交接班][确认后上传] 开始处理 building={building}, batch={batch_key}, revision={revision}, output={output_file or '-'}"
-                )
-                result = self._day_metric_export_service.rewrite_from_output_file(
-                    building=building,
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
-                    output_file=output_file,
-                    metric_values_by_id=metric_values_by_id,
-                    metric_origin_context=metric_origin_context,
-                    emit_log=emit_log,
-                )
-                result_status = str(result.get("status", "")).strip().lower() or "failed"
-                next_day_metric_state.update(
-                    {
-                        "status": result_status,
-                        "reason": str(result.get("reason", "")).strip(),
-                        "uploaded_count": int(result.get("uploaded_count", 0) or 0),
-                        "error": str(result.get("error", "")).strip(),
-                    }
-                )
-                if result_status in {"ok", "skipped"}:
-                    next_day_metric_state["uploaded_at"] = result.get("uploaded_at") or self._now_text()
-                    next_day_metric_state["uploaded_revision"] = revision
-                else:
-                    next_day_metric_state["uploaded_at"] = ""
-                    next_day_metric_state["uploaded_revision"] = 0
-                self._review_service.update_day_metric_export(
-                    session_id=session_id,
-                    day_metric_export=next_day_metric_state,
-                )
-                day_metric_result = {
-                    "status": result_status,
-                    "reason": next_day_metric_state["reason"],
-                    "uploaded_count": next_day_metric_state["uploaded_count"],
-                    "error": next_day_metric_state["error"],
-                }
 
             if attachment_state["uploaded_revision"] == revision and attachment_state["status"] in {"ok", "skipped"}:
                 attachment_result = {
@@ -1439,22 +1341,21 @@ class ReviewFollowupTriggerService:
                 }
 
             details[building] = {
-                "day_metric_export": day_metric_result,
                 "source_data_attachment_export": attachment_result,
             }
-            building_failed = any(part.get("status", "") == "failed" for part in (day_metric_result, attachment_result))
-            building_uploaded = any(part.get("status", "") == "ok" for part in (day_metric_result, attachment_result))
+            building_failed = attachment_result.get("status", "") == "failed"
+            building_uploaded = attachment_result.get("status", "") == "ok"
             if building_failed:
                 failed_buildings.append(
                     {
                         "building": building,
-                        "error": day_metric_result.get("error", "") or attachment_result.get("error", "") or "未知错误",
+                        "error": attachment_result.get("error", "") or "未知错误",
                     }
                 )
             elif building_uploaded:
                 uploaded_buildings.append(building)
             else:
-                reason = attachment_result.get("reason", "") or day_metric_result.get("reason", "") or "skipped"
+                reason = attachment_result.get("reason", "") or "skipped"
                 skipped_buildings.append({"building": building, "reason": str(reason)})
 
         return {

@@ -40,14 +40,12 @@ def _extract_numbers(text: Any) -> List[float]:
 
 
 class DayMetricBitableExportService:
-    def __init__(self, handover_cfg: Dict[str, Any]) -> None:
-        self.handover_cfg = handover_cfg
+    def __init__(self, config: Dict[str, Any]) -> None:
+        self.config = config if isinstance(config, dict) else {}
 
     @staticmethod
     def _defaults() -> Dict[str, Any]:
         return {
-            "enabled": True,
-            "only_day_shift": True,
             "source": {
                 "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
                 "table_id": "tblAHGF8mV6U9jid",
@@ -82,9 +80,41 @@ class DayMetricBitableExportService:
             ],
         }
 
+    def _runtime_day_metric_cfg(self) -> Dict[str, Any] | None:
+        if isinstance(self.config.get("day_metric_upload", {}), dict):
+            return self.config.get("day_metric_upload", {})
+        if isinstance(self.config.get("handover_log", {}), dict):
+            handover = self.config.get("handover_log", {})
+            if isinstance(handover.get("day_metric_upload", {}), dict):
+                return handover.get("day_metric_upload", {})
+        return None
+
+    def _global_feishu_cfg(self) -> Dict[str, Any]:
+        if isinstance(self.config.get("_global_feishu", {}), dict):
+            return self.config.get("_global_feishu", {})
+        if isinstance(self.config.get("feishu", {}), dict):
+            return self.config.get("feishu", {})
+        handover = self.config.get("handover_log", {})
+        if isinstance(handover, dict) and isinstance(handover.get("_global_feishu", {}), dict):
+            return handover.get("_global_feishu", {})
+        return {}
+
+    def _template_cfg(self) -> Dict[str, Any]:
+        if isinstance(self.config.get("template", {}), dict):
+            return self.config.get("template", {})
+        handover = self.config.get("handover_log", {})
+        if isinstance(handover, dict) and isinstance(handover.get("template", {}), dict):
+            return handover.get("template", {})
+        return {}
+
     def _normalize_cfg(self) -> Dict[str, Any]:
-        raw = self.handover_cfg.get("day_metric_export", {})
-        cfg = _deep_merge(self._defaults(), raw if isinstance(raw, dict) else {})
+        runtime_day_metric_cfg = self._runtime_day_metric_cfg()
+        if isinstance(runtime_day_metric_cfg, dict):
+            raw = runtime_day_metric_cfg.get("target", {})
+            cfg = _deep_merge(self._defaults(), raw if isinstance(raw, dict) else {})
+        else:
+            raw = self.config.get("day_metric_export", {})
+            cfg = _deep_merge(self._defaults(), raw if isinstance(raw, dict) else {})
 
         source = cfg.get("source", {})
         fields = cfg.get("fields", {})
@@ -127,21 +157,15 @@ class DayMetricBitableExportService:
                 normalized_types.append(item)
 
         cfg["types"] = normalized_types
-        cfg["enabled"] = bool(cfg.get("enabled", True))
-        cfg["only_day_shift"] = bool(cfg.get("only_day_shift", True))
         cfg["missing_value_policy"] = str(cfg.get("missing_value_policy", "zero")).strip().lower() or "zero"
         return cfg
 
     def _sheet_name(self) -> str:
-        template_cfg = self.handover_cfg.get("template", {})
-        if not isinstance(template_cfg, dict):
-            return ""
+        template_cfg = self._template_cfg()
         return str(template_cfg.get("sheet_name", "")).strip()
 
     def _resolve_target(self, cfg: Dict[str, Any]) -> Dict[str, str]:
-        global_feishu = self.handover_cfg.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
+        global_feishu = self._global_feishu_cfg()
 
         app_id = str(global_feishu.get("app_id", "")).strip()
         app_secret = str(global_feishu.get("app_secret", "")).strip()
@@ -160,9 +184,7 @@ class DayMetricBitableExportService:
     def build_target_descriptor(self, cfg: Dict[str, Any] | None = None, *, force_refresh: bool = False) -> Dict[str, str]:
         normalized = cfg if isinstance(cfg, dict) else self._normalize_cfg()
         source = normalized.get("source", {}) if isinstance(normalized.get("source", {}), dict) else {}
-        global_feishu = self.handover_cfg.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
+        global_feishu = self._global_feishu_cfg()
         resolver = BitableTargetResolver(
             app_id=str(global_feishu.get("app_id", "")).strip(),
             app_secret=str(global_feishu.get("app_secret", "")).strip(),
@@ -202,9 +224,7 @@ class DayMetricBitableExportService:
         *,
         resolved_target: Dict[str, str] | None = None,
     ) -> FeishuBitableClient:
-        global_feishu = self.handover_cfg.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
+        global_feishu = self._global_feishu_cfg()
 
         app_id = str(global_feishu.get("app_id", "")).strip()
         app_secret = str(global_feishu.get("app_secret", "")).strip()
@@ -441,17 +461,6 @@ class DayMetricBitableExportService:
         metric_origin_context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         cfg = self._normalize_cfg()
-        if not cfg.get("enabled", True):
-            return {
-                "status": "skipped",
-                "reason": "disabled",
-                "uploaded_count": 0,
-                "error": "",
-                "uploaded_at": "",
-                "uploaded_revision": 0,
-                "metric_values_by_id": {},
-                "metric_origin_context": {"by_metric_id": {}, "by_target_cell": {}},
-            }
         return {
             "status": "pending_review",
             "reason": "await_all_confirmed",
@@ -653,7 +662,7 @@ class DayMetricBitableExportService:
                 record_ids=record_ids,
                 batch_size=int(source.get("delete_batch_size", 200) or 200),
             )
-        emit_log(f"[交接班][白班多维] 删除旧记录 building={building}, duty_date={duty_date}, count={deleted_count}")
+        emit_log(f"[12项独立上传] 删除旧记录 building={building}, duty_date={duty_date}, count={deleted_count}")
         return {
             "status": "ok",
             "deleted_count": deleted_count,
@@ -672,12 +681,6 @@ class DayMetricBitableExportService:
         metric_origin_context: Dict[str, Any] | None,
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
-        if not cfg.get("enabled", True):
-            return {"status": "skipped", "reason": "disabled", "uploaded_count": 0}
-        if cfg.get("only_day_shift", True) and str(duty_shift or "").strip().lower() != "day":
-            emit_log("[交接班][白班多维] 跳过: 非白班")
-            return {"status": "skipped", "reason": "non_day_shift", "uploaded_count": 0}
-
         source = cfg.get("source", {})
         resolved_target = self._resolve_target(cfg)
         table_id = str(resolved_target.get("table_id", "")).strip()
@@ -694,24 +697,62 @@ class DayMetricBitableExportService:
         try:
             client = self._new_client(cfg, resolved_target=resolved_target)
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][白班多维] 初始化失败: {exc}")
-            return {"status": "failed", "uploaded_count": 0, "error": str(exc)}
+            emit_log(f"[12项独立上传] 初始化失败: {exc}")
+            return {
+                "status": "failed",
+                "uploaded_count": 0,
+                "created_records": 0,
+                "deleted_records": 0,
+                "error": str(exc),
+            }
 
-        emit_log(f"[交接班][白班多维] 开始上传 building={building}, duty_date={duty_date}, records={len(records)}")
+        emit_log(f"[12项独立上传] 开始写入 building={building}, duty_date={duty_date}, records={len(records)}")
         try:
+            existing_records = client.list_records(
+                table_id=table_id,
+                page_size=int(source.get("page_size", 500) or 500),
+                max_records=int(source.get("max_records", 5000) or 5000),
+            )
+            matched = self._matching_existing_records(
+                existing_records=existing_records,
+                building=building,
+                duty_date=duty_date,
+                cfg=cfg,
+            )
+            record_ids = [
+                str(item.get("record_id", "")).strip()
+                for item in matched
+                if str(item.get("record_id", "")).strip()
+            ]
+            deleted_count = 0
+            if record_ids:
+                deleted_count = client.batch_delete_records(
+                    table_id=table_id,
+                    record_ids=record_ids,
+                    batch_size=int(source.get("delete_batch_size", 200) or 200),
+                )
+            emit_log(
+                f"[12项独立上传] 删除旧记录完成 building={building}, duty_date={duty_date}, count={deleted_count}"
+            )
             client.batch_create_records(table_id=table_id, fields_list=records, batch_size=batch_size)
-            emit_log(f"[交接班][白班多维] 上传完成 uploaded={len(records)}")
+            emit_log(
+                f"[12项独立上传] 写入完成 building={building}, duty_date={duty_date}, created={len(records)}"
+            )
             return {
                 "status": "ok",
                 "uploaded_count": len(records),
+                "created_records": len(records),
+                "deleted_records": deleted_count,
                 "records_preview": preview,
                 "error": "",
             }
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][白班多维] 上传失败 error={exc}")
+            emit_log(f"[12项独立上传] 写入失败 error={exc}")
             return {
                 "status": "failed",
                 "uploaded_count": 0,
+                "created_records": 0,
+                "deleted_records": 0,
                 "records_preview": preview,
                 "error": str(exc),
             }
@@ -756,31 +797,13 @@ class DayMetricBitableExportService:
         try:
             cell_values = self._load_workbook_cell_values(output_file, cfg)
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][白班多维] 读取成品失败: {exc}")
+            emit_log(f"[12项独立上传] 读取成品失败: {exc}")
             return {
                 "status": "failed",
                 "uploaded_count": 0,
                 "created_records": 0,
                 "deleted_records": 0,
                 "error": str(exc),
-            }
-
-        if not cfg.get("enabled", True):
-            return {
-                "status": "skipped",
-                "reason": "disabled",
-                "uploaded_count": 0,
-                "created_records": 0,
-                "deleted_records": 0,
-            }
-        if cfg.get("only_day_shift", True) and str(duty_shift or "").strip().lower() != "day":
-            emit_log("[交接班][白班多维] 跳过: 非白班")
-            return {
-                "status": "skipped",
-                "reason": "non_day_shift",
-                "uploaded_count": 0,
-                "created_records": 0,
-                "deleted_records": 0,
             }
 
         resolved = metric_values_by_id if isinstance(metric_values_by_id, dict) else {}
@@ -800,7 +823,7 @@ class DayMetricBitableExportService:
         try:
             client = self._new_client(cfg, resolved_target=resolved_target)
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][白班多维] 初始化失败: {exc}")
+            emit_log(f"[12项独立上传] 初始化失败: {exc}")
             return {
                 "status": "failed",
                 "uploaded_count": 0,
@@ -809,7 +832,7 @@ class DayMetricBitableExportService:
                 "error": str(exc),
             }
 
-        emit_log(f"[交接班][白班多维] 开始重写 building={building}, duty_date={duty_date}, records={len(records)}")
+        emit_log(f"[12项独立上传] 开始重写 building={building}, duty_date={duty_date}, records={len(records)}")
         try:
             existing_records = client.list_records(
                 table_id=table_id,
@@ -835,11 +858,11 @@ class DayMetricBitableExportService:
                     batch_size=int(source.get("delete_batch_size", 200) or 200),
                 )
             emit_log(
-                f"[交接班][白班多维] 删除旧记录完成 building={building}, duty_date={duty_date}, count={deleted_count}"
+                f"[12项独立上传] 删除旧记录完成 building={building}, duty_date={duty_date}, count={deleted_count}"
             )
             client.batch_create_records(table_id=table_id, fields_list=records, batch_size=batch_size)
             emit_log(
-                f"[交接班][白班多维] 重写完成 building={building}, duty_date={duty_date}, created={len(records)}"
+                f"[12项独立上传] 重写完成 building={building}, duty_date={duty_date}, created={len(records)}"
             )
             return {
                 "status": "ok",
@@ -850,7 +873,7 @@ class DayMetricBitableExportService:
                 "error": "",
             }
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][白班多维] 重写失败 error={exc}")
+            emit_log(f"[12项独立上传] 重写失败 error={exc}")
             return {
                 "status": "failed",
                 "uploaded_count": 0,

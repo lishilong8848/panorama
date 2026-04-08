@@ -110,7 +110,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
 
   async function runMonthlyEventReport(scope, building = "") {
     if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表处理入口，请在外网端发起。";
+      message.value = "当前为内网端，本地管理页不提供体系月度统计表入口，请在外网端发起。";
       return;
     }
     if (!canRun.value) return;
@@ -148,7 +148,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
 
   async function runMonthlyChangeReport(scope, building = "") {
     if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表处理入口，请在外网端发起。";
+      message.value = "当前为内网端，本地管理页不提供体系月度统计表入口，请在外网端发起。";
       return;
     }
     if (!canRun.value) return;
@@ -312,8 +312,8 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     const monthly = config.value.handover_log?.monthly_event_report || {};
     const scheduler = monthly.scheduler || {};
     const payload = {
-      enabled: Boolean(scheduler.enabled),
-      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
+      enabled: true,
+      auto_start_in_gui: false,
       day_of_month: Number.parseInt(String(scheduler.day_of_month ?? 1), 10) || 1,
       run_time: String(scheduler.run_time || "").trim(),
       check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
@@ -347,7 +347,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           await fetchHealth();
           message.value = data?.message || "月度事件统计表调度配置已更新";
         } catch (err) {
-          message.value = formatError(err, "保存月度事件统计表调度配置");
+          message.value = formatError(err, "月度事件统计表调度自动更新");
         } finally {
           monthlyEventReportSchedulerQuickSaving.value = false;
         }
@@ -407,8 +407,8 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     const monthly = config.value.handover_log?.monthly_change_report || {};
     const scheduler = monthly.scheduler || {};
     const payload = {
-      enabled: Boolean(scheduler.enabled),
-      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
+      enabled: true,
+      auto_start_in_gui: false,
       day_of_month: Number.parseInt(String(scheduler.day_of_month ?? 1), 10) || 1,
       run_time: String(scheduler.run_time || "").trim(),
       check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
@@ -442,7 +442,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           await fetchHealth();
           message.value = data?.message || "月度变更统计表调度配置已更新";
         } catch (err) {
-          message.value = formatError(err, "保存月度变更统计表调度配置");
+          message.value = formatError(err, "月度变更统计表调度自动更新");
         } finally {
           monthlyChangeReportSchedulerQuickSaving.value = false;
         }
@@ -464,3 +464,4 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     saveMonthlyChangeReportSchedulerQuickConfig,
   };
 }
+
