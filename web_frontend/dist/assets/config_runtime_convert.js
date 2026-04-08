@@ -9,8 +9,6 @@ export function convertV3ConfigToLegacy(v3) {
   const features = raw.features || {};
   const monthly = features.monthly_report || {};
   const upload = monthly.upload || {};
-  const networkSwitch = clone(common.network_switch || {});
-  delete networkSwitch.enable_auto_switch_wifi;
   const pathRoot =
     String(common.paths?.business_root_dir || "").trim() ||
     String(common.paths?.download_save_dir || "").trim() ||
@@ -59,7 +57,6 @@ export function convertV3ConfigToLegacy(v3) {
       resume: clone(monthly.resume || {}),
       performance: clone(monthly.performance || {}),
     },
-    network: networkSwitch,
     scheduler: clone(common.scheduler || {}),
     updater: clone(common.updater || {}),
     notify: clone(common.notify || {}),
@@ -94,8 +91,6 @@ export function convertLegacyConfigToV3(legacy) {
   const src = clone(legacy || {});
   const monthlyUpload = src.feishu || {};
   const alarmCommonDb = clone(src.alarm_common_db || src.alarm_bitable_export?.db || src.handover_log?.alarm_db || {});
-  const networkSwitch = clone(src.network || {});
-  delete networkSwitch.enable_auto_switch_wifi;
   const pathRoot =
     String(src.download?.save_dir || "").trim() ||
     String(src.input?.excel_dir || "").trim() ||
@@ -113,7 +108,6 @@ export function convertLegacyConfigToV3(legacy) {
         external_root_dir: String(src.shared_bridge?.external_root_dir || src.shared_bridge?.root_dir || "").trim(),
       },
       internal_source_sites: clone(src.internal_source_sites || src.download?.sites || src.handover_log?.sites || []),
-      network_switch: networkSwitch,
       scheduler: clone(src.scheduler || {}),
       updater: clone(src.updater || {}),
       notify: clone(src.notify || {}),

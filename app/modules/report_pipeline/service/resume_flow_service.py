@@ -72,13 +72,13 @@ def run_resume_upload(
     if not hasattr(calc_module, "run_with_explicit_file_items"):
         raise RuntimeError("计算脚本缺少 run_with_explicit_file_items 入口，请先升级表格计算模块代码")
 
-    wifi = build_wifi_switcher(network_cfg, log_cb=emit_log)
-    require_saved = bool(network_cfg["require_saved_profiles"])
-    external_ssid = str(network_cfg["external_ssid"]).strip()
-    enable_auto_switch_wifi = bool(network_cfg.get("enable_auto_switch_wifi", True))
-    current_ssid = wifi.get_current_ssid()
+    wifi = build_wifi_switcher(network_cfg, log_cb=emit_log) if bool(network_cfg) else None
+    require_saved = bool(network_cfg.get("require_saved_profiles", False))
+    external_ssid = str(network_cfg.get("external_ssid", "")).strip()
+    enable_auto_switch_wifi = False
+    current_ssid = wifi.get_current_ssid() if wifi is not None else ""
 
-    if external_ssid and current_ssid != external_ssid:
+    if wifi is not None and external_ssid and current_ssid != external_ssid:
         ok, msg, skipped = try_switch_wifi(
             wifi=wifi,
             network_cfg=network_cfg,
@@ -88,7 +88,7 @@ def run_resume_upload(
             profile_name=str(network_cfg.get("external_profile_name", "") or "").strip() or None,
         )
         if skipped:
-            emit_log("[网络] 当前角色不使用单机切网，续传阶段按当前网络继续执行")
+            emit_log("[网络] 当前角色固定网络，续传阶段按当前网络继续执行")
         elif not ok:
             checkpoint["stage"] = "wait_external_upload"
             checkpoint["last_error"] = f"切换外网失败: {msg}"
@@ -99,7 +99,7 @@ def run_resume_upload(
             emit_log(f"[续传] {summary['error']}")
             log_file_failure(
                 feature="断点续传",
-                stage="WiFi切换(外网)",
+                stage="网络准备(外网)",
                 building="-",
                 file_path="-",
                 upload_date="-",

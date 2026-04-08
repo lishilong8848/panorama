@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from typing import Any, Callable, Dict, List, Type
@@ -82,18 +82,18 @@ def run_pipeline_with_time_windows(
     checkpoint = save_checkpoint_and_index(config, checkpoint)
     sync_summary_from_checkpoint(summary, checkpoint)
 
-    wifi = build_wifi_switcher(network_cfg, log_cb=emit_log)
-    require_saved = bool(network_cfg["require_saved_profiles"])
-    original_ssid = wifi.get_current_ssid()
     pending_notify_events: List[Any] = []
-    enable_auto_switch_wifi = bool(network_cfg.get("enable_auto_switch_wifi", True))
+    enable_auto_switch_wifi = False
+    wifi = build_wifi_switcher(network_cfg, log_cb=emit_log) if enable_auto_switch_wifi else None
+    require_saved = bool(network_cfg.get("require_saved_profiles", False))
+    original_ssid = wifi.get_current_ssid() if wifi is not None else ""
     if enable_auto_switch_wifi:
         emit_log(f"[网络] 当前SSID: {original_ssid}")
 
-    internal_ssid = str(network_cfg["internal_ssid"]).strip()
-    external_ssid = str(network_cfg["external_ssid"]).strip()
+    internal_ssid = str(network_cfg.get("internal_ssid", "")).strip()
+    external_ssid = str(network_cfg.get("external_ssid", "")).strip()
     external_profile_name = str(network_cfg.get("external_profile_name", "") or "").strip() or None
-    switch_back = bool(network_cfg["switch_back_to_original"])
+    switch_back = bool(network_cfg.get("switch_back_to_original", False))
 
     ok, msg, skipped = try_switch_wifi(
         wifi=wifi,
@@ -109,7 +109,7 @@ def run_pipeline_with_time_windows(
         emit_log(f"[网络] 切换内网失败: {msg}")
         log_file_failure(
             feature=source_name,
-            stage="WiFi切换(内网)",
+            stage="网络准备(内网)",
             building="-",
             file_path="-",
             upload_date="-",
@@ -117,7 +117,7 @@ def run_pipeline_with_time_windows(
         )
         notify_event(
             config,
-            stage="WiFi切换(内网)",
+            stage="网络准备(内网)",
             detail=msg,
             toggle_key="on_wifi_failure",
             wifi=wifi,
@@ -232,7 +232,7 @@ def run_pipeline_with_time_windows(
             emit_log(f"[网络] 切换外网失败: {msg}")
             log_file_failure(
                 feature=source_name,
-                stage="WiFi切换(外网)",
+                stage="网络准备(外网)",
                 building="-",
                 file_path="-",
                 upload_date="-",
@@ -240,7 +240,7 @@ def run_pipeline_with_time_windows(
             )
             notify_event(
                 config,
-                stage="WiFi切换(外网)",
+                stage="网络准备(外网)",
                 detail=msg,
                 toggle_key="on_wifi_failure",
                 wifi=wifi,

@@ -16,7 +16,7 @@ def validate_runtime_config(
 
     input_cfg = config["input"]
     download_cfg = config["download"]
-    network_cfg = config["network"]
+    network_cfg = config.get("network", {})
     notify_cfg = config["notify"]
     feishu_cfg = config["feishu"]
     paths_cfg = config.get("paths", {})
@@ -46,19 +46,8 @@ def validate_runtime_config(
         ],
         "download",
     )
-    _require_keys(
-        network_cfg,
-        [
-            "internal_ssid",
-            "external_ssid",
-            "switch_timeout_sec",
-            "retry_count",
-            "retry_interval_sec",
-            "require_saved_profiles",
-            "switch_back_to_original",
-        ],
-        "network",
-    )
+    if not isinstance(network_cfg, dict):
+        raise ValueError("配置错误: network 必须是对象")
     _require_keys(
         notify_cfg,
         [
@@ -118,15 +107,15 @@ def validate_runtime_config(
     if not str(resume_cfg.get("index_file", "")).strip():
         raise ValueError("配置错误: download.resume.index_file 不能为空")
 
-    if float(network_cfg["connect_poll_interval_sec"]) <= 0:
+    if float(network_cfg.get("connect_poll_interval_sec", 1)) <= 0:
         raise ValueError("配置错误: network.connect_poll_interval_sec 必须大于0")
-    if int(network_cfg["scan_attempts"]) <= 0:
+    if int(network_cfg.get("scan_attempts", 3)) <= 0:
         raise ValueError("配置错误: network.scan_attempts 必须大于0")
-    if int(network_cfg["scan_wait_sec"]) <= 0:
+    if int(network_cfg.get("scan_wait_sec", 2)) <= 0:
         raise ValueError("配置错误: network.scan_wait_sec 必须大于0")
-    if int(network_cfg["hard_recovery_after_scan_failures"]) <= 0:
+    if int(network_cfg.get("hard_recovery_after_scan_failures", 2)) <= 0:
         raise ValueError("配置错误: network.hard_recovery_after_scan_failures 必须大于0")
-    if int(network_cfg["hard_recovery_cooldown_sec"]) < 0:
+    if int(network_cfg.get("hard_recovery_cooldown_sec", 20)) < 0:
         raise ValueError("配置错误: network.hard_recovery_cooldown_sec 必须大于等于0")
     if float(network_cfg.get("post_switch_stabilize_sec", 0)) < 0:
         raise ValueError("配置错误: network.post_switch_stabilize_sec 必须大于等于0")

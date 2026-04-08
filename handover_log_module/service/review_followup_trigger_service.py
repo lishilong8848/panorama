@@ -3,7 +3,6 @@
 from datetime import datetime
 from typing import Any, Callable, Dict, List
 
-from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from handover_log_module.core.shift_window import format_duty_date_text
 from handover_log_module.service.handover_daily_report_asset_service import HandoverDailyReportAssetService
 from handover_log_module.service.handover_daily_report_bitable_export_service import (
@@ -141,7 +140,6 @@ class ReviewFollowupTriggerService:
         self._daily_report_asset_service = HandoverDailyReportAssetService(self.config)
         self._daily_report_screenshot_service = HandoverDailyReportScreenshotService(self.config)
         self._daily_report_bitable_export_service = HandoverDailyReportBitableExportService(self.config)
-        self._wifi_switch_service = WifiSwitchService(self.config)
 
     def evaluate(self, batch_status: Dict[str, Any] | None) -> Dict[str, Any]:
         payload = batch_status if isinstance(batch_status, dict) else {}
@@ -156,19 +154,8 @@ class ReviewFollowupTriggerService:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def _ensure_external_network(self, emit_log: Callable[[str], None]) -> bool:
-        network_cfg = self.config.get("network", {})
-        if not isinstance(network_cfg, dict):
-            return False
-        if not bool(network_cfg.get("enable_auto_switch_wifi", True)):
-            emit_log("[交接班][确认后上传] 当前角色不使用单机切网，按当前网络继续执行")
-            return False
-        external_ssid = str(network_cfg.get("external_ssid", "")).strip()
-        if not external_ssid:
-            emit_log("[交接班][确认后上传] 未配置外网 SSID，按当前网络继续执行")
-            return False
-        ok, msg = self._wifi_switch_service.connect(external_ssid)
-        emit_log(f"[交接班][确认后上传] 切换外网: {'成功' if ok else '失败'} - {msg}")
-        return bool(ok)
+        emit_log("[交接班][确认后上传] 网络切换功能已移除，按当前网络继续执行")
+        return False
 
     @staticmethod
     def _is_export_complete_for_revision(

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 import re
@@ -153,8 +153,8 @@ class WetBulbCollectionService:
         handover["download"] = download
         network_cfg = runtime_cfg.get("network") if isinstance(runtime_cfg.get("network"), dict) else {}
         runtime_cfg["network"] = network_cfg
-        # 湿球温度采集不再维护独立切网开关，统一跟随公共网络自动切换配置。
-        download["switch_to_internal_before_download"] = bool(network_cfg.get("enable_auto_switch_wifi", True))
+        # 湿球温度采集固定按当前角色网络执行，不再切换网络。
+        download["switch_to_internal_before_download"] = False
         return runtime_cfg
 
     def _new_target_resolver(self) -> BitableTargetResolver:
@@ -504,7 +504,6 @@ class WetBulbCollectionService:
             download_browser_pool=self._download_browser_pool,
         )
         target_buildings = [str(item).strip() for item in (buildings or []) if str(item).strip()]
-        auto_switch_wifi_enabled = bool(derived_runtime.get("network", {}).get("enable_auto_switch_wifi", True))
         reuse_download = bool(normalized_cfg.get("source", {}).get("reuse_handover_download", True))
 
         download_result = download_service.run(
@@ -538,12 +537,7 @@ class WetBulbCollectionService:
                 continue
             source_units.append({"building": building, "file_path": file_path})
 
-        if bool(getattr(download_service, "did_switch_internal_this_run", False)):
-            download_service.switch_external_after_download(emit_log)
-        elif auto_switch_wifi_enabled:
-            emit_log("[湿球温度定时采集] 本次未切到内网，跳过切回外网")
-        else:
-            emit_log("[湿球温度定时采集] 公共网络自动切换已关闭，本次未执行自动切网")
+        emit_log("[湿球温度定时采集] 下载阶段完成，继续按当前角色网络执行后续流程")
 
         return {
             "source_units": source_units,
@@ -760,14 +754,9 @@ class WetBulbCollectionService:
             }
 
         target_buildings = [str(item).strip() for item in (buildings or []) if str(item).strip()]
-        auto_switch_wifi_enabled = bool(
-            self._build_derived_runtime_cfg(cfg).get("network", {}).get("enable_auto_switch_wifi", True)
-        )
-
         emit_log(
             "[湿球温度定时采集] 开始执行: "
-            f"enable_auto_switch_wifi={str(auto_switch_wifi_enabled).lower()}, "
-            f"buildings={','.join(target_buildings) if target_buildings else '按交接班启用楼栋'}"
+            f"network_mode=current_role, buildings={','.join(target_buildings) if target_buildings else '按交接班启用楼栋'}"
         )
         if target_descriptor.get("table_id"):
             emit_log(

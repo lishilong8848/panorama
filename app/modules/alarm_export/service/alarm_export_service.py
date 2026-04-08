@@ -14,7 +14,6 @@ from app.modules.alarm_export.core.transformer import transform_row_to_feishu_fi
 from app.modules.alarm_export.repository.alarm_event_repository import AlarmEventRepository
 from app.modules.alarm_export.service.alarm_export_resume_store import AlarmExportResumeStore
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver, build_bitable_url
-from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from app.modules.report_pipeline.core.entities import AlarmExportSummary, PipelinePhaseResult
 from app.shared.logging import build_failure_line, build_success_line
 from pipeline_utils import get_app_dir, load_calc_module
@@ -704,18 +703,7 @@ class AlarmExportService:
         stage: str,
         emit_log: Callable[[str], None],
     ) -> None:
-        target = str(target_ssid or "").strip()
-        if not target:
-            emit_log(f"[告警多维上传] 未配置目标SSID，跳过切网: stage={stage}")
-            return
-        wifi = WifiSwitchService(self.config)
-        ok, msg = wifi.connect(target)
-        emit_log(
-            f"[告警多维上传] 切网 stage={stage}, target={target}, "
-            f"结果={'成功' if ok else '失败'}, 详情={msg}"
-        )
-        if not ok:
-            raise RuntimeError(f"{stage}切网失败: {msg}")
+        emit_log(f"[告警多维上传] 网络切换功能已移除，按当前网络继续执行: stage={stage}")
 
     def run(self, emit_log: Callable[[str], None] = print, source: str = "告警多维上传") -> Dict[str, Any]:
         run_started_at = datetime.now()

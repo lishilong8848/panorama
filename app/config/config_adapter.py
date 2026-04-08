@@ -307,7 +307,6 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     legacy_input = _dict(legacy_cfg.get("input"))
     legacy_output = _dict(legacy_cfg.get("output"))
     legacy_download = _dict(legacy_cfg.get("download"))
-    legacy_network = _dict(legacy_cfg.get("network"))
     legacy_scheduler = _dict(legacy_cfg.get("scheduler"))
     legacy_notify = _dict(legacy_cfg.get("notify"))
     legacy_feishu = _dict(legacy_cfg.get("feishu"))
@@ -322,8 +321,6 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     common_paths["business_root_dir"] = business_root
     common["paths"] = common_paths
 
-    common["network_switch"] = deep_merge_defaults(legacy_network, common.get("network_switch", {}))
-    common["network_switch"].pop("enable_auto_switch_wifi", None)
     common["scheduler"] = deep_merge_defaults(legacy_scheduler, common.get("scheduler", {}))
     common["notify"] = deep_merge_defaults(legacy_notify, common.get("notify", {}))
     common["console"] = deep_merge_defaults(legacy_web, common.get("console", {}))
@@ -528,8 +525,6 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         _dict(DEFAULT_CONFIG_V3["common"].get("internal_source_cache")),
     )
     internal_source_sites = _resolve_internal_source_sites(common, features)
-    network_switch = _dict(common.get("network_switch"))
-    network_switch.pop("enable_auto_switch_wifi", None)
     scheduler = _dict(common.get("scheduler"))
     updater = _dict(common.get("updater"))
     notify = _dict(common.get("notify"))
@@ -618,7 +613,6 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "internal_source_cache": copy.deepcopy(internal_source_cache),
         "internal_source_sites": copy.deepcopy(internal_source_sites),
         "network": {
-            **copy.deepcopy(network_switch),
             "enable_auto_switch_wifi": False,
         },
         "scheduler": copy.deepcopy(scheduler),
@@ -677,8 +671,6 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         _dict(common.get("internal_source_cache")),
     )
     common["internal_source_sites"] = copy.deepcopy(runtime_internal_source_sites)
-    common["network_switch"] = deep_merge_defaults(_dict(runtime.get("network")), _dict(common.get("network_switch")))
-    common["network_switch"].pop("enable_auto_switch_wifi", None)
     common["scheduler"] = deep_merge_defaults(_dict(runtime.get("scheduler")), _dict(common.get("scheduler")))
     common["updater"] = deep_merge_defaults(_dict(runtime.get("updater")), _dict(common.get("updater")))
     common["notify"] = deep_merge_defaults(_dict(runtime.get("notify")), _dict(common.get("notify")))

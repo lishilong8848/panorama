@@ -1647,7 +1647,7 @@ export function prepareConfigPayloadForSave({
     return { ok: false, error: "硬恢复冷却时间必须大于等于0" };
   }
   if (!Number.isFinite(payload.network.post_switch_stabilize_sec) || payload.network.post_switch_stabilize_sec < 0) {
-    return { ok: false, error: "切网后稳定等待秒数必须大于等于0" };
+    return { ok: false, error: "网络稳定等待秒数必须大于等于0" };
   }
   if (!Number.isFinite(payload.network.post_switch_probe_timeout_sec) || payload.network.post_switch_probe_timeout_sec <= 0) {
     return { ok: false, error: "稳定探测超时时间必须大于0" };

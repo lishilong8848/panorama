@@ -10,7 +10,6 @@ from app.config.secret_masking import merge_masked_values
 
 
 CRITICAL_SECTION_PATHS: Sequence[str] = (
-    "common.network_switch",
     "common.scheduler",
     "common.notify",
     "common.feishu_auth",

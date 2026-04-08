@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import contextlib
 import io
@@ -181,7 +181,7 @@ class JobService:
         self._config_snapshot_getter: Callable[[], Dict[str, Any]] | None = None
         self._current_ssid_getter: Callable[[], str | None] | None = None
         self._worker_app_dir: Path = Path.cwd()
-        self._network_auto_switch_enabled = True
+        self._network_auto_switch_enabled = False
         self._network_internal_ssid = ""
         self._network_external_ssid = ""
         self._network_probe_internal_host = ""
@@ -240,7 +240,7 @@ class JobService:
         network_runtime_cfg = runtime_config.get("network", {}) if isinstance(runtime_config, dict) else {}
         if not isinstance(network_runtime_cfg, dict):
             network_runtime_cfg = {}
-        self._network_auto_switch_enabled = bool(network_runtime_cfg.get("enable_auto_switch_wifi", True))
+        self._network_auto_switch_enabled = False
         self._network_internal_ssid = str(network_runtime_cfg.get("internal_ssid", "") or "").strip()
         self._network_external_ssid = str(network_runtime_cfg.get("external_ssid", "") or "").strip()
         self._network_probe_internal_host = str(network_runtime_cfg.get("post_switch_probe_internal_host", "") or "").strip()

@@ -5,18 +5,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from app.modules.network.service.network_stability import (
-    probe_external_reachability,
-    probe_internal_reachability,
-    wait_for_network_stability,
-)
-from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from handover_log_module.repository.download_gateway import (
     download_handover_xlsx_batch,
     set_runtime_config,
 )
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
-from wifi_switcher import WifiSwitcher
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -286,69 +279,11 @@ class HandoverDownloadService:
         self._maybe_switch_internal(emit_log)
         return bool(self.did_switch_internal_this_run)
 
-    def _probe_side_reachability(self, side: str, emit_log: Callable[[str], None]) -> tuple[bool, str]:
-        network_cfg = self.config.get("network", {})
-        if side == "internal":
-            result = probe_internal_reachability(
-                network_cfg=network_cfg,
-                sites=self._download_sites(),
-                emit_log=emit_log,
-            )
-            if bool(result.get("reachable", False)):
-                host = str(result.get("successful_host", "") or "").strip()
-                return True, f"内网探活成功: {host}" if host else "内网探活成功"
-            return False, str(result.get("error", "") or "内网探活失败")
-        result = probe_external_reachability(network_cfg=network_cfg, emit_log=emit_log)
-        if bool(result.get("reachable", False)):
-            host = str(result.get("host", "") or "").strip()
-            port = int(result.get("port") or 0)
-            return True, f"外网探活成功: {host}:{port}" if host else "外网探活成功"
-        return False, str(result.get("error", "") or "外网探活失败")
-
     def _ensure_target_network_ready(self, target_side: str, emit_log: Callable[[str], None]) -> None:
         side = str(target_side or "").strip().lower()
         if side not in {"internal", "external"}:
             raise ValueError(f"unsupported target_side: {target_side}")
-
-        network_cfg = self.config.get("network", {})
-        auto_switch_enabled = bool(network_cfg.get("enable_auto_switch_wifi", True))
-        if not auto_switch_enabled:
-            if side == "internal":
-                emit_log("[交接班下载] 当前角色不使用单机切网，按当前网络直接执行内网阶段")
-                return
-            emit_log(f"[交接班下载] 当前角色不使用单机切网，直接探测{side}网络可达性")
-            ready, detail = self._probe_side_reachability(side, emit_log)
-            if not ready:
-                raise RuntimeError(f"{side}网络探活失败: {detail}")
-            emit_log(f"[交接班下载] {detail}")
-            return
-
-        ssid_key = "internal_ssid" if side == "internal" else "external_ssid"
-        profile_key = "internal_profile_name" if side == "internal" else "external_profile_name"
-        target_ssid = str(network_cfg.get(ssid_key, "")).strip()
-        if not target_ssid:
-            raise RuntimeError(f"{side}_ssid 未配置")
-
-        wifi = WifiSwitchService({"network": network_cfg})
-        current = str(wifi.current_ssid() or "").strip()
-        if current != target_ssid:
-            ok, msg = wifi.connect(
-                target_ssid,
-                profile_name=str(network_cfg.get(profile_key, "") or "").strip() or None,
-            )
-            emit_log(f"[交接班下载] 确保{side}网络: {'成功' if ok else '失败'} - {msg}")
-            if not ok:
-                raise RuntimeError(f"确保{side}网络失败: {msg}")
-
-        stable_ok, stable_msg = wait_for_network_stability(
-            network_cfg=network_cfg,
-            target_side=side,
-            sites=self._download_sites(),
-            emit_log=emit_log,
-        )
-        if not stable_ok:
-            raise RuntimeError(f"{side}网络探活失败: {stable_msg}")
-        emit_log(f"[交接班下载] {side}网络已就绪: {stable_msg}")
+        emit_log(f"[交接班下载] 网络切换功能已移除，按当前网络继续执行{side}阶段")
 
     def ensure_internal_ready(self, emit_log: Callable[[str], None] = print) -> None:
         self._ensure_target_network_ready("internal", emit_log)
@@ -356,98 +291,12 @@ class HandoverDownloadService:
     def ensure_external_ready(self, emit_log: Callable[[str], None] = print) -> None:
         self._ensure_target_network_ready("external", emit_log)
 
-    def _build_wifi_switcher(self, network_cfg: Dict[str, Any], emit_log: Callable[[str], None]) -> WifiSwitcher:
-        return WifiSwitcher(
-            timeout_sec=int(network_cfg.get("switch_timeout_sec", 30)),
-            retry_count=int(network_cfg.get("retry_count", 3)),
-            retry_interval_sec=int(network_cfg.get("retry_interval_sec", 2)),
-            connect_poll_interval_sec=float(network_cfg.get("connect_poll_interval_sec", 1)),
-            fail_fast_on_netsh_error=bool(network_cfg.get("fail_fast_on_netsh_error", True)),
-            scan_before_connect=bool(network_cfg.get("scan_before_connect", True)),
-            scan_attempts=int(network_cfg.get("scan_attempts", 3)),
-            scan_wait_sec=int(network_cfg.get("scan_wait_sec", 2)),
-            strict_target_visible_before_connect=bool(network_cfg.get("strict_target_visible_before_connect", True)),
-            connect_with_ssid_param=bool(network_cfg.get("connect_with_ssid_param", True)),
-            preferred_interface=str(network_cfg.get("preferred_interface", "") or "").strip(),
-            auto_disconnect_before_connect=bool(network_cfg.get("auto_disconnect_before_connect", True)),
-            hard_recovery_enabled=bool(network_cfg.get("hard_recovery_enabled", True)),
-            hard_recovery_after_scan_failures=int(network_cfg.get("hard_recovery_after_scan_failures", 2)),
-            hard_recovery_steps=network_cfg.get("hard_recovery_steps", ["toggle_adapter", "restart_wlansvc"]),
-            hard_recovery_cooldown_sec=int(network_cfg.get("hard_recovery_cooldown_sec", 20)),
-            require_admin_for_hard_recovery=bool(network_cfg.get("require_admin_for_hard_recovery", True)),
-            log_cb=emit_log,
-        )
-
     def _maybe_switch_internal(self, emit_log: Callable[[str], None]) -> None:
         self.did_switch_internal_this_run = False
-        download_cfg = self.config.get("download", {})
-        if not bool(download_cfg.get("switch_to_internal_before_download", True)):
-            return
-
-        network_cfg = self.config.get("network", {})
-        if not bool(network_cfg.get("enable_auto_switch_wifi", True)):
-            emit_log("[交接班下载] 当前角色不使用单机切网，按当前网络继续执行内网阶段")
-            return
-
-        internal_ssid = str(network_cfg.get("internal_ssid", "")).strip()
-        if not internal_ssid:
-            emit_log("[交接班下载] 未配置内网 SSID，跳过切换内网")
-            return
-
-        wifi = self._build_wifi_switcher(network_cfg, emit_log)
-        require_saved = bool(network_cfg.get("require_saved_profiles", True))
-        ok, msg = wifi.connect(
-            internal_ssid,
-            require_saved_profile=require_saved,
-            profile_name=str(network_cfg.get("internal_profile_name", "") or "").strip() or None,
-        )
-        emit_log(f"[交接班下载] 切换内网: {'成功' if ok else '失败'} - {msg}")
-        if not ok:
-            raise RuntimeError(f"切换内网失败: {msg}")
-
-        stable_ok, stable_msg = wait_for_network_stability(
-            network_cfg=network_cfg,
-            target_side="internal",
-            sites=self._download_sites(),
-            emit_log=emit_log,
-        )
-        if not stable_ok:
-            raise RuntimeError(f"切网后网络未稳定: {stable_msg}")
-        emit_log(f"[交接班下载] 内网稳定检查: {stable_msg}")
-        self.did_switch_internal_this_run = True
+        emit_log("[交接班下载] 网络切换功能已移除，下载前不再切换到内网")
 
     def switch_external_after_download(self, emit_log: Callable[[str], None]) -> None:
-        network_cfg = self.config.get("network", {})
-        if not bool(network_cfg.get("enable_auto_switch_wifi", True)):
-            emit_log("[交接班下载] 当前角色不使用单机切网，按当前网络继续执行外网阶段")
-            return
-
-        external_ssid = str(network_cfg.get("external_ssid", "")).strip()
-        if not external_ssid:
-            emit_log("[交接班下载] 未配置外网 SSID，跳过切换外网")
-            return
-
-        wifi = self._build_wifi_switcher(network_cfg, emit_log)
-        require_saved = bool(network_cfg.get("require_saved_profiles", True))
-        ok, msg = wifi.connect(
-            external_ssid,
-            require_saved_profile=require_saved,
-            profile_name=str(network_cfg.get("external_profile_name", "") or "").strip() or None,
-        )
-        emit_log(f"[交接班下载] 切换外网: {'成功' if ok else '失败'} - {msg}")
-        if not ok:
-            return
-
-        stable_ok, stable_msg = wait_for_network_stability(
-            network_cfg=network_cfg,
-            target_side="external",
-            sites=self._download_sites(),
-            emit_log=emit_log,
-        )
-        if stable_ok:
-            emit_log(f"[交接班下载] 外网稳定检查: {stable_msg}")
-        else:
-            emit_log(f"[交接班下载] 外网稳定检查失败: {stable_msg}")
+        emit_log("[交接班下载] 网络切换功能已移除，下载后不再切回外网")
 
     def run(
         self,

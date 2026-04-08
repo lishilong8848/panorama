@@ -1079,7 +1079,6 @@ createApp({
     const configRoleMode = computed(() =>
       normalizeDeploymentRoleMode(config.value?.deployment?.role_mode || deploymentRoleMode.value),
     );
-    const showNetworkConfigTab = computed(() => false);
     const showCommonPathsConfigTab = computed(() => configRoleMode.value !== "internal");
     const showCommonSchedulerConfigTab = computed(() => configRoleMode.value !== "internal");
     const showNotifyConfigTab = computed(() => configRoleMode.value !== "internal");
@@ -2986,23 +2985,12 @@ createApp({
     );
 
     watch(
-      () => showNetworkConfigTab.value,
-      (enabled) => {
-        if (enabled) return;
-        if (String(activeConfigTab.value || "").trim() === "common_network") {
-          activeConfigTab.value = "common_deployment";
-        }
-      },
-      { immediate: true },
-    );
-
-    watch(
       () => deploymentRoleMode.value,
       (roleMode) => {
         applyDashboardRoleMode(roleMode);
         const hiddenCommonTabs = roleMode === "internal"
-          ? new Set(["common_paths", "common_console", "common_network", "common_scheduler", "common_notify", "common_feishu_auth"])
-          : new Set(["common_network", "common_alarm_db"]);
+          ? new Set(["common_paths", "common_console", "common_scheduler", "common_notify", "common_feishu_auth"])
+          : new Set(["common_alarm_db"]);
         const hiddenFeatureTabs = new Set(["feature_alarm"]);
         if (roleMode === "internal") {
           hiddenFeatureTabs.add("feature_monthly");
@@ -3349,7 +3337,6 @@ createApp({
       deploymentRoleMode,
       deploymentNodeIdDisplayText,
       deploymentNodeIdDisplayHint,
-      showNetworkConfigTab,
       showCommonPathsConfigTab,
       showCommonSchedulerConfigTab,
       showNotifyConfigTab,

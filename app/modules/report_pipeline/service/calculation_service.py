@@ -1,18 +1,16 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 from pathlib import Path
 from typing import Any, Callable, Dict
 
 from app.config.config_adapter import normalize_role_mode
-from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from pipeline_utils import load_calc_module
 
 
 class CalculationService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = copy.deepcopy(config)
-        self._wifi = WifiSwitchService(self.config)
 
     def _deployment_role_mode(self) -> str:
         deployment_cfg = self.config.get("deployment", {})
@@ -30,17 +28,8 @@ class CalculationService:
     ) -> Dict[str, Any]:
         calc_module = load_calc_module()
 
-        should_switch_external = bool(legacy_switch_external_before_upload)
-        if should_switch_external:
-            external_ssid = str(self.config.get("network", {}).get("external_ssid", "")).strip()
-            if external_ssid:
-                ok, msg = self._wifi.connect(external_ssid)
-                if not ok:
-                    emit_log(
-                        "[文件流程失败] 功能=手动补传 阶段=WiFi切换(外网) 楼栋="
-                        f"{building or '-'} 文件={file_path or '-'} 日期={upload_date or '-'} 错误={msg}"
-                    )
-                    raise RuntimeError(f"切换外网失败: {msg}")
+        if bool(legacy_switch_external_before_upload):
+            emit_log("[手动补传] 网络切换功能已移除，按当前角色网络直接上传")
 
         p = Path(file_path)
         results = calc_module.run_with_explicit_file_items(

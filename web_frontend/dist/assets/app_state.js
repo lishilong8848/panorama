@@ -449,7 +449,7 @@ function normalizeDayMetricUnitStageText(stage) {
 
 function normalizeDayMetricNetworkModeText(mode) {
   const text = String(mode || "").trim().toLowerCase();
-  if (text === "auto_switch") return "单机切网流程";
+  if (text === "auto_switch") return "当前角色网络";
   if (text === "current_network") return "当前角色网络";
   return text || "-";
 }
@@ -1686,6 +1686,178 @@ function normalizeInternalDownloadPoolSlot(slot) {
       summaryText,
     };
   }
+  function formatBridgeProgressStatusText(status) {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (!normalized) return "执行中";
+    if (["internal_running", "external_running", "running", "claimed", "internal_claimed", "external_claimed"].includes(normalized)) {
+      return "执行中";
+    }
+    if (["queued_for_internal", "pending"].includes(normalized)) {
+      return "等待执行";
+    }
+    if (["ready_for_external", "waiting_next_side"].includes(normalized)) {
+      return "等待接续";
+    }
+    if (normalized === "success") return "已完成";
+    if (normalized === "failed") return "失败";
+    if (normalized === "partial_failed") return "部分失败";
+    return String(status || "").trim() || "执行中";
+  }
+  function formatSharedSourceCacheBackfillStageText(task) {
+    const stageName = String(task?.current_stage_name || "").trim();
+    const featureLabel = String(task?.feature_label || "").trim() || "共享桥接任务";
+    const statusText = formatBridgeProgressStatusText(task?.current_stage_status || task?.status || "");
+    return stageName ? `${stageName} / ${statusText}` : `${featureLabel} / ${statusText}`;
+  }
+  function normalizeSharedSourceCacheTaskBuildings(requestPayload) {
+    const request = requestPayload && typeof requestPayload === "object" ? requestPayload : {};
+    const singleBuilding = String(request.building || "").trim();
+    if (singleBuilding) return [singleBuilding];
+    const multipleBuildings = Array.isArray(request.buildings)
+      ? request.buildings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    return multipleBuildings;
+  }
+  function formatSharedSourceCacheBackfillScopeText(task) {
+    const feature = String(task?.feature || "").trim().toLowerCase();
+    const request = task?.request && typeof task.request === "object" ? task.request : {};
+    if (feature === "handover_cache_fill") {
+      const dutyDate = String(request.duty_date || "").trim();
+      const dutyShiftText = shiftTextFromCode(request.duty_shift || "");
+      if (dutyDate && dutyShiftText !== "-") {
+        return `${dutyDate} / ${dutyShiftText}`;
+      }
+      const selectedDates = Array.isArray(request.selected_dates)
+        ? request.selected_dates.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+      if (selectedDates.length) {
+        return `日期 ${selectedDates.join(" / ")}`;
+      }
+      return "";
+    }
+    if (feature === "monthly_cache_fill") {
+      const selectedDates = Array.isArray(request.selected_dates)
+        ? request.selected_dates.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+      return selectedDates.length ? selectedDates.join(" / ") : "";
+    }
+    return "";
+  }
+  function buildSharedSourceCacheBackfillOverlays(tasks) {
+    const normalizedTasks = Array.isArray(tasks) ? tasks : [];
+    return normalizedTasks.flatMap((task) => {
+      const feature = String(task?.feature || "").trim().toLowerCase();
+      const request = task?.request && typeof task.request === "object" ? task.request : {};
+      const requestedBuildings = normalizeSharedSourceCacheTaskBuildings(request);
+      const baseOverlay = {
+        taskId: String(task?.task_id || "").trim(),
+        requestedBuildings,
+        stageText: formatSharedSourceCacheBackfillStageText(task),
+        scopeText: formatSharedSourceCacheBackfillScopeText(task),
+      };
+      if (feature === "handover_cache_fill" && String(request.continuation_kind || "").trim().toLowerCase() === "handover") {
+        return [
+          {
+            ...baseOverlay,
+            familyKey: "handover_log_family",
+          },
+          {
+            ...baseOverlay,
+            familyKey: "handover_capacity_report_family",
+          },
+        ];
+      }
+      if (feature === "monthly_cache_fill") {
+        return [
+          {
+            ...baseOverlay,
+            familyKey: "monthly_report_family",
+          },
+        ];
+      }
+      return [];
+    });
+  }
+  function applySharedSourceCacheBackfillOverlay(family, overlays) {
+    const familyOverlays = (Array.isArray(overlays) ? overlays : []).filter((item) => item.familyKey === family.key);
+    if (!familyOverlays.length) {
+      return {
+        ...family,
+        backfillRunning: false,
+        backfillText: "",
+        backfillScopeText: "",
+        backfillTaskId: "",
+      };
+    }
+    const familyBuildings = Array.isArray(family.buildings) ? family.buildings : [];
+    let runningBuildingCount = 0;
+    const buildings = familyBuildings.map((building) => {
+      const buildingName = String(building?.building || "").trim();
+      if (!buildingName || String(building?.statusKey || "").trim().toLowerCase() === "ready") {
+        return {
+          ...building,
+          backfillRunning: false,
+          backfillText: "",
+          backfillScopeText: "",
+          backfillTaskId: "",
+        };
+      }
+      const overlay = familyOverlays.find((item) => (
+        !item.requestedBuildings.length || item.requestedBuildings.includes(buildingName)
+      ));
+      if (!overlay) {
+        return {
+          ...building,
+          backfillRunning: false,
+          backfillText: "",
+          backfillScopeText: "",
+          backfillTaskId: "",
+        };
+      }
+      runningBuildingCount += 1;
+      return {
+        ...building,
+        tone: "warning",
+        stateText: "补采中",
+        backfillRunning: true,
+        backfillText: overlay.stageText,
+        backfillScopeText: overlay.scopeText,
+        backfillTaskId: overlay.taskId,
+      };
+    });
+    if (!familyBuildings.length && familyOverlays.length) {
+      return {
+        ...family,
+        backfillRunning: true,
+        backfillText: familyOverlays[0].stageText,
+        backfillScopeText: familyOverlays[0].scopeText,
+        backfillTaskId: familyOverlays[0].taskId,
+        tone: "warning",
+        statusText: "补采中",
+      };
+    }
+    if (!runningBuildingCount) {
+      return {
+        ...family,
+        buildings,
+        backfillRunning: false,
+        backfillText: "",
+        backfillScopeText: "",
+        backfillTaskId: "",
+      };
+    }
+    return {
+      ...family,
+      buildings,
+      backfillRunning: true,
+      backfillText: familyOverlays[0].stageText,
+      backfillScopeText: familyOverlays[0].scopeText,
+      backfillTaskId: familyOverlays[0].taskId,
+      tone: "warning",
+      statusText: "补采中",
+      summaryText: "历史共享文件补采中，文件到位后会自动回切为已就绪。",
+    };
+  }
   function normalizeAlarmEventReadinessBuilding(raw, fallbackBucket) {
     const building = String(raw?.building || "").trim() || "-";
     const bucketKey = String(raw?.bucket_key || "").trim() || String(fallbackBucket || "").trim() || "-";
@@ -2367,17 +2539,43 @@ function normalizeInternalDownloadPoolSlot(slot) {
         payload: (rawCache.monthly_report_family || rawCache.monthly_family || {}).latest_selection || {},
       }),
     ];
+    const displayLatestFamilies = [
+      normalizeLatestSelectionOverview({
+        key: "handover_log_family",
+        title: "交接班日志源文件",
+        payload: (rawCache.handover_log_family || rawCache.handover_family || {}).latest_selection || {},
+      }),
+      normalizeLatestSelectionOverview({
+        key: "handover_capacity_report_family",
+        title: "交接班容量报表源文件",
+        payload: (rawCache.handover_capacity_report_family || {}).latest_selection || {},
+      }),
+      normalizeLatestSelectionOverview({
+        key: "monthly_report_family",
+        title: "全景平台月报源文件",
+        payload: (rawCache.monthly_report_family || rawCache.monthly_family || {}).latest_selection || {},
+      }),
+    ];
+    const displayFamilies = displayLatestFamilies.map((family) => {
+      if (family.key !== "handover_capacity_report_family") return family;
+      return {
+        ...family,
+        summaryText: family.canProceed && family.buildings.length
+          ? "当前容量共享源文件已齐套，仅同步展示供外网状态页与容量报表链路参考。"
+          : family.summaryText || "容量共享源文件状态仅用于同步展示。",
+      };
+    });
     const alarmFamily = normalizeAlarmEventReadinessOverview({
       key: "alarm_event_family",
       title: "告警信息源文件",
       payload: rawCache.alarm_event_family || {},
     });
-    const families = [...gatingFamilies, alarmFamily];
     if (roleMode !== "external") {
       return {
         tone: "neutral",
         statusText: "当前角色未使用共享缓存",
         summaryText: "",
+        displayNoteText: "",
         referenceBucketKey: "-",
         errorText: "",
         families: [],
@@ -2434,6 +2632,11 @@ function normalizeInternalDownloadPoolSlot(slot) {
         ].join("="),
       ]),
     );
+    const overlayTasks = buildSharedSourceCacheBackfillOverlays(activeBridgeTasks.value);
+    const families = [...displayFamilies, alarmFamily].map((family) => {
+      if (family.key === "alarm_event_family") return family;
+      return applySharedSourceCacheBackfillOverlay(family, overlayTasks);
+    });
     return {
       tone: hasTooOld || hasStale ? "danger" : allReady ? "success" : "warning",
       statusText: hasTooOld ? "等待最新共享文件更新" : hasStale ? "等待共享文件就绪" : allReady ? "最新共享文件已就绪" : "等待共享文件就绪",
@@ -2445,7 +2648,8 @@ function normalizeInternalDownloadPoolSlot(slot) {
           ? "部分楼栋共享文件缺失，等待补齐后会自动重试默认入口。"
           : hasFallback
             ? "当前允许部分楼栋回退到不超过 3 桶的上一版共享文件。"
-            : "外网默认入口会读取共享目录中最新可用的双源文件。",
+            : "外网默认入口继续只依赖交接班日志源文件与全景平台月报源文件。",
+      displayNoteText: "交接班容量报表源文件仅在状态页同步展示，不单独阻断外网默认流程。",
       referenceBucketKey,
       errorText: lastError,
       families,
@@ -2877,7 +3081,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       },
       multi_date: {
         eyebrow: "批量补跑",
-        title: "多日期自动流程",
+        title: "多日用电明细自动流程",
         description: "适合补跑连续日期，保持统一下载与上传流程。",
         metrics: [
           { label: "已选日期", value: `${selectedDateCount.value} 天` },
@@ -2936,7 +3140,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
       },
       monthly_event_report: {
         eyebrow: "月度本地生成",
-        title: "月度统计表处理",
+        title: "体系月度统计表",
         description: "读取上一个自然月的事件与变更数据，按楼栋生成两类月度统计表并输出到本地目录。",
         metrics: [
           {
@@ -3157,5 +3361,6 @@ function normalizeInternalDownloadPoolSlot(slot) {
     actionGuard,
   };
 }
+
 
 

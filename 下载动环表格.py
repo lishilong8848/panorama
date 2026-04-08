@@ -63,7 +63,6 @@ from app.modules.report_pipeline.service.pipeline_flow_service import (
 from app.modules.report_pipeline.service.pipeline_notify_runtime import (
     PendingNotifyEvent,
     flush_pending_notify_events as flush_pending_notify_events_runtime,
-    is_auto_switch_wifi_enabled as is_auto_switch_wifi_enabled_runtime,
     notify_event as notify_event_runtime,
 )
 from app.modules.report_pipeline.service.resume_flow_service import (
@@ -103,9 +102,6 @@ from pipeline_utils import (
     load_pipeline_config,
     send_feishu_webhook,
 )
-from wifi_switcher import WifiSwitcher
-
-
 @dataclass
 class DownloadTask:
     date_text: str
@@ -165,17 +161,13 @@ def _combine_date_hms(day: date, hms_text: str, field_name: str) -> datetime:
     return combine_date_hms_policy(day, hms_text, field_name)
 
 
-def _is_auto_switch_wifi_enabled(config: Dict[str, Any]) -> bool:
-    return is_auto_switch_wifi_enabled_runtime(config)
-
-
 def _notify_event(
     config: Dict[str, Any],
     stage: str,
     detail: str,
     building: str | None = None,
     toggle_key: str | None = None,
-    wifi: WifiSwitcher | None = None,
+    wifi: Any | None = None,
     external_ssid: str | None = None,
     pending_events: List[PendingNotifyEvent] | None = None,
 ) -> None:
@@ -196,7 +188,7 @@ def _notify_event(
 
 def _flush_pending_notify_events(
     config: Dict[str, Any],
-    wifi: WifiSwitcher,
+    wifi: Any,
     external_ssid: str,
     external_profile_name: str | None,
     require_saved_profile: bool,

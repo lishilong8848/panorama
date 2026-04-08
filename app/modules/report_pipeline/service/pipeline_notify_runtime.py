@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List
 
 
-ROLE_FIXED_NETWORK_TEXT = "当前角色不使用单机切网，按当前网络直接发送告警"
-ROLE_FIXED_PENDING_TEXT = "当前角色不使用单机切网，按当前网络直接发送缓存告警"
+ROLE_FIXED_NETWORK_TEXT = "当前角色固定网络，按当前网络直接发送告警"
+ROLE_FIXED_PENDING_TEXT = "当前角色固定网络，按当前网络直接发送缓存告警"
 
 
 @dataclass
@@ -17,10 +17,7 @@ class PendingNotifyEvent:
 
 
 def is_auto_switch_wifi_enabled(config: Dict[str, Any]) -> bool:
-    network_cfg = config.get("network", {})
-    if not isinstance(network_cfg, dict):
-        return True
-    return bool(network_cfg.get("enable_auto_switch_wifi", True))
+    return False
 
 
 def notify_event(

@@ -52,8 +52,8 @@ export function createUiLocalActions(ctx) {
     const nextTab = String(tabKey || "").trim() || "common_paths";
     const roleMode = normalizeLocalRoleMode(config.value?.deployment?.role_mode || "");
     const hiddenCommonTabs = roleMode === "internal"
-      ? new Set(["common_network", "common_scheduler", "common_notify", "common_feishu_auth"])
-      : new Set(roleMode ? ["common_network", "common_alarm_db"] : []);
+      ? new Set(["common_scheduler", "common_notify", "common_feishu_auth"])
+      : new Set(roleMode ? ["common_alarm_db"] : []);
     const hiddenFeatureTabs = new Set(["feature_alarm"]);
     if (roleMode === "internal") {
       hiddenFeatureTabs.add("feature_monthly");

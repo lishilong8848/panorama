@@ -8,9 +8,9 @@ from wifi_switcher import WifiSwitcher
 
 def build_wifi_switcher(network_cfg: Dict[str, Any], log_cb: Callable[[str], None] = print) -> WifiSwitcher:
     return WifiSwitcher(
-        timeout_sec=int(network_cfg["switch_timeout_sec"]),
-        retry_count=int(network_cfg["retry_count"]),
-        retry_interval_sec=int(network_cfg["retry_interval_sec"]),
+        timeout_sec=int(network_cfg.get("switch_timeout_sec", 30)),
+        retry_count=int(network_cfg.get("retry_count", 2)),
+        retry_interval_sec=int(network_cfg.get("retry_interval_sec", 2)),
         connect_poll_interval_sec=float(network_cfg.get("connect_poll_interval_sec", 1)),
         fail_fast_on_netsh_error=bool(network_cfg.get("fail_fast_on_netsh_error", True)),
         scan_before_connect=bool(network_cfg.get("scan_before_connect", True)),
@@ -39,7 +39,7 @@ def try_switch_wifi(
     profile_name: str | None = None,
 ) -> Tuple[bool, str, bool]:
     if not enable_auto_switch_wifi:
-        return True, "当前角色不使用单机切网，按当前网络继续执行", True
+        return True, "当前角色固定网络，按当前网络继续执行", True
 
     ok, msg = wifi.connect(
         target_ssid,

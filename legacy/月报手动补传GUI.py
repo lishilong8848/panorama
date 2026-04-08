@@ -49,9 +49,6 @@ from pipeline_utils import (
     resolve_config_path,
     send_feishu_webhook,
 )
-from wifi_switcher import WifiSwitcher
-
-
 def _deepcopy_cfg(data: Dict[str, Any]) -> Dict[str, Any]:
     return json.loads(json.dumps(data, ensure_ascii=False))
 
@@ -212,26 +209,8 @@ def _send_failure_webhook(
     if not webhook_url:
         return
 
-    network_cfg = config["network"]
-    external_ssid = str(network_cfg["external_ssid"]).strip()
-    if external_ssid:
-        wifi = WifiSwitcher(
-            timeout_sec=int(network_cfg["switch_timeout_sec"]),
-            retry_count=int(network_cfg["retry_count"]),
-            retry_interval_sec=int(network_cfg["retry_interval_sec"]),
-        )
-        current = wifi.get_current_ssid()
-        if current != external_ssid:
-            ok, msg = wifi.connect(
-                external_ssid,
-                require_saved_profile=bool(network_cfg["require_saved_profiles"]),
-            )
-            if not ok:
-                if emit_log:
-                    emit_log(f"[Webhook] 切换外网失败，本次不发送: {msg}")
-                return
-            if emit_log:
-                emit_log(f"[Webhook] 为发送告警已切换外网: {msg}")
+    if emit_log:
+        emit_log("[Webhook] 网络切换功能已移除，按当前网络直接发送")
 
     text = build_event_text(stage=stage, detail=detail, building=building)
     ok, msg = send_feishu_webhook(webhook_url, text, keyword=keyword, timeout=timeout)
@@ -519,7 +498,7 @@ class ConfigEditorDialog(QDialog):
         sec_output = QGroupBox("输出配置")
         sec_download = QGroupBox("下载配置")
         sec_sites = QGroupBox("站点配置（download.sites）")
-        sec_network = QGroupBox("网络配置")
+        sec_network = QGroupBox("网络说明")
         sec_notify = QGroupBox("告警配置")
         sec_gui = QGroupBox("GUI开关")
         sec_scheduler = QGroupBox("调度配置")
@@ -591,20 +570,16 @@ class ConfigEditorDialog(QDialog):
 
         self._build_sites_editor(sec_sites)
 
-        self._add_line(network_form, "内网SSID", "network.internal_ssid", "例如：e-donghuan")
-        self._add_line(network_form, "外网SSID", "network.external_ssid", "例如：EL-BG")
-        self._add_int(network_form, "切换超时(秒)", "network.switch_timeout_sec", 1, 600)
-        self._add_int(network_form, "切网重试次数", "network.retry_count", 0, 100)
-        self._add_int(network_form, "切网重试间隔(秒)", "network.retry_interval_sec", 0, 3600)
-        self._add_bool(network_form, "要求已保存WiFi配置", "network.require_saved_profiles")
-        self._add_bool(network_form, "流程后切回原网络", "network.switch_back_to_original")
+        network_note = QLabel("项目已移除单机切网功能，所有下载、补传、导表和告警发送都按当前网络直接执行。这里不再维护内外网 SSID、切换超时或切回原网络等参数。")
+        network_note.setWordWrap(True)
+        network_note.setObjectName("mutedNote")
+        network_form.addRow(network_note)
 
         self._add_bool(notify_form, "启用Webhook告警", "notify.enable_webhook")
         self._add_line(notify_form, "Webhook地址", "notify.feishu_webhook_url", "https://open.feishu.cn/open-apis/bot/v2/hook/...")
         self._add_line(notify_form, "关键词", "notify.keyword", "事件")
         self._add_int(notify_form, "Webhook超时(秒)", "notify.timeout", 1, 600)
         self._add_bool(notify_form, "下载失败告警", "notify.on_download_failure")
-        self._add_bool(notify_form, "切网失败告警", "notify.on_wifi_failure")
         self._add_bool(notify_form, "上传失败告警", "notify.on_upload_failure")
 
         self._add_bool(gui_form, "启用GUI入口", "manual_upload_gui.enabled")
@@ -1191,7 +1166,7 @@ class UnifiedReportWindow(QMainWindow):
         auto_box.setObjectName("panel")
         auto_layout = QVBoxLayout(auto_box)
         auto_layout.setSpacing(10)
-        auto_hint = QLabel("点击“立即执行自动流程”会按配置自动切网下载并上传。")
+        auto_hint = QLabel("点击“立即执行自动流程”会按当前角色网络直接下载并上传，不再执行单机切网。")
         auto_hint.setObjectName("mutedNote")
         auto_layout.addWidget(auto_hint)
         row = QHBoxLayout()
@@ -1280,8 +1255,9 @@ class UnifiedReportWindow(QMainWindow):
         grid.addWidget(self.edit_file, 1, 1)
         grid.addWidget(self.btn_choose, 1, 2)
 
-        self.chk_switch = QCheckBox("补传前先切换到外网")
-        self.chk_switch.setChecked(True)
+        self.chk_switch = QCheckBox("按当前网络直接补传（切网功能已移除）")
+        self.chk_switch.setChecked(False)
+        self.chk_switch.setEnabled(False)
         grid.addWidget(self.chk_switch, 2, 1)
 
         self.btn_manual = QPushButton("执行手动补传")
@@ -1302,8 +1278,9 @@ class UnifiedReportWindow(QMainWindow):
         self.btn_choose_sheet.setProperty("kind", "secondary")
         sheet_grid.addWidget(self.edit_sheet_file, 0, 1)
         sheet_grid.addWidget(self.btn_choose_sheet, 0, 2)
-        self.chk_sheet_switch = QCheckBox("导表前先切换到外网")
-        self.chk_sheet_switch.setChecked(True)
+        self.chk_sheet_switch = QCheckBox("按当前网络直接导表（切网功能已移除）")
+        self.chk_sheet_switch.setChecked(False)
+        self.chk_sheet_switch.setEnabled(False)
         sheet_grid.addWidget(self.chk_sheet_switch, 1, 1)
         self.btn_sheet_import = QPushButton("清空并上传5个Sheet")
         self.btn_sheet_import.setProperty("kind", "primary")
@@ -1692,20 +1669,7 @@ class UnifiedReportWindow(QMainWindow):
             self.edit_sheet_file.setText(path)
 
     def _switch_to_external_network(self, scene: str) -> None:
-        net_cfg = self.config["network"]
-        ssid = str(net_cfg["external_ssid"]).strip()
-        if not ssid:
-            raise ValueError("network.external_ssid 为空")
-        wifi = WifiSwitcher(
-            timeout_sec=int(net_cfg["switch_timeout_sec"]),
-            retry_count=int(net_cfg["retry_count"]),
-            retry_interval_sec=int(net_cfg["retry_interval_sec"]),
-        )
-        self.log_async(f"[网络][{scene}] 尝试切换到外网: {ssid}")
-        ok, msg = wifi.connect(ssid, require_saved_profile=bool(net_cfg["require_saved_profiles"]))
-        if not ok:
-            raise RuntimeError(f"切换外网失败: {msg}")
-        self.log_async(f"[网络][{scene}] {msg}")
+        self.log_async(f"[网络][{scene}] 网络切换功能已移除，按当前网络继续执行")
 
     def start_manual_upload(self) -> None:
         if self.task_lock.locked():
@@ -1858,9 +1822,8 @@ class UnifiedReportWindow(QMainWindow):
         if curr in values:
             self.cmb_building.setCurrentText(curr)
 
-        ext = str(self.config["network"]["external_ssid"]).strip()
-        self.chk_switch.setText(f"补传前先切换到外网({ext})")
-        self.chk_sheet_switch.setText(f"导表前先切换到外网({ext})")
+        self.chk_switch.setText("按当前网络直接补传（切网功能已移除）")
+        self.chk_sheet_switch.setText("按当前网络直接导表（切网功能已移除）")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self.task_lock.locked():

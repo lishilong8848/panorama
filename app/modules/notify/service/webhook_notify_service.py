@@ -1,8 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Callable, Dict
 
-from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from app.modules.notify.core.event_message_builder import build_event_text
 from app.modules.notify.repository.webhook_http_repository import WebhookHttpRepository
 
@@ -11,7 +10,6 @@ class WebhookNotifyService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self._repo = WebhookHttpRepository()
-        self._wifi = WifiSwitchService(config)
 
     def send_failure(
         self,
@@ -41,20 +39,8 @@ class WebhookNotifyService:
         if not webhook_url:
             return
 
-        external_ssid = str(self.config.get("network", {}).get("external_ssid", "")).strip()
-        auto_switch_enabled = bool(self.config.get("network", {}).get("enable_auto_switch_wifi", True))
-        if not auto_switch_enabled and emit_log:
-            emit_log("[Webhook] 当前角色不使用单机切网，按当前网络直接发送")
-        if auto_switch_enabled and external_ssid:
-            current = self._wifi.current_ssid()
-            if current != external_ssid:
-                ok, msg = self._wifi.connect(external_ssid)
-                if not ok:
-                    if emit_log:
-                        emit_log(f"[Webhook] 切换外网失败，本次不发送: {msg}")
-                    return
-                if emit_log:
-                    emit_log(f"[Webhook] 为发送告警已切换外网: {msg}")
+        if emit_log:
+            emit_log("[Webhook] 当前角色固定网络，按当前网络直接发送")
 
         text = build_event_text(stage=stage, detail=detail, building=building)
         ok, msg = self._repo.send(webhook_url, text, keyword=keyword, timeout=timeout)

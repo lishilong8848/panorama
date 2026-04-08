@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 import json
@@ -154,11 +154,10 @@ class DayMetricStandaloneUploadService:
         self._save_failed_units_state(units)
 
     def _network_auto_switch_enabled(self) -> bool:
-        network_cfg = self.handover_cfg.get("network", {})
-        return bool(network_cfg.get("enable_auto_switch_wifi", True)) if isinstance(network_cfg, dict) else True
+        return False
 
     def _network_mode_text(self) -> str:
-        return "auto_switch" if self._network_auto_switch_enabled() else "current_network"
+        return "current_network"
 
     def _network_retry_attempts(self) -> int:
         return int(self._cfg.get("behavior", {}).get("network_retry_attempts", 5) or 5)
@@ -770,7 +769,7 @@ class DayMetricStandaloneUploadService:
             "selected_buildings": list(buildings),
             "building_scope": str(building_scope or "").strip(),
             "building": str(building or "").strip(),
-            "network_switch_followed_global_setting": True,
+            "network_switch_followed_global_setting": False,
             "network_auto_switch_enabled": auto_switch_enabled,
             "results": grouped_rows,
             **summary,
@@ -792,7 +791,7 @@ class DayMetricStandaloneUploadService:
 
         emit_log(
             f"[12项独立上传] 开始下载批次: dates={','.join(selected_dates)}, "
-            f"buildings={','.join(buildings)}, auto_switch={auto_switch_enabled}"
+            f"buildings={','.join(buildings)}, network_mode=current_role"
         )
         if auto_switch_enabled:
             try:
@@ -856,7 +855,7 @@ class DayMetricStandaloneUploadService:
         rows_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
 
         emit_log(
-            f"[12项独立上传] 开始上传阶段: units={len(source_units)}, auto_switch={auto_switch_enabled}"
+            f"[12项独立上传] 开始上传阶段: units={len(source_units)}, network_mode=current_role"
         )
         if auto_switch_enabled:
             try:
@@ -1095,7 +1094,7 @@ class DayMetricStandaloneUploadService:
             "selected_dates": [duty_date],
             "building_scope": "single",
             "building": building,
-            "network_switch_followed_global_setting": True,
+            "network_switch_followed_global_setting": False,
             "network_auto_switch_enabled": self._network_auto_switch_enabled(),
             "results": grouped_rows,
             **summary,
@@ -1142,7 +1141,7 @@ class DayMetricStandaloneUploadService:
                     "selected_dates": [duty_date_text],
                     "building_scope": "single",
                     "building": building_text,
-                    "network_switch_followed_global_setting": True,
+                    "network_switch_followed_global_setting": False,
                     "network_auto_switch_enabled": self._network_auto_switch_enabled(),
                     "results": grouped_rows,
                     **summary,
@@ -1203,7 +1202,7 @@ class DayMetricStandaloneUploadService:
             "selected_dates": [duty_date_text],
             "building_scope": "single",
             "building": building_text,
-            "network_switch_followed_global_setting": True,
+            "network_switch_followed_global_setting": False,
             "network_auto_switch_enabled": self._network_auto_switch_enabled(),
             "results": grouped_rows,
             **summary,
@@ -1252,7 +1251,7 @@ class DayMetricStandaloneUploadService:
                 "selected_dates": [],
                 "building_scope": "single",
                 "building": "",
-                "network_switch_followed_global_setting": True,
+                "network_switch_followed_global_setting": False,
                 "network_auto_switch_enabled": self._network_auto_switch_enabled(),
                 "results": [],
                 "total_units": 0,
@@ -1273,7 +1272,7 @@ class DayMetricStandaloneUploadService:
                 "selected_dates": [],
                 "building_scope": "single",
                 "building": "",
-                "network_switch_followed_global_setting": True,
+                "network_switch_followed_global_setting": False,
                 "network_auto_switch_enabled": self._network_auto_switch_enabled(),
                 "results": [],
                 "total_units": 0,
@@ -1332,7 +1331,7 @@ class DayMetricStandaloneUploadService:
             "selected_dates": ordered_dates,
             "building_scope": "single",
             "building": "",
-            "network_switch_followed_global_setting": True,
+            "network_switch_followed_global_setting": False,
             "network_auto_switch_enabled": self._network_auto_switch_enabled(),
             "results": grouped_rows,
             **summary,

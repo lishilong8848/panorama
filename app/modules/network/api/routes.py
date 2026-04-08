@@ -9,14 +9,6 @@ from app.config.config_adapter import normalize_role_mode
 
 router = APIRouter(prefix="/api/network", tags=["network"])
 
-
-
-def _network_cfg(container) -> Dict[str, Any]:
-    common = container.config.get("common", {}) if isinstance(container.config, dict) else {}
-    network_cfg = common.get("network_switch", {}) if isinstance(common, dict) else {}
-    return network_cfg if isinstance(network_cfg, dict) else {}
-
-
 def _deployment_role_mode(container) -> str:
     snapshot = container.deployment_snapshot() if hasattr(container, "deployment_snapshot") else {}
     if not isinstance(snapshot, dict):
@@ -26,7 +18,6 @@ def _deployment_role_mode(container) -> str:
 
 def _build_payload(container) -> dict:
     service = container.wifi_service
-    network_cfg = _network_cfg(container)
     if not service:
         return {
             "current_ssid": None,
@@ -34,9 +25,9 @@ def _build_payload(container) -> dict:
             "visible_targets": {"internal": False, "external": False},
             "switch_strategy": "role_fixed_network",
             "role_mode": _deployment_role_mode(container),
-            "hard_recovery_enabled": bool(network_cfg.get("hard_recovery_enabled", True)),
+            "hard_recovery_enabled": False,
             "is_admin": False,
-            "last_switch_report": {},
+            "last_switch_report": {"enabled": False, "message": "网络切换功能已移除"},
         }
 
     return {
@@ -45,7 +36,7 @@ def _build_payload(container) -> dict:
         "visible_targets": service.visible_targets(),
         "switch_strategy": "role_fixed_network",
         "role_mode": _deployment_role_mode(container),
-        "hard_recovery_enabled": bool(network_cfg.get("hard_recovery_enabled", True)),
+        "hard_recovery_enabled": False,
         "is_admin": service.is_admin(),
         "last_switch_report": service.get_last_switch_report(),
     }

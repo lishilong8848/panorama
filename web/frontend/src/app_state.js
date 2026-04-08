@@ -449,7 +449,7 @@ function normalizeDayMetricUnitStageText(stage) {
 
 function normalizeDayMetricNetworkModeText(mode) {
   const text = String(mode || "").trim().toLowerCase();
-  if (text === "auto_switch") return "单机切网流程";
+  if (text === "auto_switch") return "当前角色网络";
   if (text === "current_network") return "当前角色网络";
   return text || "-";
 }

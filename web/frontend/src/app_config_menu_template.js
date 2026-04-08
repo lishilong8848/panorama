@@ -10,11 +10,6 @@ export const CONFIG_MENU_TEMPLATE = `<aside class="config-menu">
               @click="switchConfigTab('common_deployment')"
             >部署与桥接</button>
             <button
-              v-if="showNetworkConfigTab"
-              :class="['btn', activeConfigTab==='common_network' ? 'btn-primary is-active' : 'btn-ghost']"
-              @click="switchConfigTab('common_network')"
-            >网络切换</button>
-            <button
               v-if="showCommonSchedulerConfigTab"
               :class="['btn', activeConfigTab==='common_scheduler' ? 'btn-primary is-active' : 'btn-ghost']"
               @click="switchConfigTab('common_scheduler')"

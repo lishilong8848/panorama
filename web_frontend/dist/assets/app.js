@@ -563,7 +563,7 @@ createApp({
     const isSourceCacheRefreshCurrentHourLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshCurrentHour));
     const isSourceCacheRefreshAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshAlarmManual));
     const isSourceCacheDeleteAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheDeleteAlarmManual));
-    const externalAlarmUploadBuilding = ref("A楼");
+    const externalAlarmUploadBuilding = ref("全部楼栋");
     const monthlyReportTestReceiveIdDraftEvent = ref("");
     const monthlyReportTestReceiveIdDraftChange = ref("");
     const isAlarmSourceCacheUploadRunning = computed(() => Boolean(externalAlarmReadinessFamily.value?.uploadRunning));
@@ -574,6 +574,14 @@ createApp({
       isAlarmSourceCacheUploadRunning.value ||
       isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${String(externalAlarmUploadBuilding.value || "").trim()}`),
     );
+    const isSourceCacheUploadAlarmSelectedLocked = computed(() => {
+      const buildingText = String(externalAlarmUploadBuilding.value || "").trim();
+      if (buildingText === "全部楼栋") {
+        return isSourceCacheUploadAlarmFullLocked.value;
+      }
+      return isAlarmSourceCacheUploadRunning.value
+        || isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${buildingText}`);
+    });
     const currentHourRefreshButtonText = computed(() =>
       isSourceCacheRefreshCurrentHourLocked.value ? "下载中..." : "立即下载当前小时全部文件",
     );
@@ -617,16 +625,23 @@ createApp({
       }
       return "重新拉取";
     }
-    const externalAlarmUploadFullButtonText = computed(() => {
+    const externalAlarmUploadActionButtonText = computed(() => {
       if (isAlarmSourceCacheUploadRunning.value) return "上传进行中...";
-      return isActionLocked(actionKeySourceCacheUploadAlarmFull) ? "上传中..." : "告警全量上传（60天）";
+      const buildingText = String(externalAlarmUploadBuilding.value || "").trim();
+      if (buildingText === "全部楼栋") {
+        return isActionLocked(actionKeySourceCacheUploadAlarmFull) ? "上传中..." : "使用共享文件上传60天";
+      }
+      return isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${buildingText}`)
+        ? "上传中..."
+        : "使用共享文件上传60天";
     });
-    const externalAlarmUploadBuildingButtonText = computed(() => {
-      if (isAlarmSourceCacheUploadRunning.value) return "上传进行中...";
-      return isActionLocked(`${actionKeySourceCacheUploadAlarmBuildingPrefix}${String(externalAlarmUploadBuilding.value || "").trim()}`)
-        ? "刷新中..."
-        : "单楼刷新上传";
-    });
+    async function uploadSelectedAlarmSourceCache() {
+      const buildingText = String(externalAlarmUploadBuilding.value || "").trim();
+      if (!buildingText || buildingText === "全部楼栋") {
+        return uploadAlarmSourceCacheFull();
+      }
+      return uploadAlarmSourceCacheBuilding(buildingText);
+    }
     const externalAlarmReadinessFamily = computed(() => {
       const families = Array.isArray(sharedSourceCacheReadinessOverview.value?.families)
         ? sharedSourceCacheReadinessOverview.value.families
@@ -1064,7 +1079,6 @@ createApp({
     const configRoleMode = computed(() =>
       normalizeDeploymentRoleMode(config.value?.deployment?.role_mode || deploymentRoleMode.value),
     );
-    const showNetworkConfigTab = computed(() => false);
     const showCommonPathsConfigTab = computed(() => configRoleMode.value !== "internal");
     const showCommonSchedulerConfigTab = computed(() => configRoleMode.value !== "internal");
     const showNotifyConfigTab = computed(() => configRoleMode.value !== "internal");
@@ -1168,7 +1182,7 @@ createApp({
       let tone = "success";
       let statusText = "可以继续外网主流程";
       let summaryText = "共享文件已就绪，当前可以直接进入自动流程、交接班或告警上传。";
-      let nextActionText = "优先从“立即自动流程”开始；需要专项处理时再进入交接班日志或告警信息上传。";
+      let nextActionText = "优先从“每日用电明细自动流程”开始；需要专项处理时再进入交接班日志或告警信息上传。";
       if (!cache.canProceedLatest) {
         tone = cache.tone || "warning";
         statusText = cache.statusText || "等待共享文件就绪";
@@ -1202,7 +1216,7 @@ createApp({
           { label: "当前任务", value: currentTaskOverview.value.statusText, tone: currentTaskOverview.value.tone },
         ],
         actions: [
-          { id: "open_auto_flow", label: "立即自动流程", desc: "从共享文件主链开始执行外网默认流程" },
+          { id: "open_auto_flow", label: "每日用电明细自动流程", desc: "从共享文件主链开始执行外网默认流程" },
           { id: "open_handover_log", label: "交接班处理", desc: "处理审核、回补和交接班后续上传" },
           { id: "open_alarm_upload", label: "告警上传", desc: "检查今天最新告警文件并执行 60 天上传" },
         ],
@@ -2971,23 +2985,12 @@ createApp({
     );
 
     watch(
-      () => showNetworkConfigTab.value,
-      (enabled) => {
-        if (enabled) return;
-        if (String(activeConfigTab.value || "").trim() === "common_network") {
-          activeConfigTab.value = "common_deployment";
-        }
-      },
-      { immediate: true },
-    );
-
-    watch(
       () => deploymentRoleMode.value,
       (roleMode) => {
         applyDashboardRoleMode(roleMode);
         const hiddenCommonTabs = roleMode === "internal"
-          ? new Set(["common_paths", "common_console", "common_network", "common_scheduler", "common_notify", "common_feishu_auth"])
-          : new Set(["common_network", "common_alarm_db"]);
+          ? new Set(["common_paths", "common_console", "common_scheduler", "common_notify", "common_feishu_auth"])
+          : new Set(["common_alarm_db"]);
         const hiddenFeatureTabs = new Set(["feature_alarm"]);
         if (roleMode === "internal") {
           hiddenFeatureTabs.add("feature_monthly");
@@ -3334,7 +3337,6 @@ createApp({
       deploymentRoleMode,
       deploymentNodeIdDisplayText,
       deploymentNodeIdDisplayHint,
-      showNetworkConfigTab,
       showCommonPathsConfigTab,
       showCommonSchedulerConfigTab,
       showNotifyConfigTab,
@@ -3600,10 +3602,9 @@ createApp({
       isSourceCacheDeleteAlarmManualLocked,
       manualAlarmDeleteButtonText,
       externalAlarmUploadBuilding,
-      isSourceCacheUploadAlarmFullLocked,
-      isSourceCacheUploadAlarmBuildingLocked,
-      externalAlarmUploadFullButtonText,
-      externalAlarmUploadBuildingButtonText,
+      isSourceCacheUploadAlarmSelectedLocked,
+      externalAlarmUploadActionButtonText,
+      uploadSelectedAlarmSourceCache,
       externalAlarmReadinessFamily,
       externalAlarmUploadStatus,
       monthlyEventReportLastRun,
@@ -3652,3 +3653,4 @@ createApp({
 }).mount("#app");
 finishAppBoot();
 }
+
