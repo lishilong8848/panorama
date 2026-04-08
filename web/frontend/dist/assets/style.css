@@ -1437,6 +1437,54 @@ a {
   align-items: start;
 }
 
+.dashboard-module-shell,
+.dashboard-module-subshell {
+  display: grid;
+  gap: 16px;
+}
+
+.dashboard-module-intro {
+  display: grid;
+  gap: 6px;
+}
+
+.dashboard-module-scheduler-card {
+  margin: 0;
+}
+
+.dashboard-module-primary-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.92fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.dashboard-module-secondary-grid,
+.dashboard-module-main-column,
+.dashboard-module-side-column,
+.dashboard-module-support-stack {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+}
+
+.dashboard-module-primary-grid > *,
+.dashboard-module-secondary-grid > * {
+  min-width: 0;
+}
+
+.dashboard-module-primary-grid > .dashboard-module-scheduler-card {
+  grid-column: 1 / -1;
+}
+
+.dashboard-module-status-card {
+  min-width: 0;
+}
+
+.dashboard-module-divider {
+  margin: 0;
+}
+
 .module-stack {
   display: grid;
   gap: 16px;
@@ -2729,6 +2777,8 @@ button:disabled,
 @media (max-width: 1320px) {
   .status-page-grid,
   .module-hero,
+  .dashboard-module-primary-grid,
+  .dashboard-module-secondary-grid,
   .module-section-grid,
   .ops-job-grid,
   .handover-task-shell,
