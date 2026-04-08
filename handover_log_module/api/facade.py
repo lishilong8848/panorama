@@ -85,7 +85,6 @@ def _validate(cfg: Dict[str, Any]) -> None:
         "parsing",
         "normalize",
         "chiller_mode",
-        "alarm_db",
         "template_fixed_fill",
         "cell_rules",
     ]

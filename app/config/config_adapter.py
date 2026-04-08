@@ -229,21 +229,11 @@ def _normalize_review_ui_fixed_cells(features: Dict[str, Any]) -> None:
     features["handover_log"] = handover
 
 
-def _apply_shared_alarm_db(
+def _discard_deprecated_alarm_db(
     common: Dict[str, Any],
     features: Dict[str, Any],
-    *,
-    legacy_alarm_db: Dict[str, Any] | None = None,
 ) -> None:
-    common_alarm_db = _dict(common.get("alarm_db"))
-    handover_alarm_db = _dict(_dict(features.get("handover_log")).get("alarm_db"))
-
-    source = common_alarm_db
-    if not source:
-        source = _dict(legacy_alarm_db) or handover_alarm_db
-
-    common["alarm_db"] = deep_merge_defaults(source, _dict(DEFAULT_CONFIG_V3["common"].get("alarm_db")))
-
+    common.pop("alarm_db", None)
     handover = _dict(features.get("handover_log"))
     handover.pop("alarm_db", None)
     features["handover_log"] = handover
@@ -329,10 +319,6 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     common["scheduler"] = deep_merge_defaults(legacy_scheduler, common.get("scheduler", {}))
     common["notify"] = deep_merge_defaults(legacy_notify, common.get("notify", {}))
     common["console"] = deep_merge_defaults(legacy_web, common.get("console", {}))
-    legacy_alarm_db = _dict(_dict(legacy_cfg.get("alarm_bitable_export")).get("db"))
-    if legacy_alarm_db:
-        common["alarm_db"] = deep_merge_defaults(legacy_alarm_db, _dict(common.get("alarm_db")))
-
     auth = _dict(common.get("feishu_auth"))
     auth["app_id"] = str(legacy_feishu.get("app_id", auth.get("app_id", "")) or "").strip()
     auth["app_secret"] = str(legacy_feishu.get("app_secret", auth.get("app_secret", "")) or "").strip()
@@ -412,7 +398,7 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     )
     common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
 
-    _apply_shared_alarm_db(common, features, legacy_alarm_db=legacy_alarm_db)
+    _discard_deprecated_alarm_db(common, features)
     _normalize_handover_rules(features)
     _apply_single_root_paths(common, features)
 
@@ -448,7 +434,7 @@ def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
         features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
             _dict(features.get("wet_bulb_collection"))
         )
-        _apply_shared_alarm_db(common, features)
+        _discard_deprecated_alarm_db(common, features)
         _normalize_handover_rules(features)
         _apply_single_root_paths(common, features)
         cfg["common"] = common
@@ -587,8 +573,6 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
     )
     alarm_export = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
     manual_upload_gui = _dict(features.get("manual_upload_gui"))
-    common_alarm_db = copy.deepcopy(_dict(common.get("alarm_db")))
-
     runtime_download = {
         "save_dir": monthly_download_dir,
         "time_range_mode": monthly.get("time_range_mode"),
@@ -634,7 +618,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "save_json": bool(legacy_output.get("save_json", False)),
         "json_dir": str(legacy_output.get("json_dir", "") or "").strip(),
     }
-    runtime_handover_log = deep_merge_defaults({"alarm_db": common_alarm_db}, copy.deepcopy(handover_log))
+    runtime_handover_log = copy.deepcopy(handover_log)
     runtime_handover_log["template"] = _dict(runtime_handover_log.get("template"))
     runtime_handover_log["template"]["output_dir"] = handover_output_dir
     runtime_handover_log["sites"] = copy.deepcopy(internal_source_sites)
@@ -779,10 +763,6 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         if monthly_save_dir:
             common_paths["business_root_dir"] = monthly_save_dir
     common["paths"] = common_paths
-    runtime_handover_alarm_db = _dict(_dict(runtime.get("handover_log")).get("alarm_db"))
-    merged_alarm_db = runtime_handover_alarm_db or _dict(common.get("alarm_db"))
-    common["alarm_db"] = deep_merge_defaults(merged_alarm_db, _dict(DEFAULT_CONFIG_V3["common"].get("alarm_db")))
-
     feishu_auth = _dict(common.get("feishu_auth"))
     runtime_feishu = _dict(runtime.get("feishu"))
     for key in ("app_id", "app_secret", "request_retry_count", "request_retry_interval_sec", "timeout"):

@@ -9,7 +9,6 @@ from typing import Any, Callable, Dict, List
 from handover_log_module.core.models import BuildingResult, RunSummary
 from handover_log_module.core.shift_window import build_duty_window, format_duty_date_text, parse_duty_date
 from handover_log_module.repository.alarm_json_repository import AlarmJsonRepository
-from handover_log_module.repository.alarm_repository import AlarmRepository
 from handover_log_module.repository.change_management_repository import ChangeRowsByBuilding
 from handover_log_module.repository.event_sections_repository import EventQueryByBuilding
 from handover_log_module.repository.exercise_management_repository import ExerciseRowsByBuilding
@@ -78,7 +77,6 @@ class HandoverOrchestrator:
         self._capacity_report_service = HandoverCapacityReportService(config)
         self._extract_service = HandoverExtractService(config)
         self._fill_service = HandoverFillService(config)
-        self._alarm_repo = AlarmRepository(config)
         self._alarm_json_repo = AlarmJsonRepository(config)
         self._shift_roster_repo = ShiftRosterRepository(config)
         self._event_category_builder = EventCategoryPayloadBuilder(config)
@@ -487,91 +485,47 @@ class HandoverOrchestrator:
         unrecovered_text = fallback["unrecovered"]
         accept_desc_text = fallback["accept_desc"]
         alarm_summary_payload: Dict[str, Any] = {}
-        if self._deployment_role_mode() == "external":
-            try:
-                alarm_summary = self._alarm_json_repo.query_alarm_summary(
-                    building=building,
-                    start_time=start_time,
-                    end_time=end_time,
-                    emit_log=emit_log,
-                    selection_snapshot=alarm_selection_snapshot,
-                    document_cache=alarm_document_cache,
-                )
-                total_text = str(alarm_summary.total_count)
-                unrecovered_text = str(alarm_summary.unrecovered_count)
-                accept_desc_text = str(alarm_summary.accept_description or "").strip() or fallback["accept_desc"]
-                alarm_summary_payload = self._build_alarm_summary_payload(
-                    source="alarm_json",
-                    building=building,
-                    start_time=start_time,
-                    end_time=end_time,
-                    fallback=fallback,
-                    total_text=total_text,
-                    unrecovered_text=unrecovered_text,
-                    accept_desc_text=accept_desc_text,
-                    alarm_summary=alarm_summary,
-                    coverage_ok=bool(getattr(alarm_summary, "coverage_ok", True)),
-                    fallback_used=bool(getattr(alarm_summary, "fallback_used", False)),
-                    error=str(getattr(alarm_summary, "error", "") or "").strip(),
-                )
-            except Exception as exc:  # noqa: BLE001
-                emit_log(f"[交接班][告警JSON] building={building} 读取失败，按兜底填充: {exc}")
-                alarm_summary_payload = self._build_alarm_summary_payload(
-                    source="alarm_json",
-                    building=building,
-                    start_time=start_time,
-                    end_time=end_time,
-                    fallback=fallback,
-                    total_text=total_text,
-                    unrecovered_text=unrecovered_text,
-                    accept_desc_text=accept_desc_text,
-                    coverage_ok=False,
-                    fallback_used=True,
-                    error=str(exc),
-                )
-        else:
-            try:
-                alarm_summary = self._alarm_repo.query_alarm_summary(
-                    building=building,
-                    start_time=start_time,
-                    end_time=end_time,
-                    emit_log=emit_log,
-                )
-                total_text = str(alarm_summary.total_count)
-                unrecovered_text = str(alarm_summary.unrecovered_count)
-                accept_desc_text = str(alarm_summary.accept_description or "").strip() or fallback["accept_desc"]
-                emit_log(
-                    f"[交接班][告警查询] building={building}, total={total_text}, "
-                    f"unrecovered={unrecovered_text}, accept_desc={accept_desc_text}"
-                )
-                alarm_summary_payload = self._build_alarm_summary_payload(
-                    source="alarm_db",
-                    building=building,
-                    start_time=start_time,
-                    end_time=end_time,
-                    fallback=fallback,
-                    total_text=total_text,
-                    unrecovered_text=unrecovered_text,
-                    accept_desc_text=accept_desc_text,
-                    alarm_summary=alarm_summary,
-                    coverage_ok=True,
-                    fallback_used=False,
-                )
-            except Exception as exc:  # noqa: BLE001
-                emit_log(f"[交接班][告警查询] building={building} 查询失败，按兜底填充: {exc}")
-                alarm_summary_payload = self._build_alarm_summary_payload(
-                    source="alarm_db",
-                    building=building,
-                    start_time=start_time,
-                    end_time=end_time,
-                    fallback=fallback,
-                    total_text=total_text,
-                    unrecovered_text=unrecovered_text,
-                    accept_desc_text=accept_desc_text,
-                    coverage_ok=False,
-                    fallback_used=True,
-                    error=str(exc),
-                )
+        try:
+            alarm_summary = self._alarm_json_repo.query_alarm_summary(
+                building=building,
+                start_time=start_time,
+                end_time=end_time,
+                emit_log=emit_log,
+                selection_snapshot=alarm_selection_snapshot,
+                document_cache=alarm_document_cache,
+            )
+            total_text = str(alarm_summary.total_count)
+            unrecovered_text = str(alarm_summary.unrecovered_count)
+            accept_desc_text = str(alarm_summary.accept_description or "").strip() or fallback["accept_desc"]
+            alarm_summary_payload = self._build_alarm_summary_payload(
+                source="alarm_json",
+                building=building,
+                start_time=start_time,
+                end_time=end_time,
+                fallback=fallback,
+                total_text=total_text,
+                unrecovered_text=unrecovered_text,
+                accept_desc_text=accept_desc_text,
+                alarm_summary=alarm_summary,
+                coverage_ok=bool(getattr(alarm_summary, "coverage_ok", True)),
+                fallback_used=bool(getattr(alarm_summary, "fallback_used", False)),
+                error=str(getattr(alarm_summary, "error", "") or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][告警JSON] building={building} 读取失败，按兜底填充: {exc}")
+            alarm_summary_payload = self._build_alarm_summary_payload(
+                source="alarm_json",
+                building=building,
+                start_time=start_time,
+                end_time=end_time,
+                fallback=fallback,
+                total_text=total_text,
+                unrecovered_text=unrecovered_text,
+                accept_desc_text=accept_desc_text,
+                coverage_ok=False,
+                fallback_used=True,
+                error=str(exc),
+            )
 
         fixed_cell_values = self._build_fixed_cell_values(
             duty_date=duty_date,
@@ -639,60 +593,20 @@ class HandoverOrchestrator:
         total_text = fallback["total"]
         unrecovered_text = fallback["unrecovered"]
         accept_desc_text = fallback["accept_desc"]
-        if self._deployment_role_mode() == "external":
-            try:
-                alarm_summary = self._alarm_json_repo.query_alarm_summary(
-                    building=building,
-                    start_time=start_time,
-                    end_time=end_time,
-                    emit_log=emit_log,
-                    selection_snapshot=alarm_selection_snapshot,
-                    document_cache=alarm_document_cache,
-                )
-                total_text = str(alarm_summary.total_count)
-                unrecovered_text = str(alarm_summary.unrecovered_count)
-                accept_desc_text = str(alarm_summary.accept_description or "").strip() or fallback["accept_desc"]
-                return self._build_alarm_summary_payload(
-                    source="alarm_json",
-                    building=building,
-                    start_time=start_time,
-                    end_time=end_time,
-                    fallback=fallback,
-                    total_text=total_text,
-                    unrecovered_text=unrecovered_text,
-                    accept_desc_text=accept_desc_text,
-                    alarm_summary=alarm_summary,
-                    coverage_ok=bool(getattr(alarm_summary, "coverage_ok", True)),
-                    fallback_used=bool(getattr(alarm_summary, "fallback_used", False)),
-                    error=str(getattr(alarm_summary, "error", "") or "").strip(),
-                )
-            except Exception as exc:  # noqa: BLE001
-                emit_log(f"[交接班][告警JSON] building={building} 读取失败，按兜底填充: {exc}")
-                return self._build_alarm_summary_payload(
-                    source="alarm_json",
-                    building=building,
-                    start_time=start_time,
-                    end_time=end_time,
-                    fallback=fallback,
-                    total_text=total_text,
-                    unrecovered_text=unrecovered_text,
-                    accept_desc_text=accept_desc_text,
-                    coverage_ok=False,
-                    fallback_used=True,
-                    error=str(exc),
-                )
         try:
-            alarm_summary = self._alarm_repo.query_alarm_summary(
+            alarm_summary = self._alarm_json_repo.query_alarm_summary(
                 building=building,
                 start_time=start_time,
                 end_time=end_time,
                 emit_log=emit_log,
+                selection_snapshot=alarm_selection_snapshot,
+                document_cache=alarm_document_cache,
             )
             total_text = str(alarm_summary.total_count)
             unrecovered_text = str(alarm_summary.unrecovered_count)
             accept_desc_text = str(alarm_summary.accept_description or "").strip() or fallback["accept_desc"]
             return self._build_alarm_summary_payload(
-                source="alarm_db",
+                source="alarm_json",
                 building=building,
                 start_time=start_time,
                 end_time=end_time,
@@ -705,9 +619,9 @@ class HandoverOrchestrator:
                 fallback_used=False,
             )
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][告警查询] building={building} 查询失败，按兜底填充: {exc}")
+            emit_log(f"[交接班][告警JSON] building={building} 读取失败，按兜底填充: {exc}")
             return self._build_alarm_summary_payload(
-                source="alarm_db",
+                source="alarm_json",
                 building=building,
                 start_time=start_time,
                 end_time=end_time,

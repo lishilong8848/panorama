@@ -88,14 +88,12 @@ export function convertV3ConfigToLegacy(v3) {
     alarm_export: cleanupAlarmExportCompat(features.alarm_export || {}, { cloneInput: true }),
     manual_upload_gui: clone(features.manual_upload_gui || {}),
     web: clone(common.console || {}),
-    alarm_common_db: clone(common.alarm_db || {}),
   };
 }
 
 export function convertLegacyConfigToV3(legacy) {
   const src = clone(legacy || {});
   const monthlyUpload = src.feishu || {};
-  const alarmCommonDb = clone(src.alarm_common_db || src.alarm_bitable_export?.db || src.handover_log?.alarm_db || {});
   const pathRoot =
     String(src.download?.save_dir || "").trim() ||
     String(src.input?.excel_dir || "").trim() ||
@@ -123,7 +121,6 @@ export function convertLegacyConfigToV3(legacy) {
         request_retry_interval_sec: monthlyUpload.request_retry_interval_sec,
         timeout: monthlyUpload.timeout,
       },
-      alarm_db: alarmCommonDb,
       console: clone(src.web || {}),
     },
     features: {

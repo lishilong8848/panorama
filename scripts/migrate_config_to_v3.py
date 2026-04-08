@@ -43,7 +43,7 @@ def main() -> None:
     else:
         print(f"[迁移完成] 配置已升级为v3: {cfg_path}")
         print(f"[迁移完成] 旧配置备份: {backup}")
-        print("[迁移完成] 告警数据库配置已公共化到 common.alarm_db")
+        print("[迁移完成] 旧版告警数据库配置已自动清理")
 
 
 if __name__ == "__main__":

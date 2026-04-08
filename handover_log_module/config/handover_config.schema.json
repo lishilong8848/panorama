@@ -81,9 +81,6 @@
       "type": "array",
       "items": { "type": "object" }
     },
-    "alarm_db": {
-      "type": "object"
-    },
     "template_fixed_fill": {
       "type": "object"
     },

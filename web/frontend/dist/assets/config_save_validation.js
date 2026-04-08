@@ -1734,52 +1734,7 @@ export function prepareConfigPayloadForSave({
     return { ok: false, error: "外网探测端口必须大于0" };
   }
 
-  payload.alarm_common_db = payload.alarm_common_db || {};
-  payload.alarm_common_db.port = Number.parseInt(payload.alarm_common_db.port ?? 3306, 10);
-  payload.alarm_common_db.connect_timeout_sec = Number.parseInt(payload.alarm_common_db.connect_timeout_sec ?? 5, 10);
-  payload.alarm_common_db.read_timeout_sec = Number.parseInt(payload.alarm_common_db.read_timeout_sec ?? 20, 10);
-  payload.alarm_common_db.write_timeout_sec = Number.parseInt(payload.alarm_common_db.write_timeout_sec ?? 20, 10);
-  payload.alarm_common_db.user = String(payload.alarm_common_db.user || "").trim();
-  payload.alarm_common_db.password = String(payload.alarm_common_db.password || "").trim();
-  payload.alarm_common_db.database = String(payload.alarm_common_db.database || "").trim();
-  payload.alarm_common_db.table_pattern = String(payload.alarm_common_db.table_pattern || "").trim();
-  payload.alarm_common_db.charset = String(payload.alarm_common_db.charset || "").trim();
-  payload.alarm_common_db.time_field_mode = String(payload.alarm_common_db.time_field_mode || "").trim();
-  payload.alarm_common_db.time_field = String(payload.alarm_common_db.time_field || "").trim();
-  payload.alarm_common_db.masked_field = String(payload.alarm_common_db.masked_field || "").trim();
-  payload.alarm_common_db.is_recover_field = String(payload.alarm_common_db.is_recover_field || "").trim();
-  payload.alarm_common_db.accept_description_field = String(payload.alarm_common_db.accept_description_field || "").trim();
-  payload.alarm_common_db.host_source = String(payload.alarm_common_db.host_source || "site_host").trim() || "site_host";
-
-  if (deploymentRoleMode === "internal") {
-    if (!Number.isInteger(payload.alarm_common_db.port) || payload.alarm_common_db.port <= 0) {
-      return { ok: false, error: "告警数据库端口必须大于0" };
-    }
-    if (!Number.isInteger(payload.alarm_common_db.connect_timeout_sec) || payload.alarm_common_db.connect_timeout_sec <= 0) {
-      return { ok: false, error: "告警数据库连接超时必须大于0" };
-    }
-    if (!Number.isInteger(payload.alarm_common_db.read_timeout_sec) || payload.alarm_common_db.read_timeout_sec <= 0) {
-      return { ok: false, error: "告警数据库读取超时必须大于0" };
-    }
-    if (!Number.isInteger(payload.alarm_common_db.write_timeout_sec) || payload.alarm_common_db.write_timeout_sec <= 0) {
-      return { ok: false, error: "告警数据库写入超时必须大于0" };
-    }
-    if (!payload.alarm_common_db.user) return { ok: false, error: "告警数据库用户不能为空" };
-    if (!payload.alarm_common_db.password) return { ok: false, error: "告警数据库密码不能为空" };
-    if (!payload.alarm_common_db.database) return { ok: false, error: "告警数据库名不能为空" };
-    if (!payload.alarm_common_db.table_pattern) return { ok: false, error: "告警数据库表格名规则不能为空" };
-    if (!payload.alarm_common_db.table_pattern.includes("{year}") || !payload.alarm_common_db.table_pattern.includes("{month")) {
-      return { ok: false, error: "告警数据库表格名规则必须包含 {year} 与 {month}" };
-    }
-    if (!payload.alarm_common_db.charset) return { ok: false, error: "告警数据库字符集不能为空" };
-    if (!payload.alarm_common_db.time_field_mode) return { ok: false, error: "告警数据库时间字段模式不能为空" };
-    if (!payload.alarm_common_db.time_field) return { ok: false, error: "告警数据库时间字段不能为空" };
-    if (!payload.alarm_common_db.masked_field) return { ok: false, error: "告警数据库 masked 字段不能为空" };
-    if (!payload.alarm_common_db.is_recover_field) return { ok: false, error: "告警数据库 is_recover 字段不能为空" };
-    if (!payload.alarm_common_db.accept_description_field) {
-      return { ok: false, error: "告警数据库 accept_description 字段不能为空" };
-    }
-  }
+  delete payload.alarm_common_db;
 
   payload.handover_log = payload.handover_log || {};
   payload.handover_log.template = payload.handover_log.template || {};

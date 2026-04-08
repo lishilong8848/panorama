@@ -25,11 +25,6 @@ export const CONFIG_MENU_TEMPLATE = `<aside class="config-menu">
               @click="switchConfigTab('common_feishu_auth')"
             >飞书鉴权</button>
             <button
-              v-if="showCommonAlarmDbConfigTab"
-              :class="['btn', activeConfigTab==='common_alarm_db' ? 'btn-primary is-active' : 'btn-ghost']"
-              @click="switchConfigTab('common_alarm_db')"
-            >告警数据库</button>
-            <button
               v-if="showConsoleConfigTab"
               :class="['btn', activeConfigTab==='common_console' ? 'btn-primary is-active' : 'btn-ghost']"
               @click="switchConfigTab('common_console')"

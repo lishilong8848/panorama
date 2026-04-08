@@ -88,7 +88,7 @@ def test_normalize_runtime_config_fills_network_defaults() -> None:
     assert out["download"]["sites"][0]["host"] == "192.168.1.10"
 
 
-def test_ensure_v3_config_migrates_legacy_alarm_db_to_common_alarm_db() -> None:
+def test_ensure_v3_config_discards_legacy_alarm_db() -> None:
     legacy_cfg = {
         "alarm_bitable_export": {
             "db": {
@@ -101,9 +101,7 @@ def test_ensure_v3_config_migrates_legacy_alarm_db_to_common_alarm_db() -> None:
         }
     }
     out = ensure_v3_config(legacy_cfg)
-    assert out["common"]["alarm_db"]["port"] == 3306
-    assert out["common"]["alarm_db"]["user"] == "root"
-    assert out["common"]["alarm_db"]["database"] == "alarm_db"
+    assert "alarm_db" not in out.get("common", {})
 
 
 def test_validate_runtime_config_rejects_invalid_hard_recovery_step() -> None:

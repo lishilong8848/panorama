@@ -13,7 +13,6 @@ CRITICAL_SECTION_PATHS: Sequence[str] = (
     "common.scheduler",
     "common.notify",
     "common.feishu_auth",
-    "common.alarm_db",
     "common.updater",
     "common.console",
     "features.monthly_report",

@@ -1106,7 +1106,6 @@ createApp({
     const showCommonSchedulerConfigTab = computed(() => configRoleMode.value !== "internal");
     const showNotifyConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeishuAuthConfigTab = computed(() => configRoleMode.value !== "internal");
-    const showCommonAlarmDbConfigTab = computed(() => configRoleMode.value === "internal");
     const showConsoleConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureMonthlyConfigTab = computed(() => configRoleMode.value !== "internal");
     const showFeatureHandoverConfigTab = computed(() => configRoleMode.value !== "internal");
@@ -3231,8 +3230,8 @@ createApp({
       (roleMode) => {
         applyDashboardRoleMode(roleMode);
         const hiddenCommonTabs = roleMode === "internal"
-          ? new Set(["common_paths", "common_console", "common_scheduler", "common_notify", "common_feishu_auth"])
-          : new Set(["common_alarm_db"]);
+          ? new Set(["common_paths", "common_console", "common_scheduler", "common_notify", "common_feishu_auth", "common_alarm_db"])
+          : new Set();
         const hiddenFeatureTabs = new Set(["feature_alarm"]);
         if (roleMode === "internal") {
           hiddenFeatureTabs.add("feature_monthly");
@@ -3606,7 +3605,6 @@ createApp({
       showCommonSchedulerConfigTab,
       showNotifyConfigTab,
       showFeishuAuthConfigTab,
-      showCommonAlarmDbConfigTab,
       showConsoleConfigTab,
       showFeatureMonthlyConfigTab,
       showFeatureHandoverConfigTab,

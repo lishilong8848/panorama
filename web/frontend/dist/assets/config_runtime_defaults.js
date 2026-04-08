@@ -130,7 +130,6 @@ function ensureRoot(cfg) {
   cfg.scheduler = cfg.scheduler || {};
   cfg.updater = cfg.updater || {};
   cfg.feishu = cfg.feishu || {};
-  cfg.alarm_common_db = cfg.alarm_common_db || {};
   cfg.alarm_export = cfg.alarm_export || {};
   cfg.feishu_sheet_import = cfg.feishu_sheet_import || {};
   cfg.handover_log = cfg.handover_log || {};
@@ -991,25 +990,6 @@ function applyHandoverDefaults(cfg) {
   delete cfg.handover_log.building_overrides;
 }
 
-function applyAlarmCommonDbDefaults(cfg) {
-  const db = cfg.alarm_common_db;
-  setNumberDefault(db, "port", 3306);
-  setStringDefault(db, "user", "root");
-  setStringDefault(db, "password", "123456");
-  setStringDefault(db, "database", "e_event");
-  setStringDefault(db, "table_pattern", "event_{year}_{month:02d}");
-  setStringDefault(db, "time_field", "event_time");
-  setStringDefault(db, "masked_field", "masked");
-  setStringDefault(db, "is_recover_field", "is_recover");
-  setStringDefault(db, "accept_description_field", "accept_description");
-  setStringDefault(db, "time_field_mode", "auto");
-  setStringDefault(db, "charset", "utf8mb4");
-  setNumberDefault(db, "connect_timeout_sec", 5);
-  setNumberDefault(db, "read_timeout_sec", 20);
-  setNumberDefault(db, "write_timeout_sec", 20);
-  setStringDefault(db, "host_source", "site_host");
-}
-
 function applyAlarmExportDefaults(cfg) {
   const alarmExport = cfg.alarm_export;
   const scheduler = alarmExport.scheduler;
@@ -1222,7 +1202,6 @@ export function ensureConfigShape(raw) {
   applyDownloadDefaults(cfg);
   applyInternalSourceSiteDefaults(cfg);
   applyHandoverDefaults(cfg);
-  applyAlarmCommonDbDefaults(cfg);
   applyAlarmExportDefaults(cfg);
   applyNetworkDefaults(cfg);
   applyWetBulbCollectionDefaults(cfg);

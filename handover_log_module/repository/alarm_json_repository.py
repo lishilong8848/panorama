@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List
 from app.modules.shared_bridge.service.alarm_event_page_export_service import load_alarm_event_json
 from app.modules.shared_bridge.service.alarm_external_selection import build_alarm_external_selection
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
-from handover_log_module.repository.alarm_repository import AlarmSummary
+from handover_log_module.repository.alarm_summary import AlarmSummary
 
 
 FAMILY_ALARM_EVENT = "alarm_event_family"

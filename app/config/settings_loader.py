@@ -216,44 +216,6 @@ def _validate_updater(cfg: Dict[str, Any]) -> None:
             raise ValueError(f"配置错误: common.updater.{key} 必须大于0")
 
 
-def _validate_common_alarm_db(cfg: Dict[str, Any]) -> None:
-    if _deployment_role_mode(cfg) == "external":
-        return
-    alarm_db = cfg.get("common", {}).get("alarm_db", {})
-    if not isinstance(alarm_db, dict):
-        raise ValueError("配置错误: common.alarm_db 缺失或格式错误")
-
-    required_text = [
-        "user",
-        "password",
-        "database",
-        "table_pattern",
-        "charset",
-        "time_field_mode",
-        "time_field",
-        "masked_field",
-        "is_recover_field",
-        "accept_description_field",
-        "host_source",
-    ]
-    for key in required_text:
-        if not str(alarm_db.get(key, "")).strip():
-            raise ValueError(f"配置错误: common.alarm_db.{key} 不能为空")
-
-    table_pattern = str(alarm_db.get("table_pattern", "")).strip()
-    if "{year}" not in table_pattern or "{month" not in table_pattern:
-        raise ValueError("配置错误: common.alarm_db.table_pattern 必须包含 {year} 与 {month}")
-
-    if int(alarm_db.get("port", 0)) <= 0:
-        raise ValueError("配置错误: common.alarm_db.port 必须大于0")
-    if int(alarm_db.get("connect_timeout_sec", 0)) <= 0:
-        raise ValueError("配置错误: common.alarm_db.connect_timeout_sec 必须大于0")
-    if int(alarm_db.get("read_timeout_sec", 0)) <= 0:
-        raise ValueError("配置错误: common.alarm_db.read_timeout_sec 必须大于0")
-    if int(alarm_db.get("write_timeout_sec", 0)) <= 0:
-        raise ValueError("配置错误: common.alarm_db.write_timeout_sec 必须大于0")
-
-
 def _validate_alarm_export(cfg: Dict[str, Any]) -> None:
     features = cfg.get("features", {})
     if not isinstance(features, dict):
@@ -1587,7 +1549,6 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _validate_resume(normalized_v3)
     _validate_sheet_import(normalized_v3)
     _validate_console(normalized_v3)
-    _validate_common_alarm_db(normalized_v3)
     _validate_alarm_export(normalized_v3)
     _validate_handover_scheduler(normalized_v3)
     _validate_handover_template(normalized_v3)
@@ -1684,15 +1645,37 @@ def _normalize_console_host_for_lan(cfg: Dict[str, Any], config_path: str | Path
     return cfg
 
 
+def _contains_deprecated_alarm_db_config(cfg: Dict[str, Any]) -> bool:
+    if not isinstance(cfg, dict):
+        return False
+    common = cfg.get("common", {})
+    if isinstance(common, dict) and isinstance(common.get("alarm_db"), dict):
+        return True
+    features = cfg.get("features", {})
+    handover = features.get("handover_log", {}) if isinstance(features, dict) else {}
+    if isinstance(handover, dict) and isinstance(handover.get("alarm_db"), dict):
+        return True
+    legacy_alarm = cfg.get("alarm_bitable_export", {})
+    if isinstance(legacy_alarm, dict) and isinstance(legacy_alarm.get("db"), dict):
+        return True
+    return False
+
+
 def load_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
+    had_deprecated_alarm_db = _contains_deprecated_alarm_db_config(cfg)
     normalized = validate_settings(cfg)
+    if had_deprecated_alarm_db:
+        write_settings_atomically(normalized, config_path)
     return _normalize_console_host_for_lan(normalized, config_path)
 
 
 def load_bootstrap_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
-    return ensure_v3_config(cfg)
+    normalized = ensure_v3_config(cfg)
+    if _contains_deprecated_alarm_db_config(cfg):
+        write_settings_atomically(normalized, config_path)
+    return normalized
 
 
 def save_settings(cfg: Dict[str, Any], config_path: str | Path | None = None) -> Dict[str, Any]:
