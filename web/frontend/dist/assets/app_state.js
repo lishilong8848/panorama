@@ -65,6 +65,66 @@ function shiftTextFromCode(shift) {
   return String(shift || "").trim() || "-";
 }
 
+function normalizeSchedulerText(value, fallback = "-") {
+  const text = String(value || "").trim();
+  return text || fallback;
+}
+
+function normalizeSchedulerDateText(value, fallback = "未安排") {
+  const text = String(value || "").trim();
+  return text || fallback;
+}
+
+function hasSchedulerFailureMarker(...values) {
+  return values.some((value) => {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text) return false;
+    return ["fail", "failed", "error", "exception", "异常", "失败"].some((marker) => text.includes(marker));
+  });
+}
+
+function normalizeSchedulerStatusVm({ running = false, configured = false, status = "", lastTriggerResult = "", lastDecision = "" }) {
+  if (hasSchedulerFailureMarker(status, lastTriggerResult, lastDecision)) {
+    return { statusText: "异常", tone: "danger" };
+  }
+  if (running) {
+    return { statusText: "已启动", tone: "success" };
+  }
+  if (!configured) {
+    return { statusText: "未配置", tone: "warning" };
+  }
+  return { statusText: "未启动", tone: "neutral" };
+}
+
+function buildMonthlySchedulerRunText(dayOfMonth, runTime) {
+  const day = Number.parseInt(String(dayOfMonth || "").trim(), 10);
+  const time = String(runTime || "").trim();
+  if (Number.isFinite(day) && day > 0 && time) {
+    return `每月${day}号 ${time}`;
+  }
+  if (Number.isFinite(day) && day > 0) {
+    return `每月${day}号`;
+  }
+  if (time) {
+    return time;
+  }
+  return "未设置";
+}
+
+function toComparableSchedulerDateText(value) {
+  const text = String(value || "").trim();
+  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?$/.test(text) ? text : "";
+}
+
+function compareSchedulerDateText(left, right) {
+  const leftText = toComparableSchedulerDateText(left);
+  const rightText = toComparableSchedulerDateText(right);
+  if (!leftText && !rightText) return 0;
+  if (!leftText) return 1;
+  if (!rightText) return -1;
+  return leftText.localeCompare(rightText);
+}
+
 function getDailyReportBrowserLabel(rawAuth, fallback = "系统浏览器") {
   const label = String(rawAuth?.browser_label || "").trim();
   return label || fallback;
@@ -3042,6 +3102,234 @@ function normalizeInternalDownloadPoolSlot(slot) {
         : "neutral",
     },
   ]);
+  const schedulerOverviewItems = computed(() => {
+    const handoverMorningTriggerText = mapSchedulerTriggerText(health.handover_scheduler?.morning?.last_trigger_result);
+    const handoverAfternoonTriggerText = mapSchedulerTriggerText(health.handover_scheduler?.afternoon?.last_trigger_result);
+    return [
+      {
+        key: "auto_flow",
+        title: "每日用电明细自动流程",
+        moduleId: "auto_flow",
+        focusKey: "",
+        ...normalizeSchedulerStatusVm({
+          running: health.scheduler.running,
+          configured: Boolean(String(config.value?.scheduler?.run_time || "").trim()),
+          status: health.scheduler.status,
+          lastTriggerResult: health.scheduler.last_trigger_result,
+          lastDecision: health.scheduler.last_decision,
+        }),
+        summaryText: schedulerDecisionText.value || schedulerTriggerText.value || "标准月报主流程调度",
+        parts: [
+          {
+            label: "每日调度",
+            runTimeText: normalizeSchedulerText(config.value?.scheduler?.run_time, "未设置"),
+            nextRunText: normalizeSchedulerDateText(health.scheduler.next_run_time),
+            lastTriggerText: normalizeSchedulerDateText(health.scheduler.last_trigger_at, "暂无记录"),
+            resultText: schedulerTriggerText.value || "暂无记录",
+          },
+        ],
+      },
+      {
+        key: "handover_log",
+        title: "交接班日志",
+        moduleId: "handover_log",
+        focusKey: "",
+        ...normalizeSchedulerStatusVm({
+          running: health.handover_scheduler.running,
+          configured: Boolean(
+            String(config.value?.handover_log?.scheduler?.morning_time || "").trim()
+              && String(config.value?.handover_log?.scheduler?.afternoon_time || "").trim(),
+          ),
+          status: health.handover_scheduler.status,
+          lastTriggerResult: `${health.handover_scheduler?.morning?.last_trigger_result || ""} ${health.handover_scheduler?.afternoon?.last_trigger_result || ""}`,
+          lastDecision: `${health.handover_scheduler?.morning?.last_decision || ""} ${health.handover_scheduler?.afternoon?.last_decision || ""}`,
+        }),
+        summaryText:
+          handoverMorningDecisionText.value
+          || handoverAfternoonDecisionText.value
+          || handoverMorningTriggerText
+          || handoverAfternoonTriggerText
+          || "上午补跑夜班，下午执行白班",
+        parts: [
+          {
+            label: "上午调度",
+            runTimeText: normalizeSchedulerText(config.value?.handover_log?.scheduler?.morning_time, "未设置"),
+            nextRunText: normalizeSchedulerDateText(health.handover_scheduler?.morning?.next_run_time),
+            lastTriggerText: normalizeSchedulerDateText(health.handover_scheduler?.morning?.last_trigger_at, "暂无记录"),
+            resultText: handoverMorningTriggerText || "暂无记录",
+          },
+          {
+            label: "下午调度",
+            runTimeText: normalizeSchedulerText(config.value?.handover_log?.scheduler?.afternoon_time, "未设置"),
+            nextRunText: normalizeSchedulerDateText(health.handover_scheduler?.afternoon?.next_run_time),
+            lastTriggerText: normalizeSchedulerDateText(health.handover_scheduler?.afternoon?.last_trigger_at, "暂无记录"),
+            resultText: handoverAfternoonTriggerText || "暂无记录",
+          },
+        ],
+      },
+      {
+        key: "day_metric_upload",
+        title: "12项独立上传",
+        moduleId: "day_metric_upload",
+        focusKey: "",
+        ...normalizeSchedulerStatusVm({
+          running: health.day_metric_upload?.scheduler?.running,
+          configured: Boolean(String(config.value?.day_metric_upload?.scheduler?.run_time || "").trim()),
+          status: health.day_metric_upload?.scheduler?.status,
+          lastTriggerResult: health.day_metric_upload?.scheduler?.last_trigger_result,
+          lastDecision: health.day_metric_upload?.scheduler?.last_decision,
+        }),
+        summaryText: dayMetricUploadSchedulerDecisionText.value || dayMetricUploadSchedulerTriggerText.value || "固定处理当天、全部启用楼栋",
+        parts: [
+          {
+            label: "每日调度",
+            runTimeText: normalizeSchedulerText(config.value?.day_metric_upload?.scheduler?.run_time, "未设置"),
+            nextRunText: normalizeSchedulerDateText(health.day_metric_upload?.scheduler?.next_run_time),
+            lastTriggerText: normalizeSchedulerDateText(health.day_metric_upload?.scheduler?.last_trigger_at, "暂无记录"),
+            resultText: dayMetricUploadSchedulerTriggerText.value || "暂无记录",
+          },
+        ],
+      },
+      {
+        key: "wet_bulb_collection",
+        title: "湿球温度定时采集",
+        moduleId: "wet_bulb_collection",
+        focusKey: "",
+        ...normalizeSchedulerStatusVm({
+          running: health.wet_bulb_collection?.scheduler?.running,
+          configured: Number.parseInt(String(config.value?.wet_bulb_collection?.scheduler?.interval_minutes || 0), 10) > 0,
+          status: health.wet_bulb_collection?.scheduler?.status,
+          lastTriggerResult: health.wet_bulb_collection?.scheduler?.last_trigger_result,
+          lastDecision: health.wet_bulb_collection?.scheduler?.last_decision,
+        }),
+        summaryText: wetBulbSchedulerDecisionText.value || wetBulbSchedulerTriggerText.value || "按固定分钟间隔循环执行",
+        parts: [
+          {
+            label: "循环调度",
+            runTimeText:
+              Number.parseInt(String(config.value?.wet_bulb_collection?.scheduler?.interval_minutes || 0), 10) > 0
+                ? `每 ${config.value?.wet_bulb_collection?.scheduler?.interval_minutes} 分钟`
+                : "未设置",
+            nextRunText: normalizeSchedulerDateText(health.wet_bulb_collection?.scheduler?.next_run_time),
+            lastTriggerText: normalizeSchedulerDateText(health.wet_bulb_collection?.scheduler?.last_trigger_at, "暂无记录"),
+            resultText: wetBulbSchedulerTriggerText.value || "暂无记录",
+          },
+        ],
+      },
+      {
+        key: "monthly_event_report",
+        title: "体系月度统计表-事件",
+        moduleId: "monthly_event_report",
+        focusKey: "monthly_event",
+        ...normalizeSchedulerStatusVm({
+          running: health.monthly_event_report?.scheduler?.running,
+          configured: Boolean(
+            Number.parseInt(String(config.value?.handover_log?.monthly_event_report?.scheduler?.day_of_month || 0), 10) > 0
+              && String(config.value?.handover_log?.monthly_event_report?.scheduler?.run_time || "").trim(),
+          ),
+          status: health.monthly_event_report?.scheduler?.status,
+          lastTriggerResult: health.monthly_event_report?.scheduler?.last_trigger_result,
+          lastDecision: health.monthly_event_report?.scheduler?.last_decision,
+        }),
+        summaryText: monthlyEventReportSchedulerDecisionText.value || monthlyEventReportSchedulerTriggerText.value || "固定读取上一个自然月事件数据",
+        parts: [
+          {
+            label: "事件月报",
+            runTimeText: buildMonthlySchedulerRunText(
+              config.value?.handover_log?.monthly_event_report?.scheduler?.day_of_month,
+              config.value?.handover_log?.monthly_event_report?.scheduler?.run_time,
+            ),
+            nextRunText: normalizeSchedulerDateText(health.monthly_event_report?.scheduler?.next_run_time),
+            lastTriggerText: normalizeSchedulerDateText(health.monthly_event_report?.scheduler?.last_trigger_at, "暂无记录"),
+            resultText: monthlyEventReportSchedulerTriggerText.value || "暂无记录",
+          },
+        ],
+      },
+      {
+        key: "monthly_change_report",
+        title: "体系月度统计表-变更",
+        moduleId: "monthly_event_report",
+        focusKey: "monthly_change",
+        ...normalizeSchedulerStatusVm({
+          running: health.monthly_change_report?.scheduler?.running,
+          configured: Boolean(
+            Number.parseInt(String(config.value?.handover_log?.monthly_change_report?.scheduler?.day_of_month || 0), 10) > 0
+              && String(config.value?.handover_log?.monthly_change_report?.scheduler?.run_time || "").trim(),
+          ),
+          status: health.monthly_change_report?.scheduler?.status,
+          lastTriggerResult: health.monthly_change_report?.scheduler?.last_trigger_result,
+          lastDecision: health.monthly_change_report?.scheduler?.last_decision,
+        }),
+        summaryText: monthlyChangeReportSchedulerDecisionText.value || monthlyChangeReportSchedulerTriggerText.value || "固定读取上一个自然月变更数据",
+        parts: [
+          {
+            label: "变更月报",
+            runTimeText: buildMonthlySchedulerRunText(
+              config.value?.handover_log?.monthly_change_report?.scheduler?.day_of_month,
+              config.value?.handover_log?.monthly_change_report?.scheduler?.run_time,
+            ),
+            nextRunText: normalizeSchedulerDateText(health.monthly_change_report?.scheduler?.next_run_time),
+            lastTriggerText: normalizeSchedulerDateText(health.monthly_change_report?.scheduler?.last_trigger_at, "暂无记录"),
+            resultText: monthlyChangeReportSchedulerTriggerText.value || "暂无记录",
+          },
+        ],
+      },
+      {
+        key: "alarm_event_upload",
+        title: "告警信息上传",
+        moduleId: "alarm_event_upload",
+        focusKey: "",
+        ...normalizeSchedulerStatusVm({
+          running: health.alarm_event_upload?.scheduler?.running,
+          configured: Boolean(String(config.value?.alarm_export?.scheduler?.run_time || "").trim()),
+          status: health.alarm_event_upload?.scheduler?.status,
+          lastTriggerResult: health.alarm_event_upload?.scheduler?.last_trigger_result,
+          lastDecision: health.alarm_event_upload?.scheduler?.last_decision,
+        }),
+        summaryText: alarmEventUploadSchedulerDecisionText.value || alarmEventUploadSchedulerTriggerText.value || "固定执行全部楼栋 60 天上传",
+        parts: [
+          {
+            label: "每日调度",
+            runTimeText: normalizeSchedulerText(config.value?.alarm_export?.scheduler?.run_time, "未设置"),
+            nextRunText: normalizeSchedulerDateText(health.alarm_event_upload?.scheduler?.next_run_time),
+            lastTriggerText: normalizeSchedulerDateText(health.alarm_event_upload?.scheduler?.last_trigger_at, "暂无记录"),
+            resultText: alarmEventUploadSchedulerTriggerText.value || "暂无记录",
+          },
+        ],
+      },
+    ];
+  });
+  const schedulerOverviewSummary = computed(() => {
+    const items = schedulerOverviewItems.value || [];
+    const runningCount = items.filter((item) => item.statusText === "已启动").length;
+    const stoppedCount = Math.max(0, items.length - runningCount);
+    const attentionItems = items.filter((item) => ["warning", "danger"].includes(String(item?.tone || "").trim()));
+    const upcomingCandidates = items
+      .flatMap((item) =>
+        (Array.isArray(item?.parts) ? item.parts : []).map((part) => ({
+          title: item.title,
+          label: part.label,
+          nextRunText: part.nextRunText,
+        })),
+      )
+      .filter((part) => toComparableSchedulerDateText(part.nextRunText));
+    upcomingCandidates.sort((left, right) => compareSchedulerDateText(left.nextRunText, right.nextRunText));
+    const nextItem = upcomingCandidates[0] || null;
+    const attentionItem = attentionItems[0] || null;
+    return {
+      runningCount,
+      stoppedCount,
+      attentionCount: attentionItems.length,
+      statusText: attentionItem ? "有待关注项" : runningCount > 0 ? "状态正常" : "全部未启动",
+      tone: attentionItem ? attentionItem.tone : runningCount > 0 ? "success" : "neutral",
+      nextSchedulerLabel: nextItem ? nextItem.title : "暂无安排",
+      nextSchedulerText: nextItem
+        ? `${nextItem.title}${nextItem.label ? ` · ${nextItem.label}` : ""} / ${nextItem.nextRunText}`
+        : "当前没有已安排的调度",
+      attentionText: attentionItem ? `${attentionItem.title}：${attentionItem.summaryText || attentionItem.statusText}` : "当前没有待关注调度",
+      summaryText: attentionItem ? "请先查看待关注调度，再进入对应模块处理。" : "这里集中查看全部调度状态，需要调整时进入对应模块操作。",
+    };
+  });
   const handoverReviewOverview = computed(() => {
     const review = health.handover?.review_status || {};
     const required = Number(review.required_count || 0);
@@ -3206,6 +3494,16 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const active = moduleMeta.value?.[dashboardActiveModule.value] || {};
     const dutyText = `${handoverDutyDate.value || "-"} / ${shiftTextFromCode(handoverDutyShift.value)}`;
     const map = {
+      scheduler_overview: {
+        eyebrow: "统一扫读",
+        title: "调度总览",
+        description: "集中查看全部调度是否已启动、何时执行，以及哪些调度需要进入对应模块处理。",
+        metrics: [
+          { label: "已启动调度", value: `${schedulerOverviewSummary.value.runningCount} 项` },
+          { label: "未启动调度", value: `${schedulerOverviewSummary.value.stoppedCount} 项` },
+          { label: "待关注项", value: `${schedulerOverviewSummary.value.attentionCount} 项` },
+        ],
+      },
       auto_flow: {
         eyebrow: "推荐主路径",
         title: "自动流程主控面板",
@@ -3459,6 +3757,8 @@ function normalizeInternalDownloadPoolSlot(slot) {
     handoverReviewMatrix,
     handoverReviewBoardRows,
     dashboardSystemStatusItems,
+    schedulerOverviewItems,
+    schedulerOverviewSummary,
     internalDownloadPoolOverview,
     internalSourceCacheOverview,
     internalRealtimeSourceFamilies,

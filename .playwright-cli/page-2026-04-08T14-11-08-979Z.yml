@@ -1,0 +1,133 @@
+- generic [active] [ref=e1]:
+  - status [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]: 启动中
+      - generic [ref=e5]: 正在打开中
+      - generic [ref=e6]: 前端资源加载完成后将自动进入对应角色页面。
+  - generic [ref=e11]:
+    - generic [ref=e12]:
+      - generic [ref=e13]:
+        - generic [ref=e14]: 配置中心
+        - heading "配置中心（公共 + 功能分组）" [level=3] [ref=e15]
+        - generic [ref=e16]: 请选择内网端或外网端后进入对应页面。
+      - generic [ref=e17]:
+        - button "保存配置" [ref=e18] [cursor=pointer]
+        - button "返回业务控制台" [ref=e19] [cursor=pointer]
+    - generic [ref=e20]:
+      - generic [ref=e21]:
+        - generic [ref=e22]: 当前状态
+        - strong [ref=e23]: 仍有关键配置待补齐
+      - generic [ref=e24]:
+        - generic [ref=e25]: 重点分组
+        - strong [ref=e26]: 5 项
+      - generic [ref=e27]:
+        - generic [ref=e28]: 返回入口
+        - strong [ref=e29]: 返回业务控制台
+    - generic [ref=e30]:
+      - generic [ref=e31]:
+        - generic [ref=e32]:
+          - generic [ref=e33]: 配置向导
+          - heading "先完成关键配置，再补高级参数" [level=4] [ref=e34]
+        - generic [ref=e35]: 仍有关键配置待补齐
+      - generic [ref=e36]: 当前已完成 3/7 项关键配置，仍缺：角色与监听 / 共享目录 / 飞书鉴权 / 告警目标。
+      - generic [ref=e37]: 大多数配置保存后可直接生效；只有角色监听模式变化时才需要自动重启。
+      - generic [ref=e38]:
+        - generic [ref=e39]:
+          - generic [ref=e40]: 角色与监听
+          - generic [ref=e41]: 未选择
+        - generic [ref=e42]:
+          - generic [ref=e43]: 共享目录
+          - generic [ref=e44]: 未配置
+        - generic [ref=e45]:
+          - generic [ref=e46]: 飞书鉴权
+          - generic [ref=e47]: 未配置
+        - generic [ref=e48]:
+          - generic [ref=e49]: 交接班模板
+          - generic [ref=e50]: 已配置
+        - generic [ref=e51]:
+          - generic [ref=e52]: 交接班云表
+          - generic [ref=e53]: 已配置
+        - generic [ref=e54]:
+          - generic [ref=e55]: 12项目标
+          - generic [ref=e56]: 已配置
+        - generic [ref=e57]:
+          - generic [ref=e58]: 告警目标
+          - generic [ref=e59]: 未配置
+      - generic [ref=e60]: 角色与监听：需要先选择有效角色，否则无法确定本机监听模式。
+      - generic [ref=e61]: 共享目录：未配置共享目录时，内外网主链无法通过共享缓存协同。
+      - generic [ref=e62]: 飞书鉴权：缺少 app_id 或 app_secret 时，涉及多维表的模块无法稳定运行。
+      - generic [ref=e63]: 交接班模板：交接班日志空模板.xlsx
+      - generic [ref=e64]: 交接班云表：https://vnet.feishu.cn/wiki/WlpWwkhQGi46pEkYbMTcNnOzntb
+      - generic [ref=e65]: 12项目标：当前按 App Token 和 Table ID 生成目标多维表链接。
+      - generic [ref=e66]: 告警目标：请先在配置中心的功能配置里补齐告警信息上传目标多维表。
+      - generic [ref=e67]:
+        - button "角色与共享目录 跳转到当前最需要优先检查的配置分组" [ref=e68] [cursor=pointer]:
+          - generic [ref=e69]: 角色与共享目录
+          - generic [ref=e70]: 跳转到当前最需要优先检查的配置分组
+        - button "飞书鉴权 跳转到当前最需要优先检查的配置分组" [ref=e71] [cursor=pointer]:
+          - generic [ref=e72]: 飞书鉴权
+          - generic [ref=e73]: 跳转到当前最需要优先检查的配置分组
+        - button "交接班 跳转到当前最需要优先检查的配置分组" [ref=e74] [cursor=pointer]:
+          - generic [ref=e75]: 交接班
+          - generic [ref=e76]: 跳转到当前最需要优先检查的配置分组
+        - button "12项独立上传 跳转到当前最需要优先检查的配置分组" [ref=e77] [cursor=pointer]:
+          - generic [ref=e78]: 12项独立上传
+          - generic [ref=e79]: 跳转到当前最需要优先检查的配置分组
+        - button "告警上传 跳转到当前最需要优先检查的配置分组" [ref=e80] [cursor=pointer]:
+          - generic [ref=e81]: 告警上传
+          - generic [ref=e82]: 跳转到当前最需要优先检查的配置分组
+    - generic [ref=e83]:
+      - complementary [ref=e84]:
+        - generic [ref=e85]: 公共配置
+        - button "路径与目录 >" [ref=e86] [cursor=pointer]
+        - button "部署与桥接 >" [ref=e87] [cursor=pointer]
+        - button "调度 >" [ref=e88] [cursor=pointer]
+        - button "告警通知 >" [ref=e89] [cursor=pointer]
+        - button "飞书鉴权 >" [ref=e90] [cursor=pointer]
+        - button "控制台 >" [ref=e91] [cursor=pointer]
+        - generic [ref=e92]: 功能配置
+        - button "月报流程 >" [ref=e93] [cursor=pointer]
+        - button "5Sheet 导入 >" [ref=e94] [cursor=pointer]
+        - button "交接班日志 >" [ref=e95] [cursor=pointer]
+        - button "12项独立上传 >" [ref=e96] [cursor=pointer]
+        - button "湿球温度定时采集 >" [ref=e97] [cursor=pointer]
+        - button "告警信息上传 >" [ref=e98] [cursor=pointer]
+        - button "手动补传开关 >" [ref=e99] [cursor=pointer]
+      - generic [ref=e101]:
+        - generic [ref=e102]:
+          - generic [ref=e103]: 路径与目录
+          - generic [ref=e104]:
+            - generic [ref=e105]:
+              - generic [ref=e106]: 业务根目录
+              - generic [ref=e107]: D:\QLDownload
+            - generic [ref=e108]:
+              - generic [ref=e109]: 楼栋数量
+              - generic [ref=e110]: "0"
+            - generic [ref=e111]:
+              - generic [ref=e112]: 当前角色
+              - generic [ref=e113]: 未设置
+          - generic [ref=e114]:
+            - generic [ref=e115]: 业务根目录会派生月报下载目录、交接班日志输出目录和部分本地缓存目录。
+            - generic [ref=e116]: 交接班共享源文件目录仅用于内网下载缓存和内部复用；外网主链直接读取共享文件夹。
+            - generic [ref=e117]: 运行时状态目录固定为程序目录下 .runtime。
+        - generic [ref=e118]:
+          - generic [ref=e119]:
+            - generic [ref=e120]: 根目录设置
+            - generic [ref=e121]:
+              - generic [ref=e122]: 业务根目录
+              - textbox [ref=e123]: D:\QLDownload
+          - generic [ref=e124]:
+            - generic [ref=e125]: 交接班模板
+            - generic [ref=e126]:
+              - generic [ref=e127]: 交接班模板文件
+              - textbox [ref=e128]: 交接班日志空模板.xlsx
+            - generic [ref=e129]: 用于交接班日志与后续容量报表链路的模板读取起点。
+          - generic [ref=e130]:
+            - generic [ref=e131]: 楼栋范围
+            - generic [ref=e132]:
+              - generic [ref=e133]: 楼栋列表（逗号或空格分隔）
+              - textbox "例如 A楼 B楼 C楼 D楼 E楼" [ref=e134]
+            - generic [ref=e135]: 这里决定默认楼栋范围；后续业务页面可以按具体任务再做单楼选择。
+      - generic [ref=e137]:
+        - button "保存配置" [ref=e138] [cursor=pointer]
+        - button "返回业务控制台" [ref=e139] [cursor=pointer]

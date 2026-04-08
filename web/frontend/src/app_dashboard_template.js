@@ -1,5 +1,6 @@
 ﻿import { DASHBOARD_AUTO_FLOW_SECTION } from "./dashboard_template_sections/dashboard_auto_flow_section.js";
 import { DASHBOARD_MULTI_DATE_SECTION } from "./dashboard_template_sections/dashboard_multi_date_section.js";
+import { DASHBOARD_SCHEDULER_OVERVIEW_SECTION } from "./dashboard_template_sections/dashboard_scheduler_overview_section.js";
 import { DASHBOARD_MANUAL_UPLOAD_SECTION } from "./dashboard_template_sections/dashboard_manual_upload_section.js";
 import { DASHBOARD_SHEET_IMPORT_SECTION } from "./dashboard_template_sections/dashboard_sheet_import_section.js";
 import { DASHBOARD_HANDOVER_LOG_SECTION } from "./dashboard_template_sections/dashboard_handover_log_section.js";
@@ -8,7 +9,7 @@ import { DASHBOARD_WET_BULB_COLLECTION_SECTION } from "./dashboard_template_sect
 import { DASHBOARD_MONTHLY_EVENT_REPORT_SECTION } from "./dashboard_template_sections/dashboard_monthly_event_report_section.js";
 import { DASHBOARD_ALARM_EVENT_UPLOAD_SECTION } from "./dashboard_template_sections/dashboard_alarm_event_upload_section.js";
 
-export const DASHBOARD_TEMPLATE = `<section v-else-if="showDashboardPageNav && isDashboardView" class="dashboard-layout">
+export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDashboardView" class="dashboard-layout">
       <aside class="content-card dashboard-menu" :class="{ 'is-open': dashboardModuleMenuOpen }">
         <div class="dashboard-menu-head">
           <span>业务模块</span>
@@ -282,6 +283,7 @@ export const DASHBOARD_TEMPLATE = `<section v-else-if="showDashboardPageNav && i
           <div class="hint" style="margin-top:10px;">这里只保留任务摘要和操作入口。</div>
         </section>
 
+${DASHBOARD_SCHEDULER_OVERVIEW_SECTION}
 ${DASHBOARD_AUTO_FLOW_SECTION}
 ${DASHBOARD_MULTI_DATE_SECTION}
 ${DASHBOARD_MANUAL_UPLOAD_SECTION}

@@ -164,8 +164,6 @@
               </article>
             </div>
           </div>
-
-          </div>
         </section>
 
 `;

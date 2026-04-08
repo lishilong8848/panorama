@@ -7,6 +7,11 @@ const AUTO_GROUP = {
   title: '自动流程',
   items: [
     {
+      id: 'scheduler_overview',
+      title: '调度总览',
+      desc: '集中查看全部调度是否已启动、何时执行，以及哪些调度需要处理。',
+    },
+    {
       id: 'auto_flow',
       title: '每日用电明细自动流程',
       desc: '单次执行整条月报主流程，并保留断点续传入口。',

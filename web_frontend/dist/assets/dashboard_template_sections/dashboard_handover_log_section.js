@@ -529,6 +529,7 @@
             </details>
           </div>
           </div>
+          </div>
         </section>
 
 `;

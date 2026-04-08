@@ -1485,6 +1485,63 @@ a {
   margin: 0;
 }
 
+.dashboard-scheduler-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.dashboard-scheduler-overview-card,
+.dashboard-scheduler-overview-summary-card {
+  display: grid;
+  gap: 12px;
+}
+
+.dashboard-scheduler-part-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.dashboard-scheduler-part-card {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(20, 33, 43, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(244, 248, 252, 0.96) 100%);
+}
+
+.dashboard-scheduler-part-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text-1);
+}
+
+.dashboard-scheduler-overview-action {
+  justify-content: flex-end;
+}
+
+.dashboard-section-spotlight {
+  border-radius: 22px;
+  box-shadow: 0 0 0 2px rgba(30, 128, 118, 0.18), 0 18px 34px rgba(16, 38, 53, 0.12);
+  animation: dashboard-section-spotlight 2.4s ease;
+}
+
+@keyframes dashboard-section-spotlight {
+  0% {
+    box-shadow: 0 0 0 0 rgba(30, 128, 118, 0), 0 10px 22px rgba(16, 38, 53, 0.08);
+  }
+  35% {
+    box-shadow: 0 0 0 4px rgba(30, 128, 118, 0.22), 0 18px 34px rgba(16, 38, 53, 0.12);
+  }
+  100% {
+    box-shadow: 0 0 0 2px rgba(30, 128, 118, 0.18), 0 18px 34px rgba(16, 38, 53, 0.12);
+  }
+}
+
 .module-stack {
   display: grid;
   gap: 16px;
@@ -2779,6 +2836,7 @@ button:disabled,
   .module-hero,
   .dashboard-module-primary-grid,
   .dashboard-module-secondary-grid,
+  .dashboard-scheduler-overview-grid,
   .module-section-grid,
   .ops-job-grid,
   .handover-task-shell,
@@ -2808,6 +2866,7 @@ button:disabled,
 
   .status-metric-grid,
   .status-metric-grid-compact,
+  .dashboard-scheduler-part-grid,
   .internal-download-pool-grid,
   .status-building-grid,
   .source-cache-building-grid,

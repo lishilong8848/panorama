@@ -339,4 +339,5 @@ ${DASHBOARD_TEMPLATE}
 
 ${CONFIG_TEMPLATE}
 </div>
+</div>
 `;

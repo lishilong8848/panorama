@@ -9,7 +9,7 @@ import { APP_TEMPLATE } from "./app_template.js";
 import { isHandoverReviewPath, mountHandoverReviewApp } from "./handover_review_app.js";
 import { clone, expandDateRange, todayText } from "./config_helpers.js";
 
-const { createApp, onMounted, onBeforeUnmount, computed, watch, ref } = Vue;
+const { createApp, onMounted, onBeforeUnmount, computed, watch, ref, nextTick } = Vue;
 const HANDOVER_DUTY_CONTEXT_STORAGE_KEY = "handover_duty_context";
 const APP_BOOT_OVERLAY_ID = "app-boot-overlay";
 const STARTUP_ROLE_RESTART_PENDING_KEY = "startup_role_restart_pending_v1";
@@ -441,6 +441,8 @@ createApp({
       handoverReviewBoardRows,
       dashboardSystemStatusItems,
       dashboardScheduleStatusItems,
+      schedulerOverviewItems,
+      schedulerOverviewSummary,
       isInternalRole,
       internalDownloadPoolOverview,
       internalSourceCacheOverview,
@@ -478,6 +480,8 @@ createApp({
     const updaterUiOverlaySubtitle = ref("");
     const updaterUiOverlayStage = ref("");
     const updaterUiOverlayKicker = ref("");
+    const dashboardSchedulerOverviewFocusKey = ref("");
+    let dashboardSchedulerOverviewFocusTimer = null;
     const updaterAwaitingRestartRecovery = ref(false);
     const startupRoleSelectorVisible = ref(false);
     const startupRoleDecisionReady = ref(false);
@@ -1729,6 +1733,38 @@ createApp({
       clearCurrentBuildingOverrides,
       restoreDefaultRuleForCurrentBuilding,
     } = uiLocalActions;
+
+    function clearDashboardSchedulerOverviewFocus() {
+      dashboardSchedulerOverviewFocusKey.value = "";
+      if (dashboardSchedulerOverviewFocusTimer && typeof window !== "undefined") {
+        window.clearTimeout(dashboardSchedulerOverviewFocusTimer);
+      }
+      dashboardSchedulerOverviewFocusTimer = null;
+    }
+
+    async function openDashboardSchedulerOverviewTarget(moduleId, focusKey = "") {
+      setDashboardActiveModule(moduleId);
+      const nextFocusKey = String(focusKey || "").trim();
+      if (!nextFocusKey || typeof window === "undefined" || typeof document === "undefined") {
+        clearDashboardSchedulerOverviewFocus();
+        return;
+      }
+      dashboardSchedulerOverviewFocusKey.value = nextFocusKey;
+      await nextTick();
+      window.requestAnimationFrame(() => {
+        const target = document.querySelector(`[data-scheduler-overview-target="${nextFocusKey}"]`);
+        if (target && typeof target.scrollIntoView === "function") {
+          target.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      });
+      if (dashboardSchedulerOverviewFocusTimer) {
+        window.clearTimeout(dashboardSchedulerOverviewFocusTimer);
+      }
+      dashboardSchedulerOverviewFocusTimer = window.setTimeout(() => {
+        dashboardSchedulerOverviewFocusKey.value = "";
+        dashboardSchedulerOverviewFocusTimer = null;
+      }, 3200);
+    }
 
     const dateHandoverActions = createDateHandoverActions({
       config,
@@ -3459,6 +3495,10 @@ createApp({
         window.clearTimeout(configAutoSaveTimer);
         configAutoSaveTimer = null;
       }
+      if (dashboardSchedulerOverviewFocusTimer) {
+        window.clearTimeout(dashboardSchedulerOverviewFocusTimer);
+        dashboardSchedulerOverviewFocusTimer = null;
+      }
     });
 
     return {
@@ -3472,6 +3512,9 @@ createApp({
       dashboardModuleMenuOpen,
       dashboardActiveModuleTitle,
       moduleMeta,
+      schedulerOverviewItems,
+      schedulerOverviewSummary,
+      dashboardSchedulerOverviewFocusKey,
       isStatusView,
       isDashboardView,
       isConfigView,
@@ -3715,6 +3758,7 @@ createApp({
       runHomeQuickAction,
       switchConfigTab,
       setDashboardActiveModule,
+      openDashboardSchedulerOverviewTarget,
       openDashboardMenuDrawer,
       closeDashboardMenuDrawer,
       addDate,

@@ -6,7 +6,11 @@
               <div class="hint">本轮只实现“事件月度统计表”；“月度变更统计表”仅保留模板占位，不执行处理链路。</div>
             </div>
 
-            <div class="dashboard-module-subshell">
+            <div
+              class="dashboard-module-subshell"
+              data-scheduler-overview-target="monthly_event"
+              :class="{ 'dashboard-section-spotlight': dashboardSchedulerOverviewFocusKey === 'monthly_event' }"
+            >
               <div class="day-metric-top-grid dashboard-module-primary-grid">
                             <article class="task-block dashboard-module-scheduler-card">
                               <div class="task-block-head">
@@ -388,7 +392,11 @@
 
             <div class="hr dashboard-module-divider"></div>
 
-            <div class="dashboard-module-subshell">
+            <div
+              class="dashboard-module-subshell"
+              data-scheduler-overview-target="monthly_change"
+              :class="{ 'dashboard-section-spotlight': dashboardSchedulerOverviewFocusKey === 'monthly_change' }"
+            >
               <div class="day-metric-top-grid dashboard-module-primary-grid">
                             <article class="task-block dashboard-module-scheduler-card">
                               <div class="task-block-head">
@@ -767,8 +775,5 @@
                           </details>
                         </div>
                       </section>
-            </div>
-          </div>
-        </section>
 
 `;

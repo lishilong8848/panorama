@@ -1,7 +1,7 @@
 ﻿import { CONFIG_MENU_TEMPLATE } from "./app_config_menu_template.js";
 import { CONFIG_TABS_TEMPLATE } from "./app_config_tabs_template.js";
 
-const CONFIG_TEMPLATE_PREFIX = `<section v-else class="config-shell">
+const CONFIG_TEMPLATE_PREFIX = `<section v-if="isConfigView" class="config-shell">
       <section class="content-card">
         <div class="config-shell-top">
           <div class="config-shell-copy">
