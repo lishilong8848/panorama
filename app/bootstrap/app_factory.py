@@ -1132,7 +1132,22 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             return False, str(exc)
 
     def updater_restart_callback(context: dict) -> tuple[bool, str]:
+        wrote_startup_handoff = False
         try:
+            write_startup_role_handoff = getattr(container, "write_startup_role_handoff", None)
+            clear_startup_role_handoff = getattr(container, "clear_startup_role_handoff", None)
+            deployment_snapshot = container.deployment_snapshot() if hasattr(container, "deployment_snapshot") else {}
+            if not isinstance(deployment_snapshot, dict):
+                deployment_snapshot = {}
+            target_role_mode = normalize_role_mode(deployment_snapshot.get("role_mode"))
+            if callable(write_startup_role_handoff) and target_role_mode in {"internal", "external"}:
+                write_startup_role_handoff(
+                    target_role_mode=target_role_mode,
+                    source="updater_restart",
+                    reason=str((context or {}).get("reason", "") or "updater_apply").strip(),
+                    source_startup_time=str(getattr(app.state, "started_at", "") or "").strip(),
+                )
+                wrote_startup_handoff = True
             restart_exit_code = str(os.environ.get("QJPT_RESTART_EXIT_CODE", "") or "").strip()
             if restart_exit_code:
                 try:
@@ -1183,6 +1198,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             threading.Thread(target=_exit_later, daemon=True, name="updater-restart").start()
             return True, "restart_scheduled"
         except Exception as exc:  # noqa: BLE001
+            if wrote_startup_handoff and callable(clear_startup_role_handoff):
+                clear_startup_role_handoff()
             return False, str(exc)
     setter = getattr(container, "set_scheduler_callback", None)
     if callable(setter):

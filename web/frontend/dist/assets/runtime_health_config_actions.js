@@ -136,6 +136,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   let bridgeTaskDetailRequestInFlight = null;
   let updaterReconnectTimer = null;
   let updaterQueueMonitorTimer = null;
+  let updaterHealthHydratedOnce = false;
 
   function isUpdaterTrafficPaused() {
     return Boolean(updaterUiOverlayVisible?.value || updaterAwaitingRestartRecovery?.value);
@@ -152,6 +153,137 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (updaterQueueMonitorTimer) {
       window.clearTimeout(updaterQueueMonitorTimer);
       updaterQueueMonitorTimer = null;
+    }
+  }
+
+  function normalizeUpdaterLastResult(runtime) {
+    return String(runtime?.last_result || "").trim().toLowerCase();
+  }
+
+  function normalizeUpdaterDependencyStatus(runtime) {
+    return String(runtime?.dependency_sync_status || "").trim().toLowerCase();
+  }
+
+  function isUpdaterApplyingRuntime(runtime) {
+    const lastResult = normalizeUpdaterLastResult(runtime);
+    const dependencyStatus = normalizeUpdaterDependencyStatus(runtime);
+    return (
+      lastResult === "downloading_patch"
+      || lastResult === "applying_patch"
+      || lastResult === "dependency_checking"
+      || lastResult === "dependency_syncing"
+      || lastResult === "dependency_rollback"
+      || dependencyStatus === "running"
+    );
+  }
+
+  function isSharedMirrorUpdater(runtime) {
+    return String(runtime?.source_kind || "").trim().toLowerCase() === "shared_mirror";
+  }
+
+  function buildAutomaticUpdaterOverlayPayload(runtime, options = {}) {
+    const queued = Boolean(options?.queued);
+    if (queued) {
+      return {
+        title: "等待任务结束后自动更新",
+        subtitle: "后台任务尚未完成。控制台已暂停轮询和日志流，任务结束后会自动开始更新。",
+        stage: "queued",
+      };
+    }
+    if (isSharedMirrorUpdater(runtime)) {
+      return {
+        title: "已检测到外网新版本",
+        subtitle: "内网端正在自动更新，请保持当前页面打开，完成后会自动恢复。",
+        stage: "applying",
+        kicker: "自动跟随更新",
+      };
+    }
+    return {
+      title: "正在更新程序",
+      subtitle: "检测到新版本，正在自动应用补丁，请保持当前页面打开。",
+      stage: "applying",
+    };
+  }
+
+  function startUpdaterRuntimeMonitor(options = {}) {
+    clearUpdaterQueueMonitorTimer();
+    pauseRuntimeTraffic();
+    setUpdaterOverlay(true, buildAutomaticUpdaterOverlayPayload(health.updater || {}, options));
+
+    const poll = async () => {
+      try {
+        const data = await getUpdaterStatusApi();
+        const runtime = data?.runtime && typeof data.runtime === "object" ? data.runtime : {};
+        Object.assign(health.updater, runtime);
+        const lastResult = normalizeUpdaterLastResult(runtime);
+        const queued = Boolean(runtime?.queued_apply?.queued);
+
+        if (lastResult === "failed") {
+          hideUpdaterOverlay();
+          message.value = `应用更新失败: ${String(runtime?.last_error || "请查看系统日志").trim() || "请查看系统日志"}`;
+          return;
+        }
+        if (lastResult === "updated_restart_scheduled" || runtime?.restart_required) {
+          beginUpdaterRestartRecovery();
+          return;
+        }
+        if (isUpdaterApplyingRuntime(runtime)) {
+          setUpdaterOverlay(true, buildAutomaticUpdaterOverlayPayload(runtime, options));
+        }
+        if (!queued && !runtime?.running && !isUpdaterApplyingRuntime(runtime)) {
+          hideUpdaterOverlay();
+          return;
+        }
+        updaterQueueMonitorTimer = window.setTimeout(poll, 3000);
+      } catch (_err) {
+        beginUpdaterRestartRecovery();
+      }
+    };
+
+    updaterQueueMonitorTimer = window.setTimeout(poll, 3000);
+  }
+
+  function handleUpdaterRuntimeSideEffects(previousRuntime, nextRuntime) {
+    const previous = previousRuntime && typeof previousRuntime === "object" ? previousRuntime : {};
+    const next = nextRuntime && typeof nextRuntime === "object" ? nextRuntime : {};
+    const nextEnabled = next?.enabled !== false;
+    const nextDisabledReason = String(next?.disabled_reason || "").trim().toLowerCase();
+    if (!nextEnabled && nextDisabledReason === "source_python_run") {
+      return;
+    }
+
+    const nextSourceKind = String(next?.source_kind || "").trim().toLowerCase();
+    const nextLastPublishAt = String(next?.last_publish_at || "").trim();
+    const nextMirrorVersion = String(next?.mirror_version || "").trim();
+    const nextLastPublishError = String(next?.last_publish_error || "").trim();
+    const prevPublishMarker = `${String(previous?.last_publish_at || "").trim()}|${String(previous?.mirror_version || "").trim()}|${String(previous?.last_publish_error || "").trim()}`;
+    const nextPublishMarker = `${nextLastPublishAt}|${nextMirrorVersion}|${nextLastPublishError}`;
+
+    if (
+      updaterHealthHydratedOnce
+      && nextSourceKind === "remote"
+      && nextPublishMarker !== prevPublishMarker
+      && nextLastPublishAt
+      && !nextLastPublishError
+    ) {
+      message.value = `已将批准版本发布到共享目录（${nextMirrorVersion || "最新版本"}），内网端会自动跟随更新。`;
+    }
+
+    const nextLastResult = normalizeUpdaterLastResult(next);
+    if (nextSourceKind === "shared_mirror" && isUpdaterApplyingRuntime(next)) {
+      if (!updaterUiOverlayVisible?.value && !updaterAwaitingRestartRecovery?.value) {
+        startUpdaterRuntimeMonitor({ queued: false });
+        return;
+      }
+    }
+    if (nextSourceKind === "shared_mirror" && (nextLastResult === "updated_restart_scheduled" || next?.restart_required)) {
+      if (!updaterAwaitingRestartRecovery?.value) {
+        beginUpdaterRestartRecovery({
+          title: "内网更新完成，正在自动重启",
+          subtitle: "已完成补丁应用，服务恢复后会自动刷新当前页面。",
+          kicker: "自动跟随更新",
+        });
+      }
     }
   }
 
@@ -230,49 +362,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function startQueuedUpdaterMonitor() {
-    clearUpdaterQueueMonitorTimer();
-    pauseRuntimeTraffic();
-    setUpdaterOverlay(true, {
-      title: "等待任务结束后自动更新",
-      subtitle: "后台任务尚未完成。控制台已暂停轮询和日志流，任务结束后会自动开始更新。",
-      stage: "queued",
-    });
-
-    const poll = async () => {
-      try {
-        const data = await getUpdaterStatusApi();
-        const runtime = data?.runtime && typeof data.runtime === "object" ? data.runtime : {};
-        Object.assign(health.updater, runtime);
-        const lastResult = String(runtime?.last_result || "").trim().toLowerCase();
-        const queued = Boolean(runtime?.queued_apply?.queued);
-
-        if (lastResult === "failed") {
-          hideUpdaterOverlay();
-          message.value = `应用更新失败: ${String(runtime?.last_error || "请查看系统日志").trim() || "请查看系统日志"}`;
-          return;
-        }
-        if (lastResult === "updated_restart_scheduled" || runtime?.restart_required) {
-          beginUpdaterRestartRecovery();
-          return;
-        }
-        if (lastResult === "downloading_patch" || lastResult === "applying_patch" || lastResult.startsWith("dependency_")) {
-          setUpdaterOverlay(true, {
-            title: "正在更新程序",
-            subtitle: "后台任务已结束，正在应用补丁，请保持当前页面打开。",
-            stage: "applying",
-          });
-        }
-        if (!queued && !runtime?.running && (lastResult === "updated" || lastResult === "restart_pending")) {
-          hideUpdaterOverlay();
-          return;
-        }
-        updaterQueueMonitorTimer = window.setTimeout(poll, 3000);
-      } catch (_err) {
-        beginUpdaterRestartRecovery();
-      }
-    };
-
-    updaterQueueMonitorTimer = window.setTimeout(poll, 3000);
+    startUpdaterRuntimeMonitor({ queued: true });
   }
 
   function mergeConfigWithServerSnapshot(baseConfig, changedConfig) {
@@ -1046,6 +1136,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           : true;
     healthRequestInFlight = (async () => {
       try {
+        const previousUpdaterSnapshot = clone(health?.updater || {});
         const params = includeHandoverContext
           ? {
               handover_duty_date: String(handoverDutyDate?.value || "").trim(),
@@ -1054,6 +1145,8 @@ export function createRuntimeHealthConfigActions(ctx) {
           : {};
         const data = await getHealthApi(params);
         applyHealthSnapshot(data);
+        handleUpdaterRuntimeSideEffects(previousUpdaterSnapshot, health?.updater || {});
+        updaterHealthHydratedOnce = true;
         if (fullHealthLoaded) {
           fullHealthLoaded.value = true;
         }

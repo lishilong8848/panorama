@@ -45,6 +45,10 @@ class _FakeContainer:
         self.scheduler = None
         self.handover_scheduler_manager = None
         self.wet_bulb_collection_scheduler = None
+        self.day_metric_upload_scheduler = None
+        self.alarm_event_upload_scheduler = None
+        self.monthly_change_report_scheduler = None
+        self.monthly_event_report_scheduler = None
         self.updater_service = None
         self.alert_log_uploader = None
         self.shared_bridge_service = None
@@ -61,6 +65,7 @@ class _FakeContainer:
             "nonce": "",
         }
         self.startup_handoff_cleared = 0
+        self.updater_restart_callback = None
         self.system_log_next_offset = lambda: 0
 
     def add_system_log(self, *_args, **_kwargs):
@@ -75,7 +80,8 @@ class _FakeContainer:
     def set_wet_bulb_collection_scheduler_callback(self, *_args, **_kwargs):
         return None
 
-    def set_updater_restart_callback(self, *_args, **_kwargs):
+    def set_updater_restart_callback(self, callback, *_args, **_kwargs):
+        self.updater_restart_callback = callback
         return None
 
     def scheduler_executor_name(self):
@@ -96,6 +102,30 @@ class _FakeContainer:
     def is_wet_bulb_collection_scheduler_executor_bound(self):
         return False
 
+    def day_metric_upload_scheduler_executor_name(self):
+        return "-"
+
+    def is_day_metric_upload_scheduler_executor_bound(self):
+        return False
+
+    def alarm_event_upload_scheduler_executor_name(self):
+        return "-"
+
+    def is_alarm_event_upload_scheduler_executor_bound(self):
+        return False
+
+    def monthly_change_report_scheduler_executor_name(self):
+        return "-"
+
+    def is_monthly_change_report_scheduler_executor_bound(self):
+        return False
+
+    def monthly_event_report_scheduler_executor_name(self):
+        return "-"
+
+    def is_monthly_event_report_scheduler_executor_bound(self):
+        return False
+
     def deployment_snapshot(self):
         return {"role_mode": self.role_mode, "node_id": "internal-node", "node_label": "内网端"}
 
@@ -113,6 +143,19 @@ class _FakeContainer:
         }
         self.startup_handoff_cleared += 1
 
+    def write_startup_role_handoff(self, *, target_role_mode: str, source: str, reason: str = "", source_startup_time: str = ""):
+        self.startup_handoff = {
+            "active": True,
+            "mode": "startup_role_resume",
+            "target_role_mode": str(target_role_mode or "").strip().lower(),
+            "requested_at": "2026-04-08 18:00:00",
+            "reason": str(reason or "").strip(),
+            "source": str(source or "").strip(),
+            "source_startup_time": str(source_startup_time or "").strip(),
+            "nonce": "updater-handoff",
+        }
+        return dict(self.startup_handoff)
+
     def shared_bridge_snapshot(self):
         return {"enabled": True, "root_dir": "D:/QJPT_Shared", "db_status": "ok"}
 
@@ -120,6 +163,18 @@ class _FakeContainer:
         self.runtime_services_armed = True
         self.runtime_service_start_calls.append(str(source or ""))
         return {"ok": True, "armed": True, "role_mode": self.role_mode}
+
+    def stop_day_metric_upload_scheduler(self, source="关闭自动"):
+        return {"ok": True, "source": source}
+
+    def stop_alarm_event_upload_scheduler(self, source="关闭自动"):
+        return {"ok": True, "source": source}
+
+    def stop_monthly_change_report_scheduler(self, source="关闭自动"):
+        return {"ok": True, "source": source}
+
+    def stop_monthly_event_report_scheduler(self, source="关闭自动"):
+        return {"ok": True, "source": source}
 
 
 def _build_app(monkeypatch, tmp_path: Path, *, role_mode: str = "internal"):
@@ -252,6 +307,40 @@ def test_startup_runtime_rejects_missing_role(monkeypatch, tmp_path):
         assert container.runtime_services_armed is False
         assert container.runtime_service_start_calls == []
         assert app.state.startup_role_confirmed is False
+
+
+def test_updater_restart_callback_writes_role_handoff_for_external(monkeypatch, tmp_path):
+    app = _build_app(monkeypatch, tmp_path, role_mode="external")
+    container = app.state.container
+    exit_calls = []
+
+    def _fake_exit(code):
+        exit_calls.append(code)
+
+    class _ImmediateThread:
+        def __init__(self, target=None, **_kwargs):
+            self._target = target
+
+        def start(self):
+            if callable(self._target):
+                self._target()
+
+    monkeypatch.setattr(app_factory.os, "_exit", _fake_exit)
+    monkeypatch.setattr(app_factory.time, "sleep", lambda _secs: None)
+    monkeypatch.setattr(app_factory.threading, "Thread", _ImmediateThread)
+    monkeypatch.setenv("QJPT_RESTART_EXIT_CODE", "194")
+
+    callback = container.updater_restart_callback
+    assert callable(callback)
+
+    ok, detail = callback({"reason": "updated_restart_scheduled"})
+
+    assert ok is True
+    assert detail == "same_console_restart_scheduled"
+    assert container.startup_handoff["active"] is True
+    assert container.startup_handoff["target_role_mode"] == "external"
+    assert container.startup_handoff["source"] == "updater_restart"
+    assert exit_calls == [194]
 
 
 def test_lifespan_keeps_saved_role_unactivated_until_user_confirms(monkeypatch, tmp_path):

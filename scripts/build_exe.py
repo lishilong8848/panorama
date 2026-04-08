@@ -83,72 +83,6 @@ EPHEMERAL_NAME_MARKERS = (
     ".syntaxfix.",
 )
 EPHEMERAL_NAME_SUFFIXES = (".bak", ".tmp_keep")
-PRESERVE_RELEASE_TOP_LEVEL_DIRS = {
-    ".runtime",
-    ".venv",
-    RUNTIME_DIR_NAME,
-    "runtime_state",
-}
-
-CRITICAL_RELEASE_SYNC_FILES = [
-    Path("app/bootstrap/container.py"),
-    Path("app/bootstrap/app_factory.py"),
-    Path("app/shared/runtime_dependency_spec.py"),
-    Path("app/shared/utils/frontend_cache.py"),
-    Path("app/config/config_adapter.py"),
-    Path("app/config/config_merge_guard.py"),
-    Path("app/config/config_schema_v3.py"),
-    Path("app/config/settings_loader.py"),
-    Path("app/modules/updater/api/routes.py"),
-    Path("app/modules/updater/service/runtime_dependency_sync_service.py"),
-    Path("app/modules/updater/service/updater_service.py"),
-    Path("app/modules/updater/service/update_applier.py"),
-    Path("app/modules/updater/core/versioning.py"),
-    Path("app/modules/updater/repository/updater_state_store.py"),
-    Path("app/modules/report_pipeline/api/routes.py"),
-    Path("app/modules/report_pipeline/service/job_service.py"),
-    Path("app/modules/report_pipeline/service/orchestrator_service.py"),
-    Path("app/modules/report_pipeline/service/runtime_config_validator.py"),
-    Path("app/modules/report_pipeline/service/system_alert_log_upload_service.py"),
-    Path("app/modules/network/service/network_stability.py"),
-    Path("app/modules/websocket/service/log_stream_service.py"),
-    Path("handover_log_module/repository/download_gateway.py"),
-    Path("handover_log_module/service/day_metric_bitable_export_service.py"),
-    Path("handover_log_module/service/day_metric_standalone_upload_service.py"),
-    Path("handover_log_module/service/review_session_service.py"),
-    Path("handover_log_module/service/review_followup_trigger_service.py"),
-    Path("handover_log_module/service/handover_cloud_sheet_sync_service.py"),
-    Path("handover_log_module/service/handover_daily_report_state_service.py"),
-    Path("handover_log_module/service/handover_daily_report_asset_service.py"),
-    Path("handover_log_module/service/handover_daily_report_screenshot_service.py"),
-    Path("handover_log_module/service/handover_daily_report_bitable_export_service.py"),
-    Path("handover_log_module/service/source_data_attachment_bitable_export_service.py"),
-    Path("app/modules/handover_review/api/routes.py"),
-    Path("web/frontend/src/api_client.js"),
-    Path("web/frontend/src/app_lifecycle.js"),
-    Path("web/frontend/src/app_config_feature_handover_tab.js"),
-    Path("web/frontend/src/app_dashboard_template.js"),
-    Path("web/frontend/src/app.js"),
-    Path("web/frontend/src/app_template.js"),
-    Path("web/frontend/src/index.html"),
-    Path("web/frontend/src/app_state.js"),
-    Path("web/frontend/src/app_status_template.js"),
-    Path("web/frontend/src/config_api_utils.js"),
-    Path("web/frontend/src/config_helpers.js"),
-    Path("web/frontend/src/config_runtime_convert.js"),
-    Path("web/frontend/src/config_runtime_defaults.js"),
-    Path("web/frontend/src/dashboard_job_actions.js"),
-    Path("web/frontend/src/dashboard_menu_config.js"),
-    Path("web/frontend/src/log_stream.js"),
-    Path("web/frontend/src/runtime_health_config_actions.js"),
-    Path("web/frontend/src/runtime_resume_actions.js"),
-    Path("web/frontend/src/style.css"),
-    Path("web/frontend/src/updater_text.js"),
-    Path("web/frontend/src/ui_local_actions.js"),
-    Path("portable_launcher.py"),
-    Path("main.py"),
-]
-
 SMOKE_IMPORT_MODULES = [
     "fastapi",
     "uvicorn",
@@ -948,125 +882,6 @@ def _resolve_baseline_dir(raw: str, default_code_dir: Path) -> Path:
     raise FileNotFoundError(f"baseline 不存在或不包含 build_meta.json: {p}")
 
 
-def _safe_unlink(path: Path) -> bool:
-    try:
-        if path.is_dir():
-            path.rmdir()
-        else:
-            path.unlink()
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _should_preserve_release_user_path(rel: Path) -> bool:
-    rel_text = str(rel).replace("\\", "/")
-    if not rel.parts:
-        return False
-    if rel.parts[0] in PRESERVE_RELEASE_TOP_LEVEL_DIRS:
-        return True
-    if rel.name in PATCH_EXCLUDE_FILE_NAMES:
-        return True
-    if rel.suffix.lower() == ".json" and "config" in rel.parts:
-        return True
-    return False
-
-
-def _remove_extra_paths_best_effort(
-    root: Path,
-    keep_rel_set: set[str],
-    *,
-    preserve_user_data: bool = False,
-) -> tuple[int, int]:
-    removed = 0
-    skipped = 0
-    if not root.exists():
-        return removed, skipped
-    items = sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True)
-    for path in items:
-        rel = str(path.relative_to(root)).replace("\\", "/")
-        if rel in keep_rel_set:
-            continue
-        rel_path = Path(rel.replace("/", "\\"))
-        if preserve_user_data and _should_preserve_release_user_path(rel_path):
-            continue
-        # keep parent dirs that still have tracked children
-        if path.is_dir():
-            has_tracked_child = any(k.startswith(rel + "/") for k in keep_rel_set)
-            if has_tracked_child:
-                continue
-            if preserve_user_data:
-                has_preserved_child = any(
-                    _should_preserve_release_user_path(Path(k.replace("/", "\\"))) and k.startswith(rel + "/")
-                    for k in keep_rel_set
-                )
-                if has_preserved_child:
-                    continue
-        if _safe_unlink(path):
-            removed += 1
-        else:
-            skipped += 1
-    return removed, skipped
-
-
-def _sync_stage_to_release(
-    stage_code_dir: Path,
-    release_code_dir: Path,
-    *,
-    preserve_user_data: bool = False,
-) -> dict[str, int]:
-    copied = 0
-    skipped = 0
-    release_code_dir.mkdir(parents=True, exist_ok=True)
-
-    stage_files = [p for p in stage_code_dir.rglob("*") if p.is_file()]
-    keep_rel_set: set[str] = set()
-    for src in stage_files:
-        rel = src.relative_to(stage_code_dir)
-        rel_text = str(rel).replace("\\", "/")
-        keep_rel_set.add(rel_text)
-        dst = release_code_dir / rel
-        if preserve_user_data and dst.exists() and _should_preserve_release_user_path(rel):
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.copy2(src, dst)
-            copied += 1
-        except PermissionError:
-            skipped += 1
-        except OSError:
-            skipped += 1
-
-    removed, remove_skipped = _remove_extra_paths_best_effort(
-        release_code_dir,
-        keep_rel_set,
-        preserve_user_data=preserve_user_data,
-    )
-    skipped += remove_skipped
-    return {"copied": copied, "removed": removed, "skipped": skipped}
-
-
-def _sync_critical_stage_files_to_release(stage_code_dir: Path, release_code_dir: Path) -> dict[str, int]:
-    copied = 0
-    skipped = 0
-    release_code_dir.mkdir(parents=True, exist_ok=True)
-    for rel in CRITICAL_RELEASE_SYNC_FILES:
-        src = stage_code_dir / rel
-        if not src.exists():
-            skipped += 1
-            continue
-        dst = release_code_dir / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.copy2(src, dst)
-            copied += 1
-        except PermissionError:
-            skipped += 1
-        except OSError:
-            skipped += 1
-    return {"copied": copied, "skipped": skipped}
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="构建全景月报便携目录 + patch 补丁")
     parser.add_argument("--name", default="", help="兼容参数：当前固定输出目录 QJPT_V3")
@@ -1287,19 +1102,9 @@ def main() -> None:
             f"patch={latest_manifest.get('target_patch_version')}, "
             f"url={latest_manifest.get('zip_url')}"
         )
-        synced_release = _sync_stage_to_release(
-            stage_code_dir,
-            release_code_dir,
-            preserve_user_data=True,
-        )
-        _write_code_launcher(release_code_dir)
-        _write_launcher(release_root)
-        _prepare_embedded_runtime(release_code_dir, embed_python_version)
-        _ensure_release_tree_imports(release_code_dir)
-        _ensure_embedded_runtime_bootstrap_imports(release_code_dir)
         log(
-            "检测到基线大版本已存在：本次仍以 patch_only 为主，但会全量同步代码到本地目录，同时保留用户配置与运行态数据。"
-            f" copied={synced_release.get('copied', 0)}, removed={synced_release.get('removed', 0)}, skipped={synced_release.get('skipped', 0)}"
+            "检测到基线大版本已存在：本次仍以 patch_only 为主，不再回写同步本地全量源码目录。"
+            f" baseline={baseline_dir}, release_code_dir={release_code_dir}"
         )
 
         try:
