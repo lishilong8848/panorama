@@ -564,8 +564,27 @@ createApp({
     const actionKeyHandoverDailyReportAuthOpen = "handover_daily_report:auth_open";
     const actionKeyHandoverDailyReportScreenshotTest = "handover_daily_report:screenshot_test";
     const actionKeyHandoverReviewAccessReprobe = "handover_review:access_reprobe";
+    function getUpdaterDisabledText() {
+      const disabledReason = String(health.updater?.disabled_reason || "").trim().toLowerCase();
+      if (disabledReason === "source_python_run") return "当前为 Python 本地源码运行，已跳过更新。";
+      return "当前运行模式已跳过更新。";
+    }
+    const isUpdaterSourceRunDisabled = computed(
+      () =>
+        health.updater?.enabled === false
+        && String(health.updater?.disabled_reason || "").trim().toLowerCase() === "source_python_run",
+    );
+    const updaterBadgeToneClass = computed(() => {
+      if (isUpdaterSourceRunDisabled.value) return "tone-info";
+      return health.updater.update_available || health.updater.force_apply_available ? "tone-warning" : "tone-neutral";
+    });
+    const updaterButtonClass = computed(() => {
+      if (isUpdaterSourceRunDisabled.value) return "btn-ghost";
+      return health.updater.update_available || health.updater.force_apply_available ? "btn-warning" : "btn-secondary";
+    });
     const isUpdaterActionLocked = computed(
       () =>
+        health.updater?.enabled === false ||
         isActionLocked(actionKeyUpdaterCheck) ||
         isActionLocked(actionKeyUpdaterApply) ||
         isActionLocked(actionKeyUpdaterRestart),
@@ -1630,6 +1649,7 @@ createApp({
       return "继续后续上传";
     });
     const updaterMainButtonText = computed(() => {
+      if (health.updater?.enabled === false) return "本地源码运行不更新";
       if (isActionLocked(actionKeyUpdaterRestart)) return "重启中...";
       if (isActionLocked(actionKeyUpdaterApply)) return "更新中...";
       if (isActionLocked(actionKeyUpdaterCheck)) return "检查中...";
@@ -1640,6 +1660,10 @@ createApp({
     });
 
     async function runUpdaterMainAction() {
+      if (health.updater?.enabled === false) {
+        message.value = getUpdaterDisabledText();
+        return;
+      }
       if (isUpdaterActionLocked.value) return;
       if (health.updater.restart_required) {
         await restartUpdaterApp();
@@ -3572,6 +3596,8 @@ createApp({
       configGuidanceOverview,
       dashboardActiveModuleHero,
       updaterMainButtonText,
+      updaterBadgeToneClass,
+      updaterButtonClass,
       isUpdaterActionLocked,
       deploymentRoleMode,
       deploymentNodeIdDisplayText,

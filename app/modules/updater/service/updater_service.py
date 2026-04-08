@@ -28,6 +28,17 @@ from app.modules.updater.service.manifest_client import (
 from app.modules.updater.service.runtime_dependency_sync_service import RuntimeDependencySyncService
 from app.modules.updater.service.update_applier import UpdateApplier
 
+
+_SOURCE_RUN_DISABLE_UPDATER_ENV = "QJPT_DISABLE_UPDATER_IN_SOURCE_RUN"
+
+
+def _updater_disabled_reason_from_env() -> str:
+    raw = str(os.environ.get(_SOURCE_RUN_DISABLE_UPDATER_ENV, "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return "source_python_run"
+    return ""
+
+
 def _default_node_id(role_mode: Any) -> str:
     role = normalize_role_mode(role_mode)
     machine_id = f"{uuid.getnode():012x}"
@@ -80,6 +91,9 @@ class UpdaterService:
             ).strip(),
             "max_backups": max(1, int(updater_cfg.get("max_backups", 3))),
         }
+        self.disabled_reason = _updater_disabled_reason_from_env()
+        if self.disabled_reason:
+            self.cfg["enabled"] = False
         self.runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
         self.emit_log = emit_log
         self.restart_callback = restart_callback
@@ -132,13 +146,30 @@ class UpdaterService:
         mirror_runtime = self._mirror_runtime_snapshot()
         self.state.setdefault("source_kind", self.source_kind)
         self.state.setdefault("source_label", self.source_label)
+        self.state.setdefault("enabled", bool(self.cfg["enabled"]))
+        self.state.setdefault("disabled_reason", self.disabled_reason)
         self.state.setdefault("mirror_ready", mirror_runtime.get("mirror_ready", False))
         self.state.setdefault("mirror_version", mirror_runtime.get("mirror_version", ""))
         self.state.setdefault("mirror_manifest_path", mirror_runtime.get("mirror_manifest_path", ""))
         self.state.setdefault("last_publish_at", mirror_runtime.get("last_publish_at", ""))
         self.state.setdefault("last_publish_error", mirror_runtime.get("last_publish_error", ""))
+        if not bool(self.cfg["enabled"]):
+            self.state.update(
+                {
+                    "enabled": False,
+                    "disabled_reason": self.disabled_reason,
+                    "last_result": "disabled",
+                    "last_error": "",
+                    "update_available": False,
+                    "force_apply_available": False,
+                    "restart_required": False,
+                    "queued_apply": self._empty_queue_payload(),
+                }
+            )
         self._persist_state()
         self.runtime: Dict[str, Any] = {
+            "enabled": bool(self.state.get("enabled", self.cfg["enabled"])),
+            "disabled_reason": str(self.state.get("disabled_reason", self.disabled_reason) or self.disabled_reason),
             "running": False,
             "last_check_at": str(self.state.get("last_check_at", "")),
             "last_result": str(self.state.get("last_result", "")),
@@ -170,6 +201,13 @@ class UpdaterService:
 
     def _log(self, text: str) -> None:
         self.emit_log(f"[Updater] {text}")
+
+    @staticmethod
+    def _disabled_reason_text(raw: Any) -> str:
+        key = str(raw or "").strip().lower()
+        if key == "source_python_run":
+            return "当前为 Python 本地源码运行，已跳过更新。"
+        return "当前运行模式已禁用更新。"
 
     @staticmethod
     def _result_text(raw: Any) -> str:
@@ -289,6 +327,8 @@ class UpdaterService:
     def start(self) -> Dict[str, Any]:
         if not self.enabled:
             self._set_runtime_and_state(
+                enabled=False,
+                disabled_reason=self.disabled_reason,
                 last_result="disabled",
                 last_error="",
                 source_kind=self.source_kind,
@@ -301,7 +341,7 @@ class UpdaterService:
                 queued_apply=self._empty_queue_payload(),
                 running=False,
             )
-            self._log("更新服务未启用: enabled=false")
+            self._log(f"更新服务未启用: {self._disabled_reason_text(self.disabled_reason)}")
             return {"started": False, "running": False, "reason": "disabled"}
         if self.source_kind == "shared_mirror" and not self.shared_mirror_client:
             self._set_runtime_and_state(
@@ -347,9 +387,43 @@ class UpdaterService:
             return dict(self.runtime)
 
     def check_now(self) -> Dict[str, Any]:
+        if not self.enabled:
+            self._set_runtime_and_state(
+                enabled=False,
+                disabled_reason=self.disabled_reason,
+                last_result="disabled",
+                last_error="",
+                update_available=False,
+                force_apply_available=False,
+                restart_required=False,
+                queued_apply=self._empty_queue_payload(),
+                running=False,
+            )
+            return self._build_result_payload(
+                last_result="disabled",
+                queue_status="none",
+                message=self._disabled_reason_text(self.disabled_reason),
+            )
         return self._run_check(apply_update=None, force_remote=False)
 
     def apply_now(self, *, mode: str = "normal", queue_if_busy: bool = False) -> Dict[str, Any]:
+        if not self.enabled:
+            self._set_runtime_and_state(
+                enabled=False,
+                disabled_reason=self.disabled_reason,
+                last_result="disabled",
+                last_error="",
+                update_available=False,
+                force_apply_available=False,
+                restart_required=False,
+                queued_apply=self._empty_queue_payload(),
+                running=False,
+            )
+            return self._build_result_payload(
+                last_result="disabled",
+                queue_status="none",
+                message=self._disabled_reason_text(self.disabled_reason),
+            )
         normalized_mode = "force_remote" if str(mode or "").strip().lower() == "force_remote" else "normal"
         if queue_if_busy and self.is_busy():
             queue_payload = self._queue_apply(mode=normalized_mode, reason="active_job_running")
@@ -357,6 +431,23 @@ class UpdaterService:
         return self._run_check(apply_update=True, force_remote=normalized_mode == "force_remote")
 
     def restart_now(self) -> Dict[str, Any]:
+        if not self.enabled:
+            self._set_runtime_and_state(
+                enabled=False,
+                disabled_reason=self.disabled_reason,
+                last_result="disabled",
+                last_error="",
+                update_available=False,
+                force_apply_available=False,
+                restart_required=False,
+                queued_apply=self._empty_queue_payload(),
+                running=False,
+            )
+            return self._build_result_payload(
+                last_result="disabled",
+                queue_status="none",
+                message=self._disabled_reason_text(self.disabled_reason),
+            )
         if not bool(self.state.get("restart_required", False)):
             return self._build_result_payload(last_result=str(self.state.get("last_result", "")), queue_status="none")
         if not callable(self.restart_callback):
@@ -401,6 +492,8 @@ class UpdaterService:
     def _build_result_payload(self, *, last_result: str, queue_status: str = "none", **extra: Any) -> Dict[str, Any]:
         payload = {
             "ok": last_result != "failed",
+            "enabled": bool(self.state.get("enabled", self.cfg["enabled"])),
+            "disabled_reason": str(self.state.get("disabled_reason", self.disabled_reason) or self.disabled_reason),
             "last_result": last_result,
             "queue_status": queue_status,
             "restart_required": bool(self.state.get("restart_required", False)),

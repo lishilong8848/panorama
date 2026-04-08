@@ -50,8 +50,15 @@ def _runtime_payload(container) -> Dict[str, Any]:
     runtime_cfg = container.runtime_config.get("updater", {}) if isinstance(container.runtime_config, dict) else {}
     if not isinstance(runtime_cfg, dict):
         runtime_cfg = {}
+    service = getattr(container, "updater_service", None)
+    runtime_enabled = runtime.get("enabled")
+    if runtime_enabled is None:
+        runtime_enabled = getattr(service, "enabled", None)
+    if runtime_enabled is None:
+        runtime_enabled = bool(runtime_cfg.get("enabled", True))
     return {
-        "enabled": bool(runtime_cfg.get("enabled", True)),
+        "enabled": bool(runtime_enabled),
+        "disabled_reason": str(runtime.get("disabled_reason", "") or ""),
         "running": bool(runtime.get("running", False)),
         "last_check_at": str(runtime.get("last_check_at", "")),
         "last_result": str(runtime.get("last_result", "")),

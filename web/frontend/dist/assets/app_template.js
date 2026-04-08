@@ -288,13 +288,13 @@ const APP_TEMPLATE_PREFIX = `
               <div class="ops-update-cluster">
                 <span
                   class="status-badge status-badge-soft"
-                  :class="health.updater.update_available || health.updater.force_apply_available ? 'tone-warning' : 'tone-neutral'"
+                  :class="updaterBadgeToneClass"
                 >
                   {{ updaterResultText }}
                 </span>
                 <button
                   class="btn"
-                  :class="health.updater.update_available || health.updater.force_apply_available ? 'btn-warning' : 'btn-secondary'"
+                  :class="updaterButtonClass"
                   :disabled="isUpdaterActionLocked"
                   @click="runUpdaterMainAction"
                 >

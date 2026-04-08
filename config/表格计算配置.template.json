@@ -51,7 +51,7 @@
     "updater": {
       "enabled": true,
       "check_interval_sec": 3600,
-      "auto_apply": false,
+      "auto_apply": true,
       "auto_restart": true,
       "allow_downgrade": false,
       "gitee_repo": "https://gitee.com/myligitt/qjpt.git",

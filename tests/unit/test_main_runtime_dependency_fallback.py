@@ -34,3 +34,25 @@ def test_main_exits_cleanly_when_dependency_bootstrap_fails(monkeypatch, capsys)
     assert excinfo.value.code == 1
     assert "运行依赖准备失败" in captured.out
     assert "代理连接失败" in captured.out
+
+
+def test_source_run_marks_updater_disabled(monkeypatch) -> None:
+    monkeypatch.delenv(main_module._SOURCE_RUN_DISABLE_UPDATER_ENV, raising=False)
+    monkeypatch.delenv(main_module._PORTABLE_LAUNCHER_ENV, raising=False)
+    monkeypatch.setattr(main_module.sys, "frozen", False, raising=False)
+
+    changed = main_module._apply_source_run_runtime_flags()
+
+    assert changed is True
+    assert main_module.os.environ[main_module._SOURCE_RUN_DISABLE_UPDATER_ENV] == "1"
+
+
+def test_portable_launcher_keeps_updater_enabled(monkeypatch) -> None:
+    monkeypatch.delenv(main_module._SOURCE_RUN_DISABLE_UPDATER_ENV, raising=False)
+    monkeypatch.setenv(main_module._PORTABLE_LAUNCHER_ENV, "1")
+    monkeypatch.setattr(main_module.sys, "frozen", False, raising=False)
+
+    changed = main_module._apply_source_run_runtime_flags()
+
+    assert changed is False
+    assert main_module.os.environ.get(main_module._SOURCE_RUN_DISABLE_UPDATER_ENV, "") == ""

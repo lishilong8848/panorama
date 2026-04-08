@@ -18,6 +18,10 @@ from app.modules.updater.service.runtime_dependency_sync_service import (  # noq
 )
 
 
+_SOURCE_RUN_DISABLE_UPDATER_ENV = "QJPT_DISABLE_UPDATER_IN_SOURCE_RUN"
+_PORTABLE_LAUNCHER_ENV = "QJPT_PORTABLE_LAUNCHER"
+
+
 def _configure_console_utf8() -> None:
     if not sys.platform.startswith("win"):
         return
@@ -179,6 +183,21 @@ def _is_loopback_host(value: object) -> bool:
     return text in {"127.0.0.1", "::1", "localhost"}
 
 
+def _should_disable_updater_for_source_run() -> bool:
+    if getattr(sys, "frozen", False):
+        return False
+    if str(os.environ.get(_PORTABLE_LAUNCHER_ENV, "") or "").strip():
+        return False
+    return True
+
+
+def _apply_source_run_runtime_flags() -> bool:
+    if not _should_disable_updater_for_source_run():
+        return False
+    os.environ[_SOURCE_RUN_DISABLE_UPDATER_ENV] = "1"
+    return True
+
+
 def main(argv: list[str] | None = None) -> None:
     _configure_console_utf8()
     parser = argparse.ArgumentParser(description="全景平台月报控制台入口")
@@ -206,6 +225,9 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[启动] 运行依赖准备失败: {exc}", flush=True)
         print("[启动] 请检查当前网络、系统代理或 VPN 配置，以及 PIP 镜像连通性后重试。", flush=True)
         raise SystemExit(1) from exc
+    source_run_updater_disabled = _apply_source_run_runtime_flags()
+    if source_run_updater_disabled:
+        print("[启动] 当前为 Python 本地源码运行，已跳过自动更新。", flush=True)
 
     import uvicorn
     from app.bootstrap.app_factory import create_app

@@ -901,6 +901,7 @@ export function createAppState(vueApi) {
     network: { current_ssid: "-" },
     updater: {
       enabled: true,
+      disabled_reason: "",
       running: false,
       last_check_at: "",
       last_result: "",
@@ -2742,6 +2743,8 @@ function normalizeInternalDownloadPoolSlot(slot) {
   });
   const updaterMirrorOverview = computed(() => {
     const updater = health.updater || {};
+    const updaterEnabled = updater?.enabled !== false;
+    const disabledReason = String(updater?.disabled_reason || "").trim().toLowerCase();
     const sourceKind = String(updater.source_kind || "").trim().toLowerCase();
     const sourceLabel = formatUpdaterSourceLabel(updater);
     const mirrorReady = Boolean(updater.mirror_ready);
@@ -2751,6 +2754,39 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const lastPublishAt = String(updater.last_publish_at || "").trim();
     const manifestPath = String(updater.mirror_manifest_path || "").trim();
     const errorText = String(updater.last_publish_error || "").trim();
+    if (!updaterEnabled && disabledReason === "source_python_run") {
+      return {
+        tone: "info",
+        kicker: "调试模式",
+        title: "本地运行模式",
+        statusText: "本地调试模式",
+        summaryText: "当前为 Python 本地源码运行，已跳过自动更新与共享目录镜像检查。",
+        manifestPath: "",
+        errorText: "",
+        items: [
+          {
+            label: "运行方式",
+            value: "Python 本地源码运行",
+            tone: "info",
+          },
+          {
+            label: "当前版本",
+            value: localRevision > 0 ? `${localVersion} / r${localRevision}` : localVersion,
+            tone: "neutral",
+          },
+          {
+            label: "更新行为",
+            value: "不自动更新",
+            tone: "neutral",
+          },
+          {
+            label: "共享镜像",
+            value: "不检查",
+            tone: "neutral",
+          },
+        ],
+      };
+    }
     let tone = "neutral";
     let statusText = "尚未发布到共享目录";
     let summaryText = "当前更新链路尚未生成可供内网跟随的批准版本。";
@@ -2783,6 +2819,8 @@ function normalizeInternalDownloadPoolSlot(slot) {
     }
     return {
       tone,
+      kicker: "更新镜像",
+      title: "共享目录批准版本",
       statusText,
       summaryText,
       manifestPath,
@@ -3143,7 +3181,14 @@ function normalizeInternalDownloadPoolSlot(slot) {
     }
     return states;
   });
-  const updaterResultText = computed(() => mapUpdaterResultText(health.updater?.last_result));
+  const updaterResultText = computed(() => {
+    const resultKey = String(health.updater?.last_result || "").trim().toLowerCase();
+    const disabledReason = String(health.updater?.disabled_reason || "").trim().toLowerCase();
+    if (resultKey === "disabled" && disabledReason === "source_python_run") {
+      return "本地源码运行不更新";
+    }
+    return mapUpdaterResultText(resultKey);
+  });
   const dashboardActiveModuleTitle = computed(() => {
     const hit = dashboardModules.value.find((item) => item.id === dashboardActiveModule.value);
     return hit?.title || "业务模块";

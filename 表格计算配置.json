@@ -118,7 +118,7 @@
     "updater": {
       "enabled": true,
       "check_interval_sec": 3600,
-      "auto_apply": false,
+      "auto_apply": true,
       "auto_restart": true,
       "allow_downgrade": false,
       "gitee_repo": "https://gitee.com/myligitt/qjpt.git",
@@ -130,7 +130,8 @@
       "state_file": "updater_state.json",
       "download_dir": "runtime_state/updater/downloads",
       "backup_dir": "runtime_state/updater/backups",
-      "max_backups": 3
+      "max_backups": 3,
+      "_auto_apply_default_migrated": true
     },
     "console": {
       "enabled": true,
@@ -4384,9 +4385,7 @@
         "source": {
           "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
           "table_id": "tblAHGF8mV6U9jid",
-          "create_batch_size": 200,
-          "base_url": "",
-          "wiki_url": ""
+          "create_batch_size": 200
         },
         "fields": {
           "type": "类型",
@@ -4593,8 +4592,7 @@
       },
       "source": {
         "reuse_handover_download": true,
-        "reuse_handover_rule_engine": true,
-        "switch_to_internal_before_download": null
+        "reuse_handover_rule_engine": true
       },
       "target": {
         "app_token": "JbZywYBfgiltYpksj2bc1HvCnPd",

@@ -89,8 +89,8 @@
         <article v-if="!isInternalDeploymentRole" class="status-card">
           <div class="status-card-head">
             <div>
-              <span class="status-panel-kicker">更新镜像</span>
-              <h2 class="status-panel-title">共享目录批准版本</h2>
+              <span class="status-panel-kicker">{{ updaterMirrorOverview.kicker || '更新镜像' }}</span>
+              <h2 class="status-panel-title">{{ updaterMirrorOverview.title || '共享目录批准版本' }}</h2>
             </div>
             <span class="status-badge status-badge-solid" :class="'tone-' + updaterMirrorOverview.tone">
               {{ updaterMirrorOverview.statusText }}

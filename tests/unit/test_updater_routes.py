@@ -104,3 +104,19 @@ def test_updater_status_exposes_source_and_mirror_fields() -> None:
     assert runtime["source_label"] == "共享目录更新源"
     assert runtime["mirror_ready"] is True
     assert runtime["mirror_version"] == "V3.61.20260328"
+
+
+def test_updater_status_prefers_runtime_disabled_state() -> None:
+    request = _fake_request()
+    request.app.state.container.updater_snapshot = lambda: {
+        "enabled": False,
+        "disabled_reason": "source_python_run",
+        "last_result": "disabled",
+    }
+
+    payload = routes.updater_status(request)
+
+    assert payload["ok"] is True
+    assert payload["runtime"]["enabled"] is False
+    assert payload["runtime"]["disabled_reason"] == "source_python_run"
+    assert payload["runtime"]["last_result"] == "disabled"
