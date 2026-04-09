@@ -143,6 +143,7 @@ class UpdaterService:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._work_lock = threading.Lock()
+        self._last_shared_mirror_signal: tuple[str, ...] = ()
         mirror_runtime = self._mirror_runtime_snapshot()
         self.state.setdefault("source_kind", self.source_kind)
         self.state.setdefault("source_label", self.source_label)
@@ -317,6 +318,41 @@ class UpdaterService:
         )
         return snapshot
 
+    def _shared_mirror_watch_signal(self) -> tuple[str, ...]:
+        if self.source_kind != "shared_mirror" or not self.shared_mirror_client:
+            return ()
+        parts: list[str] = []
+        for path in (
+            self.shared_mirror_client.manifest_path,
+            self.shared_mirror_client.publish_state_path,
+        ):
+            try:
+                if path.exists():
+                    stat = path.stat()
+                    parts.append(f"{path.name}:{stat.st_mtime_ns}:{stat.st_size}")
+                else:
+                    parts.append(f"{path.name}:missing")
+            except Exception as exc:  # noqa: BLE001
+                parts.append(f"{path.name}:error:{type(exc).__name__}")
+        return tuple(parts)
+
+    def _sync_shared_mirror_watch_signal(self) -> tuple[str, ...]:
+        signal = self._shared_mirror_watch_signal()
+        self._last_shared_mirror_signal = signal
+        return signal
+
+    def _consume_shared_mirror_watch_trigger(self) -> bool:
+        signal = self._shared_mirror_watch_signal()
+        if not signal:
+            return False
+        if not self._last_shared_mirror_signal:
+            self._last_shared_mirror_signal = signal
+            return False
+        if signal != self._last_shared_mirror_signal:
+            self._last_shared_mirror_signal = signal
+            return True
+        return False
+
     @property
     def enabled(self) -> bool:
         return bool(self.cfg["enabled"])
@@ -368,6 +404,7 @@ class UpdaterService:
             )
         except Exception as exc:  # noqa: BLE001
             self._record_failure("启动检查失败", exc)
+        self._sync_shared_mirror_watch_signal()
 
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="qjpt-updater")
@@ -976,6 +1013,7 @@ class UpdaterService:
         try:
             return self._check_once(apply_update=apply_update, force_remote=force_remote)
         finally:
+            self._sync_shared_mirror_watch_signal()
             self._work_lock.release()
 
     def _try_process_queued_apply(self) -> None:
@@ -998,6 +1036,14 @@ class UpdaterService:
         next_check_monotonic = time.monotonic() + int(self.cfg["check_interval_sec"])
         while not self._stop.wait(1):
             self._try_process_queued_apply()
+            if self._consume_shared_mirror_watch_trigger():
+                self._log("检测到共享目录批准版本变化，立即检查更新")
+                next_check_monotonic = time.monotonic() + int(self.cfg["check_interval_sec"])
+                try:
+                    self._run_check(apply_update=None, force_remote=False)
+                except Exception as exc:  # noqa: BLE001
+                    self._record_failure("共享目录变更触发检查失败", exc)
+                continue
             if time.monotonic() < next_check_monotonic:
                 continue
             next_check_monotonic = time.monotonic() + int(self.cfg["check_interval_sec"])

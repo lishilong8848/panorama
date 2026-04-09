@@ -465,11 +465,13 @@ class HandoverDownloadService:
                     end_time=end_time_text,
                     scale_label=scale_label,
                 )
-                self._source_file_cache_service.register_downloaded_source(
+                registered_file_path = self._source_file_cache_service.register_downloaded_source(
                     identity=identity,
                     file_path=file_path,
                     emit_log=emit_log,
                 )
+                if registered_file_path:
+                    item["file_path"] = registered_file_path
         else:
             emit_log("[交接班下载] 全部楼栋命中共享源文件，跳过下载")
 

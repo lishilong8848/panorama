@@ -238,3 +238,50 @@ def test_external_publish_then_internal_auto_follow_end_to_end(tmp_path: Path, m
     assert internal_result["mirror_version"] == "V3.70.20260328"
     assert internal_result["local_release_revision"] == 70
     assert internal_service.get_runtime_snapshot()["local_version"] == "V3.70.20260328"
+
+
+def test_internal_loop_triggers_immediate_check_when_shared_mirror_changes(tmp_path: Path, monkeypatch) -> None:
+    app_dir = tmp_path / "internal-app"
+    shared_root = tmp_path / "shared"
+    _write_build_meta(app_dir, release_revision=69, display_version="V3.69.20260328")
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: app_dir)
+
+    service = UpdaterService(
+        config=_build_config(tmp_path / "int", role_mode="internal", shared_root=shared_root),
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+    service._sync_shared_mirror_watch_signal()
+    run_check_calls: list[dict[str, object]] = []
+
+    def _fake_run_check(*, apply_update, force_remote):  # noqa: ANN001
+        run_check_calls.append(
+            {
+                "apply_update": apply_update,
+                "force_remote": force_remote,
+            }
+        )
+        return {"last_result": "updated"}
+
+    class _StopAfterPublish:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wait(self, _timeout: int) -> bool:
+            self.calls += 1
+            if self.calls == 1:
+                _publish_shared_version(
+                    shared_root,
+                    release_revision=70,
+                    display_version="V3.70.20260328",
+                    body=b"approved-after-loop-start",
+                )
+                return False
+            return True
+
+    service._stop = _StopAfterPublish()
+    service._run_check = _fake_run_check  # type: ignore[method-assign]
+
+    service._loop()
+
+    assert run_check_calls == [{"apply_update": None, "force_remote": False}]

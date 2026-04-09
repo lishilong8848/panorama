@@ -183,16 +183,16 @@ class HandoverSourceFileCacheService:
         identity: str,
         file_path: str,
         emit_log: Callable[[str], None] = print,
-    ) -> None:
+    ) -> str:
         if not self._local_cache_enabled():
-            return
+            return str(file_path or "").strip()
         identity_text = str(identity or "").strip()
         file_text = str(file_path or "").strip()
         if not identity_text or not file_text:
-            return
+            return file_text
         source_path = Path(file_text)
         if not source_path.exists():
-            return
+            return file_text
         self._validate_cached_source(source_path)
         target_path = self._canonical_downloaded_source_path(
             identity=identity_text,
@@ -224,6 +224,7 @@ class HandoverSourceFileCacheService:
         }
         self._save_download_index(payload)
         emit_log(f"[交接班][源文件缓存] 已登记共享源文件 identity={identity_text}, file={str(target_path)}")
+        return str(target_path)
 
     @staticmethod
     def _parse_download_identity(identity: str) -> Dict[str, str] | None:
