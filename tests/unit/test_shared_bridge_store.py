@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+import sqlite3
 
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 
@@ -146,3 +148,40 @@ def test_cleanup_terminal_history_and_stale_nodes(tmp_path) -> None:
     assert cleanup["deleted_tasks"] == 1
     assert store.get_task(task["task_id"]) is None
     assert deleted_nodes == 1
+
+
+def test_read_only_connect_uses_plain_path_for_unc_share(monkeypatch) -> None:
+    store = SharedBridgeStore(r"\\172.16.1.2\share\bridge-root")
+    captured: dict[str, object] = {}
+
+    class _FakeConnection:
+        def __init__(self) -> None:
+            self.in_transaction = False
+            self.row_factory = None
+            self.executed: list[str] = []
+
+        def execute(self, sql, *_args, **_kwargs):  # noqa: ANN001
+            self.executed.append(str(sql))
+            return self
+
+        def close(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+    fake_conn = _FakeConnection()
+
+    def _fake_connect(database, **kwargs):  # noqa: ANN001
+        captured["database"] = database
+        captured["kwargs"] = kwargs
+        return fake_conn
+
+    monkeypatch.setattr(sqlite3, "connect", _fake_connect)
+
+    with store.connect(read_only=True) as conn:
+        assert conn is fake_conn
+
+    assert captured["database"] == str(store.db_path)
+    assert "uri" not in captured["kwargs"]
+    assert "PRAGMA query_only=ON" in fake_conn.executed

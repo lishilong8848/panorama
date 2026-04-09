@@ -228,16 +228,7 @@ class SharedBridgeStore:
 
     @contextmanager
     def connect(self, *, read_only: bool = False) -> Iterator[sqlite3.Connection]:
-        if read_only:
-            db_uri = f"file:{self.db_path.as_posix()}?mode=ro"
-            conn = sqlite3.connect(
-                db_uri,
-                timeout=self.busy_timeout_ms / 1000.0,
-                check_same_thread=False,
-                uri=True,
-            )
-        else:
-            conn = sqlite3.connect(str(self.db_path), timeout=self.busy_timeout_ms / 1000.0, check_same_thread=False)
+        conn = sqlite3.connect(str(self.db_path), timeout=self.busy_timeout_ms / 1000.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
