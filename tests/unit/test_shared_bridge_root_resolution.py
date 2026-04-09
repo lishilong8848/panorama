@@ -9,6 +9,8 @@ import pytest
 
 from app.bootstrap.container import AppContainer
 from app.config.config_adapter import resolve_shared_bridge_paths
+from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
+from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -105,3 +107,48 @@ def test_app_container_shared_bridge_snapshot_uses_role_resolved_root_without_ru
     assert snapshot["root_dir"] == r"\\172.16.1.2\share"
     assert snapshot["db_status"] == "stopped"
     assert snapshot["agent_status"] == "stopped"
+
+
+def test_shared_bridge_runtime_diagnose_shared_root_initializes_required_dirs_and_counts_files(work_dir: Path) -> None:
+    shared_root = work_dir / "share-root"
+    runtime_config = {
+        "deployment": {"role_mode": "external"},
+        "shared_bridge": {"enabled": True, "root_dir": str(shared_root)},
+        "internal_source_cache": {"enabled": True},
+        "internal_source_sites": [{"building": "A楼", "enabled": True}],
+    }
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    ready_path = shared_root / "交接班日志源文件" / "202604" / "20260409--白班" / "20260409--白班--交接班日志源文件--A楼.xlsx"
+    ready_path.parent.mkdir(parents=True, exist_ok=True)
+    ready_path.write_bytes(b"test")
+    store.upsert_source_cache_entry(
+        source_family="handover_log_family",
+        building="A楼",
+        bucket_kind="date",
+        bucket_key="2026-04-09",
+        duty_date="2026-04-09",
+        duty_shift="day",
+        downloaded_at="2026-04-09 09:00:00",
+        relative_path=ready_path.relative_to(shared_root).as_posix(),
+        status="ready",
+        file_hash="abc",
+        size_bytes=4,
+        metadata={},
+    )
+
+    service = SharedBridgeRuntimeService(
+        runtime_config=runtime_config,
+        app_version="test",
+    )
+
+    payload = service.diagnose_shared_root(initialize=True)
+
+    assert payload["status"] == "success"
+    assert payload["summary"]["ready_entry_count"] == 1
+    assert payload["summary"]["accessible_ready_count"] == 1
+    assert any(item["key"] == "bridge_db" and item["exists"] for item in payload["directories"])
+    assert any(item["key"] == "tmp_source_cache" and item["exists"] for item in payload["directories"])
+    family = next(item for item in payload["families"] if item["key"] == "handover_log_family")
+    assert family["ready_entry_count"] == 1
+    assert family["accessible_ready_count"] == 1

@@ -172,6 +172,13 @@ export async function uploadAlarmSourceCacheBuildingApi(building) {
   });
 }
 
+export async function runSharedBridgeSelfCheckApi() {
+  return apiJson("/api/bridge/shared-root/self-check", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 export async function openAlarmEventUploadTargetApi() {
   return apiJson("/api/runtime/alarm-event-upload-target/open", {
     method: "POST",

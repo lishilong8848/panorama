@@ -325,6 +325,25 @@ def bridge_health(request: Request) -> Dict[str, Any]:
     }
 
 
+@router.post("/api/bridge/shared-root/self-check")
+def bridge_shared_root_self_check(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
+    if service is None or not hasattr(service, "diagnose_shared_root"):
+        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    payload = service.diagnose_shared_root(initialize=True)
+    try:
+        container.add_system_log(
+            "[共享桥接] 已执行共享目录自检: "
+            f"角色={str(payload.get('role_label', '') or '-').strip() or '-'}, "
+            f"共享目录={str(payload.get('root_dir', '') or '-').strip() or '-'}, "
+            f"结果={str(payload.get('status_text', '') or '-').strip() or '-'}"
+        )
+    except Exception:
+        pass
+    return {"ok": True, **payload}
+
+
 @router.post("/api/bridge/source-cache/refresh-current-hour")
 def bridge_source_cache_refresh_current_hour(request: Request) -> Dict[str, Any]:
     if _deployment_role_mode(request) != "internal":

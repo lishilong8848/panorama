@@ -1017,6 +1017,19 @@ class SharedSourceCacheService:
             self._alarm_cache_root.mkdir(parents=True, exist_ok=True)
         self._tmp_root.mkdir(parents=True, exist_ok=True)
 
+    def ensure_required_directories(self) -> Dict[str, str]:
+        self._ensure_dirs()
+        return self.get_required_directory_paths()
+
+    def get_required_directory_paths(self) -> Dict[str, str]:
+        return {
+            FAMILY_HANDOVER_LOG: str(self._handover_cache_root) if self._handover_cache_root is not None else "",
+            FAMILY_HANDOVER_CAPACITY_REPORT: str(self._handover_capacity_cache_root) if self._handover_capacity_cache_root is not None else "",
+            FAMILY_MONTHLY_REPORT: str(self._monthly_cache_root) if self._monthly_cache_root is not None else "",
+            FAMILY_ALARM_EVENT: str(self._alarm_cache_root) if self._alarm_cache_root is not None else "",
+            "tmp_source_cache": str(self._tmp_root) if self._tmp_root is not None else "",
+        }
+
     def _hash_file(self, path: Path) -> str:
         digest = hashlib.sha256()
         with path.open("rb") as handle:

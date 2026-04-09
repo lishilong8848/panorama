@@ -27,6 +27,11 @@ from app.modules.shared_bridge.service.internal_download_browser_pool import (
     InternalDownloadBrowserPool,
 )
 from app.modules.shared_bridge.service.shared_source_cache_service import (
+    FAMILY_ALARM_EVENT,
+    FAMILY_HANDOVER_CAPACITY_REPORT,
+    FAMILY_HANDOVER_LOG,
+    FAMILY_LABELS,
+    FAMILY_MONTHLY_REPORT,
     SharedSourceCacheService,
     is_accessible_cached_file_path,
 )
@@ -365,6 +370,251 @@ class SharedBridgeRuntimeService:
             return False
         self._store.ensure_ready()
         return self._store.retry_task(task_id)
+
+    def diagnose_shared_root(self, *, initialize: bool = True, ready_limit_per_family: int = 400) -> Dict[str, Any]:
+        root_text = str(self.shared_bridge_root or "").strip()
+        role_label = _role_label(self.role_mode)
+        families = (
+            (FAMILY_HANDOVER_LOG, FAMILY_LABELS[FAMILY_HANDOVER_LOG]),
+            (FAMILY_HANDOVER_CAPACITY_REPORT, FAMILY_LABELS[FAMILY_HANDOVER_CAPACITY_REPORT]),
+            (FAMILY_MONTHLY_REPORT, FAMILY_LABELS[FAMILY_MONTHLY_REPORT]),
+            (FAMILY_ALARM_EVENT, FAMILY_LABELS[FAMILY_ALARM_EVENT]),
+        )
+        if not root_text:
+            return {
+                "status": "misconfigured",
+                "status_text": "共享目录未配置",
+                "tone": "danger",
+                "message": "当前角色尚未配置共享目录，无法执行自检。",
+                "role_mode": self.role_mode,
+                "role_label": role_label,
+                "root_dir": "",
+                "db_path": "",
+                "checked_at": _now_text(),
+                "enabled_buildings": self.get_source_cache_buildings(),
+                "directories": [],
+                "families": [],
+                "summary": {
+                    "ready_entry_count": 0,
+                    "accessible_ready_count": 0,
+                    "missing_ready_count": 0,
+                    "initialized_count": 0,
+                },
+                "error": "",
+            }
+
+        root_path = Path(root_text)
+        cache_paths = (
+            self._source_cache_service.get_required_directory_paths()
+            if self._source_cache_service is not None and hasattr(self._source_cache_service, "get_required_directory_paths")
+            else {}
+        )
+        path_specs = [
+            ("root_dir", "共享根目录", root_path, "directory"),
+            ("bridge_db", "共享桥接数据库", root_path / "bridge.db", "file"),
+            ("artifacts", "任务产物目录", root_path / "artifacts", "directory"),
+            ("logs", "桥接日志目录", root_path / "logs", "directory"),
+            ("tmp", "桥接临时目录", root_path / "tmp", "directory"),
+            (
+                FAMILY_HANDOVER_LOG,
+                FAMILY_LABELS[FAMILY_HANDOVER_LOG],
+                Path(str(cache_paths.get(FAMILY_HANDOVER_LOG, "") or (root_path / FAMILY_LABELS[FAMILY_HANDOVER_LOG]))),
+                "directory",
+            ),
+            (
+                FAMILY_HANDOVER_CAPACITY_REPORT,
+                FAMILY_LABELS[FAMILY_HANDOVER_CAPACITY_REPORT],
+                Path(str(cache_paths.get(FAMILY_HANDOVER_CAPACITY_REPORT, "") or (root_path / FAMILY_LABELS[FAMILY_HANDOVER_CAPACITY_REPORT]))),
+                "directory",
+            ),
+            (
+                FAMILY_MONTHLY_REPORT,
+                FAMILY_LABELS[FAMILY_MONTHLY_REPORT],
+                Path(str(cache_paths.get(FAMILY_MONTHLY_REPORT, "") or (root_path / FAMILY_LABELS[FAMILY_MONTHLY_REPORT]))),
+                "directory",
+            ),
+            (
+                FAMILY_ALARM_EVENT,
+                FAMILY_LABELS[FAMILY_ALARM_EVENT],
+                Path(str(cache_paths.get(FAMILY_ALARM_EVENT, "") or (root_path / FAMILY_LABELS[FAMILY_ALARM_EVENT]))),
+                "directory",
+            ),
+            (
+                "tmp_source_cache",
+                "共享缓存临时目录",
+                Path(str(cache_paths.get("tmp_source_cache", "") or (root_path / "tmp" / "source_cache"))),
+                "directory",
+            ),
+        ]
+
+        def _path_exists(path: Path, kind: str) -> bool:
+            try:
+                if kind == "file":
+                    return path.exists() and path.is_file()
+                return path.exists() and path.is_dir()
+            except OSError:
+                return False
+
+        before_exists = {key: _path_exists(path, kind) for key, _label, path, kind in path_specs}
+        init_error = ""
+        if initialize:
+            try:
+                if self._store is not None:
+                    self._store.ensure_ready()
+                else:
+                    root_path.mkdir(parents=True, exist_ok=True)
+                    for name in ("artifacts", "logs", "tmp"):
+                        (root_path / name).mkdir(parents=True, exist_ok=True)
+                if self._source_cache_service is not None and hasattr(self._source_cache_service, "ensure_required_directories"):
+                    self._source_cache_service.ensure_required_directories()
+            except Exception as exc:  # noqa: BLE001
+                init_error = str(exc)
+
+        directory_rows: List[Dict[str, Any]] = []
+        initialized_count = 0
+        for key, label, path, kind in path_specs:
+            exists = _path_exists(path, kind)
+            created_now = exists and not bool(before_exists.get(key, False))
+            if created_now:
+                initialized_count += 1
+            directory_rows.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "path": str(path),
+                    "kind": kind,
+                    "exists": exists,
+                    "created_now": created_now,
+                }
+            )
+
+        db_error = ""
+        if self._store is not None:
+            try:
+                self._store.ensure_ready()
+                self._store.get_task_counts()
+            except Exception as exc:  # noqa: BLE001
+                db_error = str(exc)
+
+        family_rows: List[Dict[str, Any]] = []
+        ready_entry_count = 0
+        accessible_ready_count = 0
+        missing_ready_count = 0
+        for family_key, family_label in families:
+            query_error = ""
+            entries: List[Dict[str, Any]] = []
+            if self._store is not None:
+                try:
+                    entries = self._store.list_source_cache_entries(
+                        source_family=family_key,
+                        status="ready",
+                        limit=max(1, int(ready_limit_per_family or 400)),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    query_error = str(exc)
+            family_ready = len(entries)
+            family_accessible = 0
+            family_missing = 0
+            sample_ready_path = ""
+            sample_missing_path = ""
+            latest_downloaded_at = ""
+            family_root = next((item["path"] for item in directory_rows if item["key"] == family_key), "")
+            for entry in entries:
+                downloaded_at = str(entry.get("downloaded_at", "") or "").strip()
+                if downloaded_at and downloaded_at > latest_downloaded_at:
+                    latest_downloaded_at = downloaded_at
+                relative_path = str(entry.get("relative_path", "") or "").strip()
+                resolved_path = root_path / relative_path if relative_path else None
+                if resolved_path is not None and is_accessible_cached_file_path(resolved_path):
+                    family_accessible += 1
+                    if not sample_ready_path:
+                        sample_ready_path = str(resolved_path)
+                else:
+                    family_missing += 1
+                    if not sample_missing_path:
+                        sample_missing_path = str(resolved_path) if resolved_path is not None else relative_path
+            ready_entry_count += family_ready
+            accessible_ready_count += family_accessible
+            missing_ready_count += family_missing
+            if query_error:
+                tone = "danger"
+                status_text = "查询失败"
+                summary_text = f"{family_label}状态读取失败：{query_error}"
+            elif family_ready <= 0:
+                tone = "neutral"
+                status_text = "无就绪记录"
+                summary_text = "当前还没有 ready 记录。"
+            elif family_missing <= 0:
+                tone = "success"
+                status_text = "记录与文件一致"
+                summary_text = "ready 记录对应文件当前角色均可访问。"
+            elif family_accessible <= 0:
+                tone = "danger"
+                status_text = "记录存在但文件不可见"
+                summary_text = "数据库有 ready 记录，但当前角色看不到对应文件。"
+            else:
+                tone = "warning"
+                status_text = "部分文件不可见"
+                summary_text = "部分 ready 记录对应文件当前角色不可访问。"
+            family_rows.append(
+                {
+                    "key": family_key,
+                    "title": family_label,
+                    "tone": tone,
+                    "status_text": status_text,
+                    "summary_text": summary_text,
+                    "path": family_root,
+                    "ready_entry_count": family_ready,
+                    "accessible_ready_count": family_accessible,
+                    "missing_ready_count": family_missing,
+                    "latest_downloaded_at": latest_downloaded_at,
+                    "sample_ready_path": sample_ready_path,
+                    "sample_missing_path": sample_missing_path,
+                    "query_error": query_error,
+                }
+            )
+
+        status = "success"
+        status_text = "共享目录自检完成"
+        tone = "success"
+        message = "必要目录已检查完成。"
+        if init_error or db_error:
+            status = "error"
+            status_text = "共享目录自检异常"
+            tone = "danger"
+            message = init_error or db_error
+        elif missing_ready_count > 0 and ready_entry_count > 0:
+            status = "warning"
+            status_text = "发现记录与文件不一致"
+            tone = "warning"
+            message = "存在 ready 记录，但当前角色无法访问其中部分文件。"
+        elif ready_entry_count <= 0:
+            status = "empty"
+            status_text = "已补齐必要目录"
+            tone = "neutral"
+            message = "必要目录已存在或已补齐，但当前还没有 ready 记录。"
+
+        return {
+            "status": status,
+            "status_text": status_text,
+            "tone": tone,
+            "message": message,
+            "role_mode": self.role_mode,
+            "role_label": role_label,
+            "root_dir": root_text,
+            "db_path": str(root_path / "bridge.db"),
+            "checked_at": _now_text(),
+            "enabled_buildings": self.get_source_cache_buildings(),
+            "directories": directory_rows,
+            "families": family_rows,
+            "summary": {
+                "ready_entry_count": ready_entry_count,
+                "accessible_ready_count": accessible_ready_count,
+                "missing_ready_count": missing_ready_count,
+                "initialized_count": initialized_count,
+            },
+            "error": init_error or db_error,
+        }
 
     @staticmethod
     def _normalize_issue_summary(value: Any) -> str:

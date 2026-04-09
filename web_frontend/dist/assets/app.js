@@ -8,6 +8,7 @@ import { registerAppLifecycle } from "./app_lifecycle.js";
 import { APP_TEMPLATE } from "./app_template.js";
 import { isHandoverReviewPath, mountHandoverReviewApp } from "./handover_review_app.js";
 import { clone, expandDateRange, todayText } from "./config_helpers.js";
+import { buildSharedBridgeSelfCheckOverview } from "./shared_bridge_diagnostics_vm.js";
 
 const { createApp, onMounted, onBeforeUnmount, computed, watch, ref, nextTick } = Vue;
 const HANDOVER_DUTY_CONTEXT_STORAGE_KEY = "handover_duty_context";
@@ -481,6 +482,7 @@ createApp({
     const updaterUiOverlayStage = ref("");
     const updaterUiOverlayKicker = ref("");
     const dashboardSchedulerOverviewFocusKey = ref("");
+    const sharedBridgeSelfCheckResult = ref(null);
     let dashboardSchedulerOverviewFocusTimer = null;
     const updaterAwaitingRestartRecovery = ref(false);
     const startupRoleSelectorVisible = ref(false);
@@ -562,6 +564,7 @@ createApp({
     const actionKeySourceCacheDeleteAlarmManual = "bridge:source_cache_delete_alarm_manual";
     const actionKeySourceCacheUploadAlarmFull = "bridge:source_cache_upload_alarm_full";
     const actionKeySourceCacheUploadAlarmBuildingPrefix = "bridge:source_cache_upload_alarm_building:";
+    const actionKeySharedBridgeSelfCheck = "bridge:shared_root_self_check";
     const actionKeyHandoverConfirmAll = "handover_review:confirm_all";
     const actionKeyHandoverCloudRetryAll = "handover_review:cloud_retry_all";
     const actionKeyHandoverFollowupContinue = "job:handover_followup_continue";
@@ -3363,6 +3366,7 @@ createApp({
       dayMetricLocalBuilding,
       dayMetricLocalDate,
       dayMetricLocalFile,
+      sharedBridgeSelfCheckResult,
       streamController,
       fetchHealth,
       fetchJobs,
@@ -3397,6 +3401,7 @@ createApp({
       startAlarmEventUploadScheduler,
       stopAlarmEventUploadScheduler,
       saveAlarmEventUploadSchedulerQuickConfig: saveAlarmEventUploadSchedulerQuickConfigImmediate,
+      runSharedBridgeSelfCheck,
       startMonthlyEventReportScheduler,
       stopMonthlyEventReportScheduler,
       saveMonthlyEventReportSchedulerQuickConfig: saveMonthlyEventReportSchedulerQuickConfigImmediate,
@@ -3429,6 +3434,13 @@ createApp({
       runSchedulerConfigAutoSave(saveMonthlyEventReportSchedulerQuickConfigImmediate);
     const saveMonthlyChangeReportSchedulerQuickConfig = () =>
       runSchedulerConfigAutoSave(saveMonthlyChangeReportSchedulerQuickConfigImmediate);
+    const sharedBridgeSelfCheckOverview = computed(() =>
+      buildSharedBridgeSelfCheckOverview(
+        sharedBridgeSelfCheckResult.value,
+        health.shared_bridge || {},
+        health.deployment || {},
+      ),
+    );
 
     const realStreamController = createLogStreamController({
       appendLog,
@@ -3514,6 +3526,7 @@ createApp({
       moduleMeta,
       schedulerOverviewItems,
       schedulerOverviewSummary,
+      sharedBridgeSelfCheckOverview,
       dashboardSchedulerOverviewFocusKey,
       isStatusView,
       isDashboardView,
@@ -3941,6 +3954,8 @@ createApp({
       externalAlarmUploadBuilding,
       isSourceCacheUploadAlarmSelectedLocked,
       externalAlarmUploadActionButtonText,
+      actionKeySharedBridgeSelfCheck,
+      runSharedBridgeSelfCheck,
       uploadSelectedAlarmSourceCache,
       externalAlarmReadinessFamily,
       externalAlarmUploadStatus,

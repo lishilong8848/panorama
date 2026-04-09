@@ -68,6 +68,43 @@ class _FakeBridgeService:
             "deleted_count": 3,
             "deleted_buildings": ["A楼", "B楼", "C楼"],
         }
+        self.shared_root_self_check_result = {
+            "status": "warning",
+            "status_text": "发现记录与文件不一致",
+            "tone": "warning",
+            "message": "存在 ready 记录，但当前角色无法访问其中部分文件。",
+            "role_mode": "external",
+            "role_label": "外网端",
+            "root_dir": "Z:/share",
+            "db_path": "Z:/share/bridge.db",
+            "checked_at": "2026-04-09 12:00:00",
+            "enabled_buildings": ["A楼", "B楼"],
+            "directories": [],
+            "families": [
+                {
+                    "key": "handover_log_family",
+                    "title": "交接班日志源文件",
+                    "tone": "danger",
+                    "status_text": "记录存在但文件不可见",
+                    "summary_text": "数据库有 ready 记录，但当前角色看不到对应文件。",
+                    "path": "Z:/share/交接班日志源文件",
+                    "ready_entry_count": 2,
+                    "accessible_ready_count": 0,
+                    "missing_ready_count": 2,
+                    "latest_downloaded_at": "2026-04-09 11:58:00",
+                    "sample_ready_path": "",
+                    "sample_missing_path": "Z:/share/交接班日志源文件/202604/...",
+                    "query_error": "",
+                }
+            ],
+            "summary": {
+                "ready_entry_count": 2,
+                "accessible_ready_count": 0,
+                "missing_ready_count": 2,
+                "initialized_count": 1,
+            },
+            "error": "",
+        }
     def list_tasks(self, limit: int = 100):  # noqa: ANN001
         return [
             {
@@ -120,6 +157,13 @@ class _FakeBridgeService:
             "uploaded_record_count": 24,
             "consumed_count": 0,
             "failed_entries": [],
+        }
+
+    def diagnose_shared_root(self, *, initialize: bool = True, ready_limit_per_family: int = 400):
+        return {
+            **self.shared_root_self_check_result,
+            "initialize": initialize,
+            "ready_limit_per_family": ready_limit_per_family,
         }
 
 
@@ -192,6 +236,18 @@ def test_bridge_health_returns_snapshots() -> None:
     assert response["ok"] is True
     assert response["deployment"]["role_mode"] == "external"
     assert response["shared_bridge"]["root_dir"] == "D:/QJPT_Shared"
+
+
+def test_bridge_shared_root_self_check_returns_diagnostics() -> None:
+    request = _fake_request(_FakeBridgeService())
+
+    response = routes.bridge_shared_root_self_check(request)
+
+    assert response["ok"] is True
+    assert response["status_text"] == "发现记录与文件不一致"
+    assert response["root_dir"] == "Z:/share"
+    assert response["summary"]["missing_ready_count"] == 2
+    assert response["families"][0]["title"] == "交接班日志源文件"
 
 
 def test_bridge_tasks_returns_list() -> None:
