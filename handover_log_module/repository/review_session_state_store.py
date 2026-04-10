@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator
@@ -67,31 +67,34 @@ class ReviewSessionStateStore:
         self.busy_timeout_ms = max(1000, int(busy_timeout_ms or 30000))
         self._ready = False
         self._ready_lock = threading.Lock()
+        self._write_lock = threading.Lock()
 
     @contextmanager
     def connect(self, *, read_only: bool = False) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=self.busy_timeout_ms / 1000.0,
-            check_same_thread=False,
-        )
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
-            conn.execute("PRAGMA foreign_keys=ON")
-            if read_only:
-                conn.execute("PRAGMA query_only=ON")
-            yield conn
-            if not read_only and conn.in_transaction:
-                conn.commit()
-        except Exception:
-            if conn.in_transaction:
-                conn.rollback()
-            raise
-        finally:
-            conn.close()
+        lock_context = nullcontext() if read_only else self._write_lock
+        with lock_context:
+            conn = sqlite3.connect(
+                str(self.db_path),
+                timeout=self.busy_timeout_ms / 1000.0,
+                check_same_thread=False,
+            )
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
+                conn.execute("PRAGMA foreign_keys=ON")
+                if read_only:
+                    conn.execute("PRAGMA query_only=ON")
+                yield conn
+                if not read_only and conn.in_transaction:
+                    conn.commit()
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
+            finally:
+                conn.close()
 
     def ensure_ready(self) -> None:
         if self._ready:

@@ -10,11 +10,20 @@ from app.modules.report_pipeline.api import routes
 
 
 class _FakeJob:
-    def __init__(self, job_id: str) -> None:
+    def __init__(self, job_id: str, *, status: str = "queued", summary: str = "ok", wait_reason: str = "", bridge_task_id: str = "") -> None:
         self.job_id = job_id
+        self.status = status
+        self.summary = summary
+        self.wait_reason = wait_reason
+        self.bridge_task_id = bridge_task_id
 
     def to_dict(self) -> dict:
-        return {"job_id": self.job_id, "status": "queued", "summary": "ok"}
+        payload = {"job_id": self.job_id, "status": self.status, "summary": self.summary}
+        if self.wait_reason:
+            payload["wait_reason"] = self.wait_reason
+        if self.bridge_task_id:
+            payload["bridge_task_id"] = self.bridge_task_id
+        return payload
 
 
 def _touch_file(path: Path) -> Path:
@@ -128,10 +137,30 @@ class _FakeJobService:
     def __init__(self) -> None:
         self.start_job_calls = []
         self.worker_calls = []
+        self.waiting_calls = []
+        self.bind_calls = []
+        self.last_waiting_job = None
 
     def start_worker_job(self, *args, **kwargs):  # noqa: ANN002, ANN003
         self.worker_calls.append((args, kwargs))
         raise AssertionError("external cache mode should not start local worker job")
+
+    def create_waiting_worker_job(self, **kwargs):  # noqa: ANN003
+        self.waiting_calls.append(dict(kwargs))
+        job = _FakeJob(
+            f"job-waiting-{len(self.waiting_calls)}",
+            status="waiting_resource",
+            summary=str(kwargs.get("summary", "") or "").strip(),
+            wait_reason=str(kwargs.get("wait_reason", "") or "").strip(),
+        )
+        self.last_waiting_job = job
+        return job
+
+    def bind_bridge_task(self, job_id: str, bridge_task_id: str):
+        self.bind_calls.append((job_id, bridge_task_id))
+        if self.last_waiting_job and self.last_waiting_job.job_id == job_id:
+            self.last_waiting_job.bridge_task_id = bridge_task_id
+        return self.last_waiting_job
 
     def start_job(self, **kwargs):  # noqa: ANN003
         self.start_job_calls.append(dict(kwargs))
@@ -198,7 +227,9 @@ def test_auto_once_route_waits_when_indexed_file_is_missing() -> None:
 
     assert response["accepted"] is True
     assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
-    assert response["job"]["kind"] == "bridge"
+    assert response["job"]["status"] == "waiting_resource"
+    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert response["job"]["bridge_task_id"] == "bridge-monthly-auto-once-1"
 
 
 def test_auto_once_route_waits_when_indexed_file_is_inaccessible(monkeypatch) -> None:
@@ -354,8 +385,13 @@ def test_multi_date_route_creates_cache_fill_task_when_missing() -> None:
     assert response["ok"] is True
     assert response["accepted"] is True
     assert response["bridge_task"]["task_id"] == "bridge-monthly-cache-fill-1"
-    assert response["job"]["kind"] == "bridge"
-    assert ("create_monthly_cache_fill_task", {"selected_dates": ["2026-03-20", "2026-03-21"], "requested_by": "manual"}) in request.app.state.container.shared_bridge_service.calls
+    assert response["job"]["status"] == "waiting_resource"
+    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert response["job"]["bridge_task_id"] == "bridge-monthly-cache-fill-1"
+    assert (
+        "create_monthly_cache_fill_task",
+        {"selected_dates": ["2026-03-20", "2026-03-21"], "resume_job_id": "job-waiting-1", "requested_by": "manual"},
+    ) in request.app.state.container.shared_bridge_service.calls
 
 
 def test_multi_date_route_starts_from_shared_cache_when_ready() -> None:
@@ -381,12 +417,17 @@ def test_resume_routes_use_bridge_on_external_role() -> None:
     assert pending["count"] == 1
     assert submit["accepted"] is True
     assert submit["bridge_task"]["task_id"] == "bridge-monthly-resume-1"
-    assert submit["job"]["kind"] == "bridge"
+    assert submit["job"]["status"] == "waiting_resource"
+    assert submit["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert submit["job"]["bridge_task_id"] == "bridge-monthly-resume-1"
     assert deleted["ok"] is True
     assert deleted["deleted"] is True
     calls = request.app.state.container.shared_bridge_service.calls
     assert ("list_pending", {}) in calls
-    assert ("resume_upload", {"run_id": "run-1", "auto_trigger": False, "requested_by": "manual"}) in calls
+    assert (
+        "resume_upload",
+        {"run_id": "run-1", "auto_trigger": False, "resume_job_id": "job-waiting-1", "requested_by": "manual"},
+    ) in calls
     assert ("delete_run", {"run_id": "run-1"}) in calls
 
 

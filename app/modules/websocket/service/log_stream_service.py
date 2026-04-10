@@ -4,6 +4,8 @@ import asyncio
 import json
 from typing import AsyncIterator
 
+from app.modules.report_pipeline.service.job_service import TaskEngineUnavailableError
+
 
 _TERMINAL_JOB_STATUSES = {
     "success",
@@ -27,7 +29,18 @@ class LogStreamService:
     async def stream(self, job_id: str, *, last_event_id: int = 0) -> AsyncIterator[str]:
         cursor = max(0, int(last_event_id or 0))
         while True:
-            payload = self.job_service.get_logs(job_id, after_event_id=cursor, limit=1000)
+            try:
+                payload = self.job_service.get_logs(job_id, after_event_id=cursor, limit=1000)
+            except KeyError:
+                error_id = max(cursor, 1)
+                yield _sse(error_id, "error", {"job_id": job_id, "message": "任务不存在或已清理"})
+                yield _sse(error_id, "done", {"job_id": job_id, "status": "missing", "last_event_id": error_id})
+                break
+            except TaskEngineUnavailableError as exc:
+                error_id = max(cursor, 1)
+                yield _sse(error_id, "error", {"job_id": job_id, "message": str(exc)})
+                yield _sse(error_id, "done", {"job_id": job_id, "status": "unavailable", "last_event_id": error_id})
+                break
             events = list(payload.get("events") or [])
             for item in events:
                 event_id = int(item.get("event_id") or 0)

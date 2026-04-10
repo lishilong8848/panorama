@@ -185,6 +185,13 @@ def handle_multi_date(
     notify = WebhookNotifyService(config)
     selected_dates = [str(item or "").strip() for item in list(payload.get("selected_dates") or []) if str(item or "").strip()]
     try:
+        if str(payload.get("resume_kind", "") or "").strip() == "shared_bridge_monthly_multi_date":
+            return run_monthly_from_file_items(
+                config,
+                file_items=list(payload.get("file_items") or []),
+                emit_log=emit_log,
+                source_label=str(payload.get("source_label", "") or "月报历史共享文件").strip() or "月报历史共享文件",
+            )
         orchestrator = OrchestratorService(config)
         return orchestrator.run_multi_date(selected_dates, emit_log)
     except Exception as exc:  # noqa: BLE001

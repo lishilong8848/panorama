@@ -36,17 +36,29 @@ def _touch_file(path: Path) -> str:
 
 
 class _FakeJob:
-    def __init__(self, job_id: str) -> None:
+    def __init__(self, job_id: str, *, status: str = "queued", summary: str = "ok", wait_reason: str = "", bridge_task_id: str = "") -> None:
         self.job_id = job_id
+        self.status = status
+        self.summary = summary
+        self.wait_reason = wait_reason
+        self.bridge_task_id = bridge_task_id
 
     def to_dict(self) -> dict:
-        return {"job_id": self.job_id, "status": "queued", "summary": "ok"}
+        payload = {"job_id": self.job_id, "status": self.status, "summary": self.summary}
+        if self.wait_reason:
+            payload["wait_reason"] = self.wait_reason
+        if self.bridge_task_id:
+            payload["bridge_task_id"] = self.bridge_task_id
+        return payload
 
 
 class _FakeJobService:
     def __init__(self) -> None:
         self.start_job_calls: list[dict] = []
         self.worker_calls: list[dict] = []
+        self.waiting_calls: list[dict] = []
+        self.bind_calls: list[tuple[str, str]] = []
+        self.last_waiting_job: _FakeJob | None = None
 
     def active_job_id(self):
         return ""
@@ -58,6 +70,23 @@ class _FakeJobService:
     def start_worker_job(self, **kwargs):  # noqa: ANN003
         self.worker_calls.append(dict(kwargs))
         raise AssertionError("smoke matrix external path should not start local worker job")
+
+    def create_waiting_worker_job(self, **kwargs):  # noqa: ANN003
+        self.waiting_calls.append(dict(kwargs))
+        job = _FakeJob(
+            f"job-waiting-{len(self.waiting_calls)}",
+            status="waiting_resource",
+            summary=str(kwargs.get("summary", "") or "").strip(),
+            wait_reason=str(kwargs.get("wait_reason", "") or "").strip(),
+        )
+        self.last_waiting_job = job
+        return job
+
+    def bind_bridge_task(self, job_id: str, bridge_task_id: str):
+        self.bind_calls.append((job_id, bridge_task_id))
+        if self.last_waiting_job and self.last_waiting_job.job_id == job_id:
+            self.last_waiting_job.bridge_task_id = bridge_task_id
+        return self.last_waiting_job
 
     def wait_job(self, _job_id):  # noqa: ANN001
         raise AssertionError("smoke matrix should not synchronously wait jobs")
@@ -103,6 +132,10 @@ class _FakeBridgeService:
     def create_handover_cache_fill_task(self, **kwargs):  # noqa: ANN003
         self.calls.append(("create_handover_cache_fill_task", dict(kwargs)))
         return {"task_id": "bridge-handover-cache-fill-1", "feature": "handover_cache_fill", "status": "queued_for_internal"}
+
+    def create_day_metric_from_download_task(self, **kwargs):  # noqa: ANN003
+        self.calls.append(("create_day_metric_from_download_task", dict(kwargs)))
+        return {"task_id": "bridge-day-metric-from-download-1", "feature": "day_metric_from_download", "status": "queued_for_internal"}
 
 
 class _FakeContainer(SimpleNamespace):
@@ -229,6 +262,8 @@ def test_smoke_monthly_latest_too_old_creates_bridge_task(work_dir: Path) -> Non
 
     assert response["accepted"] is True
     assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
+    assert response["job"]["status"] == "waiting_resource"
+    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
     assert request.app.state.container.job_service.start_job_calls == []
 
 
@@ -251,6 +286,7 @@ def test_smoke_handover_latest_missing_creates_bridge_task(work_dir: Path) -> No
 
     assert response["accepted"] is True
     assert response["bridge_task"]["task_id"] == "bridge-handover-latest-1"
+    assert response["job"]["status"] == "waiting_resource"
 
 
 def test_smoke_day_metric_by_date_missing_creates_cache_fill_task(work_dir: Path) -> None:
@@ -263,7 +299,8 @@ def test_smoke_day_metric_by_date_missing_creates_cache_fill_task(work_dir: Path
     )
 
     assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-handover-cache-fill-1"
+    assert response["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
+    assert response["job"]["status"] == "waiting_resource"
 
 
 def test_smoke_day_metric_by_date_ready_continues_locally(work_dir: Path) -> None:

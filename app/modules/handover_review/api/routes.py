@@ -25,10 +25,58 @@ from handover_log_module.service.review_session_service import (
     ReviewSessionConflictError,
     ReviewSessionNotFoundError,
     ReviewSessionService,
+    ReviewSessionStoreUnavailableError,
 )
 
 
 router = APIRouter(tags=["handover_review"])
+
+
+def _raise_review_store_http_error(
+    exc: ReviewSessionStoreUnavailableError,
+    *,
+    saved_document: bool = False,
+) -> None:
+    detail = str(exc or "").strip() or "审核状态存储暂时不可用，请稍后重试"
+    if saved_document:
+        detail = f"当前文件已保存，但{detail}"
+    raise HTTPException(status_code=503, detail=detail) from exc
+
+
+def _empty_concurrency(current_revision: int = 0) -> Dict[str, Any]:
+    return {
+        "current_revision": int(current_revision or 0),
+        "active_editor": None,
+        "lease_expires_at": "",
+        "is_editing_elsewhere": False,
+        "client_holds_lock": False,
+    }
+
+
+def _get_session_concurrency_safe(
+    service: ReviewSessionService,
+    *,
+    building: str,
+    session_id: str,
+    client_id: str = "",
+    current_revision: int = 0,
+    emit_log=None,
+) -> Dict[str, Any]:
+    getter = getattr(service, "get_session_concurrency", None)
+    if not callable(getter):
+        return _empty_concurrency(current_revision=current_revision)
+    try:
+        return getter(
+            building=building,
+            session_id=session_id,
+            client_id=client_id,
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        if callable(emit_log):
+            emit_log(
+                f"[交接班][审核并发] 已降级: building={building}, session_id={session_id}, 错误={exc}"
+            )
+        return _empty_concurrency(current_revision=current_revision)
 
 
 def _handover_cfg(container) -> Dict[str, Any]:
@@ -406,7 +454,10 @@ def _resolve_building_or_404(service: ReviewSessionService, building_code: str) 
 
 
 def _load_latest_session_or_404(service: ReviewSessionService, building: str) -> Dict[str, Any]:
-    session = service.get_latest_session(building)
+    try:
+        session = service.get_latest_session(building)
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
     if not isinstance(session, dict):
         raise HTTPException(status_code=404, detail="暂无可审核交接班文件")
     output_file = Path(str(session.get("output_file", "")).strip())
@@ -432,14 +483,17 @@ def _load_target_session_or_404(
     session_id: str = "",
 ) -> Dict[str, Any]:
     session_id_text = str(session_id or "").strip()
-    if session_id_text:
-        session = service.get_session_by_id(session_id_text)
-    else:
-        duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
-        if duty_date_text and duty_shift_text:
-            session = service.get_session_for_building_duty(building, duty_date_text, duty_shift_text)
+    try:
+        if session_id_text:
+            session = service.get_session_by_id(session_id_text)
         else:
-            session = service.get_latest_session(building)
+            duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
+            if duty_date_text and duty_shift_text:
+                session = service.get_session_for_building_duty(building, duty_date_text, duty_shift_text)
+            else:
+                session = service.get_latest_session(building)
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
     if not isinstance(session, dict):
         raise HTTPException(status_code=404, detail="暂无可审核交接班文件")
     if str(session.get("building", "")).strip() != str(building or "").strip():
@@ -584,7 +638,10 @@ def _build_history_payload_safe(
 
 
 def _ensure_latest_session_actionable_or_400(service: ReviewSessionService, *, building: str, session_id: str) -> None:
-    latest_session_id = service.get_latest_session_id(building)
+    try:
+        latest_session_id = service.get_latest_session_id(building)
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
     if not latest_session_id:
         raise HTTPException(status_code=404, detail="暂无可审核交接班文件")
     if str(session_id or "").strip() != latest_session_id:
@@ -615,7 +672,11 @@ def handover_review_page(building_code: str, request: Request):
 def handover_review_batch_status(batch_key: str, request: Request) -> Dict[str, Any]:
     container = request.app.state.container
     service, _, _, followup = _build_review_services(container)
-    return {"ok": True, **_attach_followup_progress(followup, service.get_batch_status(batch_key))}
+    try:
+        batch_status = service.get_batch_status(batch_key)
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    return {"ok": True, **_attach_followup_progress(followup, batch_status)}
 
 
 @router.post("/api/handover/review/batch/{batch_key}/confirm-all")
@@ -1132,7 +1193,10 @@ def handover_review_data(
         session_id=session_id,
     )
     document = parser.parse(session["output_file"])
-    batch_status = service.get_batch_status(session["batch_key"])
+    try:
+        batch_status = service.get_batch_status(session["batch_key"])
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
     review_ui = parser.config.get("review_ui", {}) if isinstance(parser.config, dict) else {}
     return {
         "ok": True,
@@ -1140,10 +1204,13 @@ def handover_review_data(
         "session": session,
         "document": document,
         "batch_status": batch_status,
-        "concurrency": service.get_session_concurrency(
+        "concurrency": _get_session_concurrency_safe(
+            service,
             building=building,
             session_id=str(session.get("session_id", "")).strip(),
             client_id=str(client_id or "").strip(),
+            current_revision=int(session.get("revision", 0) or 0),
+            emit_log=container.add_system_log,
         ),
         "review_ui": review_ui if isinstance(review_ui, dict) else {},
         "history": _build_history_payload_safe(
@@ -1234,7 +1301,10 @@ def handover_review_save(
         resource_keys=_handover_resource_keys(batch_key=batch_key),
     ):
         writer.write(output_file=target["output_file"], document=document)
-        latest_session_id = service.get_latest_session_id(building)
+        try:
+            latest_session_id = service.get_latest_session_id(building)
+        except ReviewSessionStoreUnavailableError as exc:
+            _raise_review_store_http_error(exc, saved_document=True)
         is_latest_session = bool(latest_session_id and latest_session_id == session_id)
         persisted_defaults = None
         if is_latest_session:
@@ -1265,6 +1335,8 @@ def handover_review_save(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ReviewSessionStoreUnavailableError as exc:
+            _raise_review_store_http_error(exc, saved_document=True)
 
     if is_latest_session:
         container.add_system_log(
@@ -1289,10 +1361,13 @@ def handover_review_save(
         "revision": int(session.get("revision", 0) or 0),
         "updated_at": str(session.get("updated_at", "")).strip(),
         "output_file": str(session.get("output_file", "")).strip(),
-        "concurrency": service.get_session_concurrency(
+        "concurrency": _get_session_concurrency_safe(
+            service,
             building=building,
             session_id=str(session.get("session_id", "")).strip(),
             client_id=str(payload.get("client_id", "")).strip(),
+            current_revision=int(session.get("revision", 0) or 0),
+            emit_log=container.add_system_log,
         ),
         "batch_status": batch_status,
         "history": _build_history_payload_safe(
@@ -1336,6 +1411,8 @@ def handover_review_confirm(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ReviewSessionStoreUnavailableError as exc:
+            _raise_review_store_http_error(exc)
 
         container.add_system_log(
             f"[交接班][审核确认] building={building}, batch={session.get('batch_key', '-')}"
@@ -1360,10 +1437,13 @@ def handover_review_confirm(
         return {
             "ok": True,
             "session": latest_session,
-            "concurrency": service.get_session_concurrency(
+            "concurrency": _get_session_concurrency_safe(
+                service,
                 building=building,
                 session_id=str(latest_session.get("session_id", "")).strip(),
                 client_id=str(payload.get("client_id", "")).strip(),
+                current_revision=int(latest_session.get("revision", 0) or 0),
+                emit_log=container.add_system_log,
             ),
             "batch_status": latest_batch_status or _attach_followup_progress(followup, batch_status),
             "followup_result": followup_result,
@@ -1408,16 +1488,21 @@ def handover_review_unconfirm(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ReviewSessionStoreUnavailableError as exc:
+            _raise_review_store_http_error(exc)
         container.add_system_log(
             f"[交接班][审核撤销] building={building}, batch={session.get('batch_key', '-')}"
         )
         return {
             "ok": True,
             "session": session,
-            "concurrency": service.get_session_concurrency(
+            "concurrency": _get_session_concurrency_safe(
+                service,
                 building=building,
                 session_id=str(session.get("session_id", "")).strip(),
                 client_id=str(payload.get("client_id", "")).strip(),
+                current_revision=int(session.get("revision", 0) or 0),
+                emit_log=container.add_system_log,
             ),
             "batch_status": batch_status,
             "history": _build_history_payload_safe(
@@ -1446,12 +1531,15 @@ def handover_review_lock_claim(
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id 不能为空")
     _load_target_session_or_404(service, building=building, session_id=session_id)
-    concurrency = service.claim_session_lock(
-        building=building,
-        session_id=session_id,
-        client_id=client_id,
-        holder_label=holder_label,
-    )
+    try:
+        concurrency = service.claim_session_lock(
+            building=building,
+            session_id=session_id,
+            client_id=client_id,
+            holder_label=holder_label,
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
     return {"ok": True, "concurrency": concurrency, "accepted": bool(concurrency.get("acquired", False))}
 
 
@@ -1471,11 +1559,14 @@ def handover_review_lock_heartbeat(
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id 不能为空")
     _load_target_session_or_404(service, building=building, session_id=session_id)
-    concurrency = service.heartbeat_session_lock(
-        building=building,
-        session_id=session_id,
-        client_id=client_id,
-    )
+    try:
+        concurrency = service.heartbeat_session_lock(
+            building=building,
+            session_id=session_id,
+            client_id=client_id,
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
     return {"ok": True, "concurrency": concurrency, "accepted": bool(concurrency.get("renewed", False))}
 
 
@@ -1492,11 +1583,14 @@ def handover_review_lock_release(
     client_id = str(payload.get("client_id", "")).strip()
     if not session_id or not client_id:
         return {"ok": True, "concurrency": {"current_revision": 0, "active_editor": None, "lease_expires_at": "", "is_editing_elsewhere": False, "client_holds_lock": False}, "released": False}
-    concurrency = service.release_session_lock(
-        building=building,
-        session_id=session_id,
-        client_id=client_id,
-    )
+    try:
+        concurrency = service.release_session_lock(
+            building=building,
+            session_id=session_id,
+            client_id=client_id,
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
     return {"ok": True, "concurrency": concurrency, "released": bool(concurrency.get("released", False))}
 
 

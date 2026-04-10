@@ -3,6 +3,7 @@
 import asyncio
 
 from app.modules.websocket.service.log_stream_service import LogStreamService, SystemLogStreamService
+from app.modules.report_pipeline.service.job_service import TaskEngineUnavailableError
 
 
 class _FakeJobService:
@@ -101,6 +102,20 @@ def test_job_log_stream_emits_done_for_interrupted_status() -> None:
     joined = "".join(chunks)
     assert "event: done" in joined
     assert '"status": "interrupted"' in joined or '"status":"interrupted"' in joined
+
+
+def test_job_log_stream_emits_error_when_task_engine_temporarily_unavailable() -> None:
+    class _UnavailableJobService:
+        def get_logs(self, job_id: str, offset: int = 0, *, after_event_id: int | None = None, limit: int = 1000):  # noqa: ANN001
+            raise TaskEngineUnavailableError("任务状态存储暂时不可用，请稍后重试")
+
+    service = LogStreamService(_UnavailableJobService())
+    chunks = _consume_stream(service.stream("job-unavailable", last_event_id=0))
+    joined = "".join(chunks)
+    assert "event: error" in joined
+    assert "任务状态存储暂时不可用" in joined
+    assert "event: done" in joined
+    assert '"status": "unavailable"' in joined or '"status":"unavailable"' in joined
 
 
 def test_system_log_stream_replays_from_last_event_id() -> None:

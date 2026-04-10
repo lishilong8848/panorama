@@ -115,6 +115,10 @@ def _bridge_store_read_is_recoverable(service: Any, exc: Exception) -> bool:
     return bool(callable(checker) and checker(exc))
 
 
+def _raise_bridge_store_http_error(exc: Exception) -> None:
+    raise HTTPException(status_code=503, detail=_bridge_text(exc) or "共享桥接数据库暂时不可用，请稍后重试") from exc
+
+
 def _bridge_feature_label(feature: Any) -> str:
     normalized = str(feature or "").strip().lower()
     return _BRIDGE_FEATURE_LABELS.get(normalized, str(feature or "").strip() or "-")
@@ -672,7 +676,13 @@ def bridge_task_cancel(task_id: str, request: Request) -> Dict[str, Any]:
     _ensure_bridge_write_allowed(request)
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
-    if not service or not service.cancel_task(task_id):
+    try:
+        cancelled = bool(service and service.cancel_task(task_id))
+    except Exception as exc:  # noqa: BLE001
+        if not service or not _bridge_store_read_is_recoverable(service, exc):
+            raise
+        _raise_bridge_store_http_error(exc)
+    if not cancelled:
         raise HTTPException(status_code=404, detail="共享任务不存在")
     return {"ok": True}
 
@@ -682,6 +692,12 @@ def bridge_task_retry(task_id: str, request: Request) -> Dict[str, Any]:
     _ensure_bridge_write_allowed(request)
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
-    if not service or not service.retry_task(task_id):
+    try:
+        retried = bool(service and service.retry_task(task_id))
+    except Exception as exc:  # noqa: BLE001
+        if not service or not _bridge_store_read_is_recoverable(service, exc):
+            raise
+        _raise_bridge_store_http_error(exc)
+    if not retried:
         raise HTTPException(status_code=404, detail="共享任务不存在")
     return {"ok": True}

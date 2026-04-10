@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from app.modules.report_pipeline.service.job_service import TaskEngineUnavailableError
 from app.modules.websocket.service.log_stream_service import LogStreamService, SystemLogStreamService
 
 
@@ -16,6 +17,8 @@ async def job_logs(request: Request, job_id: str) -> StreamingResponse:
         container.job_service.get_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TaskEngineUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     service = LogStreamService(container.job_service)
     last_event_id = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id") or "0"

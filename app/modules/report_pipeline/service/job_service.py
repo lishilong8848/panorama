@@ -5,6 +5,7 @@ import io
 import json
 import os
 import signal
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -23,6 +24,33 @@ from app.modules.report_pipeline.service.task_engine_store import TaskEngineStor
 
 class JobBusyError(RuntimeError):
     pass
+
+
+class TaskEngineUnavailableError(RuntimeError):
+    pass
+
+
+def _is_recoverable_task_engine_error(exc: Exception) -> bool:
+    if isinstance(exc, TaskEngineUnavailableError):
+        return True
+    if isinstance(exc, PermissionError):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    tokens = (
+        "database is locked",
+        "database table is locked",
+        "database is busy",
+        "busy",
+        "unable to open database file",
+        "disk i/o error",
+        "readonly database",
+        "cannot operate on a closed database",
+        "permission denied",
+        "winerror 5",
+    )
+    if isinstance(exc, sqlite3.Error):
+        return any(token in text for token in tokens)
+    return any(token in text for token in tokens)
 
 
 _INCOMPLETE_JOB_STATUSES = {"queued", "waiting_resource", "running"}
@@ -306,7 +334,18 @@ class JobService:
         self._maybe_cleanup_task_engine()
         if not self._task_engine_db:
             return {"write_queue_length": 0, "last_cleanup_at": "", "closed": True}
-        return self._task_engine_db.runtime_snapshot()
+        try:
+            return self._task_engine_db.runtime_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            if _is_recoverable_task_engine_error(exc):
+                return {
+                    "write_queue_length": 0,
+                    "last_cleanup_at": "",
+                    "closed": False,
+                    "degraded": True,
+                    "last_error": "任务状态存储暂时不可用，已降级为内存结果",
+                }
+            raise
 
     def _next_sequence(self) -> int:
         self._job_sequence += 1
@@ -2280,9 +2319,18 @@ class JobService:
 
     def get_job(self, job_id: str) -> Dict[str, Any]:
         if self._task_engine_db:
-            payload = self._task_engine_db.get_job(job_id)
-            if payload is not None:
-                return payload
+            try:
+                payload = self._task_engine_db.get_job(job_id)
+                if payload is not None:
+                    return payload
+            except Exception as exc:  # noqa: BLE001
+                if not _is_recoverable_task_engine_error(exc):
+                    raise
+                job = self.get_job_state(job_id)
+                if job is None:
+                    raise TaskEngineUnavailableError("任务状态存储暂时不可用，请稍后重试") from exc
+                with self._lock:
+                    return job.to_dict()
         job = self.get_job_state(job_id)
         if job is None:
             raise KeyError(f"任务不存在: {job_id}")
@@ -2291,7 +2339,11 @@ class JobService:
 
     def list_jobs(self, *, limit: int = 50, statuses: List[str] | tuple[str, ...] | None = None) -> List[Dict[str, Any]]:
         if self._task_engine_db:
-            return self._task_engine_db.list_jobs(limit=limit, statuses=statuses)
+            try:
+                return self._task_engine_db.list_jobs(limit=limit, statuses=statuses)
+            except Exception as exc:  # noqa: BLE001
+                if not _is_recoverable_task_engine_error(exc):
+                    raise
         normalized_statuses = {str(item or "").strip().lower() for item in (statuses or []) if str(item or "").strip()}
         with self._lock:
             items = list(self._ordered_jobs())
@@ -2302,7 +2354,11 @@ class JobService:
 
     def job_counts(self) -> Dict[str, int]:
         if self._task_engine_db:
-            return self._task_engine_db.job_counts()
+            try:
+                return self._task_engine_db.job_counts()
+            except Exception as exc:  # noqa: BLE001
+                if not _is_recoverable_task_engine_error(exc):
+                    raise
         with self._lock:
             counts: Dict[str, int] = {}
             for job in self._jobs.values():
@@ -2407,9 +2463,13 @@ class JobService:
         if has_live_jobs or callable(self._current_ssid_getter):
             return self._build_resource_snapshot_from_memory()
         if self._task_engine_db:
-            snapshot = self._task_engine_db.get_resource_snapshot()
-            if snapshot and (snapshot.get("resources") or snapshot.get("network")):
-                return snapshot
+            try:
+                snapshot = self._task_engine_db.get_resource_snapshot()
+                if snapshot and (snapshot.get("resources") or snapshot.get("network")):
+                    return snapshot
+            except Exception as exc:  # noqa: BLE001
+                if not _is_recoverable_task_engine_error(exc):
+                    raise
         return self._build_resource_snapshot_from_memory()
 
     def log(self, job_id: str, text: str) -> None:
@@ -2430,26 +2490,47 @@ class JobService:
 
     def get_logs(self, job_id: str, offset: int = 0, *, after_event_id: int | None = None, limit: int = 1000) -> Dict[str, Any]:
         if self._task_engine_db:
-            payload = self._task_engine_db.get_job(job_id)
-            if payload is None:
-                raise KeyError(f"任务不存在: {job_id}")
-            event_cursor = max(0, int(after_event_id or 0))
-            events = self._task_engine_db.list_job_events(job_id, after_event_id=event_cursor, limit=limit)
-            lines: List[str] = []
-            for item in events:
-                payload_item = dict(item.get("payload") or {})
-                line = str(payload_item.get("line", "") or payload_item.get("message", "") or "").strip()
-                if line:
-                    lines.append(line)
-            return {
-                "job_id": job_id,
-                "offset": max(0, int(offset or 0)),
-                "next_offset": max(0, int(offset or 0)) + len(lines),
-                "status": str(payload.get("status", "") or ""),
-                "lines": lines,
-                "events": events,
-                "last_event_id": int(payload.get("last_event_id") or 0),
-            }
+            try:
+                payload = self._task_engine_db.get_job(job_id)
+                if payload is None:
+                    raise KeyError(f"任务不存在: {job_id}")
+                event_cursor = max(0, int(after_event_id or 0))
+                events = self._task_engine_db.list_job_events(job_id, after_event_id=event_cursor, limit=limit)
+                lines: List[str] = []
+                for item in events:
+                    payload_item = dict(item.get("payload") or {})
+                    line = str(payload_item.get("line", "") or payload_item.get("message", "") or "").strip()
+                    if line:
+                        lines.append(line)
+                return {
+                    "job_id": job_id,
+                    "offset": max(0, int(offset or 0)),
+                    "next_offset": max(0, int(offset or 0)) + len(lines),
+                    "status": str(payload.get("status", "") or ""),
+                    "lines": lines,
+                    "events": events,
+                    "last_event_id": int(payload.get("last_event_id") or 0),
+                }
+            except KeyError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if not _is_recoverable_task_engine_error(exc):
+                    raise
+                with self._lock:
+                    job = self._jobs.get(job_id)
+                    if job is None:
+                        raise TaskEngineUnavailableError("任务状态存储暂时不可用，请稍后重试") from exc
+                    start = max(0, int(offset))
+                    lines = job.logs[start:]
+                    return {
+                        "job_id": job_id,
+                        "offset": start,
+                        "next_offset": start + len(lines),
+                        "status": job.status,
+                        "lines": list(lines),
+                        "events": [],
+                        "last_event_id": int(job.last_event_id or 0),
+                    }
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:

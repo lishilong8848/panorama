@@ -10,11 +10,20 @@ from app.modules.report_pipeline.api import routes
 
 
 class _FakeJob:
-    def __init__(self, job_id: str = "job-worker") -> None:
+    def __init__(self, job_id: str = "job-worker", *, status: str = "queued", summary: str = "ok", wait_reason: str = "", bridge_task_id: str = "") -> None:
         self.job_id = job_id
+        self.status = status
+        self.summary = summary
+        self.wait_reason = wait_reason
+        self.bridge_task_id = bridge_task_id
 
     def to_dict(self) -> dict:
-        return {"job_id": self.job_id, "status": "queued", "summary": "ok"}
+        payload = {"job_id": self.job_id, "status": self.status, "summary": self.summary}
+        if self.wait_reason:
+            payload["wait_reason"] = self.wait_reason
+        if self.bridge_task_id:
+            payload["bridge_task_id"] = self.bridge_task_id
+        return payload
 
 
 def _touch_file(path: Path) -> Path:
@@ -29,6 +38,9 @@ class _FakeJobService:
         self.start_job_calls = []
         self.cancel_calls = []
         self.retry_calls = []
+        self.waiting_calls = []
+        self.bind_calls = []
+        self.last_waiting_job = None
 
     def start_worker_job(self, name, *, worker_handler, worker_payload=None, **kwargs):  # noqa: ANN001
         self.worker_calls.append(
@@ -44,6 +56,26 @@ class _FakeJobService:
     def start_job(self, **kwargs):  # noqa: ANN003
         self.start_job_calls.append(dict(kwargs))
         return _FakeJob(f"job-cache-{len(self.start_job_calls)}")
+
+    def get_job(self, job_id):  # noqa: ANN001
+        return {"job_id": job_id, "status": "running", "wait_reason": "", "bridge_task_id": ""}
+
+    def create_waiting_worker_job(self, **kwargs):  # noqa: ANN003
+        self.waiting_calls.append(dict(kwargs))
+        job = _FakeJob(
+            f"job-waiting-{len(self.waiting_calls)}",
+            status="waiting_resource",
+            summary=str(kwargs.get("summary", "") or "").strip(),
+            wait_reason=str(kwargs.get("wait_reason", "") or "").strip(),
+        )
+        self.last_waiting_job = job
+        return job
+
+    def bind_bridge_task(self, job_id: str, bridge_task_id: str):
+        self.bind_calls.append((job_id, bridge_task_id))
+        if self.last_waiting_job and self.last_waiting_job.job_id == job_id:
+            self.last_waiting_job.bridge_task_id = bridge_task_id
+        return self.last_waiting_job
 
     def cancel_job(self, job_id):  # noqa: ANN001
         self.cancel_calls.append(job_id)
@@ -294,7 +326,23 @@ def test_handover_from_download_route_creates_cache_fill_on_external_role_for_hi
     assert response["ok"] is True
     assert response["accepted"] is True
     assert response["bridge_task"]["task_id"] == "bridge-cache-fill-1"
-    assert response["job"]["kind"] == "bridge"
+    assert response["job"]["status"] == "waiting_resource"
+    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert response["job"]["bridge_task_id"] == "bridge-cache-fill-1"
+    assert (
+        "create_handover_cache_fill_task",
+        {
+            "continuation_kind": "handover",
+            "buildings": ["A楼"],
+            "duty_date": "2026-03-26",
+            "duty_shift": "day",
+            "selected_dates": None,
+            "building_scope": None,
+            "building": None,
+            "resume_job_id": "job-waiting-1",
+            "requested_by": "manual",
+        },
+    ) in request.app.state.container.shared_bridge_service.calls
 
 
 def test_handover_from_download_route_rejects_internal_role() -> None:
@@ -357,6 +405,29 @@ def test_cancel_job_route_calls_job_service() -> None:
     assert response["accepted"] is True
     assert response["job"]["status"] == "cancelled"
     assert request.app.state.container.job_service.cancel_calls == ["job-1"]
+
+
+def test_cancel_job_route_cancels_bound_bridge_task_first() -> None:
+    request = _fake_request(role_mode="external", bridge_enabled=True)
+    cancelled_bridge_tasks = []
+
+    request.app.state.container.job_service.get_job = lambda job_id: {  # noqa: E731
+        "job_id": job_id,
+        "status": "waiting_resource",
+        "wait_reason": "waiting:shared_bridge",
+        "bridge_task_id": "bridge-cache-fill-1",
+    }
+    request.app.state.container.shared_bridge_service.cancel_task = lambda task_id: cancelled_bridge_tasks.append(task_id) or {  # noqa: E731
+        "ok": True,
+        "task_id": task_id,
+    }
+
+    response = routes.cancel_job("job-1", request)
+
+    assert response["ok"] is True
+    assert response["accepted"] is True
+    assert request.app.state.container.job_service.cancel_calls == ["job-1"]
+    assert cancelled_bridge_tasks == ["bridge-cache-fill-1"]
 
 
 def test_retry_job_route_calls_job_service() -> None:

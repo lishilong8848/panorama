@@ -7,11 +7,20 @@ from app.modules.report_pipeline.api import routes
 
 
 class _FakeJob:
-    def __init__(self, job_id: str) -> None:
+    def __init__(self, job_id: str, *, status: str = "queued", summary: str = "ok", wait_reason: str = "", bridge_task_id: str = "") -> None:
         self.job_id = job_id
+        self.status = status
+        self.summary = summary
+        self.wait_reason = wait_reason
+        self.bridge_task_id = bridge_task_id
 
     def to_dict(self) -> dict:
-        return {"job_id": self.job_id, "status": "queued", "summary": "ok"}
+        payload = {"job_id": self.job_id, "status": self.status, "summary": self.summary}
+        if self.wait_reason:
+            payload["wait_reason"] = self.wait_reason
+        if self.bridge_task_id:
+            payload["bridge_task_id"] = self.bridge_task_id
+        return payload
 
 
 def _touch_file(path: Path) -> Path:
@@ -48,23 +57,46 @@ class _FakeBridgeService:
                 )
         return output
 
-    def create_handover_cache_fill_task(self, **kwargs):  # noqa: ANN003
-        self.calls.append(("create_handover_cache_fill_task", dict(kwargs)))
+    def create_day_metric_from_download_task(self, **kwargs):  # noqa: ANN003
+        self.calls.append(("create_day_metric_from_download_task", dict(kwargs)))
         return {
-            "task_id": "bridge-handover-cache-fill-1",
-            "feature": "handover_cache_fill",
+            "task_id": "bridge-day-metric-from-download-1",
+            "feature": "day_metric_from_download",
             "status": "queued_for_internal",
         }
+
+    def get_or_create_day_metric_from_download_task(self, **kwargs):  # noqa: ANN003
+        return self.create_day_metric_from_download_task(**kwargs)
 
 
 class _FakeJobService:
     def __init__(self) -> None:
         self.start_job_calls = []
         self.worker_calls = []
+        self.waiting_calls = []
+        self.bind_calls = []
+        self.last_waiting_job = None
 
     def start_worker_job(self, *args, **kwargs):  # noqa: ANN002, ANN003
         self.worker_calls.append((args, kwargs))
         raise AssertionError("external cache mode should not start local worker job")
+
+    def create_waiting_worker_job(self, **kwargs):  # noqa: ANN003
+        self.waiting_calls.append(dict(kwargs))
+        job = _FakeJob(
+            f"job-waiting-{len(self.waiting_calls)}",
+            status="waiting_resource",
+            summary=str(kwargs.get("summary", "") or "").strip(),
+            wait_reason=str(kwargs.get("wait_reason", "") or "").strip(),
+        )
+        self.last_waiting_job = job
+        return job
+
+    def bind_bridge_task(self, job_id: str, bridge_task_id: str):
+        self.bind_calls.append((job_id, bridge_task_id))
+        if self.last_waiting_job and self.last_waiting_job.job_id == job_id:
+            self.last_waiting_job.bridge_task_id = bridge_task_id
+        return self.last_waiting_job
 
     def start_job(self, **kwargs):  # noqa: ANN003
         self.start_job_calls.append(dict(kwargs))
@@ -103,16 +135,15 @@ def test_day_metric_from_download_route_creates_cache_fill_task_when_missing() -
 
     assert response["ok"] is True
     assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-handover-cache-fill-1"
-    assert response["job"]["kind"] == "bridge"
-    assert ("create_handover_cache_fill_task", {
-        "continuation_kind": "day_metric",
-        "buildings": None,
-        "duty_date": None,
-        "duty_shift": None,
+    assert response["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
+    assert response["job"]["status"] == "waiting_resource"
+    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert response["job"]["bridge_task_id"] == "bridge-day-metric-from-download-1"
+    assert ("create_day_metric_from_download_task", {
         "selected_dates": ["2026-03-20"],
         "building_scope": "single",
         "building": "A楼",
+        "resume_job_id": "job-waiting-1",
         "requested_by": "manual",
     }) in request.app.state.container.shared_bridge_service.calls
 
@@ -154,7 +185,7 @@ def test_day_metric_from_download_route_creates_cache_fill_when_indexed_file_is_
 
     assert response["ok"] is True
     assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-handover-cache-fill-1"
+    assert response["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
 
 
 def test_day_metric_from_download_route_creates_cache_fill_when_indexed_file_is_inaccessible(monkeypatch) -> None:
@@ -178,7 +209,7 @@ def test_day_metric_from_download_route_creates_cache_fill_when_indexed_file_is_
 
     assert response["ok"] is True
     assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-handover-cache-fill-1"
+    assert response["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
 
 
 def test_day_metric_from_download_route_uses_cached_file_path_verbatim(monkeypatch) -> None:

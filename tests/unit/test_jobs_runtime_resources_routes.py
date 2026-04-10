@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+
 from app.modules.report_pipeline.api import routes
+from app.modules.report_pipeline.service.job_service import TaskEngineUnavailableError
 
 
 class _FakeJobService:
@@ -103,3 +107,31 @@ def test_get_job_route_returns_stage_details() -> None:
     assert payload["feature"] == "handover_from_download"
     assert payload["stages"][0]["stage_id"] == "main"
     assert payload["stages"][0]["resource_keys"] == ["network:internal"]
+
+
+def test_get_job_route_returns_503_when_task_engine_temporarily_unavailable() -> None:
+    class _UnavailableJobService(_FakeJobService):
+        def get_job(self, _job_id: str):
+            raise TaskEngineUnavailableError("任务状态存储暂时不可用，请稍后重试")
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=SimpleNamespace(job_service=_UnavailableJobService()))))
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes.get_job("job-running", request)
+
+    assert exc_info.value.status_code == 503
+    assert "任务状态存储暂时不可用" in str(exc_info.value.detail)
+
+
+def test_list_jobs_route_returns_503_when_task_engine_temporarily_unavailable() -> None:
+    class _UnavailableJobService(_FakeJobService):
+        def list_jobs(self, *, limit: int = 50, statuses=None):  # noqa: ANN001
+            raise TaskEngineUnavailableError("任务状态存储暂时不可用，请稍后重试")
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=SimpleNamespace(job_service=_UnavailableJobService()))))
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes.list_jobs(request, limit=10, statuses="")
+
+    assert exc_info.value.status_code == 503
+    assert "任务状态存储暂时不可用" in str(exc_info.value.detail)

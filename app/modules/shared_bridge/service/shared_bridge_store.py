@@ -1346,6 +1346,7 @@ class SharedBridgeStore:
         *,
         run_id: str | None,
         auto_trigger: bool,
+        resume_job_id: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
         requested_by: str = "manual",
@@ -1355,6 +1356,7 @@ class SharedBridgeStore:
         request_payload = {
             "run_id": str(run_id or "").strip(),
             "auto_trigger": bool(auto_trigger),
+            "resume_job_id": str(resume_job_id or "").strip(),
         }
         dedupe_key = "|".join(["monthly_report_pipeline", "resume_upload", request_payload["run_id"] or "latest"])
         with self.connect() as conn:
@@ -1427,6 +1429,7 @@ class SharedBridgeStore:
         selected_dates: List[str] | None,
         building_scope: str | None,
         building: str | None,
+        resume_job_id: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
         requested_by: str = "manual",
@@ -1443,6 +1446,7 @@ class SharedBridgeStore:
             "selected_dates": normalized_dates,
             "building_scope": str(building_scope or "").strip(),
             "building": str(building or "").strip(),
+            "resume_job_id": str(resume_job_id or "").strip(),
         }
         dedupe_key = "|".join(
             [
@@ -1526,6 +1530,7 @@ class SharedBridgeStore:
         self,
         *,
         selected_dates: List[str] | None,
+        resume_job_id: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
         requested_by: str = "manual",
@@ -1533,7 +1538,10 @@ class SharedBridgeStore:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
         normalized_dates = [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]
-        request_payload = {"selected_dates": normalized_dates}
+        request_payload = {
+            "selected_dates": normalized_dates,
+            "resume_job_id": str(resume_job_id or "").strip(),
+        }
         dedupe_key = "|".join(["monthly_cache_fill", ",".join(normalized_dates) or "-"])
         with self.connect() as conn:
             conn.execute(

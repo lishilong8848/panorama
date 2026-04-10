@@ -139,13 +139,28 @@ class _FakeBridgeService:
 
 
 class _FakeJob:
-    def __init__(self, job_id: str = "job-cache-1") -> None:
+    def __init__(self, job_id: str = "job-cache-1", *, status: str = "queued", summary: str = "ok", wait_reason: str = "", bridge_task_id: str = "") -> None:
         self.job_id = job_id
+        self.status = status
+        self.summary = summary
+        self.wait_reason = wait_reason
+        self.bridge_task_id = bridge_task_id
+
+    def to_dict(self) -> dict:
+        payload = {"job_id": self.job_id, "status": self.status, "summary": self.summary}
+        if self.wait_reason:
+            payload["wait_reason"] = self.wait_reason
+        if self.bridge_task_id:
+            payload["bridge_task_id"] = self.bridge_task_id
+        return payload
 
 
 class _FakeJobService:
     def __init__(self) -> None:
         self.started_jobs: list[dict] = []
+        self.waiting_jobs: list[dict] = []
+        self.bind_calls: list[tuple[str, str]] = []
+        self.last_waiting_job: _FakeJob | None = None
 
     def active_job_id(self):
         return ""
@@ -153,6 +168,23 @@ class _FakeJobService:
     def start_job(self, **kwargs):  # noqa: ANN003
         self.started_jobs.append(dict(kwargs))
         return _FakeJob(f"job-{len(self.started_jobs)}")
+
+    def create_waiting_worker_job(self, **kwargs):  # noqa: ANN003
+        self.waiting_jobs.append(dict(kwargs))
+        job = _FakeJob(
+            f"job-waiting-{len(self.waiting_jobs)}",
+            status="waiting_resource",
+            summary=str(kwargs.get("summary", "") or "").strip(),
+            wait_reason=str(kwargs.get("wait_reason", "") or "").strip(),
+        )
+        self.last_waiting_job = job
+        return job
+
+    def bind_bridge_task(self, job_id: str, bridge_task_id: str):
+        self.bind_calls.append((job_id, bridge_task_id))
+        if self.last_waiting_job and self.last_waiting_job.job_id == job_id:
+            self.last_waiting_job.bridge_task_id = bridge_task_id
+        return self.last_waiting_job
 
     def wait_job(self, _job_id):  # noqa: ANN001
         raise AssertionError("external cache scheduler path should not wait synchronously")

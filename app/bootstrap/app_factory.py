@@ -27,6 +27,9 @@ from app.modules.report_pipeline.api.routes import (
     router as pipeline_router,
     schedule_handover_review_access_startup_probe,
 )
+from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import (
+    start_waiting_bridge_job,
+)
 from app.modules.shared_bridge.api.routes import router as shared_bridge_router
 from app.modules.scheduler.api.handover_routes import router as handover_scheduler_router
 from app.modules.scheduler.api.day_metric_upload_routes import router as day_metric_upload_scheduler_router
@@ -412,15 +415,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     def _current_hour_bucket() -> str:
         return datetime.now().strftime("%Y-%m-%d %H")
 
-    def _get_or_create_bridge_task(bridge_service, *, get_or_create_name: str, create_name: str, **kwargs):
-        get_or_create = getattr(bridge_service, get_or_create_name, None)
-        if callable(get_or_create):
-            return get_or_create(**kwargs)
-        create = getattr(bridge_service, create_name, None)
-        if callable(create):
-            return create(**kwargs)
-        raise AttributeError(f"共享桥接服务缺少方法: {get_or_create_name}/{create_name}")
-
     @app.post("/api/runtime/activate-startup", response_model=None)
     async def activate_startup_runtime(request: Request) -> JSONResponse:
         payload: Dict[str, Any] = {}
@@ -568,7 +562,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
                 if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
                     dedupe_key = f"auto_once:scheduler:shared_bridge:{str(selection.get('best_bucket_key', '') or '').strip()}"
-                    job = container.job_service.create_waiting_worker_job(
+                    job, bridge_task = start_waiting_bridge_job(
+                        job_service=container.job_service,
+                        bridge_service=bridge_service,
                         name=source,
                         worker_handler="auto_once",
                         worker_payload={"source": source},
@@ -577,18 +573,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         feature="auto_once",
                         dedupe_key=dedupe_key,
                         submitted_by="scheduler",
-                        wait_reason="waiting:shared_bridge",
-                        summary="等待内网补采同步",
+                        bridge_get_or_create_name="get_or_create_monthly_auto_once_task",
+                        bridge_create_name="create_monthly_auto_once_task",
+                        bridge_kwargs={"requested_by": "scheduler", "source": source},
                     )
-                    bridge_task = _get_or_create_bridge_task(
-                        bridge_service,
-                        get_or_create_name="get_or_create_monthly_auto_once_task",
-                        create_name="create_monthly_auto_once_task",
-                        resume_job_id=job.job_id,
-                        requested_by="scheduler",
-                        source=source,
-                    )
-                    container.job_service.bind_bridge_task(job.job_id, str(bridge_task.get("task_id", "") or "").strip())
                     detail = _build_latest_cache_wait_text("月报", selection if isinstance(selection, dict) else {})
                     accepted_detail = (
                         f"{detail} 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'}, job_id={job.job_id}"
@@ -705,7 +693,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     or len(capacity_entries) < len(target_buildings)
                 ):
                     dedupe_key = f"handover:scheduler:{slot}:{duty_date}:{duty_shift}"
-                    job = container.job_service.create_waiting_worker_job(
+                    job, bridge_task = start_waiting_bridge_job(
+                        job_service=container.job_service,
+                        bridge_service=bridge_service,
                         name=job_name,
                         worker_handler="handover_from_download",
                         worker_payload={"buildings": target_buildings, "end_time": None, "duty_date": duty_date, "duty_shift": duty_shift},
@@ -714,21 +704,16 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         feature="handover_from_download",
                         dedupe_key=dedupe_key,
                         submitted_by="scheduler",
-                        wait_reason="waiting:shared_bridge",
-                        summary="等待内网补采同步",
+                        bridge_get_or_create_name="get_or_create_handover_from_download_task",
+                        bridge_create_name="create_handover_from_download_task",
+                        bridge_kwargs={
+                            "buildings": target_buildings,
+                            "end_time": None,
+                            "duty_date": duty_date,
+                            "duty_shift": duty_shift,
+                            "requested_by": "scheduler",
+                        },
                     )
-                    bridge_task = _get_or_create_bridge_task(
-                        bridge_service,
-                        get_or_create_name="get_or_create_handover_from_download_task",
-                        create_name="create_handover_from_download_task",
-                        buildings=target_buildings,
-                        end_time=None,
-                        duty_date=duty_date,
-                        duty_shift=duty_shift,
-                        resume_job_id=job.job_id,
-                        requested_by="scheduler",
-                    )
-                    container.job_service.bind_bridge_task(job.job_id, str(bridge_task.get("task_id", "") or "").strip())
                     detail = _build_latest_cache_wait_text("交接班", selection if isinstance(selection, dict) else {})
                     accepted_detail = (
                         f"{detail} 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'}, job_id={job.job_id}"
@@ -853,7 +838,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
                 if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
                     dedupe_key = f"wet_bulb:scheduler:shared_bridge:{str(selection.get('best_bucket_key', '') or '').strip()}"
-                    job = container.job_service.create_waiting_worker_job(
+                    job, bridge_task = start_waiting_bridge_job(
+                        job_service=container.job_service,
+                        bridge_service=bridge_service,
                         name=source,
                         worker_handler="wet_bulb_collection_run",
                         worker_payload={"source": source},
@@ -862,18 +849,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         feature="wet_bulb_collection_run",
                         dedupe_key=dedupe_key,
                         submitted_by="scheduler",
-                        wait_reason="waiting:shared_bridge",
-                        summary="等待内网补采同步",
+                        bridge_get_or_create_name="get_or_create_wet_bulb_collection_task",
+                        bridge_create_name="create_wet_bulb_collection_task",
+                        bridge_kwargs={"buildings": target_buildings, "requested_by": "scheduler"},
                     )
-                    bridge_task = _get_or_create_bridge_task(
-                        bridge_service,
-                        get_or_create_name="get_or_create_wet_bulb_collection_task",
-                        create_name="create_wet_bulb_collection_task",
-                        buildings=target_buildings,
-                        resume_job_id=job.job_id,
-                        requested_by="scheduler",
-                    )
-                    container.job_service.bind_bridge_task(job.job_id, str(bridge_task.get("task_id", "") or "").strip())
                     detail = _build_latest_cache_wait_text("湿球温度", selection if isinstance(selection, dict) else {})
                     accepted_detail = (
                         f"{detail} 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'}, job_id={job.job_id}"
@@ -1002,7 +981,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             expected_count = len(target_buildings)
             if len(cached_entries) < expected_count:
                 dedupe_key = f"day_metric_upload:scheduler:{target_date}:{'|'.join(sorted(target_buildings))}"
-                job = container.job_service.create_waiting_worker_job(
+                job, bridge_task = start_waiting_bridge_job(
+                    job_service=container.job_service,
+                    bridge_service=bridge_service,
                     name=source,
                     worker_handler="day_metric_from_download",
                     worker_payload={"selected_dates": [target_date], "building_scope": "all_enabled", "building": None},
@@ -1011,20 +992,15 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     feature="day_metric_from_download",
                     dedupe_key=dedupe_key,
                     submitted_by="scheduler",
-                    wait_reason="waiting:shared_bridge",
-                    summary="等待内网补采同步",
+                    bridge_get_or_create_name="get_or_create_day_metric_from_download_task",
+                    bridge_create_name="create_day_metric_from_download_task",
+                    bridge_kwargs={
+                        "selected_dates": [target_date],
+                        "building_scope": "all_enabled",
+                        "building": None,
+                        "requested_by": "scheduler",
+                    },
                 )
-                bridge_task = _get_or_create_bridge_task(
-                    bridge_service,
-                    get_or_create_name="get_or_create_day_metric_from_download_task",
-                    create_name="create_day_metric_from_download_task",
-                    selected_dates=[target_date],
-                    building_scope="all_enabled",
-                    building=None,
-                    resume_job_id=job.job_id,
-                    requested_by="scheduler",
-                )
-                container.job_service.bind_bridge_task(job.job_id, str(bridge_task.get("task_id", "") or "").strip())
                 accepted_detail = (
                     "等待内网补采同步：12项当日源文件尚未全部到位。"
                     f" 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'},"

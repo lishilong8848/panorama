@@ -12,6 +12,8 @@ class _FakeBridgeService:
     def __init__(self) -> None:
         self.list_tasks_error: Exception | None = None
         self.get_task_error: Exception | None = None
+        self.cancel_error: Exception | None = None
+        self.retry_error: Exception | None = None
         self.detail_payload = {
             "task_id": "bridge-1",
             "feature": "monthly_report_pipeline",
@@ -162,9 +164,13 @@ class _FakeBridgeService:
         return "unable to open database file" in str(exc).lower()
 
     def cancel_task(self, task_id: str) -> bool:  # noqa: ANN001
+        if self.cancel_error is not None:
+            raise self.cancel_error
         return self.cancel_result and task_id == "bridge-1"
 
     def retry_task(self, task_id: str) -> bool:  # noqa: ANN001
+        if self.retry_error is not None:
+            raise self.retry_error
         return self.retry_result and task_id == "bridge-1"
 
     def start_current_hour_source_cache_refresh(self):
@@ -445,6 +451,30 @@ def test_bridge_task_retry_is_read_only_on_internal_role() -> None:
 
     assert excinfo.value.status_code == 409
     assert "只提供共享任务只读查看" in str(excinfo.value.detail)
+
+
+def test_bridge_task_cancel_returns_503_when_store_temporarily_unavailable() -> None:
+    service = _FakeBridgeService()
+    service.cancel_error = RuntimeError("unable to open database file")
+    request = _fake_request(service)
+
+    with pytest.raises(HTTPException) as excinfo:
+        routes.bridge_task_cancel("bridge-1", request)
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail == "无法打开共享桥接数据库文件"
+
+
+def test_bridge_task_retry_returns_503_when_store_temporarily_unavailable() -> None:
+    service = _FakeBridgeService()
+    service.retry_error = RuntimeError("unable to open database file")
+    request = _fake_request(service)
+
+    with pytest.raises(HTTPException) as excinfo:
+        routes.bridge_task_retry("bridge-1", request)
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail == "无法打开共享桥接数据库文件"
 
 
 def test_bridge_source_cache_refresh_current_hour_accepts_internal_role() -> None:

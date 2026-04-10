@@ -98,7 +98,7 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
               <strong class="status-metric-value">{{ waitingResourceJobs.length }}</strong>
             </div>
             <div class="status-metric">
-              <div class="status-metric-label">共享协同</div>
+              <div class="status-metric-label">补采同步</div>
               <strong class="status-metric-value">{{ activeBridgeTasks.length }}</strong>
             </div>
           </div>
@@ -240,14 +240,14 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
           <article class="task-block task-block-compact" v-if="bridgeTasksEnabled" style="margin-top:12px;">
             <div class="task-block-head">
               <div>
-                <div class="task-block-kicker">共享桥接</div>
-                <h4 class="card-title">共享协同任务</h4>
+                <div class="task-block-kicker">内外网同步</div>
+                <h4 class="card-title">补采同步任务</h4>
               </div>
               <span class="status-badge status-badge-soft" :class="activeBridgeTasks.length ? 'tone-warning' : 'tone-neutral'">
                 {{ activeBridgeTasks.length ? ('处理中 ' + activeBridgeTasks.length + ' 项') : '当前空闲' }}
               </span>
             </div>
-            <div class="hint">跨机任务会先由内网准备文件，再由外网继续处理。</div>
+            <div class="hint">缺文件任务会先由内网补采，再由原任务自动继续处理。</div>
             <div class="hint">这里只保留任务摘要和操作入口，详细排障信息不再占用首页区域。</div>
             <div class="ops-job-list" v-if="displayedBridgeTasks.length">
               <div
@@ -278,7 +278,7 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                 </div>
               </div>
             </div>
-            <div class="hint" v-else>当前还没有共享协同任务。</div>
+            <div class="hint" v-else>当前还没有补采同步任务。</div>
           </article>
           <div class="hint" style="margin-top:10px;">这里只保留任务摘要和操作入口。</div>
         </section>

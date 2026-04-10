@@ -7,11 +7,20 @@ from app.modules.report_pipeline.api import routes
 
 
 class _FakeJob:
-    def __init__(self, job_id: str) -> None:
+    def __init__(self, job_id: str, *, status: str = "queued", summary: str = "ok", wait_reason: str = "", bridge_task_id: str = "") -> None:
         self.job_id = job_id
+        self.status = status
+        self.summary = summary
+        self.wait_reason = wait_reason
+        self.bridge_task_id = bridge_task_id
 
     def to_dict(self) -> dict:
-        return {"job_id": self.job_id, "status": "queued", "summary": "ok"}
+        payload = {"job_id": self.job_id, "status": self.status, "summary": self.summary}
+        if self.wait_reason:
+            payload["wait_reason"] = self.wait_reason
+        if self.bridge_task_id:
+            payload["bridge_task_id"] = self.bridge_task_id
+        return payload
 
 
 def _touch_file(path: Path) -> Path:
@@ -76,6 +85,9 @@ class _FakeJobService:
     def __init__(self) -> None:
         self.start_job_calls = []
         self.worker_calls = []
+        self.waiting_calls = []
+        self.bind_calls = []
+        self.last_waiting_job = None
 
     def start_worker_job(self, *args, **kwargs):  # noqa: ANN002, ANN003
         self.worker_calls.append((args, kwargs))
@@ -84,6 +96,23 @@ class _FakeJobService:
     def start_job(self, **kwargs):  # noqa: ANN003
         self.start_job_calls.append(dict(kwargs))
         return _FakeJob(f"job-{len(self.start_job_calls)}")
+
+    def create_waiting_worker_job(self, **kwargs):  # noqa: ANN003
+        self.waiting_calls.append(dict(kwargs))
+        job = _FakeJob(
+            f"job-waiting-{len(self.waiting_calls)}",
+            status="waiting_resource",
+            summary=str(kwargs.get("summary", "") or "").strip(),
+            wait_reason=str(kwargs.get("wait_reason", "") or "").strip(),
+        )
+        self.last_waiting_job = job
+        return job
+
+    def bind_bridge_task(self, job_id: str, bridge_task_id: str):
+        self.bind_calls.append((job_id, bridge_task_id))
+        if self.last_waiting_job and self.last_waiting_job.job_id == job_id:
+            self.last_waiting_job.bridge_task_id = bridge_task_id
+        return self.last_waiting_job
 
 
 def _fake_request(*, ready: bool, base_dir: Path | None = None):
@@ -111,6 +140,7 @@ def test_wet_bulb_route_waits_for_latest_cache_when_missing() -> None:
 
     assert response["accepted"] is True
     assert response["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
+    assert response["job"]["status"] == "waiting_resource"
 
 
 def test_wet_bulb_route_starts_from_latest_cache_on_external_role() -> None:
@@ -182,6 +212,7 @@ def test_wet_bulb_route_waits_when_fallback_is_stale() -> None:
 
     assert response["accepted"] is True
     assert response["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
+    assert response["job"]["status"] == "waiting_resource"
 
 
 def test_wet_bulb_route_waits_when_best_bucket_is_older_than_three_hours() -> None:
@@ -207,3 +238,4 @@ def test_wet_bulb_route_waits_when_best_bucket_is_older_than_three_hours() -> No
 
     assert response["accepted"] is True
     assert response["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
+    assert response["job"]["status"] == "waiting_resource"

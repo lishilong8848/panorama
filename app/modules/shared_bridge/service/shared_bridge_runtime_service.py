@@ -90,6 +90,7 @@ class SharedBridgeRuntimeService:
     INTERNAL_BROWSER_ALERT_QUIET_SEC = 600
     INTERNAL_BROWSER_ALERT_DEDUPE_SEC = 3600
     CLEANUP_INTERVAL_SEC = 600
+    WAITING_JOB_RECONCILE_INTERVAL_SEC = 30
     TASK_RETENTION_DAYS = 14
     NODE_RETENTION_DAYS = 2
     STORE_ERROR_LOG_INTERVAL_SEC = 60
@@ -126,6 +127,7 @@ class SharedBridgeRuntimeService:
         self._cleanup_deleted_tasks = 0
         self._cleanup_deleted_entries = 0
         self._cleanup_deleted_files = 0
+        self._last_waiting_job_reconcile_monotonic = 0.0
         self._refresh_config()
 
     @staticmethod
@@ -156,6 +158,336 @@ class SharedBridgeRuntimeService:
         if not job_id or self._job_service is None:
             return
         self._job_service.fail_waiting_job(job_id, error_text=error_text, summary=summary)
+
+    @staticmethod
+    def _normalize_text_list(values: Any) -> List[str]:
+        if not isinstance(values, list):
+            return []
+        return [str(item or "").strip() for item in values if str(item or "").strip()]
+
+    def _require_accessible_cached_file(self, file_path: Any, *, description: str) -> str:
+        file_text = str(file_path or "").strip()
+        if not file_text or not is_accessible_cached_file_path(file_text):
+            raise FileNotFoundError(f"{description}不存在或不可访问: {file_text or '-'}")
+        return file_text
+
+    def _build_handover_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接存储未初始化")
+        task_id = str(task.get("task_id", "") or "").strip()
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+        building_files: List[Dict[str, str]] = []
+        for item in artifacts:
+            relative_path = str(item.get("relative_path", "") or "").strip()
+            building = str(item.get("building", "") or "").strip()
+            if not relative_path or not building:
+                continue
+            file_path = self._resolve_shared_artifact_file_path(relative_path)
+            if file_path is None:
+                raise FileNotFoundError(f"共享目录中的交接班源文件不存在或不可访问: {relative_path}")
+            building_files.append({"building": building, "file_path": str(file_path)})
+        capacity_artifacts = self._store.get_artifacts(task_id, artifact_kind="capacity_source_file", status="ready")
+        capacity_items: List[Dict[str, str]] = []
+        for item in capacity_artifacts:
+            relative_path = str(item.get("relative_path", "") or "").strip()
+            building = str(item.get("building", "") or "").strip()
+            if not relative_path or not building:
+                continue
+            file_path = self._resolve_shared_artifact_file_path(relative_path)
+            if file_path is None:
+                raise FileNotFoundError(f"共享目录中的交接班容量源文件不存在或不可访问: {relative_path}")
+            capacity_items.append({"building": building, "file_path": str(file_path)})
+        if not building_files:
+            raise RuntimeError("共享目录中没有可继续处理的交接班源文件")
+        handover_buildings = {item["building"] for item in building_files if item.get("building")}
+        capacity_map = {item["building"]: item["file_path"] for item in capacity_items if item.get("building") and item.get("file_path")}
+        if not handover_buildings or not handover_buildings.issubset(set(capacity_map)):
+            raise RuntimeError("共享目录中没有完整可继续处理的交接班容量源文件")
+        resolved_capacity_items = [
+            {"building": item["building"], "file_path": capacity_map[item["building"]]}
+            for item in building_files
+            if item["building"] in capacity_map
+        ]
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_handover",
+                "building_files": building_files,
+                "capacity_building_files": resolved_capacity_items,
+                "end_time": str(request.get("end_time", "") or "").strip() or None,
+                "duty_date": str(request.get("duty_date", "") or "").strip() or None,
+                "duty_shift": str(request.get("duty_shift", "") or "").strip() or None,
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续生成交接班日志",
+            "log_text": f"[共享桥接] 任务={task_id} 已完成文件准备，正在自动恢复交接班原任务",
+        }
+
+    def _build_day_metric_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接存储未初始化")
+        task_id = str(task.get("task_id", "") or "").strip()
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
+        internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
+        artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+        source_units: List[Dict[str, str]] = []
+        for item in artifacts:
+            relative_path = str(item.get("relative_path", "") or "").strip()
+            building = str(item.get("building", "") or "").strip()
+            metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+            duty_date = str(metadata.get("duty_date", "") or "").strip()
+            if not relative_path or not building or not duty_date:
+                continue
+            file_path = self._resolve_shared_artifact_file_path(relative_path)
+            if file_path is None:
+                raise FileNotFoundError(f"共享目录中的12项源文件不存在或不可访问: {relative_path}")
+            source_units.append({"duty_date": duty_date, "building": building, "source_file": str(file_path)})
+        if not source_units:
+            raise RuntimeError("共享目录中没有可继续上传的12项源文件")
+        selected_dates = self._normalize_text_list(internal_result.get("selected_dates", []))
+        buildings = self._normalize_text_list(internal_result.get("selected_buildings", []))
+        if not selected_dates:
+            selected_dates = self._normalize_text_list(request.get("selected_dates", []))
+        if not buildings:
+            buildings = sorted({str(item.get("building", "") or "").strip() for item in source_units if str(item.get("building", "") or "").strip()})
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_day_metric",
+                "selected_dates": selected_dates,
+                "buildings": buildings,
+                "source_units": source_units,
+                "building_scope": str(request.get("building_scope", "") or "").strip() or "all_enabled",
+                "building": str(request.get("building", "") or "").strip() or None,
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续上传12项数据",
+            "log_text": f"[共享桥接] 任务={task_id} 已完成文件准备，正在自动恢复12项原任务",
+        }
+
+    def _build_wet_bulb_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接存储未初始化")
+        task_id = str(task.get("task_id", "") or "").strip()
+        artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+        source_units: List[Dict[str, str]] = []
+        for item in artifacts:
+            relative_path = str(item.get("relative_path", "") or "").strip()
+            building = str(item.get("building", "") or "").strip()
+            if not relative_path or not building:
+                continue
+            file_path = self._resolve_shared_artifact_file_path(relative_path)
+            if file_path is None:
+                raise FileNotFoundError(f"共享目录中的湿球温度源文件不存在或不可访问: {relative_path}")
+            source_units.append({"building": building, "file_path": str(file_path)})
+        if not source_units:
+            raise RuntimeError("共享目录中没有可继续处理的湿球温度源文件")
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_wet_bulb",
+                "source_units": source_units,
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续处理湿球温度",
+            "log_text": f"[共享桥接] 任务={task_id} 已完成文件准备，正在自动恢复湿球温度原任务",
+        }
+
+    def _build_handover_history_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            raise RuntimeError("共享源缓存服务未初始化")
+        task_id = str(task.get("task_id", "") or "").strip()
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        buildings = self._normalize_text_list(request.get("buildings", []))
+        if not buildings:
+            buildings = self._source_cache_service.get_enabled_buildings()
+        duty_date = str(request.get("duty_date", "") or "").strip()
+        duty_shift = str(request.get("duty_shift", "") or "").strip().lower()
+        cached_entries = self._source_cache_service.get_handover_by_date_entries(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            buildings=buildings,
+        )
+        capacity_entries = self._source_cache_service.get_handover_capacity_by_date_entries(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            buildings=buildings,
+        )
+        if len(cached_entries) < len(buildings) or len(capacity_entries) < len(buildings):
+            raise RuntimeError(f"交接班历史缓存未齐全: duty_date={duty_date or '-'}, duty_shift={duty_shift or '-'}")
+        building_files = [
+            {
+                "building": str(item.get("building", "") or "").strip(),
+                "file_path": self._require_accessible_cached_file(
+                    item.get("file_path", ""),
+                    description="交接班历史共享源文件",
+                ),
+            }
+            for item in cached_entries
+            if str(item.get("building", "") or "").strip()
+        ]
+        capacity_items = [
+            {
+                "building": str(item.get("building", "") or "").strip(),
+                "file_path": self._require_accessible_cached_file(
+                    item.get("file_path", ""),
+                    description="交接班历史容量共享源文件",
+                ),
+            }
+            for item in capacity_entries
+            if str(item.get("building", "") or "").strip()
+        ]
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_handover",
+                "building_files": building_files,
+                "capacity_building_files": capacity_items,
+                "end_time": None,
+                "duty_date": duty_date or None,
+                "duty_shift": duty_shift or None,
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续生成交接班日志",
+            "log_text": f"[共享桥接] 任务={task_id} 历史交接班共享文件已齐全，正在自动恢复原任务",
+        }
+
+    def _build_day_metric_history_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            raise RuntimeError("共享源缓存服务未初始化")
+        task_id = str(task.get("task_id", "") or "").strip()
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        selected_dates = self._normalize_text_list(request.get("selected_dates", []))
+        building_scope = str(request.get("building_scope", "") or "").strip() or "all_enabled"
+        target_buildings = [str(request.get("building", "") or "").strip()] if building_scope == "single" else self._source_cache_service.get_enabled_buildings()
+        target_buildings = [item for item in target_buildings if item]
+        cached_entries = self._source_cache_service.get_day_metric_by_date_entries(
+            selected_dates=selected_dates,
+            buildings=target_buildings,
+        )
+        if len(cached_entries) < len(selected_dates) * max(1, len(target_buildings)):
+            raise RuntimeError(f"12项历史缓存未齐全: dates={','.join(selected_dates) or '-'}")
+        source_units = [
+            {
+                "duty_date": str(item.get("duty_date", "") or "").strip(),
+                "building": str(item.get("building", "") or "").strip(),
+                "source_file": self._require_accessible_cached_file(
+                    item.get("file_path", ""),
+                    description="12项历史共享源文件",
+                ),
+            }
+            for item in cached_entries
+            if str(item.get("building", "") or "").strip() and str(item.get("duty_date", "") or "").strip()
+        ]
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_day_metric",
+                "selected_dates": selected_dates,
+                "buildings": target_buildings,
+                "source_units": source_units,
+                "building_scope": building_scope,
+                "building": str(request.get("building", "") or "").strip() or None,
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续上传12项数据",
+            "log_text": f"[共享桥接] 任务={task_id} 历史12项共享文件已齐全，正在自动恢复原任务",
+        }
+
+    def _build_monthly_cache_fill_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            raise RuntimeError("共享源缓存服务未初始化")
+        task_id = str(task.get("task_id", "") or "").strip()
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        selected_dates = self._normalize_text_list(request.get("selected_dates", []))
+        cached_entries = self._source_cache_service.get_monthly_by_date_entries(selected_dates=selected_dates)
+        expected = len(selected_dates) * len(self._source_cache_service.get_enabled_buildings())
+        if len(cached_entries) < expected:
+            raise RuntimeError(f"月报历史缓存未齐全: dates={','.join(selected_dates) or '-'}")
+        file_items = [
+            {
+                "building": str(item.get("building", "") or "").strip(),
+                "file_path": self._require_accessible_cached_file(
+                    item.get("file_path", ""),
+                    description="月报历史共享源文件",
+                ),
+                "upload_date": str(item.get("metadata", {}).get("upload_date", "") or item.get("duty_date", "") or "").strip(),
+            }
+            for item in cached_entries
+            if str(item.get("building", "") or "").strip()
+        ]
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_monthly_multi_date",
+                "selected_dates": selected_dates,
+                "file_items": file_items,
+                "source_label": "月报历史共享文件",
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续处理多日期月报",
+            "log_text": f"[共享桥接] 任务={task_id} 月报历史共享文件已齐全，正在自动恢复原任务",
+        }
+
+    def _build_monthly_pipeline_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        task_id = str(task.get("task_id", "") or "").strip()
+        mode = str(task.get("mode", "") or "").strip().lower()
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
+        internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
+        if mode == "resume_upload":
+            return {
+                "worker_payload": {
+                    "run_id": str(request.get("run_id", "") or "").strip() or None,
+                    "auto_trigger": bool(request.get("auto_trigger", False)),
+                    "bridge_task_id": task_id,
+                },
+                "summary": "共享续传状态已就绪，正在继续断点续传",
+                "log_text": f"[共享桥接] 任务={task_id} 续传状态已就绪，正在自动恢复原任务",
+            }
+        source_root = str(internal_result.get("source_root", "") or "").strip()
+        if not source_root:
+            raise RuntimeError("月报共享桥接缺少 source_root")
+        file_items = []
+        source_root_path = Path(source_root)
+        for file_path in sorted(source_root_path.rglob("*.xlsx")):
+            if not file_path.is_file():
+                continue
+            if not is_accessible_cached_file_path(file_path):
+                raise FileNotFoundError(f"月报共享源文件不存在或不可访问: {file_path}")
+            building = str(file_path.stem.split("--")[-1] if "--" in file_path.stem else "").strip()
+            upload_date = str(file_path.parent.name.split("--")[0] if "--" in file_path.parent.name else "").strip()
+            file_items.append({"building": building, "file_path": str(file_path), "upload_date": upload_date})
+        if not file_items:
+            raise RuntimeError("月报共享桥接未找到可继续处理的共享源文件")
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_monthly_auto_once",
+                "file_items": file_items,
+                "source": str(request.get("source", "") or "共享桥接月报自动流程").strip() or "共享桥接月报自动流程",
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续处理月报自动流程",
+            "log_text": f"[共享桥接] 任务={task_id} 月报共享文件已齐全，正在自动恢复原任务",
+        }
+
+    def _build_waiting_job_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        feature = str(task.get("feature", "") or "").strip().lower()
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        if feature == "handover_from_download":
+            return self._build_handover_resume_binding_from_artifacts(task)
+        if feature == "day_metric_from_download":
+            return self._build_day_metric_resume_binding_from_artifacts(task)
+        if feature == "wet_bulb_collection":
+            return self._build_wet_bulb_resume_binding_from_artifacts(task)
+        if feature == "handover_cache_fill":
+            continuation_kind = str(request.get("continuation_kind", "") or "").strip().lower()
+            if continuation_kind == "handover":
+                return self._build_handover_history_resume_binding(task)
+            if continuation_kind == "day_metric":
+                return self._build_day_metric_history_resume_binding(task)
+            raise RuntimeError(f"不支持的共享缓存补采类型: {continuation_kind or '-'}")
+        if feature == "monthly_cache_fill":
+            return self._build_monthly_cache_fill_resume_binding(task)
+        if feature == "monthly_report_pipeline":
+            return self._build_monthly_pipeline_resume_binding(task)
+        raise RuntimeError(f"不支持的等待任务恢复类型: {feature or '-'}")
 
     def _refresh_config(self) -> None:
         deployment = self.runtime_config.get("deployment", {})
@@ -207,7 +539,9 @@ class SharedBridgeRuntimeService:
 
     def _shared_bridge_db_path_text(self) -> str:
         if self._store is not None:
-            return str(self._store.db_path)
+            store_db_path = getattr(self._store, "db_path", None)
+            if store_db_path:
+                return str(store_db_path)
         root_text = str(self.shared_bridge_root or "").strip()
         if not root_text:
             return ""
@@ -1399,6 +1733,7 @@ class SharedBridgeRuntimeService:
         *,
         run_id: str | None,
         auto_trigger: bool,
+        resume_job_id: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -1407,8 +1742,32 @@ class SharedBridgeRuntimeService:
         return self._store.create_monthly_resume_upload_task(
             run_id=run_id,
             auto_trigger=auto_trigger,
+            resume_job_id=resume_job_id,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
+            requested_by=requested_by,
+        )
+
+    def get_or_create_monthly_resume_upload_task(
+        self,
+        *,
+        run_id: str | None,
+        auto_trigger: bool,
+        resume_job_id: str | None = None,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        run_id_text = str(run_id or "").strip()
+        dedupe_key = "|".join(["monthly_report_pipeline", "resume_upload", run_id_text or "latest"])
+        existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
+        if existing:
+            return existing
+        return self.create_monthly_resume_upload_task(
+            run_id=run_id,
+            auto_trigger=auto_trigger,
+            resume_job_id=resume_job_id,
             requested_by=requested_by,
         )
 
@@ -1422,6 +1781,7 @@ class SharedBridgeRuntimeService:
         selected_dates: List[str] | None,
         building_scope: str | None,
         building: str | None,
+        resume_job_id: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -1435,6 +1795,7 @@ class SharedBridgeRuntimeService:
             selected_dates=selected_dates,
             building_scope=building_scope,
             building=building,
+            resume_job_id=resume_job_id,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -1450,6 +1811,7 @@ class SharedBridgeRuntimeService:
         selected_dates: List[str] | None,
         building_scope: str | None,
         building: str | None,
+        resume_job_id: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -1477,6 +1839,7 @@ class SharedBridgeRuntimeService:
             selected_dates=normalized_dates,
             building_scope=building_scope,
             building=building,
+            resume_job_id=resume_job_id,
             requested_by=requested_by,
         )
 
@@ -1484,6 +1847,7 @@ class SharedBridgeRuntimeService:
         self,
         *,
         selected_dates: List[str] | None,
+        resume_job_id: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -1491,6 +1855,7 @@ class SharedBridgeRuntimeService:
         self._store.ensure_ready()
         return self._store.create_monthly_cache_fill_task(
             selected_dates=selected_dates,
+            resume_job_id=resume_job_id,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -1500,6 +1865,7 @@ class SharedBridgeRuntimeService:
         self,
         *,
         selected_dates: List[str] | None,
+        resume_job_id: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -1512,6 +1878,7 @@ class SharedBridgeRuntimeService:
             return existing
         return self.create_monthly_cache_fill_task(
             selected_dates=normalized_dates,
+            resume_job_id=resume_job_id,
             requested_by=requested_by,
         )
 
@@ -2341,31 +2708,59 @@ class SharedBridgeRuntimeService:
                 for building, _ in building_files
                 if building in capacity_building_map
             ]
-            emit_log("[共享桥接][交接班][外网] 共享文件已齐全，准备唤醒原任务")
-            self._resume_bound_job(
-                task,
-                worker_payload={
-                    "resume_kind": "shared_bridge_handover",
-                    "building_files": [{"building": building, "file_path": file_path} for building, file_path in building_files],
-                    "capacity_building_files": [
-                        {"building": building, "file_path": file_path}
-                        for building, file_path in resolved_capacity_files
-                    ],
-                    "end_time": str(request.get("end_time", "") or "").strip() or None,
-                    "duty_date": str(request.get("duty_date", "") or "").strip() or None,
-                    "duty_shift": str(request.get("duty_shift", "") or "").strip() or None,
-                    "bridge_task_id": task_id,
-                },
-                summary="共享文件已到位，正在继续生成交接班日志",
+            resume_job_id = self._resume_job_id_from_task(task)
+            if resume_job_id:
+                emit_log("[共享桥接][交接班][外网] 共享文件已齐全，准备唤醒原任务")
+                self._resume_bound_job(
+                    task,
+                    worker_payload={
+                        "resume_kind": "shared_bridge_handover",
+                        "building_files": [{"building": building, "file_path": file_path} for building, file_path in building_files],
+                        "capacity_building_files": [
+                            {"building": building, "file_path": file_path}
+                            for building, file_path in resolved_capacity_files
+                        ],
+                        "end_time": str(request.get("end_time", "") or "").strip() or None,
+                        "duty_date": str(request.get("duty_date", "") or "").strip() or None,
+                        "duty_shift": str(request.get("duty_shift", "") or "").strip() or None,
+                        "bridge_task_id": task_id,
+                    },
+                    summary="共享文件已到位，正在继续生成交接班日志",
+                )
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="external",
+                    stage_result={"status": "resumed", "resume_job_id": resume_job_id},
+                    next_task_status="success",
+                    task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": resume_job_id, "internal": internal_result},
+                )
+                return
+            emit_log("[共享桥接][交接班][外网] 共享文件已齐全，开始继续处理")
+            external_result = OrchestratorService(self.runtime_config).run_handover_from_files(
+                building_files=building_files,
+                capacity_building_files=resolved_capacity_files,
+                end_time=str(request.get("end_time", "") or "").strip() or None,
+                duty_date=str(request.get("duty_date", "") or "").strip() or None,
+                duty_shift=str(request.get("duty_shift", "") or "").strip() or None,
+                emit_log=emit_log,
             )
+            merged_result = self._merge_handover_bridge_result(task_id, internal_result, external_result)
+            final_status = str(merged_result.get("status", "") or "failed").strip().lower() or "failed"
+            task_error = ""
+            if final_status in {"partial_failed", "failed"}:
+                errors = merged_result.get("errors", []) if isinstance(merged_result.get("errors", []), list) else []
+                task_error = str(errors[0] if errors else "").strip()
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
                 claim_token=claim_token,
                 side="external",
-                stage_result={"status": "resumed", "resume_job_id": self._resume_job_id_from_task(task)},
-                next_task_status="success",
-                task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": self._resume_job_id_from_task(task), "internal": internal_result},
+                stage_result=external_result,
+                next_task_status=final_status,
+                task_error=task_error,
+                task_result=merged_result,
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
@@ -2497,28 +2892,53 @@ class SharedBridgeRuntimeService:
                 selected_dates = [str(item or "").strip() for item in (request.get("selected_dates", []) if isinstance(request.get("selected_dates"), list) else []) if str(item or "").strip()]
             if not buildings:
                 buildings = sorted({str(item.get("building", "") or "").strip() for item in source_units if str(item.get("building", "") or "").strip()})
-            emit_log("[共享桥接][12项][外网] 共享文件已齐全，准备唤醒原任务")
-            self._resume_bound_job(
-                task,
-                worker_payload={
-                    "resume_kind": "shared_bridge_day_metric",
-                    "selected_dates": selected_dates,
-                    "buildings": buildings,
-                    "source_units": source_units,
-                    "building_scope": str(request.get("building_scope", "") or "").strip() or "all_enabled",
-                    "building": str(request.get("building", "") or "").strip() or None,
-                    "bridge_task_id": task_id,
-                },
-                summary="共享文件已到位，正在继续上传12项数据",
+            resume_job_id = self._resume_job_id_from_task(task)
+            if resume_job_id:
+                emit_log("[共享桥接][12项][外网] 共享文件已齐全，准备唤醒原任务")
+                self._resume_bound_job(
+                    task,
+                    worker_payload={
+                        "resume_kind": "shared_bridge_day_metric",
+                        "selected_dates": selected_dates,
+                        "buildings": buildings,
+                        "source_units": source_units,
+                        "building_scope": str(request.get("building_scope", "") or "").strip() or "all_enabled",
+                        "building": str(request.get("building", "") or "").strip() or None,
+                        "bridge_task_id": task_id,
+                    },
+                    summary="共享文件已到位，正在继续上传12项数据",
+                )
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="external",
+                    stage_result={"status": "resumed", "resume_job_id": resume_job_id},
+                    next_task_status="success",
+                    task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": resume_job_id, "internal": internal_result},
+                )
+                return
+            emit_log("[共享桥接][12项][外网] 共享文件已齐全，开始继续上传")
+            external_result = service.continue_from_source_files(
+                selected_dates=selected_dates,
+                buildings=buildings,
+                source_units=source_units,
+                building_scope=str(request.get("building_scope", "") or "").strip() or "all_enabled",
+                building=str(request.get("building", "") or "").strip() or None,
+                emit_log=emit_log,
             )
+            raw_status = str(external_result.get("status", "") or "failed").strip().lower()
+            final_status = "success" if raw_status in {"ok", "success"} else ("partial_failed" if raw_status == "partial_failed" else "failed")
+            task_error = str(external_result.get("error", "") or external_result.get("last_error", "") or "").strip() if final_status in {"partial_failed", "failed"} else ""
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
                 claim_token=claim_token,
                 side="external",
-                stage_result={"status": "resumed", "resume_job_id": self._resume_job_id_from_task(task)},
-                next_task_status="success",
-                task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": self._resume_job_id_from_task(task), "internal": internal_result},
+                stage_result=external_result,
+                next_task_status=final_status,
+                task_error=task_error,
+                task_result={"status": final_status, "bridge_task_id": task_id, "internal": internal_result, "external": external_result},
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
@@ -2655,24 +3075,45 @@ class SharedBridgeRuntimeService:
                 source_units.append({"building": building, "file_path": str(file_path)})
             if not source_units:
                 raise RuntimeError("共享目录中没有可继续处理的湿球温度源文件")
-            emit_log("[共享桥接][湿球温度][外网] 共享文件已齐全，准备唤醒原任务")
-            self._resume_bound_job(
-                task,
-                worker_payload={
-                    "resume_kind": "shared_bridge_wet_bulb",
-                    "source_units": source_units,
-                    "bridge_task_id": task_id,
-                },
-                summary="共享文件已到位，正在继续处理湿球温度",
+            resume_job_id = self._resume_job_id_from_task(task)
+            if resume_job_id:
+                emit_log("[共享桥接][湿球温度][外网] 共享文件已齐全，准备唤醒原任务")
+                self._resume_bound_job(
+                    task,
+                    worker_payload={
+                        "resume_kind": "shared_bridge_wet_bulb",
+                        "source_units": source_units,
+                        "bridge_task_id": task_id,
+                    },
+                    summary="共享文件已到位，正在继续处理湿球温度",
+                )
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="external",
+                    stage_result={"status": "resumed", "resume_job_id": resume_job_id},
+                    next_task_status="success",
+                    task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": resume_job_id, "internal": internal_result},
+                )
+                return
+            emit_log("[共享桥接][湿球温度][外网] 共享文件已齐全，开始继续处理")
+            external_result = service.continue_from_source_units(
+                source_units=source_units,
+                emit_log=emit_log,
             )
+            raw_status = str(external_result.get("status", "") or "failed").strip().lower()
+            final_status = "success" if raw_status in {"ok", "success"} else ("partial_failed" if raw_status == "partial_failed" else "failed")
+            task_error = str(external_result.get("error", "") or external_result.get("last_error", "") or "").strip() if final_status in {"partial_failed", "failed"} else ""
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
                 claim_token=claim_token,
                 side="external",
-                stage_result={"status": "resumed", "resume_job_id": self._resume_job_id_from_task(task)},
-                next_task_status="success",
-                task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": self._resume_job_id_from_task(task), "internal": internal_result},
+                stage_result=external_result,
+                next_task_status=final_status,
+                task_error=task_error,
+                task_result={"status": final_status, "bridge_task_id": task_id, "internal": internal_result, "external": external_result},
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
@@ -2790,6 +3231,7 @@ class SharedBridgeRuntimeService:
         continuation_kind = str(request.get("continuation_kind", "") or "").strip().lower()
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
         try:
+            resume_job_id = self._resume_job_id_from_task(task)
             if continuation_kind == "handover":
                 buildings = [
                     str(item or "").strip()
@@ -2824,6 +3266,34 @@ class SharedBridgeRuntimeService:
                     (str(item.get("building", "")).strip(), str(item.get("file_path", "")).strip())
                     for item in capacity_entries
                 ]
+                if resume_job_id:
+                    emit_log("[共享桥接][交接班历史补采][外网] 共享文件已齐全，准备唤醒原任务")
+                    self._resume_bound_job(
+                        task,
+                        worker_payload={
+                            "resume_kind": "shared_bridge_handover",
+                            "building_files": [{"building": building, "file_path": file_path} for building, file_path in building_files],
+                            "capacity_building_files": [
+                                {"building": building, "file_path": file_path}
+                                for building, file_path in capacity_building_files
+                            ],
+                            "end_time": None,
+                            "duty_date": duty_date or None,
+                            "duty_shift": duty_shift or None,
+                            "bridge_task_id": task_id,
+                        },
+                        summary="共享文件已到位，正在继续生成交接班日志",
+                    )
+                    self._store.complete_stage(
+                        task_id=task_id,
+                        stage_id=stage_id,
+                        claim_token=claim_token,
+                        side="external",
+                        stage_result={"status": "resumed", "resume_job_id": resume_job_id},
+                        next_task_status="success",
+                        task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": resume_job_id, "internal": internal_result},
+                    )
+                    return
                 external_result = OrchestratorService(self.runtime_config).run_handover_from_files(
                     building_files=building_files,
                     capacity_building_files=capacity_building_files,
@@ -2865,6 +3335,31 @@ class SharedBridgeRuntimeService:
                     }
                     for item in cached_entries
                 ]
+                if resume_job_id:
+                    emit_log("[共享桥接][12项历史补采][外网] 共享文件已齐全，准备唤醒原任务")
+                    self._resume_bound_job(
+                        task,
+                        worker_payload={
+                            "resume_kind": "shared_bridge_day_metric",
+                            "selected_dates": selected_dates,
+                            "buildings": target_buildings,
+                            "source_units": source_units,
+                            "building_scope": building_scope,
+                            "building": str(request.get("building", "") or "").strip() or None,
+                            "bridge_task_id": task_id,
+                        },
+                        summary="共享文件已到位，正在继续上传12项数据",
+                    )
+                    self._store.complete_stage(
+                        task_id=task_id,
+                        stage_id=stage_id,
+                        claim_token=claim_token,
+                        side="external",
+                        stage_result={"status": "resumed", "resume_job_id": resume_job_id},
+                        next_task_status="success",
+                        task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": resume_job_id, "internal": internal_result},
+                    )
+                    return
                 service = DayMetricStandaloneUploadService(self.runtime_config)
                 external_result = service.continue_from_source_files(
                     selected_dates=selected_dates,
@@ -2899,6 +3394,7 @@ class SharedBridgeRuntimeService:
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
@@ -2951,6 +3447,7 @@ class SharedBridgeRuntimeService:
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
@@ -2975,6 +3472,7 @@ class SharedBridgeRuntimeService:
         internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
         try:
+            resume_job_id = self._resume_job_id_from_task(task)
             selected_dates = [
                 str(item or "").strip()
                 for item in (request.get("selected_dates", []) if isinstance(request.get("selected_dates", []), list) else [])
@@ -2999,6 +3497,29 @@ class SharedBridgeRuntimeService:
                 }
                 for item in cached_entries
             ]
+            if resume_job_id:
+                emit_log("[共享桥接][月报历史补采][外网] 共享文件已齐全，准备唤醒原任务")
+                self._resume_bound_job(
+                    task,
+                    worker_payload={
+                        "resume_kind": "shared_bridge_monthly_multi_date",
+                        "selected_dates": selected_dates,
+                        "file_items": file_items,
+                        "source_label": "月报历史共享文件",
+                        "bridge_task_id": task_id,
+                    },
+                    summary="共享文件已到位，正在继续处理多日期月报",
+                )
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="external",
+                    stage_result={"status": "resumed", "resume_job_id": resume_job_id},
+                    next_task_status="success",
+                    task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": resume_job_id, "internal": internal_result},
+                )
+                return
             external_result = run_monthly_from_file_items(
                 self.runtime_config,
                 file_items=file_items,
@@ -3016,6 +3537,7 @@ class SharedBridgeRuntimeService:
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
@@ -3142,11 +3664,56 @@ class SharedBridgeRuntimeService:
         task_id = str(task.get("task_id", "") or "").strip()
         stage_id = "external_resume"
         claim_token = self._stage_claim_token(task, stage_id)
+        mode = str(task.get("mode", "") or "").strip().lower()
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
         internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
         try:
+            resume_job_id = self._resume_job_id_from_task(task)
+            if resume_job_id and mode == "resume_upload":
+                emit_log("[共享桥接][月报续传][外网] 准备唤醒原任务继续续传")
+                self._resume_bound_job(
+                    task,
+                    worker_payload={
+                        "run_id": str(request.get("run_id", "") or "").strip() or None,
+                        "auto_trigger": bool(request.get("auto_trigger", False)),
+                        "bridge_task_id": task_id,
+                    },
+                    summary="共享续传状态已就绪，正在继续断点续传",
+                )
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="external",
+                    stage_result={"status": "resumed", "resume_job_id": resume_job_id},
+                    next_task_status="success",
+                    task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": resume_job_id, "internal": internal_result},
+                )
+                return
+            if not resume_job_id and mode == "resume_upload":
+                emit_log("[共享桥接][月报][外网] 开始继续执行续传上传")
+                external_result = run_bridge_resume_upload(
+                    self.runtime_config,
+                    shared_root_dir=self.shared_bridge_root,
+                    run_id=str(request.get("run_id", "") or "").strip() or None,
+                    auto_trigger=bool(request.get("auto_trigger", False)),
+                )
+                raw_status = str(external_result.get("status", "") or "failed").strip().lower()
+                final_status = "success" if raw_status in {"ok", "success"} else ("partial_failed" if raw_status == "partial_failed" else "failed")
+                task_error = str(external_result.get("error", "") or external_result.get("last_error", "") or "").strip() if final_status in {"partial_failed", "failed"} else ""
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="external",
+                    stage_result=external_result,
+                    next_task_status=final_status,
+                    task_error=task_error,
+                    task_result={"status": final_status, "bridge_task_id": task_id, "internal": internal_result, "external": external_result},
+                )
+                return
             source_root = str(internal_result.get("source_root", "") or "").strip()
             if not source_root:
                 raise RuntimeError("月报共享桥接缺少 source_root")
@@ -3160,25 +3727,47 @@ class SharedBridgeRuntimeService:
                 file_items.append({"building": building, "file_path": str(file_path), "upload_date": upload_date})
             if not file_items:
                 raise RuntimeError("月报共享桥接未找到可继续处理的共享源文件")
-            emit_log("[共享桥接][月报][外网] 共享文件已齐全，准备唤醒原任务")
-            self._resume_bound_job(
-                task,
-                worker_payload={
-                    "resume_kind": "shared_bridge_monthly_auto_once",
-                    "file_items": file_items,
-                    "source": str(request.get("source", "") or "共享桥接月报自动流程").strip() or "共享桥接月报自动流程",
-                    "bridge_task_id": task_id,
-                },
-                summary="共享文件已到位，正在继续处理月报自动流程",
+            if resume_job_id:
+                emit_log("[共享桥接][月报][外网] 共享文件已齐全，准备唤醒原任务")
+                self._resume_bound_job(
+                    task,
+                    worker_payload={
+                        "resume_kind": "shared_bridge_monthly_auto_once",
+                        "file_items": file_items,
+                        "source": str(request.get("source", "") or "共享桥接月报自动流程").strip() or "共享桥接月报自动流程",
+                        "bridge_task_id": task_id,
+                    },
+                    summary="共享文件已到位，正在继续处理月报自动流程",
+                )
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="external",
+                    stage_result={"status": "resumed", "resume_job_id": resume_job_id},
+                    next_task_status="success",
+                    task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": resume_job_id, "internal": internal_result},
+                )
+                return
+            emit_log("[共享桥接][月报][外网] 共享文件已齐全，开始继续处理")
+            external_result = run_monthly_from_file_items(
+                self.runtime_config,
+                file_items=file_items,
+                emit_log=emit_log,
+                source_label=str(request.get("source", "") or "共享桥接月报自动流程").strip() or "共享桥接月报自动流程",
             )
+            raw_status = str(external_result.get("status", "") or "failed").strip().lower()
+            final_status = "success" if raw_status in {"ok", "success"} else ("partial_failed" if raw_status == "partial_failed" else "failed")
+            task_error = str(external_result.get("error", "") or external_result.get("last_error", "") or "").strip() if final_status in {"partial_failed", "failed"} else ""
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
                 claim_token=claim_token,
                 side="external",
-                stage_result={"status": "resumed", "resume_job_id": self._resume_job_id_from_task(task)},
-                next_task_status="success",
-                task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": self._resume_job_id_from_task(task), "internal": internal_result},
+                stage_result=external_result,
+                next_task_status=final_status,
+                task_error=task_error,
+                task_result={"status": final_status, "bridge_task_id": task_id, "internal": internal_result, "external": external_result},
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
@@ -3228,6 +3817,56 @@ class SharedBridgeRuntimeService:
         )
         if retried:
             self._emit_system_log(f"[共享桥接][外网端] 任务={task_text} {detail}")
+
+    def _reconcile_waiting_jobs(self) -> None:
+        if self._job_service is None or not self._store:
+            return
+        try:
+            waiting_jobs = self._job_service.list_jobs(limit=300, statuses=["waiting_resource"])
+        except Exception:
+            return
+        for snapshot in waiting_jobs if isinstance(waiting_jobs, list) else []:
+            if not isinstance(snapshot, dict):
+                continue
+            if str(snapshot.get("wait_reason", "") or "").strip().lower() != "waiting:shared_bridge":
+                continue
+            job_id = str(snapshot.get("job_id", "") or "").strip()
+            bridge_task_id = str(snapshot.get("bridge_task_id", "") or "").strip()
+            if not job_id or not bridge_task_id:
+                continue
+            task = self.get_task(bridge_task_id)
+            if not task:
+                self._job_service.fail_waiting_job(
+                    job_id,
+                    error_text="绑定补采任务丢失",
+                    summary="等待内网补采同步失败",
+                )
+                continue
+            status = str(task.get("status", "") or "").strip().lower()
+            if status == "success":
+                try:
+                    binding = self._build_waiting_job_resume_binding(task)
+                    if binding.get("log_text"):
+                        self._emit_system_log(str(binding.get("log_text", "")).strip())
+                    self._job_service.resume_waiting_worker_job(
+                        job_id,
+                        worker_payload=binding.get("worker_payload") if isinstance(binding.get("worker_payload"), dict) else {},
+                        summary=str(binding.get("summary", "") or "共享文件已到位，正在继续处理").strip() or "共享文件已到位，正在继续处理",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._job_service.fail_waiting_job(
+                        job_id,
+                        error_text=f"共享桥接已完成，但自动恢复原任务失败: {exc}",
+                        summary="等待内网补采同步失败",
+                    )
+                continue
+            if status in {"failed", "partial_failed", "cancelled"}:
+                error_text = str(task.get("error", "") or "").strip() or f"绑定补采任务已{status}"
+                self._job_service.fail_waiting_job(
+                    job_id,
+                    error_text=error_text,
+                    summary="等待内网补采同步失败",
+                )
 
     def _process_one_task_if_needed(self) -> None:
         if not self._store:
@@ -3300,6 +3939,7 @@ class SharedBridgeRuntimeService:
     def _loop(self) -> None:
         next_heartbeat = 0.0
         next_cleanup = 0.0
+        next_waiting_job_reconcile = 0.0
         while not self._stop_event.is_set():
             now_monotonic = time.monotonic()
             try:
@@ -3314,6 +3954,9 @@ class SharedBridgeRuntimeService:
                     if now_monotonic >= next_cleanup:
                         self._run_housekeeping()
                         next_cleanup = now_monotonic + self.CLEANUP_INTERVAL_SEC
+                    if now_monotonic >= next_waiting_job_reconcile:
+                        self._reconcile_waiting_jobs()
+                        next_waiting_job_reconcile = now_monotonic + self.WAITING_JOB_RECONCILE_INTERVAL_SEC
                     if self.role_mode == "internal":
                         self._process_internal_browser_alerts()
                     self._process_one_task_if_needed()

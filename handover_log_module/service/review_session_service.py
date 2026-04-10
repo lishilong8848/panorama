@@ -22,8 +22,41 @@ class ReviewSessionNotFoundError(RuntimeError):
     pass
 
 
+class ReviewSessionStoreUnavailableError(RuntimeError):
+    pass
+
+
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _is_recoverable_review_store_error(exc: Exception) -> bool:
+    if isinstance(exc, ReviewSessionStoreUnavailableError):
+        return True
+    if isinstance(exc, PermissionError):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    tokens = (
+        "database is locked",
+        "database table is locked",
+        "database is busy",
+        "busy",
+        "unable to open database file",
+        "disk i/o error",
+        "readonly database",
+        "cannot operate on a closed database",
+        "permission denied",
+        "winerror 5",
+    )
+    return any(token in text for token in tokens)
+
+
+def _reraise_review_store_error(exc: Exception) -> None:
+    if isinstance(exc, ReviewSessionStoreUnavailableError):
+        raise exc
+    if _is_recoverable_review_store_error(exc):
+        raise ReviewSessionStoreUnavailableError("审核状态存储暂时不可用，请稍后重试") from exc
+    raise exc
 
 
 class ReviewSessionService:
@@ -672,7 +705,10 @@ class ReviewSessionService:
         }
 
     def _load_state(self) -> Dict[str, Any]:
-        state = self._review_state_store.load_state()
+        try:
+            state = self._review_state_store.load_state()
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
         if not isinstance(state.get("review_cloud_batches", {}), dict):
             state["review_cloud_batches"] = {}
         sessions = state.get("review_sessions", {})
@@ -787,7 +823,10 @@ class ReviewSessionService:
     def _save_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
         self._rebuild_latest_by_building(state)
         self._rebuild_batch_status(state)
-        return self._review_state_store.save_state(state)
+        try:
+            return self._review_state_store.save_state(state)
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
 
     def get_building_by_code(self, building_code: str) -> str:
         code = str(building_code or "").strip().lower()
@@ -894,12 +933,15 @@ class ReviewSessionService:
         building_name = str(building or "").strip()
         if not isinstance(session, dict) or str(session.get("building", "")).strip() != building_name:
             raise ReviewSessionNotFoundError("review session not found")
-        return self._review_state_store.get_concurrency(
-            building=building_name,
-            session_id=str(session.get("session_id", "")).strip(),
-            current_revision=int(session.get("revision", 0) or 0),
-            client_id=str(client_id or "").strip(),
-        )
+        try:
+            return self._review_state_store.get_concurrency(
+                building=building_name,
+                session_id=str(session.get("session_id", "")).strip(),
+                current_revision=int(session.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
 
     def claim_session_lock(
         self,
@@ -914,14 +956,17 @@ class ReviewSessionService:
         building_name = str(building or "").strip()
         if not isinstance(session, dict) or str(session.get("building", "")).strip() != building_name:
             raise ReviewSessionNotFoundError("review session not found")
-        return self._review_state_store.claim_lock(
-            building=building_name,
-            session_id=str(session.get("session_id", "")).strip(),
-            current_revision=int(session.get("revision", 0) or 0),
-            client_id=str(client_id or "").strip(),
-            holder_label=str(holder_label or "").strip(),
-            lease_ttl_sec=lease_ttl_sec,
-        )
+        try:
+            return self._review_state_store.claim_lock(
+                building=building_name,
+                session_id=str(session.get("session_id", "")).strip(),
+                current_revision=int(session.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+                holder_label=str(holder_label or "").strip(),
+                lease_ttl_sec=lease_ttl_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
 
     def heartbeat_session_lock(
         self,
@@ -935,13 +980,16 @@ class ReviewSessionService:
         building_name = str(building or "").strip()
         if not isinstance(session, dict) or str(session.get("building", "")).strip() != building_name:
             raise ReviewSessionNotFoundError("review session not found")
-        return self._review_state_store.heartbeat_lock(
-            building=building_name,
-            session_id=str(session.get("session_id", "")).strip(),
-            current_revision=int(session.get("revision", 0) or 0),
-            client_id=str(client_id or "").strip(),
-            lease_ttl_sec=lease_ttl_sec,
-        )
+        try:
+            return self._review_state_store.heartbeat_lock(
+                building=building_name,
+                session_id=str(session.get("session_id", "")).strip(),
+                current_revision=int(session.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+                lease_ttl_sec=lease_ttl_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
 
     def release_session_lock(
         self,
@@ -961,12 +1009,15 @@ class ReviewSessionService:
                 "client_holds_lock": False,
                 "released": False,
             }
-        return self._review_state_store.release_lock(
-            building=building_name,
-            session_id=str(session.get("session_id", "")).strip(),
-            current_revision=int(session.get("revision", 0) or 0),
-            client_id=str(client_id or "").strip(),
-        )
+        try:
+            return self._review_state_store.release_lock(
+                building=building_name,
+                session_id=str(session.get("session_id", "")).strip(),
+                current_revision=int(session.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
 
     def get_session_for_building_duty(self, building: str, duty_date: str, duty_shift: str) -> Dict[str, Any] | None:
         building_name = str(building or "").strip()

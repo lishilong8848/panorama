@@ -16,6 +16,7 @@ from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeSt
 from app.modules.shared_bridge.service.shared_source_cache_service import (
     ALARM_EVENT_BITABLE_TARGET_FIELDS,
     FAMILY_ALARM_EVENT,
+    FAMILY_HANDOVER_CAPACITY_REPORT,
     FAMILY_HANDOVER_LOG,
     FAMILY_MONTHLY_REPORT,
     SharedSourceCacheService,
@@ -341,14 +342,14 @@ def test_external_full_health_snapshot_uses_cached_copy_until_marked_dirty(
 
     assert first[FAMILY_HANDOVER_LOG]['latest_selection'] == {'source_family': FAMILY_HANDOVER_LOG}
     assert second[FAMILY_HANDOVER_LOG]['latest_selection'] == {'source_family': FAMILY_HANDOVER_LOG}
-    assert call_counter['count'] == 2
+    assert call_counter['count'] == 3
 
     service._mark_external_full_snapshot_dirty()
     service.get_health_snapshot(mode='external_full')
-    assert call_counter['count'] == 4
+    assert call_counter['count'] == 6
 
 
-def test_alarm_event_recent_bucket_uses_previous_day_16_before_morning(work_dir: Path) -> None:
+def test_alarm_event_recent_bucket_uses_current_hour_bucket(work_dir: Path) -> None:
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
@@ -358,7 +359,7 @@ def test_alarm_event_recent_bucket_uses_previous_day_16_before_morning(work_dir:
         emit_log=lambda *_args, **_kwargs: None,
     )
 
-    assert service.current_alarm_bucket(cache_module.datetime(2026, 4, 1, 7, 30, 0)) == '2026-03-31 16'
+    assert service.current_alarm_bucket(cache_module.datetime(2026, 4, 1, 7, 30, 0)) == '2026-04-01 07'
     assert service.current_alarm_bucket(cache_module.datetime(2026, 4, 1, 8, 15, 0)) == '2026-04-01 08'
     assert service.current_alarm_bucket(cache_module.datetime(2026, 4, 1, 16, 20, 0)) == '2026-04-01 16'
 
@@ -466,6 +467,7 @@ def test_current_hour_refresh_also_refreshes_recent_alarm_bucket(
 
     assert calls == [
         (FAMILY_HANDOVER_LOG, '2026-04-01 10', True),
+        (FAMILY_HANDOVER_CAPACITY_REPORT, '2026-04-01 10', True),
         (FAMILY_MONTHLY_REPORT, '2026-04-01 10', True),
         (FAMILY_ALARM_EVENT, '2026-04-01 08', True),
     ]
@@ -590,12 +592,14 @@ def test_run_current_hour_refresh_impl_tracks_running_and_completed_buildings(
     assert service._current_hour_refresh['running_buildings'] == [
         'A楼/handover_log_family',
         'B楼/handover_log_family',
+        'E楼/handover_capacity_report_family',
         'C楼/monthly_report_family',
         'D楼/monthly_report_family',
         'E楼/alarm_event_family',
     ]
     assert service._current_hour_refresh['completed_buildings'] == [
         'A楼/handover_log_family',
+        'E楼/handover_capacity_report_family',
         'C楼/monthly_report_family',
         'E楼/alarm_event_family',
     ]
