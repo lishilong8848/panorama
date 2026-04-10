@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-import re
 from typing import Any, Callable, Dict, List, Optional
 
 from handover_log_module.core.formatter import (
@@ -11,6 +10,7 @@ from handover_log_module.core.formatter import (
     missing_metrics_for_cells,
 )
 from handover_log_module.core.models import FillValue, MetricHit
+from handover_log_module.core.building_title_rules import HANDOVER_TITLE_CELL, build_handover_building_title
 from handover_log_module.repository.template_writer import copy_template_and_fill
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
@@ -22,16 +22,6 @@ class HandoverFillService:
         self._cabinet_power_defaults_service = CabinetPowerDefaultsService()
         self._footer_inventory_defaults_service = FooterInventoryDefaultsService()
 
-    @staticmethod
-    def _extract_building_code(building: str) -> str:
-        text = str(building or "").strip()
-        if not text:
-            return ""
-        m = re.search(r"[A-Za-z]", text)
-        if not m:
-            return ""
-        return m.group(0).upper()
-
     def _inject_building_title(
         self,
         *,
@@ -39,33 +29,8 @@ class HandoverFillService:
         template_cfg: Dict[str, Any],
         fixed_cells: Dict[str, str],
     ) -> None:
-        apply_title = bool(template_cfg.get("apply_building_title", True))
-        if not apply_title:
-            return
-
-        title_cell = str(template_cfg.get("title_cell", "A1")).strip().upper() or "A1"
-        if not re.fullmatch(r"[A-Z]+[1-9]\d*", title_cell):
-            return
-        if title_cell in fixed_cells:
-            return
-
-        title_map_raw = template_cfg.get("building_title_map", {})
-        title_map = title_map_raw if isinstance(title_map_raw, dict) else {}
-        title_text = str(title_map.get(building, "")).strip()
-
-        if not title_text:
-            building_code = self._extract_building_code(building)
-            pattern = str(
-                template_cfg.get("building_title_pattern", "EA118机房{building_code}栋数据中心交接班日志")
-            ).strip()
-            if pattern and building_code:
-                try:
-                    title_text = str(
-                        pattern.format(building_code=building_code, building=building)
-                    ).strip()
-                except Exception:  # noqa: BLE001
-                    title_text = ""
-
+        title_cell = HANDOVER_TITLE_CELL
+        title_text = build_handover_building_title(building)
         if title_text:
             fixed_cells[title_cell] = title_text
 

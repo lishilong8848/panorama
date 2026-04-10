@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import json
+import os
 import shutil
 import threading
 import uuid
@@ -237,10 +238,154 @@ def test_health_snapshot_does_not_mark_missing_ready_file_as_ready(work_dir: Pat
 
     snapshot = service.get_health_snapshot()
     buildings = {item['building']: item for item in snapshot[FAMILY_MONTHLY_REPORT]['buildings']}
+    rows = store.list_source_cache_entries(
+        source_family=FAMILY_MONTHLY_REPORT,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key=bucket_key,
+        limit=1,
+    )
 
-    assert buildings['A楼']['status'] == 'waiting'
+    assert buildings['A楼']['status'] == 'failed'
     assert buildings['A楼']['ready'] is False
+    assert buildings['A楼']['last_error'] == '共享文件缺失或不可访问'
     assert snapshot[FAMILY_MONTHLY_REPORT]['ready_count'] == 0
+    assert rows[0]['status'] == 'failed'
+    assert rows[0]['metadata']['error'] == '共享文件缺失或不可访问'
+
+
+def test_store_entry_marks_entry_refreshing_before_replacing_ready_file(
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='internal', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    source_path = work_dir / 'source.xlsx'
+    source_path.write_bytes(b'test')
+    target_path = service._source_target_path(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-10 09',
+        duty_date='2026-04-10',
+        duty_shift='day',
+        source_path=source_path,
+    )
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(b'old-ready')
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-10 09',
+        duty_date='2026-04-10',
+        duty_shift='day',
+        downloaded_at='2026-04-10 09:00:00',
+        relative_path=str(target_path.relative_to(shared_root)).replace('\\', '/'),
+        status='ready',
+        file_hash='old-hash',
+        size_bytes=9,
+        metadata={'naming_version': 2},
+    )
+
+    observed_statuses: list[str] = []
+
+    def _fake_cache_file(*, source_path: Path, target_path: Path) -> dict[str, object]:
+        rows = store.list_source_cache_entries(
+            source_family=FAMILY_HANDOVER_LOG,
+            building='A楼',
+            bucket_kind='latest',
+            bucket_key='2026-04-10 09',
+            limit=5,
+        )
+        observed_statuses.extend(
+            str(item.get('status', '') or '').strip().lower()
+            for item in rows
+            if isinstance(item, dict)
+        )
+        target_path.write_bytes(b'new-ready')
+        return {
+            'file_hash': 'new-hash',
+            'size_bytes': int(target_path.stat().st_size),
+            'target_path': target_path,
+            'relative_path': target_path.relative_to(shared_root).as_posix(),
+        }
+
+    monkeypatch.setattr(service, '_cache_file', _fake_cache_file)
+
+    result = service._store_entry(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-10 09',
+        duty_date='2026-04-10',
+        duty_shift='day',
+        source_path=source_path,
+        status='ready',
+        metadata={'family': FAMILY_HANDOVER_LOG, 'building': 'A楼'},
+    )
+
+    assert 'refreshing' in observed_statuses
+    rows = store.list_source_cache_entries(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-10 09',
+        limit=1,
+    )
+    assert rows[0]['status'] == 'ready'
+    assert rows[0]['file_hash'] == 'new-hash'
+    assert result['file_path'] == str(target_path)
+
+
+def test_get_health_snapshot_repairs_stale_refreshing_entry(work_dir: Path) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='internal', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    bucket_key = '2026-04-10 09'
+    service._current_hour_bucket = bucket_key
+    stale_refreshing_at = (datetime.now() - timedelta(minutes=20)).strftime('%Y-%m-%d %H:%M:%S')
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key=bucket_key,
+        duty_date='',
+        duty_shift='',
+        downloaded_at='2026-04-10 09:00:00',
+        relative_path='交接班日志源文件/202604/20260410--09/A楼.xlsx',
+        status='refreshing',
+        file_hash='',
+        size_bytes=0,
+        metadata={'refreshing_at': stale_refreshing_at},
+    )
+
+    snapshot = service.get_health_snapshot()
+    buildings = {item['building']: item for item in snapshot[FAMILY_HANDOVER_LOG]['buildings']}
+    rows = store.list_source_cache_entries(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key=bucket_key,
+        limit=1,
+    )
+
+    assert buildings['A楼']['status'] == 'failed'
+    assert buildings['A楼']['last_error'] == '共享文件刷新超时'
+    assert rows[0]['status'] == 'failed'
+    assert rows[0]['metadata']['error'] == '共享文件刷新超时'
 
 
 def test_internal_light_health_snapshot_skips_latest_selection(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1329,6 +1474,82 @@ def test_delete_manual_alarm_files_only_deletes_manual_entries(work_dir: Path) -
         limit=1,
     )
     assert len(remaining) == 1
+
+
+def test_cleanup_expired_entries_removes_db_row_before_file_delete(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='internal', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    source_file = work_dir / 'old.xlsx'
+    workbook = openpyxl.Workbook()
+    workbook.save(source_file)
+    entry = service._store_entry(  # noqa: SLF001
+        source_family=FAMILY_MONTHLY_REPORT,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 08',
+        duty_date='',
+        duty_shift='',
+        source_path=source_file,
+        status='ready',
+        metadata={},
+    )
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_MONTHLY_REPORT,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 08',
+        duty_date='',
+        duty_shift='',
+        downloaded_at='2026-01-01 00:00:00',
+        relative_path=Path(entry['file_path']).relative_to(shared_root).as_posix(),
+        status='ready',
+        file_hash='hash-old',
+        size_bytes=1,
+        metadata={},
+    )
+    monkeypatch.setattr(service, '_safe_delete_cached_file', lambda **_kwargs: False)
+
+    result = service.cleanup_expired_entries(limit=20)
+    rows = store.list_source_cache_entries(
+        source_family=FAMILY_MONTHLY_REPORT,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 08',
+        limit=5,
+    )
+
+    assert result['deleted_entries'] == 1
+    assert rows == []
+
+
+def test_cleanup_expired_entries_removes_old_orphan_cached_file(work_dir: Path) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='internal', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    orphan_file = shared_root / '全景平台月报源文件' / '202501' / '20250101--08' / '20250101--08--全景平台月报源文件--A楼.xlsx'
+    orphan_file.parent.mkdir(parents=True, exist_ok=True)
+    workbook = openpyxl.Workbook()
+    workbook.save(orphan_file)
+    old_timestamp = (datetime.now() - timedelta(days=SharedSourceCacheService.ORPHAN_FILE_RETENTION_DAYS + 2)).timestamp()
+    os.utime(orphan_file, (old_timestamp, old_timestamp))
+
+    result = service.cleanup_expired_entries(limit=20)
+
+    assert result['deleted_orphan_files'] == 1
+    assert not orphan_file.exists()
 
 
 def test_internal_light_snapshot_includes_manual_alarm_refresh_summary(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:

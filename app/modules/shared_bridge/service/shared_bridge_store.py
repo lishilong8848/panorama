@@ -1984,6 +1984,61 @@ class SharedBridgeStore:
             ).fetchall()
         return [self._row_to_artifact_dict(row) for row in rows]
 
+    def update_artifact_status(
+        self,
+        artifact_id: str,
+        *,
+        status: str,
+        metadata_update: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        artifact_text = str(artifact_id or "").strip()
+        status_text = str(status or "").strip()
+        if not artifact_text or not status_text:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT artifact_id, task_id, stage_id, artifact_kind, building, relative_path, status,
+                       size_bytes, metadata_json, created_at, updated_at
+                FROM bridge_artifacts
+                WHERE artifact_id=?
+                """,
+                (artifact_text,),
+            ).fetchone()
+            if not row:
+                return None
+            metadata = self._loads(row["metadata_json"])
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if isinstance(metadata_update, dict):
+                metadata.update(metadata_update)
+            updated_at = _now_text()
+            conn.execute(
+                """
+                UPDATE bridge_artifacts
+                SET status=?,
+                    metadata_json=?,
+                    updated_at=?
+                WHERE artifact_id=?
+                """,
+                (
+                    status_text,
+                    json.dumps(metadata, ensure_ascii=False),
+                    updated_at,
+                    artifact_text,
+                ),
+            )
+            updated_row = conn.execute(
+                """
+                SELECT artifact_id, task_id, stage_id, artifact_kind, building, relative_path, status,
+                       size_bytes, metadata_json, created_at, updated_at
+                FROM bridge_artifacts
+                WHERE artifact_id=?
+                """,
+                (artifact_text,),
+            ).fetchone()
+        return self._row_to_artifact_dict(updated_row) if updated_row else None
+
     def upsert_source_cache_entry(
         self,
         *,

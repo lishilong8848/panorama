@@ -158,6 +158,19 @@ def _parse_hour_bucket(bucket_key: str) -> datetime | None:
     return None
 
 
+def _parse_datetime_text(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("/", "-")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _normalize_nullable_text(value: Any) -> str:
     text = str(value or "").strip()
     if text.lower() in {"none", "null", "undefined"}:
@@ -167,6 +180,9 @@ def _normalize_nullable_text(value: Any) -> str:
 
 class SharedSourceCacheService:
     EXTERNAL_FULL_SNAPSHOT_MAX_AGE_SEC = 15.0
+    REFRESHING_ENTRY_TIMEOUT_SEC = 600.0
+    REPAIR_SWEEP_COOLDOWN_SEC = 30.0
+    ORPHAN_FILE_RETENTION_DAYS = 60
 
     def __init__(
         self,
@@ -250,6 +266,7 @@ class SharedSourceCacheService:
         self._external_full_snapshot_cache: Dict[str, Any] = {}
         self._external_full_snapshot_dirty = True
         self._external_full_snapshot_built_monotonic = 0.0
+        self._last_refreshing_repair_monotonic = 0.0
         self._refresh_config()
         with self._lock:
             self._reset_light_building_state_unlocked()
@@ -257,6 +274,126 @@ class SharedSourceCacheService:
     def _mark_external_full_snapshot_dirty(self) -> None:
         with self._lock:
             self._external_full_snapshot_dirty = True
+
+    def _log_source_cache_event(self, message: str) -> None:
+        line = str(message or "").strip()
+        if line:
+            self._emit(f"[共享缓存] {line}")
+
+    def _repair_entry_to_failed(
+        self,
+        entry: Dict[str, Any] | None,
+        *,
+        error_text: str,
+        log_reason: str,
+    ) -> Dict[str, Any] | None:
+        if self.store is None or not isinstance(entry, dict):
+            return None
+        entry_id = str(entry.get("entry_id", "") or "").strip()
+        if not entry_id:
+            return None
+        metadata_update = {
+            "error": str(error_text or "").strip() or "共享文件缺失或不可访问",
+            "failed_at": _now_text(),
+        }
+        updated = self.store.update_source_cache_entry_status(
+            entry_id,
+            status="failed",
+            metadata_update=metadata_update,
+        )
+        if updated is not None:
+            self._mark_external_full_snapshot_dirty()
+            self._log_source_cache_event(
+                f"{log_reason}: family={updated.get('source_family', '')}, "
+                f"building={updated.get('building', '')}, bucket={updated.get('bucket_kind', '')}/"
+                f"{updated.get('bucket_key', '')}, relative_path={updated.get('relative_path', '')}, "
+                f"error={metadata_update['error']}"
+            )
+        return updated
+
+    def _entry_reference_datetime(self, entry: Dict[str, Any] | None) -> datetime | None:
+        if not isinstance(entry, dict):
+            return None
+        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+        for candidate in (
+            metadata.get("refreshing_at"),
+            entry.get("updated_at"),
+            entry.get("downloaded_at"),
+            entry.get("created_at"),
+        ):
+            parsed = _parse_datetime_text(candidate)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _repair_stale_refreshing_entries(
+        self,
+        *,
+        force: bool = False,
+        limit: int = 2000,
+    ) -> int:
+        if self.store is None:
+            return 0
+        now_monotonic = time.monotonic()
+        with self._lock:
+            if (
+                not force
+                and self._last_refreshing_repair_monotonic > 0
+                and (now_monotonic - self._last_refreshing_repair_monotonic) < self.REPAIR_SWEEP_COOLDOWN_SEC
+            ):
+                return 0
+            self._last_refreshing_repair_monotonic = now_monotonic
+        rows = self.store.list_source_cache_entries(status="refreshing", limit=max(1, int(limit or 1)))
+        if not rows:
+            return 0
+        now_dt = _now_dt()
+        repaired = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            reference_dt = self._entry_reference_datetime(row)
+            if reference_dt is None:
+                continue
+            age_sec = max(0.0, (now_dt - reference_dt).total_seconds())
+            if age_sec < self.REFRESHING_ENTRY_TIMEOUT_SEC:
+                continue
+            if self._repair_entry_to_failed(
+                row,
+                error_text="共享文件刷新超时",
+                log_reason="refreshing 条目超时已转失败",
+            ):
+                repaired += 1
+        return repaired
+
+    def _repair_inaccessible_ready_entries(
+        self,
+        *,
+        source_family: str,
+        limit: int = 2000,
+    ) -> int:
+        if self.store is None or self.shared_root is None:
+            return 0
+        repaired = 0
+        for family_name in self._source_family_candidates(source_family):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                status="ready",
+                limit=max(1, int(limit or 1)),
+            )
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                relative_path = str(row.get("relative_path", "") or "").strip()
+                file_path = self._resolve_relative_path_under_shared_root(relative_path)
+                if file_path is not None and _is_accessible_cached_file(file_path):
+                    continue
+                if self._repair_entry_to_failed(
+                    row,
+                    error_text="共享文件缺失或不可访问",
+                    log_reason="ready 条目已修复为 failed",
+                ):
+                    repaired += 1
+        return repaired
 
     def _default_light_building_status(self, *, building: str, bucket_key: str) -> Dict[str, Any]:
         return {
@@ -571,6 +708,7 @@ class SharedSourceCacheService:
                 "selected_entries": [],
                 "selected_by_building": {},
             }
+        self._repair_inaccessible_ready_entries(source_family=FAMILY_ALARM_EVENT)
         return build_alarm_external_selection(
             store=self.store,
             shared_root=self.shared_root,
@@ -741,6 +879,7 @@ class SharedSourceCacheService:
 
     def get_health_snapshot(self, *, mode: str = "external_full") -> Dict[str, Any]:
         normalized_mode = str(mode or "external_full").strip().lower() or "external_full"
+        self._repair_stale_refreshing_entries()
         with self._lock:
             current_bucket = self._current_hour_bucket or self.current_hour_bucket()
             families = copy.deepcopy(self._family_status)
@@ -1053,7 +1192,14 @@ class SharedSourceCacheService:
 
     def _cache_file(self, *, source_path: Path, target_path: Path) -> Dict[str, Any]:
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_copy_file(source_path, target_path, validator=self._validate_cached_source_file, temp_suffix=".downloading")
+        atomic_copy_file(
+            source_path,
+            target_path,
+            validator=self._validate_cached_source_file,
+            temp_suffix=".downloading",
+            allow_overwrite_fallback=False,
+        )
+        self._log_source_cache_event(f"共享文件校验成功: target={target_path}")
         return {
             "file_hash": self._hash_file(target_path),
             "size_bytes": int(target_path.stat().st_size),
@@ -1212,10 +1358,39 @@ class SharedSourceCacheService:
             duty_shift=duty_shift,
             source_path=source_path,
         )
-        cached = self._cache_file(source_path=source_path, target_path=target_path)
-        downloaded_at = _now_text()
         entry_metadata = dict(metadata or {})
         entry_metadata.setdefault("naming_version", 2)
+        target_relative_path = (
+            target_path.relative_to(self.shared_root).as_posix()
+            if self.shared_root is not None
+            else target_path.name
+        )
+        self._log_source_cache_event(
+            f"开始刷新共享文件: family={normalized_family}, building={building}, "
+            f"bucket={bucket_kind}/{bucket_key}, target={target_relative_path}"
+        )
+        refreshing_metadata = dict(entry_metadata)
+        refreshing_metadata["refreshing_at"] = _now_text()
+        self.store.upsert_source_cache_entry(
+            source_family=normalized_family,
+            building=building,
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            downloaded_at=_now_text(),
+            relative_path=target_relative_path,
+            status="refreshing",
+            file_hash="",
+            size_bytes=0,
+            metadata=refreshing_metadata,
+        )
+        self._log_source_cache_event(
+            f"条目已进入 refreshing: family={normalized_family}, building={building}, "
+            f"bucket={bucket_kind}/{bucket_key}, target={target_relative_path}"
+        )
+        cached = self._cache_file(source_path=source_path, target_path=target_path)
+        downloaded_at = _now_text()
         self.store.upsert_source_cache_entry(
             source_family=normalized_family,
             building=building,
@@ -1237,6 +1412,11 @@ class SharedSourceCacheService:
             except Exception:  # noqa: BLE001
                 pass
         self._mark_external_full_snapshot_dirty()
+        self._log_source_cache_event(
+            f"条目已切回 {str(status or '').strip().lower() or 'ready'}: "
+            f"family={normalized_family}, building={building}, bucket={bucket_kind}/{bucket_key}, "
+            f"target={target_relative_path}"
+        )
         if bucket_kind == "latest":
             with self._lock:
                 self._ensure_light_family_cache_unlocked(
@@ -1376,6 +1556,13 @@ class SharedSourceCacheService:
         if file_path is None:
             return None
         if not _is_accessible_cached_file(file_path):
+            status_text = str(entry.get("status", "") or "").strip().lower()
+            if status_text == "ready":
+                self._repair_entry_to_failed(
+                    entry,
+                    error_text="共享文件缺失或不可访问",
+                    log_reason="ready 条目已修复为 failed",
+                )
             return None
         return file_path
 
@@ -1611,6 +1798,7 @@ class SharedSourceCacheService:
         max_version_gap: int = 3,
         max_selection_age_hours: float = 3.0,
     ) -> Dict[str, Any]:
+        self._repair_stale_refreshing_entries()
         requested = [
             str(item or "").strip()
             for item in (buildings or self.get_enabled_buildings())
@@ -1769,6 +1957,7 @@ class SharedSourceCacheService:
     def get_latest_ready_entries(self, *, source_family: str, buildings: List[str] | None = None, bucket_key: str | None = None) -> List[Dict[str, Any]]:
         if self.store is None:
             return []
+        self._repair_stale_refreshing_entries()
         requested = [str(item or "").strip() for item in (buildings or self.get_enabled_buildings()) if str(item or "").strip()]
         target_bucket = str(bucket_key or "").strip()
         output: List[Dict[str, Any]] = []
@@ -1793,6 +1982,7 @@ class SharedSourceCacheService:
     def get_handover_by_date_entries(self, *, duty_date: str, duty_shift: str, buildings: List[str] | None = None) -> List[Dict[str, Any]]:
         if self.store is None:
             return []
+        self._repair_stale_refreshing_entries()
         requested = [str(item or "").strip() for item in (buildings or self.get_enabled_buildings()) if str(item or "").strip()]
         output: List[Dict[str, Any]] = []
         for building in requested:
@@ -1812,6 +2002,7 @@ class SharedSourceCacheService:
     def get_handover_capacity_by_date_entries(self, *, duty_date: str, duty_shift: str, buildings: List[str] | None = None) -> List[Dict[str, Any]]:
         if self.store is None:
             return []
+        self._repair_stale_refreshing_entries()
         requested = [str(item or "").strip() for item in (buildings or self.get_enabled_buildings()) if str(item or "").strip()]
         output: List[Dict[str, Any]] = []
         for building in requested:
@@ -1832,6 +2023,7 @@ class SharedSourceCacheService:
     def get_day_metric_by_date_entries(self, *, selected_dates: List[str], buildings: List[str]) -> List[Dict[str, Any]]:
         if self.store is None:
             return []
+        self._repair_stale_refreshing_entries()
         output: List[Dict[str, Any]] = []
         for duty_date in [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]:
             for building in [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]:
@@ -1854,6 +2046,7 @@ class SharedSourceCacheService:
     def get_monthly_by_date_entries(self, *, selected_dates: List[str], buildings: List[str] | None = None) -> List[Dict[str, Any]]:
         if self.store is None:
             return []
+        self._repair_stale_refreshing_entries()
         requested = [str(item or "").strip() for item in (buildings or self.get_enabled_buildings()) if str(item or "").strip()]
         output: List[Dict[str, Any]] = []
         for duty_date in [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]:
@@ -2502,6 +2695,8 @@ class SharedSourceCacheService:
         metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
         candidates = [
             metadata.get("consumed_at"),
+            metadata.get("failed_at"),
+            metadata.get("refreshing_at"),
             entry.get("downloaded_at"),
             entry.get("updated_at"),
             entry.get("created_at"),
@@ -2515,6 +2710,72 @@ class SharedSourceCacheService:
             except ValueError:
                 continue
         return None
+
+    def _managed_family_roots(self) -> List[Path]:
+        roots: List[Path] = []
+        for root in (
+            self._handover_cache_root,
+            self._handover_capacity_cache_root,
+            self._monthly_cache_root,
+            self._alarm_cache_root,
+        ):
+            if root is not None:
+                roots.append(root)
+        return roots
+
+    def _safe_delete_cached_file(self, *, file_path: Path | None, log_prefix: str) -> bool:
+        if file_path is None or not file_path.exists():
+            return False
+        try:
+            file_path.unlink(missing_ok=True)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._log_source_cache_event(f"{log_prefix}: path={file_path}, error={exc}")
+            return False
+
+    def _collect_referenced_relative_paths(self, *, limit: int = 50000) -> set[str]:
+        if self.store is None:
+            return set()
+        rows = self.store.list_cleanup_candidate_source_cache_entries(limit=max(1, int(limit or 1)))
+        return {
+            str(row.get("relative_path", "") or "").replace("\\", "/").strip()
+            for row in rows
+            if isinstance(row, dict) and str(row.get("relative_path", "") or "").strip()
+        }
+
+    def _cleanup_orphan_cached_files(self, *, limit: int = 1000) -> Dict[str, int]:
+        if self.shared_root is None:
+            return {"deleted_files": 0, "scanned_files": 0}
+        referenced_paths = self._collect_referenced_relative_paths(limit=max(50000, int(limit or 1) * 10))
+        cutoff_dt = _now_dt() - timedelta(days=self.ORPHAN_FILE_RETENTION_DAYS)
+        deleted_files = 0
+        scanned_files = 0
+        for family_root in self._managed_family_roots():
+            if not family_root.exists():
+                continue
+            for file_path in family_root.rglob("*"):
+                if scanned_files >= max(1, int(limit or 1)):
+                    return {"deleted_files": deleted_files, "scanned_files": scanned_files}
+                if not file_path.is_file() or file_path.name.startswith("."):
+                    continue
+                scanned_files += 1
+                try:
+                    relative_path = file_path.relative_to(self.shared_root).as_posix()
+                    stat = file_path.stat()
+                except Exception:  # noqa: BLE001
+                    continue
+                if relative_path in referenced_paths:
+                    continue
+                modified_dt = datetime.fromtimestamp(stat.st_mtime)
+                if modified_dt > cutoff_dt:
+                    continue
+                if self._safe_delete_cached_file(
+                    file_path=file_path,
+                    log_prefix="孤儿共享文件删除失败",
+                ):
+                    deleted_files += 1
+                    self._log_source_cache_event(f"已清理孤儿共享文件: path={file_path}")
+        return {"deleted_files": deleted_files, "scanned_files": scanned_files}
 
     def cleanup_expired_entries(self, *, limit: int = 20000) -> Dict[str, Any]:
         if self.store is None or self.shared_root is None or not hasattr(self.store, "list_cleanup_candidate_source_cache_entries"):
@@ -2533,19 +2794,24 @@ class SharedSourceCacheService:
             if reference_dt > now_dt - timedelta(days=retention_days):
                 continue
             file_path = self._resolve_relative_path_under_shared_root(str(row.get("relative_path", "") or "").strip())
-            try:
-                if file_path is not None and file_path.exists():
-                    file_path.unlink(missing_ok=True)
-                    deleted_files += 1
-            except Exception:  # noqa: BLE001
-                pass
             if self.store.delete_source_cache_entry(str(row.get("entry_id", "") or "").strip()):
                 deleted_entries += 1
+                self._log_source_cache_event(
+                    f"清理索引成功: entry_id={row.get('entry_id', '')}, relative_path={row.get('relative_path', '')}"
+                )
+                if self._safe_delete_cached_file(
+                    file_path=file_path,
+                    log_prefix="清理共享文件删除失败",
+                ):
+                    deleted_files += 1
         if deleted_entries > 0:
             self._mark_external_full_snapshot_dirty()
+        orphan_cleanup = self._cleanup_orphan_cached_files(limit=min(max(limit, 1), 2000))
+        deleted_files += int(orphan_cleanup.get("deleted_files", 0) or 0)
         return {
             "deleted_entries": deleted_entries,
             "deleted_files": deleted_files,
+            "deleted_orphan_files": int(orphan_cleanup.get("deleted_files", 0) or 0),
         }
 
     def delete_manual_alarm_files(self) -> Dict[str, Any]:
@@ -2563,13 +2829,15 @@ class SharedSourceCacheService:
                 continue
             relative_path = str(row.get("relative_path", "") or "").strip()
             file_path = self._resolve_relative_path_under_shared_root(relative_path)
-            try:
-                if file_path is not None and file_path.exists():
-                    file_path.unlink()
-            except OSError:
-                pass
             if self.store.delete_source_cache_entry(str(row.get("entry_id", "") or "").strip()):
                 deleted_count += 1
+                self._log_source_cache_event(
+                    f"清理索引成功: entry_id={row.get('entry_id', '')}, relative_path={relative_path}"
+                )
+                self._safe_delete_cached_file(
+                    file_path=file_path,
+                    log_prefix="手动删除共享文件失败",
+                )
                 building = str(row.get("building", "") or "").strip()
                 if building:
                     deleted_buildings.append(building)

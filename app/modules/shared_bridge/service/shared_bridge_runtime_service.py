@@ -183,7 +183,7 @@ class SharedBridgeRuntimeService:
             building = str(item.get("building", "") or "").strip()
             if not relative_path or not building:
                 continue
-            file_path = self._resolve_shared_artifact_file_path(relative_path)
+            file_path = self._resolve_ready_artifact_file_path(item)
             if file_path is None:
                 raise FileNotFoundError(f"共享目录中的交接班源文件不存在或不可访问: {relative_path}")
             building_files.append({"building": building, "file_path": str(file_path)})
@@ -194,7 +194,7 @@ class SharedBridgeRuntimeService:
             building = str(item.get("building", "") or "").strip()
             if not relative_path or not building:
                 continue
-            file_path = self._resolve_shared_artifact_file_path(relative_path)
+            file_path = self._resolve_ready_artifact_file_path(item)
             if file_path is None:
                 raise FileNotFoundError(f"共享目录中的交接班容量源文件不存在或不可访问: {relative_path}")
             capacity_items.append({"building": building, "file_path": str(file_path)})
@@ -239,7 +239,7 @@ class SharedBridgeRuntimeService:
             duty_date = str(metadata.get("duty_date", "") or "").strip()
             if not relative_path or not building or not duty_date:
                 continue
-            file_path = self._resolve_shared_artifact_file_path(relative_path)
+            file_path = self._resolve_ready_artifact_file_path(item)
             if file_path is None:
                 raise FileNotFoundError(f"共享目录中的12项源文件不存在或不可访问: {relative_path}")
             source_units.append({"duty_date": duty_date, "building": building, "source_file": str(file_path)})
@@ -276,7 +276,7 @@ class SharedBridgeRuntimeService:
             building = str(item.get("building", "") or "").strip()
             if not relative_path or not building:
                 continue
-            file_path = self._resolve_shared_artifact_file_path(relative_path)
+            file_path = self._resolve_ready_artifact_file_path(item)
             if file_path is None:
                 raise FileNotFoundError(f"共享目录中的湿球温度源文件不存在或不可访问: {relative_path}")
             source_units.append({"building": building, "file_path": str(file_path)})
@@ -782,6 +782,8 @@ class SharedBridgeRuntimeService:
             self._store.ensure_ready()
             task = self._store.get_task(task_text)
             if isinstance(task, dict):
+                if self._repair_task_artifacts(task):
+                    task = self._store.get_task(task_text)
                 self._cache_task_detail(task)
             elif task_text:
                 self._cached_task_details.pop(task_text, None)
@@ -2261,6 +2263,56 @@ class SharedBridgeRuntimeService:
             return None
         return candidate
 
+    def _repair_artifact_to_failed(
+        self,
+        artifact: Dict[str, Any] | None,
+        *,
+        error_text: str = "共享任务产物缺失或不可访问",
+    ) -> Dict[str, Any] | None:
+        if not self._store or not isinstance(artifact, dict):
+            return None
+        artifact_id = str(artifact.get("artifact_id", "") or "").strip()
+        if not artifact_id:
+            return None
+        updated = self._store.update_artifact_status(
+            artifact_id,
+            status="failed",
+            metadata_update={
+                "error": str(error_text or "").strip() or "共享任务产物缺失或不可访问",
+                "failed_at": _now_text(),
+            },
+        )
+        if updated:
+            self._emit_system_log(
+                "[共享桥接] 任务产物已修复为 failed: "
+                f"task_id={updated.get('task_id', '')}, kind={updated.get('artifact_kind', '')}, "
+                f"building={updated.get('building', '')}, relative_path={updated.get('relative_path', '')}, "
+                f"error={updated.get('metadata', {}).get('error', '') if isinstance(updated.get('metadata'), dict) else ''}"
+            )
+        return updated
+
+    def _resolve_ready_artifact_file_path(self, artifact: Dict[str, Any] | None) -> Path | None:
+        if not isinstance(artifact, dict):
+            return None
+        relative_path = str(artifact.get("relative_path", "") or "").strip()
+        file_path = self._resolve_shared_artifact_file_path(relative_path)
+        if file_path is None and str(artifact.get("status", "") or "").strip().lower() == "ready":
+            self._repair_artifact_to_failed(artifact)
+        return file_path
+
+    def _repair_task_artifacts(self, task: Dict[str, Any] | None) -> bool:
+        if not isinstance(task, dict):
+            return False
+        repaired = False
+        for artifact in task.get("artifacts", []) if isinstance(task.get("artifacts", []), list) else []:
+            if not isinstance(artifact, dict):
+                continue
+            if str(artifact.get("status", "") or "").strip().lower() != "ready":
+                continue
+            if self._resolve_ready_artifact_file_path(artifact) is None:
+                repaired = True
+        return repaired
+
     def _handover_artifact_target(self, task_id: str, building: str, source_path: Path) -> Path:
         return (
             Path(self.shared_bridge_root)
@@ -2324,7 +2376,13 @@ class SharedBridgeRuntimeService:
             raise FileNotFoundError(f"写入共享目录前找不到交接班源文件: {source_path}")
         target_path = self._handover_artifact_target(task_id, building, source_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_copy_file(source_path, target_path, validator=validate_excel_workbook_file, temp_suffix=".downloading")
+        atomic_copy_file(
+            source_path,
+            target_path,
+            validator=validate_excel_workbook_file,
+            temp_suffix=".downloading",
+            allow_overwrite_fallback=False,
+        )
         relative_path = target_path.relative_to(Path(self.shared_bridge_root)).as_posix()
         metadata = {"original_path": str(source_path), "file_name": source_path.name}
         self._store.upsert_artifact(
@@ -2355,7 +2413,13 @@ class SharedBridgeRuntimeService:
             raise FileNotFoundError(f"写入共享目录前找不到交接班容量源文件: {source_path}")
         target_path = self._handover_capacity_artifact_target(task_id, building, source_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_copy_file(source_path, target_path, validator=validate_excel_workbook_file, temp_suffix=".downloading")
+        atomic_copy_file(
+            source_path,
+            target_path,
+            validator=validate_excel_workbook_file,
+            temp_suffix=".downloading",
+            allow_overwrite_fallback=False,
+        )
         relative_path = target_path.relative_to(Path(self.shared_bridge_root)).as_posix()
         metadata = {"original_path": str(source_path), "file_name": source_path.name}
         self._store.upsert_artifact(
@@ -2387,7 +2451,13 @@ class SharedBridgeRuntimeService:
             raise FileNotFoundError(f"写入共享目录前找不到12项源文件: {source_path}")
         target_path = self._day_metric_artifact_target(task_id, duty_date, building, source_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_copy_file(source_path, target_path, validator=validate_excel_workbook_file, temp_suffix=".downloading")
+        atomic_copy_file(
+            source_path,
+            target_path,
+            validator=validate_excel_workbook_file,
+            temp_suffix=".downloading",
+            allow_overwrite_fallback=False,
+        )
         relative_path = target_path.relative_to(Path(self.shared_bridge_root)).as_posix()
         metadata = {
             "original_path": str(source_path),
@@ -2427,7 +2497,13 @@ class SharedBridgeRuntimeService:
             raise FileNotFoundError(f"写入共享目录前找不到湿球温度源文件: {source_path}")
         target_path = self._wet_bulb_artifact_target(task_id, building, source_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_copy_file(source_path, target_path, validator=validate_excel_workbook_file, temp_suffix=".downloading")
+        atomic_copy_file(
+            source_path,
+            target_path,
+            validator=validate_excel_workbook_file,
+            temp_suffix=".downloading",
+            allow_overwrite_fallback=False,
+        )
         relative_path = target_path.relative_to(Path(self.shared_bridge_root)).as_posix()
         metadata = {"original_path": str(source_path), "file_name": source_path.name}
         self._store.upsert_artifact(
@@ -2464,6 +2540,7 @@ class SharedBridgeRuntimeService:
             encoding="utf-8",
             validator=validate_json_file,
             temp_suffix=".downloading",
+            allow_overwrite_fallback=False,
         )
         relative_path = target_path.relative_to(Path(self.shared_bridge_root)).as_posix()
         self._store.upsert_artifact(
@@ -2682,7 +2759,7 @@ class SharedBridgeRuntimeService:
                 building = str(item.get("building", "") or "").strip()
                 if not relative_path or not building:
                     continue
-                file_path = self._resolve_shared_artifact_file_path(relative_path)
+                file_path = self._resolve_ready_artifact_file_path(item)
                 if file_path is None:
                     raise FileNotFoundError(f"共享目录中的交接班源文件不存在或不可访问: {relative_path}")
                 building_files.append((building, str(file_path)))
@@ -2693,7 +2770,7 @@ class SharedBridgeRuntimeService:
                 building = str(item.get("building", "") or "").strip()
                 if not relative_path or not building:
                     continue
-                file_path = self._resolve_shared_artifact_file_path(relative_path)
+                file_path = self._resolve_ready_artifact_file_path(item)
                 if file_path is None:
                     raise FileNotFoundError(f"共享目录中的交接班容量源文件不存在或不可访问: {relative_path}")
                 capacity_building_files.append((building, str(file_path)))
@@ -2880,7 +2957,7 @@ class SharedBridgeRuntimeService:
                 duty_date = str(metadata.get("duty_date", "") or "").strip()
                 if not relative_path or not building or not duty_date:
                     continue
-                file_path = self._resolve_shared_artifact_file_path(relative_path)
+                file_path = self._resolve_ready_artifact_file_path(item)
                 if file_path is None:
                     raise FileNotFoundError(f"共享目录中的12项源文件不存在或不可访问: {relative_path}")
                 source_units.append({"duty_date": duty_date, "building": building, "source_file": str(file_path)})
@@ -3069,7 +3146,7 @@ class SharedBridgeRuntimeService:
                 building = str(item.get("building", "") or "").strip()
                 if not relative_path or not building:
                     continue
-                file_path = self._resolve_shared_artifact_file_path(relative_path)
+                file_path = self._resolve_ready_artifact_file_path(item)
                 if file_path is None:
                     raise FileNotFoundError(f"共享目录中的湿球温度源文件不存在或不可访问: {relative_path}")
                 source_units.append({"building": building, "file_path": str(file_path)})

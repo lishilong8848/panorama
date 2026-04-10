@@ -286,3 +286,10 @@ def test_external_handover_bridge_stage_fails_when_artifact_file_missing(monkeyp
     assert updated is not None
     assert updated["status"] == "failed"
     assert "不存在或不可访问" in str(updated.get("error", "") or updated.get("last_error", "") or updated.get("task_error", "") or "")
+    repaired_artifact = next(
+        item
+        for item in updated["artifacts"]
+        if str(item.get("artifact_kind", "")).strip() == "source_file"
+    )
+    assert repaired_artifact["status"] == "failed"
+    assert repaired_artifact["metadata"]["error"] == "共享任务产物缺失或不可访问"

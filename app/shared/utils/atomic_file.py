@@ -49,7 +49,12 @@ def _is_retryable_replace_error(exc: BaseException) -> bool:
     return False
 
 
-def _replace_with_retry(temp_path: Path, target: Path) -> None:
+def _replace_with_retry(
+    temp_path: Path,
+    target: Path,
+    *,
+    allow_overwrite_fallback: bool = True,
+) -> None:
     attempts = len(_WINDOWS_REPLACE_RETRY_DELAYS_SEC) + 1
     for index in range(attempts):
         try:
@@ -57,7 +62,11 @@ def _replace_with_retry(temp_path: Path, target: Path) -> None:
             return
         except Exception as exc:
             if index >= attempts - 1 or not _is_retryable_replace_error(exc):
-                if index >= attempts - 1 and _is_retryable_replace_error(exc):
+                if (
+                    index >= attempts - 1
+                    and _is_retryable_replace_error(exc)
+                    and allow_overwrite_fallback
+                ):
                     _overwrite_from_temp_with_retry(temp_path, target)
                     return
                 raise
@@ -86,6 +95,7 @@ def atomic_write_file(
     *,
     validator: PathValidator | None = None,
     temp_suffix: str = ".tmp",
+    allow_overwrite_fallback: bool = True,
 ) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -98,7 +108,11 @@ def atomic_write_file(
                 raise FileNotFoundError(f"atomic writer did not create temp file: {temp_path}")
             if validator is not None:
                 validator(temp_path)
-            _replace_with_retry(temp_path, target)
+            _replace_with_retry(
+                temp_path,
+                target,
+                allow_overwrite_fallback=allow_overwrite_fallback,
+            )
             return target
         except Exception:
             try:
@@ -115,12 +129,14 @@ def atomic_write_bytes(
     *,
     validator: PathValidator | None = None,
     temp_suffix: str = ".tmp",
+    allow_overwrite_fallback: bool = True,
 ) -> Path:
     return atomic_write_file(
         path,
         lambda temp_path: temp_path.write_bytes(content),
         validator=validator,
         temp_suffix=temp_suffix,
+        allow_overwrite_fallback=allow_overwrite_fallback,
     )
 
 
@@ -131,12 +147,14 @@ def atomic_write_text(
     encoding: str = "utf-8",
     validator: PathValidator | None = None,
     temp_suffix: str = ".tmp",
+    allow_overwrite_fallback: bool = True,
 ) -> Path:
     return atomic_write_file(
         path,
         lambda temp_path: temp_path.write_text(content, encoding=encoding),
         validator=validator,
         temp_suffix=temp_suffix,
+        allow_overwrite_fallback=allow_overwrite_fallback,
     )
 
 
@@ -146,6 +164,7 @@ def atomic_copy_file(
     *,
     validator: PathValidator | None = None,
     temp_suffix: str = ".tmp",
+    allow_overwrite_fallback: bool = True,
 ) -> Path:
     source = Path(source_path)
     if not source.exists():
@@ -155,6 +174,7 @@ def atomic_copy_file(
         lambda temp_path: shutil.copy2(source, temp_path),
         validator=validator,
         temp_suffix=temp_suffix,
+        allow_overwrite_fallback=allow_overwrite_fallback,
     )
 
 
@@ -164,12 +184,14 @@ def atomic_save_workbook(
     *,
     validator: PathValidator | None = None,
     temp_suffix: str = ".tmp",
+    allow_overwrite_fallback: bool = True,
 ) -> Path:
     return atomic_write_file(
         output_path,
         lambda temp_path: workbook.save(temp_path),
         validator=validator or validate_excel_workbook_file,
         temp_suffix=temp_suffix,
+        allow_overwrite_fallback=allow_overwrite_fallback,
     )
 
 

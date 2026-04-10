@@ -111,6 +111,28 @@ def _normalize_building_text(value: Any) -> str:
     return _text(value).replace(" ", "").casefold()
 
 
+def _build_fixed_header_cells(building: Any) -> Dict[str, str]:
+    building_text = _text(building)
+    building_code = _extract_building_code(building_text)
+    normalized_code = building_code or building_text.replace("楼", "").replace("栋", "")
+    building_floor_text = f"{normalized_code}楼" if normalized_code else building_text
+    building_block_text = f"{normalized_code}栋" if normalized_code else building_floor_text.replace("楼", "栋", 1)
+    return {
+        "A1": f"世纪互联南通数据中心{building_block_text}FM运维交接班重要事项",
+        "E5": building_floor_text,
+        "G16": building_floor_text,
+        "G17": building_floor_text,
+        "G18": building_floor_text,
+        "S15": building_floor_text,
+        "S16": building_floor_text,
+        "S17": building_floor_text,
+        "S18": building_floor_text,
+        "A20": building_floor_text,
+        "A65": f"{building_floor_text}容量一览表",
+        "O55": f"{building_floor_text}能耗一览",
+    }
+
+
 def _build_merged_anchor_map(sheet: Any) -> Dict[str, str]:
     anchor_map: Dict[str, str] = {}
     for merged_range in getattr(sheet.merged_cells, "ranges", []):
@@ -658,6 +680,7 @@ class HandoverCapacityReportService:
                 "template_snapshot": template_snapshot,
             }
             cell_values = builder(context)
+            cell_values.update(_build_fixed_header_cells(building_text))
             _write_cells_with_merged_support(sheet, cell_values)
             atomic_save_workbook(workbook, output_file)
         finally:

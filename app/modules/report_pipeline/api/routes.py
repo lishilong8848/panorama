@@ -22,7 +22,15 @@ from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge
 from app.config.config_compat_cleanup import sanitize_wet_bulb_collection_config
 from app.config.config_merge_guard import ConfigValueLossError, merge_user_config_payload
 from app.config.secret_masking import mask_settings
-from app.config.settings_loader import save_settings
+from app.config.settings_loader import (
+    HandoverSegmentRevisionConflict,
+    get_handover_building_segment,
+    get_handover_common_segment,
+    preserve_segmented_handover_config,
+    save_handover_building_segment,
+    save_handover_common_segment,
+    save_settings,
+)
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
 from app.modules.report_pipeline.service.resume_checkpoint_store import (
     resolve_resume_index_path as resolve_monthly_resume_index_path,
@@ -1881,6 +1889,111 @@ def get_config(request: Request) -> Dict[str, Any]:
     return mask_settings(copy.deepcopy(container.config))
 
 
+def _normalize_handover_segment_code(code: str) -> str:
+    text = str(code or "").strip().upper()
+    if text not in {"A", "B", "C", "D", "E"}:
+        raise HTTPException(status_code=400, detail="仅支持 A/B/C/D/E 五个楼栋配置")
+    return text
+
+
+def _normalize_handover_segment_payload(payload: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+    raw_revision = payload.get("base_revision", 0)
+    try:
+        base_revision = int(raw_revision)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="base_revision 必须是整数") from exc
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="data 必须是 JSON 对象")
+    return base_revision, copy.deepcopy(data)
+
+
+@router.get("/api/config-segments/handover/common")
+def get_handover_common_config_segment(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    document = get_handover_common_segment(container.config_path)
+    return {
+        "revision": int(document.get("revision", 0) or 0),
+        "updated_at": str(document.get("updated_at", "") or "").strip(),
+        "data": mask_settings(copy.deepcopy(document.get("data", {}))),
+    }
+
+
+@router.put("/api/config-segments/handover/common")
+def put_handover_common_config_segment(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    base_revision, data = _normalize_handover_segment_payload(payload)
+    try:
+        saved_config, document, aggregate_refresh_error = save_handover_common_segment(
+            data,
+            base_revision=base_revision,
+            config_path=container.config_path,
+        )
+        container.reload_config(saved_config)
+        _invalidate_review_base_probe_cache()
+        if aggregate_refresh_error:
+            container.add_system_log(
+                f"[配置] 交接班公共配置已保存，但聚合配置刷新失败: {aggregate_refresh_error}"
+            )
+        else:
+            container.add_system_log("[配置] 交接班公共配置已保存")
+        return {
+            "revision": int(document.get("revision", 0) or 0),
+            "updated_at": str(document.get("updated_at", "") or "").strip(),
+            "data": mask_settings(copy.deepcopy(document.get("data", {}))),
+        }
+    except HandoverSegmentRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/api/config-segments/handover/buildings/{code}")
+def get_handover_building_config_segment(code: str, request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    normalized_code = _normalize_handover_segment_code(code)
+    document = get_handover_building_segment(normalized_code, container.config_path)
+    return {
+        "revision": int(document.get("revision", 0) or 0),
+        "updated_at": str(document.get("updated_at", "") or "").strip(),
+        "data": mask_settings(copy.deepcopy(document.get("data", {}))),
+    }
+
+
+@router.put("/api/config-segments/handover/buildings/{code}")
+def put_handover_building_config_segment(code: str, payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    normalized_code = _normalize_handover_segment_code(code)
+    base_revision, data = _normalize_handover_segment_payload(payload)
+    try:
+        saved_config, document, aggregate_refresh_error = save_handover_building_segment(
+            normalized_code,
+            data,
+            base_revision=base_revision,
+            config_path=container.config_path,
+        )
+        container.reload_config(saved_config)
+        _invalidate_review_base_probe_cache()
+        building_text = f"{normalized_code}楼"
+        if aggregate_refresh_error:
+            container.add_system_log(
+                f"[配置] 交接班{building_text}配置已保存，但聚合配置刷新失败: {aggregate_refresh_error}"
+            )
+        else:
+            container.add_system_log(f"[配置] 交接班{building_text}配置已保存")
+        return {
+            "revision": int(document.get("revision", 0) or 0),
+            "updated_at": str(document.get("updated_at", "") or "").strip(),
+            "data": mask_settings(copy.deepcopy(document.get("data", {}))),
+        }
+    except HandoverSegmentRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.put("/api/config")
 def put_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     container = request.app.state.container
@@ -1911,7 +2024,10 @@ def put_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
             include_role_mode=False,
         )
         restart_required = role_restart_required or other_restart_required
-        merged = _strip_retired_wet_bulb_fields(merge_result.merged)
+        merged = preserve_segmented_handover_config(
+            _strip_retired_wet_bulb_fields(merge_result.merged),
+            container.config_path,
+        )
         saved = save_settings(merged, container.config_path)
         container.reload_config(saved)
         _invalidate_review_base_probe_cache()

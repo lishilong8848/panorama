@@ -422,14 +422,17 @@
           <div class="form-row"><label class="label">模板 Node Token</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.template_node_token" /></div>
           <div class="form-row"><label class="label">云表名称模板</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.spreadsheet_name_pattern" /></div>
           <div class="form-row"><label class="label">源 Sheet 名</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.source_sheet_name" /></div>
-          <div class="form-row"><label class="label">A楼 Sheet 名</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.sheet_names['A楼']" /></div>
-          <div class="form-row"><label class="label">B楼 Sheet 名</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.sheet_names['B楼']" /></div>
-          <div class="form-row"><label class="label">C楼 Sheet 名</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.sheet_names['C楼']" /></div>
-          <div class="form-row"><label class="label">D楼 Sheet 名</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.sheet_names['D楼']" /></div>
-          <div class="form-row"><label class="label">E楼 Sheet 名</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.sheet_names['E楼']" /></div>
+          <div class="form-row">
+            <label class="label">当前楼栋</label>
+            <select v-model="handoverConfigBuilding" @change="fetchHandoverBuildingConfigSegment(handoverConfigBuilding)">
+              <option v-for="opt in handoverConfigBuildingOptions" :key="'handover-cloud-' + opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+          </div>
+          <div class="form-row"><label class="label">当前楼栋 Sheet 名</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.sheet_names[handoverConfigBuilding]" /></div>
           <div class="form-row"><label class="label">请求超时（秒）</label><input type="number" v-model.number="config.handover_log.cloud_sheet_sync.request.timeout_sec" /></div>
           <div class="form-row"><label class="label">重试次数</label><input type="number" v-model.number="config.handover_log.cloud_sheet_sync.request.max_retries" /></div>
           <div class="form-row"><label class="label">重试退避（秒）</label><input type="number" step="0.5" v-model.number="config.handover_log.cloud_sheet_sync.request.retry_backoff_sec" /></div>
+          <div class="hint" style="margin-bottom:8px;">当前楼栋 Sheet 名按楼独立保存；不同楼可以并行修改，互不覆盖。</div>
           <div class="hint" style="margin-bottom:8px;">下载完内网源表并切回外网后，系统只会为当前日期班次预创建一份云电子表格，并确保存在 A-E 楼 5 个固定 Sheet。五楼全部确认后，系统会把每个楼本地交接班成品 Excel 的“交接班日志”页覆盖写入同名 Sheet。审核保存本身不会立即同步云表；若最终上传失败，可按楼重试，也可一键重试全部失败楼栋。</div>
       </section>
       </div>
@@ -439,6 +442,19 @@
     <summary class="config-group-summary">审核与模板规则</summary>
     <div class="config-group-body">
       <div class="config-panel-grid two-col">
+      <section class="content-card config-panel-card config-subgroup-card">
+        <div class="section-title">楼栋配置</div>
+          <div class="form-row">
+            <label class="label">当前楼栋</label>
+            <select v-model="handoverConfigBuilding" @change="fetchHandoverBuildingConfigSegment(handoverConfigBuilding)">
+              <option v-for="opt in handoverConfigBuildingOptions" :key="'handover-building-' + opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+          </div>
+          <div class="hint">公共配置与当前楼栋配置分开保存，A楼到E楼互不覆盖。</div>
+          <div class="hint">公共配置最近同步：{{ handoverConfigCommonUpdatedAt || '暂无记录' }}</div>
+          <div class="hint">当前楼栋最近同步：{{ handoverConfigBuildingUpdatedAt || '暂无记录' }}</div>
+      </section>
+
       <section class="content-card config-panel-card config-subgroup-card">
         <div class="section-title">审核页外部访问地址</div>
           <div class="hint" v-if="health.handover.review_base_url_effective">
@@ -472,11 +488,9 @@
 
       <section class="content-card config-panel-card config-subgroup-card config-panel-card-wide config-editor-card">
         <div class="section-title">模板楼栋标题（A1）</div>
-          <div class="form-row">
-            <label><input type="checkbox" v-model="config.handover_log.template.apply_building_title" /> 启用按楼栋写入标题</label>
-          </div>
-          <div class="form-row"><label class="label">标题单元格</label><input type="text" v-model="config.handover_log.template.title_cell" placeholder="例如 A1" /></div>
-          <div class="form-row"><label class="label">兜底标题模板</label><input type="text" v-model="config.handover_log.template.building_title_pattern" placeholder="例如 EA118机房{building_code}栋数据中心交接班日志" /></div>
+          <div class="hint">交接班日志模板标题已固定收口为 A1，系统会按楼栋自动写入，不再允许单独修改，避免各楼标题被旧配置写错。</div>
+          <div class="form-row"><label class="label">固定标题单元格</label><input type="text" value="A1" disabled /></div>
+          <div class="form-row"><label class="label">固定标题规则</label><input type="text" value="EA118机房x栋数据中心交接班日志（x=A/B/C/D/E）" disabled /></div>
           <div class="config-editor-scroll">
             <table class="site-table config-editor-table" style="margin-bottom:0;">
               <thead>
@@ -488,23 +502,23 @@
               <tbody>
                 <tr>
                   <td>A楼</td>
-                  <td><input type="text" v-model="config.handover_log.template.building_title_map['A楼']" /></td>
+                  <td><input type="text" value="EA118机房A栋数据中心交接班日志" disabled /></td>
                 </tr>
                 <tr>
                   <td>B楼</td>
-                  <td><input type="text" v-model="config.handover_log.template.building_title_map['B楼']" /></td>
+                  <td><input type="text" value="EA118机房B栋数据中心交接班日志" disabled /></td>
                 </tr>
                 <tr>
                   <td>C楼</td>
-                  <td><input type="text" v-model="config.handover_log.template.building_title_map['C楼']" /></td>
+                  <td><input type="text" value="EA118机房C栋数据中心交接班日志" disabled /></td>
                 </tr>
                 <tr>
                   <td>D楼</td>
-                  <td><input type="text" v-model="config.handover_log.template.building_title_map['D楼']" /></td>
+                  <td><input type="text" value="EA118机房D栋数据中心交接班日志" disabled /></td>
                 </tr>
                 <tr>
                   <td>E楼</td>
-                  <td><input type="text" v-model="config.handover_log.template.building_title_map['E楼']" /></td>
+                  <td><input type="text" value="EA118机房E栋数据中心交接班日志" disabled /></td>
                 </tr>
               </tbody>
             </table>
@@ -514,6 +528,13 @@
       <section class="content-card config-panel-card config-subgroup-card config-panel-card-wide config-editor-card">
         <div class="section-title">单元格对应关系（可新增/删除/修改）</div>
           <div class="hint">删除楼栋覆盖只影响当前楼栋，保存后生效。关键词按 D 列模糊匹配（大小写不敏感）。单元格留空可作为中间变量。</div>
+        
+          <div class="form-row">
+            <label class="label">当前楼栋</label>
+            <select v-model="handoverConfigBuilding" @change="fetchHandoverBuildingConfigSegment(handoverConfigBuilding)">
+              <option v-for="opt in handoverConfigBuildingOptions" :key="'handover-rule-building-' + opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+          </div>
         
           <div class="form-row">
             <label class="label">作用域</label>

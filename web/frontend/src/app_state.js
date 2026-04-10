@@ -1171,6 +1171,11 @@ export function createAppState(vueApi) {
     title: "",
     hint: "",
   });
+  const handoverConfigBuilding = ref("A楼");
+  const handoverConfigCommonRevision = ref(0);
+  const handoverConfigCommonUpdatedAt = ref("");
+  const handoverConfigBuildingRevision = ref(0);
+  const handoverConfigBuildingUpdatedAt = ref("");
   const handoverRuleScope = ref("default");
   const handoverDutyAutoFollow = ref(true);
   const handoverDutyLastAutoAt = ref(0);
@@ -3683,15 +3688,21 @@ function normalizeInternalDownloadPoolSlot(slot) {
       metrics: [],
     };
   });
-  const handoverRuleScopeOptions = computed(() => {
-    const opts = [{ value: "default", label: "全局默认" }];
+  const handoverConfigBuildingOptions = computed(() => {
     const buildings = Array.isArray(config.value?.input?.buildings) ? config.value.input.buildings : [];
-    for (const item of buildings) {
-      const building = String(item || "").trim();
-      if (!building) continue;
-      opts.push({ value: building, label: `${building}覆盖` });
-    }
-    return opts;
+    const normalized = buildings
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+    const fallback = ["A楼", "B楼", "C楼", "D楼", "E楼"];
+    const list = normalized.length ? normalized : fallback;
+    return list.map((building) => ({ value: building, label: building }));
+  });
+  const handoverRuleScopeOptions = computed(() => {
+    const currentBuilding = String(handoverConfigBuilding.value || "").trim() || "A楼";
+    return [
+      { value: "default", label: "全局默认" },
+      { value: currentBuilding, label: `${currentBuilding}覆盖` },
+    ];
   });
 
   function syncCustomWindowLocalInputs() {
@@ -3768,6 +3779,11 @@ function normalizeInternalDownloadPoolSlot(slot) {
     handoverDailyReportLastScreenshotTest,
     handoverDailyReportPreviewModal,
     handoverDailyReportUploadModal,
+    handoverConfigBuilding,
+    handoverConfigCommonRevision,
+    handoverConfigCommonUpdatedAt,
+    handoverConfigBuildingRevision,
+    handoverConfigBuildingUpdatedAt,
     handoverRuleScope,
     handoverDutyAutoFollow,
     handoverDutyLastAutoAt,
@@ -3855,6 +3871,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
     dashboardActiveModuleTitle,
     moduleMeta,
     dashboardActiveModuleHero,
+    handoverConfigBuildingOptions,
     handoverRuleScopeOptions,
     syncCustomWindowLocalInputs,
     actionGuard,

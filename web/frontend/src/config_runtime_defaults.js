@@ -922,19 +922,17 @@ function applyHandoverDefaults(cfg) {
   setBooleanDefault(scheduler, "retry_failed_in_same_period", false);
   setStringDefault(scheduler, "morning_state_file", "handover_scheduler_morning_state.json");
   setStringDefault(scheduler, "afternoon_state_file", "handover_scheduler_afternoon_state.json");
-  setBooleanDefault(template, "apply_building_title", true);
+  template.apply_building_title = true;
   setStringDefault(template, "source_path", "交接班日志空模板.xlsx");
-  setStringDefault(template, "title_cell", "A1");
-  setStringDefault(template, "building_title_pattern", "EA118机房{building_code}栋数据中心交接班日志");
-  if (!template.building_title_map || typeof template.building_title_map !== "object") {
-    template.building_title_map = {
-      "A楼": "EA118机房A栋数据中心交接班日志",
-      "B楼": "EA118机房B栋数据中心交接班日志",
-      "C楼": "EA118机房C栋数据中心交接班日志",
-      "D楼": "EA118机房D栋数据中心交接班日志",
-      "E楼": "EA118机房E栋数据中心交接班日志",
-    };
-  }
+  template.title_cell = "A1";
+  template.building_title_pattern = "EA118机房{building_code}栋数据中心交接班日志";
+  template.building_title_map = {
+    "A楼": "EA118机房A栋数据中心交接班日志",
+    "B楼": "EA118机房B栋数据中心交接班日志",
+    "C楼": "EA118机房C栋数据中心交接班日志",
+    "D楼": "EA118机房D栋数据中心交接班日志",
+    "E楼": "EA118机房E栋数据中心交接班日志",
+  };
 
   const fixed = cfg.handover_log.template_fixed_fill;
   setStringDefault(fixed, "date_cell", "B2");

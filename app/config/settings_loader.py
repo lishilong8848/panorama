@@ -16,6 +16,30 @@ from app.config.config_adapter import (
     resolve_shared_bridge_paths,
     sync_runtime_back_to_v3,
 )
+from app.config.handover_segment_store import (
+    HANDOVER_SEGMENT_BUILDINGS,
+    HandoverSegmentRevisionConflict,
+    apply_handover_segment_data,
+    building_name_from_segment_code,
+    build_segment_document,
+    build_segment_documents_from_config,
+    create_pre_handover_segment_backup,
+    extract_handover_building_data,
+    extract_handover_common_data,
+    handover_building_segment_path,
+    handover_common_segment_path,
+    handover_segment_write_lock,
+    has_all_handover_segment_files,
+    has_any_handover_segment_file,
+    read_all_segment_documents,
+    read_segment_document,
+    write_segment_document,
+)
+from handover_log_module.core.building_title_rules import (
+    HANDOVER_BUILDING_TITLE_PATTERN,
+    HANDOVER_TITLE_CELL,
+    canonical_handover_building_title_map,
+)
 from handover_log_module.core.cell_rule_compiler import normalize_cell_rules
 from handover_log_module.core.expression_eval import ExpressionError, get_expression_variables
 from pipeline_utils import load_download_module, load_pipeline_config, resolve_config_path
@@ -105,6 +129,78 @@ def _normalize_sheet_rules_config(raw_rules: Any) -> List[Dict[str, Any]]:
 
 def ensure_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return ensure_v3_config(cfg)
+
+
+def _normalize_handover_template_title_config(cfg: Dict[str, Any]) -> bool:
+    if not isinstance(cfg, dict):
+        return False
+    features = cfg.get("features", {})
+    if not isinstance(features, dict):
+        return False
+    handover = features.get("handover_log", {})
+    if not isinstance(handover, dict):
+        return False
+    template = handover.get("template", {})
+    if not isinstance(template, dict):
+        return False
+
+    changed = False
+    canonical_map = canonical_handover_building_title_map()
+    if bool(template.get("apply_building_title", True)) is not True:
+        template["apply_building_title"] = True
+        changed = True
+    if str(template.get("title_cell", "") or "").strip().upper() != HANDOVER_TITLE_CELL:
+        template["title_cell"] = HANDOVER_TITLE_CELL
+        changed = True
+    if str(template.get("building_title_pattern", "") or "").strip() != HANDOVER_BUILDING_TITLE_PATTERN:
+        template["building_title_pattern"] = HANDOVER_BUILDING_TITLE_PATTERN
+        changed = True
+
+    raw_map = template.get("building_title_map", {})
+    normalized_map = raw_map if isinstance(raw_map, dict) else {}
+    normalized_map = {
+        str(key or "").strip(): str(value or "").strip()
+        for key, value in normalized_map.items()
+        if str(key or "").strip()
+    }
+    if normalized_map != canonical_map:
+        template["building_title_map"] = canonical_map
+        changed = True
+
+    handover["template"] = template
+    features["handover_log"] = handover
+    cfg["features"] = features
+    return changed
+
+
+def _contains_noncanonical_handover_template_title_config(cfg: Dict[str, Any]) -> bool:
+    if not isinstance(cfg, dict):
+        return False
+    features = cfg.get("features", {})
+    if not isinstance(features, dict) or "handover_log" not in features:
+        return False
+    handover = features.get("handover_log", {})
+    if not isinstance(handover, dict) or "template" not in handover:
+        return False
+    template = handover.get("template", {})
+    if not isinstance(template, dict):
+        return False
+
+    canonical_map = canonical_handover_building_title_map()
+    if bool(template.get("apply_building_title", True)) is not True:
+        return True
+    if str(template.get("title_cell", "") or "").strip().upper() != HANDOVER_TITLE_CELL:
+        return True
+    if str(template.get("building_title_pattern", "") or "").strip() != HANDOVER_BUILDING_TITLE_PATTERN:
+        return True
+    raw_map = template.get("building_title_map", {})
+    normalized_map = raw_map if isinstance(raw_map, dict) else {}
+    normalized_map = {
+        str(key or "").strip(): str(value or "").strip()
+        for key, value in normalized_map.items()
+        if str(key or "").strip()
+    }
+    return normalized_map != canonical_map
 
 
 def _validate_console(cfg: Dict[str, Any]) -> None:
@@ -1569,6 +1665,7 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     normalized_v3 = sync_runtime_back_to_v3(normalized_v3, runtime_cfg)
     normalized_v3 = ensure_v3_config(normalized_v3)
     _migrate_shift_roster_people_text_fields(normalized_v3)
+    _normalize_handover_template_title_config(normalized_v3)
 
     _validate_scheduler(normalized_v3)
     _validate_updater(normalized_v3)
@@ -1689,25 +1786,183 @@ def _contains_deprecated_alarm_db_config(cfg: Dict[str, Any]) -> bool:
     return False
 
 
+def _compose_handover_segmented_config(cfg: Dict[str, Any], config_path: str | Path | None = None) -> Dict[str, Any]:
+    try:
+        target = get_settings_path(config_path)
+    except FileNotFoundError:
+        return copy.deepcopy(cfg)
+    if not has_any_handover_segment_file(target):
+        return copy.deepcopy(cfg)
+    common_doc, building_docs = read_all_segment_documents(target)
+    building_payloads = {
+        building: doc.get("data", {})
+        for building, doc in building_docs.items()
+        if isinstance(doc.get("data"), dict)
+    }
+    return apply_handover_segment_data(
+        cfg,
+        common_data=common_doc.get("data", {}) if isinstance(common_doc.get("data"), dict) else {},
+        building_data_by_name=building_payloads,
+    )
+
+
+def _ensure_handover_segment_files(cfg: Dict[str, Any], config_path: str | Path | None = None) -> bool:
+    target = get_settings_path(config_path)
+    if has_all_handover_segment_files(target):
+        return False
+    with handover_segment_write_lock():
+        if has_all_handover_segment_files(target):
+            return False
+        normalized_seed = validate_settings(copy.deepcopy(cfg))
+        if has_any_handover_segment_file(target):
+            normalized_seed = validate_settings(_compose_handover_segmented_config(normalized_seed, target))
+        create_pre_handover_segment_backup(target)
+        common_doc, building_docs = build_segment_documents_from_config(normalized_seed)
+        common_path = handover_common_segment_path(target)
+        if not common_path.exists():
+            write_segment_document(common_path, common_doc)
+        for building in HANDOVER_SEGMENT_BUILDINGS:
+            building_path = handover_building_segment_path(target, building)
+            if not building_path.exists():
+                write_segment_document(building_path, building_docs[building])
+        return True
+
+
+def _preserve_segment_backed_handover(cfg: Dict[str, Any], config_path: str | Path | None = None) -> Dict[str, Any]:
+    try:
+        target = get_settings_path(config_path)
+    except FileNotFoundError:
+        return copy.deepcopy(cfg)
+    if not has_any_handover_segment_file(target):
+        return copy.deepcopy(cfg)
+    return _compose_handover_segmented_config(cfg, target)
+
+
+def preserve_segmented_handover_config(
+    cfg: Dict[str, Any],
+    config_path: str | Path | None = None,
+) -> Dict[str, Any]:
+    return _preserve_segment_backed_handover(cfg, config_path)
+
+
+def get_handover_common_segment(config_path: str | Path | None = None) -> Dict[str, Any]:
+    target = get_settings_path(config_path)
+    _ensure_handover_segment_files(load_pipeline_config(target), target)
+    return read_segment_document(handover_common_segment_path(target))
+
+
+def get_handover_building_segment(building_code: str, config_path: str | Path | None = None) -> Dict[str, Any]:
+    target = get_settings_path(config_path)
+    _ensure_handover_segment_files(load_pipeline_config(target), target)
+    return read_segment_document(handover_building_segment_path(target, building_code))
+
+
+def _refresh_handover_aggregate_view(cfg: Dict[str, Any], config_path: str | Path | None = None) -> str:
+    try:
+        write_settings_atomically(cfg, config_path)
+        return ""
+    except Exception as exc:  # noqa: BLE001
+        return str(exc)
+
+
+def _extract_all_handover_building_segments(cfg: Dict[str, Any]) -> dict[str, Dict[str, Any]]:
+    return {
+        building: extract_handover_building_data(cfg, building)
+        for building in HANDOVER_SEGMENT_BUILDINGS
+    }
+
+
+def save_handover_common_segment(
+    data: Dict[str, Any],
+    *,
+    base_revision: int,
+    config_path: str | Path | None = None,
+) -> tuple[Dict[str, Any], Dict[str, Any], str]:
+    target = get_settings_path(config_path)
+    with handover_segment_write_lock():
+        current_full = load_settings(target)
+        current_doc = read_segment_document(handover_common_segment_path(target))
+        current_revision = int(current_doc.get("revision", 0) or 0)
+        if current_revision != int(base_revision):
+            raise HandoverSegmentRevisionConflict("公共配置已被其他人修改，请刷新后重试")
+        next_full = apply_handover_segment_data(
+            current_full,
+            common_data=data,
+            building_data_by_name=_extract_all_handover_building_segments(current_full),
+        )
+        validated = validate_settings(next_full)
+        next_doc = build_segment_document(
+            extract_handover_common_data(validated),
+            revision=current_revision + 1,
+        )
+        write_segment_document(handover_common_segment_path(target), next_doc)
+        aggregate_refresh_error = _refresh_handover_aggregate_view(validated, target)
+        return validated, next_doc, aggregate_refresh_error
+
+
+def save_handover_building_segment(
+    building_code: str,
+    data: Dict[str, Any],
+    *,
+    base_revision: int,
+    config_path: str | Path | None = None,
+) -> tuple[Dict[str, Any], Dict[str, Any], str]:
+    target = get_settings_path(config_path)
+    building_path = handover_building_segment_path(target, building_code)
+    target_building = building_name_from_segment_code(building_code)
+    with handover_segment_write_lock():
+        current_full = load_settings(target)
+        current_doc = read_segment_document(building_path)
+        current_revision = int(current_doc.get("revision", 0) or 0)
+        if current_revision != int(base_revision):
+            raise HandoverSegmentRevisionConflict("当前楼配置已被其他人修改，请刷新后重试")
+        current_common = extract_handover_common_data(current_full)
+        building_payloads = _extract_all_handover_building_segments(current_full)
+        building_payloads[target_building] = copy.deepcopy(data if isinstance(data, dict) else {})
+        next_full = apply_handover_segment_data(
+            current_full,
+            common_data=current_common,
+            building_data_by_name=building_payloads,
+        )
+        validated = validate_settings(next_full)
+        next_doc = build_segment_document(
+            extract_handover_building_data(validated, target_building),
+            revision=current_revision + 1,
+        )
+        write_segment_document(building_path, next_doc)
+        aggregate_refresh_error = _refresh_handover_aggregate_view(validated, target)
+        return validated, next_doc, aggregate_refresh_error
+
+
 def load_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
     had_deprecated_alarm_db = _contains_deprecated_alarm_db_config(cfg)
-    normalized = validate_settings(cfg)
-    if had_deprecated_alarm_db:
+    had_noncanonical_handover_title = _contains_noncanonical_handover_template_title_config(cfg)
+    segments_seeded = _ensure_handover_segment_files(cfg, config_path)
+    composed = _compose_handover_segmented_config(cfg, config_path)
+    normalized = validate_settings(composed)
+    if had_deprecated_alarm_db or had_noncanonical_handover_title or segments_seeded:
         write_settings_atomically(normalized, config_path)
     return _normalize_console_host_for_lan(normalized, config_path)
 
 
 def load_bootstrap_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
-    normalized = ensure_v3_config(cfg)
-    if _contains_deprecated_alarm_db_config(cfg):
+    normalized = ensure_v3_config(_compose_handover_segmented_config(cfg, config_path))
+    if _contains_deprecated_alarm_db_config(cfg) or _contains_noncanonical_handover_template_title_config(cfg):
+        _normalize_handover_template_title_config(normalized)
         write_settings_atomically(normalized, config_path)
     return normalized
 
 
-def save_settings(cfg: Dict[str, Any], config_path: str | Path | None = None) -> Dict[str, Any]:
-    normalized = validate_settings(cfg)
+def save_settings(
+    cfg: Dict[str, Any],
+    config_path: str | Path | None = None,
+    *,
+    preserve_segmented_handover: bool = True,
+) -> Dict[str, Any]:
+    payload = _preserve_segment_backed_handover(cfg, config_path) if preserve_segmented_handover else copy.deepcopy(cfg)
+    normalized = validate_settings(payload)
     write_settings_atomically(normalized, config_path)
     return normalized
 
