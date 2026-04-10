@@ -388,6 +388,12 @@ createApp({
       handoverDailyReportLastScreenshotTest,
       handoverDailyReportPreviewModal,
       handoverDailyReportUploadModal,
+      handoverConfigBuilding,
+      handoverConfigCommonRevision,
+      handoverConfigCommonUpdatedAt,
+      handoverConfigBuildingRevision,
+      handoverConfigBuildingUpdatedAt,
+      handoverConfigBuildingOptions,
       handoverRuleScope,
       handoverDutyAutoFollow,
       handoverDutyLastAutoAt,
@@ -565,6 +571,8 @@ createApp({
     const actionKeySourceCacheDeleteAlarmManual = "bridge:source_cache_delete_alarm_manual";
     const actionKeySourceCacheUploadAlarmFull = "bridge:source_cache_upload_alarm_full";
     const actionKeySourceCacheUploadAlarmBuildingPrefix = "bridge:source_cache_upload_alarm_building:";
+    const actionKeyHandoverConfigCommonSave = "handover_config:common_save";
+    const actionKeyHandoverConfigBuildingSave = "handover_config:building_save";
     const actionKeySharedBridgeSelfCheck = "bridge:shared_root_self_check";
     const actionKeyHandoverConfirmAll = "handover_review:confirm_all";
     const actionKeyHandoverCloudRetryAll = "handover_review:cloud_retry_all";
@@ -1874,6 +1882,11 @@ createApp({
       handoverDailyReportLastScreenshotTest,
       handoverDailyReportPreviewModal,
       handoverDailyReportUploadModal,
+      handoverConfigBuilding,
+      handoverConfigCommonRevision,
+      handoverConfigCommonUpdatedAt,
+      handoverConfigBuildingRevision,
+      handoverConfigBuildingUpdatedAt,
       handoverDutyDate,
       handoverDutyShift,
       canRun,
@@ -1913,10 +1926,14 @@ createApp({
       openAlarmEventUploadTarget,
       fetchRuntimeResources,
       fetchConfig,
+      fetchHandoverCommonConfigSegment,
+      fetchHandoverBuildingConfigSegment,
       fetchHandoverEngineerDirectory,
       ensureHandoverEngineerDirectoryLoaded,
       scheduleEngineerDirectoryPrefetch,
       saveConfig,
+      saveHandoverCommonConfig,
+      saveHandoverBuildingConfig,
       autoSaveConfig,
       activateStartupRuntime,
       restartApplication,
@@ -1985,6 +2002,18 @@ createApp({
       if (action === "open_config") {
         openConfigPage();
       }
+    }
+
+    function isHomeQuickActionLocked(actionId) {
+      const action = String(actionId || "").trim().toLowerCase();
+      if (!action) return false;
+      if (action === "refresh_current_hour") {
+        return Boolean(isSourceCacheRefreshCurrentHourLocked.value);
+      }
+      if (action === "refresh_manual_alarm") {
+        return Boolean(isSourceCacheRefreshAlarmManualLocked.value);
+      }
+      return false;
     }
 
     function closeStartupRoleSelector({ handled = false } = {}) {
@@ -3599,6 +3628,11 @@ createApp({
       manualUploadDate,
       handoverDutyDate,
       handoverDutyShift,
+      handoverConfigBuilding,
+      handoverConfigCommonRevision,
+      handoverConfigCommonUpdatedAt,
+      handoverConfigBuildingRevision,
+      handoverConfigBuildingUpdatedAt,
       handoverRuleScope,
       handoverDutyAutoFollow,
       handoverDutyLastAutoAt,
@@ -3614,6 +3648,7 @@ createApp({
       handoverDailyReportLastScreenshotTest,
       handoverDailyReportPreviewModal,
       handoverDailyReportUploadModal,
+      handoverConfigBuildingOptions,
       handoverRuleScopeOptions,
       handoverDownloadScope,
       handoverMorningDecisionText,
@@ -3754,6 +3789,8 @@ createApp({
       actionKeySourceCacheRefreshCurrentHour,
       actionKeySourceCacheRefreshAlarmManual,
       actionKeySourceCacheDeleteAlarmManual,
+      actionKeyHandoverConfigCommonSave,
+      actionKeyHandoverConfigBuildingSave,
       actionKeyHandoverConfirmAll,
       actionKeyHandoverCloudRetryAll,
       actionKeyHandoverDailyReportAuthOpen,
@@ -3773,6 +3810,7 @@ createApp({
       openDashboardPage,
       openConfigPage,
       runHomeQuickAction,
+      isHomeQuickActionLocked,
       switchConfigTab,
       setDashboardActiveModule,
       openDashboardSchedulerOverviewTarget,
@@ -3814,6 +3852,8 @@ createApp({
       onHandoverDutyShiftManualChange,
       restoreAutoHandoverDuty,
       saveConfig,
+      saveHandoverCommonConfig,
+      saveHandoverBuildingConfig,
       confirmStartupRoleSelection,
       checkUpdaterNow,
       applyUpdaterPatch,
@@ -3945,6 +3985,8 @@ createApp({
       clearCurrentBuildingOverrides,
       restoreDefaultRuleForCurrentBuilding,
       fetchHandoverEngineerDirectory,
+      fetchHandoverCommonConfigSegment,
+      fetchHandoverBuildingConfigSegment,
       getInternalSourceCacheRefreshActionKey,
       getInternalSourceCacheRefreshDisabledReason,
       isInternalSourceCacheRefreshLocked,

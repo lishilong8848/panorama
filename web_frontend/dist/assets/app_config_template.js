@@ -10,9 +10,30 @@ const CONFIG_TEMPLATE_PREFIX = `<section v-if="isConfigView" class="config-shell
             <div class="hint">{{ configShellDescription }}</div>
           </div>
           <div class="btn-line">
-            <button class="btn btn-primary" :disabled="isActionLocked(actionKeyConfigSave)" @click="saveConfig">
+            <button
+              v-if="activeConfigTab !== 'feature_handover'"
+              class="btn btn-primary"
+              :disabled="isActionLocked(actionKeyConfigSave)"
+              @click="saveConfig"
+            >
               {{ isActionLocked(actionKeyConfigSave) ? '保存中...' : '保存配置' }}
             </button>
+            <template v-else>
+              <button
+                class="btn btn-primary"
+                :disabled="isActionLocked(actionKeyHandoverConfigCommonSave)"
+                @click="saveHandoverCommonConfig"
+              >
+                {{ isActionLocked(actionKeyHandoverConfigCommonSave) ? '保存中...' : '保存公共配置' }}
+              </button>
+              <button
+                class="btn btn-secondary"
+                :disabled="isActionLocked(actionKeyHandoverConfigBuildingSave)"
+                @click="saveHandoverBuildingConfig"
+              >
+                {{ isActionLocked(actionKeyHandoverConfigBuildingSave) ? '保存中...' : '保存当前楼栋配置' }}
+              </button>
+            </template>
             <button class="btn btn-secondary" @click="openDashboardPage">{{ configReturnButtonText }}</button>
           </div>
         </div>
@@ -73,9 +94,30 @@ const CONFIG_TEMPLATE_PREFIX = `<section v-if="isConfigView" class="config-shell
 const CONFIG_TEMPLATE_SUFFIX = `
         <div class="hr"></div>
         <div class="btn-line">
-          <button class="btn btn-primary" :disabled="isActionLocked(actionKeyConfigSave)" @click="saveConfig">
+          <button
+            v-if="activeConfigTab !== 'feature_handover'"
+            class="btn btn-primary"
+            :disabled="isActionLocked(actionKeyConfigSave)"
+            @click="saveConfig"
+          >
             {{ isActionLocked(actionKeyConfigSave) ? '保存中...' : '保存配置' }}
           </button>
+          <template v-else>
+            <button
+              class="btn btn-primary"
+              :disabled="isActionLocked(actionKeyHandoverConfigCommonSave)"
+              @click="saveHandoverCommonConfig"
+            >
+              {{ isActionLocked(actionKeyHandoverConfigCommonSave) ? '保存中...' : '保存公共配置' }}
+            </button>
+            <button
+              class="btn btn-secondary"
+              :disabled="isActionLocked(actionKeyHandoverConfigBuildingSave)"
+              @click="saveHandoverBuildingConfig"
+            >
+              {{ isActionLocked(actionKeyHandoverConfigBuildingSave) ? '保存中...' : '保存当前楼栋配置' }}
+            </button>
+          </template>
           <button class="btn btn-secondary" @click="openDashboardPage">{{ configReturnButtonText }}</button>
         </div>
       </section>

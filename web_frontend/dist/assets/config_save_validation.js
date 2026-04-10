@@ -143,33 +143,16 @@ function validateAndNormalizeHandoverTemplate(payload) {
   payload.handover_log.template = payload.handover_log.template || {};
   const template = payload.handover_log.template;
 
-  template.apply_building_title = Boolean(template.apply_building_title);
-  template.title_cell = String(template.title_cell || "A1").trim().toUpperCase();
-  template.building_title_pattern = String(template.building_title_pattern || "").trim();
-  template.building_title_map =
-    template.building_title_map && typeof template.building_title_map === "object"
-      ? template.building_title_map
-      : {};
-
-  const cellPattern = /^[A-Z]+[1-9]\d*$/;
-  if (!template.title_cell || !cellPattern.test(template.title_cell)) {
-    return { ok: false, error: "交接班模板标题单元格格式错误，应类似 A1" };
-  }
-
-  for (const building of Object.keys(template.building_title_map)) {
-    const title = String(template.building_title_map[building] || "").trim();
-    template.building_title_map[building] = title;
-    if (!title) {
-      return { ok: false, error: `交接班模板标题映射不能为空：${building}` };
-    }
-  }
-
-  if (template.apply_building_title) {
-    const hasMap = Object.keys(template.building_title_map).length > 0;
-    if (!hasMap && !template.building_title_pattern) {
-      return { ok: false, error: "启用楼栋标题时，标题映射或兜底模板至少填写一项" };
-    }
-  }
+  template.apply_building_title = true;
+  template.title_cell = "A1";
+  template.building_title_pattern = "EA118机房{building_code}栋数据中心交接班日志";
+  template.building_title_map = {
+    "A楼": "EA118机房A栋数据中心交接班日志",
+    "B楼": "EA118机房B栋数据中心交接班日志",
+    "C楼": "EA118机房C栋数据中心交接班日志",
+    "D楼": "EA118机房D栋数据中心交接班日志",
+    "E楼": "EA118机房E栋数据中心交接班日志",
+  };
   return { ok: true };
 }
 

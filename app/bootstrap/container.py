@@ -390,7 +390,7 @@ class AppContainer:
             config=self.runtime_config,
             emit_log=self.add_system_log,
             restart_callback=self.updater_restart_callback,
-            is_busy=self.job_service.has_incomplete_jobs,
+            is_busy=self.job_service.has_running_jobs,
         )
 
     def _build_shared_bridge_service(self) -> SharedBridgeRuntimeService:

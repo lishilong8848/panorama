@@ -534,6 +534,7 @@ class UpdaterService:
             "last_result": last_result,
             "queue_status": queue_status,
             "restart_required": bool(self.state.get("restart_required", False)),
+            "update_available": bool(self.state.get("update_available", False)),
             "force_apply_available": bool(self.state.get("force_apply_available", False)),
             "local_version": str(self.state.get("local_version", "")),
             "remote_version": str(self.state.get("remote_version", "")),

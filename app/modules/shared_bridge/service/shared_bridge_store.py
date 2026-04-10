@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import threading
 import uuid
@@ -8,6 +9,9 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
+
+from app.modules.shared_bridge.service.shared_bridge_mailbox_store import SharedBridgeMailboxStore
+from app.modules.shared_bridge.service.shared_source_cache_index_store import SharedSourceCacheIndexStore
 
 _TERMINAL_TASK_STATUSES = {"success", "failed", "partial_failed", "cancelled", "stale"}
 
@@ -34,6 +38,8 @@ class SharedBridgeStore:
         self._ready_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._ready = False
+        self._mailbox_store = SharedBridgeMailboxStore(self.root_dir)
+        self._source_cache_index_store = SharedSourceCacheIndexStore(self.root_dir)
 
     def ensure_ready(self) -> None:
         if self._ready:
@@ -44,6 +50,8 @@ class SharedBridgeStore:
             self.root_dir.mkdir(parents=True, exist_ok=True)
             for name in ("artifacts", "logs", "tmp"):
                 (self.root_dir / name).mkdir(parents=True, exist_ok=True)
+            self._mailbox_store.ensure_ready()
+            self._source_cache_index_store.ensure_ready()
             with self.connect() as conn:
                 conn.executescript(
                     """
@@ -373,6 +381,27 @@ class SharedBridgeStore:
         dedupe_text = str(dedupe_key or "").strip()
         if not dedupe_text:
             return None
+        try:
+            mailbox_tasks = self._mailbox_store.list_tasks(limit=1000)
+        except Exception:
+            mailbox_tasks = []
+        active_mailbox_tasks = [
+            task
+            for task in mailbox_tasks
+            if isinstance(task, dict)
+            and str(task.get("dedupe_key", "") or "").strip() == dedupe_text
+            and str(task.get("status", "") or "").strip().lower() not in _TERMINAL_TASK_STATUSES
+        ]
+        if active_mailbox_tasks:
+            active_mailbox_tasks.sort(
+                key=lambda item: (
+                    str(item.get("updated_at", "") or "").strip(),
+                    str(item.get("created_at", "") or "").strip(),
+                    str(item.get("task_id", "") or "").strip(),
+                ),
+                reverse=True,
+            )
+            return active_mailbox_tasks[0]
         placeholders = ", ".join("?" for _ in _TERMINAL_TASK_STATUSES)
         with self.connect(read_only=True) as conn:
             row = conn.execute(
@@ -735,12 +764,14 @@ class SharedBridgeStore:
         if not task_text:
             return False
         now_text = _now_text()
+        changed = False
         with self.connect() as conn:
             row = conn.execute("SELECT status FROM bridge_tasks WHERE task_id=?", (task_text,)).fetchone()
             if not row:
                 return False
             status = str(row["status"] or "").strip().lower()
             if status not in {"success", "failed", "partial_failed", "cancelled"}:
+                changed = True
                 conn.execute(
                     "UPDATE bridge_tasks SET status='cancelled', updated_at=?, revision=revision+1 WHERE task_id=?",
                     (now_text, task_text),
@@ -762,8 +793,10 @@ class SharedBridgeStore:
                     event_type="cancelled",
                     payload={"message": "任务已取消"},
                 )
+            if changed:
+                self._sync_task_mailbox_from_conn(conn, task_text)
         return True
-    def retry_task(self, task_id: str) -> bool:
+    def retry_task(self, task_id: str, *, record_event: bool = True, sync_mailbox: bool = True) -> bool:
         task_text = str(task_id or "").strip()
         if not task_text:
             return False
@@ -829,19 +862,22 @@ class SharedBridgeStore:
                 """,
                 [task_text, *reset_stage_ids],
             )
-            self._insert_event(
-                conn,
-                task_id=task_text,
-                stage_id="",
-                side="",
-                level="info",
-                event_type="retried",
-                payload={
-                    "message": "任务已重新排队",
-                    "retry_from": "external" if retry_from_external else "internal",
-                    "next_status": next_task_status,
-                },
-            )
+            if record_event:
+                self._insert_event(
+                    conn,
+                    task_id=task_text,
+                    stage_id="",
+                    side="",
+                    level="info",
+                    event_type="retried",
+                    payload={
+                        "message": "任务已重新排队",
+                        "retry_from": "external" if retry_from_external else "internal",
+                        "next_status": next_task_status,
+                    },
+                )
+            if sync_mailbox:
+                self._sync_task_mailbox_from_conn(conn, task_text)
         return True
     def create_handover_from_download_task(
         self,
@@ -858,6 +894,7 @@ class SharedBridgeStore:
     ) -> Dict[str, Any]:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
+        payload: Dict[str, Any] | None = None
         normalized_buildings = [
             str(item or "").strip()
             for item in (buildings or [])
@@ -956,7 +993,7 @@ class SharedBridgeStore:
                     "request": request_payload,
                 },
             )
-        payload = self.get_task(task_id)
+            payload = self._task_payload_and_sync_from_conn(conn, task_id)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -974,6 +1011,7 @@ class SharedBridgeStore:
     ) -> Dict[str, Any]:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
+        payload: Dict[str, Any] | None = None
         normalized_dates = [
             str(item or "").strip()
             for item in (selected_dates or [])
@@ -1057,7 +1095,7 @@ class SharedBridgeStore:
                     "request": request_payload,
                 },
             )
-        payload = self.get_task(task_id)
+            payload = self._task_payload_and_sync_from_conn(conn, task_id)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1074,6 +1112,7 @@ class SharedBridgeStore:
     ) -> Dict[str, Any]:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
+        payload: Dict[str, Any] | None = None
         normalized_buildings = [
             str(item or "").strip()
             for item in (buildings or [])
@@ -1155,7 +1194,7 @@ class SharedBridgeStore:
                     "request": request_payload,
                 },
             )
-        payload = self.get_task(task_id)
+            payload = self._task_payload_and_sync_from_conn(conn, task_id)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1172,6 +1211,7 @@ class SharedBridgeStore:
     ) -> Dict[str, Any]:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
+        payload: Dict[str, Any] | None = None
         request_payload = {
             "source": str(source or "").strip() or "manual",
             "resume_job_id": str(resume_job_id or "").strip(),
@@ -1249,7 +1289,7 @@ class SharedBridgeStore:
                     "request": request_payload,
                 },
             )
-        payload = self.get_task(task_id)
+            payload = self._task_payload_and_sync_from_conn(conn, task_id)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1264,6 +1304,7 @@ class SharedBridgeStore:
     ) -> Dict[str, Any]:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
+        payload: Dict[str, Any] | None = None
         normalized_dates = [
             str(item or "").strip()
             for item in (selected_dates or [])
@@ -1336,7 +1377,7 @@ class SharedBridgeStore:
                     "request": request_payload,
                 },
             )
-        payload = self.get_task(task_id)
+            payload = self._task_payload_and_sync_from_conn(conn, task_id)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1353,6 +1394,7 @@ class SharedBridgeStore:
     ) -> Dict[str, Any]:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
+        payload: Dict[str, Any] | None = None
         request_payload = {
             "run_id": str(run_id or "").strip(),
             "auto_trigger": bool(auto_trigger),
@@ -1414,7 +1456,7 @@ class SharedBridgeStore:
                     "request": request_payload,
                 },
             )
-        payload = self.get_task(task_id)
+            payload = self._task_payload_and_sync_from_conn(conn, task_id)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1436,6 +1478,7 @@ class SharedBridgeStore:
     ) -> Dict[str, Any]:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
+        payload: Dict[str, Any] | None = None
         normalized_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
         normalized_dates = [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]
         request_payload = {
@@ -1521,7 +1564,7 @@ class SharedBridgeStore:
                     "request": request_payload,
                 },
             )
-        payload = self.get_task(task_id)
+            payload = self._task_payload_and_sync_from_conn(conn, task_id)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1537,6 +1580,7 @@ class SharedBridgeStore:
     ) -> Dict[str, Any]:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
+        payload: Dict[str, Any] | None = None
         normalized_dates = [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]
         request_payload = {
             "selected_dates": normalized_dates,
@@ -1607,7 +1651,7 @@ class SharedBridgeStore:
                     "request": request_payload,
                 },
             )
-        payload = self.get_task(task_id)
+            payload = self._task_payload_and_sync_from_conn(conn, task_id)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1632,6 +1676,7 @@ class SharedBridgeStore:
     ) -> Dict[str, Any]:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
+        payload: Dict[str, Any] | None = None
         building_text = str(building or "").strip()
         failure_kind_text = str(failure_kind or "").strip().lower() or "browser_issue"
         alert_state_text = str(alert_state or "").strip().lower() or "problem"
@@ -1704,7 +1749,7 @@ class SharedBridgeStore:
                     "request": request_payload,
                 },
             )
-        payload = self.get_task(task_id)
+            payload = self._task_payload_and_sync_from_conn(conn, task_id)
         if not payload:
             raise RuntimeError(f"重新加载内网环境告警任务失败 {task_id}")
         return payload
@@ -1721,6 +1766,7 @@ class SharedBridgeStore:
         claim_token = uuid.uuid4().hex
         claimed_task_id = ""
         claimed_stage_id = ""
+        payload: Dict[str, Any] | None = None
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -1794,7 +1840,7 @@ class SharedBridgeStore:
                     "lease_expires_at": lease_expires_at,
                 },
             )
-        payload = self.get_task(claimed_task_id)
+            payload = self._task_payload_and_sync_from_conn(conn, claimed_task_id, side_hint=role_text)
         if payload:
             for item in payload.get("stages", []):
                 if str(item.get("stage_id", "")).strip() == claimed_stage_id:
@@ -1809,6 +1855,7 @@ class SharedBridgeStore:
         stage_id: str,
         claim_token: str,
         lease_sec: int = 30,
+        sync_mailbox: bool = False,
     ) -> None:
         task_text = str(task_id or "").strip()
         stage_text = str(stage_id or "").strip()
@@ -1830,10 +1877,8 @@ class SharedBridgeStore:
                     token_text,
                 ),
             )
-            conn.execute(
-                "UPDATE bridge_tasks SET updated_at=?, revision=revision+1 WHERE task_id=?",
-                (now_dt.strftime("%Y-%m-%d %H:%M:%S"), task_text),
-            )
+            if sync_mailbox:
+                self._sync_task_mailbox_from_conn(conn, task_text)
 
     def sweep_expired_running_tasks(self, *, stale_task_timeout_sec: int) -> int:
         now_dt = datetime.now()
@@ -1905,6 +1950,7 @@ class SharedBridgeStore:
                         "lease_expires_at": str(row["lease_expires_at"] or "").strip(),
                     },
                 )
+                self._sync_task_mailbox_from_conn(conn, task_id, side_hint="system")
         return len(expired_rows)
 
     def upsert_artifact(
@@ -1918,6 +1964,7 @@ class SharedBridgeStore:
         status: str,
         size_bytes: int = 0,
         metadata: Dict[str, Any] | None = None,
+        sync_mailbox: bool = True,
     ) -> None:
         task_text = str(task_id or "").strip()
         stage_text = str(stage_id or "").strip()
@@ -1955,6 +2002,8 @@ class SharedBridgeStore:
                     now_text,
                 ),
             )
+            if sync_mailbox:
+                self._sync_task_mailbox_from_conn(conn, task_text)
 
     def get_artifacts(self, task_id: str, *, artifact_kind: str = "", status: str = "") -> List[Dict[str, Any]]:
         task_text = str(task_id or "").strip()
@@ -2037,6 +2086,9 @@ class SharedBridgeStore:
                 """,
                 (artifact_text,),
             ).fetchone()
+            task_id_text = str(row["task_id"] or "").strip()
+            if task_id_text:
+                self._sync_task_mailbox_from_conn(conn, task_id_text)
         return self._row_to_artifact_dict(updated_row) if updated_row else None
 
     def upsert_source_cache_entry(
@@ -2076,7 +2128,18 @@ class SharedBridgeStore:
         )
         now_text = _now_text()
         downloaded_at_text = str(downloaded_at or "").strip() or now_text
+        created_at_text = now_text
         with self.connect() as conn:
+            existing_row = conn.execute(
+                """
+                SELECT created_at
+                FROM source_cache_entries
+                WHERE entry_id=?
+                """,
+                (entry_id,),
+            ).fetchone()
+            if existing_row and str(existing_row["created_at"] or "").strip():
+                created_at_text = str(existing_row["created_at"] or "").strip()
             conn.execute(
                 """
                 INSERT INTO source_cache_entries(
@@ -2106,10 +2169,29 @@ class SharedBridgeStore:
                     str(file_hash or "").strip(),
                     int(size_bytes or 0),
                     json.dumps(metadata or {}, ensure_ascii=False),
-                    now_text,
+                    created_at_text,
                     now_text,
                 ),
             )
+        self._source_cache_index_store.upsert_entry(
+            {
+                "entry_id": entry_id,
+                "source_family": family_text,
+                "building": building_text,
+                "bucket_kind": bucket_kind_text,
+                "bucket_key": bucket_key_text,
+                "duty_date": duty_date_text,
+                "duty_shift": duty_shift_text,
+                "downloaded_at": downloaded_at_text,
+                "relative_path": relative_path_text,
+                "status": str(status or "").strip(),
+                "file_hash": str(file_hash or "").strip(),
+                "size_bytes": int(size_bytes or 0),
+                "metadata": metadata or {},
+                "created_at": created_at_text,
+                "updated_at": now_text,
+            }
+        )
 
     def list_source_cache_entries(
         self,
@@ -2123,6 +2205,18 @@ class SharedBridgeStore:
         status: str = "",
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
+        index_rows = self._source_cache_index_store.list_entries(
+            source_family=source_family,
+            building=building,
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            status=status,
+            limit=max(1, int(limit or 200)),
+        )
+        if index_rows:
+            return index_rows
         clauses: List[str] = []
         params: List[Any] = []
         if str(source_family or "").strip():
@@ -2214,18 +2308,36 @@ class SharedBridgeStore:
                 """,
                 (entry_text,),
             ).fetchone()
-        return self._row_to_source_cache_entry_dict(updated_row) if updated_row else None
+        payload = self._row_to_source_cache_entry_dict(updated_row) if updated_row else None
+        if isinstance(payload, dict):
+            self._source_cache_index_store.upsert_entry(payload)
+        return payload
 
     def delete_source_cache_entry(self, entry_id: str) -> bool:
         entry_text = str(entry_id or "").strip()
         if not entry_text:
             return False
+        deleted_entry: Dict[str, Any] | None = None
         with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,
+                       downloaded_at, relative_path, status, file_hash, size_bytes, metadata_json, created_at, updated_at
+                FROM source_cache_entries
+                WHERE entry_id=?
+                """,
+                (entry_text,),
+            ).fetchone()
+            if row:
+                deleted_entry = self._row_to_source_cache_entry_dict(row)
             deleted = conn.execute(
                 "DELETE FROM source_cache_entries WHERE entry_id=?",
                 (entry_text,),
             )
-        return bool(int(deleted.rowcount or 0) > 0)
+        success = bool(int(deleted.rowcount or 0) > 0)
+        if success and isinstance(deleted_entry, dict):
+            self._source_cache_index_store.delete_entry(deleted_entry)
+        return success
 
     def list_cleanup_candidate_source_cache_entries(self, *, limit: int = 20000) -> List[Dict[str, Any]]:
         with self.connect(read_only=True) as conn:
@@ -2273,6 +2385,11 @@ class SharedBridgeStore:
             conn.execute(f"DELETE FROM bridge_events WHERE task_id IN ({placeholders})", deleted_task_ids)
             conn.execute(f"DELETE FROM bridge_stages WHERE task_id IN ({placeholders})", deleted_task_ids)
             conn.execute(f"DELETE FROM bridge_tasks WHERE task_id IN ({placeholders})", deleted_task_ids)
+        for task_id in deleted_task_ids:
+            try:
+                shutil.rmtree(self._mailbox_store.task_dir(task_id), ignore_errors=True)
+            except Exception:
+                pass
         return {
             "deleted_tasks": len(deleted_task_ids),
             "artifact_relative_paths": deleted_artifact_paths,
@@ -2300,6 +2417,8 @@ class SharedBridgeStore:
         task_error: str = "",
         stage_status: str = "success",
         task_result: Dict[str, Any] | None = None,
+        record_event: bool = True,
+        sync_mailbox: bool = True,
     ) -> bool:
         task_text = str(task_id or "").strip()
         stage_text = str(stage_id or "").strip()
@@ -2346,20 +2465,23 @@ class SharedBridgeStore:
                     task_text,
                 ),
             )
-            self._insert_event(
-                conn,
-                task_id=task_text,
-                stage_id=stage_text,
-                side=str(side or "").strip(),
-                level="error" if str(stage_status or "").strip().lower() == "failed" else "info",
-                event_type="completed",
-                payload={
-                    "message": "共享桥接阶段已完成",
-                    "stage_status": str(stage_status or "").strip(),
-                    "task_status": str(next_task_status or "").strip(),
-                    "error": str(stage_error or "").strip(),
-                },
-            )
+            if record_event:
+                self._insert_event(
+                    conn,
+                    task_id=task_text,
+                    stage_id=stage_text,
+                    side=str(side or "").strip(),
+                    level="error" if str(stage_status or "").strip().lower() == "failed" else "info",
+                    event_type="completed",
+                    payload={
+                        "message": "共享桥接阶段已完成",
+                        "stage_status": str(stage_status or "").strip(),
+                        "task_status": str(next_task_status or "").strip(),
+                        "error": str(stage_error or "").strip(),
+                    },
+                )
+            if sync_mailbox:
+                self._sync_task_mailbox_from_conn(conn, task_text, side_hint=str(side or "").strip())
         return True
 
     def append_event(
@@ -2371,6 +2493,7 @@ class SharedBridgeStore:
         level: str,
         event_type: str,
         payload: Dict[str, Any] | None = None,
+        sync_mailbox: bool = True,
     ) -> None:
         task_text = str(task_id or "").strip()
         if not task_text:
@@ -2385,6 +2508,8 @@ class SharedBridgeStore:
                 event_type=str(event_type or "").strip() or "log",
                 payload=payload or {},
             )
+            if sync_mailbox:
+                self._sync_task_mailbox_from_conn(conn, task_text, side_hint=str(side or "").strip())
 
     def _insert_event(
         self,
@@ -2412,6 +2537,104 @@ class SharedBridgeStore:
                 _now_text(),
             ),
         )
+
+    @staticmethod
+    def _mailbox_side_for_task(task: Dict[str, Any] | None, *, side_hint: str = "") -> str:
+        hint = str(side_hint or "").strip().lower()
+        if hint in {"internal", "external"}:
+            return hint
+        status = str((task or {}).get("status", "") or "").strip().lower()
+        if status.startswith("queued_for_internal") or status.startswith("internal_"):
+            return "internal"
+        if status.startswith("ready_for_external") or status.startswith("external_"):
+            return "external"
+        if status in _TERMINAL_TASK_STATUSES:
+            result = (task or {}).get("result", {}) if isinstance((task or {}).get("result", {}), dict) else {}
+            if isinstance(result.get("external", {}), dict) and result.get("external"):
+                return "external"
+            if isinstance(result.get("internal", {}), dict) and result.get("internal"):
+                return "internal"
+        return ""
+
+    def _task_payload_from_conn(self, conn: sqlite3.Connection, task_id: str) -> Dict[str, Any] | None:
+        task_text = str(task_id or "").strip()
+        if not task_text:
+            return None
+        task_row = conn.execute(
+            """
+            SELECT task_id, feature, mode, created_by_role, created_by_node_id, requested_by,
+                   status, dedupe_key, request_json, result_json, error, created_at, updated_at, revision
+            FROM bridge_tasks
+            WHERE task_id=?
+            """,
+            (task_text,),
+        ).fetchone()
+        if not task_row:
+            return None
+        stage_rows = conn.execute(
+            """
+            SELECT task_id, stage_id, role_target, handler, status, input_json, result_json,
+                   claimed_by_node_id, claim_token, lease_expires_at, started_at, finished_at, error, revision
+            FROM bridge_stages
+            WHERE task_id=?
+            ORDER BY stage_id
+            """,
+            (task_text,),
+        ).fetchall()
+        artifact_rows = conn.execute(
+            """
+            SELECT artifact_id, task_id, stage_id, artifact_kind, building, relative_path, status,
+                   size_bytes, metadata_json, created_at, updated_at
+            FROM bridge_artifacts
+            WHERE task_id=?
+            ORDER BY created_at
+            """,
+            (task_text,),
+        ).fetchall()
+        event_rows = conn.execute(
+            """
+            SELECT event_id, task_id, stage_id, side, level, event_type, payload_json, created_at
+            FROM bridge_events
+            WHERE task_id=?
+            ORDER BY event_id DESC
+            LIMIT 100
+            """,
+            (task_text,),
+        ).fetchall()
+        payload = self._row_to_task_dict(task_row)
+        payload["stages"] = [self._row_to_stage_dict(row) for row in stage_rows]
+        payload["artifacts"] = [self._row_to_artifact_dict(row) for row in artifact_rows]
+        payload["events"] = [self._row_to_event_dict(row) for row in event_rows]
+        return payload
+
+    def _sync_task_mailbox_from_conn(self, conn: sqlite3.Connection, task_id: str, *, side_hint: str = "") -> None:
+        payload = self._task_payload_from_conn(conn, task_id)
+        if not isinstance(payload, dict):
+            return
+        self._mailbox_store.write_request(payload)
+        side = self._mailbox_side_for_task(payload, side_hint=side_hint)
+        if side:
+            self._mailbox_store.write_side_snapshot(task=payload, side=side)
+
+    def _sync_task_mailbox(self, task: Dict[str, Any] | None, *, side_hint: str = "") -> None:
+        if not isinstance(task, dict):
+            return
+        self._mailbox_store.write_request(task)
+        side = self._mailbox_side_for_task(task, side_hint=side_hint)
+        if side:
+            self._mailbox_store.write_side_snapshot(task=task, side=side)
+
+    def _task_payload_and_sync_from_conn(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        *,
+        side_hint: str = "",
+    ) -> Dict[str, Any] | None:
+        payload = self._task_payload_from_conn(conn, task_id)
+        if isinstance(payload, dict):
+            self._sync_task_mailbox(payload, side_hint=side_hint)
+        return payload
 
     @staticmethod
     def _loads(raw: Any) -> Any:

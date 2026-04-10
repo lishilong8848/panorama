@@ -26,6 +26,8 @@ from app.modules.report_pipeline.service.orchestrator_service import Orchestrato
 from app.modules.shared_bridge.service.internal_download_browser_pool import (
     InternalDownloadBrowserPool,
 )
+from app.modules.shared_bridge.service.shared_bridge_mailbox_store import SharedBridgeMailboxStore
+from app.modules.shared_bridge.service.shared_bridge_runtime_mirror_store import SharedBridgeRuntimeMirrorStore
 from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_ALARM_EVENT,
     FAMILY_HANDOVER_CAPACITY_REPORT,
@@ -89,6 +91,7 @@ class SharedBridgeRuntimeService:
     INTERNAL_BROWSER_ALERT_FEATURE = "internal_browser_alert"
     INTERNAL_BROWSER_ALERT_QUIET_SEC = 600
     INTERNAL_BROWSER_ALERT_DEDUPE_SEC = 3600
+    INTERNAL_ALERT_STATUS_REFRESH_INTERVAL_SEC = 30
     CLEANUP_INTERVAL_SEC = 600
     WAITING_JOB_RECONCILE_INTERVAL_SEC = 30
     TASK_RETENTION_DAYS = 14
@@ -120,6 +123,8 @@ class SharedBridgeRuntimeService:
         self._cached_health_snapshot: Dict[str, Any] | None = None
         self._store_issue_log_markers: Dict[str, float] = {}
         self._store: SharedBridgeStore | None = None
+        self._mailbox_store: SharedBridgeMailboxStore | None = None
+        self._mirror_store: SharedBridgeRuntimeMirrorStore | None = None
         self._internal_download_pool: InternalDownloadBrowserPool | None = None
         self._source_cache_service: SharedSourceCacheService | None = None
         self._startup_logged = False
@@ -185,7 +190,7 @@ class SharedBridgeRuntimeService:
                 continue
             file_path = self._resolve_ready_artifact_file_path(item)
             if file_path is None:
-                raise FileNotFoundError(f"共享目录中的交接班源文件不存在或不可访问: {relative_path}")
+                raise RuntimeError(f"共享目录中没有可继续处理的交接班源文件: {relative_path}")
             building_files.append({"building": building, "file_path": str(file_path)})
         capacity_artifacts = self._store.get_artifacts(task_id, artifact_kind="capacity_source_file", status="ready")
         capacity_items: List[Dict[str, str]] = []
@@ -196,7 +201,7 @@ class SharedBridgeRuntimeService:
                 continue
             file_path = self._resolve_ready_artifact_file_path(item)
             if file_path is None:
-                raise FileNotFoundError(f"共享目录中的交接班容量源文件不存在或不可访问: {relative_path}")
+                raise RuntimeError(f"共享目录中没有完整可继续处理的交接班容量源文件: {relative_path}")
             capacity_items.append({"building": building, "file_path": str(file_path)})
         if not building_files:
             raise RuntimeError("共享目录中没有可继续处理的交接班源文件")
@@ -515,6 +520,17 @@ class SharedBridgeRuntimeService:
             if self.shared_bridge_root
             else None
         )
+        self._mailbox_store = SharedBridgeMailboxStore(self.shared_bridge_root) if self.shared_bridge_root else None
+        self._mirror_store = SharedBridgeRuntimeMirrorStore(
+            runtime_config=self.runtime_config,
+            role_mode=self.role_mode or "external",
+        )
+        if self._mirror_store is not None:
+            cached_alert_status = self._mirror_store.get_snapshot(key="internal_alert_status")
+            if isinstance(cached_alert_status, dict):
+                payload = cached_alert_status.get("payload", cached_alert_status)
+                if isinstance(payload, dict) and payload:
+                    self._cached_internal_alert_status = copy.deepcopy(payload)
         if self._source_cache_service is None:
             self._source_cache_service = SharedSourceCacheService(
                 runtime_config=self.runtime_config,
@@ -587,6 +603,10 @@ class SharedBridgeRuntimeService:
 
     def _cache_task_list(self, tasks: List[Dict[str, Any]]) -> None:
         self._cached_task_list = copy.deepcopy(tasks if isinstance(tasks, list) else [])
+        if self._mirror_store is not None:
+            for task in self._cached_task_list:
+                if isinstance(task, dict):
+                    self._mirror_store.upsert_task(task)
 
     def _cache_task_detail(self, task: Dict[str, Any] | None) -> None:
         task_payload = task if isinstance(task, dict) else None
@@ -594,9 +614,77 @@ class SharedBridgeRuntimeService:
         if not task_id:
             return
         self._cached_task_details[task_id] = copy.deepcopy(task_payload)
+        if self._mirror_store is not None:
+            self._mirror_store.upsert_task(task_payload)
+
+    def _list_mailbox_tasks(self, *, limit: int) -> List[Dict[str, Any]]:
+        if self._mailbox_store is None:
+            return []
+        try:
+            return self._mailbox_store.list_tasks(limit=limit)
+        except Exception:
+            return []
+
+    def _get_mailbox_task(self, task_id: str) -> Dict[str, Any] | None:
+        if self._mailbox_store is None:
+            return None
+        try:
+            return self._mailbox_store.load_task(task_id)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _task_counts_from_tasks(tasks: List[Dict[str, Any]]) -> Dict[str, int]:
+        pending_internal = 0
+        pending_external = 0
+        problematic = 0
+        for task in tasks if isinstance(tasks, list) else []:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "") or "").strip().lower()
+            if status in {"queued_for_internal", "internal_claimed", "internal_running"}:
+                pending_internal += 1
+            elif status in {"ready_for_external", "external_claimed", "external_running"}:
+                pending_external += 1
+            elif status in {"failed", "partial_failed", "stale"}:
+                problematic += 1
+        return {
+            "pending_internal": pending_internal,
+            "pending_external": pending_external,
+            "problematic": problematic,
+            "total_count": len(tasks if isinstance(tasks, list) else []),
+        }
+
+    def _refresh_internal_alert_status_cache(self) -> None:
+        if self._store is None or not hasattr(self._store, "list_external_alert_projections"):
+            return
+        try:
+            projections = self._store.list_external_alert_projections()
+            payload = self._build_external_internal_alert_status(projections)
+            self._cached_internal_alert_status = copy.deepcopy(payload)
+            if self._mirror_store is not None:
+                self._mirror_store.set_snapshot(
+                    key="internal_alert_status",
+                    payload={
+                        "updated_at": _now_text(),
+                        "payload": copy.deepcopy(payload),
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            if self._is_recoverable_store_error(exc):
+                self._mark_store_read_degraded(
+                    scope="internal_alert_status",
+                    exc=exc,
+                    busy_message="共享桥接数据库暂时忙碌，内网告警状态已降级为缓存结果",
+                    unavailable_message="共享桥接数据库暂时不可用，内网告警状态已降级为缓存结果",
+                )
+                return
+            raise
 
     def get_cached_tasks(self, *, limit: int | None = None) -> List[Dict[str, Any]]:
         tasks = copy.deepcopy(self._cached_task_list)
+        if not tasks and self._mirror_store is not None:
+            tasks = self._mirror_store.list_tasks(limit=max(100, int(limit or 100) if limit is not None else 500))
         if limit is None:
             return tasks
         return tasks[: max(1, int(limit or 1))]
@@ -606,6 +694,8 @@ class SharedBridgeRuntimeService:
         if not task_text:
             return None
         payload = self._cached_task_details.get(task_text)
+        if payload is None and self._mirror_store is not None:
+            payload = self._mirror_store.get_task(task_text)
         return copy.deepcopy(payload) if isinstance(payload, dict) else None
 
     def _should_run(self) -> bool:
@@ -717,11 +807,15 @@ class SharedBridgeRuntimeService:
                 if self._source_cache_service is not None
                 else self._empty_internal_source_cache_snapshot()
             )
-            if self._store is not None and normalized_mode != "internal_light":
-                internal_alert_status = self._build_external_internal_alert_status(
-                    self._store.list_external_alert_projections()
-                )
-            else:
+            internal_alert_status = copy.deepcopy(self._cached_internal_alert_status)
+            if not isinstance(internal_alert_status, dict) or not internal_alert_status:
+                if self._mirror_store is not None:
+                    cached_alert_status = self._mirror_store.get_snapshot(key="internal_alert_status")
+                    if isinstance(cached_alert_status, dict):
+                        payload = cached_alert_status.get("payload", cached_alert_status)
+                        if isinstance(payload, dict) and payload:
+                            internal_alert_status = copy.deepcopy(payload)
+            if not isinstance(internal_alert_status, dict) or not internal_alert_status:
                 internal_alert_status = self._empty_internal_alert_status()
             self._cached_internal_alert_status = copy.deepcopy(internal_alert_status)
             snapshot = {
@@ -749,6 +843,10 @@ class SharedBridgeRuntimeService:
                 "internal_alert_status": internal_alert_status,
             }
             self._cached_health_snapshot = copy.deepcopy(snapshot)
+            if self._mirror_store is not None:
+                mirror_payload = copy.deepcopy(snapshot)
+                mirror_payload["updated_at"] = _now_text()
+                self._mirror_store.set_snapshot(key="health_snapshot", payload=mirror_payload)
             return snapshot
         except Exception as exc:  # noqa: BLE001
             if self._is_recoverable_store_error(exc):
@@ -756,8 +854,12 @@ class SharedBridgeRuntimeService:
             raise
 
     def list_tasks(self, *, limit: int = 100) -> list[Dict[str, Any]]:
+        mailbox_tasks = self._list_mailbox_tasks(limit=limit)
+        if mailbox_tasks:
+            self._cache_task_list(mailbox_tasks)
+            return mailbox_tasks
         if not self._store:
-            return []
+            return self.get_cached_tasks(limit=limit)
         try:
             self._store.ensure_ready()
             tasks = self._store.list_tasks(limit=limit)
@@ -771,13 +873,21 @@ class SharedBridgeRuntimeService:
                     busy_message="共享桥接数据库暂时忙碌，共享任务列表已降级为缓存结果",
                     unavailable_message="共享桥接数据库暂时不可用，共享任务列表已降级为缓存结果",
                 )
+                mailbox_tasks = self._list_mailbox_tasks(limit=limit)
+                if mailbox_tasks:
+                    self._cache_task_list(mailbox_tasks)
+                    return mailbox_tasks
                 return self.get_cached_tasks(limit=limit)
             raise
 
     def get_task(self, task_id: str) -> Dict[str, Any] | None:
-        if not self._store:
-            return None
         task_text = str(task_id or "").strip()
+        mailbox_task = self._get_mailbox_task(task_text)
+        if isinstance(mailbox_task, dict):
+            self._cache_task_detail(mailbox_task)
+            return mailbox_task
+        if not self._store:
+            return self.get_cached_task(task_text)
         try:
             self._store.ensure_ready()
             task = self._store.get_task(task_text)
@@ -796,6 +906,10 @@ class SharedBridgeRuntimeService:
                     busy_message="共享桥接数据库暂时忙碌，共享任务详情已降级为缓存结果",
                     unavailable_message="共享桥接数据库暂时不可用，共享任务详情已降级为缓存结果",
                 )
+                mailbox_task = self._get_mailbox_task(task_text)
+                if isinstance(mailbox_task, dict):
+                    self._cache_task_detail(mailbox_task)
+                    return mailbox_task
                 return self.get_cached_task(task_text)
             raise
 
@@ -932,7 +1046,9 @@ class SharedBridgeRuntimeService:
         if self._store is not None:
             try:
                 self._store.ensure_ready()
-                self._store.get_task_counts()
+                mailbox_tasks = self._list_mailbox_tasks(limit=200)
+                if not mailbox_tasks and self._mirror_store is not None:
+                    self._mirror_store.list_tasks(limit=200)
             except Exception as exc:  # noqa: BLE001
                 db_error = str(exc)
 
@@ -1139,6 +1255,18 @@ class SharedBridgeRuntimeService:
             unavailable_message="共享桥接数据库暂时不可用，健康状态已降级为缓存结果",
         )
         base = copy.deepcopy(self._cached_health_snapshot) if isinstance(self._cached_health_snapshot, dict) else {}
+        if not base and self._mirror_store is not None:
+            base = copy.deepcopy(self._mirror_store.get_snapshot(key="health_snapshot") or {})
+        if (not isinstance(self._cached_internal_alert_status, dict) or not self._cached_internal_alert_status) and self._mirror_store is not None:
+            cached_alert_status = self._mirror_store.get_snapshot(key="internal_alert_status")
+            if isinstance(cached_alert_status, dict):
+                payload = cached_alert_status.get("payload", cached_alert_status)
+                if isinstance(payload, dict) and payload:
+                    self._cached_internal_alert_status = copy.deepcopy(payload)
+        if self._mirror_store is not None:
+            mirrored_tasks = self._mirror_store.list_tasks(limit=500)
+            if mirrored_tasks:
+                self._counts.update(self._task_counts_from_tasks(mirrored_tasks))
         if not base:
             base = {
                 "enabled": self.shared_bridge_enabled,
@@ -2239,6 +2367,7 @@ class SharedBridgeRuntimeService:
                     level="info",
                     event_type="log",
                     payload={"message": line},
+                    sync_mailbox=False,
                 )
                 now_monotonic = time.monotonic()
                 if now_monotonic - last_heartbeat >= max(1.0, min(float(self.heartbeat_interval_sec), float(self.claim_lease_sec) / 2.0)):
@@ -2394,6 +2523,7 @@ class SharedBridgeRuntimeService:
             status="ready",
             size_bytes=target_path.stat().st_size,
             metadata=metadata,
+            sync_mailbox=False,
         )
         emit_log(f"[共享桥接][交接班][内网] 已写入共享源文件 楼栋={building}, 路径={target_path}")
         return {"building": str(building or "").strip(), "relative_path": relative_path, "file_path": str(target_path)}
@@ -2431,6 +2561,7 @@ class SharedBridgeRuntimeService:
             status="ready",
             size_bytes=target_path.stat().st_size,
             metadata=metadata,
+            sync_mailbox=False,
         )
         emit_log(f"[共享桥接][交接班容量][内网] 已写入共享源文件 楼栋={building}, 路径={target_path}")
         return {"building": str(building or "").strip(), "relative_path": relative_path, "file_path": str(target_path)}
@@ -2473,6 +2604,7 @@ class SharedBridgeRuntimeService:
             status="ready",
             size_bytes=target_path.stat().st_size,
             metadata=metadata,
+            sync_mailbox=False,
         )
         emit_log(f"[共享桥接][12项][内网] 已写入共享源文件 日期={duty_date}, 楼栋={building}, 路径={target_path}")
         return {
@@ -2515,6 +2647,7 @@ class SharedBridgeRuntimeService:
             status="ready",
             size_bytes=target_path.stat().st_size,
             metadata=metadata,
+            sync_mailbox=False,
         )
         emit_log(f"[共享桥接][湿球温度][内网] 已写入共享源文件 楼栋={building}, 路径={target_path}")
         return {
@@ -2556,6 +2689,7 @@ class SharedBridgeRuntimeService:
                 "run_save_dir": str(payload.get("run_save_dir", "") or "").strip(),
                 "pending_upload_count": int(payload.get("pending_upload_count", 0) or 0),
             },
+            sync_mailbox=False,
         )
         emit_log(f"[共享桥接][月报][内网] 已写入共享续传状态 路径={target_path}")
         return {
@@ -2703,6 +2837,8 @@ class SharedBridgeRuntimeService:
                     stage_result=stage_result,
                     next_task_status="ready_for_external",
                     task_result={"internal": stage_result, "status": "ready_for_external"},
+                    record_event=False,
+                    sync_mailbox=False,
                 )
                 self._store.append_event(task_id=task_id, stage_id=stage_id, side="internal", level="info", event_type="await_external", payload={"message": "内网下载完成，等待外网继续处理"})
             else:
@@ -2898,6 +3034,8 @@ class SharedBridgeRuntimeService:
                     stage_result=stage_result,
                     next_task_status="ready_for_external",
                     task_result={"internal": stage_result, "status": "ready_for_external"},
+                    record_event=False,
+                    sync_mailbox=False,
                 )
                 self._store.append_event(task_id=task_id, stage_id=stage_id, side="internal", level="info", event_type="await_external", payload={"message": "内网下载完成，等待外网继续上传"})
             else:
@@ -3080,6 +3218,8 @@ class SharedBridgeRuntimeService:
                     stage_result=stage_result,
                     next_task_status="ready_for_external",
                     task_result={"internal": stage_result, "status": "ready_for_external"},
+                    record_event=False,
+                    sync_mailbox=False,
                 )
                 self._store.append_event(
                     task_id=task_id,
@@ -3710,6 +3850,8 @@ class SharedBridgeRuntimeService:
                 stage_result=stage_result,
                 next_task_status="ready_for_external",
                 task_result={"internal": stage_result, "status": "ready_for_external"},
+                record_event=False,
+                sync_mailbox=False,
             )
             self._store.append_event(
                 task_id=task_id,
@@ -3878,7 +4020,7 @@ class SharedBridgeRuntimeService:
         stage_text = str(stage_id or "").strip()
         if not task_text or not stage_text:
             return
-        retried = self._store.retry_task(task_text)
+        retried = self._store.retry_task(task_text, record_event=False, sync_mailbox=False)
         payload = {
             "message": wait_message,
             "detail": detail,
@@ -4016,6 +4158,7 @@ class SharedBridgeRuntimeService:
     def _loop(self) -> None:
         next_heartbeat = 0.0
         next_cleanup = 0.0
+        next_internal_alert_refresh = 0.0
         next_waiting_job_reconcile = 0.0
         while not self._stop_event.is_set():
             now_monotonic = time.monotonic()
@@ -4031,13 +4174,25 @@ class SharedBridgeRuntimeService:
                     if now_monotonic >= next_cleanup:
                         self._run_housekeeping()
                         next_cleanup = now_monotonic + self.CLEANUP_INTERVAL_SEC
+                    if now_monotonic >= next_internal_alert_refresh:
+                        self._refresh_internal_alert_status_cache()
+                        next_internal_alert_refresh = now_monotonic + self.INTERNAL_ALERT_STATUS_REFRESH_INTERVAL_SEC
                     if now_monotonic >= next_waiting_job_reconcile:
                         self._reconcile_waiting_jobs()
                         next_waiting_job_reconcile = now_monotonic + self.WAITING_JOB_RECONCILE_INTERVAL_SEC
                     if self.role_mode == "internal":
                         self._process_internal_browser_alerts()
                     self._process_one_task_if_needed()
-                    self._counts = self._store.get_task_counts()
+                    mailbox_tasks = self._list_mailbox_tasks(limit=500)
+                    if mailbox_tasks:
+                        self._counts.update(self._task_counts_from_tasks(mailbox_tasks))
+                        self._cache_task_list(mailbox_tasks)
+                    else:
+                        mirrored_tasks = self._mirror_store.list_tasks(limit=500) if self._mirror_store is not None else []
+                        if mirrored_tasks:
+                            self._counts.update(self._task_counts_from_tasks(mirrored_tasks))
+                        else:
+                            self._counts.update({"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0})
                     self._db_status = "ok"
                     self._last_error = ""
                     self._last_poll_at = _now_text()

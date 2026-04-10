@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import Counter
 
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 
@@ -185,6 +186,219 @@ def test_read_only_connect_uses_plain_path_for_unc_share(monkeypatch) -> None:
     assert captured["database"] == str(store.db_path)
     assert "uri" not in captured["kwargs"]
     assert "PRAGMA query_only=ON" in fake_conn.executed
+
+
+def test_find_active_task_by_dedupe_key_prefers_mailbox_snapshot(tmp_path) -> None:
+    store = SharedBridgeStore(tmp_path)
+    store.ensure_ready()
+    task = store.create_monthly_auto_once_task(
+        created_by_role="external",
+        created_by_node_id="ext-01",
+        requested_by="manual",
+    )
+    task_id = str(task["task_id"])
+    dedupe_key = str(task["dedupe_key"])
+
+    with store.connect() as conn:
+        conn.execute("DELETE FROM bridge_tasks WHERE task_id=?", (task_id,))
+        conn.execute("DELETE FROM bridge_stages WHERE task_id=?", (task_id,))
+        conn.execute("DELETE FROM bridge_events WHERE task_id=?", (task_id,))
+
+    found = store.find_active_task_by_dedupe_key(dedupe_key)
+
+    assert found is not None
+    assert found["task_id"] == task_id
+
+
+def test_create_task_does_not_requery_shared_db_after_write(tmp_path, monkeypatch) -> None:
+    store = SharedBridgeStore(tmp_path)
+    store.ensure_ready()
+
+    monkeypatch.setattr(store, "get_task", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not requery task")))
+
+    task = store.create_monthly_auto_once_task(
+        created_by_role="external",
+        created_by_node_id="ext-01",
+        requested_by="manual",
+    )
+
+    assert task["feature"] == "monthly_report_pipeline"
+    assert task["task_id"]
+
+
+def test_claim_next_task_does_not_requery_shared_db_after_claim(tmp_path, monkeypatch) -> None:
+    store = SharedBridgeStore(tmp_path)
+    store.ensure_ready()
+    created = store.create_monthly_auto_once_task(
+        created_by_role="external",
+        created_by_node_id="ext-01",
+        requested_by="manual",
+    )
+
+    monkeypatch.setattr(store, "get_task", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not requery task")))
+
+    claimed = store.claim_next_task(role_target="internal", node_id="int-01", lease_sec=30)
+
+    assert claimed is not None
+    assert claimed["task_id"] == created["task_id"]
+    assert claimed["status"] == "internal_running"
+
+
+def test_retry_task_can_skip_retried_event_for_automatic_requeue(tmp_path) -> None:
+    store = SharedBridgeStore(tmp_path)
+    store.ensure_ready()
+    task = store.create_day_metric_from_download_task(
+        selected_dates=["2026-03-28"],
+        building_scope="single",
+        building="A楼",
+        created_by_role="external",
+        created_by_node_id="ext-01",
+        requested_by="manual",
+    )
+
+    claimed_internal = store.claim_next_task(role_target="internal", node_id="int-01", lease_sec=30)
+    assert claimed_internal is not None
+    int_token = next(
+        (stage.get("claim_token", "") for stage in claimed_internal.get("stages", []) if stage.get("stage_id") == "internal_download"),
+        "",
+    )
+    store.complete_stage(
+        task_id=task["task_id"],
+        stage_id="internal_download",
+        claim_token=int_token,
+        side="internal",
+        stage_result={"status": "ok", "selected_dates": ["2026-03-28"], "selected_buildings": ["A楼"]},
+        next_task_status="ready_for_external",
+        task_result={
+            "status": "ready_for_external",
+            "internal": {"status": "ok", "selected_dates": ["2026-03-28"], "selected_buildings": ["A楼"]},
+        },
+    )
+
+    claimed_external = store.claim_next_task(role_target="external", node_id="ext-01", lease_sec=30)
+    assert claimed_external is not None
+
+    assert store.retry_task(task["task_id"], record_event=False) is True
+
+    updated = store.get_task(task["task_id"])
+    assert updated is not None
+    event_types = Counter(str(item.get("event_type", "") or "").strip() for item in updated.get("events", []))
+    assert event_types["claimed"] == 2
+    assert event_types["completed"] == 1
+    assert event_types["retried"] == 0
+
+
+def test_heartbeat_claim_only_extends_stage_lease_by_default(tmp_path) -> None:
+    store = SharedBridgeStore(tmp_path)
+    store.ensure_ready()
+    task = store.create_monthly_auto_once_task(
+        created_by_role="external",
+        created_by_node_id="ext-01",
+        requested_by="manual",
+    )
+
+    claimed = store.claim_next_task(role_target="internal", node_id="int-01", lease_sec=30)
+    assert claimed is not None
+    task_before = store.get_task(task["task_id"])
+    assert task_before is not None
+    stage_before = next(item for item in task_before["stages"] if item["stage_id"] == "internal_download")
+    token = str(stage_before["claim_token"] or "")
+    updated_before = str(task_before["updated_at"] or "")
+    lease_before = str(stage_before["lease_expires_at"] or "")
+
+    store.heartbeat_claim(
+        task_id=task["task_id"],
+        stage_id="internal_download",
+        claim_token=token,
+        lease_sec=45,
+    )
+
+    task_after = store.get_task(task["task_id"])
+    assert task_after is not None
+    stage_after = next(item for item in task_after["stages"] if item["stage_id"] == "internal_download")
+    assert str(stage_after["lease_expires_at"] or "") != lease_before
+    assert str(task_after["updated_at"] or "") == updated_before
+
+
+def test_complete_stage_can_skip_completed_event_for_handoff(tmp_path) -> None:
+    store = SharedBridgeStore(tmp_path)
+    store.ensure_ready()
+    task = store.create_monthly_auto_once_task(
+        created_by_role="external",
+        created_by_node_id="ext-01",
+        requested_by="manual",
+    )
+
+    claimed = store.claim_next_task(role_target="internal", node_id="int-01", lease_sec=30)
+    assert claimed is not None
+    token = next(
+        (stage.get("claim_token", "") for stage in claimed.get("stages", []) if stage.get("stage_id") == "internal_download"),
+        "",
+    )
+
+    store.complete_stage(
+        task_id=task["task_id"],
+        stage_id="internal_download",
+        claim_token=token,
+        side="internal",
+        stage_result={"status": "ok"},
+        next_task_status="ready_for_external",
+        task_result={"status": "ready_for_external", "internal": {"status": "ok"}},
+        record_event=False,
+        sync_mailbox=False,
+    )
+    store.append_event(
+        task_id=task["task_id"],
+        stage_id="internal_download",
+        side="internal",
+        level="info",
+        event_type="await_external",
+        payload={"message": "内网下载完成，等待外网继续处理"},
+    )
+
+    updated = store.get_task(task["task_id"])
+    assert updated is not None
+    event_types = Counter(str(item.get("event_type", "") or "").strip() for item in updated.get("events", []))
+    assert event_types["await_external"] == 1
+    assert event_types["completed"] == 0
+
+
+def test_cancel_terminal_task_skips_redundant_mailbox_sync(tmp_path, monkeypatch) -> None:
+    store = SharedBridgeStore(tmp_path)
+    store.ensure_ready()
+    task = store.create_monthly_auto_once_task(
+        created_by_role="external",
+        created_by_node_id="ext-01",
+        requested_by="manual",
+    )
+
+    claimed = store.claim_next_task(role_target="internal", node_id="int-01", lease_sec=30)
+    assert claimed is not None
+    token = next(
+        (stage.get("claim_token", "") for stage in claimed.get("stages", []) if stage.get("stage_id") == "internal_download"),
+        "",
+    )
+    store.complete_stage(
+        task_id=task["task_id"],
+        stage_id="internal_download",
+        claim_token=token,
+        side="internal",
+        stage_result={"status": "ok"},
+        next_task_status="success",
+        task_result={"status": "success"},
+    )
+
+    sync_calls: list[str] = []
+    original_sync = store._sync_task_mailbox_from_conn
+
+    def _tracked_sync(conn, task_id, *, side_hint=""):  # noqa: ANN001
+        sync_calls.append(str(task_id))
+        return original_sync(conn, task_id, side_hint=side_hint)
+
+    monkeypatch.setattr(store, "_sync_task_mailbox_from_conn", _tracked_sync)
+
+    assert store.cancel_task(task["task_id"]) is True
+    assert sync_calls == []
 
 
 def test_write_connect_uses_delete_journal_mode(monkeypatch, tmp_path) -> None:

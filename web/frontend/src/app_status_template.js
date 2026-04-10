@@ -64,6 +64,7 @@
               :key="'status-diagnosis-action-' + action.id"
               class="btn"
               :class="action.id === 'refresh_current_hour' ? 'btn-warning' : action.id === 'refresh_manual_alarm' ? 'btn-secondary' : 'btn-ghost'"
+              :disabled="isHomeQuickActionLocked(action.id)"
               @click="runHomeQuickAction(action.id)"
             >
               {{ action.label }}

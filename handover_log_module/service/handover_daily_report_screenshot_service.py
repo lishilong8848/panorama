@@ -28,6 +28,7 @@ class HandoverDailyReportScreenshotService:
     DEFAULT_EXTERNAL_PAGE_URL = "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgecZCUXaEtvP9Yl"
     DEFAULT_SUMMARY_PAGE_URL = "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgeZUMIpMDuIIfLA"
     DEFAULT_DEBUG_PORT = 29333
+    PREFERRED_BROWSER_KIND = "edge"
 
     def __init__(self, handover_cfg: Dict[str, Any]) -> None:
         self.handover_cfg = handover_cfg if isinstance(handover_cfg, dict) else {}
@@ -44,13 +45,13 @@ class HandoverDailyReportScreenshotService:
     def _browser_catalog() -> List[Dict[str, str]]:
         return [
             {
-                "browser_kind": "edge",
-                "browser_label": "Microsoft Edge",
+                "browser_kind": "chrome",
+                "browser_label": "Google Chrome",
                 "family": "chromium",
             },
             {
-                "browser_kind": "chrome",
-                "browser_label": "Google Chrome",
+                "browser_kind": "edge",
+                "browser_label": "Microsoft Edge",
                 "family": "chromium",
             },
         ]
@@ -75,6 +76,45 @@ class HandoverDailyReportScreenshotService:
             return Path(local_app_data) / "Microsoft" / "Edge" / "User Data"
         return Path.home() / "AppData" / "Local" / "Microsoft" / "Edge" / "User Data"
 
+    def _configured_profile_directory_name(self) -> str:
+        raw = self.handover_cfg.get("daily_report_bitable_export", {})
+        if not isinstance(raw, dict):
+            return ""
+        return str(raw.get("browser_profile_directory", "") or "").strip()
+
+    def _read_last_used_profile_directory_name(self, browser_meta: Dict[str, Any] | None = None) -> str:
+        user_data_dir = self._profile_dir(browser_meta)
+        local_state_path = user_data_dir / "Local State"
+        try:
+            payload = json.loads(local_state_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return ""
+        profile_payload = payload.get("profile", {}) if isinstance(payload, dict) else {}
+        if not isinstance(profile_payload, dict):
+            return ""
+        last_used = str(profile_payload.get("last_used", "") or "").strip()
+        if last_used:
+            return last_used
+        active_profiles = profile_payload.get("last_active_profiles", [])
+        if isinstance(active_profiles, list):
+            for item in active_profiles:
+                text = str(item or "").strip()
+                if text:
+                    return text
+        return ""
+
+    def _resolve_profile_directory_name(self, browser_meta: Dict[str, Any] | None = None) -> str:
+        configured = self._configured_profile_directory_name()
+        user_data_dir = self._profile_dir(browser_meta)
+        candidates = [configured, self._read_last_used_profile_directory_name(browser_meta), "Default"]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            if (user_data_dir / text).exists():
+                return text
+        return "Default"
+
     def _browser_executable_candidates(self, browser_kind: str) -> List[Path]:
         local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
         program_files_x86 = str(os.environ.get("ProgramFiles(x86)", "") or "").strip()
@@ -96,11 +136,13 @@ class HandoverDailyReportScreenshotService:
         label = "Google Chrome" if normalized_kind == "chrome" else "Microsoft Edge"
         executable = str(executable_path or "").strip()
         profile_dir = str(self._profile_dir({"browser_kind": normalized_kind}))
+        profile_name = self._resolve_profile_directory_name({"browser_kind": normalized_kind})
         return {
             "browser_kind": normalized_kind,
             "browser_label": label,
             "executable_path": executable,
             "profile_dir": profile_dir,
+            "profile_name": profile_name,
             "family": "chromium",
         }
 
@@ -122,15 +164,41 @@ class HandoverDailyReportScreenshotService:
         return None
 
     def _resolve_system_browser(self, *, prefer_running_debug: bool = True) -> Dict[str, str] | None:
+        preferred_meta = self._resolve_browser_meta_by_kind(self.PREFERRED_BROWSER_KIND)
         if prefer_running_debug:
             running_meta = self._browser_meta_from_debug_payload(self._probe_debug_endpoint())
-            if running_meta is not None:
+            if running_meta is not None and (
+                self._browser_kind(running_meta) == self.PREFERRED_BROWSER_KIND or preferred_meta is None
+            ):
                 return running_meta
+        if preferred_meta is not None:
+            return preferred_meta
         for item in self._browser_catalog():
             meta = self._resolve_browser_meta_by_kind(item["browser_kind"])
             if meta is not None:
                 return meta
         return None
+
+    def _preferred_browser_available(self) -> bool:
+        return self._resolve_browser_meta_by_kind(self.PREFERRED_BROWSER_KIND) is not None
+
+    def _running_debug_browser_meta(self) -> Dict[str, str] | None:
+        return self._browser_meta_from_debug_payload(self._probe_debug_endpoint())
+
+    def _can_reuse_debug_browser(self, browser_meta: Dict[str, Any] | None) -> bool:
+        if not isinstance(browser_meta, dict):
+            return False
+        running_kind = self._browser_kind(browser_meta)
+        if running_kind == self.PREFERRED_BROWSER_KIND:
+            return True
+        return not self._preferred_browser_available()
+
+    def _debug_browser_conflict_error(self, browser_meta: Dict[str, Any] | None) -> str:
+        label = self._browser_label(browser_meta)
+        return (
+            "browser_debug_port_unavailable: "
+            f"调试端口当前被{label}占用，请先关闭该浏览器后再重试，程序会改用 Microsoft Edge 打开页面"
+        )
 
     def _browser_state_fields(self, browser_meta: Dict[str, Any] | None) -> Dict[str, str]:
         if not isinstance(browser_meta, dict):
@@ -138,11 +206,13 @@ class HandoverDailyReportScreenshotService:
                 "browser_kind": "",
                 "browser_label": "",
                 "browser_executable": "",
+                "browser_profile_name": "",
             }
         return {
             "browser_kind": self._browser_kind(browser_meta),
             "browser_label": self._browser_label(browser_meta),
             "browser_executable": str(browser_meta.get("executable_path", "") or "").strip(),
+            "browser_profile_name": str(browser_meta.get("profile_name", "") or "").strip(),
         }
 
     def _auth_state_payload(
@@ -248,11 +318,12 @@ class HandoverDailyReportScreenshotService:
         if not executable:
             return False, "browser_unavailable: 未找到系统 Edge 或 Chrome 浏览器"
         profile_dir_text = str(browser_meta.get("profile_dir", "") or "").strip() or str(self._profile_dir(browser_meta))
+        profile_name = str(browser_meta.get("profile_name", "") or "").strip() or self._resolve_profile_directory_name(browser_meta)
         command = [
             executable,
             f"--remote-debugging-port={self._debug_port()}",
             "--new-window",
-            "--profile-directory=Default",
+            f"--profile-directory={profile_name}",
         ]
         if profile_dir_text:
             command.append(f"--user-data-dir={profile_dir_text}")
@@ -265,7 +336,7 @@ class HandoverDailyReportScreenshotService:
         if self._wait_for_debug_endpoint():
             emit_log(
                 f"[交接班][日报截图登录] 已接管系统浏览器调试端口 "
-                f"browser={self._browser_label(browser_meta)}, port={self._debug_port()}, profile={profile_dir_text}"
+                f"browser={self._browser_label(browser_meta)}, port={self._debug_port()}, profile={profile_name}, user_data_dir={profile_dir_text}"
             )
             return True, ""
         return False, f"browser_debug_port_unavailable: 请先关闭所有 {self._browser_label(browser_meta)} 窗口后重试"
@@ -278,9 +349,10 @@ class HandoverDailyReportScreenshotService:
         if not executable:
             return False, "browser_unavailable: 未找到系统 Edge 或 Chrome 浏览器"
         profile_dir_text = str(browser_meta.get("profile_dir", "") or "").strip() or str(self._profile_dir(browser_meta))
+        profile_name = str(browser_meta.get("profile_name", "") or "").strip() or self._resolve_profile_directory_name(browser_meta)
         command = [
             executable,
-            "--profile-directory=Default",
+            f"--profile-directory={profile_name}",
         ]
         if profile_dir_text:
             command.append(f"--user-data-dir={profile_dir_text}")
@@ -297,6 +369,11 @@ class HandoverDailyReportScreenshotService:
         startup_url: str,
         emit_log: Callable[[str], None],
     ) -> tuple[bool, str, str]:
+        running_meta = self._running_debug_browser_meta()
+        if running_meta is not None:
+            if self._can_reuse_debug_browser(running_meta):
+                return True, "", "reused"
+            return False, self._debug_browser_conflict_error(running_meta), ""
         if self._probe_debug_endpoint() is not None:
             return True, "", "reused"
         ok, error = self._start_system_browser(url=startup_url, emit_log=emit_log)
@@ -305,6 +382,9 @@ class HandoverDailyReportScreenshotService:
         return True, "", "opened_browser_startup"
 
     def _connect_browser(self, playwright, *, ensure_started: bool, open_url: str, emit_log: Callable[[str], None]):
+        running_meta = self._running_debug_browser_meta()
+        if running_meta is not None and not self._can_reuse_debug_browser(running_meta):
+            raise RuntimeError(self._debug_browser_conflict_error(running_meta))
         if self._probe_debug_endpoint() is None:
             if not ensure_started:
                 raise RuntimeError("browser_debug_port_unavailable")
@@ -321,6 +401,9 @@ class HandoverDailyReportScreenshotService:
         open_url: str,
         emit_log: Callable[[str], None],
     ):
+        running_meta = self._running_debug_browser_meta()
+        if running_meta is not None and not self._can_reuse_debug_browser(running_meta):
+            raise RuntimeError(self._debug_browser_conflict_error(running_meta))
         if self._probe_debug_endpoint() is None:
             if not ensure_started:
                 raise RuntimeError("browser_debug_port_unavailable")
@@ -328,6 +411,140 @@ class HandoverDailyReportScreenshotService:
             if not ok:
                 raise RuntimeError(error)
         return await playwright.chromium.connect_over_cdp(self._debug_base_url(), timeout=10000)
+
+    @staticmethod
+    def _looks_like_authenticated_feishu_url(url: str) -> bool:
+        raw = str(url or "").strip()
+        if not raw:
+            return False
+        parsed = urlparse(raw)
+        host = str(parsed.netloc or "").strip().lower()
+        path = str(parsed.path or "").strip().lower()
+        query = parse_qs(parsed.query or "", keep_blank_values=False)
+        if "feishu.cn" not in host and "larksuite.com" not in host:
+            return False
+        if any(
+            token in path
+            for token in (
+                "/app/",
+                "/base/",
+                "/wiki/",
+                "/docx/",
+                "/docs/",
+                "/sheet/",
+                "/sheets/",
+                "/bitable/",
+                "/minutes/",
+                "/calendar/",
+                "/drive/",
+                "/mail/",
+                "/messenger/",
+            )
+        ):
+            return True
+        return any(str(key or "").strip().lower() == "pageid" for key in query.keys())
+
+    @staticmethod
+    def _looks_like_login_url(url: str) -> bool:
+        raw = str(url or "").strip()
+        if not raw:
+            return False
+        parsed = urlparse(raw)
+        host = str(parsed.netloc or "").strip().lower()
+        path = str(parsed.path or "").strip().lower()
+        if any(token in host for token in ("passport.", "accounts.")):
+            return True
+        return any(
+            token in path
+            for token in (
+                "/passport/",
+                "/login",
+                "/signin",
+                "/accounts/login",
+                "/accounts/signin",
+            )
+        )
+
+    @staticmethod
+    def _login_indicator_selectors() -> tuple[str, ...]:
+        return (
+            "iframe[src*='passport']",
+            "input[type='password']",
+            "input[name='mobile']",
+            "input[name='username']",
+            "input[name='email']",
+            "input[autocomplete='current-password']",
+            "input[autocomplete='username']",
+        )
+
+    @staticmethod
+    def _login_text_markers() -> tuple[str, ...]:
+        return (
+            "扫码登录",
+            "扫码",
+            "登录",
+            "验证码登录",
+            "手机号登录",
+            "账号登录",
+        )
+
+    @classmethod
+    def _looks_like_login_page(cls, page) -> bool:
+        url = str(page.url or "").strip().lower()
+        if cls._looks_like_authenticated_feishu_url(url):
+            return False
+        if cls._looks_like_login_url(url):
+            return True
+        try:
+            has_form_signal = False
+            for selector in cls._login_indicator_selectors():
+                if page.locator(selector).count() > 0:
+                    has_form_signal = True
+                    break
+            if not has_form_signal:
+                return False
+            body_text = str(
+                page.evaluate(
+                    """
+() => ((document.body && document.body.innerText) || "").slice(0, 2000)
+"""
+                )
+                or ""
+            ).strip()
+            if not body_text:
+                return True
+            return any(marker in body_text for marker in cls._login_text_markers())
+        except Exception:  # noqa: BLE001
+            return False
+
+    @classmethod
+    async def _looks_like_login_page_async(cls, page) -> bool:
+        url = str(page.url or "").strip().lower()
+        if cls._looks_like_authenticated_feishu_url(url):
+            return False
+        if cls._looks_like_login_url(url):
+            return True
+        try:
+            has_form_signal = False
+            for selector in cls._login_indicator_selectors():
+                if await page.locator(selector).count() > 0:
+                    has_form_signal = True
+                    break
+            if not has_form_signal:
+                return False
+            body_text = str(
+                await page.evaluate(
+                    """
+() => ((document.body && document.body.innerText) || "").slice(0, 2000)
+"""
+                )
+                or ""
+            ).strip()
+            if not body_text:
+                return True
+            return any(marker in body_text for marker in cls._login_text_markers())
+        except Exception:  # noqa: BLE001
+            return False
 
     @staticmethod
     def _iter_browser_contexts(browser) -> List[Any]:
@@ -363,53 +580,6 @@ class HandoverDailyReportScreenshotService:
                 continue
             result.append(page)
         return result
-
-    @staticmethod
-    def _looks_like_login_page(page) -> bool:
-        url = str(page.url or "").strip().lower()
-        if any(token in url for token in ("passport", "login", "signin", "accounts")):
-            return True
-        if any(token in url for token in ("/base/", "/wiki/", "/docx/", "/sheets/", "/bitable/")):
-            return False
-        try:
-            for selector in (
-                "input[type='password']",
-                "input[name='mobile']",
-                "input[name='username']",
-                "input[name='email']",
-                "iframe[src*='passport']",
-                "[class*='login'] [class*='qr']",
-                "[data-testid*='login']",
-            ):
-                if page.locator(selector).count() > 0:
-                    return True
-        except Exception:  # noqa: BLE001
-            return False
-        return False
-
-
-    @staticmethod
-    async def _looks_like_login_page_async(page) -> bool:
-        url = str(page.url or "").strip().lower()
-        if any(token in url for token in ("passport", "login", "signin", "accounts")):
-            return True
-        if any(token in url for token in ("/base/", "/wiki/", "/docx/", "/sheets/", "/bitable/")):
-            return False
-        try:
-            for selector in (
-                "input[type='password']",
-                "input[name='mobile']",
-                "input[name='username']",
-                "input[name='email']",
-                "iframe[src*='passport']",
-                "[class*='login'] [class*='qr']",
-                "[data-testid*='login']",
-            ):
-                if await page.locator(selector).count() > 0:
-                    return True
-        except Exception:  # noqa: BLE001
-            return False
-        return False
 
     def _probe_url(self) -> str:
         return self._cfg()["external_page_url"]
@@ -882,6 +1052,20 @@ class HandoverDailyReportScreenshotService:
             )
 
         if self._probe_debug_endpoint() is None and not ensure_browser_running:
+            previous_state = self._state_service.get_screenshot_auth_state()
+            previous_status = str(previous_state.get("status", "") or "").strip().lower()
+            previous_error = str(previous_state.get("error", "") or "").strip()
+            if previous_status == "browser_unavailable" and (
+                "browser_debug_port_unavailable" in previous_error
+                or "调试端口当前被" in previous_error
+            ):
+                return self._state_service.update_screenshot_auth_state(
+                    self._auth_state_payload(
+                        status="browser_unavailable",
+                        error=previous_error,
+                        browser_meta=browser_meta,
+                    )
+                )
             return self._state_service.update_screenshot_auth_state(
                 self._auth_state_payload(
                     status="missing_login",

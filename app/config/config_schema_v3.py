@@ -715,6 +715,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 },
                 "summary_page_url": "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgeZUMIpMDuIIfLA",
                 "external_page_url": "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgecZCUXaEtvP9Yl",
+                "browser_profile_directory": "",
             },
             "template_fixed_fill": {
                 "date_cell": "B2",

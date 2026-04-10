@@ -54,6 +54,28 @@ export async function putConfigApi(v3Config) {
   });
 }
 
+export async function getHandoverCommonConfigSegmentApi() {
+  return apiJsonWithTimeout("/api/config-segments/handover/common", {}, 8000);
+}
+
+export async function putHandoverCommonConfigSegmentApi(payload) {
+  return apiJson("/api/config-segments/handover/common", {
+    method: "PUT",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function getHandoverBuildingConfigSegmentApi(code) {
+  return apiJsonWithTimeout(`/api/config-segments/handover/buildings/${encodeURIComponent(String(code || "").trim())}`, {}, 8000);
+}
+
+export async function putHandoverBuildingConfigSegmentApi(code, payload) {
+  return apiJson(`/api/config-segments/handover/buildings/${encodeURIComponent(String(code || "").trim())}`, {
+    method: "PUT",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export async function getPendingResumeRunsApi() {
   return apiJson("/api/jobs/resume/pending");
 }

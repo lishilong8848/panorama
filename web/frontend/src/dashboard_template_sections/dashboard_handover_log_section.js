@@ -297,6 +297,9 @@
                 <div class="hint" v-if="handoverDailyReportContext.screenshot_auth.last_checked_at">
                   最近检测：{{ handoverDailyReportContext.screenshot_auth.last_checked_at }}
                 </div>
+                <div class="hint" v-if="handoverDailyReportAuthVm.profileText">
+                  {{ handoverDailyReportAuthVm.profileLabel || '当前目标浏览器' }}：{{ handoverDailyReportAuthVm.profileText }}
+                </div>
                 <div class="hint" v-if="handoverDailyReportAuthVm.error">
                   {{ handoverDailyReportAuthVm.error }}
                 </div>

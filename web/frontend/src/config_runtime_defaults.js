@@ -183,6 +183,7 @@ function ensureRoot(cfg) {
   cfg.handover_log.cloud_sheet_sync.request = cfg.handover_log.cloud_sheet_sync.request || {};
   cfg.handover_log.daily_report_bitable_export.target = cfg.handover_log.daily_report_bitable_export.target || {};
   cfg.handover_log.daily_report_bitable_export.fields = cfg.handover_log.daily_report_bitable_export.fields || {};
+  setStringDefault(cfg.handover_log.daily_report_bitable_export, "browser_profile_directory", "");
   cfg.handover_log.template_fixed_fill = cfg.handover_log.template_fixed_fill || {};
   cfg.handover_log.template_fixed_fill.shift_text = cfg.handover_log.template_fixed_fill.shift_text || {};
   cfg.handover_log.template_fixed_fill.on_alarm_query_fail = cfg.handover_log.template_fixed_fill.on_alarm_query_fail || {};

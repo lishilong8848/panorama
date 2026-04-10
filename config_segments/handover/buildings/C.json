@@ -1,0 +1,20 @@
+﻿{
+  "revision": 1,
+  "updated_at": "2026-04-10T20:17:06+08:00",
+  "data": {
+    "cell_rules": {
+      "building_rows": {
+        "C楼": []
+      }
+    },
+    "cloud_sheet_sync": {
+      "sheet_names": {
+        "C楼": "C楼"
+      }
+    },
+    "review_ui": {
+      "cabinet_power_defaults_by_building": {},
+      "footer_inventory_defaults_by_building": {}
+    }
+  }
+}

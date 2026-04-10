@@ -81,7 +81,7 @@ def test_alarm_export_legacy_bridge_task_is_failed_without_db_access(tmp_path: P
     assert "已退役" in str(updated.get("error", ""))
 
 
-def test_health_snapshot_degrades_to_cached_result_when_store_temporarily_unavailable(tmp_path: Path) -> None:
+def test_health_snapshot_uses_cached_result_without_store_projection_read(tmp_path: Path) -> None:
     service = SharedBridgeRuntimeService(
         runtime_config=_runtime_config(tmp_path, "external"),
         app_version="test",
@@ -97,9 +97,9 @@ def test_health_snapshot_degrades_to_cached_result_when_store_temporarily_unavai
 
     service._store.list_external_alert_projections = _raise_permission_error  # type: ignore[method-assign]
 
-    degraded = service.get_health_snapshot()
+    cached = service.get_health_snapshot()
 
-    assert degraded["enabled"] is True
-    assert degraded["db_status"] == "unavailable"
-    assert degraded["internal_alert_status"] == initial["internal_alert_status"]
-    assert "暂时不可用" in str(degraded["last_error"] or "")
+    assert cached["enabled"] is True
+    assert cached["db_status"] == "disabled"
+    assert cached["internal_alert_status"] == initial["internal_alert_status"]
+    assert str(cached["last_error"] or "") == ""

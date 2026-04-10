@@ -2282,11 +2282,36 @@ export function createRuntimeHealthConfigActions(ctx) {
       try {
         const data = await checkUpdaterApi();
         const result = data?.result || {};
-        await fetchHealth();
+        const runtimeAfterCheck =
+          data?.runtime && typeof data.runtime === "object" ? data.runtime : {};
+        Object.assign(health.updater, runtimeAfterCheck, {
+          last_result: String(
+            result?.last_result
+              || runtimeAfterCheck?.last_result
+              || health.updater?.last_result
+              || "",
+          ),
+        });
+        const updateAvailableAfterCheck = Boolean(
+          result?.update_available
+          || runtimeAfterCheck?.update_available
+          || result?.force_apply_available
+          || runtimeAfterCheck?.force_apply_available,
+        );
+        const restartRequiredAfterCheck = Boolean(
+          result?.restart_required ?? runtimeAfterCheck?.restart_required ?? health.updater?.restart_required,
+        );
+        try {
+          await fetchHealth();
+        } catch (err) {
+          if (!autoApplyIfAvailable || !updateAvailableAfterCheck || restartRequiredAfterCheck) {
+            throw err;
+          }
+        }
         if (
           autoApplyIfAvailable
-          && !health.updater?.restart_required
-          && (health.updater?.update_available || health.updater?.force_apply_available)
+          && !restartRequiredAfterCheck
+          && updateAvailableAfterCheck
         ) {
           await applyUpdaterPatch();
           return data;
@@ -2552,7 +2577,7 @@ export function createRuntimeHealthConfigActions(ctx) {
       const status = String(handoverDailyReportContext?.value?.screenshot_auth?.status || "")
         .trim()
         .toLowerCase();
-      if (status === "ready") return true;
+      if (status === "ready" || status === "ready_without_target_page") return true;
       await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
     }
     return false;

@@ -2004,6 +2004,18 @@ createApp({
       }
     }
 
+    function isHomeQuickActionLocked(actionId) {
+      const action = String(actionId || "").trim().toLowerCase();
+      if (!action) return false;
+      if (action === "refresh_current_hour") {
+        return Boolean(isSourceCacheRefreshCurrentHourLocked.value);
+      }
+      if (action === "refresh_manual_alarm") {
+        return Boolean(isSourceCacheRefreshAlarmManualLocked.value);
+      }
+      return false;
+    }
+
     function closeStartupRoleSelector({ handled = false } = {}) {
       startupRoleSelectorVisible.value = false;
       startupRoleSelectorBusy.value = false;
@@ -3798,6 +3810,7 @@ createApp({
       openDashboardPage,
       openConfigPage,
       runHomeQuickAction,
+      isHomeQuickActionLocked,
       switchConfigTab,
       setDashboardActiveModule,
       openDashboardSchedulerOverviewTarget,

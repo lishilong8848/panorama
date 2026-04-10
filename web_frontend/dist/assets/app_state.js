@@ -241,22 +241,29 @@ function mapDailyReportAuthVm(raw) {
   const status = String(raw?.status || "").trim().toLowerCase();
   const error = String(raw?.error || "").trim();
   const browserLabel = getDailyReportBrowserLabel(raw);
+  const browserProfileName = String(raw?.browser_profile_name || "").trim();
+  const profileText = browserProfileName ? `${browserLabel} / ${browserProfileName}` : browserLabel;
+  const profileLabel = status === "ready" || status === "ready_without_target_page" ? "当前接管浏览器" : "当前目标浏览器";
   if (status === "ready") {
-    return { text: "已登录", tone: "success", error: "" };
+    return { text: "已登录", tone: "success", error: "", profileText, profileLabel };
   }
   if (status === "ready_without_target_page") {
     return {
-      text: "已登录，待打开目标页",
-      tone: "info",
+      text: "已登录",
+      tone: "success",
       error: `当前已接管${browserLabel}，但尚未定位到飞书目标页；执行截图测试时会自动尝试补开。`,
+      profileText,
+      profileLabel,
     };
   }
   if (status === "missing_login") {
     if (error === "browser_not_started") {
       return {
-        text: "待登录",
+        text: "浏览器未接管",
         tone: "warning",
-        error: `${browserLabel} 登录页尚未打开，请点击“初始化飞书截图登录态”。`,
+        error: `${browserLabel} 尚未被程序接管，请点击“初始化飞书截图登录态”。`,
+        profileText,
+        profileLabel,
       };
     }
     if (error === "browser_started_without_pages") {
@@ -264,19 +271,25 @@ function mapDailyReportAuthVm(raw) {
         text: "待打开飞书页",
         tone: "warning",
         error: `${browserLabel} 登录页已被关闭，请点击“初始化飞书截图登录态”重新打开。`,
+        profileText,
+        profileLabel,
       };
     }
     if (error === "feishu_page_not_open") {
       return {
-        text: "已登录，待打开目标页",
-        tone: "info",
+        text: "已登录",
+        tone: "success",
         error: `当前${browserLabel}中未检测到飞书目标页；执行截图测试时会自动尝试补开。`,
+        profileText,
+        profileLabel,
       };
     }
     return {
       text: "待登录",
       tone: "warning",
       error: error === "login_required" || !error ? `当前${browserLabel}中的飞书登录态未就绪，请完成扫码登录。` : error,
+      profileText,
+      profileLabel,
     };
   }
   if (status === "expired") {
@@ -284,6 +297,8 @@ function mapDailyReportAuthVm(raw) {
       text: "已失效",
       tone: "warning",
       error: error || "当前飞书截图登录态已失效，请重新初始化并扫码登录。",
+      profileText,
+      profileLabel,
     };
   }
   if (status === "browser_unavailable") {
@@ -292,22 +307,28 @@ function mapDailyReportAuthVm(raw) {
         text: "浏览器不可用",
         tone: "danger",
         error: "未找到可用系统浏览器（Edge/Chrome），请安装 Microsoft Edge 或 Google Chrome。",
+        profileText,
+        profileLabel,
       };
     }
     if (error.includes("browser_debug_port_unavailable")) {
       return {
-        text: "浏览器不可用",
+        text: "浏览器未接管",
         tone: "danger",
         error: `请先关闭所有 ${browserLabel} 窗口后，再点击“初始化飞书截图登录态”。`,
+        profileText,
+        profileLabel,
       };
     }
     return {
       text: "浏览器不可用",
       tone: "danger",
       error: error || `当前无法接管${browserLabel}，请检查其是否已安装并可正常启动。`,
+      profileText,
+      profileLabel,
     };
   }
-  return { text: "未初始化", tone: "neutral", error: error || "截图登录态尚未初始化。" };
+  return { text: "未初始化", tone: "neutral", error: error || "截图登录态尚未初始化。", profileText, profileLabel };
 }
 
 function mapDailyReportExportVm(raw, authRaw = {}) {
@@ -1171,6 +1192,11 @@ export function createAppState(vueApi) {
     title: "",
     hint: "",
   });
+  const handoverConfigBuilding = ref("A楼");
+  const handoverConfigCommonRevision = ref(0);
+  const handoverConfigCommonUpdatedAt = ref("");
+  const handoverConfigBuildingRevision = ref(0);
+  const handoverConfigBuildingUpdatedAt = ref("");
   const handoverRuleScope = ref("default");
   const handoverDutyAutoFollow = ref(true);
   const handoverDutyLastAutoAt = ref(0);
@@ -3683,15 +3709,21 @@ function normalizeInternalDownloadPoolSlot(slot) {
       metrics: [],
     };
   });
-  const handoverRuleScopeOptions = computed(() => {
-    const opts = [{ value: "default", label: "全局默认" }];
+  const handoverConfigBuildingOptions = computed(() => {
     const buildings = Array.isArray(config.value?.input?.buildings) ? config.value.input.buildings : [];
-    for (const item of buildings) {
-      const building = String(item || "").trim();
-      if (!building) continue;
-      opts.push({ value: building, label: `${building}覆盖` });
-    }
-    return opts;
+    const normalized = buildings
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+    const fallback = ["A楼", "B楼", "C楼", "D楼", "E楼"];
+    const list = normalized.length ? normalized : fallback;
+    return list.map((building) => ({ value: building, label: building }));
+  });
+  const handoverRuleScopeOptions = computed(() => {
+    const currentBuilding = String(handoverConfigBuilding.value || "").trim() || "A楼";
+    return [
+      { value: "default", label: "全局默认" },
+      { value: currentBuilding, label: `${currentBuilding}覆盖` },
+    ];
   });
 
   function syncCustomWindowLocalInputs() {
@@ -3768,6 +3800,11 @@ function normalizeInternalDownloadPoolSlot(slot) {
     handoverDailyReportLastScreenshotTest,
     handoverDailyReportPreviewModal,
     handoverDailyReportUploadModal,
+    handoverConfigBuilding,
+    handoverConfigCommonRevision,
+    handoverConfigCommonUpdatedAt,
+    handoverConfigBuildingRevision,
+    handoverConfigBuildingUpdatedAt,
     handoverRuleScope,
     handoverDutyAutoFollow,
     handoverDutyLastAutoAt,
@@ -3855,6 +3892,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
     dashboardActiveModuleTitle,
     moduleMeta,
     dashboardActiveModuleHero,
+    handoverConfigBuildingOptions,
     handoverRuleScopeOptions,
     syncCustomWindowLocalInputs,
     actionGuard,
