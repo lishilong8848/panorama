@@ -11,6 +11,9 @@ from handover_log_module.repository.alarm_summary import AlarmSummary
 
 
 FAMILY_ALARM_EVENT = "alarm_event_family"
+EVENT_TIME_KEYS = ("event_time", "告警时间", "告警发生时间")
+RECOVER_STATUS_KEYS = ("is_recover", "恢复状态", "recover_status")
+ACCEPT_CONTENT_KEYS = ("accept_content", "accept_description", "处理内容", "处理描述")
 
 
 def _parse_datetime_text(value: Any) -> datetime | None:
@@ -24,6 +27,27 @@ def _parse_datetime_text(value: Any) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _pick_row_value(row: Dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in row:
+            value = row.get(key)
+            if value not in (None, ""):
+                return value
+    return row.get(keys[0]) if keys else None
+
+
+def _is_recovered(value: Any) -> bool:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if lowered in {"1", "true", "yes", "y", "是"}:
+        return True
+    if text in {"已恢复", "恢复"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "否"}:
+        return False
+    return "已恢复" in text
 
 
 class AlarmJsonRepository:
@@ -137,18 +161,38 @@ class AlarmJsonRepository:
         accept_description = ""
         latest_unrecovered_dt = datetime.min
         rows = payload.get("rows", [])
-        for row in rows if isinstance(rows, list) else []:
+        rows_list = rows if isinstance(rows, list) else []
+        rows_total = len(rows_list)
+        parsed_time_count = 0
+        parse_failed_count = 0
+        window_hit_count = 0
+        unrecovered_hit_count = 0
+        first_event_dt: datetime | None = None
+        last_event_dt: datetime | None = None
+        for row in rows_list:
             if not isinstance(row, dict):
                 continue
-            event_dt = _parse_datetime_text(row.get("event_time"))
+            event_time_raw = _pick_row_value(row, EVENT_TIME_KEYS)
+            event_dt = _parse_datetime_text(event_time_raw)
+            if str(event_time_raw or "").strip():
+                if event_dt is None:
+                    parse_failed_count += 1
+                else:
+                    parsed_time_count += 1
             if not self._event_in_window(event_dt=event_dt, start_dt=start_dt, end_dt=end_dt):
                 continue
+            window_hit_count += 1
             total_count += 1
-            is_recover_text = str(row.get("is_recover", "") or "").strip()
-            if is_recover_text == "已恢复":
+            if first_event_dt is None or (event_dt is not None and event_dt < first_event_dt):
+                first_event_dt = event_dt
+            if last_event_dt is None or (event_dt is not None and event_dt > last_event_dt):
+                last_event_dt = event_dt
+            is_recover_text = _pick_row_value(row, RECOVER_STATUS_KEYS)
+            if _is_recovered(is_recover_text):
                 continue
             unrecovered_count += 1
-            desc_text = str(row.get("accept_content") or row.get("accept_description") or "").strip()
+            unrecovered_hit_count += 1
+            desc_text = str(_pick_row_value(row, ACCEPT_CONTENT_KEYS) or "").strip()
             if desc_text and event_dt is not None and event_dt >= latest_unrecovered_dt:
                 latest_unrecovered_dt = event_dt
                 accept_description = desc_text
@@ -160,6 +204,15 @@ class AlarmJsonRepository:
             "[交接班][告警JSON] "
             f"building={building_text}, selected={selection_scope}/{source_kind}, downloaded_at={selected_downloaded_at}, "
             f"total={total_count}, unrecovered={unrecovered_count}, accept_desc={'有' if bool(accept_description) else '无'}"
+        )
+        emit_log(
+            "[交接班][告警JSON][诊断] "
+            f"building={building_text}, file={str(file_path)}, "
+            f"query_start={start_time}, query_end={end_time}, "
+            f"json_rows={rows_total}, parsed_time={parsed_time_count}, parse_failed={parse_failed_count}, "
+            f"window_hits={window_hit_count}, unrecovered_hits={unrecovered_hit_count}, "
+            f"first_event={(first_event_dt.strftime('%Y-%m-%d %H:%M:%S') if isinstance(first_event_dt, datetime) else '-')}, "
+            f"last_event={(last_event_dt.strftime('%Y-%m-%d %H:%M:%S') if isinstance(last_event_dt, datetime) else '-')}"
         )
         return AlarmSummary(
             total_count=total_count,

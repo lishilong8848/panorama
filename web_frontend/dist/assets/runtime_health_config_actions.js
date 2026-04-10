@@ -134,9 +134,11 @@ export function createRuntimeHealthConfigActions(ctx) {
   let dailyReportContextRequestInFlight = null;
   let bridgeTasksRequestInFlight = null;
   let bridgeTaskDetailRequestInFlight = null;
+  let lastBridgeTasksFetchAt = 0;
   let updaterReconnectTimer = null;
   let updaterQueueMonitorTimer = null;
   let updaterHealthHydratedOnce = false;
+  const BRIDGE_TASKS_FETCH_COOLDOWN_MS = 1200;
 
   function isUpdaterTrafficPaused() {
     return Boolean(updaterUiOverlayVisible?.value || updaterAwaitingRestartRecovery?.value);
@@ -1287,11 +1289,20 @@ export function createRuntimeHealthConfigActions(ctx) {
   async function fetchBridgeTasks(options = {}) {
     if (isUpdaterTrafficPaused()) return false;
     if (bridgeTasksRequestInFlight) return bridgeTasksRequestInFlight;
+    const force = Boolean(options?.force);
+    const now = Date.now();
+    if (!force && lastBridgeTasksFetchAt > 0 && now - lastBridgeTasksFetchAt < BRIDGE_TASKS_FETCH_COOLDOWN_MS) {
+      return true;
+    }
+    lastBridgeTasksFetchAt = now;
     const silentMessage = Boolean(options?.silentMessage);
     bridgeTasksRequestInFlight = (async () => {
       try {
         const data = await getBridgeTasksApi({ limit: 60 });
-        const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+        const tasks = (Array.isArray(data?.tasks) ? data.tasks : []).filter((item) => {
+          const requestPayload = item?.request && typeof item.request === "object" ? item.request : {};
+          return !String(requestPayload.resume_job_id || "").trim();
+        });
         bridgeTasks.value = tasks;
         const selectedTaskId = String(selectedBridgeTaskId?.value || "").trim();
         let nextTaskId = selectedTaskId;
@@ -1344,7 +1355,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => {
       try {
         await cancelBridgeTaskApi(taskIdText);
-        await fetchBridgeTasks({ silentMessage: true });
+        await fetchBridgeTasks({ silentMessage: true, force: true });
         await fetchBridgeTaskDetail(taskIdText, { silentMessage: true });
         message.value = "共享任务取消请求已提交";
         return true;
@@ -1368,7 +1379,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => {
       try {
         await retryBridgeTaskApi(taskIdText);
-        await fetchBridgeTasks({ silentMessage: true });
+        await fetchBridgeTasks({ silentMessage: true, force: true });
         await fetchBridgeTaskDetail(taskIdText, { silentMessage: true });
         message.value = "共享任务已重新排队";
         return true;

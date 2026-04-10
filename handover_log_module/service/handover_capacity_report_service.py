@@ -545,7 +545,7 @@ class HandoverCapacityReportService:
             "latest_daily_total": format_number(latest_daily_total),
         }
         emit_log(
-            "[浜ゆ帴鐝璢[瀹归噺鎶ヨ〃][澶滅彮鑰楁按] 鏌ヨ瀹屾垚 "
+            "[交接班][容量报表][夜班耗水] 查询完成 "
             f"building={building}, window={month_start_dt.strftime('%Y-%m-%d %H:%M:%S')}~{duty_end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
             f"matched={matched_records}, O57={summary.get('latest_daily_total', '') or '-'}, R57={summary.get('month_total', '') or '-'}"
         )
@@ -581,7 +581,7 @@ class HandoverCapacityReportService:
         output_file.parent.mkdir(parents=True, exist_ok=True)
         template_path = self.resolve_template_path()
         if not template_path.exists():
-            raise FileNotFoundError(f"浜ゆ帴鐝閲忔姤琛ㄦā鏉夸笉瀛樺湪: {template_path}")
+            raise FileNotFoundError(f"交接班容量报表模板不存在: {template_path}")
 
         handover_sheet_name = _text(
             (
@@ -604,7 +604,7 @@ class HandoverCapacityReportService:
         )
         warnings: List[str] = []
         if not oil_previous.get("first") and not oil_previous.get("second"):
-            warnings.append("涓婁竴鐝噧娌硅嚜鎺х郴缁熺紦瀛樹笉瀛樺湪")
+            warnings.append("上一班燃油自控系统缓存不存在")
 
         current_alarm = self._normalize_alarm_summary(current_alarm_summary)
         previous_alarm = self._normalize_alarm_summary(previous_alarm_summary)
@@ -616,7 +616,7 @@ class HandoverCapacityReportService:
         )
         builder = _BUILDER_BY_BUILDING.get(building_text)
         if builder is None:
-            raise ValueError(f"涓嶆敮鎸佺殑瀹归噺鎶ヨ〃妤兼爧: {building_text}")
+            raise ValueError(f"不支持的容量报表楼栋: {building_text}")
 
         hvdc_debug = self._resolve_hvdc_text(
             resolved_values_by_id=resolved_values_by_id,
@@ -624,7 +624,7 @@ class HandoverCapacityReportService:
             hvdc_source_d_name=hvdc_source_d_name,
         )
         emit_log(
-            "[浜ゆ帴鐝璢[瀹归噺鎶ヨ〃][HVDC] "
+            "[交接班][容量报表][HVDC] "
             f"building={building_text}, raw_value={hvdc_debug.get('raw_value', '') or '-'}, "
             f"source_d_name={hvdc_debug.get('source_d_name', '') or '-'}, "
             f"position_code={hvdc_debug.get('position_code', '') or '-'}, "
@@ -673,7 +673,7 @@ class HandoverCapacityReportService:
             )
 
         emit_log(
-            "[浜ゆ帴鐝璢[瀹归噺鎶ヨ〃] 鐢熸垚瀹屾垚 "
+            "[交接班][容量报表] 生成完成 "
             f"building={building_text}, duty_date={duty_date_text}, duty_shift={duty_shift_text}, output={output_file}"
         )
         return {

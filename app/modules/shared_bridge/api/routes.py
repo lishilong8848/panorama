@@ -110,6 +110,11 @@ def _bridge_text(value: Any) -> str:
     return _BRIDGE_ERROR_TEXTS.get(lowered, _BRIDGE_EVENT_TYPE_LABELS.get(lowered, text))
 
 
+def _bridge_store_read_is_recoverable(service: Any, exc: Exception) -> bool:
+    checker = getattr(service, "_is_recoverable_store_error", None)
+    return bool(callable(checker) and checker(exc))
+
+
 def _bridge_feature_label(feature: Any) -> str:
     normalized = str(feature or "").strip().lower()
     return _BRIDGE_FEATURE_LABELS.get(normalized, str(feature or "").strip() or "-")
@@ -635,7 +640,13 @@ def bridge_source_cache_refresh_today(request: Request) -> Dict[str, Any]:
 def bridge_tasks(request: Request, limit: int = Query(100, ge=1, le=500)) -> Dict[str, Any]:
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
-    tasks = service.list_tasks(limit=limit) if service else []
+    try:
+        tasks = service.list_tasks(limit=limit) if service else []
+    except Exception as exc:  # noqa: BLE001
+        if not service or not _bridge_store_read_is_recoverable(service, exc):
+            raise
+        cache_reader = getattr(service, "get_cached_tasks", None)
+        tasks = cache_reader(limit=limit) if callable(cache_reader) else []
     tasks = [task for task in tasks if str(task.get("feature", "") or "").strip().lower() != "alarm_export"]
     return {"ok": True, "tasks": [_bridge_present_task(task) for task in tasks]}
 
@@ -644,7 +655,13 @@ def bridge_tasks(request: Request, limit: int = Query(100, ge=1, le=500)) -> Dic
 def bridge_task_detail(task_id: str, request: Request) -> Dict[str, Any]:
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
-    payload = service.get_task(task_id) if service else None
+    try:
+        payload = service.get_task(task_id) if service else None
+    except Exception as exc:  # noqa: BLE001
+        if not service or not _bridge_store_read_is_recoverable(service, exc):
+            raise
+        cache_reader = getattr(service, "get_cached_task", None)
+        payload = cache_reader(task_id) if callable(cache_reader) else None
     if not payload or str(payload.get("feature", "") or "").strip().lower() == "alarm_export":
         raise HTTPException(status_code=404, detail="共享任务不存在")
     return {"ok": True, "task": _bridge_present_task(payload)}

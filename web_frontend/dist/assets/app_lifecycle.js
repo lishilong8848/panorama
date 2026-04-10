@@ -93,17 +93,18 @@
         scheduleJobPanelPoll(5000);
       }, delayMs);
     };
-    const scheduleBridgeTasksPoll = (delayMs = 5000) => {
+    const bridgeTasksPollIntervalMs = 10000;
+    const scheduleBridgeTasksPoll = (delayMs = bridgeTasksPollIntervalMs) => {
       if (timers.bridgeTasksTimer) clearTimeout(timers.bridgeTasksTimer);
       timers.bridgeTasksTimer = window.setTimeout(async () => {
         if (isRuntimeTrafficPaused()) {
-          scheduleBridgeTasksPoll(5000);
+          scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
           return;
         }
         if (canPollBridgeTasks()) {
           await fetchBridgeTasks({ silentMessage: true });
         }
-        scheduleBridgeTasksPoll(5000);
+        scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
       }, delayMs);
     };
     const scheduleDailyReportContextPoll = (delayMs = 30000) => {
@@ -150,7 +151,7 @@
     }
     scheduleHealthPoll(resolveHealthPollIntervalMs());
     scheduleJobPanelPoll(5000);
-    scheduleBridgeTasksPoll(5000);
+    scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
     scheduleDailyReportContextPoll(30000);
     timers.handoverDutyTimer = setInterval(() => {
       syncHandoverDutyFromNow(false);

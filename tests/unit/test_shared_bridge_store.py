@@ -185,3 +185,40 @@ def test_read_only_connect_uses_plain_path_for_unc_share(monkeypatch) -> None:
     assert captured["database"] == str(store.db_path)
     assert "uri" not in captured["kwargs"]
     assert "PRAGMA query_only=ON" in fake_conn.executed
+
+
+def test_write_connect_uses_delete_journal_mode(monkeypatch, tmp_path) -> None:
+    store = SharedBridgeStore(tmp_path)
+    captured: dict[str, object] = {}
+
+    class _FakeConnection:
+        def __init__(self) -> None:
+            self.in_transaction = False
+            self.row_factory = None
+            self.executed: list[str] = []
+
+        def execute(self, sql, *_args, **_kwargs):  # noqa: ANN001
+            self.executed.append(str(sql))
+            return self
+
+        def close(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+    fake_conn = _FakeConnection()
+
+    def _fake_connect(database, **kwargs):  # noqa: ANN001
+        captured["database"] = database
+        captured["kwargs"] = kwargs
+        return fake_conn
+
+    monkeypatch.setattr(sqlite3, "connect", _fake_connect)
+
+    with store.connect() as conn:
+        assert conn is fake_conn
+
+    assert captured["database"] == str(store.db_path)
+    assert "PRAGMA journal_mode=DELETE" in fake_conn.executed
+    assert "PRAGMA synchronous=NORMAL" in fake_conn.executed

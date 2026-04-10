@@ -27,7 +27,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "claim_lease_sec": 30,
             "stale_task_timeout_sec": 1800,
             "artifact_retention_days": 7,
-            "sqlite_busy_timeout_ms": 5000,
+            "sqlite_busy_timeout_ms": 15000,
         },
         "internal_source_cache": {
             "enabled": True,
@@ -278,7 +278,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "building": "机楼",
                     "team": "班组",
                     "shift": "班次",
-                    "people_text": "人员（文本）",
+                    "people_text": "值班人员（实际）",
                 },
                 "cells": {
                     "current_people": "C3",
@@ -305,7 +305,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                         "duty_date": "排班日期",
                         "building": "机楼",
                         "shift": "班次",
-                        "people_text": "人员（文本）",
+                        "people_text": "值班人员（实际）",
                     },
                     "shift_value": "长白",
                     "day_cell": "B4",
@@ -537,7 +537,8 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 },
                 "fields": {
                     "building": "楼栋",
-                    "start_time": "实际开始时间",
+                    "updated_time": "最新更新时间",
+                    "actual_end_time": "实际结束时间",
                     "item": "名称",
                     "specialty": "专业",
                 },

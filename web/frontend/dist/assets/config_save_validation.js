@@ -319,7 +319,7 @@ function validateAndNormalizeHandoverShiftRoster(payload) {
   if (!roster.fields.building) return { ok: false, error: "交接班排班字段“机楼”不能为空" };
   if (!roster.fields.team) return { ok: false, error: "交接班排班字段“班组”不能为空" };
   if (!roster.fields.shift) return { ok: false, error: "交接班排班字段“班次”不能为空" };
-  if (!roster.fields.people_text) return { ok: false, error: "交接班排班字段“人员（文本）”不能为空" };
+  if (!roster.fields.people_text) return { ok: false, error: "交接班排班字段“值班人员（实际）”不能为空" };
 
   const cellPattern = /^[A-Z]+[1-9]\d*$/;
   if (!cellPattern.test(roster.cells.current_people)) {
@@ -829,9 +829,11 @@ function validateAndNormalizeHandoverMaintenanceManagementSection(payload) {
   sectionCfg.source.max_records = Number.parseInt(sectionCfg.source.max_records ?? 5000, 10);
 
   sectionCfg.fields.building = String(sectionCfg.fields.building || "").trim();
-  sectionCfg.fields.start_time = String(sectionCfg.fields.start_time || "").trim();
+  sectionCfg.fields.updated_time = String(sectionCfg.fields.updated_time || "").trim();
+  sectionCfg.fields.actual_end_time = String(sectionCfg.fields.actual_end_time || "").trim();
   sectionCfg.fields.item = String(sectionCfg.fields.item || "").trim();
   sectionCfg.fields.specialty = String(sectionCfg.fields.specialty || "").trim();
+  delete sectionCfg.fields.start_time;
 
   sectionCfg.sections.maintenance_management = String(sectionCfg.sections.maintenance_management || "").trim();
   sectionCfg.fixed_values.vendor_internal = String(sectionCfg.fixed_values.vendor_internal || "").trim();
@@ -867,8 +869,8 @@ function validateAndNormalizeHandoverMaintenanceManagementSection(payload) {
   if (!Number.isInteger(sectionCfg.source.max_records) || sectionCfg.source.max_records <= 0) {
     return { ok: false, error: "维护管理 max_records 必须大于0" };
   }
-  if (!sectionCfg.fields.building || !sectionCfg.fields.start_time || !sectionCfg.fields.item || !sectionCfg.fields.specialty) {
-    return { ok: false, error: "维护管理字段映射（楼栋/开始时间/名称/专业）不能为空" };
+  if (!sectionCfg.fields.building || !sectionCfg.fields.updated_time || !sectionCfg.fields.actual_end_time || !sectionCfg.fields.item || !sectionCfg.fields.specialty) {
+    return { ok: false, error: "维护管理字段映射（楼栋/最新更新时间/实际结束时间/名称/专业）不能为空" };
   }
   if (!sectionCfg.sections.maintenance_management) {
     return { ok: false, error: "维护管理分类名不能为空" };

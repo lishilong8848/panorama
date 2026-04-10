@@ -56,6 +56,7 @@ class JobState:
     priority: str = "manual"
     resource_keys: List[str] = field(default_factory=list)
     wait_reason: str = ""
+    bridge_task_id: str = ""
     sequence: int = 0
     acquired_resources: List[str] = field(default_factory=list)
     stages: List["StageState"] = field(default_factory=list)
@@ -82,6 +83,7 @@ class JobState:
             "priority": self.priority,
             "resource_keys": list(self.resource_keys),
             "wait_reason": self.wait_reason,
+            "bridge_task_id": self.bridge_task_id,
             "stages": [stage.to_dict() for stage in self.stages],
             "cancel_requested": bool(self.cancel_requested),
             "revision": int(self.revision or 0),
@@ -390,6 +392,17 @@ class JobService:
             and str(job.status or "").strip().lower() in _INCOMPLETE_JOB_STATUSES
         ]
         return candidates[-1] if candidates else None
+
+    def _restore_job_from_db_locked(self, job_id: str) -> JobState | None:
+        normalized_job_id = str(job_id or "").strip()
+        if not normalized_job_id or not self._task_engine_db:
+            return None
+        snapshot = self._task_engine_db.get_job(normalized_job_id)
+        if not isinstance(snapshot, dict):
+            return None
+        job = self._job_from_snapshot(snapshot)
+        self._jobs[normalized_job_id] = job
+        return job
 
     def find_active_job_by_dedupe_key(self, dedupe_key: str) -> Dict[str, Any] | None:
         normalized = self._normalize_dedupe_key(dedupe_key)
@@ -702,6 +715,7 @@ class JobService:
             priority=str(snapshot.get("priority", "manual") or "manual").strip() or "manual",
             resource_keys=self._normalize_resource_keys(snapshot.get("resource_keys") or []),
             wait_reason=str(snapshot.get("wait_reason", "") or "").strip(),
+            bridge_task_id=str(snapshot.get("bridge_task_id", "") or "").strip(),
             cancel_requested=bool(snapshot.get("cancel_requested", False)),
             revision=int(snapshot.get("revision") or 0),
             last_event_id=int(snapshot.get("last_event_id") or 0),
@@ -1916,6 +1930,70 @@ class JobService:
         submitted_by: str = "",
         resume_policy: str = "manual_resume",
     ) -> JobState:
+        return self._create_worker_job(
+            name=name,
+            worker_handler=worker_handler,
+            worker_payload=worker_payload,
+            resource_keys=resource_keys,
+            priority=priority,
+            feature=feature,
+            dedupe_key=dedupe_key,
+            submitted_by=submitted_by,
+            resume_policy=resume_policy,
+            launch_immediately=True,
+        )
+
+    def create_waiting_worker_job(
+        self,
+        name: str,
+        *,
+        worker_handler: str,
+        worker_payload: Dict[str, Any] | None = None,
+        resource_keys: List[str] | tuple[str, ...] | None = None,
+        priority: str = "manual",
+        feature: str = "",
+        dedupe_key: str = "",
+        submitted_by: str = "",
+        resume_policy: str = "manual_resume",
+        wait_reason: str = "waiting:shared_bridge",
+        summary: str = "等待内网补采同步",
+        bridge_task_id: str = "",
+    ) -> JobState:
+        return self._create_worker_job(
+            name=name,
+            worker_handler=worker_handler,
+            worker_payload=worker_payload,
+            resource_keys=resource_keys,
+            priority=priority,
+            feature=feature,
+            dedupe_key=dedupe_key,
+            submitted_by=submitted_by,
+            resume_policy=resume_policy,
+            launch_immediately=False,
+            initial_status="waiting_resource",
+            initial_wait_reason=wait_reason,
+            initial_summary=summary,
+            bridge_task_id=bridge_task_id,
+        )
+
+    def _create_worker_job(
+        self,
+        name: str,
+        *,
+        worker_handler: str,
+        worker_payload: Dict[str, Any] | None = None,
+        resource_keys: List[str] | tuple[str, ...] | None = None,
+        priority: str = "manual",
+        feature: str = "",
+        dedupe_key: str = "",
+        submitted_by: str = "",
+        resume_policy: str = "manual_resume",
+        launch_immediately: bool = True,
+        initial_status: str = "queued",
+        initial_wait_reason: str = "",
+        initial_summary: str = "",
+        bridge_task_id: str = "",
+    ) -> JobState:
         if not self._task_engine_store:
             raise RuntimeError("task engine not configured")
         normalized_resources = self._normalize_resource_keys(resource_keys)
@@ -1945,6 +2023,10 @@ class JobService:
                 submitted_by=normalized_submitted_by,
                 priority=normalized_priority,
                 resource_keys=normalized_resources,
+                status=str(initial_status or "queued").strip() or "queued",
+                wait_reason=str(initial_wait_reason or "").strip(),
+                summary=str(initial_summary or "").strip(),
+                bridge_task_id=str(bridge_task_id or "").strip(),
                 sequence=self._next_sequence(),
             )
             stage = StageState(
@@ -1953,6 +2035,8 @@ class JobService:
                 resource_keys=list(normalized_resources),
                 resume_policy=str(resume_policy or "manual_resume").strip() or "manual_resume",
                 worker_handler=normalized_handler,
+                status="waiting_resource" if str(initial_status or "").strip() == "waiting_resource" else "pending",
+                summary=str(initial_summary or "").strip(),
             )
             job.stages = [stage]
             self._jobs[job_id] = job
@@ -1965,9 +2049,128 @@ class JobService:
             if isinstance(config_snapshot, dict):
                 self._task_engine_store.persist_config_snapshot(job_id, config_snapshot)
             self._persist_job_snapshot(job, config_snapshot=config_snapshot)
+            if job.status == "waiting_resource":
+                job.wait_started_monotonic = time.monotonic()
+                self._record_job_event(
+                    job,
+                    stage_id=stage.stage_id,
+                    stream="job",
+                    event_type="waiting_resource",
+                    level="info",
+                    payload={
+                        "reason": job.wait_reason,
+                        "summary": job.summary,
+                        "bridge_task_id": job.bridge_task_id,
+                        "timestamp": self._now_text(),
+                    },
+                )
         self._persist_resource_snapshot()
-        self._launch_existing_worker_job(job, stage, payload_path=payload_path, worker_handler=normalized_handler)
+        if launch_immediately:
+            self._launch_existing_worker_job(job, stage, payload_path=payload_path, worker_handler=normalized_handler)
         return job
+
+    def bind_bridge_task(self, job_id: str, bridge_task_id: str) -> JobState:
+        with self._lock:
+            normalized_job_id = str(job_id or "").strip()
+            job = self._jobs.get(normalized_job_id)
+            if job is None:
+                job = self._restore_job_from_db_locked(normalized_job_id)
+            if job is None:
+                raise KeyError(f"任务不存在: {job_id}")
+            job.bridge_task_id = str(bridge_task_id or "").strip()
+            if isinstance(job.result, dict):
+                job.result["bridge_task_id"] = job.bridge_task_id
+            elif job.bridge_task_id:
+                job.result = {"bridge_task_id": job.bridge_task_id}
+            self._persist_job_snapshot(job)
+            return job
+
+    def resume_waiting_worker_job(
+        self,
+        job_id: str,
+        *,
+        worker_payload: Dict[str, Any] | None = None,
+        summary: str = "共享文件已到位，正在继续处理",
+    ) -> JobState:
+        if not self._task_engine_store:
+            raise RuntimeError("task engine not configured")
+        with self._lock:
+            normalized_job_id = str(job_id or "").strip()
+            job = self._jobs.get(normalized_job_id)
+            if job is None:
+                job = self._restore_job_from_db_locked(normalized_job_id)
+            if job is None:
+                raise KeyError(f"任务不存在: {job_id}")
+            if str(job.status or "").strip().lower() in {"success", "failed", "cancelled", "partial_failed"}:
+                return job
+            stage = self._get_primary_stage(job)
+            payload_path = self._task_engine_store.resolve_stage_payload_path(job.job_id, stage.stage_id)
+            if isinstance(worker_payload, dict):
+                self._task_engine_store.persist_stage_payload(job.job_id, stage.stage_id, self._json_ready(worker_payload))
+            job.status = "queued"
+            job.wait_reason = ""
+            job.summary = str(summary or "").strip()
+            job.error = ""
+            job.finished_at = ""
+            job.started_at = ""
+            job.wait_started_monotonic = 0.0
+            stage.status = "pending"
+            stage.summary = job.summary
+            stage.error = ""
+            stage.started_at = ""
+            stage.finished_at = ""
+            stage.result = None
+            stage.cancel_requested = False
+            self._append_log(job, "[共享桥接] 共享文件已到位，正在继续处理")
+            self._persist_job_snapshot(job)
+            self._record_job_event(
+                job,
+                stage_id=stage.stage_id,
+                stream="job",
+                event_type="shared_bridge_resume",
+                level="info",
+                payload={"summary": job.summary, "bridge_task_id": job.bridge_task_id, "timestamp": self._now_text()},
+            )
+        self._persist_resource_snapshot()
+        self._launch_existing_worker_job(job, stage, payload_path=payload_path, worker_handler=stage.worker_handler)
+        return job
+
+    def fail_waiting_job(self, job_id: str, *, error_text: str, summary: str = "") -> JobState:
+        with self._lock:
+            normalized_job_id = str(job_id or "").strip()
+            job = self._jobs.get(normalized_job_id)
+            if job is None:
+                job = self._restore_job_from_db_locked(normalized_job_id)
+            if job is None:
+                raise KeyError(f"任务不存在: {job_id}")
+            if str(job.status or "").strip().lower() in {"success", "failed", "cancelled", "partial_failed"}:
+                return job
+            now_text = self._now_text()
+            detail = str(error_text or "").strip() or "共享桥接阶段失败"
+            job.status = "failed"
+            job.error = detail
+            job.summary = str(summary or "").strip() or detail
+            job.finished_at = now_text
+            job.wait_reason = ""
+            job.wait_started_monotonic = 0.0
+            stage = self._get_primary_stage(job)
+            stage.status = "failed"
+            stage.error = detail
+            stage.summary = job.summary
+            stage.finished_at = now_text
+            self._append_log(job, f"[共享桥接] {detail}")
+            self._persist_job_snapshot(job)
+            self._record_job_event(
+                job,
+                stage_id=stage.stage_id,
+                stream="job",
+                event_type="shared_bridge_failed",
+                level="error",
+                payload={"error": detail, "bridge_task_id": job.bridge_task_id, "timestamp": now_text},
+            )
+            job.done_event.set()
+            self._persist_resource_snapshot()
+            return job
 
     def wait_job(self, job_id: str, timeout_sec: float | None = None) -> JobState:
         job = self.get_job_state(job_id)

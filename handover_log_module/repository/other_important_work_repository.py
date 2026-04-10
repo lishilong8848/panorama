@@ -150,6 +150,8 @@ OtherImportantWorkRowsByBuilding = Dict[str, List[OtherImportantWorkRow]]
 
 
 class OtherImportantWorkRepository:
+    DEVICE_ADJUSTMENT_TABLE_ID = "tbleqBZdQu1n8qqK"
+
     def __init__(self, handover_cfg: Dict[str, Any]) -> None:
         self.handover_cfg = handover_cfg
         self._field_option_maps_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
@@ -199,10 +201,11 @@ class OtherImportantWorkRepository:
                 },
                 "device_adjustment": {
                     "label": "设备调整",
-                    "table_id": "tbleqBZdQu1n8qqK",
+                    "table_id": self.DEVICE_ADJUSTMENT_TABLE_ID,
                     "fields": {
                         "building": "楼栋",
                         "actual_end_time": "实际结束时间",
+                        "location": "位置",
                         "description": "内容",
                         "completion": "进度",
                         "specialty": "专业",
@@ -365,6 +368,14 @@ class OtherImportantWorkRepository:
         end_time = row.actual_end_time or datetime.max
         return has_end_time, end_time, row.record_id
 
+    @staticmethod
+    def _join_location_and_description(location_text: str, description_text: str) -> str:
+        location = str(location_text or "").strip()
+        description = str(description_text or "").strip()
+        if location and description:
+            return f"{location} {description}"
+        return description or location
+
     def _load_source_rows_for_shift(
         self,
         *,
@@ -383,6 +394,11 @@ class OtherImportantWorkRepository:
         description_field = str(fields_cfg.get("description", "内容")).strip() or "内容"
         completion_field = str(fields_cfg.get("completion", "进度")).strip() or "进度"
         specialty_field = str(fields_cfg.get("specialty", "专业")).strip() or "专业"
+        should_concat_location = (
+            str(source_key or "").strip() == "device_adjustment"
+            or table_id == self.DEVICE_ADJUSTMENT_TABLE_ID
+        )
+        location_field = str(fields_cfg.get("location", "位置")).strip() or "位置"
 
         download_cfg = self.handover_cfg.get("download", {})
         shift_windows = download_cfg.get("shift_windows", {}) if isinstance(download_cfg, dict) else {}
@@ -445,6 +461,9 @@ class OtherImportantWorkRepository:
             if actual_end_time is not None and (actual_end_time < shift_start or actual_end_time > shift_end):
                 continue
             description_text = _field_text(raw_fields.get(description_field))
+            if should_concat_location:
+                location_text = _field_text(raw_fields.get(location_field))
+                description_text = self._join_location_and_description(location_text, description_text)
             if not str(description_text or "").strip():
                 blank_description_skipped += 1
                 continue

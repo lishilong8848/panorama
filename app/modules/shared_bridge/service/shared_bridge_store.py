@@ -27,11 +27,12 @@ def _parse_text_datetime(value: Any) -> datetime | None:
 
 
 class SharedBridgeStore:
-    def __init__(self, root_dir: str | Path, *, busy_timeout_ms: int = 5000) -> None:
+    def __init__(self, root_dir: str | Path, *, busy_timeout_ms: int = 15000) -> None:
         self.root_dir = Path(root_dir)
         self.db_path = self.root_dir / "bridge.db"
-        self.busy_timeout_ms = max(1000, int(busy_timeout_ms or 5000))
+        self.busy_timeout_ms = max(1000, int(busy_timeout_ms or 15000))
         self._ready_lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._ready = False
 
     def ensure_ready(self) -> None:
@@ -228,25 +229,32 @@ class SharedBridgeStore:
 
     @contextmanager
     def connect(self, *, read_only: bool = False) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.db_path), timeout=self.busy_timeout_ms / 1000.0, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        conn: sqlite3.Connection | None = None
+        lock = None if read_only else self._write_lock
+        if lock is not None:
+            lock.acquire()
         try:
+            conn = sqlite3.connect(str(self.db_path), timeout=self.busy_timeout_ms / 1000.0, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
             conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
             if read_only:
                 conn.execute("PRAGMA query_only=ON")
             else:
-                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA journal_mode=DELETE")
                 conn.execute("PRAGMA synchronous=NORMAL")
                 conn.execute("PRAGMA foreign_keys=ON")
             yield conn
-            if not read_only and conn.in_transaction:
+            if conn is not None and not read_only and conn.in_transaction:
                 conn.commit()
         except Exception:
-            if conn.in_transaction:
+            if conn is not None and conn.in_transaction:
                 conn.rollback()
             raise
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
+            if lock is not None:
+                lock.release()
 
     def upsert_node(
         self,
@@ -842,6 +850,7 @@ class SharedBridgeStore:
         end_time: str | None,
         duty_date: str | None,
         duty_shift: str | None,
+        resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
@@ -859,6 +868,7 @@ class SharedBridgeStore:
             "end_time": str(end_time or "").strip(),
             "duty_date": str(duty_date or "").strip(),
             "duty_shift": str(duty_shift or "").strip().lower(),
+            "resume_job_id": str(resume_job_id or "").strip(),
             "target_bucket_key": str(target_bucket_key or "").strip(),
         }
         if request_payload["duty_date"] and request_payload["duty_shift"]:
@@ -957,6 +967,7 @@ class SharedBridgeStore:
         selected_dates: List[str],
         building_scope: str,
         building: str | None,
+        resume_job_id: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
         requested_by: str = "manual",
@@ -972,6 +983,7 @@ class SharedBridgeStore:
             "selected_dates": normalized_dates,
             "building_scope": str(building_scope or "").strip(),
             "building": str(building or "").strip(),
+            "resume_job_id": str(resume_job_id or "").strip(),
         }
         dedupe_key = "|".join(
             [
@@ -1054,6 +1066,7 @@ class SharedBridgeStore:
         self,
         *,
         buildings: List[str] | None,
+        resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
@@ -1068,6 +1081,7 @@ class SharedBridgeStore:
         ]
         request_payload = {
             "buildings": normalized_buildings,
+            "resume_job_id": str(resume_job_id or "").strip(),
             "target_bucket_key": str(target_bucket_key or "").strip(),
         }
         dedupe_key = "|".join(
@@ -1149,6 +1163,7 @@ class SharedBridgeStore:
     def create_monthly_auto_once_task(
         self,
         *,
+        resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
@@ -1159,6 +1174,7 @@ class SharedBridgeStore:
         now_text = _now_text()
         request_payload = {
             "source": str(source or "").strip() or "manual",
+            "resume_job_id": str(resume_job_id or "").strip(),
             "target_bucket_key": str(target_bucket_key or "").strip(),
         }
         dedupe_key = "|".join(

@@ -162,6 +162,9 @@ class ShiftRosterAssignment:
 
 
 class ShiftRosterRepository:
+    PREFERRED_PEOPLE_TEXT_FIELD = "值班人员（实际）"
+    LEGACY_PEOPLE_TEXT_FIELD = "人员（文本）"
+
     def __init__(self, handover_cfg: Dict[str, Any]) -> None:
         self.handover_cfg = handover_cfg
         self._cache_store: EventFollowupCacheStore | None = None
@@ -183,7 +186,7 @@ class ShiftRosterRepository:
                 "building": "机楼",
                 "team": "班组",
                 "shift": "班次",
-                "people_text": "人员（文本）",
+                "people_text": "值班人员（实际）",
             },
             "cells": {
                 "current_people": "C3",
@@ -210,7 +213,7 @@ class ShiftRosterRepository:
                     "duty_date": "排班日期",
                     "building": "机楼",
                     "shift": "班次",
-                    "people_text": "人员（文本）",
+                    "people_text": "值班人员（实际）",
                 },
                 "shift_value": "长白",
                 "day_cell": "B4",
@@ -247,6 +250,34 @@ class ShiftRosterRepository:
             },
         }
 
+    @classmethod
+    def _normalize_people_field_name(cls, field_name: Any) -> str:
+        text = str(field_name or "").strip()
+        if not text or text == cls.LEGACY_PEOPLE_TEXT_FIELD:
+            return cls.PREFERRED_PEOPLE_TEXT_FIELD
+        return text
+
+    @classmethod
+    def _people_field_candidates(cls, field_name: Any) -> List[str]:
+        configured = cls._normalize_people_field_name(field_name)
+        candidates: List[str] = []
+        if configured and configured != cls.LEGACY_PEOPLE_TEXT_FIELD:
+            candidates.append(configured)
+        if cls.PREFERRED_PEOPLE_TEXT_FIELD not in candidates:
+            candidates.append(cls.PREFERRED_PEOPLE_TEXT_FIELD)
+        if configured and configured not in candidates:
+            candidates.append(configured)
+        if cls.LEGACY_PEOPLE_TEXT_FIELD not in candidates:
+            candidates.append(cls.LEGACY_PEOPLE_TEXT_FIELD)
+        return [name for name in candidates if name]
+
+    def _people_text_from_fields(self, *, fields: Dict[str, Any], configured_field: Any) -> str:
+        for field_name in self._people_field_candidates(configured_field):
+            text = _field_text(fields.get(field_name)).strip()
+            if text:
+                return text
+        return ""
+
     def _normalize_cfg(self) -> Dict[str, Any]:
         raw = self.handover_cfg.get("shift_roster", {})
         cfg = _deep_merge(self._defaults(), raw if isinstance(raw, dict) else {})
@@ -257,6 +288,24 @@ class ShiftRosterRepository:
         source["max_records"] = max(1, int(source.get("max_records", 5000)))
         cfg["source"] = source
         cfg["people_split_regex"] = str(cfg.get("people_split_regex", "")).strip() or r"[、,/，；;\s]+"
+        fields_cfg = cfg.get("fields", {})
+        if not isinstance(fields_cfg, dict):
+            fields_cfg = {}
+        fields_cfg["people_text"] = self._normalize_people_field_name(
+            fields_cfg.get("people_text", self.PREFERRED_PEOPLE_TEXT_FIELD)
+        )
+        cfg["fields"] = fields_cfg
+        long_day_cfg = cfg.get("long_day", {})
+        if not isinstance(long_day_cfg, dict):
+            long_day_cfg = {}
+        long_day_fields_cfg = long_day_cfg.get("fields", {})
+        if not isinstance(long_day_fields_cfg, dict):
+            long_day_fields_cfg = {}
+        long_day_fields_cfg["people_text"] = self._normalize_people_field_name(
+            long_day_fields_cfg.get("people_text", self.PREFERRED_PEOPLE_TEXT_FIELD)
+        )
+        long_day_cfg["fields"] = long_day_fields_cfg
+        cfg["long_day"] = long_day_cfg
         return cfg
 
     def _new_client(self, cfg: Dict[str, Any]) -> FeishuBitableClient:
@@ -665,7 +714,10 @@ class ShiftRosterRepository:
                 "shift": row_shift,
                 "building": row_building,
                 "team": _field_text(fields.get(str(fields_cfg.get("team", "班组")))),
-                "people_text": _field_text(fields.get(str(fields_cfg.get("people_text", "人员（文本）")))),
+                "people_text": self._people_text_from_fields(
+                    fields=fields,
+                    configured_field=fields_cfg.get("people_text", self.PREFERRED_PEOPLE_TEXT_FIELD),
+                ),
             }
             if row_date == current_date_text and row_shift == normalized_shift:
                 current_rows.append(row)
@@ -813,7 +865,10 @@ class ShiftRosterRepository:
                 # 班次仅作为可选过滤：有班次值时才匹配“长白”，无班次值不拦截
                 if row_shift and target_shift_value not in row_shift:
                     continue
-            row_people = _field_text(fields.get(str(fields_cfg.get("people_text", "人员（文本）")))).strip()
+            row_people = self._people_text_from_fields(
+                fields=fields,
+                configured_field=fields_cfg.get("people_text", self.PREFERRED_PEOPLE_TEXT_FIELD),
+            )
             if row_people:
                 break
 
@@ -905,6 +960,7 @@ class ShiftRosterRepository:
                     str(fields_cfg.get("supervisor_text", "主管（文本）")),
                     "主管（文本）",
                     "主管",
+                    "值班人员（实际）",
                     "人员（文本）",
                     "人员",
                 ],
@@ -915,6 +971,7 @@ class ShiftRosterRepository:
                     str(fields_cfg.get("supervisor_person", "主管")),
                     "主管",
                     "主管（文本）",
+                    "值班人员（实际）",
                     "人员",
                     "人员（文本）",
                 ],

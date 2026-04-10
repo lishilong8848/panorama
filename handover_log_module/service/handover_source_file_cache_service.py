@@ -439,14 +439,14 @@ class HandoverSourceFileCacheService:
                         previous_path.unlink()
                     self._cleanup_empty_parents(previous_path)
                     emit_log(
-                        f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 宸叉浛鎹㈡棫缂撳瓨 building={building}, "
+                        f"[交接班][源文件缓存] 已替换旧缓存 building={building}, "
                         f"old={previous_text}, new={str(target)}"
                     )
                 except Exception as exc:  # noqa: BLE001
-                    emit_log(f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 鏃х紦瀛樻竻鐞嗗け璐?building={building}: {exc}")
+                    emit_log(f"[交接班][源文件缓存] 旧缓存清理失败 building={building}: {exc}")
 
         emit_log(
-            f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 宸叉寔涔呭寲 building={building}, session={session_id}, path={str(target)}"
+            f"[交接班][源文件缓存] 已持久化 building={building}, session={session_id}, path={str(target)}"
         )
         return {
             "managed": True,
@@ -530,6 +530,6 @@ class HandoverSourceFileCacheService:
             except Exception:  # noqa: BLE001
                 continue
         if removed:
-            emit_log(f"[浜ゆ帴鐝璢[婧愭枃浠剁紦瀛榏 娓呯悊瀛ゅ効缂撳瓨 count={removed}")
+            emit_log(f"[交接班][源文件缓存] 清理孤儿缓存 count={removed}")
         return removed
 

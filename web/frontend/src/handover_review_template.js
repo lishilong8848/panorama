@@ -7,20 +7,20 @@
           <p class="review-subtitle">{{ sessionSummary }}</p>
         </div>
         <div class="review-header-actions">
-          <button class="btn btn-secondary btn-mini" @click="refreshData" :disabled="loading || saving || confirming || cloudSyncBusy">
+          <button class="btn btn-secondary btn-mini" @click="refreshData" :disabled="loading || saving || confirming || syncingRemoteRevision || cloudSyncBusy">
             刷新
           </button>
           <button
             class="btn btn-secondary btn-mini"
             @click="downloadCurrentReviewFile"
-            :disabled="loading || saving || downloading || cloudSyncBusy || !session || !session.session_id"
+            :disabled="loading || saving || dirty || syncingRemoteRevision || downloading || cloudSyncBusy || !session || !session.session_id"
           >
             {{ downloading ? "下载中..." : "下载交接班日志" }}
           </button>
           <button
             class="btn btn-secondary btn-mini"
             @click="downloadCurrentCapacityReviewFile"
-            :disabled="loading || saving || capacityDownloading || cloudSyncBusy || !session || !session.session_id || !session.capacity_output_file"
+            :disabled="loading || saving || dirty || syncingRemoteRevision || capacityDownloading || cloudSyncBusy || !session || !session.session_id || !session.capacity_output_file"
           >
             {{ capacityDownloading ? "下载中..." : "下载交接班容量报表" }}
           </button>

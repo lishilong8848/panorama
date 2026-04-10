@@ -395,7 +395,8 @@
         },
         "fields": {
           "building": "楼栋",
-          "start_time": "实际开始时间",
+          "updated_time": "最新更新时间",
+          "actual_end_time": "实际结束时间",
           "item": "名称",
           "specialty": "专业"
         },

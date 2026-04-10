@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -133,11 +133,35 @@ def _building_matches(target_building: str, values: List[str]) -> bool:
     return False
 
 
+def _infer_duty_by_now(now: datetime | None = None) -> tuple[str, str]:
+    cursor = now or datetime.now()
+    second_of_day = cursor.hour * 3600 + cursor.minute * 60 + cursor.second
+    if second_of_day < 9 * 3600:
+        day = cursor.date() - timedelta(days=1)
+        return day.strftime("%Y-%m-%d"), "night"
+    if second_of_day < 18 * 3600:
+        return cursor.strftime("%Y-%m-%d"), "day"
+    return cursor.strftime("%Y-%m-%d"), "night"
+
+
+def _is_current_duty_context(
+    *,
+    duty_date: str,
+    duty_shift: str,
+    now: datetime | None = None,
+) -> bool:
+    current_duty_date, current_duty_shift = _infer_duty_by_now(now=now)
+    return (
+        str(duty_date or "").strip() == current_duty_date
+        and str(duty_shift or "").strip().lower() == current_duty_shift
+    )
+
+
 @dataclass
 class MaintenanceManagementRow:
     record_id: str
     building_values: List[str]
-    start_time: datetime
+    updated_time: datetime
     item_text: str
     specialty_text: str
     raw_fields: Dict[str, Any]
@@ -163,7 +187,8 @@ class MaintenanceManagementRepository:
             },
             "fields": {
                 "building": "楼栋",
-                "start_time": "实际开始时间",
+                "updated_time": "最新更新时间",
+                "actual_end_time": "实际结束时间",
                 "item": "名称",
                 "specialty": "专业",
             },
@@ -312,13 +337,29 @@ class MaintenanceManagementRepository:
     ) -> Tuple[List[MaintenanceManagementRow], Dict[str, Any], Dict[str, int]]:
         cfg = self._normalize_cfg()
         if not bool(cfg.get("enabled", True)):
-            return [], cfg, {"total": 0, "in_shift": 0, "parse_fail": 0}
+            return [], cfg, {
+                "total": 0,
+                "in_shift": 0,
+                "start_time_parse_fail": 0,
+                "start_time_out_of_shift_skipped": 0,
+                "end_time_parse_fail": 0,
+                "end_time_missing_for_history_skipped": 0,
+                "end_time_before_shift_skipped": 0,
+                "end_time_after_shift_skipped": 0,
+                "end_time_before_start_skipped": 0,
+                "blank_item_skipped": 0,
+            }
 
         source = cfg.get("source", {})
         fields_cfg = cfg.get("fields", {}) if isinstance(cfg.get("fields", {}), dict) else {}
         table_id = str(source.get("table_id", "")).strip()
         building_field = str(fields_cfg.get("building", "楼栋")).strip() or "楼栋"
-        start_time_field = str(fields_cfg.get("start_time", "实际开始时间")).strip() or "实际开始时间"
+        configured_start_time_field = str(fields_cfg.get("start_time", "")).strip()
+        legacy_updated_time_field = str(fields_cfg.get("updated_time", "")).strip()
+        start_time_field = configured_start_time_field or (
+            legacy_updated_time_field if legacy_updated_time_field and legacy_updated_time_field != "最新更新时间" else "实际开始时间"
+        )
+        actual_end_time_field = str(fields_cfg.get("actual_end_time", "实际结束时间")).strip() or "实际结束时间"
         item_field = str(fields_cfg.get("item", "名称")).strip() or "名称"
         specialty_field = str(fields_cfg.get("specialty", "专业")).strip() or "专业"
 
@@ -331,12 +372,14 @@ class MaintenanceManagementRepository:
         )
         start_dt = datetime.strptime(duty_window.start_time, "%Y-%m-%d %H:%M:%S")
         end_dt = datetime.strptime(duty_window.end_time, "%Y-%m-%d %H:%M:%S")
+        is_current_duty = _is_current_duty_context(duty_date=duty_date, duty_shift=duty_shift)
 
         emit_log(
             "[交接班][维护管理] 读取飞书: "
             f"table_id={table_id}, page_size={int(source.get('page_size', 500) or 500)}, "
             f"max_records={int(source.get('max_records', 5000) or 5000)}, "
-            f"window={duty_window.start_time}~{duty_window.end_time}"
+            f"window={duty_window.start_time}~{duty_window.end_time}, "
+            f"mode={'current' if is_current_duty else 'history'}"
         )
 
         client = self._new_client(cfg)
@@ -357,7 +400,13 @@ class MaintenanceManagementRepository:
         rows: List[MaintenanceManagementRow] = []
         total = 0
         in_shift = 0
-        parse_fail = 0
+        start_time_parse_fail = 0
+        start_time_out_of_shift_skipped = 0
+        end_time_parse_fail = 0
+        end_time_missing_for_history_skipped = 0
+        end_time_before_shift_skipped = 0
+        end_time_after_shift_skipped = 0
+        end_time_before_start_skipped = 0
         blank_item_skipped = 0
 
         for item in records:
@@ -372,10 +421,29 @@ class MaintenanceManagementRepository:
             building_values = _field_texts_with_option_map(raw_fields.get(building_field), building_option_map)
             start_time = _parse_datetime(raw_fields.get(start_time_field))
             if start_time is None:
-                parse_fail += 1
+                start_time_parse_fail += 1
                 continue
-            if start_time < start_dt or start_time > end_dt:
+            raw_actual_end_time = raw_fields.get(actual_end_time_field)
+            actual_end_time_text = _field_text(raw_actual_end_time)
+            actual_end_time = _parse_datetime(raw_actual_end_time)
+            if actual_end_time is None and actual_end_time_text:
+                end_time_parse_fail += 1
                 continue
+            if actual_end_time is None and not is_current_duty:
+                end_time_missing_for_history_skipped += 1
+                continue
+            if actual_end_time is not None and actual_end_time < start_time:
+                end_time_before_start_skipped += 1
+                continue
+            if actual_end_time is not None:
+                # 当前/历史交接班都按时间段是否与当前班次窗口重合判定；
+                # 当前交接班只额外允许“有开始、无结束”的进行中记录。
+                if actual_end_time < start_dt:
+                    end_time_before_shift_skipped += 1
+                    continue
+                if start_time > end_dt:
+                    start_time_out_of_shift_skipped += 1
+                    continue
 
             item_text = _field_text(raw_fields.get(item_field))
             if not item_text:
@@ -387,7 +455,7 @@ class MaintenanceManagementRepository:
                 MaintenanceManagementRow(
                     record_id=record_id,
                     building_values=building_values,
-                    start_time=start_time,
+                    updated_time=start_time,
                     item_text=item_text,
                     specialty_text=normalize_specialty_text(
                         _field_text_with_option_map(raw_fields.get(specialty_field), specialty_option_map)
@@ -396,11 +464,17 @@ class MaintenanceManagementRepository:
                 )
             )
 
-        rows.sort(key=lambda item: (item.start_time, item.record_id))
+        rows.sort(key=lambda item: (item.updated_time, item.record_id))
         return rows, cfg, {
             "total": total,
             "in_shift": in_shift,
-            "parse_fail": parse_fail,
+            "start_time_parse_fail": start_time_parse_fail,
+            "start_time_out_of_shift_skipped": start_time_out_of_shift_skipped,
+            "end_time_parse_fail": end_time_parse_fail,
+            "end_time_missing_for_history_skipped": end_time_missing_for_history_skipped,
+            "end_time_before_shift_skipped": end_time_before_shift_skipped,
+            "end_time_after_shift_skipped": end_time_after_shift_skipped,
+            "end_time_before_start_skipped": end_time_before_start_skipped,
             "blank_item_skipped": blank_item_skipped,
         }
 
@@ -421,7 +495,14 @@ class MaintenanceManagementRepository:
         emit_log(
             "[交接班][维护管理] 读取完成: "
             f"total={counters['total']}, in_shift={counters['in_shift']}, "
-            f"building_assigned={len(matched_rows)}, parse_fail={counters['parse_fail']}, "
+            f"building_assigned={len(matched_rows)}, "
+            f"start_time_parse_fail={counters.get('start_time_parse_fail', 0)}, "
+            f"start_time_out_of_shift_skipped={counters.get('start_time_out_of_shift_skipped', 0)}, "
+            f"end_time_parse_fail={counters.get('end_time_parse_fail', 0)}, "
+            f"end_time_missing_for_history_skipped={counters.get('end_time_missing_for_history_skipped', 0)}, "
+            f"end_time_before_shift_skipped={counters.get('end_time_before_shift_skipped', 0)}, "
+            f"end_time_after_shift_skipped={counters.get('end_time_after_shift_skipped', 0)}, "
+            f"end_time_before_start_skipped={counters.get('end_time_before_start_skipped', 0)}, "
             f"blank_item_skipped={counters.get('blank_item_skipped', 0)}"
         )
         return matched_rows, cfg
@@ -457,7 +538,14 @@ class MaintenanceManagementRepository:
         emit_log(
             "[交接班][维护管理] 读取完成: "
             f"total={counters['total']}, in_shift={counters['in_shift']}, "
-            f"building_assigned={assigned_rows}, parse_fail={counters['parse_fail']}, "
+            f"building_assigned={assigned_rows}, "
+            f"start_time_parse_fail={counters.get('start_time_parse_fail', 0)}, "
+            f"start_time_out_of_shift_skipped={counters.get('start_time_out_of_shift_skipped', 0)}, "
+            f"end_time_parse_fail={counters.get('end_time_parse_fail', 0)}, "
+            f"end_time_missing_for_history_skipped={counters.get('end_time_missing_for_history_skipped', 0)}, "
+            f"end_time_before_shift_skipped={counters.get('end_time_before_shift_skipped', 0)}, "
+            f"end_time_after_shift_skipped={counters.get('end_time_after_shift_skipped', 0)}, "
+            f"end_time_before_start_skipped={counters.get('end_time_before_start_skipped', 0)}, "
             f"blank_item_skipped={counters.get('blank_item_skipped', 0)}"
         )
         emit_log(

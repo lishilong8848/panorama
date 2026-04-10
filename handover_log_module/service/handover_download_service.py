@@ -283,7 +283,8 @@ class HandoverDownloadService:
         side = str(target_side or "").strip().lower()
         if side not in {"internal", "external"}:
             raise ValueError(f"unsupported target_side: {target_side}")
-        emit_log(f"[交接班下载] 网络切换功能已移除，按当前网络继续执行{side}阶段")
+        # 网络切换已移除：保持幂等兼容，不再输出遗留提示。
+        return None
 
     def ensure_internal_ready(self, emit_log: Callable[[str], None] = print) -> None:
         self._ensure_target_network_ready("internal", emit_log)
@@ -293,10 +294,10 @@ class HandoverDownloadService:
 
     def _maybe_switch_internal(self, emit_log: Callable[[str], None]) -> None:
         self.did_switch_internal_this_run = False
-        emit_log("[交接班下载] 网络切换功能已移除，下载前不再切换到内网")
+        return None
 
     def switch_external_after_download(self, emit_log: Callable[[str], None]) -> None:
-        emit_log("[交接班下载] 网络切换功能已移除，下载后不再切回外网")
+        return None
 
     def run(
         self,

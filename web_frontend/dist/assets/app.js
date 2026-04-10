@@ -58,7 +58,7 @@ const STARTUP_BRIDGE_DEFAULTS = Object.freeze({
   claim_lease_sec: 30,
   stale_task_timeout_sec: 1800,
   artifact_retention_days: 7,
-  sqlite_busy_timeout_ms: 5000,
+  sqlite_busy_timeout_ms: 15000,
 });
 
 function resolveSharedBridgeRoleRoot(config, roleMode) {
@@ -2643,6 +2643,8 @@ createApp({
       if (lowered === "shared_bridge_service_unavailable") return "共享桥接服务不可用";
       if (lowered === "disabled_or_switching" || lowered === "disabled_or_unselected") return "当前未启用共享桥接";
       if (lowered === "misconfigured") return "共享桥接目录未配置";
+      if (lowered === "busy") return "共享桥接数据库正忙";
+      if (lowered === "unavailable") return "共享桥接数据库暂时不可用";
       if (lowered === "database is locked") return "共享桥接数据库正忙，请稍后重试";
       if (lowered === "unable to open database file") return "无法打开共享桥接数据库文件";
       if (lowered === "cannot operate on a closed database" || lowered === "cannot operate on a closed database.") {

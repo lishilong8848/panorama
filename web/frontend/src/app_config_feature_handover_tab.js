@@ -41,7 +41,7 @@
           <div class="form-row"><label class="label">字段：机楼</label><input type="text" v-model="config.handover_log.shift_roster.fields.building" /></div>
           <div class="form-row"><label class="label">字段：班组</label><input type="text" v-model="config.handover_log.shift_roster.fields.team" /></div>
           <div class="form-row"><label class="label">字段：班次</label><input type="text" v-model="config.handover_log.shift_roster.fields.shift" /></div>
-          <div class="form-row"><label class="label">字段：人员（文本）</label><input type="text" v-model="config.handover_log.shift_roster.fields.people_text" /></div>
+          <div class="form-row"><label class="label">字段：值班人员（实际）</label><input type="text" v-model="config.handover_log.shift_roster.fields.people_text" /></div>
           <div class="form-row"><label class="label">当前班组人员单元格（C3）</label><input type="text" v-model="config.handover_log.shift_roster.cells.current_people" /></div>
           <div class="form-row"><label class="label">下一个班组人员单元格（G3）</label><input type="text" v-model="config.handover_log.shift_roster.cells.next_people" /></div>
           <div class="form-row">
@@ -219,7 +219,8 @@
           <div class="form-row"><label class="label">分页大小</label><input type="number" v-model.number="config.handover_log.maintenance_management_section.source.page_size" /></div>
           <div class="form-row"><label class="label">最多读取记录数</label><input type="number" v-model.number="config.handover_log.maintenance_management_section.source.max_records" /></div>
           <div class="form-row"><label class="label">字段：楼栋</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.building" /></div>
-          <div class="form-row"><label class="label">字段：开始时间（班次判定）</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.start_time" /></div>
+          <div class="form-row"><label class="label">字段：最新更新时间（班次判定）</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.updated_time" /></div>
+          <div class="form-row"><label class="label">字段：实际结束时间</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.actual_end_time" /></div>
           <div class="form-row"><label class="label">字段：名称</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.item" /></div>
           <div class="form-row"><label class="label">字段：专业</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.specialty" /></div>
           <div class="form-row"><label class="label">分类名：维护管理</label><input type="text" v-model="config.handover_log.maintenance_management_section.sections.maintenance_management" /></div>
@@ -235,7 +236,7 @@
           <div class="form-row"><label class="label">回退列：维护执行方</label><input type="text" v-model="config.handover_log.maintenance_management_section.column_mapping.fallback_cols.maintenance_party" /></div>
           <div class="form-row"><label class="label">回退列：维护完成情况</label><input type="text" v-model="config.handover_log.maintenance_management_section.column_mapping.fallback_cols.completion" /></div>
           <div class="form-row"><label class="label">回退列：执行人</label><input type="text" v-model="config.handover_log.maintenance_management_section.column_mapping.fallback_cols.executor" /></div>
-          <div class="hint">维护管理按“楼栋”包含关系归属楼栋；多楼一起执行时会一次读取当前班次记录并按楼栋复用。执行人按“当前楼栋 + 专业”匹配工程师目录主管；名称包含“厂家/厂商”写厂维，否则写自维。</div>
+          <div class="hint">维护管理按“楼栋”包含关系归属楼栋；筛选规则为“最新更新时间落在当前班次窗口内，且实际结束时间为空或也落在当前班次窗口内”。多楼一起执行时会按楼栋批量复用。执行人按“当前楼栋 + 专业”匹配工程师目录主管；名称包含“厂家/厂商”写厂维，否则写自维。</div>
       </section>
 
       <section class="content-card config-panel-card config-subgroup-card">
@@ -304,7 +305,7 @@
           <div class="form-row"><label class="label">字段：排班日期</label><input type="text" v-model="config.handover_log.shift_roster.long_day.fields.duty_date" /></div>
           <div class="form-row"><label class="label">字段：机楼</label><input type="text" v-model="config.handover_log.shift_roster.long_day.fields.building" /></div>
           <div class="form-row"><label class="label">字段：班次</label><input type="text" v-model="config.handover_log.shift_roster.long_day.fields.shift" /></div>
-          <div class="form-row"><label class="label">字段：人员（文本）</label><input type="text" v-model="config.handover_log.shift_roster.long_day.fields.people_text" /></div>
+          <div class="form-row"><label class="label">字段：值班人员（实际）</label><input type="text" v-model="config.handover_log.shift_roster.long_day.fields.people_text" /></div>
           <div class="form-row"><label class="label">班次值关键字</label><input type="text" v-model="config.handover_log.shift_roster.long_day.shift_value" placeholder="例如 长白" /></div>
           <div class="form-row"><label class="label">白班填充单元格</label><input type="text" v-model="config.handover_log.shift_roster.long_day.day_cell" /></div>
           <div class="form-row"><label class="label">夜班填充单元格</label><input type="text" v-model="config.handover_log.shift_roster.long_day.night_cell" /></div>

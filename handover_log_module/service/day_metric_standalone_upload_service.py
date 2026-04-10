@@ -304,7 +304,17 @@ class DayMetricStandaloneUploadService:
         return HandoverFillService(self.handover_cfg)
 
     def _new_attachment_service(self) -> SourceDataAttachmentBitableExportService:
-        return SourceDataAttachmentBitableExportService(self.handover_cfg)
+        try:
+            return SourceDataAttachmentBitableExportService(
+                self.handover_cfg,
+                log_prefix="[12项独立上传][源数据附件]",
+            )
+        except TypeError as exc:
+            # Compatibility fallback: test doubles / legacy constructors may
+            # still only accept (cfg) and do not support log_prefix.
+            if "log_prefix" not in str(exc):
+                raise
+            return SourceDataAttachmentBitableExportService(self.handover_cfg)
 
     def _new_export_service(self) -> DayMetricBitableExportService:
         return DayMetricBitableExportService(self.runtime_config)
@@ -604,7 +614,12 @@ class DayMetricStandaloneUploadService:
         if normalized_stage not in {"attachment", "extract", "upload"}:
             normalized_stage = "attachment"
 
+        emit_log(
+            f"[12项独立上传] 单元开始: duty_date={duty_date}, building={building}, "
+            f"start_stage={normalized_stage}, source_file={source_file}"
+        )
         if normalized_stage == "attachment":
+            emit_log(f"[12项独立上传] 附件阶段开始: duty_date={duty_date}, building={building}")
             attachment_ok, attachment_result, attachment_attempts = self._run_attachment_stage(
                 mode=mode,
                 duty_date=duty_date,
@@ -620,8 +635,12 @@ class DayMetricStandaloneUploadService:
                     attachment_result.get("error", "") or attachment_result.get("reason", "") or "attachment_failed"
                 ).strip() or "attachment_failed"
                 row["failed_at"] = _now_text()
+                emit_log(
+                    f"[12项独立上传] 附件阶段失败: duty_date={duty_date}, building={building}, error={row['error']}"
+                )
                 return row
 
+        emit_log(f"[12项独立上传] 提取填充开始: duty_date={duty_date}, building={building}")
         try:
             extract_service = self._new_extract_service()
             fill_service = self._new_fill_service()
@@ -642,8 +661,21 @@ class DayMetricStandaloneUploadService:
             row["failed_at"] = _now_text()
             row["retryable"] = bool(Path(source_file).exists()) if mode == "from_file" else True
             row["network_side"] = ""
+            emit_log(
+                f"[12项独立上传] 提取填充失败: duty_date={duty_date}, building={building}, error={row['error']}"
+            )
             return row
 
+        resolved_count = 0
+        if isinstance(fill_result, dict):
+            resolved_values = fill_result.get("resolved_values_by_id", {})
+            if isinstance(resolved_values, dict):
+                resolved_count = len(resolved_values)
+        emit_log(
+            f"[12项独立上传] 提取填充完成: duty_date={duty_date}, building={building}, metrics={resolved_count}"
+        )
+
+        emit_log(f"[12项独立上传] 写入阶段开始: duty_date={duty_date}, building={building}")
         upload_ok, upload_result, upload_attempts = self._run_upload_stage(
             mode=mode,
             duty_date=duty_date,
@@ -663,6 +695,9 @@ class DayMetricStandaloneUploadService:
             row["status"] = "failed"
             row["error"] = str(upload_result.get("error", "") or "upload_failed").strip() or "upload_failed"
             row["failed_at"] = _now_text()
+            emit_log(
+                f"[12项独立上传] 写入阶段失败: duty_date={duty_date}, building={building}, error={row['error']}"
+            )
             return row
 
         row["status"] = "ok"
@@ -671,6 +706,10 @@ class DayMetricStandaloneUploadService:
         row["error"] = ""
         row["failed_at"] = ""
         row["retryable"] = False
+        emit_log(
+            f"[12项独立上传] 单元完成: duty_date={duty_date}, building={building}, "
+            f"deleted={row['deleted_records']}, created={row['created_records']}"
+        )
         return row
 
     @staticmethod
@@ -785,7 +824,7 @@ class DayMetricStandaloneUploadService:
 
         emit_log(
             f"[12项独立上传] 开始下载批次: dates={','.join(selected_dates)}, "
-            f"buildings={','.join(buildings)}, network_mode=current_role"
+            f"buildings={','.join(buildings)}, network_mode={self._network_mode_text()}"
         )
         if auto_switch_enabled:
             try:
@@ -849,7 +888,7 @@ class DayMetricStandaloneUploadService:
         rows_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
 
         emit_log(
-            f"[12项独立上传] 开始上传阶段: units={len(source_units)}, network_mode=current_role"
+            f"[12项独立上传] 开始上传阶段: units={len(source_units)}, network_mode={self._network_mode_text()}"
         )
         if auto_switch_enabled:
             try:
@@ -908,13 +947,22 @@ class DayMetricStandaloneUploadService:
                 row["failed_at"] = _now_text()
                 row["network_side"] = "external"
                 rows_by_key[(duty_date, building_name)] = row
+                emit_log(
+                    f"[12项独立上传] 单元跳过: duty_date={duty_date}, building={building_name}, error={row['error']}"
+                )
                 continue
-            rows_by_key[(duty_date, building_name)] = self._process_source_file_unit(
+            row = self._process_source_file_unit(
                 mode="from_download",
                 duty_date=duty_date,
                 building=building_name,
                 source_file=source_file,
                 emit_log=emit_log,
+            )
+            rows_by_key[(duty_date, building_name)] = row
+            emit_log(
+                f"[12项独立上传] 单元结果: duty_date={duty_date}, building={building_name}, "
+                f"status={str(row.get('status', '') or '-').strip()}, "
+                f"stage={str(row.get('stage', '') or '-').strip()}"
             )
 
         result = self._build_batch_result(

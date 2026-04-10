@@ -36,9 +36,10 @@ def _attachment_reason_text(reason: Any) -> str:
 
 
 class SourceDataAttachmentBitableExportService:
-    def __init__(self, handover_cfg: Dict[str, Any]) -> None:
+    def __init__(self, handover_cfg: Dict[str, Any], *, log_prefix: str = "[交接班][源数据附件]") -> None:
         self.handover_cfg = handover_cfg if isinstance(handover_cfg, dict) else {}
         self._source_file_cache_service = HandoverSourceFileCacheService(self.handover_cfg)
+        self._log_prefix = str(log_prefix or "").strip() or "[交接班][源数据附件]"
 
     @staticmethod
     def _defaults() -> Dict[str, Any]:
@@ -145,6 +146,9 @@ class SourceDataAttachmentBitableExportService:
             dimension_mapping={},
         )
 
+    def _emit(self, emit_log: Callable[[str], None], message: str) -> None:
+        emit_log(f"{self._log_prefix} {str(message or '').strip()}")
+
     @staticmethod
     def _midnight_timestamp_ms(duty_date: str) -> int:
         dt = datetime.strptime(str(duty_date or "").strip(), "%Y-%m-%d")
@@ -241,7 +245,7 @@ class SourceDataAttachmentBitableExportService:
             page_size=int(source.get("page_size", 500) or 500),
             max_records=int(source.get("max_records", 5000) or 5000),
         )
-        emit_log(f"[交接班][源数据附件] 旧记录读取完成: table_id={table_id}, total={len(records)}")
+        self._emit(emit_log, f"旧记录读取完成: table_id={table_id}, total={len(records)}")
         return records
 
     def _matching_existing_record_ids(
@@ -306,9 +310,9 @@ class SourceDataAttachmentBitableExportService:
             missing_reason = (
                 "missing_source_file_cache" if self._is_managed_source_file(data_file_text) else "missing_source_file"
             )
-            emit_log(
-                "[交接班][源数据附件] 上传失败: "
-                f"building={building_text}, 原因={_attachment_reason_text(missing_reason)}, file={data_file_text or '-'}"
+            self._emit(
+                emit_log,
+                f"上传失败: building={building_text}, 原因={_attachment_reason_text(missing_reason)}, file={data_file_text or '-'}",
             )
             return {
                 "status": "failed",
@@ -324,9 +328,9 @@ class SourceDataAttachmentBitableExportService:
         table_id = str(source.get("table_id", "")).strip()
         client = self._new_client(cfg)
         shift_text = str(shift_text_cfg.get(shift_key, "白班" if shift_key == "day" else "夜班")).strip()
-        emit_log(
-            "[交接班][源数据附件] 开始上传: "
-            f"building={building_text}, batch={duty_date_text}|{shift_key}, data_file={data_file_text}"
+        self._emit(
+            emit_log,
+            f"开始上传: building={building_text}, batch={duty_date_text}|{shift_key}, data_file={data_file_text}",
         )
 
         try:
@@ -346,9 +350,9 @@ class SourceDataAttachmentBitableExportService:
                     record_ids=deleted_record_ids,
                     batch_size=int(source.get("delete_batch_size", 200) or 200),
                 )
-                emit_log(
-                    "[交接班][源数据附件] 已删除旧记录: "
-                    f"building={building_text}, duty_date={duty_date_text}, duty_shift={shift_key}, count={len(deleted_record_ids)}"
+                self._emit(
+                    emit_log,
+                    f"已删除旧记录: building={building_text}, duty_date={duty_date_text}, duty_shift={shift_key}, count={len(deleted_record_ids)}",
                 )
 
             file_token = client.upload_attachment(data_file_text)
@@ -361,9 +365,9 @@ class SourceDataAttachmentBitableExportService:
             }
             client.batch_create_records(table_id=table_id, fields_list=[row_fields], batch_size=1)
             uploaded_at = self._now_text()
-            emit_log(
-                "[交接班][源数据附件] 上传完成: "
-                f"building={building_text}, type={fixed_values.get('type', '动环数据')}, shift={shift_text}, uploaded=1"
+            self._emit(
+                emit_log,
+                f"上传完成: building={building_text}, type={fixed_values.get('type', '动环数据')}, shift={shift_text}, uploaded=1",
             )
             return {
                 "status": "ok",
@@ -376,7 +380,7 @@ class SourceDataAttachmentBitableExportService:
                 "file_token": file_token,
             }
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][源数据附件] 上传失败: building={building_text}, 错误={exc}")
+            self._emit(emit_log, f"上传失败: building={building_text}, 错误={exc}")
             return {
                 "status": "failed",
                 "reason": "upload_error",

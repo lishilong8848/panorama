@@ -244,6 +244,13 @@ function mapDailyReportAuthVm(raw) {
   if (status === "ready") {
     return { text: "已登录", tone: "success", error: "" };
   }
+  if (status === "ready_without_target_page") {
+    return {
+      text: "已登录，待打开目标页",
+      tone: "info",
+      error: `当前已接管${browserLabel}，但尚未定位到飞书目标页；执行截图测试时会自动尝试补开。`,
+    };
+  }
   if (status === "missing_login") {
     if (error === "browser_not_started") {
       return {
@@ -252,11 +259,18 @@ function mapDailyReportAuthVm(raw) {
         error: `${browserLabel} 登录页尚未打开，请点击“初始化飞书截图登录态”。`,
       };
     }
-    if (error === "browser_started_without_pages" || error === "feishu_page_not_open") {
+    if (error === "browser_started_without_pages") {
       return {
-        text: "待登录",
+        text: "待打开飞书页",
         tone: "warning",
         error: `${browserLabel} 登录页已被关闭，请点击“初始化飞书截图登录态”重新打开。`,
+      };
+    }
+    if (error === "feishu_page_not_open") {
+      return {
+        text: "已登录，待打开目标页",
+        tone: "info",
+        error: `当前${browserLabel}中未检测到飞书目标页；执行截图测试时会自动尝试补开。`,
       };
     }
     return {
@@ -1378,6 +1392,8 @@ export function createAppState(vueApi) {
     if (normalized === "ok") return "正常";
     if (normalized === "disabled") return "未启用";
     if (normalized === "misconfigured") return "共享目录未配置";
+    if (normalized === "busy") return "数据库正忙";
+    if (normalized === "unavailable") return "数据库暂不可用";
     if (normalized === "error") return "异常";
     return String(dbStatus || "").trim() || "未启用";
   }

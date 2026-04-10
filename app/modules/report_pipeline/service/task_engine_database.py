@@ -60,6 +60,7 @@ class TaskEngineDatabase:
                     priority TEXT NOT NULL DEFAULT 'manual',
                     resource_keys_json TEXT NOT NULL DEFAULT '[]',
                     wait_reason TEXT NOT NULL DEFAULT '',
+                    bridge_task_id TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'queued',
                     created_at TEXT NOT NULL DEFAULT '',
                     started_at TEXT NOT NULL DEFAULT '',
@@ -162,6 +163,8 @@ class TaskEngineDatabase:
                 conn.execute("ALTER TABLE jobs ADD COLUMN resource_keys_json TEXT NOT NULL DEFAULT '[]'")
             if "wait_reason" not in columns:
                 conn.execute("ALTER TABLE jobs ADD COLUMN wait_reason TEXT NOT NULL DEFAULT ''")
+            if "bridge_task_id" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN bridge_task_id TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_jobs_dedupe_key_status_created_at "
                 "ON jobs(dedupe_key, status, created_at DESC, job_id DESC)"
@@ -237,10 +240,10 @@ class TaskEngineDatabase:
             conn.execute(
                 """
                 INSERT INTO jobs (
-                    job_id, name, feature, dedupe_key, submitted_by, priority, resource_keys_json, wait_reason, status,
+                    job_id, name, feature, dedupe_key, submitted_by, priority, resource_keys_json, wait_reason, bridge_task_id, status,
                     created_at, started_at, finished_at, summary, error,
                     result_json, config_snapshot_json, cancel_requested, revision
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(job_id) DO UPDATE SET
                     name=excluded.name,
                     feature=excluded.feature,
@@ -249,6 +252,7 @@ class TaskEngineDatabase:
                     priority=excluded.priority,
                     resource_keys_json=excluded.resource_keys_json,
                     wait_reason=excluded.wait_reason,
+                    bridge_task_id=excluded.bridge_task_id,
                     status=excluded.status,
                     created_at=excluded.created_at,
                     started_at=excluded.started_at,
@@ -272,6 +276,7 @@ class TaskEngineDatabase:
                     str(payload.get("priority", "manual") or "manual").strip(),
                     json.dumps(payload.get("resource_keys") or [], ensure_ascii=False, default=str),
                     str(payload.get("wait_reason", "") or "").strip(),
+                    str(payload.get("bridge_task_id", "") or "").strip(),
                     str(payload.get("status", "queued") or "queued").strip(),
                     str(payload.get("created_at", "") or "").strip(),
                     str(payload.get("started_at", "") or "").strip(),
@@ -486,6 +491,7 @@ class TaskEngineDatabase:
             "priority": str(row["priority"] or "manual"),
             "resource_keys": self._loads(row["resource_keys_json"], []),
             "wait_reason": str(row["wait_reason"] or ""),
+            "bridge_task_id": str(row["bridge_task_id"] or ""),
             "stages": stages,
             "cancel_requested": bool(int(row["cancel_requested"] or 0)),
             "revision": int(row["revision"] or 0),

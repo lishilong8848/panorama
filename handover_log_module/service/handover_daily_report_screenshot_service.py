@@ -369,12 +369,23 @@ class HandoverDailyReportScreenshotService:
         url = str(page.url or "").strip().lower()
         if any(token in url for token in ("passport", "login", "signin", "accounts")):
             return True
+        if any(token in url for token in ("/base/", "/wiki/", "/docx/", "/sheets/", "/bitable/")):
+            return False
         try:
-            text = str(page.locator("body").inner_text(timeout=1500) or "")
+            for selector in (
+                "input[type='password']",
+                "input[name='mobile']",
+                "input[name='username']",
+                "input[name='email']",
+                "iframe[src*='passport']",
+                "[class*='login'] [class*='qr']",
+                "[data-testid*='login']",
+            ):
+                if page.locator(selector).count() > 0:
+                    return True
         except Exception:  # noqa: BLE001
             return False
-        lowered = text.lower()
-        return any(token in lowered for token in ("扫码", "登录", "sign in", "qr code"))
+        return False
 
 
     @staticmethod
@@ -382,12 +393,23 @@ class HandoverDailyReportScreenshotService:
         url = str(page.url or "").strip().lower()
         if any(token in url for token in ("passport", "login", "signin", "accounts")):
             return True
+        if any(token in url for token in ("/base/", "/wiki/", "/docx/", "/sheets/", "/bitable/")):
+            return False
         try:
-            text = str(await page.locator("body").inner_text(timeout=1500) or "")
+            for selector in (
+                "input[type='password']",
+                "input[name='mobile']",
+                "input[name='username']",
+                "input[name='email']",
+                "iframe[src*='passport']",
+                "[class*='login'] [class*='qr']",
+                "[data-testid*='login']",
+            ):
+                if await page.locator(selector).count() > 0:
+                    return True
         except Exception:  # noqa: BLE001
             return False
-        lowered = text.lower()
-        return any(token in lowered for token in ("扫码", "登录", "sign in", "qr code"))
+        return False
 
     def _probe_url(self) -> str:
         return self._cfg()["external_page_url"]
@@ -558,7 +580,7 @@ class HandoverDailyReportScreenshotService:
         if saw_feishu_page:
             return {"status": "missing_login", "error": "login_required"}
         if saw_any_page:
-            return {"status": "missing_login", "error": "feishu_page_not_open"}
+            return {"status": "ready_without_target_page", "error": "feishu_page_not_open"}
         return {"status": "missing_login", "error": "browser_started_without_pages"}
 
     async def _auth_state_from_existing_pages_async(self, browser) -> Dict[str, str]:
@@ -581,7 +603,7 @@ class HandoverDailyReportScreenshotService:
         if saw_feishu_page:
             return {"status": "missing_login", "error": "login_required"}
         if saw_any_page:
-            return {"status": "missing_login", "error": "feishu_page_not_open"}
+            return {"status": "ready_without_target_page", "error": "feishu_page_not_open"}
         return {"status": "missing_login", "error": "browser_started_without_pages"}
 
     @staticmethod
@@ -997,7 +1019,7 @@ class HandoverDailyReportScreenshotService:
                                 )
                             last_status = status
                             last_error = error
-                        if status == "ready":
+                        if status in {"ready", "ready_without_target_page"}:
                             emit_log("[交接班][日报截图登录] 登录态已就绪")
                             return
                         time.sleep(3)
@@ -1170,7 +1192,7 @@ class HandoverDailyReportScreenshotService:
         )
         browser_label = self._browser_label(profile_state)
         profile_status = str(profile_state.get("status", "")).strip().lower()
-        if profile_status != "ready":
+        if profile_status not in {"ready", "ready_without_target_page"}:
             return self._capture_failure_result(
                 stage=stage,
                 error="login_required",

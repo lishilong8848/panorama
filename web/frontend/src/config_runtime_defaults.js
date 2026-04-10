@@ -254,7 +254,7 @@ function applyDeploymentDefaults(cfg) {
   setNumberDefault(cfg.shared_bridge, "claim_lease_sec", 30);
   setNumberDefault(cfg.shared_bridge, "stale_task_timeout_sec", 1800);
   setNumberDefault(cfg.shared_bridge, "artifact_retention_days", 7);
-  setNumberDefault(cfg.shared_bridge, "sqlite_busy_timeout_ms", 5000);
+  setNumberDefault(cfg.shared_bridge, "sqlite_busy_timeout_ms", 15000);
   if (cfg.deployment.role_mode === "internal") {
     cfg.shared_bridge.root_dir = cfg.shared_bridge.internal_root_dir;
   } else if (cfg.deployment.role_mode === "external") {
@@ -432,7 +432,9 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(shiftRoster.fields, "building", "机楼");
   setStringDefault(shiftRoster.fields, "team", "班组");
   setStringDefault(shiftRoster.fields, "shift", "班次");
-  setStringDefault(shiftRoster.fields, "people_text", "人员（文本）");
+  if (!String(shiftRoster.fields.people_text || "").trim() || String(shiftRoster.fields.people_text || "").trim() === "人员（文本）") {
+    shiftRoster.fields.people_text = "值班人员（实际）";
+  }
   setStringDefault(shiftRoster.cells, "current_people", "C3");
   setStringDefault(shiftRoster.cells, "next_people", "G3");
   if (!Array.isArray(shiftRoster.cells.next_first_person_cells) || !shiftRoster.cells.next_first_person_cells.length) {
@@ -455,7 +457,9 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(longDay.fields, "duty_date", "排班日期");
   setStringDefault(longDay.fields, "building", "机楼");
   setStringDefault(longDay.fields, "shift", "班次");
-  setStringDefault(longDay.fields, "people_text", "人员（文本）");
+  if (!String(longDay.fields.people_text || "").trim() || String(longDay.fields.people_text || "").trim() === "人员（文本）") {
+    longDay.fields.people_text = "值班人员（实际）";
+  }
   setStringDefault(longDay, "shift_value", "长白");
   setStringDefault(longDay, "day_cell", "B4");
   setStringDefault(longDay, "night_cell", "F4");
@@ -668,7 +672,8 @@ function applyHandoverDefaults(cfg) {
   setNumberDefault(maintenanceManagement.source, "page_size", 500);
   setNumberDefault(maintenanceManagement.source, "max_records", 5000);
   setStringDefault(maintenanceManagement.fields, "building", "楼栋");
-  setStringDefault(maintenanceManagement.fields, "start_time", "实际开始时间");
+  setStringDefault(maintenanceManagement.fields, "updated_time", "最新更新时间");
+  setStringDefault(maintenanceManagement.fields, "actual_end_time", "实际结束时间");
   setStringDefault(maintenanceManagement.fields, "item", "名称");
   setStringDefault(maintenanceManagement.fields, "specialty", "专业");
   setStringDefault(maintenanceManagement.sections, "maintenance_management", "维护管理");

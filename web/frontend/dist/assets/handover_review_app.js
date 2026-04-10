@@ -497,6 +497,7 @@ export function mountHandoverReviewApp(Vue) {
       const reviewHolderLabel = String(reviewClientIdentity.holderLabel || "").trim();
       const concurrency = ref(emptyConcurrencyState(0));
       const staleRevisionConflict = ref(false);
+      const syncingRemoteRevision = ref(false);
       const heldLockSessionId = ref("");
 
       const cloudSyncBusy = computed(() => retryingCloudSync.value || updatingHistoryCloudSync.value);
@@ -551,9 +552,9 @@ export function mountHandoverReviewApp(Vue) {
 
       const reviewSaveBadge = computed(() => {
         if (errorText.value) return badgeVm("保存异常", "danger", "soft", "error");
-        if (needsRefresh.value) return badgeVm("需刷新", "warning", "soft", "warn");
+        if (needsRefresh.value) return badgeVm("等待同步", "warning", "soft", "warn");
         if (saving.value) return badgeVm(statusText.value || "正在保存...", "info", "soft", "clock");
-        if (dirty.value) return badgeVm("待自动保存（空闲后保存）", "warning", "soft", "warn");
+        if (dirty.value) return badgeVm("待保存", "warning", "soft", "warn");
         return badgeVm(statusText.value || "已自动保存", "success", "soft", "check");
       });
       const reviewConfirmBadge = computed(() =>
@@ -576,22 +577,23 @@ export function mountHandoverReviewApp(Vue) {
       });
 
       const reviewHeaderBadges = computed(() => {
-        const badges = [];
-        if (reviewFileSummary.value) {
-          badges.push(badgeVm(`文件 ${reviewFileSummary.value}`, "neutral", "outline", "file"));
-        } else {
-          badges.push(badgeVm("暂无输出文件", "neutral", "outline", "file"));
-        }
-        badges.push(badgeVm(`模式 ${currentModeText.value}`, isHistoryMode.value ? "warning" : "info", "outline", "clock"));
-        badges.push(badgeVm(`审核版本 ${session.value?.revision || "-"}`, "neutral", "outline", "clock"));
+        const badges = [
+          badgeVm(
+            isHistoryMode.value ? "历史记录" : "当前记录",
+            isHistoryMode.value ? "warning" : "info",
+            "outline",
+            "clock",
+          ),
+          reviewSaveBadge.value,
+          isHistoryMode.value ? badgeVm("可编辑", "neutral", "outline", "file") : reviewConfirmBadge.value,
+        ];
         if (concurrency.value?.client_holds_lock) {
-          badges.push(badgeVm("当前终端正在编辑", "info", "outline", "warn"));
+          badges.push(badgeVm("本端编辑中", "info", "outline", "warn"));
         } else if (activeEditorLabel.value) {
-          badges.push(badgeVm(`编辑中 ${activeEditorLabel.value}`, "warning", "outline", "warn"));
+          badges.push(badgeVm("其他终端编辑中", "warning", "outline", "warn"));
+        } else if (["warning", "danger"].includes(String(reviewCloudSheetVm.value.tone || ""))) {
+          badges.push(badgeVm(reviewCloudSheetVm.value.text, reviewCloudSheetVm.value.tone, "outline", "link"));
         }
-        badges.push(reviewConfirmBadge.value);
-        badges.push(badgeVm(reviewCloudSheetVm.value.text, reviewCloudSheetVm.value.tone, "outline", "link"));
-        badges.push(reviewSaveBadge.value);
         return badges;
       });
 
@@ -599,19 +601,25 @@ export function mountHandoverReviewApp(Vue) {
         const rows = [];
         if (isHistoryMode.value) {
           rows.push({
-            text: "当前为历史模式：允许编辑并保存历史交接班日志，但不会更新该楼模板默认值；如需同步云文档，请手动点击“更新云文档”。",
+            text: "当前为历史模式：只更新当前历史记录，不改模板默认值；如需同步云文档，请手动点击“更新云文档”。",
             tone: "info",
+          });
+        }
+        if (syncingRemoteRevision.value) {
+          rows.push({
+            text: "其他用户正在保存，请稍等，系统将自动刷新最新内容。",
+            tone: "warning",
           });
         }
         if (staleRevisionConflict.value) {
           rows.push({
-            text: "当前页面内容已过期，保存或确认会与最新版本冲突。请先刷新页面后再继续处理。",
+            text: "内容已有更新，请稍等，系统将自动同步最新内容。",
             tone: "warning",
           });
         }
         if (concurrency.value?.is_editing_elsewhere && activeEditorLabel.value) {
           rows.push({
-            text: `当前有其他终端正在编辑：${activeEditorLabel.value}。你仍可继续本地编辑，但提交时可能发生冲突。`,
+            text: `其他用户正在编辑：${activeEditorLabel.value}。如需保存或确认，请稍等。`,
             tone: "warning",
           });
         }
@@ -620,7 +628,7 @@ export function mountHandoverReviewApp(Vue) {
         }
         if (needsRefresh.value) {
           rows.push({
-            text: "检测到该楼有新生成的交接班版本，请先刷新页面查看。",
+            text: "检测到新版本，请刷新后查看。",
             tone: "warning",
           });
         }
@@ -634,9 +642,9 @@ export function mountHandoverReviewApp(Vue) {
       });
 
       const confirmActionVm = computed(() => {
-        const disabled = !session.value || saving.value || confirming.value || cloudSyncBusy.value || needsRefresh.value || staleRevisionConflict.value;
+        const disabled = !session.value || saving.value || dirty.value || confirming.value || cloudSyncBusy.value || needsRefresh.value || staleRevisionConflict.value || syncingRemoteRevision.value;
         if (!session.value) {
-          return { text: "暂无会话", variant: "secondary", disabled: true };
+          return { text: "暂无记录", variant: "secondary", disabled: true };
         }
         if (confirming.value) {
           return {
@@ -779,17 +787,20 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       function markRevisionConflict(message = "") {
-        staleRevisionConflict.value = true;
-        needsRefresh.value = true;
-        clearSaveTimers();
-        if (message) {
-          errorText.value = String(message || "");
-        }
-        statusText.value = "审核内容已被其他人更新，请刷新后再继续处理。";
+        beginRemoteSaveRefresh(message || "其他用户正在保存，请稍等，系统将自动刷新最新内容。");
       }
 
       function isRevisionConflictError(error) {
         return Number.parseInt(String(error?.httpStatus || 0), 10) === 409;
+      }
+
+      function beginRemoteSaveRefresh(message = "其他用户正在保存，请稍等，系统将自动刷新最新内容。") {
+        syncingRemoteRevision.value = true;
+        staleRevisionConflict.value = false;
+        needsRefresh.value = false;
+        clearSaveTimers();
+        errorText.value = "";
+        statusText.value = message;
       }
 
       function touchEditingIntent() {
@@ -896,6 +907,7 @@ export function mountHandoverReviewApp(Vue) {
           statusText.value = "";
         }
         lastSavedSnapshot.value = serializeDocument(nextDocument);
+        syncingRemoteRevision.value = false;
         window.setTimeout(() => {
           suspendAutoSave.value = false;
         }, 0);
@@ -937,7 +949,7 @@ export function mountHandoverReviewApp(Vue) {
 
           if (incomingSessionId && currentSessionId && incomingSessionId !== currentSessionId) {
             needsRefresh.value = true;
-            statusText.value = "检测到该楼有新生成的交接班版本，请刷新页面查看。";
+            statusText.value = "检测到新版本，请刷新后查看。";
             return;
           }
 
@@ -946,11 +958,8 @@ export function mountHandoverReviewApp(Vue) {
               return;
             }
             if (dirty.value) {
-              staleRevisionConflict.value = true;
-              needsRefresh.value = true;
               clearSaveTimers();
-              statusText.value = "审核内容已被其他人更新，请刷新后再继续处理。";
-              return;
+              beginRemoteSaveRefresh();
             }
             hydrateFromPayload(payload, { fromBackground: true });
             statusText.value = "已同步最新审核内容";
@@ -975,12 +984,12 @@ export function mountHandoverReviewApp(Vue) {
 
       function scheduleSaveRetryAfterFailure() {
         if (pendingFailureRetryCount.value >= REVIEW_SAVE_MAX_IDLE_RETRY_AFTER_FAILURE) {
-          statusText.value = "保存失败，请继续编辑后重试。";
+          statusText.value = "保存失败，请稍后重试。";
           return;
         }
         clearSaveFailureRetryTimer();
         pendingFailureRetryCount.value += 1;
-        statusText.value = "保存失败，将在 30 秒后重试一次。";
+        statusText.value = "保存失败，30 秒后自动重试。";
         saveFailureRetryTimer.value = window.setTimeout(() => {
           saveFailureRetryTimer.value = null;
           saveDocument({ reason: "retry" });
@@ -997,9 +1006,9 @@ export function mountHandoverReviewApp(Vue) {
 
       async function saveDocument(options = {}) {
         const { reason = "autosave" } = options || {};
-        if (saving.value || confirming.value || cloudSyncBusy.value || suspendAutoSave.value || !session.value) return false;
+        if (saving.value || confirming.value || cloudSyncBusy.value || suspendAutoSave.value || syncingRemoteRevision.value || !session.value) return false;
         if (staleRevisionConflict.value) {
-          statusText.value = "审核内容已被其他人更新，请先刷新再保存。";
+          beginRemoteSaveRefresh();
           return false;
         }
         const payloadSnapshot = serializeDocument(documentRef.value);
@@ -1014,13 +1023,13 @@ export function mountHandoverReviewApp(Vue) {
         errorText.value = "";
         await ensureEditingLock();
         if (reason === "confirm") {
-          statusText.value = "正在保存最新改动...";
+          statusText.value = "正在保存...";
         } else if (reason === "retry") {
-          statusText.value = "正在重试保存...";
+          statusText.value = "正在重新保存...";
         } else if (reason === "switch") {
-          statusText.value = "正在保存当前交接班日志后切换...";
+          statusText.value = "正在保存并切换...";
         } else if (reason === "cloud_update") {
-          statusText.value = "正在保存后更新云文档...";
+          statusText.value = "正在保存并更新云文档...";
         } else {
           statusText.value = "正在自动保存...";
         }
@@ -1045,7 +1054,9 @@ export function mountHandoverReviewApp(Vue) {
           return true;
         } catch (error) {
           if (isRevisionConflictError(error)) {
-            markRevisionConflict(String(error?.message || error || "审核内容已被其他人更新"));
+            beginRemoteSaveRefresh();
+            await loadReviewData({ background: false });
+            statusText.value = "已同步最新审核内容";
             return false;
           }
           errorText.value = String(error?.message || error || "保存失败");
@@ -1098,10 +1109,19 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       async function toggleConfirm() {
-        if (isHistoryMode.value || !session.value || saving.value || confirming.value || cloudSyncBusy.value || needsRefresh.value || staleRevisionConflict.value) return;
+        if (
+          isHistoryMode.value ||
+          !session.value ||
+          saving.value ||
+          confirming.value ||
+          cloudSyncBusy.value ||
+          syncingRemoteRevision.value ||
+          needsRefresh.value ||
+          staleRevisionConflict.value
+        ) return;
         if (dirty.value) {
-          const saved = await saveDocument({ reason: "confirm" });
-          if (!saved) return;
+          statusText.value = "请先等待当前修改保存成功后再确认。";
+          return;
         }
         confirming.value = true;
         errorText.value = "";
@@ -1120,7 +1140,9 @@ export function mountHandoverReviewApp(Vue) {
           statusText.value = session.value?.confirmed ? "已确认当前楼栋" : "已撤销确认";
         } catch (error) {
           if (isRevisionConflictError(error)) {
-            markRevisionConflict(String(error?.message || error || "审核状态已被其他人更新"));
+            beginRemoteSaveRefresh();
+            await loadReviewData({ background: false });
+            statusText.value = "已同步最新审核内容";
           } else {
             errorText.value = String(error?.message || error || "确认失败");
           }
@@ -1133,7 +1155,7 @@ export function mountHandoverReviewApp(Vue) {
         if (!buildingCode || !session.value || retryingCloudSync.value || !canRetryCloudSync.value) return;
         retryingCloudSync.value = true;
         errorText.value = "";
-        statusText.value = "正在重试云表上传...";
+        statusText.value = "正在重试云表同步...";
         try {
           const response = await retryHandoverReviewCloudSyncApi(buildingCode, {
             session_id: session.value.session_id,
@@ -1142,7 +1164,7 @@ export function mountHandoverReviewApp(Vue) {
           if (!jobId) {
             throw new Error("云表重试任务提交失败");
           }
-          statusText.value = "云表重试任务已提交，正在后台执行...";
+          statusText.value = "已提交云表同步任务，正在处理中...";
           void (async () => {
             const job = await waitForBackgroundJob(jobId, { timeoutMs: 10 * 60 * 1000 });
             if (!job) return;
@@ -1185,7 +1207,7 @@ export function mountHandoverReviewApp(Vue) {
         }
         updatingHistoryCloudSync.value = true;
         errorText.value = "";
-        statusText.value = "正在更新当前历史交接班日志的云文档...";
+        statusText.value = "正在更新历史云文档...";
         try {
           const response = await updateHandoverReviewCloudSyncApi(buildingCode, {
             session_id: session.value.session_id,
@@ -1193,7 +1215,7 @@ export function mountHandoverReviewApp(Vue) {
           applyPayloadMeta(response || {});
           const updateStatus = String(response.status || "").trim().toLowerCase();
           if (updateStatus === "ok" || updateStatus === "success") {
-            statusText.value = "当前历史交接班日志已更新到云文档";
+            statusText.value = "历史云文档已更新";
           } else {
             errorText.value = String(response?.cloud_sheet_sync?.failed_buildings?.[0]?.error || response?.status || "历史云文档更新失败");
             statusText.value = "历史云文档更新失败";
@@ -1207,6 +1229,10 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       async function downloadCurrentReviewFile() {
+        if (saving.value || dirty.value || syncingRemoteRevision.value) {
+          statusText.value = "请先等待当前修改保存成功后再下载。";
+          return;
+        }
         const sessionId = String(session.value?.session_id || "").trim();
         if (!buildingCode || !sessionId) {
           statusText.value = "当前没有可下载的交接班文件";
@@ -1245,6 +1271,10 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       async function downloadCurrentCapacityReviewFile() {
+        if (saving.value || dirty.value || syncingRemoteRevision.value) {
+          statusText.value = "请先等待当前修改保存成功后再下载。";
+          return;
+        }
         const sessionId = String(session.value?.session_id || "").trim();
         const capacityOutputFile = String(session.value?.capacity_output_file || "").trim();
         if (!buildingCode || !sessionId || !capacityOutputFile) {
@@ -1360,15 +1390,15 @@ export function mountHandoverReviewApp(Vue) {
           clearSaveFailureRetryTimer();
           if (staleRevisionConflict.value) {
             clearSaveTimers();
-            statusText.value = "审核内容已被其他人更新，请刷新后再继续处理。";
+            beginRemoteSaveRefresh();
             return;
           }
           if (!isHistoryMode.value && session.value?.confirmed) {
-            statusText.value = "内容已变更，保存后需重新确认";
+            statusText.value = "内容已修改，保存后需重新确认";
           } else if (isHistoryMode.value) {
-            statusText.value = "历史交接班日志待保存";
+            statusText.value = "历史记录待保存";
           } else {
-            statusText.value = "待自动保存（空闲后保存）";
+            statusText.value = "待保存";
           }
           scheduleAutosave();
         },
@@ -1439,6 +1469,7 @@ export function mountHandoverReviewApp(Vue) {
         reviewHeaderBadges,
         reviewStatusBanners,
         confirmActionVm,
+        syncingRemoteRevision,
         onHistorySelectionChange,
         returnToLatestSession,
         updateHistoryCloudSync,
@@ -1459,3 +1490,6 @@ export function mountHandoverReviewApp(Vue) {
     template: HANDOVER_REVIEW_TEMPLATE,
   }).mount("#app");
 }
+
+
+

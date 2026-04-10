@@ -79,3 +79,27 @@ def test_alarm_export_legacy_bridge_task_is_failed_without_db_access(tmp_path: P
     assert updated is not None
     assert updated["status"] == "failed"
     assert "已退役" in str(updated.get("error", ""))
+
+
+def test_health_snapshot_degrades_to_cached_result_when_store_temporarily_unavailable(tmp_path: Path) -> None:
+    service = SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    service._store.ensure_ready()
+
+    initial = service.get_health_snapshot()
+    assert initial["db_status"] == "disabled"
+
+    def _raise_permission_error():
+        raise PermissionError("[WinError 5] 拒绝访问")
+
+    service._store.list_external_alert_projections = _raise_permission_error  # type: ignore[method-assign]
+
+    degraded = service.get_health_snapshot()
+
+    assert degraded["enabled"] is True
+    assert degraded["db_status"] == "unavailable"
+    assert degraded["internal_alert_status"] == initial["internal_alert_status"]
+    assert "暂时不可用" in str(degraded["last_error"] or "")

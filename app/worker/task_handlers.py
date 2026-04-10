@@ -7,9 +7,12 @@ from typing import Any, Callable, Dict, List, Tuple
 
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
 from app.modules.report_pipeline.service.calculation_service import CalculationService
+from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
 from app.modules.sheet_import.service.sheet_import_service import SheetImportService
 from app.shared.utils.runtime_temp_workspace import cleanup_runtime_temp_dir
+from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
+from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 from pipeline_utils import get_app_dir
 
 
@@ -44,6 +47,33 @@ def handle_handover_from_download(
     notify = WebhookNotifyService(config)
     try:
         orchestrator = OrchestratorService(config)
+        if str(payload.get("resume_kind", "") or "").strip() == "shared_bridge_handover":
+            raw_items = list(payload.get("building_files") or [])
+            building_files: List[Tuple[str, str]] = []
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                building = str(item.get("building", "") or "").strip()
+                file_path = str(item.get("file_path", "") or "").strip()
+                if building and file_path:
+                    building_files.append((building, file_path))
+            raw_capacity_items = list(payload.get("capacity_building_files") or [])
+            capacity_building_files: List[Tuple[str, str]] = []
+            for item in raw_capacity_items:
+                if not isinstance(item, dict):
+                    continue
+                building = str(item.get("building", "") or "").strip()
+                file_path = str(item.get("file_path", "") or "").strip()
+                if building and file_path:
+                    capacity_building_files.append((building, file_path))
+            return orchestrator.run_handover_from_files(
+                building_files=building_files,
+                capacity_building_files=capacity_building_files,
+                end_time=payload.get("end_time"),
+                duty_date=payload.get("duty_date"),
+                duty_shift=payload.get("duty_shift"),
+                emit_log=emit_log,
+            )
         result = orchestrator.run_handover_from_download(
             buildings=payload.get("buildings"),
             end_time=payload.get("end_time"),
@@ -77,6 +107,16 @@ def handle_day_metric_from_download(
 ) -> Dict[str, Any]:
     notify = WebhookNotifyService(config)
     try:
+        if str(payload.get("resume_kind", "") or "").strip() == "shared_bridge_day_metric":
+            service = DayMetricStandaloneUploadService(config)
+            return service.continue_from_source_files(
+                selected_dates=list(payload.get("selected_dates") or []),
+                buildings=list(payload.get("buildings") or []),
+                source_units=list(payload.get("source_units") or []),
+                building_scope=str(payload.get("building_scope", "") or "").strip() or "all_enabled",
+                building=str(payload.get("building", "") or "").strip() or None,
+                emit_log=emit_log,
+            )
         orchestrator = OrchestratorService(config)
         return orchestrator.run_day_metric_from_download(
             selected_dates=list(payload.get("selected_dates") or []),
@@ -101,6 +141,12 @@ def handle_wet_bulb_collection_run(
 ) -> Dict[str, Any]:
     notify = WebhookNotifyService(config)
     try:
+        if str(payload.get("resume_kind", "") or "").strip() == "shared_bridge_wet_bulb":
+            service = WetBulbCollectionService(config)
+            return service.continue_from_source_units(
+                source_units=list(payload.get("source_units") or []),
+                emit_log=emit_log,
+            )
         orchestrator = OrchestratorService(config)
         source = str(payload.get("source", "") or "").strip() or "湿球温度定时采集"
         return orchestrator.run_wet_bulb_collection(emit_log=emit_log, source=source)
@@ -117,6 +163,13 @@ def handle_auto_once(
     notify = WebhookNotifyService(config)
     source = str(payload.get("source", "") or "").strip() or "立即执行自动流程"
     try:
+        if str(payload.get("resume_kind", "") or "").strip() == "shared_bridge_monthly_auto_once":
+            return run_monthly_from_file_items(
+                config,
+                file_items=list(payload.get("file_items") or []),
+                emit_log=emit_log,
+                source_label=source,
+            )
         orchestrator = OrchestratorService(config)
         return orchestrator.run_auto_once(emit_log, source=source)
     except Exception as exc:  # noqa: BLE001

@@ -421,6 +421,17 @@ def _accepted_bridge_task_response(task: Dict[str, Any], *, name: str, feature: 
     }
 
 
+def _accepted_waiting_job_response(job, task: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = {
+        "ok": True,
+        "accepted": True,
+        "job": job.to_dict() if hasattr(job, "to_dict") else dict(job or {}),
+    }
+    if isinstance(task, dict) and task:
+        payload["bridge_task"] = task
+    return payload
+
+
 def _get_or_create_bridge_task(
     bridge_service,
     *,
@@ -2081,23 +2092,38 @@ def job_auto_once(request: Request) -> Dict[str, Any]:
         ))
         cached_entries = selection["selected_entries"]
         if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
+            dedupe_key = _job_dedupe_key(
+                "monthly_auto_once_wait_shared_bridge",
+                bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
+                buildings=target_buildings,
+            )
+            job = container.job_service.create_waiting_worker_job(
+                name="月报自动流程",
+                worker_handler="auto_once",
+                worker_payload={"source": "月报共享桥接自动恢复"},
+                resource_keys=_job_resource_keys("shared_bridge:monthly_report"),
+                priority="manual",
+                feature="auto_once",
+                dedupe_key=dedupe_key,
+                submitted_by="manual",
+                wait_reason="waiting:shared_bridge",
+                summary="等待内网补采同步",
+            )
             task = _get_or_create_bridge_task(
                 bridge_service,
                 get_or_create_name="get_or_create_monthly_auto_once_task",
                 create_name="create_monthly_auto_once_task",
+                resume_job_id=job.job_id,
                 requested_by="manual",
                 source="manual",
             )
+            container.job_service.bind_bridge_task(job.job_id, str(task.get("task_id", "") or "").strip())
             container.add_system_log(
                 "[共享桥接] 已受理月报自动流程共享桥接任务 "
                 f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
                 f"reason={_build_latest_cache_wait_detail(feature_name='全景平台月报', selection=selection)}"
             )
-            return _accepted_bridge_task_response(
-                task,
-                name="月报自动流程-共享桥接补采",
-                feature="monthly_report_pipeline",
-            )
+            return _accepted_waiting_job_response(job, task)
 
         def _run_from_cache(emit_log):
             file_items = [
@@ -2187,23 +2213,38 @@ def job_wet_bulb_collection_run(request: Request) -> Dict[str, Any]:
         ))
         cached_entries = selection["selected_entries"]
         if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
+            dedupe_key = _job_dedupe_key(
+                "wet_bulb_wait_shared_bridge",
+                bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
+                buildings=target_buildings,
+            )
+            job = container.job_service.create_waiting_worker_job(
+                name="湿球温度定时采集",
+                worker_handler="wet_bulb_collection_run",
+                worker_payload={"source": "湿球温度定时采集"},
+                resource_keys=_job_resource_keys("shared_bridge:wet_bulb"),
+                priority="manual",
+                feature="wet_bulb_collection_run",
+                dedupe_key=dedupe_key,
+                submitted_by="manual",
+                wait_reason="waiting:shared_bridge",
+                summary="等待内网补采同步",
+            )
             task = _get_or_create_bridge_task(
                 bridge_service,
                 get_or_create_name="get_or_create_wet_bulb_collection_task",
                 create_name="create_wet_bulb_collection_task",
                 buildings=target_buildings,
+                resume_job_id=job.job_id,
                 requested_by="manual",
             )
+            container.job_service.bind_bridge_task(job.job_id, str(task.get("task_id", "") or "").strip())
             container.add_system_log(
                 "[共享桥接] 已受理湿球温度共享桥接任务 "
                 f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
                 f"reason={_build_latest_cache_wait_detail(feature_name='交接班日志', selection=selection)}"
             )
-            return _accepted_bridge_task_response(
-                task,
-                name="湿球温度定时采集-共享桥接补采",
-                feature="wet_bulb_collection",
-            )
+            return _accepted_waiting_job_response(job, task)
 
         def _run_from_cache(emit_log):
             source_units = [
@@ -3110,6 +3151,29 @@ def job_handover_from_download(payload: Dict[str, Any], request: Request) -> Dic
                 or len(cached_entries) < len(target_buildings)
                 or len(capacity_building_files) < len(target_buildings)
             ):
+                dedupe_key = _job_dedupe_key(
+                    "handover_latest_wait_shared_bridge",
+                    bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
+                    buildings=target_buildings,
+                    end_time=end_time_text or "",
+                )
+                job = container.job_service.create_waiting_worker_job(
+                    name="交接班日志-内网下载生成",
+                    worker_handler="handover_from_download",
+                    worker_payload={
+                        "buildings": target_buildings,
+                        "end_time": end_time_text,
+                        "duty_date": None,
+                        "duty_shift": None,
+                    },
+                    resource_keys=_job_resource_keys("shared_bridge:handover"),
+                    priority="manual",
+                    feature="handover_from_download",
+                    dedupe_key=dedupe_key,
+                    submitted_by="manual",
+                    wait_reason="waiting:shared_bridge",
+                    summary="等待内网补采同步",
+                )
                 task = _get_or_create_bridge_task(
                     bridge_service,
                     get_or_create_name="get_or_create_handover_from_download_task",
@@ -3118,18 +3182,16 @@ def job_handover_from_download(payload: Dict[str, Any], request: Request) -> Dic
                     end_time=end_time_text,
                     duty_date=None,
                     duty_shift=None,
+                    resume_job_id=job.job_id,
                     requested_by="manual",
                 )
+                container.job_service.bind_bridge_task(job.job_id, str(task.get("task_id", "") or "").strip())
                 container.add_system_log(
                     "[共享桥接] 已受理交接班 latest 共享桥接任务 "
                     f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
                     f"reason={_build_latest_cache_wait_detail(feature_name='交接班日志', selection=selection)}"
                 )
-                return _accepted_bridge_task_response(
-                    task,
-                    name="交接班日志-共享桥接补采",
-                    feature="handover_from_download",
-                )
+                return _accepted_waiting_job_response(job, task)
             building_files = [(str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip()) for item in cached_entries]
 
         def _run_from_cache(emit_log):
@@ -3265,34 +3327,46 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
         ))
         expected_count = len(selected_dates) * len(target_buildings)
         if len(cached_entries) < expected_count:
+            dedupe_key = _job_dedupe_key(
+                "day_metric_wait_shared_bridge",
+                selected_dates=selected_dates,
+                building_scope=building_scope,
+                building=building or "",
+                buildings=target_buildings,
+            )
+            job = container.job_service.create_waiting_worker_job(
+                name="12项独立上传-内网下载",
+                worker_handler="day_metric_from_download",
+                worker_payload={
+                    "selected_dates": selected_dates,
+                    "building_scope": building_scope,
+                    "building": building or None,
+                },
+                resource_keys=_job_resource_keys("shared_bridge:day_metric"),
+                priority="manual",
+                feature="day_metric_from_download",
+                dedupe_key=dedupe_key,
+                submitted_by="manual",
+                wait_reason="waiting:shared_bridge",
+                summary="等待内网补采同步",
+            )
             task = _get_or_create_bridge_task(
                 bridge_service,
-                get_or_create_name="get_or_create_handover_cache_fill_task",
-                create_name="create_handover_cache_fill_task",
-                continuation_kind="day_metric",
-                buildings=None,
-                duty_date=None,
-                duty_shift=None,
+                get_or_create_name="get_or_create_day_metric_from_download_task",
+                create_name="create_day_metric_from_download_task",
                 selected_dates=selected_dates,
                 building_scope=building_scope,
                 building=building or None,
+                resume_job_id=job.job_id,
                 requested_by="manual",
             )
+            container.job_service.bind_bridge_task(job.job_id, str(task.get("task_id", "") or "").strip())
             container.add_system_log(
-                "[共享缓存] 已提交12项历史缓存补采任务 "
+                "[共享桥接] 已受理12项共享桥接任务 "
                 f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
                 f"dates={','.join(selected_dates)}, scope={building_scope}, building={building or '-'}"
             )
-            return {
-                "ok": True,
-                "accepted": True,
-                "bridge_task": task,
-                "job": _bridge_proxy_job(
-                    task,
-                    name="12项历史共享文件补采",
-                    feature="handover_cache_fill",
-                ),
-            }
+            return _accepted_waiting_job_response(job, task)
 
         def _run_from_cache(emit_log):
             source_units = [

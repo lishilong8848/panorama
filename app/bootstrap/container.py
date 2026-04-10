@@ -391,6 +391,7 @@ class AppContainer:
         return SharedBridgeRuntimeService(
             runtime_config=self.runtime_config,
             app_version=self.version,
+            job_service=self.job_service,
             emit_log=self.add_system_log,
         )
 

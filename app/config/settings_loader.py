@@ -916,7 +916,7 @@ def _validate_handover_maintenance_management_section(cfg: Dict[str, Any]) -> No
         if int(source.get("max_records", 0)) <= 0:
             raise ValueError("配置错误: features.handover_log.maintenance_management_section.source.max_records 必须大于0")
 
-        for key in ("building", "start_time", "item", "specialty"):
+        for key in ("building", "updated_time", "actual_end_time", "item", "specialty"):
             if not str(fields.get(key, "")).strip():
                 raise ValueError(
                     f"配置错误: features.handover_log.maintenance_management_section.fields.{key} 不能为空"
@@ -1529,6 +1529,33 @@ def _validate_handover_cell_rules(cfg: Dict[str, Any]) -> None:
         _validate_rows(rows, f"features.handover_log.cell_rules.building_rows[{building}]", set())
 
 
+def _migrate_shift_roster_people_text_fields(cfg: Dict[str, Any]) -> None:
+    features = cfg.get("features", {})
+    if not isinstance(features, dict):
+        return
+    handover = features.get("handover_log", {})
+    if not isinstance(handover, dict):
+        return
+    roster = handover.get("shift_roster", {})
+    if not isinstance(roster, dict):
+        return
+
+    preferred_field = "值班人员（实际）"
+    legacy_field = "人员（文本）"
+
+    def _migrate_fields(raw_fields: Any) -> None:
+        if not isinstance(raw_fields, dict):
+            return
+        people_field = str(raw_fields.get("people_text", "") or "").strip()
+        if not people_field or people_field == legacy_field:
+            raw_fields["people_text"] = preferred_field
+
+    _migrate_fields(roster.get("fields", {}))
+    long_day = roster.get("long_day", {})
+    if isinstance(long_day, dict):
+        _migrate_fields(long_day.get("fields", {}))
+
+
 def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     normalized_v3 = ensure_v3_config(cfg)
 
@@ -1541,6 +1568,7 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     normalized_v3 = sync_runtime_back_to_v3(normalized_v3, runtime_cfg)
     normalized_v3 = ensure_v3_config(normalized_v3)
+    _migrate_shift_roster_people_text_fields(normalized_v3)
 
     _validate_scheduler(normalized_v3)
     _validate_updater(normalized_v3)

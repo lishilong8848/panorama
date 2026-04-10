@@ -35,6 +35,7 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (
     SharedSourceCacheService,
     is_accessible_cached_file_path,
 )
+from app.modules.report_pipeline.service.job_service import JobService
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.shared.runtime.internal_download_browser_pool_runtime import (
     clear_internal_download_browser_pool,
@@ -91,17 +92,20 @@ class SharedBridgeRuntimeService:
     CLEANUP_INTERVAL_SEC = 600
     TASK_RETENTION_DAYS = 14
     NODE_RETENTION_DAYS = 2
+    STORE_ERROR_LOG_INTERVAL_SEC = 60
 
     def __init__(
         self,
         *,
         runtime_config: Dict[str, Any],
         app_version: str,
+        job_service: JobService | None = None,
         emit_log: Callable[[str], None] | None = None,
     ) -> None:
         self.runtime_config = copy.deepcopy(runtime_config if isinstance(runtime_config, dict) else {})
         self.app_version = str(app_version or "").strip()
         self.emit_log = emit_log
+        self._job_service = job_service
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -109,6 +113,11 @@ class SharedBridgeRuntimeService:
         self._db_status = "disabled"
         self._last_error = ""
         self._counts = {"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0, "node_count": 0}
+        self._cached_task_list: List[Dict[str, Any]] = []
+        self._cached_task_details: Dict[str, Dict[str, Any]] = {}
+        self._cached_internal_alert_status: Dict[str, Any] = self._empty_internal_alert_status()
+        self._cached_health_snapshot: Dict[str, Any] | None = None
+        self._store_issue_log_markers: Dict[str, float] = {}
         self._store: SharedBridgeStore | None = None
         self._internal_download_pool: InternalDownloadBrowserPool | None = None
         self._source_cache_service: SharedSourceCacheService | None = None
@@ -118,6 +127,35 @@ class SharedBridgeRuntimeService:
         self._cleanup_deleted_entries = 0
         self._cleanup_deleted_files = 0
         self._refresh_config()
+
+    @staticmethod
+    def _resume_job_id_from_task(task: Dict[str, Any]) -> str:
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        return str(request.get("resume_job_id", "") or "").strip()
+
+    def _resume_bound_job(
+        self,
+        task: Dict[str, Any],
+        *,
+        worker_payload: Dict[str, Any],
+        summary: str,
+    ) -> None:
+        job_id = self._resume_job_id_from_task(task)
+        if not job_id:
+            return
+        if self._job_service is None:
+            raise RuntimeError("共享桥接缺少任务服务，无法恢复原任务")
+        self._job_service.resume_waiting_worker_job(
+            job_id,
+            worker_payload=worker_payload,
+            summary=summary,
+        )
+
+    def _fail_bound_job(self, task: Dict[str, Any], *, error_text: str, summary: str = "") -> None:
+        job_id = self._resume_job_id_from_task(task)
+        if not job_id or self._job_service is None:
+            return
+        self._job_service.fail_waiting_job(job_id, error_text=error_text, summary=summary)
 
     def _refresh_config(self) -> None:
         deployment = self.runtime_config.get("deployment", {})
@@ -139,7 +177,7 @@ class SharedBridgeRuntimeService:
         self.claim_lease_sec = max(5, int(resolved_bridge_cfg.get("claim_lease_sec", 30) or 30))
         self.stale_task_timeout_sec = max(60, int(resolved_bridge_cfg.get("stale_task_timeout_sec", 1800) or 1800))
         self.artifact_retention_days = max(1, int(resolved_bridge_cfg.get("artifact_retention_days", 7) or 7))
-        self.sqlite_busy_timeout_ms = max(1000, int(resolved_bridge_cfg.get("sqlite_busy_timeout_ms", 5000) or 5000))
+        self.sqlite_busy_timeout_ms = max(1000, int(resolved_bridge_cfg.get("sqlite_busy_timeout_ms", 15000) or 15000))
         self._store = (
             SharedBridgeStore(self.shared_bridge_root, busy_timeout_ms=self.sqlite_busy_timeout_ms)
             if self.shared_bridge_root
@@ -166,6 +204,75 @@ class SharedBridgeRuntimeService:
             "node_id": self.node_id,
             "node_label": self.node_label,
         }
+
+    def _shared_bridge_db_path_text(self) -> str:
+        if self._store is not None:
+            return str(self._store.db_path)
+        root_text = str(self.shared_bridge_root or "").strip()
+        if not root_text:
+            return ""
+        return str(Path(root_text) / "bridge.db")
+
+    @staticmethod
+    def _store_error_state(exc: Exception) -> str:
+        text = str(exc or "").strip().lower()
+        if any(token in text for token in ("database is locked", "database table is locked", "database is busy", "busy")):
+            return "busy"
+        return "unavailable"
+
+    def _emit_store_issue_log(self, scope: str, exc: Exception) -> None:
+        error_text = str(exc or "").strip()
+        status = self._store_error_state(exc)
+        marker = f"{scope}|{status}|{type(exc).__name__}|{error_text.lower()}"
+        now_monotonic = time.monotonic()
+        previous = float(self._store_issue_log_markers.get(marker, 0.0) or 0.0)
+        if previous and now_monotonic - previous < self.STORE_ERROR_LOG_INTERVAL_SEC:
+            return
+        self._store_issue_log_markers[marker] = now_monotonic
+        self._emit_system_log(
+            "[共享桥接] 数据库降级: "
+            f"scope={scope}, status={status}, role={_role_label(self.role_mode)}, "
+            f"root={self.shared_bridge_root or '-'}, db={self._shared_bridge_db_path_text() or '-'}, "
+            f"error={type(exc).__name__}: {error_text or '-'}"
+        )
+
+    def _mark_store_read_degraded(
+        self,
+        *,
+        scope: str,
+        exc: Exception,
+        busy_message: str,
+        unavailable_message: str,
+    ) -> str:
+        status = self._store_error_state(exc)
+        self._db_status = status
+        self._last_error = busy_message if status == "busy" else unavailable_message
+        self._last_poll_at = _now_text()
+        self._emit_store_issue_log(scope, exc)
+        return status
+
+    def _cache_task_list(self, tasks: List[Dict[str, Any]]) -> None:
+        self._cached_task_list = copy.deepcopy(tasks if isinstance(tasks, list) else [])
+
+    def _cache_task_detail(self, task: Dict[str, Any] | None) -> None:
+        task_payload = task if isinstance(task, dict) else None
+        task_id = str(task_payload.get("task_id", "") if task_payload else "").strip()
+        if not task_id:
+            return
+        self._cached_task_details[task_id] = copy.deepcopy(task_payload)
+
+    def get_cached_tasks(self, *, limit: int | None = None) -> List[Dict[str, Any]]:
+        tasks = copy.deepcopy(self._cached_task_list)
+        if limit is None:
+            return tasks
+        return tasks[: max(1, int(limit or 1))]
+
+    def get_cached_task(self, task_id: str) -> Dict[str, Any] | None:
+        task_text = str(task_id or "").strip()
+        if not task_text:
+            return None
+        payload = self._cached_task_details.get(task_text)
+        return copy.deepcopy(payload) if isinstance(payload, dict) else None
 
     def _should_run(self) -> bool:
         return self.role_mode in {"internal", "external"} and self.shared_bridge_enabled and bool(self.shared_bridge_root)
@@ -259,104 +366,101 @@ class SharedBridgeRuntimeService:
 
     def get_health_snapshot(self, *, mode: str = "external_full") -> Dict[str, Any]:
         normalized_mode = str(mode or "external_full").strip().lower() or "external_full"
-        internal_download_pool = (
-            self._internal_download_pool.get_health_snapshot()
-            if self._internal_download_pool is not None
-            else {
-                "enabled": False,
-                "browser_ready": False,
-                "page_slots": [],
-                "active_buildings": [],
-                "last_error": "",
-            }
-        )
-        internal_source_cache = (
-            self._source_cache_service.get_health_snapshot(mode=normalized_mode)
-            if self._source_cache_service is not None
-            else {
-                "enabled": False,
-                "scheduler_running": False,
-                "current_hour_bucket": "",
-                "last_run_at": "",
-                "last_success_at": "",
-                "last_error": "",
-                "cache_root": "",
-                "current_hour_refresh": {
-                    "running": False,
-                    "last_run_at": "",
-                    "last_success_at": "",
+        try:
+            internal_download_pool = (
+                self._internal_download_pool.get_health_snapshot()
+                if self._internal_download_pool is not None
+                else {
+                    "enabled": False,
+                    "browser_ready": False,
+                    "page_slots": [],
+                    "active_buildings": [],
                     "last_error": "",
-                    "failed_buildings": [],
-                    "scope_text": "当前小时",
-                },
-                "handover_log_family": {},
-                "monthly_report_family": {},
-                "alarm_event_family": {},
-            }
-        )
-        if self._store is not None and normalized_mode != "internal_light":
-            try:
+                }
+            )
+            internal_source_cache = (
+                self._source_cache_service.get_health_snapshot(mode=normalized_mode)
+                if self._source_cache_service is not None
+                else self._empty_internal_source_cache_snapshot()
+            )
+            if self._store is not None and normalized_mode != "internal_light":
                 internal_alert_status = self._build_external_internal_alert_status(
                     self._store.list_external_alert_projections()
                 )
-            except Exception as exc:  # noqa: BLE001
-                if self._is_recoverable_store_error(exc):
-                    self._db_status = "busy"
-                    self._last_error = "共享桥接数据库暂时忙碌，告警摘要已降级为空结果"
-                    internal_alert_status = self._empty_internal_alert_status()
-                else:
-                    raise
-        else:
-            internal_alert_status = self._empty_internal_alert_status()
-        return {
-            "enabled": self.shared_bridge_enabled,
-            "role_mode": self.role_mode,
-            "root_dir": self.shared_bridge_root,
-            "db_status": self._db_status,
-            "last_error": self._last_error,
-            "last_poll_at": self._last_poll_at,
-            "last_cleanup_at": self._last_cleanup_at,
-            "cleanup_deleted_tasks": int(self._cleanup_deleted_tasks or 0),
-            "cleanup_deleted_entries": int(self._cleanup_deleted_entries or 0),
-            "cleanup_deleted_files": int(self._cleanup_deleted_files or 0),
-            "pending_internal": int(self._counts.get("pending_internal", 0)),
-            "pending_external": int(self._counts.get("pending_external", 0)),
-            "problematic": int(self._counts.get("problematic", 0)),
-            "task_count": int(self._counts.get("total_count", 0)),
-            "node_count": int(self._counts.get("node_count", 0)),
-            "node_heartbeat_ok": bool(self.is_running() and self._db_status == "ok"),
-            "agent_status": "running" if self.is_running() else ("disabled" if not self._should_run() else "stopped"),
-            "heartbeat_interval_sec": self.heartbeat_interval_sec,
-            "poll_interval_sec": self.poll_interval_sec,
-            "internal_download_pool": internal_download_pool,
-            "internal_source_cache": internal_source_cache,
-            "internal_alert_status": internal_alert_status,
-        }
+            else:
+                internal_alert_status = self._empty_internal_alert_status()
+            self._cached_internal_alert_status = copy.deepcopy(internal_alert_status)
+            snapshot = {
+                "enabled": self.shared_bridge_enabled,
+                "role_mode": self.role_mode,
+                "root_dir": self.shared_bridge_root,
+                "db_status": self._db_status,
+                "last_error": self._last_error,
+                "last_poll_at": self._last_poll_at,
+                "last_cleanup_at": self._last_cleanup_at,
+                "cleanup_deleted_tasks": int(self._cleanup_deleted_tasks or 0),
+                "cleanup_deleted_entries": int(self._cleanup_deleted_entries or 0),
+                "cleanup_deleted_files": int(self._cleanup_deleted_files or 0),
+                "pending_internal": int(self._counts.get("pending_internal", 0)),
+                "pending_external": int(self._counts.get("pending_external", 0)),
+                "problematic": int(self._counts.get("problematic", 0)),
+                "task_count": int(self._counts.get("total_count", 0)),
+                "node_count": int(self._counts.get("node_count", 0)),
+                "node_heartbeat_ok": bool(self.is_running() and self._db_status == "ok"),
+                "agent_status": "running" if self.is_running() else ("disabled" if not self._should_run() else "stopped"),
+                "heartbeat_interval_sec": self.heartbeat_interval_sec,
+                "poll_interval_sec": self.poll_interval_sec,
+                "internal_download_pool": internal_download_pool,
+                "internal_source_cache": internal_source_cache,
+                "internal_alert_status": internal_alert_status,
+            }
+            self._cached_health_snapshot = copy.deepcopy(snapshot)
+            return snapshot
+        except Exception as exc:  # noqa: BLE001
+            if self._is_recoverable_store_error(exc):
+                return self._build_degraded_health_snapshot(exc)
+            raise
 
     def list_tasks(self, *, limit: int = 100) -> list[Dict[str, Any]]:
         if not self._store:
             return []
         try:
             self._store.ensure_ready()
-            return self._store.list_tasks(limit=limit)
+            tasks = self._store.list_tasks(limit=limit)
+            self._cache_task_list(tasks)
+            return tasks
         except Exception as exc:  # noqa: BLE001
             if self._is_recoverable_store_error(exc):
-                self._db_status = "busy"
-                self._last_error = "共享桥接数据库暂时忙碌，共享任务列表已降级为空结果"
-                return []
+                self._mark_store_read_degraded(
+                    scope="list_tasks",
+                    exc=exc,
+                    busy_message="共享桥接数据库暂时忙碌，共享任务列表已降级为缓存结果",
+                    unavailable_message="共享桥接数据库暂时不可用，共享任务列表已降级为缓存结果",
+                )
+                return self.get_cached_tasks(limit=limit)
             raise
 
     def get_task(self, task_id: str) -> Dict[str, Any] | None:
         if not self._store:
             return None
+        task_text = str(task_id or "").strip()
         try:
             self._store.ensure_ready()
-            return self._store.get_task(task_id)
+            task = self._store.get_task(task_text)
+            if isinstance(task, dict):
+                self._cache_task_detail(task)
+            elif task_text:
+                self._cached_task_details.pop(task_text, None)
+            return task
         except Exception as exc:  # noqa: BLE001
             if self._is_recoverable_store_error(exc):
-                self._db_status = "busy"
-                self._last_error = "共享桥接数据库暂时忙碌，共享任务详情暂时不可用"
-                return None
+                self._mark_store_read_degraded(
+                    scope="get_task",
+                    exc=exc,
+                    busy_message="共享桥接数据库暂时忙碌，共享任务详情已降级为缓存结果",
+                    unavailable_message="共享桥接数据库暂时不可用，共享任务详情已降级为缓存结果",
+                )
+                return self.get_cached_task(task_text)
             raise
 
     def cancel_task(self, task_id: str) -> bool:
@@ -668,6 +772,94 @@ class SharedBridgeRuntimeService:
             "last_notified_at": "",
         }
 
+    @staticmethod
+    def _empty_internal_source_cache_snapshot() -> Dict[str, Any]:
+        return {
+            "enabled": False,
+            "scheduler_running": False,
+            "current_hour_bucket": "",
+            "last_run_at": "",
+            "last_success_at": "",
+            "last_error": "",
+            "cache_root": "",
+            "current_hour_refresh": {
+                "running": False,
+                "last_run_at": "",
+                "last_success_at": "",
+                "last_error": "",
+                "failed_buildings": [],
+                "scope_text": "当前小时",
+            },
+            "handover_log_family": {},
+            "monthly_report_family": {},
+            "alarm_event_family": {},
+        }
+
+    def _build_degraded_health_snapshot(self, exc: Exception) -> Dict[str, Any]:
+        self._mark_store_read_degraded(
+            scope="health_snapshot",
+            exc=exc,
+            busy_message="共享桥接数据库暂时忙碌，健康状态已降级为缓存结果",
+            unavailable_message="共享桥接数据库暂时不可用，健康状态已降级为缓存结果",
+        )
+        base = copy.deepcopy(self._cached_health_snapshot) if isinstance(self._cached_health_snapshot, dict) else {}
+        if not base:
+            base = {
+                "enabled": self.shared_bridge_enabled,
+                "role_mode": self.role_mode,
+                "root_dir": self.shared_bridge_root,
+                "db_status": self._db_status,
+                "last_error": self._last_error,
+                "last_poll_at": self._last_poll_at,
+                "last_cleanup_at": self._last_cleanup_at,
+                "cleanup_deleted_tasks": int(self._cleanup_deleted_tasks or 0),
+                "cleanup_deleted_entries": int(self._cleanup_deleted_entries or 0),
+                "cleanup_deleted_files": int(self._cleanup_deleted_files or 0),
+                "pending_internal": int(self._counts.get("pending_internal", 0)),
+                "pending_external": int(self._counts.get("pending_external", 0)),
+                "problematic": int(self._counts.get("problematic", 0)),
+                "task_count": int(self._counts.get("total_count", 0)),
+                "node_count": int(self._counts.get("node_count", 0)),
+                "node_heartbeat_ok": False,
+                "agent_status": "running" if self.is_running() else ("disabled" if not self._should_run() else "stopped"),
+                "heartbeat_interval_sec": self.heartbeat_interval_sec,
+                "poll_interval_sec": self.poll_interval_sec,
+                "internal_download_pool": {
+                    "enabled": False,
+                    "browser_ready": False,
+                    "page_slots": [],
+                    "active_buildings": [],
+                    "last_error": "",
+                },
+                "internal_source_cache": self._empty_internal_source_cache_snapshot(),
+                "internal_alert_status": copy.deepcopy(self._cached_internal_alert_status),
+            }
+        base.update(
+            {
+                "enabled": self.shared_bridge_enabled,
+                "role_mode": self.role_mode,
+                "root_dir": self.shared_bridge_root,
+                "db_status": self._db_status,
+                "last_error": self._last_error,
+                "last_poll_at": self._last_poll_at,
+                "last_cleanup_at": self._last_cleanup_at,
+                "cleanup_deleted_tasks": int(self._cleanup_deleted_tasks or 0),
+                "cleanup_deleted_entries": int(self._cleanup_deleted_entries or 0),
+                "cleanup_deleted_files": int(self._cleanup_deleted_files or 0),
+                "pending_internal": int(self._counts.get("pending_internal", 0)),
+                "pending_external": int(self._counts.get("pending_external", 0)),
+                "problematic": int(self._counts.get("problematic", 0)),
+                "task_count": int(self._counts.get("total_count", 0)),
+                "node_count": int(self._counts.get("node_count", 0)),
+                "node_heartbeat_ok": bool(self.is_running() and self._db_status == "ok"),
+                "agent_status": "running" if self.is_running() else ("disabled" if not self._should_run() else "stopped"),
+                "heartbeat_interval_sec": self.heartbeat_interval_sec,
+                "poll_interval_sec": self.poll_interval_sec,
+                "internal_alert_status": copy.deepcopy(self._cached_internal_alert_status),
+            }
+        )
+        return base
+
     @classmethod
     def _build_external_internal_alert_status(cls, projections: List[Dict[str, Any]]) -> Dict[str, Any]:
         latest_notified_at = ""
@@ -955,6 +1147,7 @@ class SharedBridgeRuntimeService:
         end_time: str | None,
         duty_date: str | None,
         duty_shift: str | None,
+        resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
@@ -966,6 +1159,7 @@ class SharedBridgeRuntimeService:
             end_time=end_time,
             duty_date=duty_date,
             duty_shift=duty_shift,
+            resume_job_id=resume_job_id,
             target_bucket_key=target_bucket_key,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
@@ -979,6 +1173,7 @@ class SharedBridgeRuntimeService:
         end_time: str | None,
         duty_date: str | None,
         duty_shift: str | None,
+        resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
@@ -1023,6 +1218,7 @@ class SharedBridgeRuntimeService:
             end_time=end_time,
             duty_date=duty_date,
             duty_shift=duty_shift,
+            resume_job_id=resume_job_id,
             target_bucket_key=resolved_bucket_key if not (duty_date_text and duty_shift_text) else "",
             requested_by=requested_by,
         )
@@ -1033,6 +1229,7 @@ class SharedBridgeRuntimeService:
         selected_dates: List[str],
         building_scope: str,
         building: str | None,
+        resume_job_id: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -1042,6 +1239,7 @@ class SharedBridgeRuntimeService:
             selected_dates=selected_dates,
             building_scope=building_scope,
             building=building,
+            resume_job_id=resume_job_id,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -1051,6 +1249,7 @@ class SharedBridgeRuntimeService:
         self,
         *,
         buildings: List[str] | None,
+        resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
@@ -1059,9 +1258,46 @@ class SharedBridgeRuntimeService:
         self._store.ensure_ready()
         return self._store.create_wet_bulb_collection_task(
             buildings=buildings,
+            resume_job_id=resume_job_id,
             target_bucket_key=target_bucket_key,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
+            requested_by=requested_by,
+        )
+
+    def get_or_create_day_metric_from_download_task(
+        self,
+        *,
+        selected_dates: List[str],
+        building_scope: str,
+        building: str | None,
+        resume_job_id: str | None = None,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        normalized_dates = [
+            str(item or "").strip()
+            for item in (selected_dates or [])
+            if str(item or "").strip()
+        ]
+        dedupe_key = "|".join(
+            [
+                "day_metric_from_download",
+                ",".join(normalized_dates) or "-",
+                str(building_scope or "").strip() or "-",
+                str(building or "").strip() or "all_enabled",
+            ]
+        )
+        existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
+        if existing:
+            return existing
+        return self.create_day_metric_from_download_task(
+            selected_dates=normalized_dates,
+            building_scope=building_scope,
+            building=building,
+            resume_job_id=resume_job_id,
             requested_by=requested_by,
         )
 
@@ -1069,6 +1305,7 @@ class SharedBridgeRuntimeService:
         self,
         *,
         buildings: List[str] | None,
+        resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
@@ -1093,6 +1330,7 @@ class SharedBridgeRuntimeService:
             return existing
         return self.create_wet_bulb_collection_task(
             buildings=normalized_buildings,
+            resume_job_id=resume_job_id,
             target_bucket_key=resolved_bucket_key,
             requested_by=requested_by,
         )
@@ -1100,6 +1338,7 @@ class SharedBridgeRuntimeService:
     def create_monthly_auto_once_task(
         self,
         *,
+        resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         requested_by: str = "manual",
         source: str = "manual",
@@ -1109,6 +1348,7 @@ class SharedBridgeRuntimeService:
         self._store.ensure_ready()
         return self._store.create_monthly_auto_once_task(
             target_bucket_key=target_bucket_key,
+            resume_job_id=resume_job_id,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -1118,6 +1358,7 @@ class SharedBridgeRuntimeService:
     def get_or_create_monthly_auto_once_task(
         self,
         *,
+        resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         requested_by: str = "manual",
         source: str = "manual",
@@ -1132,6 +1373,7 @@ class SharedBridgeRuntimeService:
             return existing
         return self.create_monthly_auto_once_task(
             target_bucket_key=resolved_bucket_key,
+            resume_job_id=resume_job_id,
             requested_by=requested_by,
             source=source,
         )
@@ -1500,14 +1742,36 @@ class SharedBridgeRuntimeService:
     @staticmethod
     def _is_recoverable_store_error(exc: Exception) -> bool:
         text = str(exc or "").strip().lower()
-        if isinstance(exc, sqlite3.OperationalError):
-            return any(token in text for token in ("database is locked", "database table is locked", "database is busy", "busy"))
-        return any(token in text for token in ("database is locked", "database table is locked"))
+        if isinstance(exc, PermissionError):
+            return True
+        recoverable_tokens = (
+            "database is locked",
+            "database table is locked",
+            "database is busy",
+            "busy",
+            "unable to open database file",
+            "disk i/o error",
+            "readonly database",
+            "cannot operate on a closed database",
+            "invalid uri authority",
+            "permissionerror",
+            "winerror 5",
+            "access is denied",
+            "拒绝访问",
+        )
+        if isinstance(exc, (sqlite3.OperationalError, OSError)):
+            return any(token in text for token in recoverable_tokens)
+        return any(token in text for token in recoverable_tokens)
 
     def _mark_loop_error(self, exc: Exception) -> None:
         if self._is_recoverable_store_error(exc):
-            self._db_status = "busy"
-            self._last_error = "共享桥接数据库暂时忙碌，下一轮自动重试"
+            if self._store_error_state(exc) == "busy":
+                self._db_status = "busy"
+                self._last_error = "共享桥接数据库暂时忙碌，下一轮自动重试"
+            else:
+                self._db_status = "unavailable"
+                self._last_error = "共享桥接数据库暂时不可用，下一轮自动重试"
+            self._emit_store_issue_log("runtime_loop", exc)
         else:
             self._db_status = "error"
             self._last_error = str(exc)
@@ -2003,6 +2267,7 @@ class SharedBridgeRuntimeService:
                     or str(capacity_result.get("error", "") or "").strip()
                     or "内网下载未产生完整且可匹配的交接班共享源文件"
                 )
+                self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
                 self._store.complete_stage(
                     task_id=task_id,
                     stage_id=stage_id,
@@ -2017,6 +2282,7 @@ class SharedBridgeRuntimeService:
                 )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
@@ -2070,34 +2336,40 @@ class SharedBridgeRuntimeService:
             capacity_building_map = {building: file_path for building, file_path in capacity_building_files if building and file_path}
             if not handover_buildings or not handover_buildings.issubset(set(capacity_building_map)):
                 raise RuntimeError("共享目录中没有完整可继续处理的交接班容量源文件")
-            emit_log("[共享桥接][交接班][外网] 开始继续生成")
-            result = OrchestratorService(self.runtime_config).run_handover_from_files(
-                building_files=building_files,
-                capacity_building_files=[(building, capacity_building_map[building]) for building, _ in building_files if building in capacity_building_map],
-                end_time=str(request.get("end_time", "") or "").strip() or None,
-                duty_date=str(request.get("duty_date", "") or "").strip() or None,
-                duty_shift=str(request.get("duty_shift", "") or "").strip() or None,
-                emit_log=emit_log,
+            resolved_capacity_files = [
+                (building, capacity_building_map[building])
+                for building, _ in building_files
+                if building in capacity_building_map
+            ]
+            emit_log("[共享桥接][交接班][外网] 共享文件已齐全，准备唤醒原任务")
+            self._resume_bound_job(
+                task,
+                worker_payload={
+                    "resume_kind": "shared_bridge_handover",
+                    "building_files": [{"building": building, "file_path": file_path} for building, file_path in building_files],
+                    "capacity_building_files": [
+                        {"building": building, "file_path": file_path}
+                        for building, file_path in resolved_capacity_files
+                    ],
+                    "end_time": str(request.get("end_time", "") or "").strip() or None,
+                    "duty_date": str(request.get("duty_date", "") or "").strip() or None,
+                    "duty_shift": str(request.get("duty_shift", "") or "").strip() or None,
+                    "bridge_task_id": task_id,
+                },
+                summary="共享文件已到位，正在继续生成交接班日志",
             )
-            merged_result = {**result, "bridge_task_id": task_id, "internal": internal_result}
-            raw_status = str(result.get("status", "") or "failed").strip().lower()
-            final_status = "success" if raw_status in {"ok", "success"} else ("partial_failed" if raw_status == "partial_failed" else "failed")
-            task_error = ""
-            if final_status in {"partial_failed", "failed"}:
-                errors = result.get("errors", []) if isinstance(result.get("errors", []), list) else []
-                task_error = str(errors[0] if errors else "").strip()
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
                 claim_token=claim_token,
                 side="external",
-                stage_result=result,
-                next_task_status=final_status,
-                task_error=task_error,
-                task_result=merged_result,
+                stage_result={"status": "resumed", "resume_job_id": self._resume_job_id_from_task(task)},
+                next_task_status="success",
+                task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": self._resume_job_id_from_task(task), "internal": internal_result},
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
@@ -2162,6 +2434,7 @@ class SharedBridgeRuntimeService:
                     grouped = date_row.get("buildings", []) if isinstance(date_row, dict) else []
                     result_rows.extend([row for row in grouped if isinstance(row, dict)])
                 error_text = self._first_failed_error_from_rows(result_rows) or "内网下载未产生任何共享源文件"
+                self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
                 self._store.complete_stage(
                     task_id=task_id,
                     stage_id=stage_id,
@@ -2176,6 +2449,7 @@ class SharedBridgeRuntimeService:
                 )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
@@ -2223,48 +2497,32 @@ class SharedBridgeRuntimeService:
                 selected_dates = [str(item or "").strip() for item in (request.get("selected_dates", []) if isinstance(request.get("selected_dates"), list) else []) if str(item or "").strip()]
             if not buildings:
                 buildings = sorted({str(item.get("building", "") or "").strip() for item in source_units if str(item.get("building", "") or "").strip()})
-            emit_log("[共享桥接][12项][外网] 开始继续上传")
-            external_result = service.continue_from_source_files(
-                selected_dates=selected_dates,
-                buildings=buildings,
-                source_units=source_units,
-                building_scope=str(request.get("building_scope", "") or "").strip() or "all_enabled",
-                building=str(request.get("building", "") or "").strip() or None,
-                emit_log=emit_log,
+            emit_log("[共享桥接][12项][外网] 共享文件已齐全，准备唤醒原任务")
+            self._resume_bound_job(
+                task,
+                worker_payload={
+                    "resume_kind": "shared_bridge_day_metric",
+                    "selected_dates": selected_dates,
+                    "buildings": buildings,
+                    "source_units": source_units,
+                    "building_scope": str(request.get("building_scope", "") or "").strip() or "all_enabled",
+                    "building": str(request.get("building", "") or "").strip() or None,
+                    "bridge_task_id": task_id,
+                },
+                summary="共享文件已到位，正在继续上传12项数据",
             )
-            merged_result = service.merge_bridge_results(
-                internal_result=internal_result,
-                external_result=external_result,
-                selected_dates=selected_dates,
-                buildings=buildings,
-                building_scope=str(request.get("building_scope", "") or "").strip() or "all_enabled",
-                building=str(request.get("building", "") or "").strip() or None,
-                emit_log=emit_log,
-            )
-            merged_result["bridge_task_id"] = task_id
-            merged_result["internal"] = internal_result
-            merged_result["external"] = external_result
-            raw_status = str(merged_result.get("status", "") or "failed").strip().lower()
-            final_status = "success" if raw_status in {"ok", "success"} else ("partial_failed" if raw_status == "partial_failed" else "failed")
-            task_error = ""
-            if final_status in {"partial_failed", "failed"}:
-                result_rows: List[Dict[str, Any]] = []
-                for date_row in merged_result.get("results", []) if isinstance(merged_result.get("results", []), list) else []:
-                    grouped = date_row.get("buildings", []) if isinstance(date_row, dict) else []
-                    result_rows.extend([row for row in grouped if isinstance(row, dict)])
-                task_error = self._first_failed_error_from_rows(result_rows)
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
                 claim_token=claim_token,
                 side="external",
-                stage_result=external_result,
-                next_task_status=final_status,
-                task_error=task_error,
-                task_result=merged_result,
+                stage_result={"status": "resumed", "resume_job_id": self._resume_job_id_from_task(task)},
+                next_task_status="success",
+                task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": self._resume_job_id_from_task(task), "internal": internal_result},
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
@@ -2343,6 +2601,7 @@ class SharedBridgeRuntimeService:
                     error_text = str(item.get("error", "") or "").strip() or error_text
                     if error_text:
                         break
+                self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
                 self._store.complete_stage(
                     task_id=task_id,
                     stage_id=stage_id,
@@ -2357,6 +2616,7 @@ class SharedBridgeRuntimeService:
                 )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
@@ -2395,42 +2655,28 @@ class SharedBridgeRuntimeService:
                 source_units.append({"building": building, "file_path": str(file_path)})
             if not source_units:
                 raise RuntimeError("共享目录中没有可继续处理的湿球温度源文件")
-            emit_log("[共享桥接][湿球温度][外网] 开始继续提取并上传")
-            external_result = service.continue_from_source_units(
-                source_units=source_units,
-                emit_log=emit_log,
+            emit_log("[共享桥接][湿球温度][外网] 共享文件已齐全，准备唤醒原任务")
+            self._resume_bound_job(
+                task,
+                worker_payload={
+                    "resume_kind": "shared_bridge_wet_bulb",
+                    "source_units": source_units,
+                    "bridge_task_id": task_id,
+                },
+                summary="共享文件已到位，正在继续处理湿球温度",
             )
-            merged_result = dict(external_result)
-            merged_result["bridge_task_id"] = task_id
-            merged_result["internal"] = internal_result
-            merged_result["external"] = external_result
-            raw_status = str(external_result.get("status", "") or "failed").strip().lower()
-            if raw_status in {"ok", "success", "skipped"}:
-                final_status = "success"
-            elif raw_status == "partial_failed":
-                final_status = "partial_failed"
-            else:
-                final_status = "failed"
-            task_error = ""
-            if final_status in {"partial_failed", "failed"}:
-                for item in external_result.get("failed_buildings", []) if isinstance(external_result.get("failed_buildings", []), list) else []:
-                    if not isinstance(item, dict):
-                        continue
-                    task_error = str(item.get("error", "") or "").strip()
-                    if task_error:
-                        break
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
                 claim_token=claim_token,
                 side="external",
-                stage_result=external_result,
-                next_task_status=final_status,
-                task_error=task_error,
-                task_result=merged_result,
+                stage_result={"status": "resumed", "resume_job_id": self._resume_job_id_from_task(task)},
+                next_task_status="success",
+                task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": self._resume_job_id_from_task(task), "internal": internal_result},
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
@@ -2518,6 +2764,7 @@ class SharedBridgeRuntimeService:
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
@@ -2900,51 +3147,42 @@ class SharedBridgeRuntimeService:
         internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
         try:
-            run_id = str(request.get("run_id", "") or internal_result.get("run_id", "") or "").strip() or None
-            auto_trigger = bool(request.get("auto_trigger", False))
-            emit_log(
-                "[共享桥接][月报][外网] 开始断点续传阶段 "
-                f"运行ID={run_id or '-'}, 自动触发={str(auto_trigger).lower()}"
+            source_root = str(internal_result.get("source_root", "") or "").strip()
+            if not source_root:
+                raise RuntimeError("月报共享桥接缺少 source_root")
+            file_items = []
+            source_root_path = Path(source_root)
+            for file_path in sorted(source_root_path.rglob("*.xlsx")):
+                if not file_path.is_file():
+                    continue
+                building = str(file_path.stem.split("--")[-1] if "--" in file_path.stem else "").strip()
+                upload_date = str(file_path.parent.name.split("--")[0] if "--" in file_path.parent.name else "").strip()
+                file_items.append({"building": building, "file_path": str(file_path), "upload_date": upload_date})
+            if not file_items:
+                raise RuntimeError("月报共享桥接未找到可继续处理的共享源文件")
+            emit_log("[共享桥接][月报][外网] 共享文件已齐全，准备唤醒原任务")
+            self._resume_bound_job(
+                task,
+                worker_payload={
+                    "resume_kind": "shared_bridge_monthly_auto_once",
+                    "file_items": file_items,
+                    "source": str(request.get("source", "") or "共享桥接月报自动流程").strip() or "共享桥接月报自动流程",
+                    "bridge_task_id": task_id,
+                },
+                summary="共享文件已到位，正在继续处理月报自动流程",
             )
-            external_result = run_bridge_resume_upload(
-                self.runtime_config,
-                shared_root_dir=self.shared_bridge_root,
-                run_id=run_id,
-                auto_trigger=auto_trigger,
-            )
-            merged_result = dict(external_result)
-            merged_result["bridge_task_id"] = task_id
-            merged_result["internal"] = internal_result
-            merged_result["external"] = external_result
-
-            raw_status = str(external_result.get("status", "") or "failed").strip().lower()
-            if raw_status in {"ok", "success", "skipped"}:
-                final_status = "success"
-            elif raw_status == "partial_failed":
-                final_status = "partial_failed"
-            else:
-                final_status = "failed"
-
-            task_error = ""
-            if final_status in {"partial_failed", "failed"}:
-                task_error = str(external_result.get("last_error", "") or "").strip()
-                if not task_error:
-                    task_error = str(external_result.get("error", "") or "").strip()
-                if not task_error:
-                    task_error = "月报外网断点续传阶段失败"
-
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,
                 claim_token=claim_token,
                 side="external",
-                stage_result=external_result,
-                next_task_status=final_status,
-                task_error=task_error,
-                task_result=merged_result,
+                stage_result={"status": "resumed", "resume_job_id": self._resume_job_id_from_task(task)},
+                next_task_status="success",
+                task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": self._resume_job_id_from_task(task), "internal": internal_result},
             )
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,

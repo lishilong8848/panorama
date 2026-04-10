@@ -10,6 +10,8 @@ from app.modules.shared_bridge.api import routes
 
 class _FakeBridgeService:
     def __init__(self) -> None:
+        self.list_tasks_error: Exception | None = None
+        self.get_task_error: Exception | None = None
         self.detail_payload = {
             "task_id": "bridge-1",
             "feature": "monthly_report_pipeline",
@@ -105,7 +107,29 @@ class _FakeBridgeService:
             },
             "error": "",
         }
+        self.cached_tasks = [
+            {
+                "task_id": "bridge-cached-1",
+                "feature": "monthly_report_pipeline",
+                "mode": "auto_once",
+                "status": "queued_for_internal",
+                "error": "",
+            }
+        ]
+        self.cached_detail = {
+            "task_id": "bridge-cached-1",
+            "feature": "monthly_report_pipeline",
+            "mode": "auto_once",
+            "status": "queued_for_internal",
+            "error": "",
+            "stages": [],
+            "events": [],
+            "artifacts": [],
+        }
+
     def list_tasks(self, limit: int = 100):  # noqa: ANN001
+        if self.list_tasks_error is not None:
+            raise self.list_tasks_error
         return [
             {
                 "task_id": "bridge-1",
@@ -118,7 +142,24 @@ class _FakeBridgeService:
         ]
 
     def get_task(self, task_id: str):  # noqa: ANN001
+        if self.get_task_error is not None:
+            raise self.get_task_error
         return self.detail_payload if task_id == "bridge-1" else None
+
+    def get_cached_tasks(self, *, limit: int | None = None):  # noqa: ANN001
+        tasks = list(self.cached_tasks)
+        if limit is None:
+            return tasks
+        return tasks[: max(1, int(limit or 1))]
+
+    def get_cached_task(self, task_id: str):  # noqa: ANN001
+        if str(task_id or "").strip() == str(self.cached_detail.get("task_id", "")).strip():
+            return dict(self.cached_detail)
+        return None
+
+    @staticmethod
+    def _is_recoverable_store_error(exc: Exception) -> bool:
+        return "unable to open database file" in str(exc).lower()
 
     def cancel_task(self, task_id: str) -> bool:  # noqa: ANN001
         return self.cancel_result and task_id == "bridge-1"
@@ -262,6 +303,17 @@ def test_bridge_tasks_returns_list() -> None:
     assert response["tasks"][0]["current_stage_name"] == "准备月报共享文件"
 
 
+def test_bridge_tasks_falls_back_to_cached_tasks_when_store_read_is_recoverable() -> None:
+    service = _FakeBridgeService()
+    service.list_tasks_error = RuntimeError("unable to open database file")
+    request = _fake_request(service)
+
+    response = routes.bridge_tasks(request, limit=25)
+
+    assert response["ok"] is True
+    assert response["tasks"][0]["task_id"] == "bridge-cached-1"
+
+
 def test_bridge_task_detail_contains_stage_labels_and_display_error() -> None:
     request = _fake_request(_FakeBridgeService())
 
@@ -273,6 +325,17 @@ def test_bridge_task_detail_contains_stage_labels_and_display_error() -> None:
     assert response["task"]["stages"][0]["stage_name"] == "准备月报共享文件"
     assert response["task"]["artifacts"][0]["artifact_kind_label"] == "续传状态"
     assert response["task"]["events"][0]["event_text"] == "内网下载进行中"
+
+
+def test_bridge_task_detail_falls_back_to_cached_detail_when_store_read_is_recoverable() -> None:
+    service = _FakeBridgeService()
+    service.get_task_error = RuntimeError("unable to open database file")
+    request = _fake_request(service)
+
+    response = routes.bridge_task_detail("bridge-cached-1", request)
+
+    assert response["ok"] is True
+    assert response["task"]["task_id"] == "bridge-cached-1"
 
 
 def test_bridge_task_detail_maps_internal_error_codes_to_chinese() -> None:
