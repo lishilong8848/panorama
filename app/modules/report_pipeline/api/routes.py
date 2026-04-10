@@ -250,6 +250,26 @@ def _shared_bridge_health_snapshot(container, request: Request, *, role_mode: st
     return _sanitize_shared_bridge_snapshot_for_role(snapshot, role_mode=role_mode)
 
 
+def _shared_root_diagnostic_snapshot(
+    container,
+    *,
+    shared_bridge_snapshot: Dict[str, Any],
+    updater_snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    snapshot_getter = getattr(container, "shared_root_diagnostic_snapshot", None)
+    if callable(snapshot_getter):
+        try:
+            payload = snapshot_getter(
+                shared_bridge_snapshot=shared_bridge_snapshot,
+                updater_snapshot=updater_snapshot,
+            )
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+    return {}
+
+
 def _shared_bridge_service_or_raise(container):
     if not _shared_bridge_is_available(container):
         raise HTTPException(status_code=409, detail="共享桥接未启用或共享目录未配置")
@@ -1589,6 +1609,11 @@ def health(
     get_next_offset = getattr(container, "system_log_next_offset", None)
     system_log_next_offset = int(get_next_offset() or 0) if callable(get_next_offset) else len(system_logs)
     shared_bridge_snapshot = _shared_bridge_health_snapshot(container, request, role_mode=role_mode)
+    shared_root_diagnostic = _shared_root_diagnostic_snapshot(
+        container,
+        shared_bridge_snapshot=shared_bridge_snapshot,
+        updater_snapshot=updater_runtime,
+    )
     task_engine_snapshot = (
         container.task_engine_snapshot()
         if hasattr(container, "task_engine_snapshot")
@@ -1814,6 +1839,7 @@ def health(
             "assets_dir": str(getattr(container, "frontend_assets_dir", "")),
         },
         "deployment": container.deployment_snapshot(),
+        "shared_root_diagnostic": shared_root_diagnostic,
         "shared_bridge": shared_bridge_snapshot,
         "network": {
             "current_ssid": wifi_name,

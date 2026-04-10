@@ -1822,7 +1822,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
   }
   function formatSharedSourceCacheBackfillStageText(task) {
     const stageName = String(task?.current_stage_name || "").trim();
-    const featureLabel = String(task?.feature_label || "").trim() || "共享桥接任务";
+    const featureLabel = String(task?.feature_label || "").trim() || "内外网同步任务";
     const statusText = formatBridgeProgressStatusText(task?.current_stage_status || task?.status || "", task);
     return stageName ? `${stageName} / ${statusText}` : `${featureLabel} / ${statusText}`;
   }

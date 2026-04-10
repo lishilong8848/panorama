@@ -1149,9 +1149,9 @@ createApp({
         nextActionText = "先处理资源阻塞，再决定是否重试任务。";
       } else if (bridgeCount > 0) {
         tone = "warning";
-        statusText = "共享桥接仍在推进";
-        summaryText = `当前有 ${bridgeCount} 个共享协同任务仍未结束。`;
-        nextActionText = "优先查看共享协同任务，再执行新的跨机动作。";
+        statusText = "内外网同步仍在推进";
+        summaryText = `当前有 ${bridgeCount} 个补采同步任务仍未结束。`;
+        nextActionText = "优先查看补采同步任务，再执行新的跨机动作。";
       } else if (recentFailure) {
         tone = "danger";
         statusText = "最近有失败任务";
@@ -1170,7 +1170,7 @@ createApp({
         items: [
           { label: "运行中任务", value: `${runningCount} 个`, tone: runningCount > 0 ? "info" : "neutral" },
           { label: "等待资源", value: `${waitingCount} 个`, tone: waitingCount > 0 ? "warning" : "neutral" },
-          { label: "共享协同", value: `${bridgeCount} 个`, tone: bridgeCount > 0 ? "warning" : "neutral" },
+          { label: "补采同步", value: `${bridgeCount} 个`, tone: bridgeCount > 0 ? "warning" : "neutral" },
           {
             label: "最近失败",
             value: recentFailure ? (recentFailure.name || recentFailure.feature || recentFailure.job_id || "-") : "无",
@@ -2447,7 +2447,7 @@ createApp({
 
     function formatJobKind(job) {
       const normalized = String(job?.kind || "").trim().toLowerCase();
-      if (normalized === "bridge") return "共享桥接代理";
+      if (normalized === "bridge") return "内外网同步任务";
       return "本地任务";
     }
 

@@ -256,6 +256,7 @@ export function createDashboardJobActions(ctx) {
         ? response.job
         : response;
     const isBridgeJob = String(wrappedJob?.kind || "").trim().toLowerCase() === "bridge";
+    const isWaitingSharedBridge = String(wrappedJob?.wait_reason || "").trim().toLowerCase() === "waiting:shared_bridge";
     const bridgeTaskId = String(response?.bridge_task?.task_id || "").trim();
     if (isBridgeJob) {
       currentJob.value = null;
@@ -274,9 +275,7 @@ export function createDashboardJobActions(ctx) {
       if (bridgeTaskId && typeof fetchBridgeTaskDetail === "function") {
         await fetchBridgeTaskDetail(bridgeTaskId, { silentMessage: true });
       }
-      message.value = bridgeTaskId
-        ? `${title} 已提交到共享桥接，任务号 ${bridgeTaskId}`
-        : `${title} 已提交到共享桥接`;
+      message.value = `${title} 已进入内外网同步处理`;
       return;
     }
 
@@ -290,6 +289,9 @@ export function createDashboardJobActions(ctx) {
     }
     if (typeof fetchJobs === "function") {
       await fetchJobs({ silentMessage: true });
+    }
+    if (isWaitingSharedBridge) {
+      message.value = `${title} 已进入等待内网补采同步，共享文件到位后会自动继续`;
     }
   }
 

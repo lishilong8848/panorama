@@ -322,10 +322,10 @@ class UpdaterService:
         if self.source_kind != "shared_mirror" or not self.shared_mirror_client:
             return ()
         parts: list[str] = []
-        for path in (
-            self.shared_mirror_client.manifest_path,
-            self.shared_mirror_client.publish_state_path,
-        ):
+        # Only use the final publish-state file as the immediate trigger.
+        # The manifest may appear slightly earlier during publishing, and
+        # watching it would widen the window for reacting to a half-published mirror.
+        for path in (self.shared_mirror_client.publish_state_path,):
             try:
                 if path.exists():
                     stat = path.stat()

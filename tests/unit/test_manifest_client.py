@@ -75,6 +75,75 @@ def test_shared_mirror_pending_before_publish(tmp_path) -> None:
         raise AssertionError("expected SharedMirrorPendingError")
 
 
+def test_shared_mirror_manifest_without_publish_state_is_still_pending(tmp_path) -> None:
+    shared_root = tmp_path / "shared"
+    client = SharedMirrorManifestClient(shared_root)
+    approved_root = shared_root / "updater" / "approved"
+    approved_root.mkdir(parents=True, exist_ok=True)
+    patch_name = "QJPT_patch_only_p99_r99.zip"
+    patch_path = approved_root / patch_name
+    patch_path.write_bytes(b"approved-patch")
+    manifest_path = approved_root / "latest_patch.json"
+    manifest_path.write_text(
+        (
+            "{\n"
+            '  "target_version": "QJPT_V3",\n'
+            '  "target_display_version": "V3.99.20260328",\n'
+            '  "target_release_revision": 99,\n'
+            f'  "zip_relpath": "{patch_name}",\n'
+            f'  "zip_size": {patch_path.stat().st_size}\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        client.fetch_latest_manifest()
+    except SharedMirrorPendingError:
+        pass
+    else:
+        raise AssertionError("expected SharedMirrorPendingError")
+
+
+def test_shared_mirror_publish_state_manifest_mismatch_is_pending(tmp_path) -> None:
+    shared_root = tmp_path / "shared"
+    client = SharedMirrorManifestClient(shared_root)
+    patch_zip = tmp_path / "QJPT_patch_only_p99_r99.zip"
+    patch_zip.write_bytes(b"approved-patch")
+    expected_sha = hashlib.sha256(b"approved-patch").hexdigest()
+
+    client.publish_approved_update(
+        remote_manifest={
+            "target_version": "QJPT_V3",
+            "target_display_version": "V3.99.20260328",
+            "target_release_revision": 99,
+            "zip_url": "https://example.invalid/updates/patches/QJPT_patch_only_p99_r99.zip",
+            "zip_sha256": expected_sha,
+        },
+        patch_zip=patch_zip,
+        expected_sha256=expected_sha,
+        published_by_role="external",
+        published_by_node_id="external-node",
+        approved_local_version="V3.99.20260328",
+        approved_release_revision=99,
+    )
+
+    client.manifest_path.write_text(
+        client.manifest_path.read_text(encoding="utf-8").replace(
+            '"zip_relpath": "QJPT_patch_only_p99_r99.zip"',
+            '"zip_relpath": "QJPT_patch_only_p100_r100.zip"',
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        client.fetch_latest_manifest()
+    except SharedMirrorPendingError:
+        pass
+    else:
+        raise AssertionError("expected SharedMirrorPendingError")
+
+
 def test_shared_mirror_publish_fetch_and_download(tmp_path) -> None:
     shared_root = tmp_path / "shared"
     client = SharedMirrorManifestClient(shared_root)

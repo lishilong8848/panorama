@@ -26,6 +26,12 @@ from app.modules.scheduler.service.interval_scheduler_service import IntervalSch
 from app.modules.scheduler.service.monthly_scheduler_service import MonthlySchedulerService
 from app.modules.updater.service.updater_service import UpdaterService
 from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
+from app.shared.utils.file_utils import (
+    canonicalize_windows_path_for_compare,
+    normalize_windows_path_text,
+    resolve_windows_network_path,
+    windows_paths_point_to_same_location,
+)
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from pipeline_utils import get_app_dir, get_bundle_dir
 
@@ -1195,6 +1201,151 @@ class AppContainer:
                 "last_publish_error": "",
             }
         return self.updater_service.get_runtime_snapshot()
+
+    def shared_root_diagnostic_snapshot(
+        self,
+        *,
+        shared_bridge_snapshot: Dict[str, Any] | None = None,
+        updater_snapshot: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        deployment = self.deployment_snapshot()
+        role_mode = str(deployment.get("role_mode", "") or "").strip().lower()
+        role_label = str(deployment.get("node_label", "") or "").strip() or (
+            "内网端" if role_mode == "internal" else "外网端" if role_mode == "external" else "当前角色"
+        )
+        runtime_shared_bridge = {}
+        if isinstance(self.runtime_config, dict):
+            runtime_shared_bridge = self.runtime_config.get("shared_bridge", {})
+        if not isinstance(runtime_shared_bridge, dict) or not runtime_shared_bridge:
+            common_cfg = self.config.get("common", {}) if isinstance(self.config, dict) else {}
+            runtime_shared_bridge = common_cfg.get("shared_bridge", {}) if isinstance(common_cfg, dict) else {}
+        resolved_bridge = resolve_shared_bridge_paths(runtime_shared_bridge, role_mode)
+        internal_root = normalize_windows_path_text(resolved_bridge.get("internal_root_dir", ""))
+        external_root = normalize_windows_path_text(resolved_bridge.get("external_root_dir", ""))
+        active_root = normalize_windows_path_text(resolved_bridge.get("root_dir", ""))
+
+        bridge_snapshot = dict(shared_bridge_snapshot) if isinstance(shared_bridge_snapshot, dict) else {}
+        bridge_runtime_root = normalize_windows_path_text(bridge_snapshot.get("root_dir", "")) or active_root
+        updater_runtime = dict(updater_snapshot) if isinstance(updater_snapshot, dict) else {}
+        updater_root = ""
+        if self.updater_service is not None:
+            updater_root = normalize_windows_path_text(getattr(self.updater_service, "shared_bridge_root", ""))
+        if not updater_root:
+            updater_root = active_root
+
+        internal_canonical = canonicalize_windows_path_for_compare(internal_root)
+        external_canonical = canonicalize_windows_path_for_compare(external_root)
+        active_canonical = canonicalize_windows_path_for_compare(bridge_runtime_root)
+        updater_canonical = canonicalize_windows_path_for_compare(updater_root)
+
+        configured_complete = bool(internal_root and external_root and active_root)
+        internal_external_consistent = bool(
+            internal_canonical and external_canonical and internal_canonical == external_canonical
+        )
+        active_matches_role = bool(
+            active_canonical
+            and (
+                windows_paths_point_to_same_location(active_root, internal_root if role_mode == "internal" else external_root)
+                if role_mode in {"internal", "external"}
+                else False
+            )
+        )
+        updater_matches_bridge = bool(
+            active_canonical and updater_canonical and active_canonical == updater_canonical
+        )
+        alias_same_root = internal_external_consistent and internal_root != external_root
+
+        tone = "success"
+        status = "consistent"
+        status_text = "共享目录配置一致"
+        summary_text = "内外网与更新镜像当前都指向同一共享目录。"
+        if not configured_complete:
+            tone = "danger"
+            status = "misconfigured"
+            status_text = "共享目录配置不完整"
+            summary_text = "内网、外网或当前角色的共享目录配置仍有缺失。"
+        elif not internal_external_consistent:
+            tone = "danger"
+            status = "mismatch"
+            status_text = "内外网共享目录不一致"
+            summary_text = "内网和外网当前配置指向了不同共享目录，补采与跟随更新会失效。"
+        elif not active_matches_role:
+            tone = "danger"
+            status = "role_mismatch"
+            status_text = "当前角色共享目录异常"
+            summary_text = "当前角色运行时使用的共享目录与角色配置不一致，请检查角色切换后的配置。"
+        elif not updater_matches_bridge:
+            tone = "warning"
+            status = "updater_mismatch"
+            status_text = "更新镜像目录与共享桥接目录不一致"
+            summary_text = "更新链和共享桥接当前没有落到同一共享目录，自动跟随更新可能失效。"
+        elif alias_same_root:
+            tone = "info"
+            status = "alias_match"
+            status_text = "路径写法不同但目录一致"
+            summary_text = "内外网路径文本不同，例如映射盘与 UNC，但归一后仍是同一共享目录。"
+
+        return {
+            "role_mode": role_mode,
+            "role_label": role_label,
+            "status": status,
+            "status_text": status_text,
+            "tone": tone,
+            "summary_text": summary_text,
+            "source_kind": str(updater_runtime.get("source_kind", "") or ""),
+            "paths": [
+                {
+                    "key": "internal_root",
+                    "label": "内网共享目录",
+                    "path": internal_root,
+                    "canonical_path": resolve_windows_network_path(internal_root),
+                },
+                {
+                    "key": "external_root",
+                    "label": "外网共享目录",
+                    "path": external_root,
+                    "canonical_path": resolve_windows_network_path(external_root),
+                },
+                {
+                    "key": "active_root",
+                    "label": "当前角色共享目录",
+                    "path": bridge_runtime_root,
+                    "canonical_path": resolve_windows_network_path(bridge_runtime_root),
+                },
+                {
+                    "key": "updater_root",
+                    "label": "更新镜像共享目录",
+                    "path": updater_root,
+                    "canonical_path": resolve_windows_network_path(updater_root),
+                },
+            ],
+            "items": [
+                {
+                    "label": "当前角色",
+                    "value": role_label,
+                    "tone": "info",
+                },
+                {
+                    "label": "路径一致性",
+                    "value": status_text,
+                    "tone": tone,
+                },
+                {
+                    "label": "共享桥接目录",
+                    "value": bridge_runtime_root or "未配置",
+                    "tone": "success" if bridge_runtime_root else "danger",
+                },
+                {
+                    "label": "更新镜像目录",
+                    "value": updater_root or "未配置",
+                    "tone": "success" if updater_root else "danger",
+                },
+            ],
+            "notes": [
+                "当前角色运行值和 updater 实际共享目录都来自后端运行时，不是前端推测值。",
+                "若内外网目录文本不同但状态为“路径写法不同但目录一致”，通常是映射盘和 UNC 的正常差异。",
+            ],
+        }
 
     def start_alert_log_uploader(self, source: str = "自动") -> Dict[str, Any]:
         if not self.alert_log_uploader:

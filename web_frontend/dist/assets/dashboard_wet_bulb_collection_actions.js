@@ -104,6 +104,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
               ? response.job
               : response;
           const isBridgeJob = String(wrappedJob?.kind || "").trim().toLowerCase() === "bridge";
+          const isWaitingSharedBridge = String(wrappedJob?.wait_reason || "").trim().toLowerCase() === "waiting:shared_bridge";
           const bridgeTaskId = String(response?.bridge_task?.task_id || "").trim();
           const job = wrappedJob;
           if (isBridgeJob) {
@@ -124,9 +125,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
             if (bridgeTaskId && typeof fetchBridgeTaskDetail === "function") {
               await fetchBridgeTaskDetail(bridgeTaskId, { silentMessage: true });
             }
-            message.value = bridgeTaskId
-              ? `湿球温度定时采集已提交到共享桥接，任务号 ${bridgeTaskId}`
-              : "湿球温度定时采集已提交到共享桥接";
+            message.value = "湿球温度定时采集已进入内外网同步处理";
             return;
           }
 
@@ -139,6 +138,9 @@ export function createDashboardWetBulbCollectionActions(ctx) {
           }
           if (typeof fetchJobs === "function") {
             await fetchJobs({ silentMessage: true });
+          }
+          if (isWaitingSharedBridge) {
+            message.value = "湿球温度定时采集已进入等待内网补采同步，共享文件到位后会自动继续";
           }
         } catch (err) {
           message.value = formatWetBulbCollectionError(err, "湿球温度定时采集提交");

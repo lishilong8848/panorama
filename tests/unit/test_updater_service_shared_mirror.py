@@ -285,3 +285,119 @@ def test_internal_loop_triggers_immediate_check_when_shared_mirror_changes(tmp_p
     service._loop()
 
     assert run_check_calls == [{"apply_update": None, "force_remote": False}]
+
+
+def test_internal_loop_does_not_trigger_on_manifest_only_change(tmp_path: Path, monkeypatch) -> None:
+    app_dir = tmp_path / "internal-app"
+    shared_root = tmp_path / "shared"
+    _write_build_meta(app_dir, release_revision=69, display_version="V3.69.20260328")
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: app_dir)
+
+    service = UpdaterService(
+        config=_build_config(tmp_path / "int", role_mode="internal", shared_root=shared_root),
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+    service._sync_shared_mirror_watch_signal()
+    run_check_calls: list[dict[str, object]] = []
+
+    def _fake_run_check(*, apply_update, force_remote):  # noqa: ANN001
+        run_check_calls.append(
+            {
+                "apply_update": apply_update,
+                "force_remote": force_remote,
+            }
+        )
+        return {"last_result": "updated"}
+
+    approved_root = shared_root / "updater" / "approved"
+    approved_root.mkdir(parents=True, exist_ok=True)
+
+    class _StopAfterManifestOnlyWrite:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wait(self, _timeout: int) -> bool:
+            self.calls += 1
+            if self.calls == 1:
+                (approved_root / "latest_patch.json").write_text(
+                    (
+                        "{\n"
+                        '  "target_version": "QJPT_V3",\n'
+                        '  "target_display_version": "V3.70.20260328",\n'
+                        '  "target_release_revision": 70,\n'
+                        '  "zip_relpath": "QJPT_patch_only_p70_r70.zip"\n'
+                        "}\n"
+                    ),
+                    encoding="utf-8",
+                )
+                return False
+            return True
+
+    service._stop = _StopAfterManifestOnlyWrite()
+    service._run_check = _fake_run_check  # type: ignore[method-assign]
+
+    service._loop()
+
+    assert run_check_calls == []
+
+
+def test_external_and_internal_can_share_same_mirror_with_different_root_texts(tmp_path: Path, monkeypatch) -> None:
+    shared_root = tmp_path / "shared"
+    shared_root_alias = tmp_path / "mapped" / ".." / "shared"
+    external_app_dir = tmp_path / "external-app"
+    internal_app_dir = tmp_path / "internal-app"
+    body = b"approved-shared-mirror-patch"
+    expected_sha = hashlib.sha256(body).hexdigest()
+
+    _write_build_meta(external_app_dir, release_revision=80, display_version="V3.80.20260410")
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: external_app_dir)
+    external_service = UpdaterService(
+        config=_build_config(tmp_path / "ext", role_mode="external", shared_root=shared_root_alias),
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+    external_service.client.fetch_latest_manifest = lambda: {
+        "target_version": "QJPT_V3",
+        "major_version": 3,
+        "target_display_version": "V3.81.20260410",
+        "target_release_revision": 81,
+        "target_patch_version": 81,
+        "zip_url": "https://example.invalid/QJPT_patch_only_p81_r81.zip",
+        "zip_sha256": expected_sha,
+        "created_at": "2026-04-10 11:20:00",
+    }
+    external_service.client.download_patch = lambda zip_url, zip_path, expected_sha256="": zip_path.write_bytes(body)
+    external_service.applier.apply_patch_zip = lambda **_kwargs: {
+        "replaced": 8,
+        "deleted": 0,
+        "backup": str(tmp_path / "external-backup"),
+        "patch_meta": {},
+    }
+
+    external_result = external_service.apply_now(mode="normal", queue_if_busy=False)
+
+    assert external_result["last_result"] == "updated"
+    assert (shared_root / "updater" / "approved" / "latest_patch.json").exists()
+
+    _write_build_meta(internal_app_dir, release_revision=80, display_version="V3.80.20260410")
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: internal_app_dir)
+    internal_config = _build_config(tmp_path / "int", role_mode="internal", shared_root=shared_root)
+    internal_config["updater"]["auto_apply"] = True
+    internal_service = UpdaterService(
+        config=internal_config,
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+    internal_service.applier.apply_patch_zip = lambda **_kwargs: {
+        "replaced": 8,
+        "deleted": 0,
+        "backup": str(tmp_path / "internal-backup"),
+        "patch_meta": {},
+    }
+
+    internal_result = internal_service.check_now()
+
+    assert internal_result["last_result"] == "updated"
+    assert internal_result["mirror_ready"] is True
+    assert internal_result["local_release_revision"] == 81

@@ -245,23 +245,58 @@ class SharedMirrorManifestClient:
             raise RuntimeError("共享目录更新清单格式错误。")
         return payload
 
-    def fetch_latest_manifest(self) -> Dict[str, Any]:
-        if not self.manifest_path.exists():
-            raise SharedMirrorPendingError("共享目录中还没有已批准的更新版本。")
-        payload = self._load_manifest_file()
+    @staticmethod
+    def _normalize_zip_relpath(payload: Dict[str, Any]) -> str:
         zip_relpath = str(payload.get("zip_relpath", "") or "").strip()
         if not zip_relpath:
             zip_relpath = str(payload.get("zip_url", "") or "").strip()
         if not zip_relpath:
             raise RuntimeError("共享目录更新清单缺少 zip_relpath。")
-        payload["zip_relpath"] = str(_safe_relative_path(zip_relpath)).replace("\\", "/")
-        payload.setdefault("zip_url", payload["zip_relpath"])
+        return str(_safe_relative_path(zip_relpath)).replace("\\", "/")
+
+    def _build_ready_manifest(self) -> Dict[str, Any]:
+        state = self.load_publish_state()
+        if not self.publish_state_path.exists():
+            raise SharedMirrorPendingError("共享目录中还没有已批准的更新版本。")
+        if not bool(state.get("mirror_ready", False)):
+            raise SharedMirrorPendingError("共享目录批准版本尚未完成发布。")
+        if str(state.get("last_publish_error", "") or "").strip():
+            raise SharedMirrorPendingError("共享目录批准版本发布异常，等待外网端重新发布。")
+        if not self.manifest_path.exists():
+            raise SharedMirrorPendingError("共享目录批准清单尚未完成发布。")
+
+        payload = self._load_manifest_file()
+        zip_relpath = self._normalize_zip_relpath(payload)
+        state_zip_relpath = str(state.get("zip_relpath", "") or "").strip()
+        if state_zip_relpath and state_zip_relpath != zip_relpath:
+            raise SharedMirrorPendingError("共享目录批准状态与更新清单尚未一致。")
+
+        manifest_release_revision = int(
+            payload.get("target_release_revision", payload.get("approved_release_revision", 0)) or 0
+        )
+        state_release_revision = int(state.get("mirror_release_revision", 0) or 0)
+        if state_release_revision > 0 and manifest_release_revision > 0 and state_release_revision != manifest_release_revision:
+            raise SharedMirrorPendingError("共享目录批准状态与版本清单修订号不一致。")
+
+        approved_zip = self.approved_root / _safe_relative_path(zip_relpath)
+        if not approved_zip.exists():
+            raise SharedMirrorPendingError("共享目录中的批准补丁还未就绪。")
+        validate_non_empty_file(approved_zip)
+        manifest_zip_size = int(payload.get("zip_size", 0) or 0)
+        if manifest_zip_size > 0 and approved_zip.stat().st_size != manifest_zip_size:
+            raise SharedMirrorPendingError("共享目录中的批准补丁大小与清单不一致。")
+
+        payload["zip_relpath"] = zip_relpath
+        payload.setdefault("zip_url", zip_relpath)
         payload.setdefault("published_at", "")
         payload.setdefault("published_by_role", "")
         payload.setdefault("published_by_node_id", "")
         payload.setdefault("approved_local_version", "")
         payload.setdefault("approved_release_revision", 0)
         return payload
+
+    def fetch_latest_manifest(self) -> Dict[str, Any]:
+        return self._build_ready_manifest()
 
     def download_patch(self, zip_ref: str, save_to: Path, *, expected_sha256: str = "") -> Path:
         rel_path = _safe_relative_path(str(zip_ref or "").strip())
@@ -377,40 +412,34 @@ class SharedMirrorManifestClient:
 
     def get_runtime_snapshot(self) -> Dict[str, Any]:
         state = self.load_publish_state()
-        manifest_exists = self.manifest_path.exists()
         zip_relpath = str(state.get("zip_relpath", "") or "").strip()
-        if manifest_exists:
-            try:
-                manifest = self.fetch_latest_manifest()
-                zip_relpath = str(manifest.get("zip_relpath", "") or "").strip() or zip_relpath
-                state["mirror_version"] = str(
-                    manifest.get("target_display_version")
-                    or manifest.get("target_version")
-                    or state.get("mirror_version", "")
-                ).strip()
-                state["mirror_release_revision"] = int(
-                    manifest.get("target_release_revision", state.get("mirror_release_revision", 0))
-                    or state.get("mirror_release_revision", 0)
-                    or 0
-                )
-                state["last_publish_at"] = str(manifest.get("published_at", "") or state.get("last_publish_at", "")).strip()
-                state["published_by_role"] = str(
-                    manifest.get("published_by_role", "") or state.get("published_by_role", "")
-                ).strip()
-                state["published_by_node_id"] = str(
-                    manifest.get("published_by_node_id", "") or state.get("published_by_node_id", "")
-                ).strip()
-            except SharedMirrorPendingError:
-                manifest_exists = False
-            except Exception:
-                pass
-        approved_zip_exists = False
-        if zip_relpath:
-            try:
-                approved_zip_exists = (self.approved_root / _safe_relative_path(zip_relpath)).exists()
-            except Exception:
-                approved_zip_exists = False
-        state["mirror_ready"] = bool(manifest_exists and approved_zip_exists)
+        mirror_ready = False
+        try:
+            manifest = self._build_ready_manifest()
+            zip_relpath = str(manifest.get("zip_relpath", "") or "").strip() or zip_relpath
+            state["mirror_version"] = str(
+                manifest.get("target_display_version")
+                or manifest.get("target_version")
+                or state.get("mirror_version", "")
+            ).strip()
+            state["mirror_release_revision"] = int(
+                manifest.get("target_release_revision", state.get("mirror_release_revision", 0))
+                or state.get("mirror_release_revision", 0)
+                or 0
+            )
+            state["last_publish_at"] = str(manifest.get("published_at", "") or state.get("last_publish_at", "")).strip()
+            state["published_by_role"] = str(
+                manifest.get("published_by_role", "") or state.get("published_by_role", "")
+            ).strip()
+            state["published_by_node_id"] = str(
+                manifest.get("published_by_node_id", "") or state.get("published_by_node_id", "")
+            ).strip()
+            mirror_ready = True
+        except SharedMirrorPendingError:
+            mirror_ready = False
+        except Exception:
+            mirror_ready = False
+        state["mirror_ready"] = mirror_ready
         state["mirror_manifest_path"] = str(self.manifest_path)
         state["zip_relpath"] = zip_relpath
         return state

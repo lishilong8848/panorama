@@ -121,6 +121,7 @@ export function createRuntimeResumeActions(ctx) {
             ? response.job
             : response;
         const isBridgeJob = String(wrappedJob?.kind || "").trim().toLowerCase() === "bridge";
+        const isWaitingSharedBridge = String(wrappedJob?.wait_reason || "").trim().toLowerCase() === "waiting:shared_bridge";
         const bridgeTaskId = String(response?.bridge_task?.task_id || "").trim();
         if (isBridgeJob) {
           currentJob.value = null;
@@ -140,9 +141,7 @@ export function createRuntimeResumeActions(ctx) {
           if (bridgeTaskId && typeof fetchBridgeTaskDetail === "function") {
             await fetchBridgeTaskDetail(bridgeTaskId, { silentMessage: true });
           }
-          message.value = bridgeTaskId
-            ? `断点续传已提交到共享桥接，任务号 ${bridgeTaskId}`
-            : "断点续传已提交到共享桥接";
+          message.value = "断点续传已进入内外网同步处理";
         } else {
           currentJob.value = wrappedJob;
           if (selectedJobId) {
@@ -151,7 +150,11 @@ export function createRuntimeResumeActions(ctx) {
           if (wrappedJob?.job_id) {
             streamController.attachJobStream(wrappedJob.job_id);
           }
-          message.value = autoTrigger ? "已自动触发断点续传" : "已提交断点续传任务";
+          if (isWaitingSharedBridge) {
+            message.value = "断点续传已进入等待内网补采同步，共享文件到位后会自动继续";
+          } else {
+            message.value = autoTrigger ? "已自动触发断点续传" : "已提交断点续传任务";
+          }
         }
         autoResumeState.lastRunId = effectiveRunId;
         autoResumeState.lastTryTs = Date.now();

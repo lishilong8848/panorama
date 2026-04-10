@@ -222,3 +222,33 @@ def test_write_connect_uses_delete_journal_mode(monkeypatch, tmp_path) -> None:
     assert captured["database"] == str(store.db_path)
     assert "PRAGMA journal_mode=DELETE" in fake_conn.executed
     assert "PRAGMA synchronous=NORMAL" in fake_conn.executed
+
+
+def test_store_alias_paths_share_same_bridge_db(tmp_path) -> None:
+    canonical_root = tmp_path / "shared"
+    alias_root = tmp_path / "nested" / ".." / "shared"
+
+    writer_store = SharedBridgeStore(canonical_root)
+    writer_store.ensure_ready()
+    task = writer_store.create_internal_browser_alert_task(
+        building="A楼",
+        failure_kind="login_failed",
+        alert_state="problem",
+        status_key="login_failed",
+        summary="A楼 登录失败",
+        latest_detail="A楼 登录失败",
+        first_seen_at="2026-04-10 10:00:00",
+        last_seen_at="2026-04-10 10:00:00",
+        resolved_at="",
+        occurrence_count=1,
+        still_unresolved=True,
+        created_by_role="internal",
+        created_by_node_id="int-01",
+    )
+
+    reader_store = SharedBridgeStore(str(alias_root))
+    fetched = reader_store.get_task(task["task_id"])
+
+    assert fetched is not None
+    assert fetched["task_id"] == task["task_id"]
+    assert fetched["feature"] == "internal_browser_alert"
