@@ -3072,6 +3072,7 @@ class SharedSourceCacheService:
         target_fields: Dict[str, str],
         list_page_size: int,
         delete_batch_size: int,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> int:
         building_field_name = str(target_fields.get("building", "") or "").strip()
         building_text = str(building or "").strip()
@@ -3090,7 +3091,15 @@ class SharedSourceCacheService:
                 record_ids.append(record_id)
         if not record_ids:
             return 0
-        return client.batch_delete_records(table_id=table_id, record_ids=record_ids, batch_size=delete_batch_size)
+        try:
+            return client.batch_delete_records(
+                table_id=table_id,
+                record_ids=record_ids,
+                batch_size=delete_batch_size,
+                progress_callback=progress_callback,
+            )
+        except TypeError:
+            return client.batch_delete_records(table_id=table_id, record_ids=record_ids, batch_size=delete_batch_size)
 
     def _mark_alarm_entry_uploaded(
         self,
@@ -3408,6 +3417,7 @@ class SharedSourceCacheService:
             client = self._build_alarm_event_bitable_client(target)
             table_id = str(target.get("table_id", "") or "").strip()
             last_progress_checkpoint = 0
+            last_delete_logged = -1
 
             def _progress_callback(uploaded: int, total: int) -> None:
                 nonlocal last_progress_checkpoint
@@ -3420,8 +3430,26 @@ class SharedSourceCacheService:
                         emit_log=emit_log,
                     )
 
+            def _delete_progress_callback(deleted: int, total: int) -> None:
+                nonlocal last_delete_logged
+                normalized_deleted = max(0, int(deleted or 0))
+                normalized_total = max(0, int(total or 0))
+                if normalized_total <= 0:
+                    return
+                if normalized_deleted == last_delete_logged:
+                    return
+                last_delete_logged = normalized_deleted
+                self._emit_alarm_upload_log(
+                    f"[共享缓存] 外网告警删除旧记录进度: mode={normalized_mode}, scope={scope_text}, deleted={normalized_deleted}/{normalized_total}",
+                    emit_log=emit_log,
+                )
+
             deleted_count = 0
             if normalized_mode == "single_building":
+                self._emit_alarm_upload_log(
+                    f"[共享缓存] 外网告警开始删除旧记录: mode={normalized_mode}, scope={scope_text}, strategy=single_building",
+                    emit_log=emit_log,
+                )
                 deleted_count = self._delete_alarm_records_for_building_from_bitable(
                     client=client,
                     table_id=table_id,
@@ -3429,12 +3457,30 @@ class SharedSourceCacheService:
                     target_fields=target_fields,
                     list_page_size=self._read_positive_int(target.get("list_page_size"), 500),
                     delete_batch_size=self._read_positive_int(target.get("delete_batch_size"), 500),
+                    progress_callback=_delete_progress_callback,
                 )
             elif bool(replace_existing):
-                deleted_count = client.clear_table(
-                    table_id=table_id,
-                    list_page_size=self._read_positive_int(target.get("list_page_size"), 500),
-                    delete_batch_size=self._read_positive_int(target.get("delete_batch_size"), 500),
+                self._emit_alarm_upload_log(
+                    f"[共享缓存] 外网告警开始删除旧记录: mode={normalized_mode}, scope={scope_text}, strategy=clear_table",
+                    emit_log=emit_log,
+                )
+                try:
+                    deleted_count = client.clear_table(
+                        table_id=table_id,
+                        list_page_size=self._read_positive_int(target.get("list_page_size"), 500),
+                        delete_batch_size=self._read_positive_int(target.get("delete_batch_size"), 500),
+                        progress_callback=_delete_progress_callback,
+                    )
+                except TypeError:
+                    deleted_count = client.clear_table(
+                        table_id=table_id,
+                        list_page_size=self._read_positive_int(target.get("list_page_size"), 500),
+                        delete_batch_size=self._read_positive_int(target.get("delete_batch_size"), 500),
+                    )
+            if normalized_mode == "single_building" or bool(replace_existing):
+                self._emit_alarm_upload_log(
+                    f"[共享缓存] 外网告警删除旧记录完成: mode={normalized_mode}, scope={scope_text}, deleted={deleted_count}",
+                    emit_log=emit_log,
                 )
             if aggregated_records:
                 client.batch_create_records(

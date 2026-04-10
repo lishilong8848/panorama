@@ -115,6 +115,43 @@
           </div>
         </article>
 
+        <article class="status-card">
+          <div class="status-card-head">
+            <div>
+              <span class="status-panel-kicker">{{ sharedRootDiagnosticOverview.kicker || '共享目录诊断' }}</span>
+              <h2 class="status-panel-title">{{ sharedRootDiagnosticOverview.title || '共享目录一致性' }}</h2>
+            </div>
+            <span class="status-badge status-badge-solid" :class="'tone-' + sharedRootDiagnosticOverview.tone">
+              {{ sharedRootDiagnosticOverview.statusText }}
+            </span>
+          </div>
+          <div class="hint">{{ sharedRootDiagnosticOverview.summaryText }}</div>
+          <div class="status-list" v-if="sharedRootDiagnosticOverview.items && sharedRootDiagnosticOverview.items.length">
+            <div
+              class="status-list-row"
+              v-for="item in sharedRootDiagnosticOverview.items"
+              :key="'status-shared-root-' + item.label"
+            >
+              <span class="status-list-label">{{ item.label }}</span>
+              <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
+            </div>
+          </div>
+          <div class="hint-stack" v-if="sharedRootDiagnosticOverview.paths && sharedRootDiagnosticOverview.paths.length">
+            <div class="hint" v-for="item in sharedRootDiagnosticOverview.paths" :key="'status-shared-root-path-' + item.label">
+              {{ item.label }}：{{ item.path }}
+              <template v-if="item.showCanonicalPath">
+                <br />
+                归一后：{{ item.canonicalPath }}
+              </template>
+            </div>
+          </div>
+          <div class="hint-stack" v-if="sharedRootDiagnosticOverview.notes && sharedRootDiagnosticOverview.notes.length">
+            <div class="hint" v-for="note in sharedRootDiagnosticOverview.notes" :key="'status-shared-root-note-' + note">
+              {{ note }}
+            </div>
+          </div>
+        </article>
+
         <article v-if="!isInternalDeploymentRole" class="status-card">
           <div class="status-card-head">
             <div>

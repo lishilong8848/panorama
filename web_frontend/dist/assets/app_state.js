@@ -895,6 +895,18 @@ export function createAppState(vueApi) {
       node_id: "",
       node_label: "",
     },
+    shared_root_diagnostic: {
+      role_mode: "",
+      role_label: "",
+      status: "",
+      status_text: "",
+      tone: "neutral",
+      summary_text: "",
+      source_kind: "",
+      items: [],
+      paths: [],
+      notes: [],
+    },
     shared_bridge: {
       enabled: false,
       role_mode: "",
@@ -2925,6 +2937,45 @@ function normalizeInternalDownloadPoolSlot(slot) {
       ],
     };
   });
+  const sharedRootDiagnosticOverview = computed(() => {
+    const diagnostic = health.shared_root_diagnostic || {};
+    const tone = String(diagnostic.tone || "").trim() || "neutral";
+    const statusText = String(diagnostic.status_text || "").trim() || "未诊断";
+    const summaryText = String(diagnostic.summary_text || "").trim() || "当前还没有共享目录一致性诊断结果。";
+    const rawItems = Array.isArray(diagnostic.items) ? diagnostic.items : [];
+    const rawPaths = Array.isArray(diagnostic.paths) ? diagnostic.paths : [];
+    const notes = Array.isArray(diagnostic.notes)
+      ? diagnostic.notes.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const paths = rawPaths
+      .map((item) => {
+        const label = String(item?.label || "").trim();
+        const path = String(item?.path || "").trim();
+        const canonicalPath = String(item?.canonical_path || "").trim();
+        if (!label) return null;
+        return {
+          label,
+          path: path || "未配置",
+          canonicalPath,
+          showCanonicalPath: Boolean(canonicalPath) && canonicalPath !== path,
+        };
+      })
+      .filter(Boolean);
+    return {
+      tone,
+      kicker: "共享目录诊断",
+      title: "共享目录一致性",
+      statusText,
+      summaryText,
+      items: rawItems.map((item) => ({
+        label: String(item?.label || "").trim() || "-",
+        value: String(item?.value || "").trim() || "-",
+        tone: String(item?.tone || "").trim() || "neutral",
+      })),
+      paths,
+      notes,
+    };
+  });
   const currentBridgeTask = computed(() => {
     const selectedTaskId = String(selectedBridgeTaskId.value || "").trim();
     if (bridgeTaskDetail.value && String(bridgeTaskDetail.value?.task_id || "").trim() === selectedTaskId) {
@@ -3783,6 +3834,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
     internalRuntimeOverview,
     internalSourceCacheHistoryOverview,
     sharedSourceCacheReadinessOverview,
+    sharedRootDiagnosticOverview,
     updaterMirrorOverview,
     dashboardScheduleStatusItems,
     handoverReviewOverview,

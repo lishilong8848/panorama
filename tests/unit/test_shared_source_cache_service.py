@@ -316,10 +316,11 @@ def test_external_full_health_snapshot_uses_cached_copy_until_marked_dirty(
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
+    logs: list[str] = []
     service = SharedSourceCacheService(
         runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
         store=store,
-        emit_log=lambda *_args, **_kwargs: None,
+        emit_log=lambda text, *_args, **_kwargs: logs.append(str(text)),
     )
     call_counter = {'count': 0}
 
@@ -699,10 +700,11 @@ def test_get_handover_by_date_entries_reuses_latest_matching_date_shift_entry(wo
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
+    logs: list[str] = []
     service = SharedSourceCacheService(
         runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
         store=store,
-        emit_log=lambda *_args, **_kwargs: None,
+        emit_log=lambda text, *_args, **_kwargs: logs.append(str(text)),
     )
 
     latest_file = shared_root / '交接班日志源文件' / '202603' / '20260331--21' / '20260331--21--交接班日志源文件--A楼.xlsx'
@@ -950,10 +952,11 @@ def test_get_latest_ready_selection_allows_fallback_within_three_buckets(
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
+    logs: list[str] = []
     service = SharedSourceCacheService(
         runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
         store=store,
-        emit_log=lambda *_args, **_kwargs: None,
+        emit_log=lambda text, *_args, **_kwargs: logs.append(str(text)),
     )
 
     latest_a = shared_root / '全景平台月报源文件' / '202603' / '20260330--08' / '20260330--08--全景平台月报源文件--A楼.xlsx'
@@ -2077,10 +2080,11 @@ def test_external_upload_alarm_entries_single_building_keeps_only_rows_within_60
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
+    logs: list[str] = []
     service = SharedSourceCacheService(
         runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
         store=store,
-        emit_log=lambda *_args, **_kwargs: None,
+        emit_log=lambda text, *_args, **_kwargs: logs.append(str(text)),
     )
 
     class _FakeBitableClient:
@@ -2104,8 +2108,17 @@ def test_external_upload_alarm_entries_single_building_keeps_only_rows_within_60
                 {'record_id': 'record-a-1', 'fields': {'楼栋': 'A楼', '告警内容': '其他楼栋记录'}},
             ]
 
-        def batch_delete_records(self, table_id: str, record_ids: list[str], batch_size: int = 500) -> int:
+        def batch_delete_records(
+            self,
+            table_id: str,
+            record_ids: list[str],
+            batch_size: int = 500,
+            progress_callback=None,
+        ) -> int:
             self.delete_calls.append({'table_id': table_id, 'record_ids': list(record_ids), 'batch_size': batch_size})
+            if callable(progress_callback):
+                progress_callback(0, len(record_ids))
+                progress_callback(len(record_ids), len(record_ids))
             return len(record_ids)
 
         def batch_create_records(
@@ -2159,6 +2172,9 @@ def test_external_upload_alarm_entries_single_building_keeps_only_rows_within_60
     uploaded_rows = fake_client.create_calls[0]['fields_list']
     assert len(uploaded_rows) == 1
     assert uploaded_rows[0]['告警内容'] == '近60天记录'
+    assert any('外网告警开始删除旧记录' in text for text in logs)
+    assert any('外网告警删除旧记录进度' in text and 'deleted=1/1' in text for text in logs)
+    assert any('外网告警删除旧记录完成' in text and 'deleted=1' in text for text in logs)
 
 
 def test_external_upload_alarm_entries_single_building_allows_yesterday_fallback(

@@ -342,7 +342,13 @@ class FeishuBitableClient:
         item = payload.get("record") if isinstance(payload, dict) else {}
         return item if isinstance(item, dict) else {}
 
-    def batch_delete_records(self, table_id: str, record_ids: List[str], batch_size: int = 500) -> int:
+    def batch_delete_records(
+        self,
+        table_id: str,
+        record_ids: List[str],
+        batch_size: int = 500,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> int:
         normalized = [str(record_id).strip() for record_id in record_ids if str(record_id).strip()]
         if not normalized:
             return 0
@@ -351,18 +357,34 @@ class FeishuBitableClient:
 
         url = self.BATCH_DELETE_RECORD_URL.format(app_token=self.app_token, table_id=table_id)
         deleted = 0
+        total = len(normalized)
+        if callable(progress_callback):
+            progress_callback(0, total)
         for i in range(0, len(normalized), batch_size):
             chunk = normalized[i : i + batch_size]
             payload = {"records": chunk}
             self._post_json(url, payload)
             deleted += len(chunk)
+            if callable(progress_callback):
+                progress_callback(deleted, total)
         return deleted
 
-    def clear_table(self, table_id: str, list_page_size: int = 500, delete_batch_size: int = 500) -> int:
+    def clear_table(
+        self,
+        table_id: str,
+        list_page_size: int = 500,
+        delete_batch_size: int = 500,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> int:
         record_ids = self.list_record_ids(table_id=table_id, page_size=list_page_size)
         if not record_ids:
             return 0
-        return self.batch_delete_records(table_id=table_id, record_ids=record_ids, batch_size=delete_batch_size)
+        return self.batch_delete_records(
+            table_id=table_id,
+            record_ids=record_ids,
+            batch_size=delete_batch_size,
+            progress_callback=progress_callback,
+        )
 
     def list_fields(self, table_id: str, page_size: int = 500) -> List[Dict[str, Any]]:
         if page_size <= 0:

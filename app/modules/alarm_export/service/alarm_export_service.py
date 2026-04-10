@@ -272,6 +272,51 @@ class AlarmExportService:
         )
 
     @staticmethod
+    def _clear_feishu_table_with_progress(
+        client: Any,
+        *,
+        table_id: str,
+        feishu_cfg: Dict[str, Any],
+        emit_log: Callable[[str], None],
+        source: str,
+    ) -> int:
+        emit_log(f"[{source}] 正在清空目标表旧记录...")
+        last_logged_deleted = -1
+        last_logged_total = -1
+
+        def _progress_callback(deleted: int, total: int) -> None:
+            nonlocal last_logged_deleted, last_logged_total
+            normalized_deleted = max(0, int(deleted or 0))
+            normalized_total = max(0, int(total or 0))
+            if normalized_total <= 0:
+                return
+            if (
+                normalized_deleted == last_logged_deleted
+                and normalized_total == last_logged_total
+            ):
+                return
+            last_logged_deleted = normalized_deleted
+            last_logged_total = normalized_total
+            emit_log(f"[{source}] 清空旧记录进度: {normalized_deleted}/{normalized_total}")
+
+        clear_kwargs = {
+            "table_id": table_id,
+            "list_page_size": int(feishu_cfg.get("list_page_size", 500)),
+            "delete_batch_size": int(feishu_cfg.get("delete_batch_size", 500)),
+        }
+        try:
+            cleared_count = int(
+                client.clear_table(
+                    **clear_kwargs,
+                    progress_callback=_progress_callback,
+                )
+            )
+        except TypeError:
+            cleared_count = int(client.clear_table(**clear_kwargs))
+        emit_log(f"[{source}] 已清空旧记录: {cleared_count}")
+        return cleared_count
+
+    @staticmethod
     def _build_target_descriptor(resolved_target: Dict[str, str]) -> Dict[str, str]:
         table_id = str(resolved_target.get("table_id", "")).strip()
         return {
@@ -580,15 +625,13 @@ class AlarmExportService:
             )
 
             if bool(feishu_cfg.get("clear_before_upload", True)):
-                emit_log(f"[{source}] 正在清空目标表旧记录...")
-                cleared_count = int(
-                    client.clear_table(
-                        table_id=table_id,
-                        list_page_size=int(feishu_cfg.get("list_page_size", 500)),
-                        delete_batch_size=int(feishu_cfg.get("delete_batch_size", 500)),
-                    )
+                cleared_count = self._clear_feishu_table_with_progress(
+                    client,
+                    table_id=table_id,
+                    feishu_cfg=feishu_cfg,
+                    emit_log=emit_log,
+                    source=source,
                 )
-                emit_log(f"[{source}] 已清空旧记录: {cleared_count}")
                 if resume_state:
                     resume_state["cleared"] = True
                     resume_state["cleared_count"] = cleared_count
@@ -986,15 +1029,13 @@ class AlarmExportService:
                     cleared_count = int(resume_state.get("cleared_count", 0))
                     emit_log(f"[{source}] 续传任务已清空旧记录，跳过重复清表: cleared={cleared_count}")
                 else:
-                    emit_log(f"[{source}] 正在清空目标表旧记录...")
-                    cleared_count = int(
-                        client.clear_table(
-                            table_id=table_id,
-                            list_page_size=int(feishu_cfg.get("list_page_size", 500)),
-                            delete_batch_size=int(feishu_cfg.get("delete_batch_size", 500)),
-                        )
+                    cleared_count = self._clear_feishu_table_with_progress(
+                        client,
+                        table_id=table_id,
+                        feishu_cfg=feishu_cfg,
+                        emit_log=emit_log,
+                        source=source,
                     )
-                    emit_log(f"[{source}] 已清空旧记录: {cleared_count}")
                     if resume_state:
                         resume_state["cleared"] = True
                         resume_state["cleared_count"] = cleared_count
