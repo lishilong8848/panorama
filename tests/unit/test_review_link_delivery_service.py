@@ -148,6 +148,54 @@ def test_send_for_batch_manual_success_uses_open_id(monkeypatch):
     assert any("批次完成" in line for line in logs)
 
 
+def test_send_for_batch_auto_uses_effective_base_url_fallback(monkeypatch):
+    service = _make_service(
+        monkeypatch,
+        recipients_by_building={"A楼": [{"open_id": "ou_abc", "note": "本人"}]},
+        review_links=[],
+        review_base_url_effective="http://192.168.224.157:18765",
+    )
+    logs = []
+    calls = []
+
+    class _FakeClient:
+        def send_text_message(self, *, receive_id: str, receive_id_type: str, text: str):
+            calls.append(
+                {
+                    "receive_id": receive_id,
+                    "receive_id_type": receive_id_type,
+                    "text": text,
+                }
+            )
+            return {"message_id": "msg-1"}
+
+    service._build_feishu_client = lambda: _FakeClient()
+
+    session = dict(_FakeReviewSessionService.sessions[0])
+    result = service.send_for_session(
+        session,
+        source="auto",
+        force=False,
+        emit_log=logs.append,
+    )
+
+    assert result["status"] == "success"
+    assert result["url"] == "http://192.168.224.157:18765/handover/review/a"
+    assert calls == [
+        {
+            "receive_id": "ou_abc",
+            "receive_id_type": "open_id",
+            "text": (
+                "这是一条交接班审核访问链接，请在办公电脑的浏览器中打开。\n"
+                "楼栋：A楼\n"
+                "日期：2026-04-10\n"
+                "班次：夜班\n"
+                "审核链接：http://192.168.224.157:18765/handover/review/a"
+            ),
+        }
+    ]
+
+
 def test_validate_manual_send_preflight_building_unconfigured(monkeypatch):
     service = _make_service(
         monkeypatch,

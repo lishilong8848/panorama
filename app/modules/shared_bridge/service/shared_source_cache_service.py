@@ -2441,8 +2441,8 @@ class SharedSourceCacheService:
 
         emit_log(
             "[共享缓存] 后台扫描完成: "
-            f"lookback_days={max(1, int(lookback_days or 1))}, scanned={scanned}, "
-            f"downgraded={downgraded}, kept={kept}, skipped={skipped}"
+            f"观察窗口={max(1, int(lookback_days or 1))}天, 已扫描={scanned}, "
+            f"已降级={downgraded}, 保持有效={kept}, 已跳过={skipped}"
         )
         return {
             "scanned": scanned,

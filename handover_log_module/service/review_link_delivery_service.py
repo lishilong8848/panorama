@@ -419,7 +419,7 @@ class ReviewLinkDeliveryService:
             if isinstance(review_access_snapshot, dict)
             else materialize_review_access_snapshot(self.handover_cfg)
         )
-        url = self._review_url_for_building(snapshot, building)
+        url = self._review_url_for_building(snapshot, building) or self._manual_test_review_url_for_building(snapshot, building)
         emit_log(
             "[交接班][审核链接发送] 开始发送 "
             f"building={building}, session_id={session_id}, revision={int(recipient_snapshot.get('revision', 0) or 0)}, "

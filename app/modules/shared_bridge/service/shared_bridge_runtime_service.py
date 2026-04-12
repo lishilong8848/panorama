@@ -2767,10 +2767,10 @@ class SharedBridgeRuntimeService:
             )
         summary_text = (
             "共享缓存库后台扫描完成: "
-            f"scanned={int(source_cache_summary.get('scanned', 0) or 0)}, "
-            f"downgraded={int(source_cache_summary.get('downgraded', 0) or 0)}, "
-            f"kept={int(source_cache_summary.get('kept', 0) or 0)}, "
-            f"skipped={int(source_cache_summary.get('skipped', 0) or 0)}"
+            f"已扫描={int(source_cache_summary.get('scanned', 0) or 0)}, "
+            f"已降级={int(source_cache_summary.get('downgraded', 0) or 0)}, "
+            f"保持有效={int(source_cache_summary.get('kept', 0) or 0)}, "
+            f"已跳过={int(source_cache_summary.get('skipped', 0) or 0)}"
         )
         self._emit_system_log(f"[共享桥接][后台任务] {summary_text}")
         return {
@@ -2822,8 +2822,8 @@ class SharedBridgeRuntimeService:
                 artifact_kept += 1
         summary_text = (
             "共享桥接产物后台自愈完成: "
-            f"scanned={artifact_scanned}, downgraded={artifact_downgraded}, "
-            f"kept={artifact_kept}, skipped={artifact_skipped}"
+            f"已扫描={artifact_scanned}, 已降级={artifact_downgraded}, "
+            f"保持有效={artifact_kept}, 已跳过={artifact_skipped}"
         )
         self._emit_system_log(f"[共享桥接][后台任务] {summary_text}")
         return {

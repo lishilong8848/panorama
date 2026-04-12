@@ -137,7 +137,20 @@ def _normalize_inventory_rows(rows: Any, columns: List[Dict[str, Any]]) -> List[
 
 
 def _set_inventory_row_values(ws: Worksheet, row_idx: int, row_payload: Dict[str, str], columns: List[Dict[str, Any]]) -> None:
+    managed_col_letters: set[str] = set()
+    for column in columns:
+        source_cols = column.get("source_cols", [])
+        if not isinstance(source_cols, list):
+            continue
+        for source_col in source_cols:
+            text = str(source_col or "").strip().upper()
+            if text:
+                managed_col_letters.add(text)
+
     for col_idx in range(2, 10):
+        column_letter = get_column_letter(col_idx).upper()
+        if column_letter not in managed_col_letters:
+            continue
         existing = ws._cells.get((row_idx, col_idx))  # noqa: SLF001
         if isinstance(existing, MergedCell):
             del ws._cells[(row_idx, col_idx)]  # noqa: SLF001

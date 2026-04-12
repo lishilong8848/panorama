@@ -196,26 +196,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     container = build_container()
 
     def _persist_last_started_role_mode(role_mode: str) -> None:
-        normalized_role = normalize_role_mode(role_mode)
-        if normalized_role not in {"internal", "external"}:
-            return
-        current_config = container.config if isinstance(container.config, dict) else {}
-        common_cfg = current_config.get("common", {}) if isinstance(current_config.get("common", {}), dict) else {}
-        deployment_cfg = common_cfg.get("deployment", {}) if isinstance(common_cfg, dict) else {}
-        current_last_started = normalize_role_mode(deployment_cfg.get("last_started_role_mode"))
-        if current_last_started == normalized_role:
-            return
-        updated = copy.deepcopy(current_config)
-        updated.setdefault("common", {})
-        if not isinstance(updated["common"], dict):
-            updated["common"] = {}
-        updated["common"].setdefault("deployment", {})
-        if not isinstance(updated["common"]["deployment"], dict):
-            updated["common"]["deployment"] = {}
-        updated["common"]["deployment"]["last_started_role_mode"] = normalized_role
-        saved = save_settings(updated, container.config_path)
-        container.config = copy.deepcopy(saved)
-        container.runtime_config = adapt_runtime_config(container.config)
+        _ = role_mode
+        return
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):

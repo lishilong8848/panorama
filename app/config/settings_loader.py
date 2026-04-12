@@ -44,6 +44,7 @@ from handover_log_module.core.building_title_rules import (
 )
 from handover_log_module.core.cell_rule_compiler import normalize_cell_rules
 from handover_log_module.core.expression_eval import ExpressionError, get_expression_variables
+from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from pipeline_utils import (
     DEFAULT_CONFIG_TEMPLATE_FILENAME,
     get_app_dir,
@@ -2079,6 +2080,7 @@ def write_settings_atomically(
 
 
 def _normalize_console_host_for_lan(cfg: Dict[str, Any], config_path: str | Path | None = None) -> Dict[str, Any]:
+    _ = config_path
     if not isinstance(cfg, dict):
         return cfg
     common_cfg = cfg.get("common", {})
@@ -2093,7 +2095,6 @@ def _normalize_console_host_for_lan(cfg: Dict[str, Any], config_path: str | Path
     console_cfg["host"] = "0.0.0.0"
     common_cfg["console"] = console_cfg
     cfg["common"] = common_cfg
-    write_settings_atomically(cfg, config_path)
     return cfg
 
 
@@ -2134,25 +2135,8 @@ def _compose_handover_segmented_config(cfg: Dict[str, Any], config_path: str | P
 
 
 def _ensure_handover_segment_files(cfg: Dict[str, Any], config_path: str | Path | None = None) -> bool:
-    target = get_settings_path(config_path)
-    if has_all_handover_segment_files(target):
-        return False
-    with handover_segment_write_lock():
-        if has_all_handover_segment_files(target):
-            return False
-        normalized_seed = validate_settings(copy.deepcopy(cfg))
-        if has_any_handover_segment_file(target):
-            normalized_seed = validate_settings(_compose_handover_segmented_config(normalized_seed, target))
-        create_pre_handover_segment_backup(target)
-        common_doc, building_docs = build_segment_documents_from_config(normalized_seed)
-        common_path = handover_common_segment_path(target)
-        if not common_path.exists():
-            write_segment_document(common_path, common_doc)
-        for building in HANDOVER_SEGMENT_BUILDINGS:
-            building_path = handover_building_segment_path(target, building)
-            if not building_path.exists():
-                write_segment_document(building_path, building_docs[building])
-        return True
+    _ = (cfg, config_path)
+    return False
 
 
 def _preserve_segment_backed_handover(cfg: Dict[str, Any], config_path: str | Path | None = None) -> Dict[str, Any]:
@@ -2174,22 +2158,55 @@ def preserve_segmented_handover_config(
 
 def get_handover_common_segment(config_path: str | Path | None = None) -> Dict[str, Any]:
     target = get_settings_path(config_path)
-    _ensure_handover_segment_files(load_pipeline_config(target), target)
-    return read_segment_document(handover_common_segment_path(target))
+    common_path = handover_common_segment_path(target)
+    if common_path.exists():
+        return read_segment_document(common_path)
+    common_doc, _ = build_segment_documents_from_config(load_pipeline_config(target))
+    return build_segment_document(common_doc.get("data", {}), revision=0, updated_at="")
 
 
 def get_handover_building_segment(building_code: str, config_path: str | Path | None = None) -> Dict[str, Any]:
     target = get_settings_path(config_path)
-    _ensure_handover_segment_files(load_pipeline_config(target), target)
-    return read_segment_document(handover_building_segment_path(target, building_code))
+    building_path = handover_building_segment_path(target, building_code)
+    if building_path.exists():
+        return read_segment_document(building_path)
+    _, building_docs = build_segment_documents_from_config(load_pipeline_config(target))
+    building_doc = building_docs[building_name_from_segment_code(building_code)]
+    return build_segment_document(building_doc.get("data", {}), revision=0, updated_at="")
 
 
 def _refresh_handover_aggregate_view(cfg: Dict[str, Any], config_path: str | Path | None = None) -> str:
     try:
-        write_settings_atomically(cfg, config_path)
+        write_settings_atomically(_normalize_footer_defaults_for_persistence(cfg), config_path)
         return ""
     except Exception as exc:  # noqa: BLE001
         return str(exc)
+
+
+def _normalize_footer_defaults_for_persistence(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = copy.deepcopy(cfg if isinstance(cfg, dict) else {})
+    features = normalized.get("features", {})
+    if not isinstance(features, dict):
+        return normalized
+    handover = features.get("handover_log", {})
+    if not isinstance(handover, dict):
+        return normalized
+    review_ui = handover.get("review_ui", {})
+    if not isinstance(review_ui, dict):
+        return normalized
+    defaults_by_building = review_ui.get("footer_inventory_defaults_by_building", {})
+    if not isinstance(defaults_by_building, dict):
+        return normalized
+    service = FooterInventoryDefaultsService()
+    review_ui["footer_inventory_defaults_by_building"] = {
+        str(building or "").strip(): {"rows": service.normalize_rows(payload.get("rows", []) if isinstance(payload, dict) else [])}
+        for building, payload in defaults_by_building.items()
+        if str(building or "").strip()
+    }
+    handover["review_ui"] = review_ui
+    features["handover_log"] = handover
+    normalized["features"] = features
+    return normalized
 
 
 def _extract_all_handover_building_segments(cfg: Dict[str, Any]) -> dict[str, Dict[str, Any]]:
@@ -2217,7 +2234,7 @@ def save_handover_common_segment(
             common_data=data,
             building_data_by_name=_extract_all_handover_building_segments(current_full),
         )
-        validated = validate_settings(next_full)
+        validated = _normalize_footer_defaults_for_persistence(validate_settings(next_full))
         next_doc = build_segment_document(
             extract_handover_common_data(validated),
             revision=current_revision + 1,
@@ -2251,7 +2268,7 @@ def save_handover_building_segment(
             common_data=current_common,
             building_data_by_name=building_payloads,
         )
-        validated = validate_settings(next_full)
+        validated = _normalize_footer_defaults_for_persistence(validate_settings(next_full))
         next_doc = build_segment_document(
             extract_handover_building_data(validated, target_building),
             revision=current_revision + 1,
@@ -2263,44 +2280,16 @@ def save_handover_building_segment(
 
 def load_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
-    had_deprecated_alarm_db = _contains_deprecated_alarm_db_config(cfg)
-    had_noncanonical_handover_title = _contains_noncanonical_handover_template_title_config(cfg)
-    segments_seeded = _ensure_handover_segment_files(cfg, config_path)
+    _ = _ensure_handover_segment_files(cfg, config_path)
     composed = _compose_handover_segmented_config(cfg, config_path)
-    repaired, repaired_notes = _repair_critical_settings_from_backups(composed, config_path)
-    normalized = validate_settings(repaired)
-    backup_count = len(_settings_backup_candidates(config_path))
-    if repaired_notes:
-        print(
-            f"[配置修复] 已从本地备份恢复关键配置: {'；'.join(repaired_notes)}; "
-            f"config={get_settings_path(config_path)}, backups={backup_count}"
-        )
-    else:
-        print(f"[配置修复] 已检查本地备份，当前关键配置无需恢复: config={get_settings_path(config_path)}, backups={backup_count}")
-    if had_deprecated_alarm_db or had_noncanonical_handover_title or segments_seeded or repaired_notes:
-        write_settings_atomically(normalized, config_path)
+    normalized = validate_settings(composed)
     return _normalize_console_host_for_lan(normalized, config_path)
 
 
 def load_bootstrap_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
-    repaired, repaired_notes = _repair_critical_settings_from_backups(
-        _compose_handover_segmented_config(cfg, config_path),
-        config_path,
-    )
-    normalized = ensure_v3_config(repaired)
-    backup_count = len(_settings_backup_candidates(config_path))
-    if repaired_notes:
-        print(
-            f"[配置修复] 已从本地备份恢复关键配置: {'；'.join(repaired_notes)}; "
-            f"config={get_settings_path(config_path)}, backups={backup_count}"
-        )
-    elif backup_count > 0:
-        print(f"[配置修复] 已检查本地备份，当前关键配置无需恢复: config={get_settings_path(config_path)}, backups={backup_count}")
-    if _contains_deprecated_alarm_db_config(cfg) or _contains_noncanonical_handover_template_title_config(cfg) or repaired_notes:
-        _normalize_handover_template_title_config(normalized)
-        write_settings_atomically(normalized, config_path)
-    return normalized
+    composed = _compose_handover_segmented_config(cfg, config_path)
+    return ensure_v3_config(composed)
 
 
 def repair_day_metric_related_settings(
@@ -2319,7 +2308,7 @@ def save_settings(
     preserve_segmented_handover: bool = True,
 ) -> Dict[str, Any]:
     payload = _preserve_segment_backed_handover(cfg, config_path) if preserve_segmented_handover else copy.deepcopy(cfg)
-    normalized = validate_settings(payload)
+    normalized = _normalize_footer_defaults_for_persistence(validate_settings(payload))
     write_settings_atomically(normalized, config_path)
     return normalized
 

@@ -22,6 +22,7 @@ HANDOVER_SEGMENT_BUILDING_TO_CODE: dict[str, str] = {
 HANDOVER_SEGMENT_CODE_TO_BUILDING: dict[str, str] = {
     code: building for building, code in HANDOVER_SEGMENT_BUILDING_TO_CODE.items()
 }
+_FOOTER_DEFAULT_VISIBLE_COLUMNS: tuple[str, ...] = ("B", "C", "E", "F", "G")
 
 _SEGMENT_ROOT_DIR = "config_segments"
 _SEGMENT_FEATURE_DIR = "handover"
@@ -189,6 +190,35 @@ def _deep_merge_dict(base: Dict[str, Any], overlay: Mapping[str, Any] | None) ->
     return base
 
 
+def _normalize_footer_default_rows(rows: Any) -> list[Dict[str, Any]]:
+    normalized: list[Dict[str, Any]] = []
+    source_rows = rows if isinstance(rows, list) else []
+    for raw_row in source_rows:
+        cells = raw_row.get("cells", {}) if isinstance(raw_row, dict) else {}
+        if not isinstance(cells, Mapping):
+            cells = {}
+        normalized_cells = {
+            column: str(cells.get(column, "") or "").strip()
+            for column in _FOOTER_DEFAULT_VISIBLE_COLUMNS
+        }
+        normalized.append({"cells": normalized_cells})
+    if normalized:
+        return normalized
+    return [{"cells": {column: "" for column in _FOOTER_DEFAULT_VISIBLE_COLUMNS}}]
+
+
+def _normalize_footer_defaults_by_building(payload: Any) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    source = payload if isinstance(payload, Mapping) else {}
+    for raw_building, raw_payload in source.items():
+        building = str(raw_building or "").strip()
+        if not building:
+            continue
+        rows = raw_payload.get("rows", []) if isinstance(raw_payload, Mapping) else []
+        output[building] = {"rows": _normalize_footer_default_rows(rows)}
+    return output
+
+
 def _ensure_child_dict(root: Dict[str, Any], key: str) -> Dict[str, Any]:
     child = root.get(key)
     if not isinstance(child, dict):
@@ -288,7 +318,7 @@ def extract_handover_building_data(cfg: Mapping[str, Any], building: str) -> Dic
         else {}
     )
     footer_payload = (
-        {building_name: copy.deepcopy(footer_defaults.get(building_name))}
+        _normalize_footer_defaults_by_building({building_name: copy.deepcopy(footer_defaults.get(building_name))})
         if isinstance(footer_defaults, Mapping) and building_name in footer_defaults
         else {}
     )

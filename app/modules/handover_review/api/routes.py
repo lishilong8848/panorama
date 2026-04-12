@@ -8,7 +8,12 @@ from typing import Any, Dict
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
-from app.config.settings_loader import save_settings
+from app.config.handover_segment_store import building_code_from_name
+from app.config.settings_loader import (
+    get_handover_building_segment,
+    save_handover_building_segment,
+    save_settings,
+)
 from app.shared.utils.frontend_cache import render_frontend_index_html, source_frontend_no_cache_headers
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
@@ -422,9 +427,21 @@ def _daily_report_capture_result_payload(raw: Dict[str, Any] | None = None, *, f
 def _persist_footer_inventory_defaults(container, *, building: str, document: Dict[str, Any]) -> int:
     defaults_service = FooterInventoryDefaultsService()
     rows = defaults_service.extract_rows_from_document(document)
-    updated_config = defaults_service.set_building_defaults(container.config, building, rows)
-    saved_config = save_settings(updated_config, container.config_path)
+    building_code = building_code_from_name(building)
+    current_doc = get_handover_building_segment(building_code, container.config_path)
+    current_data = current_doc.get("data", {}) if isinstance(current_doc.get("data", {}), dict) else {}
+    updated_config = defaults_service.set_building_defaults(current_data, building, rows)
+    saved_config, _document, aggregate_refresh_error = save_handover_building_segment(
+        building_code,
+        updated_config,
+        base_revision=int(current_doc.get("revision", 0) or 0),
+        config_path=container.config_path,
+    )
     container.reload_config(saved_config)
+    if aggregate_refresh_error:
+        container.add_system_log(
+            f"[交接班][审核模板默认] 楼栋分段已保存，但聚合配置刷新失败: building={building}, error={aggregate_refresh_error}"
+        )
     return len(rows)
 
 
@@ -434,12 +451,22 @@ def _persist_review_defaults(container, *, building: str, document: Dict[str, An
 
     footer_rows = footer_defaults_service.extract_rows_from_document(document)
     cabinet_cells = cabinet_defaults_service.extract_cells_from_document(document)
-
-    updated_config = footer_defaults_service.set_building_defaults(container.config, building, footer_rows)
+    building_code = building_code_from_name(building)
+    current_doc = get_handover_building_segment(building_code, container.config_path)
+    current_data = current_doc.get("data", {}) if isinstance(current_doc.get("data", {}), dict) else {}
+    updated_config = footer_defaults_service.set_building_defaults(current_data, building, footer_rows)
     updated_config = cabinet_defaults_service.set_building_defaults(updated_config, building, cabinet_cells)
-
-    saved_config = save_settings(updated_config, container.config_path)
+    saved_config, _document, aggregate_refresh_error = save_handover_building_segment(
+        building_code,
+        updated_config,
+        base_revision=int(current_doc.get("revision", 0) or 0),
+        config_path=container.config_path,
+    )
     container.reload_config(saved_config)
+    if aggregate_refresh_error:
+        container.add_system_log(
+            f"[交接班][审核模板默认] 楼栋分段已保存，但聚合配置刷新失败: building={building}, error={aggregate_refresh_error}"
+        )
     return {
         "footer_inventory_rows": len(footer_rows),
         "cabinet_power_fields": len(cabinet_cells),
@@ -1306,18 +1333,9 @@ def handover_review_save(
         except ReviewSessionStoreUnavailableError as exc:
             _raise_review_store_http_error(exc, saved_document=True)
         is_latest_session = bool(latest_session_id and latest_session_id == session_id)
-        persisted_defaults = None
+        persisted_defaults = {"footer_inventory_rows": 0, "cabinet_power_fields": 0}
         if is_latest_session:
-            try:
-                persisted_defaults = _persist_review_defaults(container, building=building, document=document)
-            except Exception as exc:  # noqa: BLE001
-                container.add_system_log(
-                    f"[交接班][审核模板默认] 默认值保存失败: building={building}, 错误={exc}"
-                )
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"当前文件已保存，但楼栋模板默认值保存失败，未生效: {exc}",
-                ) from exc
+            persisted_defaults = _persist_review_defaults(container, building=building, document=document)
         try:
             if is_latest_session:
                 session, batch_status = service.touch_session_after_save(
@@ -1343,7 +1361,7 @@ def handover_review_save(
             f"[交接班][审核保存] building={building}, session_id={session_id}, revision={session.get('revision', '-')}"
         )
         container.add_system_log(
-            f"[交接班][审核模板默认] 默认值已更新: building={building}, "
+            f"[交接班][审核模板默认] 已跳过默认值回写: building={building}, "
             f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0) if isinstance(persisted_defaults, dict) else 0}, "
             f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}, "
             f"config={container.config_path}"

@@ -17,7 +17,7 @@ from handover_log_module.repository.footer_inventory_writer import write_footer_
 
 
 class FooterInventoryDefaultsService:
-    VISIBLE_COLUMNS = ("B", "C", "E", "F", "G", "H")
+    VISIBLE_COLUMNS = ("B", "C", "E", "F", "G")
     DEFAULTS_KEY = "footer_inventory_defaults_by_building"
 
     @classmethod
@@ -139,6 +139,11 @@ class FooterInventoryDefaultsService:
 
     def build_inventory_block(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         normalized_rows = self.normalize_rows(rows)
+        managed_columns = [
+            dict(item)
+            for item in FOOTER_INVENTORY_COLUMNS
+            if str(item.get("key", "")).strip().upper() in self.VISIBLE_COLUMNS
+        ]
         block_rows: List[Dict[str, Any]] = []
         for index, row in enumerate(normalized_rows, start=1):
             cells = row.get("cells", {}) if isinstance(row, dict) else {}
@@ -158,7 +163,7 @@ class FooterInventoryDefaultsService:
             "type": "inventory_table",
             "title": "交接确认",
             "group_title": FOOTER_GROUP_TITLE_TEXT,
-            "columns": [dict(item) for item in FOOTER_INVENTORY_COLUMNS],
+            "columns": managed_columns,
             "rows": block_rows,
         }
 

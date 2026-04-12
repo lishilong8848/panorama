@@ -117,7 +117,6 @@ def test_footer_inventory_defaults_roundtrip_v3_config() -> None:
                 "E": "5",
                 "F": "\u5426",
                 "G": "\u65e0",
-                "H": "\u5f20\u4e09",
             }
         }
     ]
@@ -168,6 +167,9 @@ def test_apply_building_defaults_to_output_overwrites_template_footer(tmp_path: 
         assert ws["B56"].value == "\u5e94\u6025\u706f"
         assert ws["C56"].value == "A\u697c\u4ed3\u5e93"
         assert ws["F56"].value == "\u662f"
+        assert ws["H52"].value == "\u66fe\u5c0f\u5e86"
+        assert ws["H55"].value == "\u66fe\u5c0f\u5e86"
+        assert ws["H56"].value in {"", None}
         assert ws["A57"].value == FOOTER_SIGNOFF_MARKER
         merged = {str(item) for item in ws.merged_cells.ranges}
         assert "A51:A56" in merged
@@ -206,7 +208,6 @@ def test_persist_footer_inventory_defaults_updates_main_config_file(tmp_path: Pa
                 "E": "5",
                 "F": "\u5426",
                 "G": "\u65e0",
-                "H": "\u674e\u56db",
             }
         }
     ]
