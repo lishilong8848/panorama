@@ -54,6 +54,13 @@ export async function putConfigApi(v3Config) {
   });
 }
 
+export async function repairDayMetricUploadConfigApi() {
+  return apiJson("/api/config-repair/day-metric-upload", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 export async function getHandoverCommonConfigSegmentApi() {
   return apiJsonWithTimeout("/api/config-segments/handover/common", {}, 8000);
 }
@@ -387,6 +394,14 @@ export async function applyUpdaterApi(payload = {}) {
 
 export async function restartUpdaterApi() {
   return apiJson("/api/updater/restart", { method: "POST", body: "{}" });
+}
+
+export async function triggerInternalPeerUpdaterCheckApi() {
+  return apiJson("/api/updater/internal-peer/check", { method: "POST", body: "{}" });
+}
+
+export async function triggerInternalPeerUpdaterApplyApi() {
+  return apiJson("/api/updater/internal-peer/apply", { method: "POST", body: "{}" });
 }
 
 export async function restartAppApi(payload = {}) {

@@ -125,9 +125,6 @@
     if (!isRuntimeTrafficPaused()) {
       streamController.attachSystemStream();
     }
-    if (bootstrapReady) {
-      bootstrapReady.value = true;
-    }
     void fetchBootstrapHealth({ silentMessage: true });
     void fetchConfig({ silentMessage: true });
     if (!isRuntimeTrafficPaused() && canFetchHealth()) {

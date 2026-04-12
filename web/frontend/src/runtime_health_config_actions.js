@@ -17,6 +17,8 @@ import {
   getUpdaterStatusApi,
   restartUpdaterApi,
   restartAppApi,
+  triggerInternalPeerUpdaterApplyApi,
+  triggerInternalPeerUpdaterCheckApi,
   getBridgeTaskApi,
   getBridgeTasksApi,
   buildHandoverDailyReportCaptureAssetUrl,
@@ -41,6 +43,7 @@ import {
   runHandoverDailyReportScreenshotTestApi,
   uploadHandoverDailyReportAssetApi,
   putConfigApi,
+  repairDayMetricUploadConfigApi,
   putHandoverBuildingConfigSegmentApi,
   putHandoverCommonConfigSegmentApi,
   refreshManualAlarmSourceCacheApi,
@@ -48,6 +51,7 @@ import {
   uploadAlarmSourceCacheFullApi,
   uploadAlarmSourceCacheBuildingApi,
   openAlarmEventUploadTargetApi,
+  startJsonJobApi,
 } from "./api_client.js";
 import { prepareConfigPayloadForSave } from "./config_save_validation.js";
 import { buildUpdaterApplyMessage, mapUpdaterResultText } from "./updater_text.js";
@@ -57,6 +61,8 @@ const ACTION_KEY_APP_RESTART = "app:restart";
 const ACTION_KEY_UPDATER_CHECK = "updater:check";
 const ACTION_KEY_UPDATER_APPLY = "updater:apply";
 const ACTION_KEY_UPDATER_RESTART = "updater:restart";
+const ACTION_KEY_UPDATER_INTERNAL_PEER_CHECK = "updater:internal_peer_check";
+const ACTION_KEY_UPDATER_INTERNAL_PEER_APPLY = "updater:internal_peer_apply";
 const ACTION_KEY_HANDOVER_CONFIRM_ALL = "handover_review:confirm_all";
 const ACTION_KEY_HANDOVER_CLOUD_RETRY_ALL = "handover_review:cloud_retry_all";
 const ACTION_KEY_HANDOVER_DAILY_REPORT_AUTH_OPEN = "handover_daily_report:auth_open";
@@ -66,6 +72,7 @@ const ACTION_KEY_HANDOVER_DAILY_REPORT_UPLOAD_PREFIX = "handover_daily_report:up
 const ACTION_KEY_HANDOVER_DAILY_REPORT_RESTORE_PREFIX = "handover_daily_report:restore:";
 const ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE = "handover_daily_report:record_rewrite";
 const ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE = "handover_review:access_reprobe";
+const ACTION_KEY_HANDOVER_REVIEW_BASE_URL_SAVE = "handover_review:base_url_save";
 const ACTION_KEY_BRIDGE_CANCEL_PREFIX = "bridge:cancel:";
 const ACTION_KEY_BRIDGE_RETRY_PREFIX = "bridge:retry:";
 const ACTION_KEY_SOURCE_CACHE_REFRESH_CURRENT_HOUR = "bridge:source_cache_refresh_current_hour";
@@ -76,6 +83,8 @@ const ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_FULL = "bridge:source_cache_upload_al
 const ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_BUILDING = "bridge:source_cache_upload_alarm_building";
 const ACTION_KEY_HANDOVER_CONFIG_COMMON_SAVE = "handover_config:common_save";
 const ACTION_KEY_HANDOVER_CONFIG_BUILDING_SAVE = "handover_config:building_save";
+const ACTION_KEY_DAY_METRIC_CONFIG_REPAIR = "day_metric_upload:config_repair";
+const ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX = "handover_review:link_send:";
 const SOURCE_CACHE_FAMILY_LABELS = {
   handover_log_family: "交接班日志源文件",
   handover_capacity_report_family: "交接班容量报表源文件",
@@ -114,6 +123,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     handoverDailyReportPreviewModal,
     handoverDailyReportUploadModal,
     handoverConfigBuilding,
+    handoverRuleScope,
     handoverConfigCommonRevision,
     handoverConfigCommonUpdatedAt,
     handoverConfigBuildingRevision,
@@ -135,6 +145,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     updaterUiOverlayStage,
     updaterUiOverlayKicker,
     updaterAwaitingRestartRecovery,
+    markRestartRecoveryIntent,
     shouldIncludeHandoverHealthContext,
     shouldLoadEngineerDirectory,
   } = ctx;
@@ -148,6 +159,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   let lastBridgeTasksFetchAt = 0;
   let handoverCommonSegmentRequestSeq = 0;
   let handoverBuildingSegmentRequestSeq = 0;
+  let bootstrapRetryTimer = null;
   let updaterReconnectTimer = null;
   let updaterQueueMonitorTimer = null;
   let updaterHealthHydratedOnce = false;
@@ -155,6 +167,22 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   function isUpdaterTrafficPaused() {
     return Boolean(updaterUiOverlayVisible?.value || updaterAwaitingRestartRecovery?.value);
+  }
+
+  function clearBootstrapRetryTimer() {
+    if (bootstrapRetryTimer) {
+      window.clearTimeout(bootstrapRetryTimer);
+      bootstrapRetryTimer = null;
+    }
+  }
+
+  function scheduleBootstrapHealthRetry() {
+    if (bootstrapReady?.value) return;
+    clearBootstrapRetryTimer();
+    bootstrapRetryTimer = window.setTimeout(() => {
+      bootstrapRetryTimer = null;
+      void fetchBootstrapHealth({ silentMessage: true });
+    }, 1000);
   }
 
   function clearUpdaterReconnectTimer() {
@@ -330,6 +358,9 @@ export function createRuntimeHealthConfigActions(ctx) {
     clearUpdaterReconnectTimer();
     clearUpdaterQueueMonitorTimer();
     pauseRuntimeTraffic();
+    if (typeof markRestartRecoveryIntent === "function") {
+      markRestartRecoveryIntent(String(options?.targetRoleMode || "").trim().toLowerCase());
+    }
     if (updaterAwaitingRestartRecovery) updaterAwaitingRestartRecovery.value = true;
     setUpdaterOverlay(true, {
       title: String(options?.title || "更新完成，正在重启服务"),
@@ -792,7 +823,12 @@ export function createRuntimeHealthConfigActions(ctx) {
           ...data.handover.review_status,
         };
       }
+      health.handover.review_recipient_status_by_building = Array.isArray(data.handover.review_recipient_status_by_building)
+        ? data.handover.review_recipient_status_by_building
+        : [];
       applyHandoverReviewAccessSnapshot(data.handover);
+    } else if (health?.handover) {
+      health.handover.review_recipient_status_by_building = [];
     }
     if (data.wet_bulb_collection && typeof data.wet_bulb_collection === "object") {
       health.wet_bulb_collection.enabled = Boolean(data.wet_bulb_collection.enabled);
@@ -1122,15 +1158,29 @@ export function createRuntimeHealthConfigActions(ctx) {
     try {
       const data = await getBootstrapHealthApi();
       applyHealthSnapshot(data);
+      clearBootstrapRetryTimer();
+      if (bootstrapReady) {
+        bootstrapReady.value = true;
+      }
       if (healthLoadError) {
         healthLoadError.value = "";
       }
       return true;
     } catch (err) {
+      if (isAbortError(err)) {
+        scheduleBootstrapHealthRetry();
+        return false;
+      }
       if (healthLoadError) {
         healthLoadError.value = String(err || "").trim();
       }
-      if (isTransientNetworkError(err)) return false;
+      if (isTransientNetworkError(err)) {
+        scheduleBootstrapHealthRetry();
+        return false;
+      }
+      if (!bootstrapReady?.value) {
+        scheduleBootstrapHealthRetry();
+      }
       if (!silentMessage) {
         message.value = `启动状态读取失败: ${err}`;
       }
@@ -1873,6 +1923,23 @@ export function createRuntimeHealthConfigActions(ctx) {
     return normalizeHandoverBuildingName(building).replace("楼", "");
   }
 
+  function normalizeHandoverReviewBaseUrlInput(rawValue) {
+    const trimmed = String(rawValue || "").trim();
+    if (!trimmed) {
+      return { ok: true, value: "" };
+    }
+    const prefixed = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+    try {
+      const parsed = new URL(prefixed);
+      if (!/^https?:$/i.test(parsed.protocol) || !String(parsed.host || "").trim()) {
+        return { ok: false, error: "审核页外部访问基地址必须是合法的 http/https 地址" };
+      }
+      return { ok: true, value: `${parsed.protocol}//${parsed.host}` };
+    } catch (_err) {
+      return { ok: false, error: "审核页外部访问基地址格式错误，应类似 http://192.168.220.160:18765" };
+    }
+  }
+
   function ensureHandoverSegmentConfigShape() {
     if (!config.value || typeof config.value !== "object") return null;
     config.value.handover_log = config.value.handover_log && typeof config.value.handover_log === "object"
@@ -1905,6 +1972,10 @@ export function createRuntimeHealthConfigActions(ctx) {
       && typeof handover.review_ui.footer_inventory_defaults_by_building === "object"
       ? handover.review_ui.footer_inventory_defaults_by_building
       : {};
+    handover.review_ui.review_link_recipients_by_building = handover.review_ui.review_link_recipients_by_building
+      && typeof handover.review_ui.review_link_recipients_by_building === "object"
+      ? handover.review_ui.review_link_recipients_by_building
+      : {};
     return handover;
   }
 
@@ -1915,6 +1986,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     const preservedSheetNames = clone(handover.cloud_sheet_sync?.sheet_names || {});
     const preservedCabinetDefaults = clone(handover.review_ui?.cabinet_power_defaults_by_building || {});
     const preservedFooterDefaults = clone(handover.review_ui?.footer_inventory_defaults_by_building || {});
+    const preservedReviewLinkRecipients = clone(handover.review_ui?.review_link_recipients_by_building || {});
     const next = segmentData && typeof segmentData === "object" ? clone(segmentData) : {};
     next.cell_rules = next.cell_rules && typeof next.cell_rules === "object" ? next.cell_rules : {};
     next.cloud_sheet_sync = next.cloud_sheet_sync && typeof next.cloud_sheet_sync === "object" ? next.cloud_sheet_sync : {};
@@ -1923,6 +1995,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     next.cloud_sheet_sync.sheet_names = preservedSheetNames;
     next.review_ui.cabinet_power_defaults_by_building = preservedCabinetDefaults;
     next.review_ui.footer_inventory_defaults_by_building = preservedFooterDefaults;
+    next.review_ui.review_link_recipients_by_building = preservedReviewLinkRecipients;
     config.value.handover_log = next;
   }
 
@@ -1945,6 +2018,10 @@ export function createRuntimeHealthConfigActions(ctx) {
       && typeof payload.review_ui.footer_inventory_defaults_by_building === "object"
       ? payload.review_ui.footer_inventory_defaults_by_building
       : {};
+    const reviewLinkRecipients = payload?.review_ui?.review_link_recipients_by_building
+      && typeof payload.review_ui.review_link_recipients_by_building === "object"
+      ? payload.review_ui.review_link_recipients_by_building
+      : {};
     handover.cell_rules.building_rows[buildingText] = clone(buildingRows[buildingText] || []);
     handover.cloud_sheet_sync.sheet_names[buildingText] = String(sheetNames[buildingText] || "").trim();
     if (Object.prototype.hasOwnProperty.call(cabinetDefaults, buildingText)) {
@@ -1957,6 +2034,9 @@ export function createRuntimeHealthConfigActions(ctx) {
     } else {
       delete handover.review_ui.footer_inventory_defaults_by_building[buildingText];
     }
+    handover.review_ui.review_link_recipients_by_building[buildingText] = Array.isArray(reviewLinkRecipients[buildingText])
+      ? clone(reviewLinkRecipients[buildingText])
+      : [];
   }
 
   function buildHandoverCommonSegmentPayload() {
@@ -1980,11 +2060,16 @@ export function createRuntimeHealthConfigActions(ctx) {
       && typeof payload.review_ui.footer_inventory_defaults_by_building === "object"
       ? payload.review_ui.footer_inventory_defaults_by_building
       : {};
+    payload.review_ui.review_link_recipients_by_building = payload.review_ui.review_link_recipients_by_building
+      && typeof payload.review_ui.review_link_recipients_by_building === "object"
+      ? payload.review_ui.review_link_recipients_by_building
+      : {};
     for (const building of ["A楼", "B楼", "C楼", "D楼", "E楼"]) {
       delete payload.cell_rules.building_rows[building];
       delete payload.cloud_sheet_sync.sheet_names[building];
       delete payload.review_ui.cabinet_power_defaults_by_building[building];
       delete payload.review_ui.footer_inventory_defaults_by_building[building];
+      delete payload.review_ui.review_link_recipients_by_building[building];
     }
     return payload;
   }
@@ -1999,6 +2084,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         review_ui: {
           cabinet_power_defaults_by_building: { [buildingText]: [] },
           footer_inventory_defaults_by_building: { [buildingText]: {} },
+          review_link_recipients_by_building: { [buildingText]: [] },
         },
       };
     }
@@ -2030,8 +2116,59 @@ export function createRuntimeHealthConfigActions(ctx) {
             [buildingText]: clone(handover.review_ui?.footer_inventory_defaults_by_building?.[buildingText] || {}),
           }
           : {},
+        review_link_recipients_by_building: {
+          [buildingText]: clone(handover.review_ui?.review_link_recipients_by_building?.[buildingText] || []),
+        },
       },
     };
+  }
+
+  function collectHandoverReviewRecipientDraftIssues(building = handoverConfigBuilding?.value) {
+    const handover = ensureHandoverSegmentConfigShape();
+    const buildingText = normalizeHandoverBuildingName(building);
+    if (!handover) return [];
+    const rawItems = Array.isArray(handover.review_ui?.review_link_recipients_by_building?.[buildingText])
+      ? handover.review_ui.review_link_recipients_by_building[buildingText]
+      : [];
+    const issues = [];
+    const seenOpenIds = new Set();
+    rawItems.forEach((rawItem, index) => {
+      if (!rawItem || typeof rawItem !== "object") return;
+      const note = String(rawItem.note || "").trim();
+      const openId = String(rawItem.open_id || "").trim();
+      if (!note && !openId) return;
+      if (!openId) {
+        issues.push(`第 ${index + 1} 行缺少 Open ID`);
+        return;
+      }
+      if (seenOpenIds.has(openId)) {
+        issues.push(`第 ${index + 1} 行 Open ID 重复`);
+        return;
+      }
+      seenOpenIds.add(openId);
+    });
+    return issues;
+  }
+
+  async function sendHandoverReviewLink(building, options = {}) {
+    const buildingText = normalizeHandoverBuildingName(building);
+    const batchKey = String(options?.batchKey || health.handover?.review_status?.batch_key || "").trim();
+    const actionKey = `${ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX}${batchKey || "manual-test"}:${buildingText}`;
+    const runner = async () => {
+      try {
+        const data = await startJsonJobApi("/api/jobs/handover/review-link/send", {
+          batch_key: batchKey,
+          building: buildingText,
+        });
+        message.value = `${buildingText}审核链接测试发送任务已提交`;
+        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        return data;
+      } catch (err) {
+        message.value = `发送${buildingText}审核链接测试消息失败: ${err}`;
+        throw err;
+      }
+    };
+    return runSingleFlight(actionKey, runner, { cooldownMs: 300 });
   }
 
   async function fetchHandoverCommonConfigSegment(options = {}) {
@@ -2066,19 +2203,21 @@ export function createRuntimeHealthConfigActions(ctx) {
       if (requestSeq !== handoverBuildingSegmentRequestSeq) {
         return null;
       }
-      if (handoverConfigBuilding) {
-        handoverConfigBuilding.value = buildingText;
-      }
-      if (handoverConfigBuildingRevision) {
-        handoverConfigBuildingRevision.value = Number.parseInt(String(data?.revision || 0), 10) || 0;
-      }
-      if (handoverConfigBuildingUpdatedAt) {
-        handoverConfigBuildingUpdatedAt.value = String(data?.updated_at || "").trim();
-      }
-      if (handoverRuleScope && String(handoverRuleScope.value || "").trim() !== "default") {
-        handoverRuleScope.value = buildingText;
-      }
-      applyHandoverBuildingSegmentData(buildingText, data?.data || {});
+      withAutoSaveSuspended(() => {
+        if (handoverConfigBuilding) {
+          handoverConfigBuilding.value = buildingText;
+        }
+        if (handoverConfigBuildingRevision) {
+          handoverConfigBuildingRevision.value = Number.parseInt(String(data?.revision || 0), 10) || 0;
+        }
+        if (handoverConfigBuildingUpdatedAt) {
+          handoverConfigBuildingUpdatedAt.value = String(data?.updated_at || "").trim();
+        }
+        if (handoverRuleScope && String(handoverRuleScope.value || "").trim() !== "default") {
+          handoverRuleScope.value = buildingText;
+        }
+        applyHandoverBuildingSegmentData(buildingText, data?.data || {});
+      });
       return data;
     } catch (err) {
       if (!options?.silentMessage) {
@@ -2119,32 +2258,42 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
   }
 
-  async function saveHandoverCommonConfig() {
+  async function saveHandoverCommonConfig(options = {}) {
     const runner = async () => {
       try {
         const data = await putHandoverCommonConfigSegmentApi({
           base_revision: Number.parseInt(String(handoverConfigCommonRevision?.value || 0), 10) || 0,
           data: buildHandoverCommonSegmentPayload(),
         });
-        if (handoverConfigCommonRevision) {
-          handoverConfigCommonRevision.value = Number.parseInt(String(data?.revision || 0), 10) || 0;
+        withAutoSaveSuspended(() => {
+          if (handoverConfigCommonRevision) {
+            handoverConfigCommonRevision.value = Number.parseInt(String(data?.revision || 0), 10) || 0;
+          }
+          if (handoverConfigCommonUpdatedAt) {
+            handoverConfigCommonUpdatedAt.value = String(data?.updated_at || "").trim();
+          }
+          applyHandoverCommonSegmentData(data?.data || {});
+        });
+        if (!options?.skipConfigRefresh) {
+          await fetchConfig({ silentMessage: true });
         }
-        if (handoverConfigCommonUpdatedAt) {
-          handoverConfigCommonUpdatedAt.value = String(data?.updated_at || "").trim();
+        if (!options?.silentSuccess) {
+          message.value = "交接班公共配置已保存";
         }
-        applyHandoverCommonSegmentData(data?.data || {});
-        await fetchConfig({ silentMessage: true });
-        message.value = "交接班公共配置已保存";
         return { saved: true, reason: "saved", data };
       } catch (err) {
         if (Number.parseInt(String(err?.httpStatus || 0), 10) === 409) {
           await fetchConfig({ silentMessage: true });
           await fetchHandoverCommonConfigSegment({ silentMessage: true });
           await fetchHandoverBuildingConfigSegment(handoverConfigBuilding?.value, { silentMessage: true });
-          message.value = "交接班公共配置已被其他人修改，请刷新后重试";
+          if (!options?.silentConflictMessage) {
+            message.value = "交接班公共配置已被其他人修改，请刷新后重试";
+          }
           return { saved: false, reason: "conflict", error: String(err || "") };
         }
-        message.value = `保存交接班公共配置失败: ${err}`;
+        if (!options?.silentErrorMessage) {
+          message.value = `保存交接班公共配置失败: ${err}`;
+        }
         return { saved: false, reason: "error", error: String(err || "") };
       }
     };
@@ -2154,37 +2303,126 @@ export function createRuntimeHealthConfigActions(ctx) {
     return runner();
   }
 
-  async function saveHandoverBuildingConfig(building = handoverConfigBuilding?.value) {
+  async function saveHandoverReviewBaseUrlQuickConfig(options = {}) {
+    const handover = ensureHandoverSegmentConfigShape();
+    if (!handover) {
+      return { saved: false, reason: "missing_config" };
+    }
+    const normalized = normalizeHandoverReviewBaseUrlInput(handover.review_ui?.public_base_url || "");
+    if (!normalized.ok) {
+      if (!options?.silentMessage) {
+        message.value = normalized.error;
+      }
+      return { saved: false, reason: "invalid", error: normalized.error };
+    }
+    const normalizedBaseUrl = normalized.value;
+    handover.review_ui.public_base_url = normalizedBaseUrl;
+    const currentSavedBaseUrl = String(health.handover?.review_base_url || "").trim();
+    if (normalizedBaseUrl === currentSavedBaseUrl) {
+      if (!options?.silentNoChange) {
+        message.value = normalizedBaseUrl
+          ? `审核访问地址已保持为：${normalizedBaseUrl}`
+          : "审核访问地址已清空";
+      }
+      return { saved: true, reason: "unchanged", value: normalizedBaseUrl };
+    }
+    const runner = async () => {
+      try {
+        const data = await putHandoverCommonConfigSegmentApi({
+          base_revision: Number.parseInt(String(handoverConfigCommonRevision?.value || 0), 10) || 0,
+          data: {
+            review_ui: {
+              public_base_url: normalizedBaseUrl,
+            },
+          },
+        });
+        if (handoverConfigCommonRevision) {
+          handoverConfigCommonRevision.value = Number.parseInt(String(data?.revision || 0), 10) || 0;
+        }
+        if (handoverConfigCommonUpdatedAt) {
+          handoverConfigCommonUpdatedAt.value = String(data?.updated_at || "").trim();
+        }
+        const savedBaseUrl = String(data?.data?.review_ui?.public_base_url || normalizedBaseUrl).trim();
+        handover.review_ui.public_base_url = savedBaseUrl;
+        health.handover.review_base_url = savedBaseUrl;
+        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        if (!options?.silentSuccess) {
+          message.value = savedBaseUrl
+            ? `审核访问地址已保存：${savedBaseUrl}`
+            : "审核访问地址已清空";
+        }
+        return { saved: true, reason: "saved", value: savedBaseUrl, data };
+      } catch (err) {
+        if (Number.parseInt(String(err?.httpStatus || 0), 10) === 409) {
+          await fetchConfig({ silentMessage: true });
+          await fetchHandoverCommonConfigSegment({ silentMessage: true });
+          await fetchHandoverBuildingConfigSegment(handoverConfigBuilding?.value, { silentMessage: true });
+          if (!options?.silentMessage) {
+            message.value = "审核访问地址已被其他人修改，请刷新后重试";
+          }
+          return { saved: false, reason: "conflict", error: String(err || "") };
+        }
+        if (!options?.silentMessage) {
+          message.value = `保存审核访问地址失败: ${err}`;
+        }
+        return { saved: false, reason: "error", error: String(err || "") };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_HANDOVER_REVIEW_BASE_URL_SAVE, runner, { cooldownMs: 300 });
+    }
+    return runner();
+  }
+
+  async function saveHandoverBuildingConfig(building = handoverConfigBuilding?.value, options = {}) {
     const buildingText = normalizeHandoverBuildingName(building);
     const buildingCode = normalizeHandoverBuildingCode(buildingText);
     const runner = async () => {
+      const recipientDraftIssues = collectHandoverReviewRecipientDraftIssues(buildingText);
+      if (recipientDraftIssues.length) {
+        const errorText = `${buildingText}审核链接接收人未填写完整：${recipientDraftIssues.join("；")}`;
+        if (!options?.silentErrorMessage) {
+          message.value = errorText;
+        }
+        return { saved: false, reason: "invalid_recipient_draft", error: errorText };
+      }
       try {
         const data = await putHandoverBuildingConfigSegmentApi(buildingCode, {
           base_revision: Number.parseInt(String(handoverConfigBuildingRevision?.value || 0), 10) || 0,
           data: buildHandoverBuildingSegmentPayload(buildingText),
         });
-        if (handoverConfigBuilding) {
-          handoverConfigBuilding.value = buildingText;
+        withAutoSaveSuspended(() => {
+          if (handoverConfigBuilding) {
+            handoverConfigBuilding.value = buildingText;
+          }
+          if (handoverConfigBuildingRevision) {
+            handoverConfigBuildingRevision.value = Number.parseInt(String(data?.revision || 0), 10) || 0;
+          }
+          if (handoverConfigBuildingUpdatedAt) {
+            handoverConfigBuildingUpdatedAt.value = String(data?.updated_at || "").trim();
+          }
+          applyHandoverBuildingSegmentData(buildingText, data?.data || {});
+        });
+        if (!options?.skipConfigRefresh) {
+          await fetchConfig({ silentMessage: true });
         }
-        if (handoverConfigBuildingRevision) {
-          handoverConfigBuildingRevision.value = Number.parseInt(String(data?.revision || 0), 10) || 0;
+        if (!options?.silentSuccess) {
+          message.value = `${buildingText}交接班配置已保存`;
         }
-        if (handoverConfigBuildingUpdatedAt) {
-          handoverConfigBuildingUpdatedAt.value = String(data?.updated_at || "").trim();
-        }
-        applyHandoverBuildingSegmentData(buildingText, data?.data || {});
-        await fetchConfig({ silentMessage: true });
-        message.value = `${buildingText}交接班配置已保存`;
         return { saved: true, reason: "saved", data };
       } catch (err) {
         if (Number.parseInt(String(err?.httpStatus || 0), 10) === 409) {
           await fetchConfig({ silentMessage: true });
           await fetchHandoverCommonConfigSegment({ silentMessage: true });
           await fetchHandoverBuildingConfigSegment(buildingText, { silentMessage: true });
-          message.value = "当前楼配置已被其他人修改，请刷新后重试";
+          if (!options?.silentConflictMessage) {
+            message.value = "当前楼配置已被其他人修改，请刷新后重试";
+          }
           return { saved: false, reason: "conflict", error: String(err || "") };
         }
-        message.value = `保存${buildingText}交接班配置失败: ${err}`;
+        if (!options?.silentErrorMessage) {
+          message.value = `保存${buildingText}交接班配置失败: ${err}`;
+        }
         return { saved: false, reason: "error", error: String(err || "") };
       }
     };
@@ -2254,6 +2492,56 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
   }
 
+  async function savePartialConfig(requestPayload, options = {}) {
+    if (!requestPayload || typeof requestPayload !== "object" || Array.isArray(requestPayload)) {
+      if (!options?.silentErrorMessage) {
+        message.value = "配置未加载，无法保存";
+      }
+      return { saved: false, reason: "missing_config", restartRequired: false, error: "配置未加载，无法保存" };
+    }
+
+    const mergedRequestPayload = mergeConfigWithServerSnapshot(serverConfigSnapshot, requestPayload);
+    try {
+      const data = await putConfigApi(mergedRequestPayload);
+      serverConfigSnapshot = clone(data?.config || mergedRequestPayload);
+      const normalized = ensureConfigShape(convertV3ConfigToLegacy(data?.config || mergedRequestPayload));
+      withAutoSaveSuspended(() => {
+        hydrateConfigView(normalized);
+        setLastSavedSignatureFromPreparedPayload();
+      });
+      if (configLoaded) {
+        configLoaded.value = true;
+      }
+      if (engineerDirectoryLoaded) {
+        engineerDirectoryLoaded.value = false;
+      }
+      clearEngineerDirectoryCache();
+      applyHandoverReviewAccessSnapshot(data?.handover_review_access);
+      if (!options?.skipPostSaveHealthRefresh) {
+        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        scheduleEngineerDirectoryPrefetch(0);
+      }
+      if (!options?.silentSuccessMessage) {
+        const warnings = Array.isArray(data?.warnings) ? data.warnings.filter(Boolean) : [];
+        const restartNote = Boolean(data?.restart_required) ? "；角色/共享桥接配置需重启后完全生效" : "";
+        message.value = warnings.length
+          ? `配置已保存（${warnings.join("；")}）${restartNote}`
+          : `配置已保存${restartNote}`;
+      }
+      return {
+        saved: true,
+        reason: "saved",
+        restartRequired: Boolean(data?.restart_required),
+        data,
+      };
+    } catch (err) {
+      if (!options?.silentErrorMessage) {
+        message.value = `保存配置失败: ${err}`;
+      }
+      return { saved: false, reason: "error", error: String(err), restartRequired: false };
+    }
+  }
+
   async function saveConfig(options = {}) {
     const runner = async () => saveConfigInternal({
       auto: false,
@@ -2272,6 +2560,44 @@ export function createRuntimeHealthConfigActions(ctx) {
     });
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_SAVE_CONFIG, runner, { cooldownMs: 500 });
+    }
+    return runner();
+  }
+
+  async function repairDayMetricUploadConfig() {
+    const runner = async () => {
+      try {
+        const data = await repairDayMetricUploadConfigApi();
+        serverConfigSnapshot = clone(data?.config || serverConfigSnapshot || config.value || {});
+        const normalized = ensureConfigShape(convertV3ConfigToLegacy(data?.config || serverConfigSnapshot || {}));
+        withAutoSaveSuspended(() => {
+          hydrateConfigView(normalized);
+          setLastSavedSignatureFromPreparedPayload();
+        });
+        if (configLoaded) {
+          configLoaded.value = true;
+        }
+        if (engineerDirectoryLoaded) {
+          engineerDirectoryLoaded.value = false;
+        }
+        clearEngineerDirectoryCache();
+        applyHandoverReviewAccessSnapshot(data?.handover_review_access);
+        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        scheduleEngineerDirectoryPrefetch(0);
+        const notes = Array.isArray(data?.notes) ? data.notes.filter(Boolean) : [];
+        if (data?.repaired) {
+          message.value = notes.length ? `12项配置已修复（${notes.join("；")}）` : "12项配置已修复";
+        } else {
+          message.value = "12项配置检查完成，无需修复";
+        }
+        return data;
+      } catch (err) {
+        message.value = `修复12项配置失败: ${err}`;
+        throw err;
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_DAY_METRIC_CONFIG_REPAIR, runner, { cooldownMs: 500 });
     }
     return runner();
   }
@@ -2419,6 +2745,58 @@ export function createRuntimeHealthConfigActions(ctx) {
     return runner();
   }
 
+  async function triggerInternalPeerUpdaterCheck() {
+    const runner = async () => {
+      try {
+        const data = await triggerInternalPeerUpdaterCheckApi();
+        if (data?.runtime && typeof data.runtime === "object") {
+          Object.assign(health.updater, data.runtime);
+        }
+        const result = data?.result || {};
+        message.value = String(result?.message || "").trim() || "已下发内网端检查更新命令。";
+        try {
+          await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        } catch (_err) {
+          // ignore transient fetch failures; command submission already succeeded
+        }
+        return data;
+      } catch (err) {
+        message.value = `下发内网端检查更新失败: ${err}`;
+        return { ok: false, reason: "error", error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_UPDATER_INTERNAL_PEER_CHECK, runner, { cooldownMs: 500 });
+    }
+    return runner();
+  }
+
+  async function triggerInternalPeerUpdaterApply() {
+    const runner = async () => {
+      try {
+        const data = await triggerInternalPeerUpdaterApplyApi();
+        if (data?.runtime && typeof data.runtime === "object") {
+          Object.assign(health.updater, data.runtime);
+        }
+        const result = data?.result || {};
+        message.value = String(result?.message || "").trim() || "已下发内网端开始更新命令。";
+        try {
+          await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        } catch (_err) {
+          // ignore transient fetch failures; command submission already succeeded
+        }
+        return data;
+      } catch (err) {
+        message.value = `下发内网端开始更新失败: ${err}`;
+        return { ok: false, reason: "error", error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_UPDATER_INTERNAL_PEER_APPLY, runner, { cooldownMs: 500 });
+    }
+    return runner();
+  }
+
   async function restartApplication(options = {}) {
     const runner = async () => {
       const kicker = String(options?.kicker || "角色切换中");
@@ -2442,6 +2820,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           kicker,
           title,
           subtitle,
+          targetRoleMode: String(options?.targetRoleMode || "").trim().toLowerCase(),
           reloadTitle: String(options?.reloadTitle || "服务已恢复"),
           reloadSubtitle: String(options?.reloadSubtitle || "正在刷新当前页面并接入新的运行角色。"),
         });
@@ -2454,6 +2833,7 @@ export function createRuntimeHealthConfigActions(ctx) {
               kicker,
               title,
               subtitle,
+              targetRoleMode: String(options?.targetRoleMode || "").trim().toLowerCase(),
               reloadTitle: String(options?.reloadTitle || "服务已恢复"),
               reloadSubtitle: String(options?.reloadSubtitle || "正在刷新当前页面并接入新的运行角色。"),
             },
@@ -2860,23 +3240,26 @@ export function createRuntimeHealthConfigActions(ctx) {
   async function reprobeHandoverReviewAccess() {
     const runner = async () => {
       try {
+        const saveResult = await saveHandoverReviewBaseUrlQuickConfig({
+          silentSuccess: true,
+          silentNoChange: true,
+        });
+        if (!saveResult?.saved) {
+          return saveResult;
+        }
         const data = await reprobeHandoverReviewAccessApi();
         const snapshot = data?.handover_review_access || {};
         applyHandoverReviewAccessSnapshot(snapshot);
         void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
         const effectiveBaseUrl = String(snapshot?.review_base_url_effective || "").trim();
-        const source = String(snapshot?.review_base_url_effective_source || "").trim().toLowerCase();
         if (effectiveBaseUrl) {
-          message.value =
-            source === "manual"
-              ? `审核访问地址已刷新，当前仍使用手工地址：${effectiveBaseUrl}`
-              : `审核访问地址重新探测完成，当前生效地址：${effectiveBaseUrl}`;
+          message.value = `审核访问地址已刷新，当前生效地址：${effectiveBaseUrl}`;
         } else {
-          message.value = "审核访问地址重新探测完成，但当前未找到可用地址。";
+          message.value = "审核访问地址已刷新，请先在配置中心填写手工地址。";
         }
         return data;
       } catch (err) {
-        message.value = `重新探测审核访问地址失败: ${err}`;
+        message.value = `刷新审核访问地址失败: ${err}`;
         return { ok: false, reason: "error", error: String(err) };
       }
     };
@@ -2911,7 +3294,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     ensureHandoverEngineerDirectoryLoaded,
     scheduleEngineerDirectoryPrefetch,
     saveConfig,
+    savePartialConfig,
+    repairDayMetricUploadConfig,
     saveHandoverCommonConfig,
+    saveHandoverReviewBaseUrlQuickConfig,
     saveHandoverBuildingConfig,
     autoSaveConfig,
     activateStartupRuntime,
@@ -2919,6 +3305,8 @@ export function createRuntimeHealthConfigActions(ctx) {
     checkUpdaterNow,
     applyUpdaterPatch,
     restartUpdaterApp,
+    triggerInternalPeerUpdaterCheck,
+    triggerInternalPeerUpdaterApply,
     confirmAllHandoverReview,
     retryAllFailedHandoverCloudSync,
     openHandoverDailyReportScreenshotAuth,
@@ -2932,6 +3320,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     restoreHandoverDailyReportAutoAsset,
     rewriteHandoverDailyReportRecord,
     reprobeHandoverReviewAccess,
+    sendHandoverReviewLink,
     buildHandoverDailyReportCaptureAssetUrl,
     getBridgeTaskCancelActionKey,
     getBridgeTaskRetryActionKey,
@@ -2948,6 +3337,11 @@ export function createRuntimeHealthConfigActions(ctx) {
     ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_BUILDING,
     ACTION_KEY_HANDOVER_CONFIG_COMMON_SAVE,
     ACTION_KEY_HANDOVER_CONFIG_BUILDING_SAVE,
+    ACTION_KEY_DAY_METRIC_CONFIG_REPAIR,
+    ACTION_KEY_HANDOVER_REVIEW_BASE_URL_SAVE,
+    ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX,
+    ACTION_KEY_UPDATER_INTERNAL_PEER_CHECK,
+    ACTION_KEY_UPDATER_INTERNAL_PEER_APPLY,
     ACTION_KEY_HANDOVER_DAILY_REPORT_SCREENSHOT_TEST,
     ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE,
     ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,

@@ -8,9 +8,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 import openpyxl
 
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
+from app.modules.report_pipeline.core.metrics_rules import DERIVED_CATEGORY_HINT
 from handover_log_module.core.models import MetricHit
 
 
@@ -81,30 +83,31 @@ class DayMetricBitableExportService:
         }
 
     def _runtime_day_metric_cfg(self) -> Dict[str, Any] | None:
-        if isinstance(self.config.get("day_metric_upload", {}), dict):
+        if "day_metric_upload" in self.config and isinstance(self.config.get("day_metric_upload"), dict):
             return self.config.get("day_metric_upload", {})
-        if isinstance(self.config.get("handover_log", {}), dict):
+        features = self.config.get("features", {})
+        if isinstance(features, dict) and "day_metric_upload" in features and isinstance(features.get("day_metric_upload"), dict):
+            return features.get("day_metric_upload", {})
+        if "handover_log" in self.config and isinstance(self.config.get("handover_log"), dict):
             handover = self.config.get("handover_log", {})
-            if isinstance(handover.get("day_metric_upload", {}), dict):
+            if "day_metric_upload" in handover and isinstance(handover.get("day_metric_upload"), dict):
                 return handover.get("day_metric_upload", {})
         return None
 
     def _global_feishu_cfg(self) -> Dict[str, Any]:
-        if isinstance(self.config.get("_global_feishu", {}), dict):
-            return self.config.get("_global_feishu", {})
-        if isinstance(self.config.get("feishu", {}), dict):
-            return self.config.get("feishu", {})
-        handover = self.config.get("handover_log", {})
-        if isinstance(handover, dict) and isinstance(handover.get("_global_feishu", {}), dict):
-            return handover.get("_global_feishu", {})
-        return {}
+        return require_feishu_auth_settings(self.config)
 
     def _template_cfg(self) -> Dict[str, Any]:
-        if isinstance(self.config.get("template", {}), dict):
+        if "template" in self.config and isinstance(self.config.get("template"), dict):
             return self.config.get("template", {})
         handover = self.config.get("handover_log", {})
-        if isinstance(handover, dict) and isinstance(handover.get("template", {}), dict):
+        if isinstance(handover, dict) and "template" in handover and isinstance(handover.get("template"), dict):
             return handover.get("template", {})
+        features = self.config.get("features", {})
+        if isinstance(features, dict):
+            handover_feature = features.get("handover_log", {})
+            if isinstance(handover_feature, dict) and "template" in handover_feature and isinstance(handover_feature.get("template"), dict):
+                return handover_feature.get("template", {})
         return {}
 
     def _normalize_cfg(self) -> Dict[str, Any]:
@@ -421,11 +424,46 @@ class DayMetricBitableExportService:
         )
 
     @staticmethod
-    def _compose_position_code(origin_payload: Dict[str, Any] | None) -> str:
+    def _clean_position_text(value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        raw = re.sub(r"[-_/\\ ]*冷通道\s*$", "", raw)
+        raw = re.sub(r"[-_/\\ ]+$", "", raw).strip()
+        raw = re.sub(r"\s+", " ", raw)
+        return raw
+
+    @classmethod
+    def _compose_position_code(
+        cls,
+        origin_payload: Dict[str, Any] | None,
+        *,
+        type_item: Dict[str, Any] | None = None,
+    ) -> str:
         payload = origin_payload if isinstance(origin_payload, dict) else {}
-        b_norm = str(payload.get("b_norm", "")).strip()
-        c_norm = str(payload.get("c_norm", "")).strip()
-        c_text = str(payload.get("c_text", "")).strip()
+        type_cfg = type_item if isinstance(type_item, dict) else {}
+        type_name = str(type_cfg.get("name", "")).strip()
+        metric_key = str(payload.get("metric_key") or type_cfg.get("metric_id") or "").strip()
+        b_norm = cls._clean_position_text(payload.get("b_norm", ""))
+        c_norm = cls._clean_position_text(payload.get("c_norm", ""))
+        c_text = cls._clean_position_text(payload.get("c_text", ""))
+        b_text = cls._clean_position_text(payload.get("b_text", ""))
+        d_name = cls._clean_position_text(payload.get("d_name", ""))
+
+        pue_hint = str(DERIVED_CATEGORY_HINT.get("PUE", "pue能耗数据计算")).strip() or "pue能耗数据计算"
+        if type_name in {"总负荷（KW）", "IT总负荷（KW）"} or metric_key in {"city_power", "it_power"}:
+            return pue_hint
+        if type_name == "蓄水池后备最短时间（H）" or metric_key == "water_pool_backup_time":
+            for candidate in (d_name, c_text, c_norm, b_text, b_norm):
+                if "负载率" in candidate:
+                    return candidate
+            return "负载率"
+        if type_name == "供油可用时长（H）" or metric_key == "oil_backup_time":
+            for candidate in (b_text, b_norm, c_text, c_norm, d_name):
+                if "燃油系统" in candidate:
+                    return candidate
+            return "燃油系统"
+
         if b_norm and c_norm:
             return f"{b_norm} {c_norm}"
         if c_norm:
@@ -434,6 +472,10 @@ class DayMetricBitableExportService:
             return c_text
         if b_norm:
             return b_norm
+        if b_text:
+            return b_text
+        if d_name:
+            return d_name
         return ""
 
     def _resolve_origin_payload(
@@ -556,7 +598,8 @@ class DayMetricBitableExportService:
                 self._resolve_origin_payload(
                     type_item=item,
                     metric_origin_context=origin_context,
-                )
+                ),
+                type_item=item,
             )
 
             row_fields = {

@@ -15,7 +15,62 @@ const HANDOVER_DUTY_CONTEXT_STORAGE_KEY = "handover_duty_context";
 const APP_BOOT_OVERLAY_ID = "app-boot-overlay";
 const STARTUP_ROLE_RESTART_PENDING_KEY = "startup_role_restart_pending_v1";
 const STARTUP_ROLE_RESTART_RESUME_KEY = "startup_role_restart_resume_v1";
+const STARTUP_ROLE_SESSION_KEY = "startup_role_session_v1";
+const STARTUP_RUNTIME_RECOVERY_KEY = "startup_runtime_recovery_v1";
 const STARTUP_ROLE_RESTART_PENDING_TTL_MS = 5 * 60 * 1000;
+
+function normalizeBrowserPathname(pathname) {
+  const raw = String(pathname || "").trim() || "/";
+  if (raw === "/") return "/";
+  return raw.endsWith("/") ? raw.slice(0, -1) : raw;
+}
+
+function parseAppBrowserRoute(pathname) {
+  const normalizedPath = normalizeBrowserPathname(pathname).toLowerCase();
+  if (normalizedPath === "/" || normalizedPath === "/index.html" || normalizedPath === "/login") {
+    return { kind: "login", role_mode: "", view: "" };
+  }
+  if (normalizedPath === "/internal" || normalizedPath === "/internal/status") {
+    return { kind: "app", role_mode: "internal", view: "status" };
+  }
+  if (normalizedPath === "/internal/config") {
+    return { kind: "app", role_mode: "internal", view: "config" };
+  }
+  if (normalizedPath === "/external" || normalizedPath === "/external/dashboard") {
+    return { kind: "app", role_mode: "external", view: "dashboard" };
+  }
+  if (normalizedPath === "/external/status") {
+    return { kind: "app", role_mode: "external", view: "status" };
+  }
+  if (normalizedPath === "/external/config") {
+    return { kind: "app", role_mode: "external", view: "config" };
+  }
+  if (normalizedPath === "/status") {
+    return { kind: "app", role_mode: "", view: "status" };
+  }
+  if (normalizedPath === "/dashboard") {
+    return { kind: "app", role_mode: "", view: "dashboard" };
+  }
+  if (normalizedPath === "/config") {
+    return { kind: "app", role_mode: "", view: "config" };
+  }
+  return { kind: "unknown", role_mode: "", view: "" };
+}
+
+function buildAppBrowserRoutePath(roleMode, view, selectorVisible = false) {
+  if (selectorVisible || !normalizeDeploymentRoleMode(roleMode)) {
+    return "/";
+  }
+  const normalizedRole = normalizeDeploymentRoleMode(roleMode);
+  const normalizedView = String(view || "").trim().toLowerCase();
+  if (normalizedRole === "internal") {
+    if (normalizedView === "config") return "/internal/config";
+    return "/internal/status";
+  }
+  if (normalizedView === "config") return "/external/config";
+  if (normalizedView === "status") return "/external/status";
+  return "/external/dashboard";
+}
 
 function normalizeDeploymentRoleMode(value) {
   const text = String(value || "").trim().toLowerCase();
@@ -311,6 +366,141 @@ function clearStartupRoleRestartResume() {
   }
 }
 
+function readStartupRoleSession() {
+  if (typeof window === "undefined" || !window.localStorage) return null;
+  try {
+    const raw = window.localStorage.getItem(STARTUP_ROLE_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const role = normalizeDeploymentRoleMode(parsed?.role_mode);
+    const startupToken = String(parsed?.startup_token || "").trim();
+    const nodeId = String(parsed?.node_id || "").trim();
+    if (!role || !startupToken) {
+      window.localStorage.removeItem(STARTUP_ROLE_SESSION_KEY);
+      return null;
+    }
+    return {
+      role_mode: role,
+      startup_token: startupToken,
+      node_id: nodeId,
+    };
+  } catch (_) {
+    try {
+      window.localStorage.removeItem(STARTUP_ROLE_SESSION_KEY);
+    } catch (_) {
+      // ignore localStorage errors
+    }
+    return null;
+  }
+}
+
+function writeStartupRoleSession(roleMode, startupToken = "", nodeId = "") {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  const role = normalizeDeploymentRoleMode(roleMode);
+  const token = String(startupToken || "").trim();
+  if (!role || !token) return;
+  try {
+    window.localStorage.setItem(
+      STARTUP_ROLE_SESSION_KEY,
+      JSON.stringify({
+        role_mode: role,
+        startup_token: token,
+        node_id: String(nodeId || "").trim(),
+        confirmed_at: Date.now(),
+      }),
+    );
+  } catch (_) {
+    // ignore localStorage errors
+  }
+}
+
+function clearStartupRoleSession() {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.removeItem(STARTUP_ROLE_SESSION_KEY);
+  } catch (_) {
+    // ignore localStorage errors
+  }
+}
+
+function readMatchingStartupRoleSession(startupToken = "", nodeId = "") {
+  const session = readStartupRoleSession();
+  if (!session) return null;
+  const currentStartupToken = String(startupToken || "").trim();
+  const currentNodeId = String(nodeId || "").trim();
+  if (!currentStartupToken) {
+    return null;
+  }
+  if (session.startup_token !== currentStartupToken) {
+    clearStartupRoleSession();
+    return null;
+  }
+  if (currentNodeId && session.node_id && session.node_id !== currentNodeId) {
+    clearStartupRoleSession();
+    return null;
+  }
+  return session;
+}
+
+function readStartupRuntimeRecovery() {
+  if (typeof window === "undefined" || !window.sessionStorage) return null;
+  try {
+    const raw = window.sessionStorage.getItem(STARTUP_RUNTIME_RECOVERY_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const role = normalizeDeploymentRoleMode(parsed?.role_mode);
+    const requestedAt = Number.parseInt(String(parsed?.requested_at || 0), 10);
+    const path = normalizeBrowserPathname(parsed?.path || "/");
+    if (!role || !Number.isFinite(requestedAt) || requestedAt <= 0) {
+      window.sessionStorage.removeItem(STARTUP_RUNTIME_RECOVERY_KEY);
+      return null;
+    }
+    if (Date.now() - requestedAt > STARTUP_ROLE_RESTART_PENDING_TTL_MS) {
+      window.sessionStorage.removeItem(STARTUP_RUNTIME_RECOVERY_KEY);
+      return null;
+    }
+    return {
+      role_mode: role,
+      requested_at: requestedAt,
+      path,
+    };
+  } catch (_) {
+    try {
+      window.sessionStorage.removeItem(STARTUP_RUNTIME_RECOVERY_KEY);
+    } catch (_) {
+      // ignore sessionStorage errors
+    }
+    return null;
+  }
+}
+
+function writeStartupRuntimeRecovery(roleMode, path = "") {
+  if (typeof window === "undefined" || !window.sessionStorage) return;
+  const role = normalizeDeploymentRoleMode(roleMode);
+  if (!role) return;
+  try {
+    window.sessionStorage.setItem(
+      STARTUP_RUNTIME_RECOVERY_KEY,
+      JSON.stringify({
+        role_mode: role,
+        requested_at: Date.now(),
+        path: normalizeBrowserPathname(path || "/"),
+      }),
+    );
+  } catch (_) {
+    // ignore sessionStorage errors
+  }
+}
+
+function clearStartupRuntimeRecovery() {
+  if (typeof window === "undefined" || !window.sessionStorage) return;
+  try {
+    window.sessionStorage.removeItem(STARTUP_RUNTIME_RECOVERY_KEY);
+  } catch (_) {
+    // ignore sessionStorage errors
+  }
+}
+
 if (isHandoverReviewPath(window.location.pathname)) {
   mountHandoverReviewApp(Vue);
   finishAppBoot();
@@ -389,12 +579,12 @@ createApp({
       handoverDailyReportPreviewModal,
       handoverDailyReportUploadModal,
       handoverConfigBuilding,
+      handoverRuleScope,
       handoverConfigCommonRevision,
       handoverConfigCommonUpdatedAt,
       handoverConfigBuildingRevision,
       handoverConfigBuildingUpdatedAt,
       handoverConfigBuildingOptions,
-      handoverRuleScope,
       handoverDutyAutoFollow,
       handoverDutyLastAutoAt,
       customAbsoluteStartLocal,
@@ -488,6 +678,8 @@ createApp({
     const updaterUiOverlaySubtitle = ref("");
     const updaterUiOverlayStage = ref("");
     const updaterUiOverlayKicker = ref("");
+    const browserRouteReady = ref(false);
+    const browserRouteLastPath = ref(normalizeBrowserPathname(typeof window !== "undefined" ? window.location.pathname : "/"));
     const dashboardSchedulerOverviewFocusKey = ref("");
     const sharedBridgeSelfCheckResult = ref(null);
     let dashboardSchedulerOverviewFocusTimer = null;
@@ -519,6 +711,15 @@ createApp({
         description: "统一发起协同任务，优先读取共享文件；缺失时再等待内网补采。",
       },
     ]);
+    const initialRuntimeRecoveryIntent = readStartupRuntimeRecovery();
+    if (initialRuntimeRecoveryIntent) {
+      startupRoleSelectorSelection.value = initialRuntimeRecoveryIntent.role_mode;
+      startupRoleLoadingVisible.value = true;
+      startupRoleLoadingTitle.value = `正在恢复${formatDeploymentRoleLabel(initialRuntimeRecoveryIntent.role_mode)}`;
+      startupRoleLoadingSubtitle.value = "检测到更新后的自动恢复请求，正在重新进入对应系统。";
+      startupRoleLoadingStage.value = "recovering";
+      startupRoleFlowState.value = "recovering";
+    }
     clearStartupRoleRestartPending();
     clearStartupRoleRestartResume();
 
@@ -545,6 +746,7 @@ createApp({
     const actionKeyDayMetricUploadSchedulerStart = "day_metric_upload_scheduler:start";
     const actionKeyDayMetricUploadSchedulerStop = "day_metric_upload_scheduler:stop";
     const actionKeyDayMetricUploadSchedulerSave = "day_metric_upload_scheduler:save";
+    const actionKeyDayMetricConfigRepair = "day_metric_upload:config_repair";
     const actionKeyAlarmEventUploadSchedulerStart = "alarm_event_upload_scheduler:start";
     const actionKeyAlarmEventUploadSchedulerStop = "alarm_event_upload_scheduler:stop";
     const actionKeyAlarmEventUploadSchedulerSave = "alarm_event_upload_scheduler:save";
@@ -565,6 +767,8 @@ createApp({
     const actionKeyUpdaterCheck = "updater:check";
     const actionKeyUpdaterApply = "updater:apply";
     const actionKeyUpdaterRestart = "updater:restart";
+    const actionKeyUpdaterInternalPeerCheck = "updater:internal_peer_check";
+    const actionKeyUpdaterInternalPeerApply = "updater:internal_peer_apply";
     const actionKeySourceCacheRefreshCurrentHour = "bridge:source_cache_refresh_current_hour";
     const actionKeySourceCacheRefreshBuildingLatestPrefix = "bridge:source_cache_refresh_building_latest:";
     const actionKeySourceCacheRefreshAlarmManual = "bridge:source_cache_refresh_alarm_manual";
@@ -580,6 +784,7 @@ createApp({
     const actionKeyHandoverDailyReportAuthOpen = "handover_daily_report:auth_open";
     const actionKeyHandoverDailyReportScreenshotTest = "handover_daily_report:screenshot_test";
     const actionKeyHandoverReviewAccessReprobe = "handover_review:access_reprobe";
+    const actionKeyHandoverReviewLinkSendPrefix = "handover_review:link_send:";
     function getUpdaterDisabledText() {
       const disabledReason = String(health.updater?.disabled_reason || "").trim().toLowerCase();
       if (disabledReason === "source_python_run") return "当前为 Python 本地源码运行，已跳过更新。";
@@ -605,6 +810,59 @@ createApp({
         isActionLocked(actionKeyUpdaterApply) ||
         isActionLocked(actionKeyUpdaterRestart),
     );
+    const updaterInternalPeerSnapshot = computed(() =>
+      health.updater?.internal_peer && typeof health.updater.internal_peer === "object"
+        ? health.updater.internal_peer
+        : {},
+    );
+    const updaterInternalPeerCommandActive = computed(() =>
+      Boolean(updaterInternalPeerSnapshot.value?.command?.active),
+    );
+    const updaterInternalPeerCommandAction = computed(() =>
+      String(updaterInternalPeerSnapshot.value?.command?.action || "").trim().toLowerCase(),
+    );
+    const updaterInternalPeerOnline = computed(() =>
+      Boolean(updaterInternalPeerSnapshot.value?.online),
+    );
+    const isUpdaterInternalPeerCheckLocked = computed(() =>
+      health.updater?.enabled === false
+      || !Boolean(updaterInternalPeerSnapshot.value?.available)
+      || updaterInternalPeerCommandActive.value
+      || isActionLocked(actionKeyUpdaterInternalPeerCheck),
+    );
+    const isUpdaterInternalPeerApplyLocked = computed(() =>
+      health.updater?.enabled === false
+      || !Boolean(updaterInternalPeerSnapshot.value?.available)
+      || updaterInternalPeerCommandActive.value
+      || !Boolean(updaterInternalPeerSnapshot.value?.update_available)
+      || isActionLocked(actionKeyUpdaterInternalPeerApply),
+    );
+    const updaterInternalPeerCheckButtonText = computed(() => {
+      if (isActionLocked(actionKeyUpdaterInternalPeerCheck)) return "下发中...";
+      if (updaterInternalPeerCommandActive.value) {
+        if (updaterInternalPeerCommandAction.value === "check") {
+          return updaterInternalPeerOnline.value ? "等待检查完成..." : "等待内网上线执行...";
+        }
+        return "已有待执行命令";
+      }
+      return "内网端检查更新";
+    });
+    const updaterInternalPeerApplyButtonText = computed(() => {
+      if (isActionLocked(actionKeyUpdaterInternalPeerApply)) return "下发中...";
+      if (updaterInternalPeerCommandActive.value) {
+        if (updaterInternalPeerCommandAction.value === "check") return "等待检查完成...";
+        if (updaterInternalPeerCommandAction.value === "apply") {
+          return updaterInternalPeerOnline.value ? "更新进行中..." : "等待内网上线执行...";
+        }
+        return "已有待执行命令";
+      }
+      if (!Boolean(updaterInternalPeerSnapshot.value?.update_available)) {
+        const lastCheckAt = String(updaterInternalPeerSnapshot.value?.last_check_at || "").trim();
+        const lastResult = String(updaterInternalPeerSnapshot.value?.last_result || "").trim();
+        return lastCheckAt || lastResult ? "未发现更新" : "需先检查更新";
+      }
+      return "内网端开始更新";
+    });
     const isSourceCacheRefreshCurrentHourLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshCurrentHour));
     const isSourceCacheRefreshAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheRefreshAlarmManual));
     const isSourceCacheDeleteAlarmManualLocked = computed(() => isActionLocked(actionKeySourceCacheDeleteAlarmManual));
@@ -1132,6 +1390,10 @@ createApp({
     const showManualFeatureConfigTab = computed(() => configRoleMode.value !== "internal");
     const showRuntimeNetworkPanel = computed(() => false);
     const showDashboardPageNav = computed(() => deploymentRoleMode.value !== "internal");
+    const initialBrowserRoute = parseAppBrowserRoute(typeof window !== "undefined" ? window.location.pathname : "/");
+    applyBrowserRoute(initialBrowserRoute, {
+      forceLogin: initialBrowserRoute.kind === "login",
+    });
     const currentTaskOverview = computed(() => {
       const current = currentJob.value || runningJobs.value[0] || waitingResourceJobs.value[0] || null;
       const runningCount = Number(runningJobs.value.length || 0);
@@ -1594,10 +1856,10 @@ createApp({
       Boolean(startupRoleSelectorBusy.value || startupRoleBridgeValidationMessage.value),
     );
     const startupRoleGateReady = computed(() =>
-      Boolean(bootstrapReady.value && configLoaded.value),
+      Boolean(bootstrapReady.value && String(health.startup_time || "").trim()),
     );
     const startupRoleGateVisible = computed(() =>
-      Boolean(startupRoleDecisionReady.value && startupRoleSelectorVisible.value),
+      Boolean(startupRoleSelectorVisible.value || !startupRoleDecisionReady.value),
     );
     const shouldRenderAppShell = computed(() =>
       Boolean(config.value) && startupRoleDecisionReady.value && !startupRoleSelectorVisible.value,
@@ -1697,6 +1959,24 @@ createApp({
         return;
       }
       await checkUpdaterNow({ autoApplyIfAvailable: true });
+    }
+
+    async function checkInternalPeerUpdaterNow() {
+      if (health.updater?.enabled === false) {
+        message.value = getUpdaterDisabledText();
+        return;
+      }
+      if (isUpdaterInternalPeerCheckLocked.value) return;
+      await triggerInternalPeerUpdaterCheck();
+    }
+
+    async function applyInternalPeerUpdaterNow() {
+      if (health.updater?.enabled === false) {
+        message.value = getUpdaterDisabledText();
+        return;
+      }
+      if (isUpdaterInternalPeerApplyLocked.value) return;
+      await triggerInternalPeerUpdaterApply();
     }
 
     const uiLocalActions = createUiLocalActions({
@@ -1904,6 +2184,7 @@ createApp({
       updaterUiOverlayStage,
       updaterUiOverlayKicker,
       updaterAwaitingRestartRecovery,
+      markRestartRecoveryIntent: persistRuntimeRecoveryIntent,
       shouldIncludeHandoverHealthContext: () => shouldIncludeHandoverHealthContext.value,
       shouldLoadEngineerDirectory: () => shouldLoadEngineerDirectory.value,
     });
@@ -1932,7 +2213,10 @@ createApp({
       ensureHandoverEngineerDirectoryLoaded,
       scheduleEngineerDirectoryPrefetch,
       saveConfig,
+      savePartialConfig,
+      repairDayMetricUploadConfig,
       saveHandoverCommonConfig,
+      saveHandoverReviewBaseUrlQuickConfig,
       saveHandoverBuildingConfig,
       autoSaveConfig,
       activateStartupRuntime,
@@ -1940,6 +2224,8 @@ createApp({
       checkUpdaterNow,
       applyUpdaterPatch,
       restartUpdaterApp,
+      triggerInternalPeerUpdaterCheck,
+      triggerInternalPeerUpdaterApply,
       confirmAllHandoverReview,
       retryAllFailedHandoverCloudSync,
       fetchHandoverDailyReportContext,
@@ -1954,12 +2240,14 @@ createApp({
       restoreHandoverDailyReportAutoAsset,
       rewriteHandoverDailyReportRecord,
       reprobeHandoverReviewAccess,
+      sendHandoverReviewLink: sendHandoverReviewLinkAction,
       getBridgeTaskCancelActionKey,
       getBridgeTaskRetryActionKey,
       getSourceCacheRefreshBuildingActionKey,
       getHandoverDailyReportRecaptureActionKey,
       getHandoverDailyReportUploadActionKey,
       getHandoverDailyReportRestoreActionKey,
+      ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX,
       fetchPendingResumeRuns,
       runResumeUpload,
       deleteResumeRun,
@@ -1970,8 +2258,15 @@ createApp({
       formatResumeDateFull,
       tryAutoResume,
       ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE,
+      ACTION_KEY_DAY_METRIC_CONFIG_REPAIR,
       ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,
     } = runtimeActions;
+
+    function getHandoverReviewLinkSendActionKey(building, batchKey = "") {
+      const buildingText = String(building || "").trim();
+      const targetBatchKey = String(batchKey || health.handover?.review_status?.batch_key || "manual-test").trim();
+      return `${ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX || actionKeyHandoverReviewLinkSendPrefix}${targetBatchKey}:${buildingText}`;
+    }
 
     async function runHomeQuickAction(actionId) {
       const action = String(actionId || "").trim().toLowerCase();
@@ -2063,6 +2358,13 @@ createApp({
       startupRoleLoadingStage.value = "";
     }
 
+    function clearStartupRouteFallbackTimer() {
+      if (startupRouteFallbackTimer) {
+        window.clearTimeout(startupRouteFallbackTimer);
+        startupRouteFallbackTimer = null;
+      }
+    }
+
     function clearStartupRoleRestartPendingState() {
       clearStartupRoleRestartPending();
     }
@@ -2074,6 +2376,70 @@ createApp({
     function clearLegacyStartupRoleRestartState() {
       clearStartupRoleRestartPendingState();
       clearStartupRoleRestartResumeState();
+    }
+
+    function persistStartupRoleSession(roleMode = "") {
+      const confirmedRole = normalizeDeploymentRoleMode(roleMode || startupRoleCurrentMode.value);
+      const startupToken = String(health.startup_time || startupRoleCurrentToken.value || "").trim();
+      const nodeId = String(health.deployment?.node_id || startupRoleCurrentNodeId.value || "").trim();
+      if (!confirmedRole || !startupToken) return;
+      writeStartupRoleSession(confirmedRole, startupToken, nodeId);
+    }
+
+    function persistRuntimeRecoveryIntent(roleMode = "") {
+      const confirmedRole = normalizeDeploymentRoleMode(
+        roleMode || startupRoleCurrentMode.value || deploymentRoleMode.value,
+      );
+      if (!confirmedRole || typeof window === "undefined") return;
+      writeStartupRuntimeRecovery(confirmedRole, window.location.pathname);
+    }
+
+    function applyBrowserRoute(route, options = {}) {
+      const nextRoute = route && typeof route === "object" ? route : parseAppBrowserRoute(typeof window !== "undefined" ? window.location.pathname : "/");
+      const forceLogin = Boolean(options?.forceLogin);
+      const routeRole = normalizeDeploymentRoleMode(nextRoute.role_mode);
+      const routeView = String(nextRoute.view || "").trim().toLowerCase();
+      if (forceLogin || nextRoute.kind === "login") {
+        browserRouteLastPath.value = "/";
+        return;
+      }
+      if (routeView === "config") {
+        currentView.value = "config";
+      } else if (routeView === "status") {
+        currentView.value = "status";
+      } else if (routeView === "dashboard") {
+        currentView.value = routeRole === "internal" ? "status" : "dashboard";
+      } else if (routeRole === "internal") {
+        currentView.value = "status";
+      } else if (routeRole === "external") {
+        currentView.value = "dashboard";
+      }
+      browserRouteLastPath.value = buildAppBrowserRoutePath(
+        routeRole || deploymentRoleMode.value,
+        currentView.value,
+        false,
+      );
+    }
+
+    function syncBrowserRoute(options = {}) {
+      if (typeof window === "undefined" || !window.history) return;
+      const replace = Boolean(options?.replace);
+      const selectorVisible = Boolean(options?.selectorVisible ?? startupRoleSelectorVisible.value);
+      const targetPath = buildAppBrowserRoutePath(
+        deploymentRoleMode.value,
+        currentView.value,
+        selectorVisible,
+      );
+      const currentPath = normalizeBrowserPathname(window.location.pathname);
+      if (currentPath === targetPath) {
+        browserRouteLastPath.value = targetPath;
+        browserRouteReady.value = true;
+        return;
+      }
+      const method = replace || !browserRouteReady.value ? "replaceState" : "pushState";
+      window.history[method]({}, "", targetPath);
+      browserRouteLastPath.value = targetPath;
+      browserRouteReady.value = true;
     }
 
     function currentStartupHandoff() {
@@ -2164,6 +2530,7 @@ createApp({
       startupRoleSuppressedHandoffNonce.value = "";
       await fetchBootstrapHealth({ silentMessage: true });
       await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+      persistStartupRoleSession(targetRole);
       hideStartupRoleLoading();
       startupRoleFlowState.value = "activated";
       return true;
@@ -2258,7 +2625,46 @@ createApp({
           });
         }
         const isRoleSwitch = targetRole !== currentRole;
-        const saveResult = await saveConfig({
+        const startupRoleConfigPatch = {
+          common: {
+            deployment: {
+              role_mode: targetRole,
+              node_label: formatDeploymentRoleLabel(targetRole),
+            },
+            shared_bridge: {
+              enabled: true,
+              ...(targetRole === "internal"
+                ? { internal_root_dir: String(startupRoleBridgeDraft.value.root_dir || "").trim() }
+                : { external_root_dir: String(startupRoleBridgeDraft.value.root_dir || "").trim() }),
+              root_dir: String(startupRoleBridgeDraft.value.root_dir || "").trim(),
+              poll_interval_sec: normalizePositiveInteger(
+                startupRoleBridgeDraft.value.poll_interval_sec,
+                STARTUP_BRIDGE_DEFAULTS.poll_interval_sec,
+              ),
+              heartbeat_interval_sec: normalizePositiveInteger(
+                startupRoleBridgeDraft.value.heartbeat_interval_sec,
+                STARTUP_BRIDGE_DEFAULTS.heartbeat_interval_sec,
+              ),
+              claim_lease_sec: normalizePositiveInteger(
+                startupRoleBridgeDraft.value.claim_lease_sec,
+                STARTUP_BRIDGE_DEFAULTS.claim_lease_sec,
+              ),
+              stale_task_timeout_sec: normalizePositiveInteger(
+                startupRoleBridgeDraft.value.stale_task_timeout_sec,
+                STARTUP_BRIDGE_DEFAULTS.stale_task_timeout_sec,
+              ),
+              artifact_retention_days: normalizePositiveInteger(
+                startupRoleBridgeDraft.value.artifact_retention_days,
+                STARTUP_BRIDGE_DEFAULTS.artifact_retention_days,
+              ),
+              sqlite_busy_timeout_ms: normalizePositiveInteger(
+                startupRoleBridgeDraft.value.sqlite_busy_timeout_ms,
+                STARTUP_BRIDGE_DEFAULTS.sqlite_busy_timeout_ms,
+              ),
+            },
+          },
+        };
+        const saveResult = await savePartialConfig(startupRoleConfigPatch, {
           skipPostSaveHealthRefresh: isRoleSwitch || Boolean(health.runtime_activated),
         });
         if (!saveResult?.saved) {
@@ -3045,9 +3451,21 @@ createApp({
     }
 
     let configAutoSaveTimer = null;
+    let handoverConfigAutoSaveTimer = null;
+    let startupRouteFallbackTimer = null;
+    let lastSavedHandoverCommonSignature = "";
+    const lastSavedHandoverBuildingSignatures = Object.create(null);
     const scheduleAutoSaveConfig = () => {
       if (!config.value) return;
       if ((configAutoSaveSuspendDepth?.value || 0) > 0) return;
+      if (currentView.value === "config" && String(activeConfigTab.value || "").trim() === "feature_handover") {
+        if (configAutoSaveTimer) {
+          window.clearTimeout(configAutoSaveTimer);
+          configAutoSaveTimer = null;
+        }
+        scheduleHandoverConfigAutoSave();
+        return;
+      }
       if (configAutoSaveTimer) {
         window.clearTimeout(configAutoSaveTimer);
       }
@@ -3056,6 +3474,253 @@ createApp({
         autoSaveConfig();
       }, 1200);
     };
+
+    function serializeCurrentHandoverCommonDraft() {
+      const handover = config.value?.handover_log && typeof config.value.handover_log === "object"
+        ? clone(config.value.handover_log)
+        : {};
+      handover.cell_rules = handover.cell_rules && typeof handover.cell_rules === "object" ? handover.cell_rules : {};
+      handover.cloud_sheet_sync = handover.cloud_sheet_sync && typeof handover.cloud_sheet_sync === "object" ? handover.cloud_sheet_sync : {};
+      handover.review_ui = handover.review_ui && typeof handover.review_ui === "object" ? handover.review_ui : {};
+      handover.cell_rules.building_rows = handover.cell_rules.building_rows && typeof handover.cell_rules.building_rows === "object"
+        ? handover.cell_rules.building_rows
+        : {};
+      handover.cloud_sheet_sync.sheet_names = handover.cloud_sheet_sync.sheet_names && typeof handover.cloud_sheet_sync.sheet_names === "object"
+        ? handover.cloud_sheet_sync.sheet_names
+        : {};
+      handover.review_ui.cabinet_power_defaults_by_building =
+        handover.review_ui.cabinet_power_defaults_by_building && typeof handover.review_ui.cabinet_power_defaults_by_building === "object"
+          ? handover.review_ui.cabinet_power_defaults_by_building
+          : {};
+      handover.review_ui.footer_inventory_defaults_by_building =
+        handover.review_ui.footer_inventory_defaults_by_building && typeof handover.review_ui.footer_inventory_defaults_by_building === "object"
+          ? handover.review_ui.footer_inventory_defaults_by_building
+          : {};
+      handover.review_ui.review_link_recipients_by_building =
+        handover.review_ui.review_link_recipients_by_building && typeof handover.review_ui.review_link_recipients_by_building === "object"
+          ? handover.review_ui.review_link_recipients_by_building
+          : {};
+      for (const building of ["A楼", "B楼", "C楼", "D楼", "E楼"]) {
+        delete handover.cell_rules.building_rows[building];
+        delete handover.cloud_sheet_sync.sheet_names[building];
+        delete handover.review_ui.cabinet_power_defaults_by_building[building];
+        delete handover.review_ui.footer_inventory_defaults_by_building[building];
+        delete handover.review_ui.review_link_recipients_by_building[building];
+      }
+      return JSON.stringify(handover);
+    }
+
+    function serializeCurrentHandoverBuildingDraft(building = handoverConfigBuilding.value) {
+      const buildingText = String(building || "").trim() || "A楼";
+      const handover = config.value?.handover_log && typeof config.value.handover_log === "object"
+        ? config.value.handover_log
+        : {};
+      const cellRules = handover.cell_rules && typeof handover.cell_rules === "object" ? handover.cell_rules : {};
+      const cloudSheetSync = handover.cloud_sheet_sync && typeof handover.cloud_sheet_sync === "object" ? handover.cloud_sheet_sync : {};
+      const reviewUi = handover.review_ui && typeof handover.review_ui === "object" ? handover.review_ui : {};
+      return JSON.stringify({
+        building: buildingText,
+        building_rows: cellRules.building_rows?.[buildingText] || [],
+        sheet_name: String(cloudSheetSync.sheet_names?.[buildingText] || "").trim(),
+        cabinet_defaults: reviewUi.cabinet_power_defaults_by_building?.[buildingText] || null,
+        footer_defaults: reviewUi.footer_inventory_defaults_by_building?.[buildingText] || null,
+        review_link_recipients: reviewUi.review_link_recipients_by_building?.[buildingText] || [],
+      });
+    }
+
+    function collectHandoverReviewRecipientOpenIds(rawItems) {
+      const rows = Array.isArray(rawItems) ? rawItems : [];
+      const seen = new Set();
+      const openIds = [];
+      rows.forEach((raw) => {
+        const openId = typeof raw === "string"
+          ? String(raw || "").trim()
+          : String(raw?.open_id || "").trim();
+        if (!openId || seen.has(openId)) return;
+        seen.add(openId);
+        openIds.push(openId);
+      });
+      return openIds.sort();
+    }
+
+    function collectCurrentHandoverReviewRecipientOpenIds(building = handoverConfigBuilding.value) {
+      const buildingText = String(building || "").trim() || "A楼";
+      const reviewUi = config.value?.handover_log?.review_ui && typeof config.value.handover_log.review_ui === "object"
+        ? config.value.handover_log.review_ui
+        : {};
+      return collectHandoverReviewRecipientOpenIds(reviewUi.review_link_recipients_by_building?.[buildingText] || []);
+    }
+
+    function collectPersistedHandoverReviewRecipientOpenIds(segmentDocument, building = handoverConfigBuilding.value) {
+      const buildingText = String(building || "").trim() || "A楼";
+      const data = segmentDocument?.data && typeof segmentDocument.data === "object" ? segmentDocument.data : {};
+      const reviewUi = data.review_ui && typeof data.review_ui === "object" ? data.review_ui : {};
+      const recipientsByBuilding =
+        reviewUi.review_link_recipients_by_building && typeof reviewUi.review_link_recipients_by_building === "object"
+          ? reviewUi.review_link_recipients_by_building
+          : {};
+      return collectHandoverReviewRecipientOpenIds(recipientsByBuilding[buildingText] || []);
+    }
+
+    function syncSavedHandoverCommonSignature() {
+      lastSavedHandoverCommonSignature = serializeCurrentHandoverCommonDraft();
+    }
+
+    function syncSavedHandoverBuildingSignature(building = handoverConfigBuilding.value) {
+      const buildingText = String(building || "").trim() || "A楼";
+      lastSavedHandoverBuildingSignatures[buildingText] = serializeCurrentHandoverBuildingDraft(buildingText);
+    }
+
+    function scheduleHandoverConfigAutoSave() {
+      if (!config.value) return;
+      if (!configLoaded.value) return;
+      if ((configAutoSaveSuspendDepth?.value || 0) > 0) return;
+      if (currentView.value !== "config") return;
+      if (String(activeConfigTab.value || "").trim() !== "feature_handover") return;
+      if (handoverConfigAutoSaveTimer) {
+        window.clearTimeout(handoverConfigAutoSaveTimer);
+      }
+      handoverConfigAutoSaveTimer = window.setTimeout(() => {
+        handoverConfigAutoSaveTimer = null;
+        void flushPendingHandoverConfigAutoSave({
+          silentSuccess: true,
+        });
+      }, 5000);
+    }
+
+    async function flushPendingHandoverConfigAutoSave(options = {}) {
+      if (handoverConfigAutoSaveTimer) {
+        window.clearTimeout(handoverConfigAutoSaveTimer);
+        handoverConfigAutoSaveTimer = null;
+      }
+      if (!config.value) return null;
+      if (!configLoaded.value) return null;
+      if (!options?.force && currentView.value !== "config") return null;
+      if (!options?.force && String(activeConfigTab.value || "").trim() !== "feature_handover") return null;
+      if ((configAutoSaveSuspendDepth?.value || 0) > 0) return null;
+      const currentBuilding = String(handoverConfigBuilding.value || "").trim() || "A楼";
+      const currentCommonSignature = serializeCurrentHandoverCommonDraft();
+      const currentBuildingSignature = serializeCurrentHandoverBuildingDraft(currentBuilding);
+      const commonDirty = currentCommonSignature !== lastSavedHandoverCommonSignature;
+      const buildingDirty =
+        currentBuildingSignature !== String(lastSavedHandoverBuildingSignatures[currentBuilding] || "");
+      if (!commonDirty && !buildingDirty) {
+        return { saved: true, reason: "unchanged" };
+      }
+      if (commonDirty) {
+        const commonResult = await saveHandoverCommonConfig({
+          silentSuccess: true,
+          silentConflictMessage: false,
+          silentErrorMessage: false,
+          skipConfigRefresh: true,
+        });
+        if (!commonResult?.saved) {
+          return commonResult;
+        }
+      }
+      if (buildingDirty) {
+        const buildingResult = await saveHandoverBuildingConfig(currentBuilding, {
+          silentSuccess: true,
+          silentConflictMessage: false,
+          silentErrorMessage: false,
+          skipConfigRefresh: true,
+        });
+        if (!buildingResult?.saved) {
+          return buildingResult;
+        }
+      }
+      syncSavedHandoverCommonSignature();
+      syncSavedHandoverBuildingSignature(currentBuilding);
+      await fetchConfig({ silentMessage: true });
+      await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+      if (!options?.silentSuccess) {
+        message.value = "交接班配置已自动保存";
+      }
+      return {
+        saved: true,
+        reason: "saved",
+        commonDirty,
+        buildingDirty,
+        building: currentBuilding,
+      };
+    }
+
+    const isConfigSaveLocked = computed(() => {
+      if (String(activeConfigTab.value || "").trim() === "feature_handover") {
+        return isActionLocked(actionKeyHandoverConfigCommonSave) || isActionLocked(actionKeyHandoverConfigBuildingSave);
+      }
+      return isActionLocked(actionKeyConfigSave);
+    });
+
+    const configSaveButtonText = computed(() => (isConfigSaveLocked.value ? "保存中..." : "保存配置"));
+
+    async function saveActiveConfig() {
+      if (String(activeConfigTab.value || "").trim() === "feature_handover") {
+        const result = await flushPendingHandoverConfigAutoSave({
+          force: true,
+          silentSuccess: false,
+        });
+        if (!result) {
+          message.value = "当前没有可保存的交接班配置变更";
+          return { saved: false, reason: "missing" };
+        }
+        if (result.saved === false) {
+          return result;
+        }
+        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        if (result.reason === "unchanged") {
+          message.value = "交接班配置已是最新";
+        }
+        return result;
+      }
+      return saveConfig();
+    }
+
+    async function sendHandoverReviewLink(building, options = {}) {
+      const targetBuilding = String(building || "").trim() || String(handoverConfigBuilding.value || "").trim() || "A楼";
+      const flushResult = await flushPendingHandoverConfigAutoSave({
+        force: true,
+        silentSuccess: true,
+      });
+      if (flushResult && flushResult.saved === false) {
+        return {
+          accepted: false,
+          reason: String(flushResult.reason || "save_failed"),
+          error: String(flushResult.error || "").trim(),
+        };
+      }
+      const draftOpenIds = collectCurrentHandoverReviewRecipientOpenIds(targetBuilding);
+      const persistedSegment = await fetchHandoverBuildingConfigSegment(targetBuilding, { silentMessage: true });
+      if (!persistedSegment) {
+        message.value = "读取当前楼已保存配置失败，请稍后重试";
+        return { accepted: false, reason: "segment_load_failed" };
+      }
+      const persistedOpenIds = collectPersistedHandoverReviewRecipientOpenIds(persistedSegment, targetBuilding);
+      if (!persistedOpenIds.length) {
+        message.value = draftOpenIds.length
+          ? "当前楼审核链接接收人尚未保存成功，请先等待自动保存完成"
+          : "当前楼未配置审核链接接收人";
+        return {
+          accepted: false,
+          reason: draftOpenIds.length ? "recipient_not_persisted" : "recipient_unconfigured",
+        };
+      }
+      if (JSON.stringify(draftOpenIds) !== JSON.stringify(persistedOpenIds)) {
+        message.value = "当前楼审核链接接收人尚未保存成功，请先等待自动保存完成";
+        return { accepted: false, reason: "recipient_not_persisted" };
+      }
+      message.value = `${targetBuilding}审核链接测试发送中...`;
+      return sendHandoverReviewLinkAction(targetBuilding, options);
+    }
+
+    async function onHandoverConfigBuildingChange(nextBuilding) {
+      const targetBuilding = String(nextBuilding || "").trim() || String(handoverConfigBuilding.value || "").trim() || "A楼";
+      await flushPendingHandoverConfigAutoSave({
+        force: true,
+        silentSuccess: true,
+      });
+      await fetchHandoverBuildingConfigSegment(targetBuilding);
+    }
 
     async function runSchedulerConfigAutoSave(taskFn) {
       if (typeof taskFn !== "function") return;
@@ -3078,7 +3743,6 @@ createApp({
     const shouldPauseRuntimeRequests = computed(() => {
       return Boolean(
         !startupRoleSelectorHandled.value
-        || !startupRoleGateReady.value
         || updaterUiOverlayVisible.value
         || updaterAwaitingRestartRecovery.value
         || startupRoleSelectorVisible.value
@@ -3092,6 +3756,7 @@ createApp({
         configLoaded: configLoaded.value,
         currentRole: startupRoleCurrentMode.value,
         currentStartupToken: startupRoleCurrentToken.value,
+        currentNodeId: startupRoleCurrentNodeId.value,
         flowState: startupRoleFlowState.value,
         overlayVisible: updaterUiOverlayVisible.value,
         selectorVisible: startupRoleSelectorVisible.value,
@@ -3105,9 +3770,64 @@ createApp({
         startupHandoffNonce: String(health.startup_handoff?.nonce || "").trim(),
       }),
       (state) => {
-        if (!state.bootstrapReady || !state.configLoaded) return;
-        if (state.overlayVisible || state.loadingVisible) return;
-        const savedRole = normalizeDeploymentRoleMode(state.currentRole);
+        const routeRole = parseAppBrowserRoute(typeof window !== "undefined" ? window.location.pathname : "/").role_mode;
+        if (!state.bootstrapReady) {
+          if (
+            routeRole
+            && !state.runtimeActivated
+            && !startupRoleSelectorBusy.value
+            && !startupRoleLoadingVisible.value
+            && !startupRoleSelectorHandled.value
+          ) {
+            if (!startupRouteFallbackTimer) {
+              startupRouteFallbackTimer = window.setTimeout(() => {
+                startupRouteFallbackTimer = null;
+                if (
+                  startupRoleSelectorBusy.value
+                  || startupRoleLoadingVisible.value
+                  || startupRoleSelectorHandled.value
+                ) {
+                  return;
+                }
+                selectStartupRole(routeRole);
+                syncStartupRoleBridgeDraft();
+                startupRoleDecisionReady.value = true;
+                startupRoleSelectorHandled.value = true;
+                startupRoleSelectorVisible.value = false;
+                startupRoleAutoActivationKey.value = `route-bootstrap-fallback:${routeRole}`;
+                startupRoleSelectorBusy.value = true;
+                showStartupRoleLoading({
+                  title: `正在恢复${formatDeploymentRoleLabel(routeRole)}`,
+                  subtitle: "启动状态读取较慢，已按当前地址直接恢复对应系统。",
+                  stage: "recovering",
+                });
+                void (async () => {
+                  const activated = await activateStartupRuntimeAfterSelection("startup_role_route_bootstrap_fallback", {
+                    targetRoleMode: routeRole,
+                  });
+                  startupRoleSelectorBusy.value = false;
+                  if (!activated) {
+                    showStartupRoleSelector("后台运行时激活失败，请重新确认启动角色。");
+                    return;
+                  }
+                  closeStartupRoleSelector({ handled: true });
+                })();
+              }, 1200);
+            }
+          } else {
+            clearStartupRouteFallbackTimer();
+          }
+          return;
+        }
+        clearStartupRouteFallbackTimer();
+        if (state.overlayVisible) return;
+        if (state.loadingVisible && state.flowState !== "recovering") return;
+        const savedRole = normalizeDeploymentRoleMode(state.currentRole || routeRole);
+        const storedStartupRoleSession = readMatchingStartupRoleSession(
+          state.currentStartupToken,
+          state.currentNodeId,
+        );
+        const runtimeRecoveryIntent = readStartupRuntimeRecovery();
         const startupHandoff = currentStartupHandoff();
         const canResumeAfterRestart =
           Boolean(startupHandoff.active)
@@ -3117,7 +3837,7 @@ createApp({
         if (canResumeAfterRestart && !state.runtimeActivated) {
           const resumeRole = startupHandoff.target_role_mode || savedRole || startupRoleSelectorSelection.value || "internal";
           const activationKey = `${state.currentStartupToken || ""}|${resumeRole}|${startupHandoff.nonce}|restart_resume`;
-          if (startupRoleSelectorBusy.value || startupRoleLoadingVisible.value) return;
+          if (startupRoleSelectorBusy.value || (startupRoleLoadingVisible.value && startupRoleFlowState.value !== "recovering")) return;
           if (startupRoleAutoActivationKey.value === activationKey) return;
           selectStartupRole(resumeRole);
           syncStartupRoleBridgeDraft();
@@ -3159,8 +3879,105 @@ createApp({
           startupRoleAutoActivationKey.value = activationKey;
           hideStartupRoleLoading();
           startupRoleSelectorBusy.value = false;
+          persistStartupRoleSession(activatedRole);
+          clearStartupRuntimeRecovery();
           clearLegacyStartupRoleRestartState();
           startupRoleSuppressedHandoffNonce.value = "";
+          return;
+        }
+        if (runtimeRecoveryIntent && savedRole && runtimeRecoveryIntent.role_mode === savedRole) {
+          const activationKey = `${state.currentStartupToken || ""}|${savedRole}|runtime_recovery`;
+          if (startupRoleSelectorBusy.value || (startupRoleLoadingVisible.value && startupRoleFlowState.value !== "recovering")) return;
+          if (startupRoleAutoActivationKey.value === activationKey) return;
+          selectStartupRole(savedRole);
+          syncStartupRoleBridgeDraft();
+          startupRoleDecisionReady.value = true;
+          startupRoleSelectorHandled.value = true;
+          startupRoleSelectorVisible.value = false;
+          startupRoleAutoActivationKey.value = activationKey;
+          startupRoleSelectorBusy.value = true;
+          showStartupRoleLoading({
+            title: `正在恢复${formatDeploymentRoleLabel(savedRole)}`,
+            subtitle: "检测到更新后的自动恢复请求，正在重新进入对应页面。",
+            stage: "recovering",
+          });
+          void (async () => {
+            const activated = await activateStartupRuntimeAfterSelection("startup_role_runtime_recovery", {
+              targetRoleMode: savedRole,
+            });
+            startupRoleSelectorBusy.value = false;
+            if (!activated) {
+              clearStartupRuntimeRecovery();
+              showStartupRoleSelector("后台运行时激活失败，请重新确认启动角色。");
+              return;
+            }
+            closeStartupRoleSelector({ handled: true });
+          })();
+          return;
+        }
+        if (storedStartupRoleSession && savedRole && storedStartupRoleSession.role_mode === savedRole) {
+          const activationKey = `${state.currentStartupToken || ""}|${savedRole}|session_resume`;
+          if (startupRoleSelectorBusy.value || (startupRoleLoadingVisible.value && startupRoleFlowState.value !== "recovering")) return;
+          if (startupRoleAutoActivationKey.value === activationKey) return;
+          selectStartupRole(savedRole);
+          syncStartupRoleBridgeDraft();
+          startupRoleDecisionReady.value = true;
+          startupRoleSelectorHandled.value = true;
+          startupRoleSelectorVisible.value = false;
+          startupRoleAutoActivationKey.value = activationKey;
+          startupRoleSelectorBusy.value = true;
+          showStartupRoleLoading({
+            title: `正在恢复${formatDeploymentRoleLabel(savedRole)}`,
+            subtitle: "检测到本次启动已确认角色，正在恢复对应页面。",
+            stage: "recovering",
+          });
+          void (async () => {
+            const activated = await activateStartupRuntimeAfterSelection("startup_role_session_resume", {
+              targetRoleMode: savedRole,
+            });
+            startupRoleSelectorBusy.value = false;
+            if (!activated) {
+              clearStartupRoleSession();
+              showStartupRoleSelector("后台运行时激活失败，请重新确认启动角色。");
+              return;
+            }
+            closeStartupRoleSelector({ handled: true });
+          })();
+          return;
+        }
+        if (
+          routeRole
+          && savedRole
+          && routeRole === savedRole
+          && state.startupRoleConfirmed
+          && !state.roleSelectionRequired
+        ) {
+          const activationKey = `${state.currentStartupToken || ""}|${routeRole}|route_resume`;
+          if (startupRoleSelectorBusy.value || (startupRoleLoadingVisible.value && startupRoleFlowState.value !== "recovering")) return;
+          if (startupRoleAutoActivationKey.value === activationKey) return;
+          selectStartupRole(routeRole);
+          syncStartupRoleBridgeDraft();
+          startupRoleDecisionReady.value = true;
+          startupRoleSelectorHandled.value = true;
+          startupRoleSelectorVisible.value = false;
+          startupRoleAutoActivationKey.value = activationKey;
+          startupRoleSelectorBusy.value = true;
+          showStartupRoleLoading({
+            title: `正在恢复${formatDeploymentRoleLabel(routeRole)}`,
+            subtitle: "检测到当前地址对应已确认角色，正在恢复对应页面。",
+            stage: "recovering",
+          });
+          void (async () => {
+            const activated = await activateStartupRuntimeAfterSelection("startup_role_route_resume", {
+              targetRoleMode: routeRole,
+            });
+            startupRoleSelectorBusy.value = false;
+            if (!activated) {
+              showStartupRoleSelector("后台运行时激活失败，请重新确认启动角色。");
+              return;
+            }
+            closeStartupRoleSelector({ handled: true });
+          })();
           return;
         }
         if (state.selectorVisible || state.selectorBusy) return;
@@ -3169,6 +3986,8 @@ createApp({
         selectStartupRole(savedRole || startupRoleSelectorSelection.value || "internal");
         syncStartupRoleBridgeDraft();
         hideStartupRoleLoading();
+        clearStartupRoleSession();
+        clearStartupRuntimeRecovery();
         showStartupRoleSelector(savedRole ? "" : "请先选择有效角色。");
       },
       { immediate: true, deep: false },
@@ -3250,6 +4069,55 @@ createApp({
     );
 
     watch(
+      () => [String(currentView.value || "").trim(), String(activeConfigTab.value || "").trim()],
+      ([view, tab], [prevView, prevTab]) => {
+        const isHandoverTab = view === "config" && tab === "feature_handover";
+        const wasHandoverTab = prevView === "config" && prevTab === "feature_handover";
+        if (wasHandoverTab && !isHandoverTab) {
+          void flushPendingHandoverConfigAutoSave({
+            force: true,
+            silentSuccess: true,
+          });
+        }
+        if (!isHandoverTab) return;
+        if (configAutoSaveTimer) {
+          window.clearTimeout(configAutoSaveTimer);
+          configAutoSaveTimer = null;
+        }
+      },
+    );
+
+    watch(
+      () => handoverConfigCommonRevision.value,
+      () => {
+        if (!configLoaded.value) return;
+        syncSavedHandoverCommonSignature();
+      },
+      { immediate: true },
+    );
+
+    watch(
+      () => [handoverConfigBuilding.value, handoverConfigBuildingRevision.value],
+      ([building]) => {
+        if (!configLoaded.value) return;
+        if (!building) return;
+        syncSavedHandoverBuildingSignature(building);
+      },
+      { immediate: true },
+    );
+
+    watch(
+      () => String(currentView.value || "").trim(),
+      (view) => {
+        if (view === "config") return;
+        if (handoverConfigAutoSaveTimer) {
+          window.clearTimeout(handoverConfigAutoSaveTimer);
+          handoverConfigAutoSaveTimer = null;
+        }
+      },
+    );
+
+    watch(
       () => [handoverDutyDate.value, handoverDutyShift.value],
       () => {
         persistHandoverDutyContext(handoverDutyDate.value, handoverDutyShift.value);
@@ -3325,6 +4193,41 @@ createApp({
       },
       { immediate: true },
     );
+
+    watch(
+      () => [
+        deploymentRoleMode.value,
+        String(currentView.value || "").trim(),
+        Boolean(startupRoleSelectorVisible.value),
+        Boolean(startupRoleGateReady.value),
+      ],
+      ([, , selectorVisible, gateReady]) => {
+        if (!gateReady) return;
+        syncBrowserRoute({
+          replace: !browserRouteReady.value,
+          selectorVisible,
+        });
+      },
+      { immediate: true },
+    );
+
+    const handleBrowserPopstate = () => {
+      const nextRoute = parseAppBrowserRoute(window.location.pathname);
+      if (nextRoute.kind === "login") {
+        if (!startupRoleSelectorVisible.value) {
+          syncBrowserRoute({ replace: true, selectorVisible: false });
+        }
+        return;
+      }
+      applyBrowserRoute(nextRoute);
+    };
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("popstate", handleBrowserPopstate);
+      onBeforeUnmount(() => {
+        window.removeEventListener("popstate", handleBrowserPopstate);
+      });
+    }
 
     watch(
       () => shouldPollHandoverDailyReportContext.value,
@@ -3535,9 +4438,14 @@ createApp({
     );
 
     onBeforeUnmount(() => {
+      clearStartupRouteFallbackTimer();
       if (configAutoSaveTimer) {
         window.clearTimeout(configAutoSaveTimer);
         configAutoSaveTimer = null;
+      }
+      if (handoverConfigAutoSaveTimer) {
+        window.clearTimeout(handoverConfigAutoSaveTimer);
+        handoverConfigAutoSaveTimer = null;
       }
       if (dashboardSchedulerOverviewFocusTimer) {
         window.clearTimeout(dashboardSchedulerOverviewFocusTimer);
@@ -3693,6 +4601,10 @@ createApp({
       updaterBadgeToneClass,
       updaterButtonClass,
       isUpdaterActionLocked,
+      isUpdaterInternalPeerCheckLocked,
+      isUpdaterInternalPeerApplyLocked,
+      updaterInternalPeerCheckButtonText,
+      updaterInternalPeerApplyButtonText,
       deploymentRoleMode,
       deploymentNodeIdDisplayText,
       deploymentNodeIdDisplayHint,
@@ -3780,10 +4692,13 @@ createApp({
       actionKeyDayMetricUploadSchedulerStart,
       actionKeyDayMetricUploadSchedulerStop,
       actionKeyDayMetricUploadSchedulerSave,
+      actionKeyDayMetricConfigRepair: ACTION_KEY_DAY_METRIC_CONFIG_REPAIR || actionKeyDayMetricConfigRepair,
       actionKeyAlarmEventUploadSchedulerStart,
       actionKeyAlarmEventUploadSchedulerStop,
       actionKeyAlarmEventUploadSchedulerSave,
       actionKeyConfigSave,
+      isConfigSaveLocked,
+      configSaveButtonText,
       actionKeyUpdaterCheck,
       actionKeyUpdaterApply,
       actionKeySourceCacheRefreshCurrentHour,
@@ -3852,12 +4767,18 @@ createApp({
       onHandoverDutyShiftManualChange,
       restoreAutoHandoverDuty,
       saveConfig,
+      repairDayMetricUploadConfig,
+      saveActiveConfig,
       saveHandoverCommonConfig,
+      saveHandoverReviewBaseUrlQuickConfig,
       saveHandoverBuildingConfig,
+      onHandoverConfigBuildingChange,
       confirmStartupRoleSelection,
       checkUpdaterNow,
       applyUpdaterPatch,
       restartUpdaterApp,
+      checkInternalPeerUpdaterNow,
+      applyInternalPeerUpdaterNow,
       confirmAllHandoverReview,
       retryAllFailedHandoverCloudSync,
       continueHandoverFollowupUpload,
@@ -3929,6 +4850,8 @@ createApp({
       restoreHandoverDailyReportAutoAsset,
       rewriteHandoverDailyReportRecord,
       reprobeHandoverReviewAccess,
+      sendHandoverReviewLink,
+      getHandoverReviewLinkSendActionKey,
       getHandoverDailyReportRecaptureActionKey,
       getHandoverDailyReportUploadActionKey,
       getHandoverDailyReportRestoreActionKey,

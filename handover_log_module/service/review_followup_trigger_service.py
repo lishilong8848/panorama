@@ -527,8 +527,12 @@ class ReviewFollowupTriggerService:
             building = str(session.get("building", "")).strip()
             cloud_state = _normalize_cloud_sync_state(session.get("cloud_sheet_sync", {}))
             output_file = str(session.get("output_file", "")).strip()
+            revision = int(session.get("revision", 0) or 0)
             if cloud_state["status"] == "disabled":
                 skipped_buildings.append({"building": building, "reason": "disabled"})
+                continue
+            if self._is_cloud_sync_complete_for_revision(cloud_state, revision):
+                skipped_buildings.append({"building": building, "reason": "already_uploaded"})
                 continue
             if not output_file:
                 failed_buildings.append({"building": building, "error": "missing_output_file"})
@@ -537,7 +541,7 @@ class ReviewFollowupTriggerService:
                 {
                     "building": building,
                     "output_file": output_file,
-                    "revision": int(session.get("revision", 0) or 0),
+                    "revision": revision,
                 }
             )
         return upload_items, skipped_buildings, failed_buildings

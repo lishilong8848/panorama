@@ -67,14 +67,10 @@ class HandoverDailyReportScreenshotService:
 
     def _profile_dir(self, browser_meta: Dict[str, Any] | None = None) -> Path:
         browser_kind = self._browser_kind(browser_meta)
-        local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
-        if browser_kind == "chrome":
-            if local_app_data:
-                return Path(local_app_data) / "Google" / "Chrome" / "User Data"
-            return Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data"
-        if local_app_data:
-            return Path(local_app_data) / "Microsoft" / "Edge" / "User Data"
-        return Path.home() / "AppData" / "Local" / "Microsoft" / "Edge" / "User Data"
+        normalized_kind = browser_kind if browser_kind in {"chrome", "edge"} else self.PREFERRED_BROWSER_KIND
+        managed_dir = self._runtime_root() / "handover" / "daily_report_browser" / normalized_kind
+        managed_dir.mkdir(parents=True, exist_ok=True)
+        return managed_dir
 
     def _configured_profile_directory_name(self) -> str:
         raw = self.handover_cfg.get("daily_report_bitable_export", {})
@@ -1127,6 +1123,10 @@ class HandoverDailyReportScreenshotService:
         profile_dir = str((browser_meta or {}).get("profile_dir", "") or "")
         global _LOGIN_BROWSER_THREAD
         with _LOGIN_BROWSER_GUARD:
+            emit_log(
+                f"[交接班][日报截图登录] 开始初始化 browser={self._browser_label(browser_meta)}, "
+                f"profile={str((browser_meta or {}).get('profile_name', '') or '').strip() or '-'}"
+            )
             try:
                 ok, error, browser_mode = await asyncio.to_thread(
                     self.ensure_browser_debug_ready,
@@ -1167,6 +1167,10 @@ class HandoverDailyReportScreenshotService:
                         )
             except Exception as exc:  # noqa: BLE001
                 error = str(exc)
+                emit_log(
+                    f"[交接班][日报截图登录] 初始化失败 browser={self._browser_label(browser_meta)}, "
+                    f"错误={error}"
+                )
                 self._state_service.update_screenshot_auth_state(
                     self._auth_state_payload(
                         status="browser_unavailable",

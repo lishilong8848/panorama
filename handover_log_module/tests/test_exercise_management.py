@@ -200,3 +200,60 @@ def test_exercise_management_builder_skips_blank_project_rows(tmp_path: Path) ->
     assert payload["演练管理"] == [
         {"cells": {"B": "计划性演练", "C": "UPS切换演练", "D": "已完成", "H": "张三、李四"}}
     ]
+
+
+def test_exercise_management_builder_dedupes_duplicate_projects(tmp_path: Path) -> None:
+    template_path = tmp_path / "exercise_template_dedupe.xlsx"
+    _build_exercise_template(template_path)
+    cfg = {
+        "enabled": True,
+        "sections": {"exercise_management": "演练管理"},
+        "fixed_values": {"exercise_type": "计划性演练", "completion": "已完成"},
+        "column_mapping": {
+            "resolve_by_header": True,
+            "header_alias": {
+                "exercise_type": ["演练类型"],
+                "exercise_item": ["演练项目"],
+                "completion": ["演练完成情况"],
+                "executor": ["执行人"],
+            },
+            "fallback_cols": {
+                "exercise_type": "B",
+                "exercise_item": "C",
+                "completion": "D",
+                "executor": "H",
+            },
+        },
+    }
+    rows = [
+        ExerciseManagementRow(
+            record_id="rec-1",
+            building_values=["A楼"],
+            start_time=datetime(2026, 3, 14, 9, 0, 0),
+            project_text="UPS切换演练",
+            raw_fields={},
+        ),
+        ExerciseManagementRow(
+            record_id="rec-2",
+            building_values=["A楼"],
+            start_time=datetime(2026, 3, 14, 9, 30, 0),
+            project_text=" UPS切换演练 ",
+            raw_fields={},
+        ),
+    ]
+    builder = ExerciseManagementPayloadBuilder(
+        {"template": {"source_path": str(template_path), "sheet_name": "交接班日志"}},
+        repository=_FakeExerciseRepo(cfg, rows),
+    )
+
+    payload = builder.build(
+        building="A楼",
+        duty_date="2026-03-14",
+        duty_shift="day",
+        executor_text="张三、李四",
+        emit_log=lambda *_args: None,
+    )
+
+    assert payload["演练管理"] == [
+        {"cells": {"B": "计划性演练", "C": "UPS切换演练", "D": "已完成", "H": "张三、李四"}}
+    ]

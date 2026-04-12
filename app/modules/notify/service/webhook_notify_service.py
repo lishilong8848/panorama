@@ -11,6 +11,16 @@ class WebhookNotifyService:
         self.config = config
         self._repo = WebhookHttpRepository()
 
+    def _notify_config(self) -> Dict[str, Any]:
+        common = self.config.get("common", {})
+        common_notify = common.get("notify", {}) if isinstance(common, dict) else {}
+        root_notify = self.config.get("notify", {})
+        if isinstance(common_notify, dict) and common_notify:
+            return common_notify
+        if isinstance(root_notify, dict):
+            return root_notify
+        return {}
+
     def send_failure(
         self,
         stage: str,
@@ -19,7 +29,7 @@ class WebhookNotifyService:
         emit_log: Callable[[str], None] | None = None,
         category: str = "upload",
     ) -> None:
-        notify_cfg = self.config.get("notify", {})
+        notify_cfg = self._notify_config()
         if not bool(notify_cfg.get("enable_webhook", False)):
             return
         normalized_category = str(category or "upload").strip().lower() or "upload"
@@ -45,4 +55,7 @@ class WebhookNotifyService:
         text = build_event_text(stage=stage, detail=detail, building=building)
         ok, msg = self._repo.send(webhook_url, text, keyword=keyword, timeout=timeout)
         if emit_log:
-            emit_log(f"[Webhook] {'发送成功' if ok else '发送失败'}: {msg}")
+            if ok:
+                emit_log(f"[Webhook] 发送成功: {msg}")
+            else:
+                emit_log(f"[Webhook] 发送失败: {msg}, keyword={keyword or '-'}")

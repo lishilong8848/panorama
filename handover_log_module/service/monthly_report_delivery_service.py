@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.feishu.service.im_file_message_client import FeishuImFileMessageClient
 from app.shared.utils.atomic_file import atomic_write_text
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
@@ -234,16 +235,10 @@ class MonthlyReportDeliveryService:
 
     def _build_feishu_client(self) -> FeishuImFileMessageClient:
         handover_cfg = self._handover_cfg()
-        global_feishu = handover_cfg.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
-        app_id = str(global_feishu.get("app_id", "") or "").strip()
-        app_secret = str(global_feishu.get("app_secret", "") or "").strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+        global_feishu = require_feishu_auth_settings(handover_cfg)
         return FeishuImFileMessageClient(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             timeout=int(global_feishu.get("timeout", 30) or 30),
             request_retry_count=int(global_feishu.get("request_retry_count", 3) or 3),
             request_retry_interval_sec=float(global_feishu.get("request_retry_interval_sec", 2) or 2),

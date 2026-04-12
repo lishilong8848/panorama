@@ -450,6 +450,8 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 },
                 "fields": {
                     "building": "楼栋",
+                    "start_time": "变更开始时间",
+                    "end_time": "变更结束时间",
                     "updated_time": "更新最新的时间",
                     "change_level": "阿里-变更等级",
                     "process_updates": "过程更新时间",
@@ -537,6 +539,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 },
                 "fields": {
                     "building": "楼栋",
+                    "start_time": "实际开始时间",
                     "updated_time": "最新更新时间",
                     "actual_end_time": "实际结束时间",
                     "item": "名称",
@@ -601,6 +604,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                         "table_id": "tblf2uQrzCWw5eIV",
                         "fields": {
                             "building": "楼栋",
+                            "actual_start_time": "实际开始时间",
                             "actual_end_time": "实际结束时间",
                             "description": "名称",
                             "completion": "进度",
@@ -612,6 +616,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                         "table_id": "tbleqBZdQu1n8qqK",
                         "fields": {
                             "building": "楼栋",
+                            "actual_start_time": "实际开始时间",
                             "actual_end_time": "实际结束时间",
                             "description": "内容",
                             "completion": "进度",
@@ -623,6 +628,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                         "table_id": "tbl0XK1iQ1P6VY5Y",
                         "fields": {
                             "building": "楼栋",
+                            "actual_start_time": "实际开始时间",
                             "actual_end_time": "实际结束时间",
                             "description": "内容",
                             "completion": "进度",
@@ -634,6 +640,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                         "table_id": "tblpaHktT0mn0hwg",
                         "fields": {
                             "building": "楼栋",
+                            "actual_start_time": "实际开始时间",
                             "actual_end_time": "实际结束时间",
                             "description": "维修故障",
                             "completion": "进度（完成情况）",
@@ -774,6 +781,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "section_hidden_columns": ["I"],
                 "cabinet_power_defaults_by_building": {},
                 "footer_inventory_defaults_by_building": {},
+                "review_link_recipients_by_building": {},
             },
             "cell_rules": {
                 "default_rows": [

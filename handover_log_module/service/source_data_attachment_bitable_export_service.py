@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
 
 
@@ -117,14 +118,7 @@ class SourceDataAttachmentBitableExportService:
         return cfg
 
     def _new_client(self, cfg: Dict[str, Any]) -> FeishuBitableClient:
-        global_feishu = self.handover_cfg.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
-
-        app_id = str(global_feishu.get("app_id", "")).strip()
-        app_secret = str(global_feishu.get("app_secret", "")).strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+        global_feishu = require_feishu_auth_settings(self.handover_cfg)
 
         source = cfg.get("source", {})
         app_token = str(source.get("app_token", "")).strip()
@@ -133,8 +127,8 @@ class SourceDataAttachmentBitableExportService:
             raise ValueError("源数据附件上报多维配置缺失: app_token/table_id")
 
         return FeishuBitableClient(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             app_token=app_token,
             calc_table_id=table_id,
             attachment_table_id=table_id,

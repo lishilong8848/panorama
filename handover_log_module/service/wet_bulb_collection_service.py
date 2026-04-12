@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List
 from app.config.config_compat_cleanup import sanitize_wet_bulb_collection_config
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.core.formatter import build_metric_text
 from handover_log_module.core.models import MetricHit
@@ -166,11 +167,7 @@ class WetBulbCollectionService:
         )
 
     def _new_client(self, cfg: Dict[str, Any], *, target_descriptor: Dict[str, Any] | None = None) -> FeishuBitableClient:
-        global_feishu = self.runtime_config.get("feishu", {}) if isinstance(self.runtime_config.get("feishu", {}), dict) else {}
-        app_id = str(global_feishu.get("app_id", "")).strip()
-        app_secret = str(global_feishu.get("app_secret", "")).strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+        global_feishu = require_feishu_auth_settings(self.runtime_config)
 
         resolved_target = dict(target_descriptor or {})
         if not resolved_target:
@@ -183,8 +180,8 @@ class WetBulbCollectionService:
             raise ValueError("湿球温度目标多维表缺少 operation_app_token/table_id")
 
         return FeishuBitableClient(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             app_token=operation_app_token,
             calc_table_id=table_id,
             attachment_table_id=table_id,

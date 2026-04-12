@@ -56,20 +56,20 @@ const APP_TEMPLATE_PREFIX = `
     >
       <div class="startup-role-gate-card">
           <div class="startup-role-gate-head">
-            <div class="startup-role-gate-kicker">启动角色确认</div>
-            <div class="startup-role-gate-title">选择本次程序启动角色</div>
+            <div class="startup-role-gate-kicker">角色登录</div>
+            <div class="startup-role-gate-title">选择进入角色</div>
             <div class="startup-role-gate-subtitle">
-            每次启动都会先显示这一页；确认角色后，系统才会进入对应的内网端或外网端页面。
+            程序启动后先选择本次使用角色。确认后将直接进入对应的内网端或外网端页面。
             </div>
           </div>
 
         <template v-if="startupRoleGateReady">
           <div class="startup-role-gate-meta">
             <div class="startup-role-gate-current">
-              当前角色：<strong>{{ startupRoleCurrentLabel }}</strong>
+              已保存角色：<strong>{{ startupRoleCurrentLabel }}</strong>
             </div>
             <div class="startup-role-gate-tip">
-              选择角色后，请确认对应共享目录；内网端使用本地路径，外网端使用 UNC 路径。
+              只在程序刚启动时选择一次；刷新页面不会要求重复选择。共享目录需与当前角色对应。
             </div>
           </div>
 
@@ -101,7 +101,7 @@ const APP_TEMPLATE_PREFIX = `
               <div class="startup-role-config-kicker">共享桥接配置</div>
               <div class="startup-role-config-title">{{ startupRoleSelectedLabel }} 运行参数</div>
               <div class="startup-role-config-subtitle">
-                启动门面会直接使用当前配置值预填；确认后将自动启用共享桥接，并在当前窗口加载目标角色页面。
+                这里填写当前角色实际使用的共享目录。确认后会直接进入目标页面。
               </div>
             </div>
 
@@ -148,10 +148,6 @@ const APP_TEMPLATE_PREFIX = `
               </div>
             </div>
 
-            <div class="startup-role-config-note">
-              双机模式下，内网前置下载产物会自动写入共享目录下的 <code>artifacts/...</code>，不会继续使用普通下载目录作为桥接接力路径。
-            </div>
-
             <div class="startup-role-config-toolbar">
               <button
                 class="btn btn-ghost"
@@ -162,7 +158,7 @@ const APP_TEMPLATE_PREFIX = `
                 {{ startupRoleAdvancedVisible ? '收起高级设置' : '展开高级设置' }}
               </button>
               <div class="startup-role-config-toolbar-hint">
-                高级设置会沿用当前值；如未配置，则自动使用默认值。
+                高级项通常无需修改，默认沿用当前值。
               </div>
             </div>
 

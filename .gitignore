@@ -56,3 +56,7 @@ __pycache__/
 /docs/
 /全景平台月报自动定时上传.spec
 tests/
+!tests/
+!tests/unit/
+!tests/unit/test_handover_shift_interval_filters.py
+!tests/unit/test_settings_loader_handover_shift_fields.py

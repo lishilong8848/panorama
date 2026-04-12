@@ -32,6 +32,34 @@ PATCH_DIR_NAME = "patch_only"
 LAUNCHER_NAME = "启动程序.bat"
 CODE_LAUNCHER_NAME = "启动程序.bat"
 USER_CONFIG_FILE_NAME = "表格计算配置.json"
+CRITICAL_RELEASE_SYNC_FILES = [
+    Path("main.py"),
+    Path("portable_launcher.py"),
+    Path("pipeline_utils.py"),
+    Path("config/表格计算配置.template.json"),
+    Path("app/bootstrap/container.py"),
+    Path("app/config/config_merge_guard.py"),
+    Path("app/modules/network/service/network_stability.py"),
+    Path("app/modules/report_pipeline/service/job_service.py"),
+    Path("app/modules/report_pipeline/service/system_alert_log_upload_service.py"),
+    Path("app/modules/updater/api/routes.py"),
+    Path("app/modules/updater/core/versioning.py"),
+    Path("app/modules/updater/repository/updater_state_store.py"),
+    Path("app/modules/updater/service/runtime_dependency_sync_service.py"),
+    Path("app/modules/updater/service/update_applier.py"),
+    Path("app/modules/updater/service/updater_service.py"),
+    Path("app/modules/websocket/service/log_stream_service.py"),
+    Path("app/shared/runtime_dependency_spec.py"),
+    Path("handover_log_module/service/review_session_service.py"),
+    Path("handover_log_module/service/handover_daily_report_bitable_export_service.py"),
+    Path("web/frontend/src/app_lifecycle.js"),
+    Path("web/frontend/src/config_api_utils.js"),
+    Path("web/frontend/src/index.html"),
+    Path("web/frontend/src/log_stream.js"),
+    Path("web/frontend/src/runtime_health_config_actions.js"),
+    Path("web/frontend/src/runtime_resume_actions.js"),
+    Path("web/frontend/src/updater_text.js"),
+]
 
 DEFAULT_GITEE_REPO = "https://gitee.com/myligitt/qjpt.git"
 DEFAULT_GITEE_BRANCH = "master"
@@ -65,13 +93,13 @@ EXCLUDE_TOP_LEVEL = {
     "dist",
     "build_output",
     "output",
+    "config_segments",
 }
 
 EXCLUDE_SUFFIX = {".pyc", ".pyo", ".tmp", ".log"}
 EXCLUDE_CONTAINS = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache"}
 PATCH_EXCLUDE_FILE_NAMES = {
     "表格计算配置.json",
-    "表格计算配置.template.json",
     "handover_default.json",
     "handover_config.schema.json",
 }
@@ -371,6 +399,8 @@ def _should_exclude(rel: Path, include_venv: bool, include_runtime: bool = True)
         return True
     if rel.suffix.lower() in EXCLUDE_SUFFIX:
         return True
+    if rel.name == USER_CONFIG_FILE_NAME:
+        return True
     return False
 
 
@@ -410,22 +440,6 @@ def _copy_project_tree(
     return copied, skipped
 
 
-def _capture_existing_user_config(code_dir: Path) -> bytes | None:
-    config_path = code_dir / USER_CONFIG_FILE_NAME
-    if not config_path.exists():
-        return None
-    return config_path.read_bytes()
-
-
-def _restore_existing_user_config(code_dir: Path, payload: bytes | None) -> bool:
-    if payload is None:
-        return False
-    config_path = code_dir / USER_CONFIG_FILE_NAME
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_bytes(payload)
-    return True
-
-
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -446,9 +460,26 @@ def _file_manifest(root: Path, *, include_venv: bool, include_runtime: bool = Tr
     return out
 
 
+def _remove_packaged_runtime_config_artifacts(code_dir: Path) -> list[str]:
+    removed: list[str] = []
+    config_path = code_dir / USER_CONFIG_FILE_NAME
+    if config_path.exists():
+        config_path.unlink()
+        removed.append(USER_CONFIG_FILE_NAME)
+
+    handover_segments_dir = code_dir / "config_segments"
+    if handover_segments_dir.exists():
+        shutil.rmtree(handover_segments_dir, ignore_errors=True)
+        removed.append("config_segments/")
+    return removed
+
+
 def _should_exclude_from_patch(rel: Path) -> bool:
     rel_text = str(rel).replace("\\", "/")
+    is_config_template = rel_text == "config/表格计算配置.template.json" or rel.name == "表格计算配置.template.json"
     if rel_text.startswith(f"{RUNTIME_DIR_NAME}/"):
+        return True
+    if rel.parts and rel.parts[0] == "config_segments":
         return True
     if rel.parts and str(rel.parts[0]).startswith(".tmp_"):
         return True
@@ -461,7 +492,7 @@ def _should_exclude_from_patch(rel: Path) -> bool:
         return True
     if rel.name in PATCH_EXCLUDE_FILE_NAMES:
         return True
-    if rel.suffix.lower() == ".json" and "config" in rel.parts:
+    if rel.suffix.lower() == ".json" and "config" in rel.parts and not is_config_template:
         return True
     return False
 
@@ -547,26 +578,6 @@ def _write_runtime_dependency_lock(code_dir: Path, *, python_version: str) -> di
     )
     _write_json(code_dir / "runtime_dependency_lock.json", payload)
     return payload
-
-
-def _force_console_host_for_packaged_config(code_dir: Path) -> bool:
-    config_path = code_dir / "表格计算配置.json"
-    payload = _read_json(config_path)
-    if not isinstance(payload, dict):
-        return False
-    common_cfg = payload.setdefault("common", {})
-    if not isinstance(common_cfg, dict):
-        payload["common"] = {}
-        common_cfg = payload["common"]
-    console_cfg = common_cfg.setdefault("console", {})
-    if not isinstance(console_cfg, dict):
-        common_cfg["console"] = {}
-        console_cfg = common_cfg["console"]
-    if str(console_cfg.get("host", "") or "").strip() == "0.0.0.0":
-        return False
-    console_cfg["host"] = "0.0.0.0"
-    _write_json(config_path, payload)
-    return True
 
 
 def _write_build_meta(
@@ -870,6 +881,72 @@ def _write_code_launcher(code_dir: Path) -> Path:
     return launcher
 
 
+def _capture_existing_user_config(source_dir: Path) -> dict[str, bytes]:
+    payload: dict[str, bytes] = {}
+    config_path = source_dir / USER_CONFIG_FILE_NAME
+    if config_path.exists() and config_path.is_file():
+        payload[USER_CONFIG_FILE_NAME] = config_path.read_bytes()
+    segments_dir = source_dir / "config_segments"
+    if segments_dir.exists() and segments_dir.is_dir():
+        for path in segments_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(source_dir)
+            payload[str(rel).replace("\\", "/")] = path.read_bytes()
+    return payload
+
+
+def _restore_existing_user_config(target_dir: Path, payload: dict[str, bytes]) -> bool:
+    restored = False
+    for rel_text, raw in (payload or {}).items():
+        target = target_dir / rel_text
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        restored = True
+    return restored
+
+
+def _sync_critical_stage_files_to_release(stage_code_dir: Path, release_code_dir: Path) -> dict[str, int]:
+    copied = 0
+    skipped = 0
+    release_code_dir.mkdir(parents=True, exist_ok=True)
+    for rel in CRITICAL_RELEASE_SYNC_FILES:
+        src = stage_code_dir / rel
+        if not src.exists() or not src.is_file():
+            skipped += 1
+            continue
+        dst = release_code_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        copied += 1
+    return {"copied": copied, "skipped": skipped}
+
+
+def _sync_stage_to_release(stage_dir: Path, release_dir: Path, preserve_user_data: bool = True) -> dict[str, int | bool]:
+    preserved_user_config = _capture_existing_user_config(release_dir) if preserve_user_data else {}
+    copied = 0
+    skipped = 0
+    release_dir.mkdir(parents=True, exist_ok=True)
+    for path in stage_dir.rglob("*"):
+        rel = path.relative_to(stage_dir)
+        if not rel.parts:
+            continue
+        target = release_dir / rel
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(path, target)
+            copied += 1
+        except PermissionError:
+            skipped += 1
+        except OSError:
+            skipped += 1
+    restored = _restore_existing_user_config(release_dir, preserved_user_config) if preserve_user_data else False
+    return {"copied": copied, "skipped": skipped, "restored_user_config": restored}
+
+
 def _resolve_baseline_dir(raw: str, default_code_dir: Path) -> Path:
     if not str(raw or "").strip():
         return default_code_dir
@@ -932,20 +1009,19 @@ def main() -> None:
     release_root = BUILD_DIR / RELEASE_ROOT_NAME
     release_code_dir = release_root / RELEASE_CODE_DIR_NAME
     patch_dir = BUILD_DIR / PATCH_DIR_NAME
+    removed_runtime_artifacts = _remove_packaged_runtime_config_artifacts(release_code_dir)
+    if removed_runtime_artifacts:
+        log(f"已清理全量目录中的历史运行配置产物: {', '.join(removed_runtime_artifacts)}")
 
     persisted_major, persisted_patch, persisted_release_revision = _pick_persisted_version()
     first_full_build = bool(args.force_full) or not (release_code_dir / "build_meta.json").exists()
 
     if first_full_build:
-        preserved_user_config = _capture_existing_user_config(release_code_dir)
         copied_count, skipped_count = _copy_project_tree(
             release_code_dir,
             include_venv=include_venv_in_full,
             clean_before_copy=True,
         )
-        preserved_config_restored = _restore_existing_user_config(release_code_dir, preserved_user_config)
-        if not preserved_config_restored:
-            _force_console_host_for_packaged_config(release_code_dir)
         _prepare_embedded_runtime(release_code_dir, embed_python_version)
         _ensure_release_tree_imports(release_code_dir)
         _ensure_embedded_runtime_bootstrap_imports(release_code_dir)
@@ -984,7 +1060,7 @@ def main() -> None:
             "首次构建完成（全量便携目录）: "
             f"root={release_root}, code={release_code_dir}, launcher={launcher.name}, code_launcher={code_launcher.name}, files={copied_count}, "
             f"skipped={skipped_count}, version={build_meta.get('display_version')}, mode={package_mode}, "
-            f"preserved_user_config={preserved_config_restored}"
+            "packaged_config=excluded"
         )
         log("当前未生成补丁；后续再次执行 build_exe.py 将只生成 patch_only 并上传。")
         return
@@ -1020,7 +1096,7 @@ def main() -> None:
             include_venv=bool(args.patch_include_venv),
             clean_before_copy=True,
         )
-        _force_console_host_for_packaged_config(stage_code_dir)
+        _remove_packaged_runtime_config_artifacts(stage_code_dir)
         _write_code_launcher(stage_code_dir)
         log(f"代码快照完成: {stage_code_dir} (files={copied_count}, skipped={skipped_count})")
 
@@ -1102,11 +1178,6 @@ def main() -> None:
             f"patch={latest_manifest.get('target_patch_version')}, "
             f"url={latest_manifest.get('zip_url')}"
         )
-        log(
-            "检测到基线大版本已存在：本次仍以 patch_only 为主，不再回写同步本地全量源码目录。"
-            f" baseline={baseline_dir}, release_code_dir={release_code_dir}"
-        )
-
         try:
             uploaded_branch = _upload_to_gitee(
                 patch_zip=patch_zip,
@@ -1130,6 +1201,18 @@ def main() -> None:
                 log(f"已上传 patch 与 latest manifest 到 Gitee: branch={uploaded_branch}")
         except Exception as exc:  # noqa: BLE001
             log(f"Gitee 上传失败（已保留本地产物）: {exc}")
+
+        sync_result = _sync_stage_to_release(stage_code_dir, release_code_dir, preserve_user_data=True)
+        log(
+            "已刷新本地运行目录到最新代码快照（保留用户配置）: "
+            f"release_code_dir={release_code_dir}, copied={sync_result.get('copied', 0)}, "
+            f"skipped={sync_result.get('skipped', 0)}, "
+            f"restored_user_config={bool(sync_result.get('restored_user_config', False))}"
+        )
+        _sync_critical_stage_files_to_release(stage_code_dir, release_code_dir)
+        _write_launcher(release_root)
+        _write_code_launcher(release_code_dir)
+        _ensure_release_tree_imports(release_code_dir)
 
     log("完成")
 

@@ -111,6 +111,7 @@ def test_patch_build_excludes_temp_and_backup_artifacts() -> None:
     assert module._should_exclude(Path("表格计算部分代码.py.recovered.tmp_keep"), include_venv=False)
     assert module._should_exclude_from_patch(Path(".tmp_runtime_tests/shared_bridge_monthly_runtime/artifact.xlsx"))
     assert module._should_exclude_from_patch(Path("表格计算配置.backup.20260403-081043.json"))
+    assert not module._should_exclude_from_patch(Path("config/表格计算配置.template.json"))
 
 
 def test_ensure_release_tree_imports_raises_when_import_check_fails(monkeypatch, tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ _BUILTIN_COMPUTED_OPS = {
     "ring_supply_temp",
     "chiller_mode_summary",
 }
+_MISSING_VAR_EXPR_LOGGED: Set[str] = set()
 
 
 def _extract_th_suffix(text: Any) -> str:
@@ -218,12 +219,13 @@ def _resolve_raw_value(
         return None
 
     visiting.add(metric_key)
+    variable_names: List[str] = []
+    variable_values: Dict[str, Any] = {}
     try:
         if op in _BUILTIN_COMPUTED_OPS:
             raw_value = None
         else:
             variable_names = get_expression_variables(op)
-            variable_values: Dict[str, Any] = {}
             for var_name in variable_names:
                 variable_values[var_name] = _resolve_raw_value(
                     var_name,
@@ -235,7 +237,19 @@ def _resolve_raw_value(
                 )
             raw_value = evaluate_expression(op, variable_values)
     except Exception as exc:  # noqa: BLE001
-        print(f"[交接班][表达式] metric={metric_key} 计算失败: {exc}")
+        missing_vars = [name for name, value in variable_values.items() if value is None]
+        if missing_vars:
+            # 缺少变量通常代表源数据为空，降级为“跳过计算”并去重日志，避免批量噪音。
+            missing_text = ",".join(missing_vars)
+            log_key = f"{metric_key}|{op}|{missing_text}"
+            if log_key not in _MISSING_VAR_EXPR_LOGGED:
+                print(
+                    f"[交接班][表达式] metric={metric_key} 跳过计算: "
+                    f"缺少变量={missing_text}; op={op}"
+                )
+                _MISSING_VAR_EXPR_LOGGED.add(log_key)
+        else:
+            print(f"[交接班][表达式] metric={metric_key} 计算失败: {exc}")
         raw_value = None
 
     visiting.discard(metric_key)

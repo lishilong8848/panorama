@@ -11,9 +11,12 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 
 DEFAULT_CONFIG_FILENAME = "表格计算配置.json"
+DEFAULT_CONFIG_TEMPLATE_FILENAME = "表格计算配置.template.json"
 DEFAULT_CALC_FILENAME = "表格计算部分代码.py"
 DEFAULT_DOWNLOAD_FILENAME = "下载动环表格.py"
 DEFAULT_WEBHOOK_KEYWORD = "事件"
+RELEASE_CODE_DIR_NAME = "QJPT_V3_code"
+PERSISTENT_USER_DATA_DIR_NAME = "user_data"
 
 
 def get_app_dir() -> Path:
@@ -53,26 +56,69 @@ def _pick_first_existing(candidates: Iterable[Path]) -> Path | None:
 
 
 def _resolve_single_config_target() -> Path:
-    return get_app_dir() / DEFAULT_CONFIG_FILENAME
+    app_dir = get_app_dir()
+    if app_dir.name == RELEASE_CODE_DIR_NAME:
+        return app_dir.parent / PERSISTENT_USER_DATA_DIR_NAME / DEFAULT_CONFIG_FILENAME
+    return app_dir / DEFAULT_CONFIG_FILENAME
+
+
+def _legacy_root_config_candidates(target: Path) -> List[tuple[Path, str]]:
+    app_dir = get_app_dir()
+    bundle_dir = get_bundle_dir()
+    candidates: List[tuple[Path, str]] = []
+    app_root_config = app_dir / DEFAULT_CONFIG_FILENAME
+    if app_root_config != target:
+        candidates.append((app_root_config, "legacy_root"))
+    candidates.append((app_dir / "config" / DEFAULT_CONFIG_FILENAME, "legacy"))
+    candidates.append((app_dir / "config" / DEFAULT_CONFIG_TEMPLATE_FILENAME, "template"))
+    if getattr(sys, "frozen", False):
+        bundle_root_config = bundle_dir / DEFAULT_CONFIG_FILENAME
+        if bundle_root_config != target:
+            candidates.append((bundle_root_config, "legacy_root"))
+        candidates.append((bundle_dir / "config" / DEFAULT_CONFIG_FILENAME, "legacy"))
+        candidates.append((bundle_dir / "config" / DEFAULT_CONFIG_TEMPLATE_FILENAME, "template"))
+    return candidates
+
+
+def _migrate_legacy_segment_dir_if_needed(target: Path) -> None:
+    segment_target = target.parent / "config_segments"
+    if segment_target.exists():
+        return
+    candidate_roots = [get_app_dir(), get_bundle_dir()]
+    for root in candidate_roots:
+        segment_source = root / "config_segments"
+        if not segment_source.exists() or not segment_source.is_dir():
+            continue
+        segment_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(segment_source, segment_target, dirs_exist_ok=True)
+        print(f"[配置迁移] 已迁移交接班分段配置: {segment_source} -> {segment_target}")
+        return
 
 
 def _migrate_legacy_config_if_needed(target: Path) -> Path | None:
     if target.exists():
         return target
 
-    candidates: List[Path] = [
-        get_app_dir() / "config" / DEFAULT_CONFIG_FILENAME,
-    ]
-    if getattr(sys, "frozen", False):
-        candidates.append(get_bundle_dir() / "config" / DEFAULT_CONFIG_FILENAME)
+    candidates = _legacy_root_config_candidates(target)
 
-    legacy = _pick_first_existing(candidates)
+    legacy = None
+    source_kind = ""
+    for candidate, kind in candidates:
+        if candidate.exists():
+            legacy = candidate
+            source_kind = kind
+            break
+
     if legacy is None:
         return None
 
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(legacy, target)
-    print(f"[配置迁移] 已迁移旧配置: {legacy} -> {target}")
+    _migrate_legacy_segment_dir_if_needed(target)
+    if source_kind == "template":
+        print(f"[配置初始化] 已根据模板生成默认配置: {legacy} -> {target}")
+    else:
+        print(f"[配置迁移] 已迁移旧配置: {legacy} -> {target}")
     return target
 
 
@@ -105,9 +151,11 @@ def resolve_config_path(config_path: str | Path | None = None) -> Path:
     raise FileNotFoundError(
         "Config file not found. Expected single config at:\n"
         f"{target}\n"
-        "Legacy checked for one-time migration:\n"
+        "Legacy/template checked for one-time migration or initialization:\n"
         f"{get_app_dir() / 'config' / DEFAULT_CONFIG_FILENAME}\n"
-        f"{get_bundle_dir() / 'config' / DEFAULT_CONFIG_FILENAME}"
+        f"{get_app_dir() / 'config' / DEFAULT_CONFIG_TEMPLATE_FILENAME}\n"
+        f"{get_bundle_dir() / 'config' / DEFAULT_CONFIG_FILENAME}\n"
+        f"{get_bundle_dir() / 'config' / DEFAULT_CONFIG_TEMPLATE_FILENAME}"
     )
 
 

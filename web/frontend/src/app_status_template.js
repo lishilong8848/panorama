@@ -114,6 +114,25 @@
           <div class="hint" v-if="updaterMirrorOverview.errorText">
             发布异常：{{ updaterMirrorOverview.errorText }}
           </div>
+          <div class="btn-line" style="margin-top:10px;">
+            <button
+              class="btn btn-secondary"
+              @click="checkInternalPeerUpdaterNow"
+              :disabled="isUpdaterInternalPeerCheckLocked"
+            >
+              {{ updaterInternalPeerCheckButtonText }}
+            </button>
+            <button
+              class="btn btn-warning"
+              @click="applyInternalPeerUpdaterNow"
+              :disabled="isUpdaterInternalPeerApplyLocked"
+            >
+              {{ updaterInternalPeerApplyButtonText }}
+            </button>
+          </div>
+          <div class="hint" v-if="updaterMirrorOverview.internalPeer && updaterMirrorOverview.internalPeer.command && updaterMirrorOverview.internalPeer.command.message">
+            内网命令反馈：{{ updaterMirrorOverview.internalPeer.command.message }}
+          </div>
         </article>
 
         <article class="status-card">
@@ -629,13 +648,13 @@
             </div>
           </div>
           <div class="hint" v-if="health.handover.review_base_url_effective">
-            当前生效地址（{{ health.handover.review_base_url_effective_source === 'manual' ? '手工指定' : '已缓存自动诊断结果' }}）：{{ health.handover.review_base_url_effective }}
+            当前生效地址（手工指定）：{{ health.handover.review_base_url_effective }}
           </div>
           <div class="hint" v-else-if="health.handover.review_base_url_error">
             {{ health.handover.review_base_url_error }}
           </div>
-          <div class="hint" v-else-if="health.handover.review_base_url_status === 'no_candidate'">
-            未检测到可用私网 IPv4 地址
+          <div class="hint" v-else-if="health.handover.review_base_url_status === 'manual_only'">
+            请先在配置中心手工填写审核页访问基地址
           </div>
           <div class="review-matrix review-matrix-detailed" v-if="handoverReviewBoardRows && handoverReviewBoardRows.length">
             <div

@@ -8,6 +8,7 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 from pipeline_utils import get_app_dir
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.core.section_layout import parse_category_sections
 from handover_log_module.repository.event_followup_cache_store import EventFollowupCacheStore
 from handover_log_module.repository.event_sections_repository import (
@@ -167,7 +168,7 @@ class EventCategoryPayloadBuilder:
         if not source_path.exists():
             return output
 
-        wb = openpyxl.load_workbook(source_path, read_only=True, data_only=True)
+        wb = load_workbook_quietly(source_path, read_only=True, data_only=True)
         try:
             if sheet_name not in wb.sheetnames:
                 return output

@@ -156,7 +156,9 @@
           <div class="form-row"><label class="label">分页大小</label><input type="number" v-model.number="config.handover_log.change_management_section.source.page_size" /></div>
           <div class="form-row"><label class="label">最多读取记录数</label><input type="number" v-model.number="config.handover_log.change_management_section.source.max_records" /></div>
           <div class="form-row"><label class="label">字段：楼栋（多选）</label><input type="text" v-model="config.handover_log.change_management_section.fields.building" /></div>
-          <div class="form-row"><label class="label">字段：更新最新的时间</label><input type="text" v-model="config.handover_log.change_management_section.fields.updated_time" /></div>
+          <div class="form-row"><label class="label">字段：变更开始时间</label><input type="text" v-model="config.handover_log.change_management_section.fields.start_time" /></div>
+          <div class="form-row"><label class="label">字段：变更结束时间</label><input type="text" v-model="config.handover_log.change_management_section.fields.end_time" /></div>
+          <div class="form-row"><label class="label">字段：更新时间回退</label><input type="text" v-model="config.handover_log.change_management_section.fields.updated_time" /></div>
           <div class="form-row"><label class="label">字段：阿里-变更等级</label><input type="text" v-model="config.handover_log.change_management_section.fields.change_level" /></div>
           <div class="form-row"><label class="label">字段：过程更新时间</label><input type="text" v-model="config.handover_log.change_management_section.fields.process_updates" /></div>
           <div class="form-row"><label class="label">字段：名称</label><input type="text" v-model="config.handover_log.change_management_section.fields.description" /></div>
@@ -183,7 +185,7 @@
           <div class="form-row"><label class="label">白班默认结束</label><input type="time" step="1" v-model="config.handover_log.change_management_section.work_window_text.day_default_end" /></div>
           <div class="form-row"><label class="label">夜班作业时间锚点</label><input type="time" step="1" v-model="config.handover_log.change_management_section.work_window_text.night_anchor" /></div>
           <div class="form-row"><label class="label">夜班默认结束（次日）</label><input type="time" step="1" v-model="config.handover_log.change_management_section.work_window_text.night_default_end_next_day" /></div>
-          <div class="hint">变更管理分类仍按“更新最新的时间”命中当前班次；月度变更统计表则复用同一张多维表，并按“变更开始时间”统计上一个自然月。</div>
+          <div class="hint">变更管理按“变更开始时间-变更结束时间”与（班次开始+1小时，班次结束+1小时] 是否有交集判断；当前班次和历史班次都允许有开始、无结束。更新时间字段仅作旧配置回退。</div>
       </section>
 
       <section class="content-card config-panel-card config-subgroup-card">
@@ -219,7 +221,8 @@
           <div class="form-row"><label class="label">分页大小</label><input type="number" v-model.number="config.handover_log.maintenance_management_section.source.page_size" /></div>
           <div class="form-row"><label class="label">最多读取记录数</label><input type="number" v-model.number="config.handover_log.maintenance_management_section.source.max_records" /></div>
           <div class="form-row"><label class="label">字段：楼栋</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.building" /></div>
-          <div class="form-row"><label class="label">字段：最新更新时间（班次判定）</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.updated_time" /></div>
+          <div class="form-row"><label class="label">字段：实际开始时间</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.start_time" /></div>
+          <div class="form-row"><label class="label">字段：最新更新时间回退</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.updated_time" /></div>
           <div class="form-row"><label class="label">字段：实际结束时间</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.actual_end_time" /></div>
           <div class="form-row"><label class="label">字段：名称</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.item" /></div>
           <div class="form-row"><label class="label">字段：专业</label><input type="text" v-model="config.handover_log.maintenance_management_section.fields.specialty" /></div>
@@ -236,7 +239,7 @@
           <div class="form-row"><label class="label">回退列：维护执行方</label><input type="text" v-model="config.handover_log.maintenance_management_section.column_mapping.fallback_cols.maintenance_party" /></div>
           <div class="form-row"><label class="label">回退列：维护完成情况</label><input type="text" v-model="config.handover_log.maintenance_management_section.column_mapping.fallback_cols.completion" /></div>
           <div class="form-row"><label class="label">回退列：执行人</label><input type="text" v-model="config.handover_log.maintenance_management_section.column_mapping.fallback_cols.executor" /></div>
-          <div class="hint">维护管理按“楼栋”包含关系归属楼栋；筛选规则为“最新更新时间落在当前班次窗口内，且实际结束时间为空或也落在当前班次窗口内”。多楼一起执行时会按楼栋批量复用。执行人按“当前楼栋 + 专业”匹配工程师目录主管；名称包含“厂家/厂商”写厂维，否则写自维。</div>
+          <div class="hint">维护管理按“实际开始时间-实际结束时间”与（班次开始+1小时，班次结束+1小时] 是否有交集判断；当前班次和历史班次都允许有开始、无结束。最新更新时间字段仅作旧配置回退。</div>
       </section>
 
       <section class="content-card config-panel-card config-subgroup-card">
@@ -260,6 +263,7 @@
         <div class="section-title">其他重要工作记录来源：上电通告</div>
           <div class="form-row"><label class="label">Table ID</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.power_notice.table_id" /></div>
           <div class="form-row"><label class="label">字段：楼栋</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.power_notice.fields.building" /></div>
+          <div class="form-row"><label class="label">字段：实际开始时间</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.power_notice.fields.actual_start_time" /></div>
           <div class="form-row"><label class="label">字段：实际结束时间</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.power_notice.fields.actual_end_time" /></div>
           <div class="form-row"><label class="label">字段：描述</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.power_notice.fields.description" /></div>
           <div class="form-row"><label class="label">字段：完成情况</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.power_notice.fields.completion" /></div>
@@ -270,6 +274,7 @@
         <div class="section-title">其他重要工作记录来源：设备调整</div>
           <div class="form-row"><label class="label">Table ID</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_adjustment.table_id" /></div>
           <div class="form-row"><label class="label">字段：楼栋</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_adjustment.fields.building" /></div>
+          <div class="form-row"><label class="label">字段：实际开始时间</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_adjustment.fields.actual_start_time" /></div>
           <div class="form-row"><label class="label">字段：实际结束时间</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_adjustment.fields.actual_end_time" /></div>
           <div class="form-row"><label class="label">字段：描述</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_adjustment.fields.description" /></div>
           <div class="form-row"><label class="label">字段：完成情况</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_adjustment.fields.completion" /></div>
@@ -280,6 +285,7 @@
         <div class="section-title">其他重要工作记录来源：设备轮巡</div>
           <div class="form-row"><label class="label">Table ID</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_patrol.table_id" /></div>
           <div class="form-row"><label class="label">字段：楼栋</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_patrol.fields.building" /></div>
+          <div class="form-row"><label class="label">字段：实际开始时间</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_patrol.fields.actual_start_time" /></div>
           <div class="form-row"><label class="label">字段：实际结束时间</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_patrol.fields.actual_end_time" /></div>
           <div class="form-row"><label class="label">字段：描述</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_patrol.fields.description" /></div>
           <div class="form-row"><label class="label">字段：完成情况</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_patrol.fields.completion" /></div>
@@ -290,11 +296,12 @@
         <div class="section-title">其他重要工作记录来源：设备检修</div>
           <div class="form-row"><label class="label">Table ID</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_repair.table_id" /></div>
           <div class="form-row"><label class="label">字段：楼栋</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_repair.fields.building" /></div>
+          <div class="form-row"><label class="label">字段：实际开始时间</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_repair.fields.actual_start_time" /></div>
           <div class="form-row"><label class="label">字段：实际结束时间</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_repair.fields.actual_end_time" /></div>
           <div class="form-row"><label class="label">字段：描述</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_repair.fields.description" /></div>
           <div class="form-row"><label class="label">字段：完成情况</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_repair.fields.completion" /></div>
           <div class="form-row"><label class="label">字段：专业</label><input type="text" v-model="config.handover_log.other_important_work_section.sources.device_repair.fields.specialty" /></div>
-          <div class="hint">4 张表按“楼栋包含命中 + 实际结束时间为空或落在本班次窗口内”汇总到其他重要工作记录。多楼一起执行时会按楼栋批量复用，最终顺序固定为：上电通告 -> 设备调整 -> 设备轮巡 -> 设备检修。</div>
+          <div class="hint">4 张表统一按“实际开始时间-实际结束时间”与（班次开始+1小时，班次结束+1小时] 是否有交集判断；当前班次和历史班次都允许有开始、无结束。设备调整仍按“位置 + 内容”写入。</div>
       </section>
 
       <section class="content-card config-panel-card config-subgroup-card">
@@ -424,7 +431,7 @@
           <div class="form-row"><label class="label">源 Sheet 名</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.source_sheet_name" /></div>
           <div class="form-row">
             <label class="label">当前楼栋</label>
-            <select v-model="handoverConfigBuilding" @change="fetchHandoverBuildingConfigSegment(handoverConfigBuilding)">
+            <select :value="handoverConfigBuilding" @change="onHandoverConfigBuildingChange($event.target.value)">
               <option v-for="opt in handoverConfigBuildingOptions" :key="'handover-cloud-' + opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </div>
@@ -446,7 +453,7 @@
         <div class="section-title">楼栋配置</div>
           <div class="form-row">
             <label class="label">当前楼栋</label>
-            <select v-model="handoverConfigBuilding" @change="fetchHandoverBuildingConfigSegment(handoverConfigBuilding)">
+            <select :value="handoverConfigBuilding" @change="onHandoverConfigBuildingChange($event.target.value)">
               <option v-for="opt in handoverConfigBuildingOptions" :key="'handover-building-' + opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </div>
@@ -458,31 +465,69 @@
       <section class="content-card config-panel-card config-subgroup-card">
         <div class="section-title">审核页外部访问地址</div>
           <div class="hint" v-if="health.handover.review_base_url_effective">
-            当前生效地址（{{ health.handover.review_base_url_effective_source === 'manual' ? '手工指定' : '已缓存自动诊断结果' }}）：{{ health.handover.review_base_url_effective }}
+            当前生效地址（手工指定）：{{ health.handover.review_base_url_effective }}
           </div>
           <div class="hint" v-if="health.handover.review_base_url_error">
             {{ health.handover.review_base_url_error }}
           </div>
           <div class="form-row">
-            <label class="label">审核页访问基地址（手工指定后立即生效）</label>
+            <label class="label">审核页访问基地址（失焦后自动保存并立即生效）</label>
             <input
               type="text"
               v-model="config.handover_log.review_ui.public_base_url"
+              @blur="saveHandoverReviewBaseUrlQuickConfig({ silentSuccess: true, silentNoChange: true })"
               placeholder="例如 http://192.168.220.160:18765"
             />
+          </div>
+          <div class="hint">审核访问地址仅使用手工配置值，不再自动探测。</div>
+      </section>
+
+      <section class="content-card config-panel-card config-subgroup-card config-panel-card-wide config-editor-card">
+        <div class="section-title">审核链接接收人</div>
+          <div class="hint">当前楼栋支持配置多位收件人；系统会按 open_id 发送审核链接文本消息。</div>
+          <div class="form-row">
+            <label class="label">当前楼栋</label>
+            <select :value="handoverConfigBuilding" @change="onHandoverConfigBuildingChange($event.target.value)">
+              <option v-for="opt in handoverConfigBuildingOptions" :key="'handover-review-recipient-' + opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
           </div>
           <div class="btn-line" style="margin-bottom:8px;">
             <button
               class="btn btn-secondary"
-              :disabled="isActionLocked(actionKeyHandoverReviewAccessReprobe)"
-              @click="reprobeHandoverReviewAccess"
-            >
-              {{ isActionLocked(actionKeyHandoverReviewAccessReprobe) ? '探测中...' : '重新探测审核访问地址' }}
-            </button>
+              @click="(config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] || (config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] = [])).push({ note: '', open_id: '' })"
+            >新增接收人</button>
           </div>
-          <div class="hint">当前审核访问地址已持久化；外网端启动后会基于真实审核页访问结果进行校验。</div>
-          <div class="hint" v-if="health.handover.review_base_url_effective_source === 'auto'">
-            当前自动地址来自已缓存的历史诊断结果；只有手动点击“重新探测审核访问地址”才会再次探测。
+          <div class="config-editor-scroll">
+            <table class="site-table config-editor-table" style="margin-bottom:0;">
+              <thead>
+                <tr>
+                  <th style="width:160px;">备注</th>
+                  <th>Open ID</th>
+                  <th style="width:100px;">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="(row, idx) in (config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] || [])"
+                  :key="'handover-review-recipient-row-' + handoverConfigBuilding + '-' + idx"
+                >
+                  <td><input type="text" v-model="row.note" placeholder="例如 值班经理" /></td>
+                  <td><input type="text" v-model="row.open_id" placeholder="例如 ou_xxx" /></td>
+                  <td>
+                    <button
+                      class="btn btn-danger"
+                      @click="config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding].splice(idx, 1)"
+                    >删除</button>
+                  </td>
+                </tr>
+                <tr
+                  v-if="!(config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] || []).length"
+                  class="config-editor-empty-row"
+                >
+                  <td colspan="3" class="hint">当前楼还没有审核链接接收人；自动发送会跳过并显示“未配置收件人”。</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
       </section>
 
@@ -531,7 +576,7 @@
         
           <div class="form-row">
             <label class="label">当前楼栋</label>
-            <select v-model="handoverConfigBuilding" @change="fetchHandoverBuildingConfigSegment(handoverConfigBuilding)">
+            <select :value="handoverConfigBuilding" @change="onHandoverConfigBuildingChange($event.target.value)">
               <option v-for="opt in handoverConfigBuildingOptions" :key="'handover-rule-building-' + opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </div>

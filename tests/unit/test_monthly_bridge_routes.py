@@ -439,6 +439,26 @@ def test_resume_pending_returns_empty_list_on_internal_role() -> None:
     assert response == {"runs": [], "count": 0}
 
 
+def test_resume_pending_downgrades_on_recoverable_network_oserror(monkeypatch) -> None:
+    logs = []
+    request = _fake_request(role_mode="", bridge_enabled=False)
+    request.app.state.container.add_system_log = logs.append
+
+    class _BrokenOrchestrator:
+        def __init__(self, _config) -> None:
+            pass
+
+        def list_pending_resume_runs(self):
+            raise OSError(64, "指定的网络名不再可用。")
+
+    monkeypatch.setattr(routes, "OrchestratorService", _BrokenOrchestrator)
+
+    response = routes.list_resume_pending(request)
+
+    assert response == {"runs": [], "count": 0}
+    assert any("续传索引暂不可用" in line for line in logs)
+
+
 def test_auto_once_route_rejects_internal_role() -> None:
     request = _fake_request(role_mode="internal", bridge_enabled=True)
     with pytest.raises(HTTPException) as excinfo:

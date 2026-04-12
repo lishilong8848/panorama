@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 1,
-  "updated_at": "2026-04-10T20:17:06+08:00",
+  "revision": 2,
+  "updated_at": "2026-04-12T12:47:28+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -675,6 +675,14 @@
             }
           ]
         }
+      },
+      "review_link_recipients_by_building": {
+        "A楼": [
+          {
+            "note": "李世龙A",
+            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+          }
+        ]
       }
     }
   }

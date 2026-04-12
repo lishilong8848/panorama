@@ -6,7 +6,12 @@ import re
 from typing import Any, Callable, Dict, List
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
+from handover_log_module.core.shift_interval_overlap import (
+    build_shift_interval_window,
+    interval_overlaps_filter_window,
+)
 from handover_log_module.core.shift_window import build_duty_window
 from handover_log_module.core.specialty_normalizer import normalize_specialty_text
 
@@ -166,7 +171,8 @@ def _building_exact_single_match(target_building: str, values: List[str]) -> boo
 class ChangeManagementRow:
     record_id: str
     building_values: List[str]
-    updated_time: datetime
+    start_time: datetime
+    end_time: datetime | None
     change_level: str
     process_updates_text: str
     description: str
@@ -194,6 +200,8 @@ class ChangeManagementRepository:
             },
             "fields": {
                 "building": "楼栋",
+                "start_time": "变更开始时间",
+                "end_time": "变更结束时间",
                 "updated_time": "更新最新的时间",
                 "change_level": "阿里-变更等级",
                 "process_updates": "过程更新时间",
@@ -241,13 +249,7 @@ class ChangeManagementRepository:
         return self._normalize_cfg()
 
     def _new_client(self, cfg: Dict[str, Any]) -> FeishuBitableClient:
-        global_feishu = self.handover_cfg.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
-        app_id = str(global_feishu.get("app_id", "")).strip()
-        app_secret = str(global_feishu.get("app_secret", "")).strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+        global_feishu = require_feishu_auth_settings(self.handover_cfg)
 
         source = cfg.get("source", {})
         app_token = str(source.get("app_token", "")).strip()
@@ -256,8 +258,8 @@ class ChangeManagementRepository:
             raise ValueError("变更管理多维配置缺失: app_token/table_id")
 
         return FeishuBitableClient(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             app_token=app_token,
             calc_table_id=table_id,
             attachment_table_id=table_id,
@@ -352,12 +354,21 @@ class ChangeManagementRepository:
                 "single_building_rows": 0,
                 "multi_building_skipped": 0,
                 "blank_building_skipped": 0,
-                "parse_fail": 0,
+                "start_time_parse_fail": 0,
+                "end_time_parse_fail": 0,
+                "end_time_before_start_skipped": 0,
+                "start_time_after_filter_end_skipped": 0,
+                "end_time_before_filter_start_skipped": 0,
                 "blank_description_skipped": 0,
             }
 
         source = cfg.get("source", {})
         fields_cfg = cfg.get("fields", {}) if isinstance(cfg.get("fields", {}), dict) else {}
+        monthly_fields_cfg = (
+            cfg.get("monthly_report_fields", {})
+            if isinstance(cfg.get("monthly_report_fields", {}), dict)
+            else {}
+        )
         download_cfg = self.handover_cfg.get("download", {})
         shift_windows = download_cfg.get("shift_windows", {}) if isinstance(download_cfg, dict) else {}
         duty_window = build_duty_window(
@@ -365,17 +376,25 @@ class ChangeManagementRepository:
             duty_shift=duty_shift,
             shift_windows=shift_windows if isinstance(shift_windows, dict) else {},
         )
-        start_dt = datetime.strptime(duty_window.start_time, "%Y-%m-%d %H:%M:%S")
-        end_dt = datetime.strptime(duty_window.end_time, "%Y-%m-%d %H:%M:%S")
+        shift_start = datetime.strptime(duty_window.start_time, "%Y-%m-%d %H:%M:%S")
+        shift_end = datetime.strptime(duty_window.end_time, "%Y-%m-%d %H:%M:%S")
+        filter_window = build_shift_interval_window(
+            shift_start=shift_start,
+            shift_end=shift_end,
+            offset_hours=1,
+        )
 
         table_id = str(source.get("table_id", "")).strip()
         page_size = int(source.get("page_size", 500))
         max_records = int(source.get("max_records", 5000))
         emit_log(
             f"[交接班][变更管理] 读取飞书: table_id={table_id}, page_size={page_size}, "
-            f"max_records={max_records}, window={start_dt.strftime('%Y-%m-%d %H:%M:%S')}~{end_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+            f"max_records={max_records}, window={shift_start.strftime('%Y-%m-%d %H:%M:%S')}~{shift_end.strftime('%Y-%m-%d %H:%M:%S')}, "
+            f"filter_window={filter_window.filter_start.strftime('%Y-%m-%d %H:%M:%S')}~{filter_window.filter_end.strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
+        start_time_field = str(fields_cfg.get("start_time", "")).strip() or str(monthly_fields_cfg.get("start_time", "")).strip()
+        end_time_field = str(fields_cfg.get("end_time", "")).strip() or str(monthly_fields_cfg.get("end_time", "")).strip()
         updated_field = str(fields_cfg.get("updated_time", "更新最新的时间")).strip()
         building_field = str(fields_cfg.get("building", "楼栋")).strip()
         change_level_field = str(fields_cfg.get("change_level", "阿里-变更等级")).strip()
@@ -395,7 +414,11 @@ class ChangeManagementRepository:
         output: List[ChangeManagementRow] = []
         multi_building_skipped = 0
         blank_building_skipped = 0
-        parse_fail = 0
+        start_time_parse_fail = 0
+        end_time_parse_fail = 0
+        end_time_before_start_skipped = 0
+        start_time_after_filter_end_skipped = 0
+        end_time_before_filter_start_skipped = 0
         blank_description_skipped = 0
 
         for item in records:
@@ -420,11 +443,34 @@ class ChangeManagementRepository:
                     blank_building_skipped += 1
                 continue
 
-            updated_time = _parse_datetime(fields.get(updated_field))
-            if updated_time is None:
-                parse_fail += 1
+            raw_start_time = fields.get(start_time_field) if start_time_field else None
+            start_time = _parse_datetime(raw_start_time)
+            if start_time is None and updated_field:
+                start_time = _parse_datetime(fields.get(updated_field))
+            if start_time is None:
+                start_time_parse_fail += 1
                 continue
-            if not (start_dt <= updated_time < end_dt):
+            raw_end_time = fields.get(end_time_field) if end_time_field else None
+            end_time_text = _field_text(raw_end_time)
+            end_time = _parse_datetime(raw_end_time)
+            if end_time is None and end_time_text:
+                end_time_parse_fail += 1
+                continue
+            if end_time is not None and end_time < start_time:
+                end_time_before_start_skipped += 1
+                continue
+            if start_time > filter_window.filter_end:
+                start_time_after_filter_end_skipped += 1
+                continue
+            if end_time is not None and end_time <= filter_window.filter_start:
+                end_time_before_filter_start_skipped += 1
+                continue
+            if not interval_overlaps_filter_window(
+                start_time=start_time,
+                end_time=end_time,
+                filter_start=filter_window.filter_start,
+                filter_end=filter_window.filter_end,
+            ):
                 continue
 
             raw_specialty_text = _field_text(fields.get(specialty_field)).strip()
@@ -447,7 +493,8 @@ class ChangeManagementRepository:
                 ChangeManagementRow(
                     record_id=str(item.get("record_id", "")).strip(),
                     building_values=building_values,
-                    updated_time=updated_time,
+                    start_time=start_time,
+                    end_time=end_time,
                     change_level=_field_text_with_option_map(
                         fields.get(change_level_field),
                         option_maps.get(change_level_field, {}),
@@ -459,14 +506,18 @@ class ChangeManagementRepository:
                 )
             )
 
-        output.sort(key=lambda row: (row.updated_time, row.record_id))
+        output.sort(key=lambda row: (row.start_time, row.record_id))
         return output, cfg, {
             "total": len(records),
             "in_shift": len(output),
             "single_building_rows": len(output),
             "multi_building_skipped": multi_building_skipped,
             "blank_building_skipped": blank_building_skipped,
-            "parse_fail": parse_fail,
+            "start_time_parse_fail": start_time_parse_fail,
+            "end_time_parse_fail": end_time_parse_fail,
+            "end_time_before_start_skipped": end_time_before_start_skipped,
+            "start_time_after_filter_end_skipped": start_time_after_filter_end_skipped,
+            "end_time_before_filter_start_skipped": end_time_before_filter_start_skipped,
             "blank_description_skipped": blank_description_skipped,
         }
 
@@ -488,7 +539,12 @@ class ChangeManagementRepository:
         emit_log(
             f"[交接班][变更管理] 读取完成: total={counters['total']}, single_building_hit={len(output)}, "
             f"in_shift={len(output)}, multi_building_skipped={counters['multi_building_skipped']}, "
-            f"non_exact_building_skipped={non_exact_building_skipped}, parse_fail={counters['parse_fail']}, "
+            f"non_exact_building_skipped={non_exact_building_skipped}, "
+            f"start_time_parse_fail={counters.get('start_time_parse_fail', 0)}, "
+            f"end_time_parse_fail={counters.get('end_time_parse_fail', 0)}, "
+            f"end_time_before_start_skipped={counters.get('end_time_before_start_skipped', 0)}, "
+            f"start_time_after_filter_end_skipped={counters.get('start_time_after_filter_end_skipped', 0)}, "
+            f"end_time_before_filter_start_skipped={counters.get('end_time_before_filter_start_skipped', 0)}, "
             f"blank_description_skipped={counters['blank_description_skipped']}"
         )
         return output, cfg
@@ -525,7 +581,12 @@ class ChangeManagementRepository:
         emit_log(
             f"[交接班][变更管理] 读取完成: total={counters['total']}, in_shift={counters['in_shift']}, "
             f"building_assigned={assigned_rows}, multi_building_skipped={counters['multi_building_skipped']}, "
-            f"blank_building_skipped={counters['blank_building_skipped']}, parse_fail={counters['parse_fail']}, "
+            f"blank_building_skipped={counters['blank_building_skipped']}, "
+            f"start_time_parse_fail={counters.get('start_time_parse_fail', 0)}, "
+            f"end_time_parse_fail={counters.get('end_time_parse_fail', 0)}, "
+            f"end_time_before_start_skipped={counters.get('end_time_before_start_skipped', 0)}, "
+            f"start_time_after_filter_end_skipped={counters.get('start_time_after_filter_end_skipped', 0)}, "
+            f"end_time_before_filter_start_skipped={counters.get('end_time_before_filter_start_skipped', 0)}, "
             f"blank_description_skipped={counters['blank_description_skipped']}"
         )
         emit_log(

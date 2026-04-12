@@ -7,6 +7,7 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 from pipeline_utils import get_app_dir
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.core.section_layout import parse_category_sections
 from handover_log_module.repository.exercise_management_repository import (
     ExerciseManagementRepository,
@@ -17,6 +18,10 @@ from handover_log_module.repository.exercise_management_repository import (
 
 def _norm_header(value: Any) -> str:
     return str(value or "").replace(" ", "").strip().casefold()
+
+
+def _dedupe_text(value: Any) -> str:
+    return "".join(str(value or "").split()).casefold()
 
 
 class ExerciseManagementPayloadBuilder:
@@ -71,7 +76,7 @@ class ExerciseManagementPayloadBuilder:
         if not source_path.exists():
             return output
 
-        wb = openpyxl.load_workbook(source_path, read_only=True, data_only=True)
+        wb = load_workbook_quietly(source_path, read_only=True, data_only=True)
         try:
             if sheet_name not in wb.sheetnames:
                 return output
@@ -165,10 +170,18 @@ class ExerciseManagementPayloadBuilder:
         col_map = self._resolve_section_column_mapping(cfg=cfg, emit_log=emit_log).get(section_name, {})
 
         payload_rows = []
+        deduped_count = 0
+        seen_projects: set[str] = set()
         for row in rows:
             project_text = str(row.project_text or "").strip()
             if not project_text:
                 continue
+            dedupe_key = _dedupe_text(project_text)
+            if dedupe_key and dedupe_key in seen_projects:
+                deduped_count += 1
+                continue
+            if dedupe_key:
+                seen_projects.add(dedupe_key)
             payload_rows.append(
                 {
                     "cells": self._to_cells(
@@ -184,6 +197,6 @@ class ExerciseManagementPayloadBuilder:
             )
         emit_log(
             f"[交接班][演练管理] 构建完成: building={building}, count={len(payload_rows)}, "
-            f"executor={str(executor_text or '').strip() or '/'}"
+            f"deduped={deduped_count}, executor={str(executor_text or '').strip() or '/'}"
         )
         return {section_name: payload_rows}

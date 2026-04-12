@@ -3,6 +3,7 @@ export function createActionGuard(vueApi) {
 
   const lockMap = reactive({});
   const actionLastDoneAt = reactive({});
+  const inflightPromiseMap = {};
 
   function isActionLocked(key) {
     const name = String(key || "").trim();
@@ -24,14 +25,17 @@ export function createActionGuard(vueApi) {
     const cooldownMs = Number.isFinite(cooldownRaw) && cooldownRaw > 0 ? cooldownRaw : 0;
     const now = Date.now();
     const lastDone = Number.parseInt(String(actionLastDoneAt[name] || 0), 10) || 0;
-    if (lockMap[name]) return undefined;
+    if (lockMap[name]) return inflightPromiseMap[name];
     if (cooldownMs > 0 && now - lastDone < cooldownMs) return undefined;
 
     lockMap[name] = true;
+    const runningPromise = (async () => taskFn())();
+    inflightPromiseMap[name] = runningPromise;
     try {
-      return await taskFn();
+      return await runningPromise;
     } finally {
       lockMap[name] = false;
+      delete inflightPromiseMap[name];
       actionLastDoneAt[name] = Date.now();
     }
   }
@@ -39,6 +43,7 @@ export function createActionGuard(vueApi) {
   return {
     lockMap,
     actionLastDoneAt,
+    inflightPromiseMap,
     isActionLocked,
     runSingleFlight,
   };

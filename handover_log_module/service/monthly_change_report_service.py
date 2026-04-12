@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Iterable, List
 import openpyxl
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
 from app.shared.utils.atomic_file import atomic_save_workbook, atomic_write_text
@@ -485,22 +486,15 @@ class MonthlyChangeReportService:
 
     def _new_source_client(self) -> tuple[FeishuBitableClient, Dict[str, Any], Dict[str, Any]]:
         handover_cfg, source_cfg, monthly_fields = self._normalize_source_cfg()
-        global_feishu = handover_cfg.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
-
-        app_id = str(global_feishu.get("app_id", "") or "").strip()
-        app_secret = str(global_feishu.get("app_secret", "") or "").strip()
+        global_feishu = require_feishu_auth_settings(handover_cfg)
         app_token = str(source_cfg.get("app_token", "") or "").strip()
         table_id = str(source_cfg.get("table_id", "") or "").strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
         if not app_token or not table_id:
             raise ValueError("变更管理源配置缺失: app_token/table_id")
 
         client = FeishuBitableClient(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             app_token=app_token,
             calc_table_id=table_id,
             attachment_table_id=table_id,

@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
+
 
 class FeishuSheetsClientRuntime:
     AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
@@ -34,11 +36,20 @@ class FeishuSheetsClientRuntime:
         request_retry_count: int = 3,
         request_retry_interval_sec: float = 1.0,
     ) -> None:
-        self.app_id = str(app_id or "").strip()
-        self.app_secret = str(app_secret or "").strip()
-        self.timeout = max(1, int(timeout or 20))
-        self.request_retry_count = max(0, int(request_retry_count or 0))
-        self.request_retry_interval_sec = max(0.0, float(request_retry_interval_sec or 0.0))
+        auth = resolve_feishu_auth_settings(
+            {
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "timeout": timeout,
+                "request_retry_count": request_retry_count,
+                "request_retry_interval_sec": request_retry_interval_sec,
+            }
+        )
+        self.app_id = str(auth.get("app_id", "") or "").strip()
+        self.app_secret = str(auth.get("app_secret", "") or "").strip()
+        self.timeout = max(1, int(auth.get("timeout", 20) or 20))
+        self.request_retry_count = max(0, int(auth.get("request_retry_count", 0) or 0))
+        self.request_retry_interval_sec = max(0.0, float(auth.get("request_retry_interval_sec", 0.0) or 0.0))
         self._tenant_access_token: Optional[str] = None
 
         if not self.app_id or not self.app_secret:
@@ -520,11 +531,43 @@ class FeishuSheetsClientRuntime:
                             ).get("column_count", item.get("columnCount", 0))
                             or 0
                         ),
+                        "merges": self._normalize_sheet_merges(item.get("merges", [])),
                     }
                 )
         if isinstance(sheet_cache, dict) and cache_key:
             sheet_cache[cache_key] = [dict(item) for item in output]
         return output
+
+    @staticmethod
+    def _normalize_sheet_merges(raw: Any) -> List[Dict[str, int]]:
+        merges: List[Dict[str, int]] = []
+        if not isinstance(raw, list):
+            return merges
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start_row = int(item.get("start_row_index", item.get("startRowIndex", 0)) or 0)
+                end_row = int(item.get("end_row_index", item.get("endRowIndex", 0)) or 0)
+                start_col = int(item.get("start_column_index", item.get("startColumnIndex", 0)) or 0)
+                end_col = int(item.get("end_column_index", item.get("endColumnIndex", 0)) or 0)
+            except (TypeError, ValueError):
+                continue
+            if end_row < start_row or end_col < start_col:
+                continue
+            if end_row == start_row:
+                end_row += 1
+            if end_col == start_col:
+                end_col += 1
+            merges.append(
+                {
+                    "start_row_index": start_row,
+                    "end_row_index": end_row,
+                    "start_column_index": start_col,
+                    "end_column_index": end_col,
+                }
+            )
+        return merges
 
     def batch_update_sheet_requests(self, spreadsheet_token: str, requests_payload: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not requests_payload:
@@ -571,6 +614,112 @@ class FeishuSheetsClientRuntime:
             if str(sheet.get("title", "")).strip() == str(title or "").strip():
                 return sheet
         raise RuntimeError(f"飞书创建目标 sheet 后未找到: {title}")
+
+    def copy_sheet(
+        self,
+        spreadsheet_token: str,
+        *,
+        source_sheet_id: str,
+        title: str,
+        sheet_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> Dict[str, Any]:
+        normalized_source_sheet_id = str(source_sheet_id or "").strip()
+        normalized_title = str(title or "").strip()
+        if not normalized_source_sheet_id:
+            raise ValueError("source_sheet_id 不能为空")
+        if not normalized_title:
+            raise ValueError("sheet title 不能为空")
+        data = self.batch_update_sheet_requests(
+            spreadsheet_token,
+            [
+                {
+                    "copySheet": {
+                        "source": {"sheetId": normalized_source_sheet_id},
+                        "destination": {"title": normalized_title},
+                    }
+                }
+            ],
+        )
+        copied_sheet_id = ""
+        replies = data.get("replies") or []
+        if isinstance(replies, list) and replies:
+            copy_reply = (replies[0] or {}).get("copySheet", {})
+            if isinstance(copy_reply, dict):
+                properties = copy_reply.get("properties", {})
+                if isinstance(properties, dict):
+                    copied_sheet_id = str(properties.get("sheetId", "") or "").strip()
+        sheets = self.query_sheets(spreadsheet_token, sheet_cache=sheet_cache, force_refresh=True)
+        if copied_sheet_id:
+            for sheet in sheets:
+                if str(sheet.get("sheet_id", "")).strip() == copied_sheet_id:
+                    return sheet
+        matched = [sheet for sheet in sheets if str(sheet.get("title", "")).strip() == normalized_title]
+        if matched:
+            matched.sort(key=lambda item: int(item.get("index", 0) or 0))
+            return matched[-1]
+        raise RuntimeError(f"飞书复制目标 sheet 后未找到: {title}")
+
+    def rename_sheet(
+        self,
+        spreadsheet_token: str,
+        *,
+        sheet_id: str,
+        title: str,
+        sheet_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> Dict[str, Any]:
+        return self.rename_and_move_sheet(
+            spreadsheet_token,
+            sheet_id=sheet_id,
+            title=title,
+            index=None,
+            sheet_cache=sheet_cache,
+        )
+
+    def move_sheet(
+        self,
+        spreadsheet_token: str,
+        *,
+        sheet_id: str,
+        index: int,
+        sheet_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> Dict[str, Any]:
+        return self.rename_and_move_sheet(
+            spreadsheet_token,
+            sheet_id=sheet_id,
+            title=None,
+            index=index,
+            sheet_cache=sheet_cache,
+        )
+
+    def rename_and_move_sheet(
+        self,
+        spreadsheet_token: str,
+        *,
+        sheet_id: str,
+        title: Optional[str] = None,
+        index: Optional[int] = None,
+        sheet_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> Dict[str, Any]:
+        normalized_sheet_id = str(sheet_id or "").strip()
+        if not normalized_sheet_id:
+            raise ValueError("sheet_id 不能为空")
+        properties: Dict[str, Any] = {"sheetId": normalized_sheet_id}
+        if title is not None:
+            normalized_title = str(title or "").strip()
+            if not normalized_title:
+                raise ValueError("sheet title 不能为空")
+            properties["title"] = normalized_title
+        if index is not None:
+            properties["index"] = int(index or 0)
+        self.batch_update_sheet_requests(
+            spreadsheet_token,
+            [{"updateSheet": {"properties": properties}}],
+        )
+        sheets = self.query_sheets(spreadsheet_token, sheet_cache=sheet_cache, force_refresh=True)
+        for sheet in sheets:
+            if str(sheet.get("sheet_id", "")).strip() == normalized_sheet_id:
+                return sheet
+        raise RuntimeError(f"飞书更新目标 sheet 后未找到: {sheet_id}")
 
     def get_or_create_named_sheet(
         self,
@@ -697,6 +846,35 @@ class FeishuSheetsClientRuntime:
                     "sheetId": str(sheet_id or "").strip(),
                     "majorDimension": str(major_dimension or "ROWS").strip().upper(),
                     "length": add_length,
+                }
+            },
+        )
+        return body.get("data") or {}
+
+    def delete_dimension(
+        self,
+        spreadsheet_token: str,
+        *,
+        sheet_id: str,
+        major_dimension: str,
+        start_index: int,
+        end_index: int,
+    ) -> Dict[str, Any]:
+        normalized_sheet_id = str(sheet_id or "").strip()
+        normalized_dimension = str(major_dimension or "ROWS").strip().upper()
+        normalized_start_index = max(0, int(start_index or 0))
+        normalized_end_index = max(normalized_start_index, int(end_index or 0))
+        if normalized_end_index <= normalized_start_index:
+            return {"delCount": 0, "majorDimension": normalized_dimension}
+        body = self._request_json_with_auth_retry(
+            "DELETE",
+            self.DIMENSION_RANGE_URL.format(spreadsheet_token=spreadsheet_token),
+            payload={
+                "dimension": {
+                    "sheetId": normalized_sheet_id,
+                    "majorDimension": normalized_dimension,
+                    "startIndex": normalized_start_index + 1,
+                    "endIndex": max(normalized_start_index + 1, normalized_end_index),
                 }
             },
         )

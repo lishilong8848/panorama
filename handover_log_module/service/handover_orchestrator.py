@@ -30,6 +30,7 @@ from handover_log_module.service.handover_source_file_cache_service import Hando
 from handover_log_module.service.maintenance_management_payload_builder import MaintenanceManagementPayloadBuilder
 from handover_log_module.service.other_important_work_payload_builder import OtherImportantWorkPayloadBuilder
 from handover_log_module.service.review_session_service import ReviewSessionService
+from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
 )
@@ -96,6 +97,7 @@ class HandoverOrchestrator:
         self._source_data_attachment_export_service = SourceDataAttachmentBitableExportService(config)
         self._source_file_cache_service = HandoverSourceFileCacheService(config)
         self._review_session_service = ReviewSessionService(config)
+        self._review_link_delivery_service = ReviewLinkDeliveryService(config)
 
     def _deployment_role_mode(self) -> str:
         text = str(self.config.get("_deployment_role_mode", "") or "").strip().lower()
@@ -980,6 +982,20 @@ class HandoverOrchestrator:
                         f"building={building}, session_id={review_session.get('session_id', '-')}, "
                         f"output={result.output_file}"
                     )
+                    try:
+                        delivery_state = self._review_link_delivery_service.send_for_session(
+                            review_session,
+                            source="auto",
+                            force=False,
+                            emit_log=emit_log,
+                        )
+                        review_session["review_link_delivery"] = delivery_state
+                        result.review_session = review_session
+                    except Exception as exc:  # noqa: BLE001
+                        emit_log(
+                            "[交接班][审核链接发送] 自动发送失败但不阻断主流程 "
+                            f"building={building}, error={exc}"
+                        )
                 except Exception as exc:  # noqa: BLE001
                     managed_stored_path = (
                         str(managed_source_file_cache.get("stored_path", "")).strip()

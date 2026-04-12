@@ -20,6 +20,15 @@ export const CONFIG_FEATURE_DAY_METRIC_UPLOAD_TAB_TEMPLATE = `
       <div class="hint">本页只维护 12 项独立上传本身的目标多维表和重试参数，不进入交接班审核链路。</div>
       <div class="hint">调度只在业务控制台配置；这里不再提供调度入口、功能开关或白夜班判断。</div>
     </div>
+    <div class="btn-line" style="margin-top:10px;">
+      <button
+        class="btn btn-secondary"
+        @click="repairDayMetricUploadConfig"
+        :disabled="isActionLocked(actionKeyDayMetricConfigRepair)"
+      >
+        {{ isActionLocked(actionKeyDayMetricConfigRepair) ? '修复中...' : '修复12项配置' }}
+      </button>
+    </div>
   </div>
 
   <div class="config-panel-grid two-col">

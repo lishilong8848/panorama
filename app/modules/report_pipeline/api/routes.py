@@ -8,8 +8,6 @@ import socket
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
 from datetime import date, datetime
 from ipaddress import ip_address
 from pathlib import Path
@@ -27,6 +25,7 @@ from app.config.settings_loader import (
     get_handover_building_segment,
     get_handover_common_segment,
     preserve_segmented_handover_config,
+    repair_day_metric_related_settings,
     save_handover_building_segment,
     save_handover_common_segment,
     save_settings,
@@ -63,15 +62,13 @@ from handover_log_module.service.monthly_change_report_service import MonthlyCha
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
 from handover_log_module.service.monthly_report_delivery_service import MonthlyReportDeliveryService
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
+from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 from pipeline_utils import get_app_dir
 
 
 router = APIRouter(tags=["pipeline"])
-_REVIEW_BASE_PROBE_TTL_SEC = 30.0
-_review_base_probe_cache: dict[tuple[tuple[str, ...], str], dict[str, Any]] = {}
-_review_base_probe_lock = threading.Lock()
 _REVIEW_ACCESS_STATE_FILE_NAME = "handover_review_access_state.json"
 _IPCONFIG_IPV4_RE = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
 _VIRTUAL_ADAPTER_KEYWORDS = (
@@ -116,6 +113,26 @@ _INTERNAL_HEALTH_SHARED_BRIDGE_SLOW_LOG_INTERVAL_SEC = 60.0
 
 def _runtime_config(container) -> Dict[str, Any]:
     return copy.deepcopy(container.runtime_config)
+
+
+def _is_recoverable_resume_index_error(exc: Exception) -> bool:
+    if not isinstance(exc, OSError):
+        return False
+    winerror = getattr(exc, "winerror", None)
+    if winerror in {53, 64, 67}:
+        return True
+    text = f"{type(exc).__name__}: {exc}".strip().lower()
+    recoverable_tokens = (
+        "winerror 64",
+        "network name is no longer available",
+        "specified network name is no longer available",
+        "指定的网络名不再可用",
+        "系统找不到指定的路径",
+        "the system cannot find the path specified",
+        "device is not ready",
+        "设备尚未就绪",
+    )
+    return any(token in text for token in recoverable_tokens)
 
 
 def _runtime_state_config(container) -> Dict[str, Any]:
@@ -191,16 +208,6 @@ def _resolve_runtime_console_bind_port(container) -> int:
     common_cfg = config.get("common", {}) if isinstance(config.get("common", {}), dict) else {}
     console_cfg = common_cfg.get("console", {}) if isinstance(common_cfg, dict) else {}
     return _resolve_console_port(console_cfg)
-
-
-def _review_access_probe_guard(container) -> tuple[bool, str, str]:
-    role_mode = _deployment_role_mode(container)
-    if role_mode != "external":
-        return False, "internal_local_only", "当前为内网端，不提供局域网审核访问地址"
-    bind_host = _resolve_runtime_console_bind_host(container)
-    if _is_loopback_console_host(bind_host):
-        return False, "external_bind_required", "当前外网端未开放局域网监听，无法生成审核访问地址"
-    return True, "", ""
 
 
 def _ensure_not_internal_role(container, detail: str) -> None:
@@ -691,44 +698,29 @@ def _materialize_review_access_snapshot(
         review_cfg.get("public_base_url", "") if isinstance(review_cfg, dict) else ""
     )
     persisted = _normalize_review_access_state(state or _load_review_access_state(container))
-    probe_enabled, disabled_status, disabled_error = _review_access_probe_guard(container)
     effective_base_url = ""
     effective_source = ""
-    status = "no_candidate"
+    status = "manual_only"
     error = ""
 
-    if not probe_enabled:
-        status = disabled_status
-        error = disabled_error
-    elif configured_base_url:
+    if configured_base_url:
         effective_base_url = configured_base_url
         effective_source = "manual"
         status = "manual_ok"
-    elif persisted.get("effective_base_url") and persisted.get("effective_source") == "auto":
-        effective_base_url = str(persisted.get("effective_base_url", "") or "").strip()
-        effective_source = "auto"
-        status = str(persisted.get("status", "") or "auto_ok").strip() or "auto_ok"
-        error = str(persisted.get("error", "") or "").strip()
-    elif bool(persisted.get("configured", False)):
-        status = "manual_only"
     else:
-        status = str(persisted.get("status", "") or "no_candidate").strip() or "no_candidate"
-        error = str(persisted.get("error", "") or "").strip()
+        status = "manual_only"
+        error = "请先手工填写审核页访问基地址"
 
     return {
-        "configured": bool(persisted.get("configured", False)) or bool(configured_base_url),
+        "configured": bool(configured_base_url),
         "review_base_url": configured_base_url,
         "review_base_url_effective": effective_base_url,
         "review_base_url_effective_source": effective_source,
-        "review_base_url_candidates": list(persisted.get("candidates", [])) if probe_enabled else [],
+        "review_base_url_candidates": [],
         "review_base_url_status": status,
         "review_base_url_error": "" if effective_base_url else error,
-        "review_base_url_validated_candidates": (
-            copy.deepcopy(persisted.get("validated_candidates", [])) if probe_enabled else []
-        ),
-        "review_base_url_candidate_results": (
-            copy.deepcopy(persisted.get("candidate_results", [])) if probe_enabled else []
-        ),
+        "review_base_url_validated_candidates": [],
+        "review_base_url_candidate_results": [],
         "review_base_url_manual_available": True,
         "review_base_url_configured_at": str(persisted.get("configured_at", "") or "").strip(),
         "review_base_url_last_probe_at": str(persisted.get("last_probe_at", "") or "").strip(),
@@ -737,7 +729,7 @@ def _materialize_review_access_snapshot(
         "review_links": _build_review_links_for_base_url(
             review_cfg if isinstance(review_cfg, dict) else {},
             effective_base_url,
-        ) if probe_enabled else [],
+        ),
         "console_port": _resolve_console_port(console_cfg),
     }
 
@@ -774,87 +766,8 @@ def _probe_and_persist_review_access_snapshot(
     duty_date: str = "",
     duty_shift: str = "",
 ) -> Dict[str, Any]:
-    config = container.config if isinstance(getattr(container, "config", None), dict) else {}
-    console_cfg = config.get("common", {}).get("console", {}) if isinstance(config.get("common", {}), dict) else {}
-    resolved_port = _resolve_runtime_console_bind_port(container) if port is None else _resolve_console_port(
-        console_cfg,
-        request_port=port,
-    )
-    review_cfg = (
-        config.get("features", {}).get("handover_log", {}).get("review_ui", {})
-        if isinstance(config.get("features", {}), dict)
-        else {}
-    )
-    probe_enabled, disabled_status, disabled_error = _review_access_probe_guard(container)
-    configured_base_url = _normalize_review_base_url(
-        review_cfg.get("public_base_url", "") if isinstance(review_cfg, dict) else ""
-    )
-    previous = _load_review_access_state(container)
-    now_text = _review_access_now_text()
-    state = _normalize_review_access_state(previous)
-    if not probe_enabled:
-        state["configured"] = bool(previous.get("configured", False)) or bool(configured_base_url)
-        state["effective_base_url"] = ""
-        state["effective_source"] = ""
-        state["candidates"] = []
-        state["validated_candidates"] = []
-        state["candidate_results"] = []
-        state["status"] = disabled_status
-        state["error"] = disabled_error
-        state["last_probe_at"] = now_text
-        state["configured_at"] = str(state.get("configured_at", "") or "").strip() or (
-            now_text if state["configured"] else ""
-        )
-        persisted = _save_review_access_state(container, state)
-        return _materialize_review_access_snapshot(
-            container,
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            state=persisted,
-        )
-
-    candidate_hosts = _detect_lan_ipv4s(request_host=request_host)
-    candidate_base_urls = [f"http://{host}:{resolved_port}" for host in candidate_hosts]
-    probe_targets = _review_probe_targets(review_cfg if isinstance(review_cfg, dict) else {})
-    candidate_results = _probe_review_base_urls_cached(candidate_base_urls, probe_targets)
-    validated_candidates = [copy.deepcopy(item) for item in candidate_results if bool(item.get("ok"))]
-    auto_success = validated_candidates[0] if validated_candidates else None
-
-    state["configured"] = bool(previous.get("configured", False)) or bool(configured_base_url) or bool(auto_success)
-    state["candidates"] = candidate_base_urls
-    state["validated_candidates"] = validated_candidates
-    state["candidate_results"] = candidate_results
-    state["last_probe_at"] = now_text
-    state["configured_at"] = str(state.get("configured_at", "") or "").strip() or (now_text if state["configured"] else "")
-
-    if configured_base_url:
-        state["effective_base_url"] = configured_base_url
-        state["effective_source"] = "manual"
-        state["status"] = "manual_ok"
-        state["error"] = ""
-    elif auto_success:
-        state["effective_base_url"] = str(auto_success.get("base_url", "") or "").strip()
-        state["effective_source"] = "auto"
-        state["status"] = "auto_ok"
-        state["error"] = ""
-    elif candidate_base_urls:
-        state["effective_base_url"] = ""
-        state["effective_source"] = ""
-        state["status"] = "auto_unreachable"
-        state["error"] = "已检测到 IPv4，但审核页面均不可访问"
-    else:
-        state["effective_base_url"] = ""
-        state["effective_source"] = ""
-        state["status"] = "no_candidate"
-        state["error"] = "未检测到可用私网 IPv4 地址"
-
-    persisted = _save_review_access_state(container, state)
-    return _materialize_review_access_snapshot(
-        container,
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-        state=persisted,
-    )
+    _ = (request_host, port, duty_date, duty_shift)
+    return _persist_manual_review_access_snapshot(container)
 
 
 def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, Any]:
@@ -1077,183 +990,6 @@ def _resolve_console_port(console_cfg: Dict[str, Any] | None, request_port: Any 
         return 18765
 
 
-def _review_probe_targets(review_cfg: Dict[str, Any]) -> list[Dict[str, str]]:
-    buildings = review_cfg.get("buildings", []) if isinstance(review_cfg, dict) else []
-    targets: list[Dict[str, str]] = []
-    for item in buildings if isinstance(buildings, list) else []:
-        if not isinstance(item, dict):
-            continue
-        code = str(item.get("code", "") or "").strip().lower()
-        name = str(item.get("name", "") or "").strip()
-        if not code:
-            continue
-        targets.append(
-            {
-                "code": code,
-                "name": name or code.upper(),
-                "path": f"/handover/review/{code}",
-            }
-        )
-    if targets:
-        return targets
-    return [
-        {
-            "code": str(item.get("code", "") or "").strip().lower(),
-            "name": str(item.get("name", "") or "").strip(),
-            "path": f"/handover/review/{str(item.get('code', '') or '').strip().lower()}",
-        }
-        for item in _DEFAULT_REVIEW_BUILDINGS
-    ]
-
-
-def _is_review_probe_success(status_code: int, content_type: str, body_text: str) -> bool:
-    content = str(content_type or "").lower()
-    body_lower = str(body_text or "").lower()
-    if status_code != 200:
-        return False
-    if "text/html" not in content:
-        return False
-    has_html_shell = "<html" in body_lower or "<!doctype html" in body_lower
-    has_frontend_marker = "/assets/" in body_lower or "/assets-src/" in body_lower or "id=\"app\"" in body_lower
-    return has_html_shell and has_frontend_marker
-
-
-def _probe_review_target_url(base_url: str, probe_path: str, *, timeout_sec: float = 1.5) -> Dict[str, Any]:
-    normalized_base = _normalize_review_base_url(base_url)
-    result = {"base_url": normalized_base, "ok": False, "error": "", "path": str(probe_path or "").strip()}
-    if not normalized_base:
-        result["error"] = "empty_base_url"
-        return result
-
-    target_url = f"{normalized_base}{probe_path}"
-    request = urllib.request.Request(
-        target_url,
-        headers={
-            "Accept": "text/html,application/xhtml+xml",
-            "User-Agent": "QJPT-ReviewProbe/1.0",
-        },
-        method="GET",
-    )
-    status_code = 0
-    content_type = ""
-    body_text = ""
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-            status_code = int(getattr(response, "status", 200) or 200)
-            content_type = str(response.headers.get("Content-Type", "") or "")
-            body_text = response.read(4096).decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        status_code = int(getattr(exc, "code", 0) or 0)
-        content_type = str(exc.headers.get("Content-Type", "") or "")
-        body_text = exc.read(4096).decode("utf-8", errors="replace")
-    except Exception as exc:  # noqa: BLE001
-        result["error"] = str(exc)
-        return result
-
-    if _is_review_probe_success(status_code, content_type, body_text):
-        result["ok"] = True
-        return result
-
-    result["error"] = f"http_{status_code or 'error'}"
-    return result
-
-
-def _probe_review_base_url(
-    base_url: str,
-    probe_targets: list[Dict[str, str]],
-    *,
-    timeout_sec: float = 1.5,
-) -> Dict[str, Any]:
-    normalized_base = _normalize_review_base_url(base_url)
-    targets = probe_targets if isinstance(probe_targets, list) else []
-    result: Dict[str, Any] = {
-        "base_url": normalized_base,
-        "ok": False,
-        "error": "",
-        "probes": [],
-    }
-    if not normalized_base:
-        result["error"] = "empty_base_url"
-        return result
-    if not targets:
-        result["error"] = "empty_probe_targets"
-        return result
-
-    all_ok = True
-    first_error = ""
-    probe_results: list[Dict[str, Any]] = []
-    for target in targets:
-        path = str(target.get("path", "") or "").strip()
-        code = str(target.get("code", "") or "").strip().lower()
-        name = str(target.get("name", "") or "").strip()
-        target_result = _probe_review_target_url(normalized_base, path, timeout_sec=timeout_sec)
-        target_result["code"] = code
-        target_result["name"] = name or code.upper()
-        probe_results.append(target_result)
-        if not bool(target_result.get("ok")):
-            all_ok = False
-            if not first_error:
-                first_error = str(target_result.get("error", "") or "").strip() or "probe_failed"
-    result["ok"] = all_ok
-    result["error"] = "" if all_ok else first_error or "probe_failed"
-    result["probes"] = probe_results
-    return result
-
-
-def _probe_review_base_urls_cached(
-    base_urls: list[str],
-    probe_targets: list[Dict[str, str]],
-    *,
-    timeout_sec: float = 1.5,
-) -> list[Dict[str, Any]]:
-    normalized_urls = tuple(
-        value for value in (_normalize_review_base_url(item) for item in base_urls) if value
-    )
-    if not normalized_urls:
-        return []
-    normalized_targets = tuple(
-        (
-            str(item.get("code", "") or "").strip().lower(),
-            str(item.get("name", "") or "").strip(),
-            str(item.get("path", "") or "").strip(),
-        )
-        for item in (probe_targets if isinstance(probe_targets, list) else [])
-        if str(item.get("path", "") or "").strip()
-    )
-    if not normalized_targets:
-        normalized_targets = tuple(
-            (item["code"], item["name"], item["path"]) for item in _review_probe_targets({})
-        )
-    cache_key = (normalized_urls, normalized_targets)
-    now = time.time()
-    with _review_base_probe_lock:
-        cached = _review_base_probe_cache.get(cache_key)
-        if cached and (now - float(cached.get("checked_at", 0.0) or 0.0)) < _REVIEW_BASE_PROBE_TTL_SEC:
-            return copy.deepcopy(cached.get("result", []))
-    results = [
-        _probe_review_base_url(
-            base_url,
-            [
-                {"code": code, "name": name, "path": path}
-                for code, name, path in cache_key[1]
-            ],
-            timeout_sec=timeout_sec,
-        )
-        for base_url in normalized_urls
-    ]
-    with _review_base_probe_lock:
-        _review_base_probe_cache[cache_key] = {
-            "checked_at": now,
-            "result": copy.deepcopy(results),
-        }
-    return results
-
-
-def _invalidate_review_base_probe_cache() -> None:
-    with _review_base_probe_lock:
-        _review_base_probe_cache.clear()
-
-
 def _build_handover_review_access_for_context(
     container,
     *,
@@ -1293,48 +1029,37 @@ def schedule_handover_review_access_startup_probe(
 ) -> None:
     if getattr(container, "_handover_review_access_probe_scheduled", False):
         return
-    probe_enabled, _, disabled_error = _review_access_probe_guard(container)
-    if not probe_enabled:
-        setattr(container, "_handover_review_access_probe_scheduled", True)
-        if disabled_error:
-            try:
-                container.add_system_log(f"[交接班审核访问] 已跳过启动探测: {disabled_error}")
-            except Exception:  # noqa: BLE001
-                pass
-        return
-    current_snapshot = _materialize_review_access_snapshot(container)
-    if bool(current_snapshot.get("configured", False)):
-        setattr(container, "_handover_review_access_probe_scheduled", True)
-        try:
-            container.add_system_log(
-                "[交接班审核访问] 已加载持久化配置，启动不再自动探测 "
-                f"effective={str(current_snapshot.get('review_base_url_effective', '') or '-').strip() or '-'}, "
-                f"source={str(current_snapshot.get('review_base_url_effective_source', '') or '-').strip() or '-'}"
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        return
     setattr(container, "_handover_review_access_probe_scheduled", True)
 
     def _runner() -> None:
         try:
             time.sleep(max(0.0, float(delay_sec or 0.0)))
-            snapshot = _probe_and_persist_review_access_snapshot(container)
+            snapshot = _persist_manual_review_access_snapshot(container)
+            try:
+                delivery_results = ReviewLinkDeliveryService(
+                    _runtime_config(container),
+                    config_path=container.config_path,
+                ).dispatch_pending_review_links(
+                    emit_log=container.add_system_log,
+                )
+            except Exception as exc:  # noqa: BLE001
+                delivery_results = []
+                container.add_system_log(f"[交接班][审核链接发送] 启动补发失败: {exc}")
             container.add_system_log(
-                "[交接班审核访问] 启动探测完成: "
+                "[交接班审核访问] 启动检查完成: "
                 f"effective={str(snapshot.get('review_base_url_effective', '') or '-').strip() or '-'}, "
                 f"source={str(snapshot.get('review_base_url_effective_source', '') or '-').strip() or '-'}, "
-                f"validated={len(snapshot.get('review_base_url_validated_candidates', []) or [])}"
+                f"review_link_dispatch={len(delivery_results)}"
             )
         except Exception as exc:  # noqa: BLE001
             try:
-                container.add_system_log(f"[交接班审核访问] 启动探测失败: {exc}")
+                container.add_system_log(f"[交接班审核访问] 启动检查失败: {exc}")
             except Exception:  # noqa: BLE001
                 pass
 
     threading.Thread(
         target=_runner,
-        name="handover-review-access-probe",
+        name="handover-review-access-bootstrap",
         daemon=True,
     ).start()
 
@@ -1581,6 +1306,7 @@ def health(
 
     handover_review_status: Dict[str, Any] = _empty_handover_review_status()
     handover_review_access = _empty_handover_review_access()
+    handover_review_recipient_status_by_building: list[Dict[str, Any]] = []
     if include_handover_runtime_context:
         try:
             review_service = ReviewSessionService(handover_loaded_cfg)
@@ -1606,6 +1332,13 @@ def health(
             duty_date=str(handover_review_status.get("duty_date", "")).strip(),
             duty_shift=str(handover_review_status.get("duty_shift", "")).strip().lower(),
         )
+        try:
+            handover_review_recipient_status_by_building = ReviewLinkDeliveryService(
+                runtime_cfg,
+                config_path=container.config_path,
+            ).build_recipient_status_by_building()
+        except Exception:
+            handover_review_recipient_status_by_building = []
     system_logs = list(getattr(container, "system_logs", []))[-200:]
     get_log_entries = getattr(container, "get_system_log_entries", None)
     system_log_entries = get_log_entries(limit=200) if callable(get_log_entries) else []
@@ -1701,6 +1434,7 @@ def health(
                 "target_preview": engineer_directory_target_preview,
             },
             "review_status": handover_review_status,
+            "review_recipient_status_by_building": handover_review_recipient_status_by_building,
             "review_links": handover_review_access.get("review_links", []),
             "review_base_url": str(handover_review_access.get("review_base_url", "") or ""),
             "review_base_url_effective": str(handover_review_access.get("review_base_url_effective", "") or ""),
@@ -1840,6 +1574,9 @@ def health(
             "mirror_manifest_path": str(updater_runtime.get("mirror_manifest_path", "")),
             "last_publish_at": str(updater_runtime.get("last_publish_at", "")),
             "last_publish_error": str(updater_runtime.get("last_publish_error", "")),
+            "internal_peer": dict(updater_runtime.get("internal_peer", {}))
+            if isinstance(updater_runtime.get("internal_peer", {}), dict)
+            else {},
         },
         "frontend": {
             "mode": str(getattr(container, "frontend_mode", "")),
@@ -1889,6 +1626,47 @@ def get_config(request: Request) -> Dict[str, Any]:
     return mask_settings(copy.deepcopy(container.config))
 
 
+@router.post("/api/config-repair/day-metric-upload")
+def post_repair_day_metric_upload_config(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    try:
+        repaired, notes, changed = repair_day_metric_related_settings(container.config, container.config_path)
+        if changed:
+            saved = save_settings(repaired, container.config_path)
+            container.reload_config(saved)
+            if notes:
+                container.add_system_log(f"[配置修复] 12项配置修复完成: {'；'.join(notes)}")
+            else:
+                container.add_system_log("[配置修复] 12项配置修复完成")
+        else:
+            saved = copy.deepcopy(container.config)
+            container.add_system_log("[配置修复] 12项配置修复检查完成，无需修复")
+
+        review_cfg = (
+            saved.get("features", {}).get("handover_log", {}).get("review_ui", {})
+            if isinstance(saved.get("features", {}), dict)
+            else {}
+        )
+        configured_base_url = _normalize_review_base_url(
+            review_cfg.get("public_base_url", "") if isinstance(review_cfg, dict) else ""
+        )
+        handover_review_access = (
+            _persist_manual_review_access_snapshot(container)
+            if configured_base_url
+            else _materialize_review_access_snapshot(container)
+        )
+        return {
+            "ok": True,
+            "repaired": bool(changed),
+            "notes": notes,
+            "config": mask_settings(copy.deepcopy(saved)),
+            "handover_review_access": handover_review_access,
+            "restart_required": False,
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _normalize_handover_segment_code(code: str) -> str:
     text = str(code or "").strip().upper()
     if text not in {"A", "B", "C", "D", "E"}:
@@ -1932,7 +1710,6 @@ def put_handover_common_config_segment(payload: Dict[str, Any], request: Request
             config_path=container.config_path,
         )
         container.reload_config(saved_config)
-        _invalidate_review_base_probe_cache()
         if aggregate_refresh_error:
             container.add_system_log(
                 f"[配置] 交接班公共配置已保存，但聚合配置刷新失败: {aggregate_refresh_error}"
@@ -1975,7 +1752,6 @@ def put_handover_building_config_segment(code: str, payload: Dict[str, Any], req
             config_path=container.config_path,
         )
         container.reload_config(saved_config)
-        _invalidate_review_base_probe_cache()
         building_text = f"{normalized_code}楼"
         if aggregate_refresh_error:
             container.add_system_log(
@@ -2030,7 +1806,6 @@ def put_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
         )
         saved = save_settings(merged, container.config_path)
         container.reload_config(saved)
-        _invalidate_review_base_probe_cache()
         container.add_system_log("[配置] 已保存并重新加载")
         review_cfg = (
             saved.get("features", {}).get("handover_log", {}).get("review_ui", {})
@@ -2112,23 +1887,102 @@ def restart_app(
 @router.post("/api/handover/review-access/reprobe")
 def reprobe_handover_review_access(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    _invalidate_review_base_probe_cache()
-    snapshot = _probe_and_persist_review_access_snapshot(
+    snapshot = _persist_manual_review_access_snapshot(
         container,
-        request_host=str(getattr(request.url, "hostname", "") or "").strip(),
-        port=getattr(request.url, "port", None),
     )
+    try:
+        delivery_results = ReviewLinkDeliveryService(
+            _runtime_config(container),
+            config_path=container.config_path,
+        ).dispatch_pending_review_links(
+            emit_log=container.add_system_log,
+        )
+    except Exception as exc:  # noqa: BLE001
+        delivery_results = []
+        container.add_system_log(f"[交接班][审核链接发送] 刷新后补发失败: {exc}")
     container.add_system_log(
-        "[交接班审核访问] 手动重新探测完成: "
+        "[交接班审核访问] 手动刷新完成: "
         f"effective={str(snapshot.get('review_base_url_effective', '') or '-').strip() or '-'}, "
         f"source={str(snapshot.get('review_base_url_effective_source', '') or '-').strip() or '-'}, "
-        f"validated={len(snapshot.get('review_base_url_validated_candidates', []) or [])}, "
-        f"status={str(snapshot.get('review_base_url_status', '') or '-').strip() or '-'}"
+        f"status={str(snapshot.get('review_base_url_status', '') or '-').strip() or '-'}, "
+        f"review_link_dispatch={len(delivery_results)}"
     )
     return {
         "ok": bool(str(snapshot.get("review_base_url_effective", "") or "").strip()),
         "handover_review_access": snapshot,
     }
+
+
+@router.post("/api/jobs/handover/review-link/send")
+def send_handover_review_link_job(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+    batch_key = str(payload.get("batch_key", "") or "").strip()
+    building = str(payload.get("building", "") or "").strip()
+    if not building:
+        raise HTTPException(status_code=400, detail="building 不能为空")
+    dedupe_key = _job_dedupe_key(
+        "handover_review_link_send",
+        batch_key=batch_key,
+        building=building,
+    )
+    runtime_cfg = _runtime_config(container)
+    try:
+        ReviewLinkDeliveryService(runtime_cfg, config_path=container.config_path).validate_manual_send_preflight(
+            batch_key=batch_key,
+            building=building,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _run(job_ctx) -> Dict[str, Any]:
+        def _emit(message: str) -> None:
+            text = str(message or "").strip()
+            if not text:
+                return
+            try:
+                job_ctx.emit_log(text)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                container.add_system_log(text)
+            except Exception:  # noqa: BLE001
+                pass
+
+        service = ReviewLinkDeliveryService(runtime_cfg, config_path=container.config_path)
+        try:
+            return service.send_manual_test(
+                batch_key=batch_key,
+                building=building,
+                emit_log=_emit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _emit(
+                "[交接班][审核链接发送测试] 执行失败 "
+                f"batch={batch_key}, building={building or '-'}, error={exc}"
+            )
+            raise
+
+    try:
+        job = _start_background_job(
+            container,
+            name=f"交接班审核链接发送测试{f' {building}' if building else ''}{f' batch={batch_key}' if batch_key else ''}",
+            run_func=_run,
+            resource_keys=["handover:review_link_delivery"],
+            priority="manual",
+            feature="handover_review_link_delivery",
+            dedupe_key=dedupe_key,
+            submitted_by="manual",
+        )
+        container.add_system_log(
+            f"[任务] 已提交: 交接班审核链接发送测试{f' {building}' if building else ''}{f' batch={batch_key}' if batch_key else ''} ({job.job_id})"
+        )
+        return {"accepted": True, "job": job.to_dict()}
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/api/runtime/alarm-event-upload-target/open")
@@ -2703,7 +2557,13 @@ def list_resume_pending(request: Request) -> Dict[str, Any]:
         return {"runs": [], "count": 0}
     config = _runtime_config(container)
     orchestrator = OrchestratorService(config)
-    runs = orchestrator.list_pending_resume_runs()
+    try:
+        runs = orchestrator.list_pending_resume_runs()
+    except Exception as exc:  # noqa: BLE001
+        if _is_recoverable_resume_index_error(exc):
+            container.add_system_log(f"[断点续传] 续传索引暂不可用，已降级为空结果: {exc}")
+            return {"runs": [], "count": 0}
+        raise
     return {"runs": runs, "count": len(runs)}
 
 

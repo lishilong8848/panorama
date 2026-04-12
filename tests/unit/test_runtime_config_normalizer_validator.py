@@ -104,6 +104,27 @@ def test_ensure_v3_config_discards_legacy_alarm_db() -> None:
     assert "alarm_db" not in out.get("common", {})
 
 
+def test_ensure_v3_config_backfills_feishu_auth_from_legacy_root_in_v3_payload() -> None:
+    cfg = ensure_v3_config({})
+    cfg["common"]["feishu_auth"]["app_id"] = ""
+    cfg["common"]["feishu_auth"]["app_secret"] = ""
+    cfg["feishu"] = {
+        "app_id": "cli_legacy",
+        "app_secret": "secret_legacy",
+        "request_retry_count": 4,
+        "request_retry_interval_sec": 1.2,
+        "timeout": 40,
+    }
+
+    out = ensure_v3_config(cfg)
+
+    assert out["common"]["feishu_auth"]["app_id"] == "cli_legacy"
+    assert out["common"]["feishu_auth"]["app_secret"] == "secret_legacy"
+    assert out["common"]["feishu_auth"]["request_retry_count"] == 4
+    assert out["common"]["feishu_auth"]["request_retry_interval_sec"] == 1.2
+    assert out["common"]["feishu_auth"]["timeout"] == 40
+
+
 def test_validate_runtime_config_rejects_invalid_hard_recovery_step() -> None:
     cfg = normalize_runtime_config(_base_config(), extract_site_host=extract_site_host)
     cfg["network"]["hard_recovery_steps"] = ["bad_step"]

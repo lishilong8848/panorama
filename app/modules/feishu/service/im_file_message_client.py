@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
+
 
 class FeishuImFileMessageClient:
     AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
@@ -23,12 +25,23 @@ class FeishuImFileMessageClient:
         request_retry_count: int = 3,
         request_retry_interval_sec: float = 1.0,
     ) -> None:
-        self.app_id = str(app_id or "").strip()
-        self.app_secret = str(app_secret or "").strip()
-        self.timeout = max(1, int(timeout or 30))
-        self.request_retry_count = max(0, int(request_retry_count or 0))
-        self.request_retry_interval_sec = max(0.0, float(request_retry_interval_sec or 0.0))
+        auth = resolve_feishu_auth_settings(
+            {
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "timeout": timeout,
+                "request_retry_count": request_retry_count,
+                "request_retry_interval_sec": request_retry_interval_sec,
+            }
+        )
+        self.app_id = str(auth.get("app_id", "") or "").strip()
+        self.app_secret = str(auth.get("app_secret", "") or "").strip()
+        self.timeout = max(1, int(auth.get("timeout", 30) or 30))
+        self.request_retry_count = max(0, int(auth.get("request_retry_count", 0) or 0))
+        self.request_retry_interval_sec = max(0.0, float(auth.get("request_retry_interval_sec", 0.0) or 0.0))
         self._tenant_access_token: Optional[str] = None
+        if not self.app_id or not self.app_secret:
+            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
 
     @staticmethod
     def _is_retryable_exception(exc: Exception) -> bool:
@@ -185,6 +198,37 @@ class FeishuImFileMessageClient:
                 "receive_id": receive_id_text,
                 "msg_type": "file",
                 "content": json.dumps({"file_key": file_key_text}, ensure_ascii=False),
+            },
+            content_type_json=True,
+        )
+        data = body.get("data", {}) if isinstance(body.get("data", {}), dict) else {}
+        return {
+            "message_id": str(data.get("message_id", "") or "").strip(),
+            "raw": body,
+        }
+
+    def send_text_message(
+        self,
+        *,
+        receive_id: str,
+        receive_id_type: str,
+        text: str,
+    ) -> Dict[str, Any]:
+        receive_id_text = str(receive_id or "").strip()
+        receive_id_type_text = str(receive_id_type or "").strip() or "open_id"
+        text_value = str(text or "").strip()
+        if not receive_id_text:
+            raise ValueError("receive_id 不能为空")
+        if not text_value:
+            raise ValueError("text 不能为空")
+        body = self._request_json_with_auth_retry(
+            "POST",
+            self.SEND_MESSAGE_URL,
+            params={"receive_id_type": receive_id_type_text},
+            payload={
+                "receive_id": receive_id_text,
+                "msg_type": "text",
+                "content": json.dumps({"text": text_value}, ensure_ascii=False),
             },
             content_type_json=True,
         )

@@ -1258,7 +1258,15 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     if callable(setter):
         setter(updater_restart_callback)
     @app.get("/", response_class=HTMLResponse)
+    @app.get("/login", response_class=HTMLResponse)
     @app.get("/index.html", response_class=HTMLResponse)
+    @app.get("/internal", response_class=HTMLResponse)
+    @app.get("/internal/status", response_class=HTMLResponse)
+    @app.get("/internal/config", response_class=HTMLResponse)
+    @app.get("/external", response_class=HTMLResponse)
+    @app.get("/external/status", response_class=HTMLResponse)
+    @app.get("/external/dashboard", response_class=HTMLResponse)
+    @app.get("/external/config", response_class=HTMLResponse)
     def index() -> Response:
         if str(container.frontend_mode or "").strip().lower() == "source":
             return HTMLResponse(

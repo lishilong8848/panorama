@@ -3,6 +3,7 @@
 from typing import Any, Dict
 
 from fastapi import APIRouter, Body, HTTPException, Request
+from app.config.config_adapter import normalize_role_mode
 
 
 router = APIRouter(prefix="/api/updater", tags=["updater"])
@@ -82,6 +83,9 @@ def _runtime_payload(container) -> Dict[str, Any]:
         "mirror_manifest_path": str(runtime.get("mirror_manifest_path", "")),
         "last_publish_at": str(runtime.get("last_publish_at", "")),
         "last_publish_error": str(runtime.get("last_publish_error", "")),
+        "internal_peer": dict(runtime.get("internal_peer", {}))
+        if isinstance(runtime.get("internal_peer", {}), dict)
+        else {},
     }
 
 
@@ -137,3 +141,62 @@ def updater_restart(request: Request) -> Dict[str, Any]:
         return {"ok": True, "result": result, "runtime": _runtime_payload(container)}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"触发重启失败: {exc}") from exc
+
+
+def _resolve_container_role_mode(container) -> str:
+    deployment_snapshot = getattr(container, "deployment_snapshot", None)
+    if callable(deployment_snapshot):
+        try:
+            snapshot = deployment_snapshot()
+        except Exception:  # noqa: BLE001
+            snapshot = {}
+        if isinstance(snapshot, dict):
+            role_mode = normalize_role_mode(snapshot.get("role_mode"))
+            if role_mode in {"internal", "external"}:
+                return role_mode
+
+    config = container.config if isinstance(getattr(container, "config", None), dict) else {}
+    common = config.get("common", {}) if isinstance(config, dict) else {}
+    deployment = common.get("deployment", {}) if isinstance(common, dict) else {}
+    if not isinstance(deployment, dict):
+        deployment = config.get("deployment", {}) if isinstance(config, dict) else {}
+    role_mode = normalize_role_mode(deployment.get("role_mode") if isinstance(deployment, dict) else "")
+    return role_mode
+
+
+def _require_external_role(container) -> None:
+    role_mode = _resolve_container_role_mode(container)
+    if role_mode != "external":
+        raise HTTPException(status_code=403, detail="仅外网端可下发内网更新命令")
+
+
+def _submit_internal_peer_command(request: Request, *, action: str) -> Dict[str, Any]:
+    container = request.app.state.container
+    _require_external_role(container)
+    try:
+        with container.job_service.resource_guard(
+            name=f"updater_internal_peer_{action}",
+            resource_keys=["updater:global"],
+        ):
+            service = container.ensure_updater_service()
+            result = service.submit_internal_peer_command(action=action)
+        container.add_system_log(
+            "[更新] 外网下发内网远程更新命令: "
+            f"action={action}, accepted={bool(result.get('accepted', False))}, "
+            f"already_pending={bool(result.get('already_pending', False))}"
+        )
+        return {"ok": True, "result": result, "runtime": _runtime_payload(container)}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"下发内网更新命令失败: {exc}") from exc
+
+
+@router.post("/internal-peer/check")
+def updater_internal_peer_check(request: Request) -> Dict[str, Any]:
+    return _submit_internal_peer_command(request, action="check")
+
+
+@router.post("/internal-peer/apply")
+def updater_internal_peer_apply(request: Request) -> Dict[str, Any]:
+    return _submit_internal_peer_command(request, action="apply")

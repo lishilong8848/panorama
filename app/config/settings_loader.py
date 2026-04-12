@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from app.config.config_compat_cleanup import sanitize_day_metric_upload_config
+from app.config.config_schema_v3 import DEFAULT_CONFIG_V3, deep_merge_defaults
 from app.config.config_adapter import (
     adapt_runtime_config,
     ensure_v3_config,
@@ -42,7 +44,16 @@ from handover_log_module.core.building_title_rules import (
 )
 from handover_log_module.core.cell_rule_compiler import normalize_cell_rules
 from handover_log_module.core.expression_eval import ExpressionError, get_expression_variables
-from pipeline_utils import load_download_module, load_pipeline_config, resolve_config_path
+from pipeline_utils import (
+    DEFAULT_CONFIG_TEMPLATE_FILENAME,
+    get_app_dir,
+    get_bundle_dir,
+    load_download_module,
+    load_pipeline_config,
+    resolve_config_path,
+)
+
+_DAY_METRIC_REPAIR_BASELINE_FILENAME = "表格计算配置.backup.20260409-145808.json"
 
 
 def _valid_time(value: str) -> bool:
@@ -849,7 +860,7 @@ def _validate_handover_change_management_section(cfg: Dict[str, Any]) -> None:
         if int(source.get("max_records", 0)) <= 0:
             raise ValueError("配置错误: features.handover_log.change_management_section.source.max_records 必须大于0")
 
-        for key in ("building", "updated_time", "change_level", "process_updates", "description", "specialty"):
+        for key in ("building", "start_time", "end_time", "updated_time", "change_level", "process_updates", "description", "specialty"):
             if not str(fields.get(key, "")).strip():
                 raise ValueError(
                     f"配置错误: features.handover_log.change_management_section.fields.{key} 不能为空"
@@ -1012,7 +1023,7 @@ def _validate_handover_maintenance_management_section(cfg: Dict[str, Any]) -> No
         if int(source.get("max_records", 0)) <= 0:
             raise ValueError("配置错误: features.handover_log.maintenance_management_section.source.max_records 必须大于0")
 
-        for key in ("building", "updated_time", "actual_end_time", "item", "specialty"):
+        for key in ("building", "start_time", "updated_time", "actual_end_time", "item", "specialty"):
             if not str(fields.get(key, "")).strip():
                 raise ValueError(
                     f"配置错误: features.handover_log.maintenance_management_section.fields.{key} 不能为空"
@@ -1141,7 +1152,7 @@ def _validate_handover_other_important_work_section(cfg: Dict[str, Any]) -> None
                     "配置错误: features.handover_log.other_important_work_section."
                     f"sources.{source_key}.fields 必须是对象"
                 )
-            for field_key in ("building", "actual_end_time", "description", "completion", "specialty"):
+            for field_key in ("building", "actual_start_time", "actual_end_time", "description", "completion", "specialty"):
                 if not str(fields.get(field_key, "")).strip():
                     raise ValueError(
                         "配置错误: features.handover_log.other_important_work_section."
@@ -1382,6 +1393,7 @@ def _validate_handover_review_ui(cfg: Dict[str, Any]) -> None:
     public_base_url = str(review_ui.get("public_base_url", "") or "").strip()
     cabinet_power_defaults = review_ui.get("cabinet_power_defaults_by_building", {})
     footer_inventory_defaults = review_ui.get("footer_inventory_defaults_by_building", {})
+    review_link_recipients = review_ui.get("review_link_recipients_by_building", {})
 
     if not isinstance(buildings, list) or len(buildings) != 5:
         raise ValueError("配置错误: features.handover_log.review_ui.buildings 必须包含5个楼栋")
@@ -1486,6 +1498,10 @@ def _validate_handover_review_ui(cfg: Dict[str, Any]) -> None:
         raise ValueError(
             "配置错误: features.handover_log.review_ui.footer_inventory_defaults_by_building 必须是对象"
         )
+    if not isinstance(review_link_recipients, dict):
+        raise ValueError(
+            "配置错误: features.handover_log.review_ui.review_link_recipients_by_building 必须是对象"
+        )
     allowed_footer_columns = {"B", "C", "E", "F", "G", "H"}
     for raw_building, raw_payload in footer_inventory_defaults.items():
         building = str(raw_building or "").strip()
@@ -1528,6 +1544,36 @@ def _validate_handover_review_ui(cfg: Dict[str, Any]) -> None:
                         "配置错误: features.handover_log.review_ui.footer_inventory_defaults_by_building."
                         f"{building}.rows 第{idx}项 {cell} 必须是字符串"
                     )
+    for raw_building, raw_items in review_link_recipients.items():
+        building = str(raw_building or "").strip()
+        if not building:
+            raise ValueError(
+                "配置错误: features.handover_log.review_ui.review_link_recipients_by_building 不能包含空楼栋键"
+            )
+        if not isinstance(raw_items, list):
+            raise ValueError(
+                "配置错误: features.handover_log.review_ui.review_link_recipients_by_building."
+                f"{building} 必须是数组"
+            )
+        seen_open_ids: set[str] = set()
+        for idx, raw_item in enumerate(raw_items, 1):
+            if not isinstance(raw_item, dict):
+                raise ValueError(
+                    "配置错误: features.handover_log.review_ui.review_link_recipients_by_building."
+                    f"{building} 第{idx}项必须是对象"
+                )
+            open_id = str(raw_item.get("open_id", "") or "").strip()
+            if not open_id:
+                raise ValueError(
+                    "配置错误: features.handover_log.review_ui.review_link_recipients_by_building."
+                    f"{building} 第{idx}项 open_id 不能为空"
+                )
+            if open_id in seen_open_ids:
+                raise ValueError(
+                    "配置错误: features.handover_log.review_ui.review_link_recipients_by_building."
+                    f"{building} 存在重复 open_id: {open_id}"
+                )
+            seen_open_ids.add(open_id)
 
 
 def _validate_handover_cell_rules(cfg: Dict[str, Any]) -> None:
@@ -1697,6 +1743,323 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 def get_settings_path(config_path: str | Path | None = None) -> Path:
     return resolve_config_path(config_path)
+
+
+def _settings_backup_candidates(config_path: str | Path | None = None, *, path: Path | None = None) -> List[Path]:
+    target = path if path is not None else get_settings_path(config_path)
+    pattern = f"{target.stem}.backup.*{target.suffix}"
+    backups: List[tuple[float, str, Path]] = []
+    for candidate in target.parent.glob(pattern):
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+        backups.append((stat.st_mtime, candidate.name, candidate))
+    backups.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in backups]
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _load_backup_settings_v3(path: Path) -> Dict[str, Any] | None:
+    try:
+        with path.open("r", encoding="utf-8-sig") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return ensure_v3_config(raw)
+    except Exception:
+        return None
+
+
+def _load_template_settings_v3() -> tuple[Dict[str, Any] | None, str]:
+    candidates = [
+        get_app_dir() / "config" / DEFAULT_CONFIG_TEMPLATE_FILENAME,
+        get_bundle_dir() / "config" / DEFAULT_CONFIG_TEMPLATE_FILENAME,
+    ]
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not candidate.exists():
+            continue
+        loaded = _load_backup_settings_v3(candidate)
+        if loaded:
+            return loaded, candidate.name
+    return None, ""
+
+
+def _day_metric_repair_baseline_candidates(config_path: str | Path | None = None) -> List[Path]:
+    candidates: List[Path] = []
+    try:
+        target = get_settings_path(config_path)
+        candidates.append(target.parent / _DAY_METRIC_REPAIR_BASELINE_FILENAME)
+    except Exception:
+        pass
+
+    candidates.extend(
+        [
+            get_app_dir() / _DAY_METRIC_REPAIR_BASELINE_FILENAME,
+            get_bundle_dir() / _DAY_METRIC_REPAIR_BASELINE_FILENAME,
+            get_app_dir() / "config" / _DAY_METRIC_REPAIR_BASELINE_FILENAME,
+            get_bundle_dir() / "config" / _DAY_METRIC_REPAIR_BASELINE_FILENAME,
+        ]
+    )
+
+    deduped: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _has_meaningful_feishu_auth(cfg: Dict[str, Any]) -> bool:
+    common = cfg.get("common", {})
+    if not isinstance(common, dict):
+        return False
+    auth = common.get("feishu_auth", {})
+    if not isinstance(auth, dict):
+        return False
+    return bool(_text(auth.get("app_id")) and _text(auth.get("app_secret")))
+
+
+def _extract_legacy_feishu_auth(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(cfg, dict):
+        return {}
+    candidates: List[Dict[str, Any]] = []
+    common = cfg.get("common", {})
+    if isinstance(common, dict):
+        common_legacy = common.get("feishu", {})
+        if isinstance(common_legacy, dict):
+            candidates.append(common_legacy)
+    top_level_legacy = cfg.get("feishu", {})
+    if isinstance(top_level_legacy, dict):
+        candidates.append(top_level_legacy)
+
+    for candidate in candidates:
+        app_id = _text(candidate.get("app_id"))
+        app_secret = _text(candidate.get("app_secret"))
+        if not app_id or not app_secret:
+            continue
+        normalized = {
+            "app_id": app_id,
+            "app_secret": app_secret,
+        }
+        if "request_retry_count" in candidate:
+            normalized["request_retry_count"] = candidate.get("request_retry_count")
+        if "request_retry_interval_sec" in candidate:
+            normalized["request_retry_interval_sec"] = candidate.get("request_retry_interval_sec")
+        if "timeout" in candidate:
+            normalized["timeout"] = candidate.get("timeout")
+        return normalized
+    return {}
+
+
+def _normalized_notify_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    common = cfg.get("common", {})
+    notify_cfg = common.get("notify", {}) if isinstance(common, dict) else {}
+    defaults = _dict(_dict(DEFAULT_CONFIG_V3.get("common")).get("notify"))
+    return deep_merge_defaults(copy.deepcopy(notify_cfg), copy.deepcopy(defaults))
+
+
+def _default_notify_config() -> Dict[str, Any]:
+    return copy.deepcopy(_dict(_dict(DEFAULT_CONFIG_V3.get("common")).get("notify")))
+
+
+def _backup_notify_patch(current_cfg: Dict[str, Any], backup_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    current = _normalized_notify_config(current_cfg)
+    backup = _normalized_notify_config(backup_cfg)
+    default = _default_notify_config()
+
+    patch: Dict[str, Any] = {}
+    current_webhook = _text(current.get("feishu_webhook_url"))
+    backup_webhook = _text(backup.get("feishu_webhook_url"))
+    current_keyword = _text(current.get("keyword"))
+    backup_keyword = _text(backup.get("keyword"))
+    default_keyword = _text(default.get("keyword"))
+
+    if not current_webhook and backup_webhook:
+        return copy.deepcopy(backup)
+
+    if (
+        current_webhook
+        and backup_webhook
+        and current_webhook == backup_webhook
+        and backup_keyword
+        and backup_keyword != current_keyword
+        and current_keyword in {"", default_keyword}
+    ):
+        patch["keyword"] = backup_keyword
+
+    return patch
+
+
+def _normalized_day_metric_upload(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    features = cfg.get("features", {})
+    feature_cfg = features.get("day_metric_upload", {}) if isinstance(features, dict) else {}
+    defaults = _dict(_dict(DEFAULT_CONFIG_V3.get("features")).get("day_metric_upload"))
+    return sanitize_day_metric_upload_config(
+        deep_merge_defaults(copy.deepcopy(feature_cfg), copy.deepcopy(defaults))
+    )
+
+
+def _default_day_metric_upload() -> Dict[str, Any]:
+    return sanitize_day_metric_upload_config(
+        copy.deepcopy(_dict(_dict(DEFAULT_CONFIG_V3.get("features")).get("day_metric_upload")))
+    )
+
+
+def _has_meaningful_day_metric_upload(cfg: Dict[str, Any]) -> bool:
+    feature_cfg = _normalized_day_metric_upload(cfg)
+    if feature_cfg == _default_day_metric_upload():
+        return False
+    target = feature_cfg.get("target", {})
+    source = target.get("source", {}) if isinstance(target, dict) else {}
+    types = target.get("types", []) if isinstance(target, dict) else []
+    return bool(_text(source.get("app_token")) and _text(source.get("table_id")) and isinstance(types, list) and len(types) > 0)
+
+
+def _extract_day_metric_repair_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    feature_cfg = _normalized_day_metric_upload(cfg)
+    payload = {
+        "target": copy.deepcopy(feature_cfg.get("target", {})),
+        "source": copy.deepcopy(feature_cfg.get("source", {})),
+        "behavior": copy.deepcopy(feature_cfg.get("behavior", {})),
+    }
+    return payload
+
+
+def _has_meaningful_day_metric_repair_payload(payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    target = payload.get("target", {})
+    source = target.get("source", {}) if isinstance(target, dict) else {}
+    types = target.get("types", []) if isinstance(target, dict) else []
+    return bool(_text(_dict(source).get("app_token")) and _text(_dict(source).get("table_id")) and isinstance(types, list) and len(types) > 0)
+
+
+def _apply_day_metric_repair_payload(cfg: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    output = ensure_v3_config(copy.deepcopy(cfg))
+    features = output.get("features", {})
+    if not isinstance(features, dict):
+        features = {}
+    day_metric = _normalized_day_metric_upload(output)
+    day_metric["target"] = copy.deepcopy(payload.get("target", {}))
+    day_metric["source"] = copy.deepcopy(payload.get("source", {}))
+    day_metric["behavior"] = copy.deepcopy(payload.get("behavior", {}))
+    features["day_metric_upload"] = day_metric
+    output["features"] = features
+    return output
+
+
+def _pick_day_metric_repair_payload_from_backups(config_path: str | Path | None = None) -> tuple[Dict[str, Any] | None, str]:
+    # 优先固定修复基线，保证“修复按钮”每次收敛到同一版本，不随最近备份漂移。
+    for baseline_path in _day_metric_repair_baseline_candidates(config_path):
+        if not baseline_path.exists():
+            continue
+        baseline_cfg = _load_backup_settings_v3(baseline_path)
+        if not baseline_cfg:
+            continue
+        payload = _extract_day_metric_repair_payload(baseline_cfg)
+        if _has_meaningful_day_metric_repair_payload(payload):
+            return payload, baseline_path.name
+
+    for backup_path in _settings_backup_candidates(config_path):
+        backup_cfg = _load_backup_settings_v3(backup_path)
+        if not backup_cfg:
+            continue
+        payload = _extract_day_metric_repair_payload(backup_cfg)
+        if _has_meaningful_day_metric_repair_payload(payload):
+            return payload, backup_path.name
+    template_cfg, template_name = _load_template_settings_v3()
+    if template_cfg:
+        payload = _extract_day_metric_repair_payload(template_cfg)
+        if _has_meaningful_day_metric_repair_payload(payload):
+            return payload, template_name
+    return None, ""
+
+
+def _repair_critical_settings_from_backups(
+    cfg: Dict[str, Any],
+    config_path: str | Path | None = None,
+) -> tuple[Dict[str, Any], List[str]]:
+    repaired = ensure_v3_config(copy.deepcopy(cfg))
+    repaired_notes: List[str] = []
+    needs_feishu_auth = not _has_meaningful_feishu_auth(repaired)
+    needs_day_metric = _normalized_day_metric_upload(repaired) == _default_day_metric_upload()
+    needs_notify = False
+    if _text(_normalized_notify_config(repaired).get("feishu_webhook_url")):
+        needs_notify = True
+    if needs_feishu_auth:
+        legacy_auth = _extract_legacy_feishu_auth(cfg)
+        if legacy_auth:
+            current_auth = _dict(_dict(repaired.get("common")).get("feishu_auth"))
+            current_auth.update(copy.deepcopy(legacy_auth))
+            repaired["common"]["feishu_auth"] = current_auth
+            repaired_notes.append("飞书应用凭据 <- 当前配置兼容字段(feishu)")
+            needs_feishu_auth = False
+
+    if not needs_feishu_auth and not needs_day_metric and not needs_notify:
+        return repaired, repaired_notes
+
+    for backup_path in _settings_backup_candidates(config_path):
+        if not needs_feishu_auth and not needs_day_metric and not needs_notify:
+            break
+        backup_cfg = _load_backup_settings_v3(backup_path)
+        if not backup_cfg:
+            continue
+        if needs_feishu_auth and _has_meaningful_feishu_auth(backup_cfg):
+            repaired["common"]["feishu_auth"] = copy.deepcopy(backup_cfg["common"]["feishu_auth"])
+            repaired_notes.append(f"飞书应用凭据 <- {backup_path.name}")
+            needs_feishu_auth = False
+        if needs_notify:
+            notify_patch = _backup_notify_patch(repaired, backup_cfg)
+            if notify_patch:
+                current_notify = _normalized_notify_config(repaired)
+                current_notify.update(copy.deepcopy(notify_patch))
+                repaired["common"]["notify"] = current_notify
+                repaired_notes.append(f"Webhook告警配置 <- {backup_path.name}")
+                needs_notify = False
+        if needs_day_metric and _has_meaningful_day_metric_upload(backup_cfg):
+            repaired["features"]["day_metric_upload"] = _normalized_day_metric_upload(backup_cfg)
+            repaired_notes.append(f"12项独立上传配置 <- {backup_path.name}")
+            needs_day_metric = False
+
+    if needs_feishu_auth or needs_day_metric or needs_notify:
+        template_cfg, template_name = _load_template_settings_v3()
+        if template_cfg:
+            if needs_feishu_auth and _has_meaningful_feishu_auth(template_cfg):
+                repaired["common"]["feishu_auth"] = copy.deepcopy(template_cfg["common"]["feishu_auth"])
+                repaired_notes.append(f"飞书应用凭据 <- {template_name}")
+                needs_feishu_auth = False
+            if needs_notify:
+                notify_patch = _backup_notify_patch(repaired, template_cfg)
+                if notify_patch:
+                    current_notify = _normalized_notify_config(repaired)
+                    current_notify.update(copy.deepcopy(notify_patch))
+                    repaired["common"]["notify"] = current_notify
+                    repaired_notes.append(f"Webhook告警配置 <- {template_name}")
+                    needs_notify = False
+            if needs_day_metric and _has_meaningful_day_metric_upload(template_cfg):
+                repaired["features"]["day_metric_upload"] = _normalized_day_metric_upload(template_cfg)
+                repaired_notes.append(f"12项独立上传配置 <- {template_name}")
+                needs_day_metric = False
+    return repaired, repaired_notes
 
 
 def backup_settings_file(
@@ -1940,19 +2303,68 @@ def load_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     had_noncanonical_handover_title = _contains_noncanonical_handover_template_title_config(cfg)
     segments_seeded = _ensure_handover_segment_files(cfg, config_path)
     composed = _compose_handover_segmented_config(cfg, config_path)
-    normalized = validate_settings(composed)
-    if had_deprecated_alarm_db or had_noncanonical_handover_title or segments_seeded:
+    repaired, repaired_notes = _repair_critical_settings_from_backups(composed, config_path)
+    normalized = validate_settings(repaired)
+    backup_count = len(_settings_backup_candidates(config_path))
+    if repaired_notes:
+        print(
+            f"[配置修复] 已从本地备份恢复关键配置: {'；'.join(repaired_notes)}; "
+            f"config={get_settings_path(config_path)}, backups={backup_count}"
+        )
+    else:
+        print(f"[配置修复] 已检查本地备份，当前关键配置无需恢复: config={get_settings_path(config_path)}, backups={backup_count}")
+    if had_deprecated_alarm_db or had_noncanonical_handover_title or segments_seeded or repaired_notes:
         write_settings_atomically(normalized, config_path)
     return _normalize_console_host_for_lan(normalized, config_path)
 
 
 def load_bootstrap_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
-    normalized = ensure_v3_config(_compose_handover_segmented_config(cfg, config_path))
-    if _contains_deprecated_alarm_db_config(cfg) or _contains_noncanonical_handover_template_title_config(cfg):
+    repaired, repaired_notes = _repair_critical_settings_from_backups(
+        _compose_handover_segmented_config(cfg, config_path),
+        config_path,
+    )
+    normalized = ensure_v3_config(repaired)
+    backup_count = len(_settings_backup_candidates(config_path))
+    if repaired_notes:
+        print(
+            f"[配置修复] 已从本地备份恢复关键配置: {'；'.join(repaired_notes)}; "
+            f"config={get_settings_path(config_path)}, backups={backup_count}"
+        )
+    elif backup_count > 0:
+        print(f"[配置修复] 已检查本地备份，当前关键配置无需恢复: config={get_settings_path(config_path)}, backups={backup_count}")
+    if _contains_deprecated_alarm_db_config(cfg) or _contains_noncanonical_handover_template_title_config(cfg) or repaired_notes:
         _normalize_handover_template_title_config(normalized)
         write_settings_atomically(normalized, config_path)
     return normalized
+
+
+def repair_day_metric_related_settings(
+    cfg: Dict[str, Any],
+    config_path: str | Path | None = None,
+) -> tuple[Dict[str, Any], List[str], bool]:
+    current = ensure_v3_config(copy.deepcopy(cfg))
+    repaired, notes = _repair_critical_settings_from_backups(current, config_path)
+
+    # Repair button should also reconcile 12-item runtime profile from latest valid backup,
+    # even when current config is not the global default.
+    current_payload = _extract_day_metric_repair_payload(repaired)
+    backup_payload, payload_source = _pick_day_metric_repair_payload_from_backups(config_path)
+    if backup_payload and _has_meaningful_day_metric_repair_payload(backup_payload):
+        if current_payload != backup_payload:
+            repaired = _apply_day_metric_repair_payload(repaired, backup_payload)
+            if payload_source:
+                notes.append(f"12项配置轮廓 <- {payload_source}")
+            else:
+                notes.append("12项配置轮廓 <- 已知模板")
+
+    changed = (
+        _normalized_day_metric_upload(current) != _normalized_day_metric_upload(repaired)
+        or _dict(_dict(current.get("common")).get("feishu_auth"))
+        != _dict(_dict(repaired.get("common")).get("feishu_auth"))
+        or _normalized_notify_config(current) != _normalized_notify_config(repaired)
+    )
+    return repaired, notes, changed
 
 
 def save_settings(

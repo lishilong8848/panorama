@@ -3,6 +3,7 @@
 import copy
 from typing import Any, Callable, Dict, List
 
+from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
 from handover_log_module.core.cell_rule_compiler import migrate_legacy_rule_structures, normalize_cell_rules
 from handover_log_module.service.handover_orchestrator import HandoverOrchestrator
 
@@ -116,7 +117,7 @@ def load_handover_config(config: Dict[str, Any] | None = None) -> Dict[str, Any]
         runtime_cfg.get("download", {}) if isinstance(runtime_cfg.get("download", {}), dict) else {}
     )
     global_network = runtime_cfg.get("network", {}) if isinstance(runtime_cfg.get("network", {}), dict) else {}
-    global_feishu = runtime_cfg.get("feishu", {}) if isinstance(runtime_cfg.get("feishu", {}), dict) else {}
+    global_feishu = resolve_feishu_auth_settings(runtime_cfg)
     global_paths = runtime_cfg.get("paths", {}) if isinstance(runtime_cfg.get("paths", {}), dict) else {}
     global_shared_bridge = runtime_cfg.get("shared_bridge", {}) if isinstance(runtime_cfg.get("shared_bridge", {}), dict) else {}
     if not base_cfg.get("sites") and isinstance(global_download.get("sites"), list):

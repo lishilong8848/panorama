@@ -7,6 +7,7 @@ import openpyxl
 from app.shared.utils.atomic_file import atomic_save_workbook
 from handover_log_module.core.footer_layout import FOOTER_DYNAMIC_FIXED_CELLS
 from handover_log_module.core.section_layout import capture_section_snapshots, parse_category_sections
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.footer_inventory_writer import write_footer_inventory_table
 from handover_log_module.repository.section_writer import write_category_sections
 
@@ -136,7 +137,7 @@ class ReviewDocumentWriter:
         output_file: str,
         document: Dict[str, Any],
     ) -> None:
-        workbook = openpyxl.load_workbook(output_file)
+        workbook = load_workbook_quietly(output_file)
         try:
             sheet_name = self._sheet_name()
             ws = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active

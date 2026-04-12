@@ -87,6 +87,7 @@ def test_other_important_work_builder_maps_template_columns_and_preserves_source
             source_label="上电通告",
             record_id="rec-1",
             building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 0, 0),
             actual_end_time=None,
             description_text="上电事项",
             completion_text="进行中",
@@ -98,6 +99,7 @@ def test_other_important_work_builder_maps_template_columns_and_preserves_source
             source_label="设备调整",
             record_id="rec-2",
             building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 30, 0),
             actual_end_time=datetime(2026, 3, 14, 10, 0, 0),
             description_text="调整事项",
             completion_text="已完成",
@@ -109,6 +111,7 @@ def test_other_important_work_builder_maps_template_columns_and_preserves_source
             source_label="设备轮巡",
             record_id="rec-3",
             building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 40, 0),
             actual_end_time=datetime(2026, 3, 14, 10, 5, 0),
             description_text="轮巡事项",
             completion_text="已完成",
@@ -120,6 +123,7 @@ def test_other_important_work_builder_maps_template_columns_and_preserves_source
             source_label="设备检修",
             record_id="rec-4",
             building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 50, 0),
             actual_end_time=datetime(2026, 3, 14, 10, 10, 0),
             description_text="检修事项",
             completion_text="未完成",
@@ -158,6 +162,7 @@ def test_other_important_work_grouped_rows_reuse_multi_building_records() -> Non
             source_label="上电通告",
             record_id="rec-a",
             building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 0, 0),
             actual_end_time=None,
             description_text="A事项",
             completion_text="已完成",
@@ -169,6 +174,7 @@ def test_other_important_work_grouped_rows_reuse_multi_building_records() -> Non
             source_label="设备调整",
             record_id="rec-ac",
             building_values=["A楼", "C楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 10, 0),
             actual_end_time=datetime(2026, 3, 14, 9, 30, 0),
             description_text="AC事项",
             completion_text="进行中",
@@ -180,6 +186,7 @@ def test_other_important_work_grouped_rows_reuse_multi_building_records() -> Non
             source_label="设备检修",
             record_id="rec-b",
             building_values=["B楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 40, 0),
             actual_end_time=datetime(2026, 3, 14, 10, 0, 0),
             description_text="B事项",
             completion_text="已完成",
@@ -226,6 +233,7 @@ def test_other_important_work_builder_skips_blank_description_rows(tmp_path: Pat
             source_label="上电通告",
             record_id="rec-keep",
             building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 8, 0, 0),
             actual_end_time=None,
             description_text="保留事项",
             completion_text="已完成",
@@ -237,6 +245,7 @@ def test_other_important_work_builder_skips_blank_description_rows(tmp_path: Pat
             source_label="设备调整",
             record_id="rec-blank",
             building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 8, 10, 0),
             actual_end_time=None,
             description_text="",
             completion_text="已完成",
@@ -290,6 +299,7 @@ def test_other_important_work_builder_normalizes_specialty_for_executor_match(tm
             source_label="设备轮巡",
             record_id="rec-normalized",
             building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 0, 0),
             actual_end_time=None,
             description_text="暖通轮巡事项",
             completion_text="已完成",
@@ -314,4 +324,70 @@ def test_other_important_work_builder_normalizes_specialty_for_executor_match(tm
 
     assert payload["其他重要工作记录"] == [
         {"cells": {"B": "暖通轮巡事项", "F": "已完成", "H": "郭克成"}},
+    ]
+
+
+def test_other_important_work_builder_dedupes_duplicate_descriptions(tmp_path: Path) -> None:
+    template_path = tmp_path / "other_work_dedupe_template.xlsx"
+    _build_other_work_template(template_path)
+    cfg = {
+        "enabled": True,
+        "sections": {"other_important_work": "其他重要工作记录"},
+        "column_mapping": {
+            "resolve_by_header": True,
+            "header_alias": {
+                "description": ["描述"],
+                "completion": ["完成情况"],
+                "executor": ["执行人"],
+            },
+            "fallback_cols": {
+                "description": "B",
+                "completion": "F",
+                "executor": "H",
+            },
+        },
+    }
+    rows = [
+        OtherImportantWorkRow(
+            source_key="device_patrol",
+            source_label="设备轮巡",
+            record_id="rec-1",
+            building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 0, 0),
+            actual_end_time=None,
+            description_text="重复事项",
+            completion_text="已完成",
+            specialty_text="电气",
+            raw_fields={},
+        ),
+        OtherImportantWorkRow(
+            source_key="device_repair",
+            source_label="设备检修",
+            record_id="rec-2",
+            building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 10, 0),
+            actual_end_time=None,
+            description_text=" 重复事项 ",
+            completion_text="未完成",
+            specialty_text="电气",
+            raw_fields={},
+        ),
+    ]
+    builder = OtherImportantWorkPayloadBuilder(
+        {"template": {"source_path": str(template_path), "sheet_name": "交接班日志"}},
+        repository=_FakeOtherWorkRepo(cfg, rows),
+        shift_roster_repo=_FakeShiftRosterRepo(
+            [{"building": "A楼", "specialty": "电气", "supervisor": "汪根尚"}]
+        ),
+    )
+
+    payload = builder.build(
+        building="A楼",
+        duty_date="2026-03-14",
+        duty_shift="day",
+        emit_log=lambda *_args: None,
+    )
+
+    assert payload["其他重要工作记录"] == [
+        {"cells": {"B": "重复事项", "F": "已完成", "H": "汪根尚"}},
     ]

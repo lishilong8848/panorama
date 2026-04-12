@@ -7,6 +7,7 @@ from typing import Any, Dict
 import openpyxl
 
 from app.shared.utils.atomic_file import atomic_save_workbook
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 
 
 class CabinetPowerDefaultsService:
@@ -131,7 +132,7 @@ class CabinetPowerDefaultsService:
             return None
 
         output_path = Path(str(output_file).strip())
-        workbook = openpyxl.load_workbook(output_path)
+        workbook = load_workbook_quietly(output_path)
         try:
             if sheet_name not in workbook.sheetnames:
                 raise ValueError(f"交接班模板sheet不存在: {sheet_name}")

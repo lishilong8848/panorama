@@ -12,6 +12,7 @@ from handover_log_module.core.footer_layout import (
     FOOTER_INVENTORY_COLUMNS,
     find_footer_inventory_layout,
 )
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.footer_inventory_writer import write_footer_inventory_table
 
 
@@ -175,7 +176,7 @@ class FooterInventoryDefaultsService:
             return None
 
         output_path = Path(str(output_file).strip())
-        workbook = openpyxl.load_workbook(output_path)
+        workbook = load_workbook_quietly(output_path)
         try:
             if sheet_name not in workbook.sheetnames:
                 raise ValueError(f"交接班模板sheet不存在: {sheet_name}")

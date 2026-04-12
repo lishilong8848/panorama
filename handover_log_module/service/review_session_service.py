@@ -5,10 +5,9 @@ from pathlib import Path
 import re
 from typing import Any, Dict, List
 
-from openpyxl import load_workbook
-
 from app.shared.utils.artifact_naming import handover_log_output_patterns
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.review_session_state_store import ReviewSessionStateStore
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
 from pipeline_utils import get_app_dir
@@ -57,6 +56,42 @@ def _reraise_review_store_error(exc: Exception) -> None:
     if _is_recoverable_review_store_error(exc):
         raise ReviewSessionStoreUnavailableError("审核状态存储暂时不可用，请稍后重试") from exc
     raise exc
+
+
+def _normalize_review_link_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    return {
+        "status": str(payload.get("status", "") or "").strip().lower(),
+        "last_attempt_at": str(payload.get("last_attempt_at", "") or "").strip(),
+        "last_sent_at": str(payload.get("last_sent_at", "") or "").strip(),
+        "error": str(payload.get("error", "") or "").strip(),
+        "url": str(payload.get("url", "") or "").strip(),
+        "successful_recipients": [
+            str(item or "").strip()
+            for item in (
+                payload.get("successful_recipients", [])
+                if isinstance(payload.get("successful_recipients", []), list)
+                else []
+            )
+            if str(item or "").strip()
+        ],
+        "failed_recipients": [
+            {
+                "open_id": str(item.get("open_id", "") or "").strip(),
+                "note": str(item.get("note", "") or "").strip(),
+                "error": str(item.get("error", "") or "").strip(),
+            }
+            for item in (
+                payload.get("failed_recipients", [])
+                if isinstance(payload.get("failed_recipients", []), list)
+                else []
+            )
+            if isinstance(item, dict)
+        ],
+        "source": str(payload.get("source", "") or "").strip().lower(),
+        "auto_attempted": bool(payload.get("auto_attempted", False)),
+        "auto_attempted_at": str(payload.get("auto_attempted_at", "") or "").strip(),
+    }
 
 
 class ReviewSessionService:
@@ -216,7 +251,7 @@ class ReviewSessionService:
             return duty_date, "night"
         workbook = None
         try:
-            workbook = load_workbook(output_path, read_only=True, data_only=False)
+            workbook = load_workbook_quietly(output_path, read_only=True, data_only=False)
             sheet_name = self._template_sheet_name()
             if sheet_name not in workbook.sheetnames:
                 return None
@@ -614,6 +649,7 @@ class ReviewSessionService:
             "source_data_attachment_export": self._normalize_source_data_attachment_export(
                 raw.get("source_data_attachment_export", {})
             ),
+            "review_link_delivery": _normalize_review_link_delivery(raw.get("review_link_delivery", {})),
         }
 
     def _managed_source_file_references(self, state: Dict[str, Any]) -> set[str]:
@@ -796,6 +832,11 @@ class ReviewSessionService:
                         "session_id": str(session.get("session_id", "")).strip() if has_session else "",
                         "revision": int(session.get("revision", 0) or 0) if has_session else 0,
                         "updated_at": str(session.get("updated_at", "")).strip() if has_session else "",
+                        "review_link_delivery": (
+                            _normalize_review_link_delivery(session.get("review_link_delivery", {}))
+                            if has_session
+                            else _normalize_review_link_delivery({})
+                        ),
                         "cloud_sheet_sync": (
                             self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
                             if has_session
@@ -831,6 +872,13 @@ class ReviewSessionService:
     def get_building_by_code(self, building_code: str) -> str:
         code = str(building_code or "").strip().lower()
         return self._code_to_building().get(code, "")
+
+    def list_buildings(self) -> List[str]:
+        return [
+            str(item.get("name", "")).strip()
+            for item in self._building_defs()
+            if str(item.get("name", "")).strip()
+        ]
 
     def get_batch_status(self, batch_key: str) -> Dict[str, Any]:
         key = str(batch_key or "").strip()
@@ -887,6 +935,27 @@ class ReviewSessionService:
             if str(session.get("batch_key", "")).strip() == target_batch:
                 output.append(session)
         output.sort(key=lambda item: str(item.get("building", "")))
+        return output
+
+    def list_sessions(self) -> List[Dict[str, Any]]:
+        state = self._load_state()
+        sessions = state.get("review_sessions", {})
+        if not isinstance(sessions, dict):
+            return []
+        output: List[Dict[str, Any]] = []
+        for raw in list(sessions.values()):
+            if not isinstance(raw, dict):
+                continue
+            output.append(self._normalize_session(raw))
+        output.sort(
+            key=lambda item: (
+                str(item.get("duty_date", "")),
+                str(item.get("duty_shift", "")),
+                str(item.get("building", "")),
+                self._parse_updated_at(str(item.get("updated_at", ""))),
+            ),
+            reverse=True,
+        )
         return output
 
     def get_latest_session(self, building: str) -> Dict[str, Any] | None:
@@ -1285,11 +1354,38 @@ class ReviewSessionService:
             "source_data_attachment_export": self._normalize_source_data_attachment_export(
                 source_data_attachment_export
             ),
+            "review_link_delivery": _normalize_review_link_delivery(
+                previous.get("review_link_delivery", {}) if isinstance(previous, dict) else {}
+            ),
         }
         sessions[session_id] = session
         latest_map[building_name] = session_id
         state["review_sessions"] = sessions
         state["review_latest_by_building"] = latest_map
+        self._save_state(state)
+        return dict(session)
+
+    def update_review_link_delivery(
+        self,
+        *,
+        session_id: str,
+        review_link_delivery: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        target_session_id = str(session_id or "").strip()
+        if not target_session_id:
+            raise ReviewSessionNotFoundError("review session not found")
+        state = self._load_state()
+        sessions = state.get("review_sessions", {})
+        if not isinstance(sessions, dict) or target_session_id not in sessions:
+            raise ReviewSessionNotFoundError("review session not found")
+        raw_session = sessions.get(target_session_id, {})
+        if not isinstance(raw_session, dict):
+            raise ReviewSessionNotFoundError("review session not found")
+        session = self._normalize_session(raw_session)
+        session["review_link_delivery"] = _normalize_review_link_delivery(review_link_delivery)
+        session["updated_at"] = _now_text()
+        sessions[target_session_id] = session
+        state["review_sessions"] = sessions
         self._save_state(state)
         return dict(session)
 

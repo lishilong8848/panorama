@@ -263,6 +263,28 @@ def build_trigger(review_service: FakeReviewService, cloud_service: FakeCloudSyn
     return trigger
 
 
+def test_build_cloud_items_only_returns_buildings_with_outdated_cloud_sync() -> None:
+    review_service = FakeReviewService(
+        [
+            make_session("A楼", revision=3, cloud_status="success", synced_revision=3),
+            make_session("B楼", revision=2, cloud_status="success", synced_revision=1),
+            make_session("C楼", revision=1, cloud_status="disabled", synced_revision=0),
+        ]
+    )
+    trigger = build_trigger(review_service, FakeCloudSyncService())
+
+    upload_items, skipped_buildings, failed_buildings = trigger._build_cloud_items(
+        review_service.list_batch_sessions("2026-03-22|night")
+    )
+
+    assert [item["building"] for item in upload_items] == ["B楼"]
+    assert failed_buildings == []
+    assert skipped_buildings == [
+        {"building": "A楼", "reason": "already_uploaded"},
+        {"building": "C楼", "reason": "disabled"},
+    ]
+
+
 class FakeDailyReportStateService:
     def __init__(self) -> None:
         self.updated = []

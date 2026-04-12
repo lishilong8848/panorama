@@ -15,6 +15,7 @@ from app.shared.utils.artifact_naming import (
 )
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.footer_layout import find_footer_inventory_layout, trim_rows_below_footer
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.core.footer_snapshot import (
     capture_footer_block_snapshot,
     restore_footer_block_snapshot,
@@ -99,7 +100,7 @@ def _write_workbook(
 ) -> None:
     def _writer(temp_path: Path) -> None:
         shutil.copy2(source_path, temp_path)
-        wb = openpyxl.load_workbook(temp_path)
+        wb = load_workbook_quietly(temp_path)
         try:
             if sheet_name not in wb.sheetnames:
                 raise ValueError(f"template sheet not found: {sheet_name}")

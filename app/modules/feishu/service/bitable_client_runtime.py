@@ -6,6 +6,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import requests
 
+from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
+
 
 class FeishuBitableClient:
     AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
@@ -35,21 +37,32 @@ class FeishuBitableClient:
         canonical_metric_name_fn: Callable[[Any], str],
         dimension_mapping: Dict[str, tuple[str, str, str]],
     ) -> None:
-        self.app_id = app_id
-        self.app_secret = app_secret
+        auth = resolve_feishu_auth_settings(
+            {
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "timeout": timeout,
+                "request_retry_count": request_retry_count,
+                "request_retry_interval_sec": request_retry_interval_sec,
+            }
+        )
+        self.app_id = str(auth.get("app_id", "") or "").strip()
+        self.app_secret = str(auth.get("app_secret", "") or "").strip()
         self.app_token = app_token
         self.calc_table_id = calc_table_id
         self.attachment_table_id = attachment_table_id
         self.date_field_mode = date_field_mode
         self.date_field_day = date_field_day
         self.date_tz_offset_hours = date_tz_offset_hours
-        self.timeout = timeout
-        self.request_retry_count = max(0, int(request_retry_count))
-        self.request_retry_interval_sec = max(0.0, float(request_retry_interval_sec))
+        self.timeout = int(auth.get("timeout", timeout) or timeout)
+        self.request_retry_count = max(0, int(auth.get("request_retry_count", request_retry_count) or request_retry_count))
+        self.request_retry_interval_sec = max(0.0, float(auth.get("request_retry_interval_sec", request_retry_interval_sec) or request_retry_interval_sec))
         self._tenant_access_token: Optional[str] = None
         self._date_text_to_timestamp_ms_fn = date_text_to_timestamp_ms_fn
         self._canonical_metric_name_fn = canonical_metric_name_fn
         self._dimension_mapping = dict(dimension_mapping)
+        if not self.app_id or not self.app_secret:
+            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
 
     def _to_feishu_date(self, date_text: str) -> Any:
         if self.date_field_mode == "text":

@@ -7,6 +7,7 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 from pipeline_utils import get_app_dir
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.core.change_work_window import resolve_work_window
 from handover_log_module.core.section_layout import parse_category_sections
 from handover_log_module.core.specialty_normalizer import normalize_specialty_text
@@ -20,6 +21,10 @@ from handover_log_module.repository.shift_roster_repository import ShiftRosterRe
 
 def _norm_header(value: Any) -> str:
     return str(value or "").replace(" ", "").strip().casefold()
+
+
+def _dedupe_text(value: Any) -> str:
+    return "".join(str(value or "").split()).casefold()
 
 
 class ChangeManagementPayloadBuilder:
@@ -80,7 +85,7 @@ class ChangeManagementPayloadBuilder:
         if not source_path.exists():
             return output
 
-        wb = openpyxl.load_workbook(source_path, read_only=True, data_only=True)
+        wb = load_workbook_quietly(source_path, read_only=True, data_only=True)
         try:
             if sheet_name not in wb.sheetnames:
                 return output
@@ -209,11 +214,19 @@ class ChangeManagementPayloadBuilder:
         payload_rows: List[Dict[str, str]] = []
         matched_supervisor = 0
         unmatched_supervisor = 0
+        deduped_count = 0
+        seen_descriptions: set[str] = set()
 
         for row in rows:
             description_text = str(row.description or "").strip()
             if not description_text:
                 continue
+            dedupe_key = _dedupe_text(description_text)
+            if dedupe_key and dedupe_key in seen_descriptions:
+                deduped_count += 1
+                continue
+            if dedupe_key:
+                seen_descriptions.add(dedupe_key)
             work_window = resolve_work_window(
                 process_updates_text=row.process_updates_text,
                 duty_date=duty_date,
@@ -246,6 +259,7 @@ class ChangeManagementPayloadBuilder:
         output_rows = [{"cells": self._to_cells(row_payload, col_map)} for row_payload in payload_rows]
         emit_log(
             f"[交接班][变更管理] 构建完成: count={len(output_rows)}, "
-            f"matched_supervisor={matched_supervisor}, unmatched_supervisor={unmatched_supervisor}"
+            f"deduped={deduped_count}, matched_supervisor={matched_supervisor}, "
+            f"unmatched_supervisor={unmatched_supervisor}"
         )
         return {section_name: output_rows}

@@ -487,15 +487,15 @@
                 <div class="hint" v-if="handoverReviewOverview.dutyText">
                   本次上传云文档批次：{{ handoverReviewOverview.dutyText }}
                 </div>
-                <div class="hint">以下地址已通过真实审核页访问探测，可直接发给局域网内对应楼栋电脑访问。</div>
+                <div class="hint">以下地址来自手工配置的审核页基地址，可直接发给局域网内对应楼栋电脑访问。</div>
                 <div class="hint" v-if="health.handover.review_base_url_effective">
-                  当前生效地址（{{ health.handover.review_base_url_effective_source === 'manual' ? '手工指定' : '已缓存自动诊断结果' }}）：{{ health.handover.review_base_url_effective }}
+                  当前生效地址（手工指定）：{{ health.handover.review_base_url_effective }}
                 </div>
                 <div class="hint" v-else-if="health.handover.review_base_url_error">
                   {{ health.handover.review_base_url_error }}
                 </div>
-                <div class="hint" v-else-if="health.handover.review_base_url_status === 'no_candidate'">
-                  未检测到可用私网 IPv4 地址
+                <div class="hint" v-else-if="health.handover.review_base_url_status === 'manual_only'">
+                  请先在配置中心手工填写审核页访问基地址
                 </div>
                 <div class="handover-access-empty" v-if="!handoverReviewBoardRows.length">暂未获取到局域网访问地址。</div>
                 <div class="review-board-grid" v-if="handoverReviewBoardRows.length">
@@ -507,6 +507,10 @@
                     <div class="hint" style="margin-top:4px;">
                       云表同步：
                       <span class="status-badge status-badge-soft" :class="'tone-' + row.cloudSheetSyncTone">{{ row.cloudSheetSyncText }}</span>
+                    </div>
+                    <div class="hint" style="margin-top:4px;">
+                      审核链接发送：
+                      <span class="status-badge status-badge-soft" :class="'tone-' + row.reviewLinkDeliveryTone">{{ row.reviewLinkDeliveryText }}</span>
                     </div>
                     <a
                       v-if="row.hasUrl"
@@ -523,6 +527,18 @@
                       target="_blank"
                       rel="noopener noreferrer"
                     >打开云文档</a>
+                    <div class="btn-line" style="margin-top:8px;">
+                      <button
+                        class="btn btn-secondary"
+                        :disabled="isActionLocked(getHandoverReviewLinkSendActionKey(row.building, handoverReviewOverview.batchKey))"
+                        @click="sendHandoverReviewLink(row.building, { batchKey: handoverReviewOverview.batchKey, force: true })"
+                      >
+                        {{ isActionLocked(getHandoverReviewLinkSendActionKey(row.building, handoverReviewOverview.batchKey)) ? '发送中...' : '手动发送审核链接' }}
+                      </button>
+                    </div>
+                    <div class="hint" v-if="row.reviewLinkDeliveryLastSentAt">最近发送：{{ row.reviewLinkDeliveryLastSentAt }}</div>
+                    <div class="hint" v-else-if="row.reviewLinkDeliveryLastAttemptAt">最近尝试：{{ row.reviewLinkDeliveryLastAttemptAt }}</div>
+                    <div class="hint" v-if="row.reviewLinkDeliveryError">{{ row.reviewLinkDeliveryError }}</div>
                     <div class="hint" v-if="row.cloudSheetError">{{ row.cloudSheetError }}</div>
                   </div>
                 </div>

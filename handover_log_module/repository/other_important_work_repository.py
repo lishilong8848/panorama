@@ -6,7 +6,12 @@ import re
 from typing import Any, Callable, Dict, List, Tuple
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
+from handover_log_module.core.shift_interval_overlap import (
+    build_shift_interval_window,
+    interval_overlaps_filter_window,
+)
 from handover_log_module.core.shift_window import build_duty_window
 from handover_log_module.core.specialty_normalizer import normalize_specialty_text
 
@@ -139,6 +144,7 @@ class OtherImportantWorkRow:
     source_label: str
     record_id: str
     building_values: List[str]
+    actual_start_time: datetime
     actual_end_time: datetime | None
     description_text: str
     completion_text: str
@@ -193,6 +199,7 @@ class OtherImportantWorkRepository:
                     "table_id": "tblf2uQrzCWw5eIV",
                     "fields": {
                         "building": "楼栋",
+                        "actual_start_time": "实际开始时间",
                         "actual_end_time": "实际结束时间",
                         "description": "名称",
                         "completion": "进度",
@@ -201,9 +208,10 @@ class OtherImportantWorkRepository:
                 },
                 "device_adjustment": {
                     "label": "设备调整",
-                    "table_id": self.DEVICE_ADJUSTMENT_TABLE_ID,
+                    "table_id": OtherImportantWorkRepository.DEVICE_ADJUSTMENT_TABLE_ID,
                     "fields": {
                         "building": "楼栋",
+                        "actual_start_time": "实际开始时间",
                         "actual_end_time": "实际结束时间",
                         "location": "位置",
                         "description": "内容",
@@ -216,6 +224,7 @@ class OtherImportantWorkRepository:
                     "table_id": "tbl0XK1iQ1P6VY5Y",
                     "fields": {
                         "building": "楼栋",
+                        "actual_start_time": "实际开始时间",
                         "actual_end_time": "实际结束时间",
                         "description": "内容",
                         "completion": "进度",
@@ -227,6 +236,7 @@ class OtherImportantWorkRepository:
                     "table_id": "tblpaHktT0mn0hwg",
                     "fields": {
                         "building": "楼栋",
+                        "actual_start_time": "实际开始时间",
                         "actual_end_time": "实际结束时间",
                         "description": "维修故障",
                         "completion": "进度（完成情况）",
@@ -270,19 +280,13 @@ class OtherImportantWorkRepository:
         return self._normalize_cfg()
 
     def _new_client(self, *, app_token: str, table_id: str) -> FeishuBitableClient:
-        global_feishu = self.handover_cfg.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
-        app_id = str(global_feishu.get("app_id", "")).strip()
-        app_secret = str(global_feishu.get("app_secret", "")).strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+        global_feishu = require_feishu_auth_settings(self.handover_cfg)
         if not app_token or not table_id:
             raise ValueError("其他重要工作记录多维配置缺失: app_token/table_id")
 
         return FeishuBitableClient(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             app_token=app_token,
             calc_table_id=table_id,
             attachment_table_id=table_id,
@@ -363,10 +367,10 @@ class OtherImportantWorkRepository:
         return {field_name: dict(output.get(field_name, {})) for field_name in field_names}
 
     @staticmethod
-    def _sort_key(row: OtherImportantWorkRow) -> tuple[int, datetime, str]:
+    def _sort_key(row: OtherImportantWorkRow) -> tuple[datetime, int, datetime, str]:
         has_end_time = 1 if row.actual_end_time is not None else 0
         end_time = row.actual_end_time or datetime.max
-        return has_end_time, end_time, row.record_id
+        return row.actual_start_time, has_end_time, end_time, row.record_id
 
     @staticmethod
     def _join_location_and_description(location_text: str, description_text: str) -> str:
@@ -390,6 +394,7 @@ class OtherImportantWorkRepository:
         label = str(source_cfg.get("label", "")).strip() or source_key
         fields_cfg = source_cfg.get("fields", {}) if isinstance(source_cfg.get("fields", {}), dict) else {}
         building_field = str(fields_cfg.get("building", "楼栋")).strip() or "楼栋"
+        actual_start_time_field = str(fields_cfg.get("actual_start_time", "实际开始时间")).strip() or "实际开始时间"
         actual_end_time_field = str(fields_cfg.get("actual_end_time", "实际结束时间")).strip() or "实际结束时间"
         description_field = str(fields_cfg.get("description", "内容")).strip() or "内容"
         completion_field = str(fields_cfg.get("completion", "进度")).strip() or "进度"
@@ -409,13 +414,19 @@ class OtherImportantWorkRepository:
         )
         shift_start = datetime.strptime(duty_window.start_time, "%Y-%m-%d %H:%M:%S")
         shift_end = datetime.strptime(duty_window.end_time, "%Y-%m-%d %H:%M:%S")
+        filter_window = build_shift_interval_window(
+            shift_start=shift_start,
+            shift_end=shift_end,
+            offset_hours=1,
+        )
 
         emit_log(
             "[交接班][其他重要工作] 读取飞书: "
             f"source={source_key}, label={label}, table_id={table_id}, "
             f"page_size={int(shared_source_cfg.get('page_size', 500) or 500)}, "
             f"max_records={int(shared_source_cfg.get('max_records', 5000) or 5000)}, "
-            f"window={duty_window.start_time}~{duty_window.end_time}"
+            f"window={duty_window.start_time}~{duty_window.end_time}, "
+            f"filter_window={filter_window.filter_start.strftime('%Y-%m-%d %H:%M:%S')}~{filter_window.filter_end.strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
         client = self._new_client(
@@ -440,7 +451,11 @@ class OtherImportantWorkRepository:
         rows: List[OtherImportantWorkRow] = []
         total = 0
         in_scope = 0
-        parse_fail = 0
+        start_time_parse_fail = 0
+        end_time_parse_fail = 0
+        start_time_after_filter_end_skipped = 0
+        end_time_before_filter_start_skipped = 0
+        end_time_before_start_skipped = 0
         blank_description_skipped = 0
         for item in records:
             if not isinstance(item, dict):
@@ -452,13 +467,31 @@ class OtherImportantWorkRepository:
                 raw_fields = {}
 
             building_values = _field_texts_with_option_map(raw_fields.get(building_field), building_option_map)
+            start_time = _parse_datetime(raw_fields.get(actual_start_time_field))
+            if start_time is None:
+                start_time_parse_fail += 1
+                continue
             raw_actual_end_time = raw_fields.get(actual_end_time_field)
             actual_end_time_text = _field_text(raw_actual_end_time)
             actual_end_time = _parse_datetime(raw_actual_end_time)
             if actual_end_time is None and actual_end_time_text:
-                parse_fail += 1
+                end_time_parse_fail += 1
                 continue
-            if actual_end_time is not None and (actual_end_time < shift_start or actual_end_time > shift_end):
+            if actual_end_time is not None and actual_end_time < start_time:
+                end_time_before_start_skipped += 1
+                continue
+            if start_time > filter_window.filter_end:
+                start_time_after_filter_end_skipped += 1
+                continue
+            if actual_end_time is not None and actual_end_time <= filter_window.filter_start:
+                end_time_before_filter_start_skipped += 1
+                continue
+            if not interval_overlaps_filter_window(
+                start_time=start_time,
+                end_time=actual_end_time,
+                filter_start=filter_window.filter_start,
+                filter_end=filter_window.filter_end,
+            ):
                 continue
             description_text = _field_text(raw_fields.get(description_field))
             if should_concat_location:
@@ -475,6 +508,7 @@ class OtherImportantWorkRepository:
                     source_label=label,
                     record_id=record_id,
                     building_values=building_values,
+                    actual_start_time=start_time,
                     actual_end_time=actual_end_time,
                     description_text=description_text,
                     completion_text=_field_text(raw_fields.get(completion_field)),
@@ -489,9 +523,21 @@ class OtherImportantWorkRepository:
         emit_log(
             "[交接班][其他重要工作] 读取完成: "
             f"source={source_key}, total={total}, in_scope={in_scope}, "
-            f"blank_description_skipped={blank_description_skipped}, parse_fail={parse_fail}"
+            f"blank_description_skipped={blank_description_skipped}, "
+            f"start_time_parse_fail={start_time_parse_fail}, end_time_parse_fail={end_time_parse_fail}, "
+            f"start_time_after_filter_end_skipped={start_time_after_filter_end_skipped}, "
+            f"end_time_before_filter_start_skipped={end_time_before_filter_start_skipped}, "
+            f"end_time_before_start_skipped={end_time_before_start_skipped}"
         )
-        return rows, {"total": total, "in_scope": in_scope, "parse_fail": parse_fail}
+        return rows, {
+            "total": total,
+            "in_scope": in_scope,
+            "start_time_parse_fail": start_time_parse_fail,
+            "end_time_parse_fail": end_time_parse_fail,
+            "start_time_after_filter_end_skipped": start_time_after_filter_end_skipped,
+            "end_time_before_filter_start_skipped": end_time_before_filter_start_skipped,
+            "end_time_before_start_skipped": end_time_before_start_skipped,
+        }
 
     def _load_rows_for_shift(
         self,
@@ -502,7 +548,15 @@ class OtherImportantWorkRepository:
     ) -> Tuple[List[OtherImportantWorkRow], Dict[str, Any], Dict[str, int]]:
         cfg = self._normalize_cfg()
         if not bool(cfg.get("enabled", True)):
-            return [], cfg, {"total": 0, "in_scope": 0, "parse_fail": 0}
+            return [], cfg, {
+                "total": 0,
+                "in_scope": 0,
+                "start_time_parse_fail": 0,
+                "end_time_parse_fail": 0,
+                "start_time_after_filter_end_skipped": 0,
+                "end_time_before_filter_start_skipped": 0,
+                "end_time_before_start_skipped": 0,
+            }
 
         shared_source_cfg = cfg.get("source", {}) if isinstance(cfg.get("source", {}), dict) else {}
         sources_cfg = cfg.get("sources", {}) if isinstance(cfg.get("sources", {}), dict) else {}
@@ -511,7 +565,11 @@ class OtherImportantWorkRepository:
         all_rows: List[OtherImportantWorkRow] = []
         total = 0
         in_scope = 0
-        parse_fail = 0
+        start_time_parse_fail = 0
+        end_time_parse_fail = 0
+        start_time_after_filter_end_skipped = 0
+        end_time_before_filter_start_skipped = 0
+        end_time_before_start_skipped = 0
         for source_key in order:
             current_cfg = sources_cfg.get(source_key, {})
             if not isinstance(current_cfg, dict):
@@ -534,9 +592,21 @@ class OtherImportantWorkRepository:
             all_rows.extend(source_rows)
             total += int(counters.get("total", 0) or 0)
             in_scope += int(counters.get("in_scope", 0) or 0)
-            parse_fail += int(counters.get("parse_fail", 0) or 0)
+            start_time_parse_fail += int(counters.get("start_time_parse_fail", 0) or 0)
+            end_time_parse_fail += int(counters.get("end_time_parse_fail", 0) or 0)
+            start_time_after_filter_end_skipped += int(counters.get("start_time_after_filter_end_skipped", 0) or 0)
+            end_time_before_filter_start_skipped += int(counters.get("end_time_before_filter_start_skipped", 0) or 0)
+            end_time_before_start_skipped += int(counters.get("end_time_before_start_skipped", 0) or 0)
 
-        return all_rows, cfg, {"total": total, "in_scope": in_scope, "parse_fail": parse_fail}
+        return all_rows, cfg, {
+            "total": total,
+            "in_scope": in_scope,
+            "start_time_parse_fail": start_time_parse_fail,
+            "end_time_parse_fail": end_time_parse_fail,
+            "start_time_after_filter_end_skipped": start_time_after_filter_end_skipped,
+            "end_time_before_filter_start_skipped": end_time_before_filter_start_skipped,
+            "end_time_before_start_skipped": end_time_before_start_skipped,
+        }
 
     def list_current_shift_rows(
         self,
@@ -555,7 +625,12 @@ class OtherImportantWorkRepository:
         emit_log(
             "[交接班][其他重要工作] 读取完成: "
             f"total={counters['total']}, in_scope={counters['in_scope']}, "
-            f"building_assigned={len(matched_rows)}, parse_fail={counters['parse_fail']}"
+            f"building_assigned={len(matched_rows)}, "
+            f"start_time_parse_fail={counters.get('start_time_parse_fail', 0)}, "
+            f"end_time_parse_fail={counters.get('end_time_parse_fail', 0)}, "
+            f"start_time_after_filter_end_skipped={counters.get('start_time_after_filter_end_skipped', 0)}, "
+            f"end_time_before_filter_start_skipped={counters.get('end_time_before_filter_start_skipped', 0)}, "
+            f"end_time_before_start_skipped={counters.get('end_time_before_start_skipped', 0)}"
         )
         return matched_rows, cfg
 
@@ -590,7 +665,12 @@ class OtherImportantWorkRepository:
         emit_log(
             "[交接班][其他重要工作] 读取完成: "
             f"total={counters['total']}, in_scope={counters['in_scope']}, "
-            f"building_assigned={assigned_rows}, parse_fail={counters['parse_fail']}"
+            f"building_assigned={assigned_rows}, "
+            f"start_time_parse_fail={counters.get('start_time_parse_fail', 0)}, "
+            f"end_time_parse_fail={counters.get('end_time_parse_fail', 0)}, "
+            f"start_time_after_filter_end_skipped={counters.get('start_time_after_filter_end_skipped', 0)}, "
+            f"end_time_before_filter_start_skipped={counters.get('end_time_before_filter_start_skipped', 0)}, "
+            f"end_time_before_start_skipped={counters.get('end_time_before_start_skipped', 0)}"
         )
         emit_log(
             "[交接班][其他重要工作] 批量分桶完成: "

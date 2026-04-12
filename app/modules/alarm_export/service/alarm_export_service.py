@@ -14,6 +14,7 @@ from app.modules.alarm_export.core.field_type_converter import (
 from app.modules.alarm_export.core.transformer import transform_row_to_feishu_fields
 from app.modules.alarm_export.repository.alarm_event_repository import AlarmEventRepository
 from app.modules.alarm_export.service.alarm_export_resume_store import AlarmExportResumeStore
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver, build_bitable_url
 from app.modules.report_pipeline.core.entities import AlarmExportSummary, PipelinePhaseResult
 from app.shared.logging import build_failure_line, build_success_line
@@ -171,15 +172,11 @@ class AlarmExportService:
 
     def _resolve_feishu_target(self, export_cfg: Dict[str, Any]) -> Dict[str, str]:
         feishu_cfg = export_cfg["feishu"]
-        global_feishu = self.config.get("feishu", {})
-        app_id = str(global_feishu.get("app_id", "")).strip()
-        app_secret = str(global_feishu.get("app_secret", "")).strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: feishu.app_id / feishu.app_secret")
+        global_feishu = require_feishu_auth_settings(self.config)
 
         return BitableTargetResolver(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             timeout=int(feishu_cfg.get("timeout", 30)),
             request_retry_count=int(global_feishu.get("request_retry_count", 3)),
             request_retry_interval_sec=float(global_feishu.get("request_retry_interval_sec", 2)),
@@ -192,11 +189,7 @@ class AlarmExportService:
         resolved_target: Dict[str, str] | None = None,
     ):
         feishu_cfg = export_cfg["feishu"]
-        global_feishu = self.config.get("feishu", {})
-        app_id = str(global_feishu.get("app_id", "")).strip()
-        app_secret = str(global_feishu.get("app_secret", "")).strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: feishu.app_id / feishu.app_secret")
+        global_feishu = require_feishu_auth_settings(self.config)
 
         calc_module = load_calc_module()
         client_cls = getattr(calc_module, "FeishuBitableClient", None)
@@ -206,8 +199,8 @@ class AlarmExportService:
         target = resolved_target if isinstance(resolved_target, dict) else self._resolve_feishu_target(export_cfg)
 
         return client_cls(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             app_token=target["app_token"],
             calc_table_id=target["table_id"],
             attachment_table_id=target["table_id"],

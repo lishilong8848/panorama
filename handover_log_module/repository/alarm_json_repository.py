@@ -98,12 +98,51 @@ class AlarmJsonRepository:
         )
 
     @staticmethod
-    def _covers_window(payload: Dict[str, Any], *, start_dt: datetime, end_dt: datetime) -> bool:
+    def _coverage_result(
+        payload: Dict[str, Any],
+        *,
+        start_dt: datetime,
+        end_dt: datetime,
+        source_kind: str,
+        selection_scope: str,
+        now_dt: datetime | None = None,
+    ) -> Dict[str, Any]:
         query_start_dt = _parse_datetime_text(payload.get("query_start"))
         query_end_dt = _parse_datetime_text(payload.get("query_end"))
         if query_start_dt is None or query_end_dt is None:
-            return False
-        return query_start_dt <= start_dt and query_end_dt >= end_dt
+            return {
+                "ok": False,
+                "mode": "insufficient",
+                "available_end": "",
+            }
+        if query_start_dt > start_dt:
+            return {
+                "ok": False,
+                "mode": "insufficient",
+                "available_end": query_end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        if query_end_dt >= end_dt:
+            return {
+                "ok": True,
+                "mode": "full",
+                "available_end": query_end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        source_kind_text = str(source_kind or "").strip().lower()
+        selection_scope_text = str(selection_scope or "").strip().lower()
+        current_now = now_dt or datetime.now()
+        is_latest_like = source_kind_text == "latest" or selection_scope_text in {"today", "latest"}
+        is_current_shift = start_dt <= current_now < end_dt
+        if is_latest_like and is_current_shift:
+            return {
+                "ok": True,
+                "mode": "partial_latest",
+                "available_end": query_end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        return {
+            "ok": False,
+            "mode": "insufficient",
+            "available_end": query_end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
     @staticmethod
     def _event_in_window(*, event_dt: datetime | None, start_dt: datetime, end_dt: datetime) -> bool:
@@ -149,7 +188,16 @@ class AlarmJsonRepository:
         payload_building = str(payload.get("building", "") or "").strip()
         if payload_building and payload_building != building_text:
             raise RuntimeError(f"告警 JSON building 不匹配: payload={payload_building}, building={building_text}")
-        if not self._covers_window(payload, start_dt=start_dt, end_dt=end_dt):
+        selection_scope = str(selected.get("selection_scope", "") or "").strip()
+        source_kind = str(selected.get("source_kind", "") or selected.get("bucket_kind", "") or "").strip().lower()
+        coverage = self._coverage_result(
+            payload,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            source_kind=source_kind,
+            selection_scope=selection_scope,
+        )
+        if not coverage["ok"]:
             raise RuntimeError(
                 "告警 JSON coverage 不足: "
                 f"window={start_time}~{end_time}, "
@@ -197,8 +245,6 @@ class AlarmJsonRepository:
                 latest_unrecovered_dt = event_dt
                 accept_description = desc_text
 
-        selection_scope = str(selected.get("selection_scope", "") or "").strip()
-        source_kind = str(selected.get("source_kind", "") or selected.get("bucket_kind", "") or "").strip().lower()
         selected_downloaded_at = str(selected.get("downloaded_at", "") or "").strip()
         emit_log(
             "[交接班][告警JSON] "
@@ -209,6 +255,8 @@ class AlarmJsonRepository:
             "[交接班][告警JSON][诊断] "
             f"building={building_text}, file={str(file_path)}, "
             f"query_start={start_time}, query_end={end_time}, "
+            f"coverage_mode={str(coverage.get('mode', '') or '-').strip() or '-'}, "
+            f"available_end={str(coverage.get('available_end', '') or '-').strip() or '-'}, "
             f"json_rows={rows_total}, parsed_time={parsed_time_count}, parse_failed={parse_failed_count}, "
             f"window_hits={window_hit_count}, unrecovered_hits={unrecovered_hit_count}, "
             f"first_event={(first_event_dt.strftime('%Y-%m-%d %H:%M:%S') if isinstance(first_event_dt, datetime) else '-')}, "

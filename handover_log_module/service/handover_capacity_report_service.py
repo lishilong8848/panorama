@@ -9,6 +9,7 @@ import openpyxl
 from openpyxl.utils import get_column_letter, range_boundaries
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
 from app.shared.utils.atomic_file import atomic_save_workbook
@@ -16,7 +17,7 @@ from app.shared.utils.artifact_naming import OUTPUT_TYPE_HANDOVER_CAPACITY, buil
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.shift_window import build_duty_window, parse_duty_date
 from handover_log_module.core.normalizers import format_number
-from handover_log_module.repository.excel_reader import load_rows
+from handover_log_module.repository.excel_reader import load_rows, load_workbook_quietly
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
 from handover_log_module.service.capacity_report_common import build_capacity_template_snapshot
 from handover_log_module.service.handover_capacity_oil_cache_service import HandoverCapacityOilCacheService
@@ -244,7 +245,7 @@ class HandoverCapacityReportService:
 
     @staticmethod
     def _read_handover_cells(output_file: str, cells: List[str], sheet_name: str = "") -> Dict[str, str]:
-        workbook = openpyxl.load_workbook(output_file, data_only=True, read_only=True)
+        workbook = load_workbook_quietly(output_file, data_only=True, read_only=True)
         try:
             ws = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook[workbook.sheetnames[0]]
             values: Dict[str, str] = {}
@@ -448,20 +449,14 @@ class HandoverCapacityReportService:
         return output
 
     def _new_night_water_client(self) -> FeishuBitableClient:
-        global_feishu = self.config.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
-        app_id = str(global_feishu.get("app_id", "") or "").strip()
-        app_secret = str(global_feishu.get("app_secret", "") or "").strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+        global_feishu = require_feishu_auth_settings(self.config)
         app_token = str(_NIGHT_WATER_SOURCE.get("app_token", "") or "").strip()
         table_id = str(_NIGHT_WATER_SOURCE.get("table_id", "") or "").strip()
         if not app_token or not table_id:
             raise ValueError("夜班耗水多维配置缺失: app_token/table_id")
         return FeishuBitableClient(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             app_token=app_token,
             calc_table_id=table_id,
             attachment_table_id=table_id,
@@ -653,7 +648,7 @@ class HandoverCapacityReportService:
             f"H17={hvdc_debug.get('formatted', '') or '-'}"
         )
 
-        workbook = openpyxl.load_workbook(template_path)
+        workbook = load_workbook_quietly(template_path)
         try:
             sheet_name = self._sheet_name(workbook, _text(self._template_cfg().get("sheet_name")))
             sheet = workbook[sheet_name]

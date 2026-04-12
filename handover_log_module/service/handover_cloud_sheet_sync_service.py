@@ -12,9 +12,11 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 from app.modules.feishu.service.sheets_client_runtime import FeishuSheetsClientRuntime
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 
 
 class HandoverCloudSheetSyncService:
+    MANAGED_BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
     FIXED_HEADER_ROW_COUNT = 21
     DYNAMIC_START_ROW = FIXED_HEADER_ROW_COUNT + 1
     FINAL_SHEET_SERIAL_RETRY_ATTEMPTS = 4
@@ -465,7 +467,7 @@ class HandoverCloudSheetSyncService:
         try:
             emit_log(f"[交接班][云表最终上传] 开始 building={building}, output={output_file.name}")
             workbook_started = time.perf_counter()
-            workbook = openpyxl.load_workbook(output_file, data_only=False)
+            workbook = load_workbook_quietly(output_file, data_only=False)
             self._add_elapsed_ms(timings, "workbook_ms", workbook_started)
             try:
                 snapshot_started = time.perf_counter()
@@ -479,6 +481,7 @@ class HandoverCloudSheetSyncService:
                 client=client,
                 spreadsheet_token=spreadsheet_token,
                 sheet_title=target_sheet_title,
+                target_index=self._target_sheet_index(building),
                 snapshot=snapshot,
                 previous_cloud_sync=previous_cloud_sync if isinstance(previous_cloud_sync, dict) else {},
                 emit_log=emit_log,
@@ -703,12 +706,37 @@ class HandoverCloudSheetSyncService:
         max_row = max(1, int(worksheet.max_row or 1))
         max_column = max(1, int(worksheet.max_column or 1))
         values: List[List[Any]] = []
+        row_heights: List[Dict[str, int]] = []
+        default_row_height = float(getattr(getattr(worksheet, "sheet_format", object()), "defaultRowHeight", 15.0) or 15.0)
         for row_idx in range(1, max_row + 1):
             value_row: List[Any] = []
             for col_idx in range(1, max_column + 1):
                 cell = worksheet.cell(row=row_idx, column=col_idx)
                 value_row.append(self._display_value_for_handover_cell(worksheet, cell))
             values.append(value_row)
+            row_dimension = worksheet.row_dimensions[row_idx]
+            row_heights.append(
+                {
+                    "start_index": row_idx - 1,
+                    "end_index": row_idx,
+                    "pixel_size": self._row_height_to_pixels(row_dimension.height if row_dimension.height is not None else default_row_height),
+                }
+            )
+
+        column_widths: List[Dict[str, int]] = []
+        default_column_width = float(getattr(getattr(worksheet, "sheet_format", object()), "defaultColWidth", 8.43) or 8.43)
+        for col_idx in range(1, max_column + 1):
+            letter = get_column_letter(col_idx)
+            column_dimension = worksheet.column_dimensions[letter]
+            column_widths.append(
+                {
+                    "start_index": col_idx - 1,
+                    "end_index": col_idx,
+                    "pixel_size": self._column_width_to_pixels(
+                        column_dimension.width if column_dimension.width is not None else default_column_width
+                    ),
+                }
+            )
 
         fixed_header_merges = []
         dynamic_merges = []
@@ -733,6 +761,8 @@ class HandoverCloudSheetSyncService:
             "fixed_header_merges": self._normalize_merge_ranges(fixed_header_merges),
             "dynamic_merges": self._normalize_merge_ranges(dynamic_merges),
             "dynamic_merge_signature": self._build_dynamic_merge_signature(dynamic_merges),
+            "row_heights": self._compress_dimension_ranges(row_heights),
+            "column_widths": self._compress_dimension_ranges(column_widths),
         }
 
     def _ensure_target_sheets(
@@ -742,10 +772,105 @@ class HandoverCloudSheetSyncService:
         spreadsheet_token: str,
         sheet_cache: Dict[str, List[Dict[str, Any]]] | None = None,
     ) -> None:
-        for index, building in enumerate(("A楼", "B楼", "C楼", "D楼", "E楼")):
+        for index, building in enumerate(self.MANAGED_BUILDINGS):
             title = self._target_sheet_title(building)
             client.dedupe_named_sheets(spreadsheet_token, title, sheet_cache=sheet_cache)
             client.get_or_create_named_sheet(spreadsheet_token, title, index=index, sheet_cache=sheet_cache)
+
+    def _target_sheet_index(self, building: str) -> int:
+        normalized_building = str(building or "").strip()
+        try:
+            return self.MANAGED_BUILDINGS.index(normalized_building)
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _find_sheet_by_title(sheets: List[Dict[str, Any]], title: str) -> Dict[str, Any]:
+        normalized_title = str(title or "").strip()
+        matched = [dict(item) for item in sheets if str(item.get("title", "")).strip() == normalized_title]
+        if not matched:
+            return {}
+        matched.sort(key=lambda item: int(item.get("index", 0) or 0))
+        return matched[0]
+
+    @staticmethod
+    def _find_sheet_by_id(sheets: List[Dict[str, Any]], sheet_id: str) -> Dict[str, Any]:
+        normalized_sheet_id = str(sheet_id or "").strip()
+        for item in sheets:
+            if str(item.get("sheet_id", "")).strip() == normalized_sheet_id:
+                return dict(item)
+        return {}
+
+    @staticmethod
+    def _build_shadow_sheet_title(sheet_title: str, kind: str) -> str:
+        normalized_title = str(sheet_title or "").strip()
+        normalized_kind = str(kind or "").strip().lower() or "tmp"
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        candidate = f"{normalized_title}__{normalized_kind}__{stamp}"
+        return candidate[:90]
+
+    def _cleanup_shadow_sheets(
+        self,
+        *,
+        client: FeishuSheetsClientRuntime,
+        spreadsheet_token: str,
+        sheet_title: str,
+        emit_log: Callable[[str], None],
+        sheet_cache: Dict[str, List[Dict[str, Any]]] | None = None,
+    ) -> None:
+        normalized_title = str(sheet_title or "").strip()
+        if not normalized_title:
+            return
+        tmp_prefix = f"{normalized_title}__tmp__"
+        old_prefix = f"{normalized_title}__old__"
+        sheets = client.query_sheets(spreadsheet_token, sheet_cache=sheet_cache, force_refresh=True)
+        for item in sheets:
+            title = str(item.get("title", "")).strip()
+            if not (title.startswith(tmp_prefix) or title.startswith(old_prefix)):
+                continue
+            shadow_sheet_id = str(item.get("sheet_id", "")).strip()
+            if not shadow_sheet_id:
+                continue
+            emit_log(f"[交接班][云表重建] 清理遗留临时页 sheet={title}")
+            client.delete_sheet(spreadsheet_token, shadow_sheet_id, sheet_cache=sheet_cache)
+
+    def _prepare_rebuild_target_sheet(
+        self,
+        *,
+        client: FeishuSheetsClientRuntime,
+        spreadsheet_token: str,
+        sheet_title: str,
+        index: int,
+        emit_log: Callable[[str], None],
+        sheet_cache: Dict[str, List[Dict[str, Any]]] | None = None,
+    ) -> Dict[str, Any]:
+        self._cleanup_shadow_sheets(
+            client=client,
+            spreadsheet_token=spreadsheet_token,
+            sheet_title=sheet_title,
+            emit_log=emit_log,
+            sheet_cache=sheet_cache,
+        )
+        deduped_target = client.dedupe_named_sheets(spreadsheet_token, sheet_title, sheet_cache=sheet_cache)
+        if deduped_target:
+            temp_title = self._build_shadow_sheet_title(sheet_title, "tmp")
+            emit_log(f"[交接班][云表重建] 复制正式页为临时页 source={sheet_title}, temp={temp_title}")
+            temp_sheet = client.copy_sheet(
+                spreadsheet_token,
+                source_sheet_id=str(deduped_target.get("sheet_id", "")).strip(),
+                title=temp_title,
+                sheet_cache=sheet_cache,
+            )
+            return {"target_sheet": deduped_target, "temp_sheet": temp_sheet}
+        temp_title = self._build_shadow_sheet_title(sheet_title, "tmp")
+        emit_log(f"[交接班][云表重建] 正式页不存在，创建空白临时页 temp={temp_title}")
+        temp_sheet = client.add_sheet(
+            spreadsheet_token,
+            temp_title,
+            index=index,
+            sheet_cache=sheet_cache,
+        )
+        return {"target_sheet": {}, "temp_sheet": temp_sheet}
 
     def _ensure_named_target_sheet(
         self,
@@ -804,6 +929,178 @@ class HandoverCloudSheetSyncService:
         return hashlib.sha1(
             json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
+
+    def _apply_dimension_ranges(
+        self,
+        *,
+        client: FeishuSheetsClientRuntime,
+        spreadsheet_token: str,
+        sheet_id: str,
+        major_dimension: str,
+        items: List[Dict[str, int]],
+        timings: Dict[str, int] | None = None,
+    ) -> None:
+        normalized_items = self._compress_dimension_ranges(items)
+        for item in normalized_items:
+            started = time.perf_counter()
+            client.update_dimension_range(
+                spreadsheet_token,
+                sheet_id=sheet_id,
+                major_dimension=major_dimension,
+                start_index=int(item.get("start_index", 0) or 0),
+                end_index=int(item.get("end_index", 0) or 0),
+                pixel_size=int(item.get("pixel_size", 20) or 20),
+            )
+            self._add_elapsed_ms(timings, "dimension_ms", started)
+
+    def _resize_rebuild_sheet(
+        self,
+        *,
+        client: FeishuSheetsClientRuntime,
+        spreadsheet_token: str,
+        sheet_id: str,
+        current_rows: int,
+        current_cols: int,
+        target_rows: int,
+        target_cols: int,
+        timings: Dict[str, int] | None = None,
+    ) -> None:
+        if current_rows < target_rows:
+            started = time.perf_counter()
+            client.add_dimension(
+                spreadsheet_token,
+                sheet_id=sheet_id,
+                major_dimension="ROWS",
+                length=target_rows - current_rows,
+            )
+            self._add_elapsed_ms(timings, "dimension_ms", started)
+        elif current_rows > target_rows:
+            started = time.perf_counter()
+            client.delete_dimension(
+                spreadsheet_token,
+                sheet_id=sheet_id,
+                major_dimension="ROWS",
+                start_index=target_rows,
+                end_index=current_rows,
+            )
+            self._add_elapsed_ms(timings, "dimension_ms", started)
+
+        if current_cols < target_cols:
+            started = time.perf_counter()
+            client.add_dimension(
+                spreadsheet_token,
+                sheet_id=sheet_id,
+                major_dimension="COLUMNS",
+                length=target_cols - current_cols,
+            )
+            self._add_elapsed_ms(timings, "dimension_ms", started)
+        elif current_cols > target_cols:
+            started = time.perf_counter()
+            client.delete_dimension(
+                spreadsheet_token,
+                sheet_id=sheet_id,
+                major_dimension="COLUMNS",
+                start_index=target_cols,
+                end_index=current_cols,
+            )
+            self._add_elapsed_ms(timings, "dimension_ms", started)
+
+    def _rebuild_temp_sheet(
+        self,
+        *,
+        client: FeishuSheetsClientRuntime,
+        spreadsheet_token: str,
+        temp_sheet: Dict[str, Any],
+        snapshot: Dict[str, Any],
+        emit_log: Callable[[str], None],
+        sheet_cache: Dict[str, List[Dict[str, Any]]] | None = None,
+        timings: Dict[str, int] | None = None,
+    ) -> Dict[str, Any]:
+        temp_sheet_id = str(temp_sheet.get("sheet_id", "")).strip()
+        if not temp_sheet_id:
+            raise RuntimeError("临时 sheet 缺少 sheet_id")
+        temp_sheet_title = str(temp_sheet.get("title", "")).strip() or temp_sheet_id
+        existing_merges = self._normalize_merge_ranges(temp_sheet.get("merges", []))
+        if existing_merges:
+            merge_started = time.perf_counter()
+            client.batch_unmerge_cells(spreadsheet_token, temp_sheet_id, existing_merges)
+            self._add_elapsed_ms(timings, "merge_ms", merge_started)
+
+        target_rows = max(1, int(snapshot.get("max_row", 1) or 1))
+        target_cols = max(1, int(snapshot.get("max_column", 1) or 1))
+        self._resize_rebuild_sheet(
+            client=client,
+            spreadsheet_token=spreadsheet_token,
+            sheet_id=temp_sheet_id,
+            current_rows=max(1, int(temp_sheet.get("row_count", 0) or 1)),
+            current_cols=max(1, int(temp_sheet.get("column_count", 0) or 1)),
+            target_rows=target_rows,
+            target_cols=target_cols,
+            timings=timings,
+        )
+        refreshed_sheet = self._find_sheet_by_id(
+            client.query_sheets(spreadsheet_token, sheet_cache=sheet_cache, force_refresh=True),
+            temp_sheet_id,
+        )
+        if refreshed_sheet:
+            temp_sheet = refreshed_sheet
+
+        clear_started = time.perf_counter()
+        client.batch_clear_values(
+            spreadsheet_token,
+            self._range_name_by_sheet_id(temp_sheet_id, target_rows, target_cols),
+            target_rows,
+            target_cols,
+        )
+        self._add_elapsed_ms(timings, "clear_ms", clear_started)
+
+        self._apply_dimension_ranges(
+            client=client,
+            spreadsheet_token=spreadsheet_token,
+            sheet_id=temp_sheet_id,
+            major_dimension="ROWS",
+            items=snapshot.get("row_heights", []),
+            timings=timings,
+        )
+        self._apply_dimension_ranges(
+            client=client,
+            spreadsheet_token=spreadsheet_token,
+            sheet_id=temp_sheet_id,
+            major_dimension="COLUMNS",
+            items=snapshot.get("column_widths", []),
+            timings=timings,
+        )
+
+        current_fixed_merges = self._normalize_merge_ranges(snapshot.get("fixed_header_merges", []))
+        current_dynamic_merges = self._normalize_merge_ranges(snapshot.get("dynamic_merges", []))
+        effective_merges = self._merge_union(current_fixed_merges, current_dynamic_merges)
+        if effective_merges:
+            merge_started = time.perf_counter()
+            client.batch_merge_cells(spreadsheet_token, temp_sheet_id, effective_merges)
+            self._add_elapsed_ms(timings, "merge_ms", merge_started)
+
+        value_started = time.perf_counter()
+        value_ranges = self._build_writable_ranges(
+            sheet_id=temp_sheet_id,
+            values=snapshot.get("values", []),
+            effective_merges=effective_merges,
+            clear_rows=target_rows,
+            clear_cols=target_cols,
+        )
+        if value_ranges:
+            client.batch_update_values(spreadsheet_token, value_ranges)
+        self._add_elapsed_ms(timings, "value_ms", value_started)
+        emit_log(
+            f"[交接班][云表重建] 临时页构建完成 sheet={temp_sheet_title}, rows={target_rows}, cols={target_cols}"
+        )
+        return {
+            "sheet_id": temp_sheet_id,
+            "sheet_title": temp_sheet_title,
+            "synced_row_count": target_rows,
+            "synced_column_count": target_cols,
+            "synced_merges": current_dynamic_merges,
+            "dynamic_merge_signature": str(snapshot.get("dynamic_merge_signature", "")).strip(),
+        }
 
     def _build_writable_ranges(
         self,
@@ -867,106 +1164,96 @@ class HandoverCloudSheetSyncService:
         client: FeishuSheetsClientRuntime,
         spreadsheet_token: str,
         sheet_title: str,
+        target_index: int,
         snapshot: Dict[str, Any],
         previous_cloud_sync: Dict[str, Any],
         emit_log: Callable[[str], None],
         sheet_cache: Dict[str, List[Dict[str, Any]]] | None = None,
         timings: Dict[str, int] | None = None,
     ) -> Dict[str, Any]:
+        del previous_cloud_sync
+        self._cleanup_shadow_sheets(
+            client=client,
+            spreadsheet_token=spreadsheet_token,
+            sheet_title=sheet_title,
+            emit_log=emit_log,
+            sheet_cache=sheet_cache,
+        )
         ensure_started = time.perf_counter()
         target_sheet = self._ensure_named_target_sheet(
             client=client,
             spreadsheet_token=spreadsheet_token,
             sheet_title=sheet_title,
+            index=target_index,
             sheet_cache=sheet_cache,
         )
         self._add_elapsed_ms(timings, "ensure_sheet_ms", ensure_started)
-        sheet_id = str(target_sheet.get("sheet_id", "")).strip()
-        if not sheet_id:
+        target_sheet_id = str(target_sheet.get("sheet_id", "")).strip()
+        if not target_sheet_id:
             raise RuntimeError(f"目标 sheet 缺少 sheet_id: {sheet_title}")
 
-        current_rows = max(1, int(snapshot.get("max_row", 1) or 1))
-        current_cols = max(1, int(snapshot.get("max_column", 1) or 1))
-        previous_rows = max(0, int(previous_cloud_sync.get("synced_row_count", 0) or 0))
-        previous_cols = max(0, int(previous_cloud_sync.get("synced_column_count", 0) or 0))
-        clear_rows = max(previous_rows, current_rows, 1)
-        clear_cols = max(previous_cols, current_cols, 1)
-        current_capacity_rows = max(0, int(target_sheet.get("row_count", 0) or 0))
-        current_capacity_cols = max(0, int(target_sheet.get("column_count", 0) or 0))
-        if current_capacity_rows < clear_rows:
-            dimension_started = time.perf_counter()
-            client.add_dimension(
-                spreadsheet_token,
-                sheet_id=sheet_id,
-                major_dimension="ROWS",
-                length=clear_rows - current_capacity_rows,
-            )
-            self._add_elapsed_ms(timings, "dimension_ms", dimension_started)
-            current_capacity_rows = clear_rows
-        if current_capacity_cols < clear_cols:
-            dimension_started = time.perf_counter()
-            client.add_dimension(
-                spreadsheet_token,
-                sheet_id=sheet_id,
-                major_dimension="COLUMNS",
-                length=clear_cols - current_capacity_cols,
-            )
-            self._add_elapsed_ms(timings, "dimension_ms", dimension_started)
-            current_capacity_cols = clear_cols
-        if isinstance(sheet_cache, dict):
-            cache_key = str(spreadsheet_token or "").strip()
-            cached_items = sheet_cache.get(cache_key, [])
-            refreshed_items = []
-            for item in cached_items:
-                current_item = dict(item)
-                if str(current_item.get("sheet_id", "")).strip() == sheet_id:
-                    current_item["row_count"] = max(current_capacity_rows, clear_rows)
-                    current_item["column_count"] = max(current_capacity_cols, clear_cols)
-                refreshed_items.append(current_item)
-            if refreshed_items:
-                sheet_cache[cache_key] = refreshed_items
+        existing_merges = self._normalize_merge_ranges(target_sheet.get("merges", []))
+        if existing_merges:
+            merge_started = time.perf_counter()
+            client.batch_unmerge_cells(spreadsheet_token, target_sheet_id, existing_merges)
+            self._add_elapsed_ms(timings, "merge_ms", merge_started)
 
-        previous_dynamic_merges = self._normalize_merge_ranges(previous_cloud_sync.get("synced_merges", []))
+        target_rows = max(1, int(snapshot.get("max_row", 1) or 1))
+        target_cols = max(1, int(snapshot.get("max_column", 1) or 1))
+        self._resize_rebuild_sheet(
+            client=client,
+            spreadsheet_token=spreadsheet_token,
+            sheet_id=target_sheet_id,
+            current_rows=max(1, int(target_sheet.get("row_count", 0) or 1)),
+            current_cols=max(1, int(target_sheet.get("column_count", 0) or 1)),
+            target_rows=target_rows,
+            target_cols=target_cols,
+            timings=timings,
+        )
+        refreshed_sheet = self._find_sheet_by_id(
+            client.query_sheets(spreadsheet_token, sheet_cache=sheet_cache, force_refresh=True),
+            target_sheet_id,
+        )
+        if refreshed_sheet:
+            target_sheet = refreshed_sheet
+
+        clear_started = time.perf_counter()
+        client.batch_clear_values(
+            spreadsheet_token,
+            self._range_name_by_sheet_id(target_sheet_id, target_rows, target_cols),
+            target_rows,
+            target_cols,
+        )
+        self._add_elapsed_ms(timings, "clear_ms", clear_started)
+
         current_fixed_merges = self._normalize_merge_ranges(snapshot.get("fixed_header_merges", []))
         current_dynamic_merges = self._normalize_merge_ranges(snapshot.get("dynamic_merges", []))
-        current_dynamic_signature = str(snapshot.get("dynamic_merge_signature", "")).strip()
-        previous_dynamic_signature = str(previous_cloud_sync.get("dynamic_merge_signature", "")).strip()
-        dynamic_merge_changed = current_dynamic_signature != previous_dynamic_signature
-
-        emit_log(
-            f"[交接班][云表覆写] building={sheet_title}, spreadsheet={spreadsheet_token}, "
-            f"sheet={sheet_title}, clear_rows={clear_rows}, clear_cols={clear_cols}"
-        )
-        emit_log(f"[交接班][云表覆写] dynamic_merge_changed={str(dynamic_merge_changed).lower()}")
-
-        if dynamic_merge_changed:
+        effective_merges = self._merge_union(current_fixed_merges, current_dynamic_merges)
+        if effective_merges:
             merge_started = time.perf_counter()
-            if previous_dynamic_merges:
-                client.batch_unmerge_cells(spreadsheet_token, sheet_id, previous_dynamic_merges)
-            if current_dynamic_merges:
-                client.batch_merge_cells(spreadsheet_token, sheet_id, current_dynamic_merges)
+            client.batch_merge_cells(spreadsheet_token, target_sheet_id, effective_merges)
             self._add_elapsed_ms(timings, "merge_ms", merge_started)
 
         value_started = time.perf_counter()
         value_ranges = self._build_writable_ranges(
-            sheet_id=sheet_id,
+            sheet_id=target_sheet_id,
             values=snapshot.get("values", []),
-            effective_merges=self._merge_union(current_fixed_merges, current_dynamic_merges),
-            clear_rows=clear_rows,
-            clear_cols=clear_cols,
+            effective_merges=effective_merges,
+            clear_rows=target_rows,
+            clear_cols=target_cols,
         )
         if value_ranges:
             client.batch_update_values(spreadsheet_token, value_ranges)
         self._add_elapsed_ms(timings, "value_ms", value_started)
-
         emit_log(
-            f"[交接班][云表覆写] 覆写完成 building={sheet_title}, sheet={sheet_title}, rows={current_rows}, cols={current_cols}"
+            f"[交接班][云表重建] 原页重建完成 sheet={sheet_title}, rows={target_rows}, cols={target_cols}"
         )
         return {
-            "sheet_id": sheet_id,
+            "sheet_id": target_sheet_id,
             "sheet_title": sheet_title,
-            "synced_row_count": current_rows,
-            "synced_column_count": current_cols,
+            "synced_row_count": target_rows,
+            "synced_column_count": target_cols,
             "synced_merges": current_dynamic_merges,
-            "dynamic_merge_signature": current_dynamic_signature,
+            "dynamic_merge_signature": str(snapshot.get("dynamic_merge_signature", "")).strip(),
+            "rebuild_mode": "overwrite_sheet",
         }

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 
 
 class DailyReportBitableExportError(RuntimeError):
@@ -81,21 +82,15 @@ class HandoverDailyReportBitableExportService:
         return cfg
 
     def _new_client(self, cfg: Dict[str, Any]) -> FeishuBitableClient:
-        global_feishu = self.handover_cfg.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
+        global_feishu = require_feishu_auth_settings(self.handover_cfg)
         target = cfg.get("target", {})
-        app_id = str(global_feishu.get("app_id", "") or "").strip()
-        app_secret = str(global_feishu.get("app_secret", "") or "").strip()
         app_token = str(target.get("app_token", "") or "").strip()
         table_id = str(target.get("table_id", "") or "").strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
         if not app_token or not table_id:
             raise ValueError("日报多维表配置缺失: app_token/table_id")
         return FeishuBitableClient(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             app_token=app_token,
             calc_table_id=table_id,
             attachment_table_id=table_id,

@@ -602,6 +602,8 @@ function applyHandoverDefaults(cfg) {
   setNumberDefault(changeManagement.source, "page_size", 500);
   setNumberDefault(changeManagement.source, "max_records", 5000);
   setStringDefault(changeManagement.fields, "building", "楼栋");
+  setStringDefault(changeManagement.fields, "start_time", "变更开始时间");
+  setStringDefault(changeManagement.fields, "end_time", "变更结束时间");
   setStringDefault(changeManagement.fields, "updated_time", "更新最新的时间");
   setStringDefault(changeManagement.fields, "change_level", "阿里-变更等级");
   setStringDefault(changeManagement.fields, "process_updates", "过程更新时间");
@@ -673,6 +675,7 @@ function applyHandoverDefaults(cfg) {
   setNumberDefault(maintenanceManagement.source, "page_size", 500);
   setNumberDefault(maintenanceManagement.source, "max_records", 5000);
   setStringDefault(maintenanceManagement.fields, "building", "楼栋");
+  setStringDefault(maintenanceManagement.fields, "start_time", "实际开始时间");
   setStringDefault(maintenanceManagement.fields, "updated_time", "最新更新时间");
   setStringDefault(maintenanceManagement.fields, "actual_end_time", "实际结束时间");
   setStringDefault(maintenanceManagement.fields, "item", "名称");
@@ -730,6 +733,7 @@ function applyHandoverDefaults(cfg) {
     setStringDefault(current, "label", label);
     setStringDefault(current, "table_id", tableId);
     setStringDefault(current.fields, "building", "楼栋");
+    setStringDefault(current.fields, "actual_start_time", "实际开始时间");
     setStringDefault(current.fields, "actual_end_time", "实际结束时间");
     setStringDefault(current.fields, "description", descriptionField);
     setStringDefault(current.fields, "completion", completionField);
@@ -903,6 +907,12 @@ function applyHandoverDefaults(cfg) {
   setNumberDefault(reviewUi, "poll_interval_sec", 5);
   setBooleanDefault(reviewUi, "bind_latest_session", true);
   setStringDefault(reviewUi, "public_base_url", "");
+  reviewUi.review_link_recipients_by_building =
+    reviewUi.review_link_recipients_by_building &&
+    typeof reviewUi.review_link_recipients_by_building === "object" &&
+    !Array.isArray(reviewUi.review_link_recipients_by_building)
+      ? reviewUi.review_link_recipients_by_building
+      : {};
   if (!Array.isArray(reviewUi.section_hidden_columns) || !reviewUi.section_hidden_columns.length) {
     reviewUi.section_hidden_columns = ["I"];
   } else {
@@ -985,6 +995,9 @@ function applyHandoverDefaults(cfg) {
   for (const building of ["A楼", "B楼", "C楼", "D楼", "E楼"]) {
     if (!Array.isArray(cellRules.building_rows[building])) {
       cellRules.building_rows[building] = [];
+    }
+    if (!Array.isArray(reviewUi.review_link_recipients_by_building[building])) {
+      reviewUi.review_link_recipients_by_building[building] = [];
     }
   }
 

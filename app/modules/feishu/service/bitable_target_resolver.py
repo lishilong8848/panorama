@@ -7,6 +7,7 @@ import urllib.parse
 from datetime import datetime
 from typing import Any, Dict
 
+from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
 from app.modules.feishu.service.sheets_client_runtime import FeishuSheetsClientRuntime
 
 
@@ -152,11 +153,20 @@ class BitableTargetResolver:
         request_retry_count: int = 3,
         request_retry_interval_sec: float = 1.0,
     ) -> None:
-        self.app_id = str(app_id or "").strip()
-        self.app_secret = str(app_secret or "").strip()
-        self.timeout = max(1, int(timeout or 20))
-        self.request_retry_count = max(0, int(request_retry_count or 0))
-        self.request_retry_interval_sec = max(0.0, float(request_retry_interval_sec or 0.0))
+        auth = resolve_feishu_auth_settings(
+            {
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "timeout": timeout,
+                "request_retry_count": request_retry_count,
+                "request_retry_interval_sec": request_retry_interval_sec,
+            }
+        )
+        self.app_id = str(auth.get("app_id", "") or "").strip()
+        self.app_secret = str(auth.get("app_secret", "") or "").strip()
+        self.timeout = max(1, int(auth.get("timeout", 20) or 20))
+        self.request_retry_count = max(0, int(auth.get("request_retry_count", 0) or 0))
+        self.request_retry_interval_sec = max(0.0, float(auth.get("request_retry_interval_sec", 0.0) or 0.0))
 
     @staticmethod
     def _now_text() -> str:

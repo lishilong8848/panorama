@@ -28,7 +28,7 @@ def parse_time_or_none(value: str) -> datetime | None:
 
 
 def safe_load_json(path: Path, default_obj: Dict[str, Any]) -> Dict[str, Any]:
-    if not path.exists():
+    if not _safe_path_exists(path):
         return copy.deepcopy(default_obj)
     try:
         with path.open("r", encoding="utf-8-sig") as f:
@@ -43,6 +43,20 @@ def safe_load_json(path: Path, default_obj: Dict[str, Any]) -> Dict[str, Any]:
 def safe_save_json(path: Path, data: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _safe_path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _safe_path_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
 
 
 def _resolve_runtime_state_root(
@@ -240,12 +254,15 @@ def cleanup_resume_index(
         if not checkpoint_text:
             continue
         checkpoint_file = Path(checkpoint_text)
-        if not checkpoint_file.exists():
+        if not _safe_path_exists(checkpoint_file):
             continue
 
         updated_at = parse_time_or_none(str(item.get("updated_at", "")))
         if updated_at is None:
-            updated_at = datetime.fromtimestamp(checkpoint_file.stat().st_mtime)
+            checkpoint_mtime = _safe_path_mtime(checkpoint_file)
+            if checkpoint_mtime is None:
+                continue
+            updated_at = datetime.fromtimestamp(checkpoint_mtime)
         if now - updated_at > timedelta(days=retention_days):
             continue
         kept.append(item)
@@ -333,7 +350,7 @@ def save_checkpoint_and_index(
 
 
 def load_checkpoint_by_path(checkpoint_file: Path) -> Dict[str, Any]:
-    if not checkpoint_file.exists():
+    if not _safe_path_exists(checkpoint_file):
         raise FileNotFoundError(f"checkpoint不存在: {checkpoint_file}")
     obj = safe_load_json(checkpoint_file, {})
     if not obj:
@@ -371,7 +388,7 @@ def list_pending_upload_runs_internal(
         if not isinstance(item, dict):
             continue
         checkpoint_file = Path(str(item.get("checkpoint_path", "")).strip())
-        if not checkpoint_file.exists():
+        if not _safe_path_exists(checkpoint_file):
             continue
         try:
             checkpoint = load_checkpoint_by_path(checkpoint_file)

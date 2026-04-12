@@ -106,6 +106,38 @@ def _resolve_runtime_state_root(common_paths: Dict[str, Any]) -> str:
     return explicit_root or default_root
 
 
+def _backfill_common_feishu_auth_from_legacy(cfg: Dict[str, Any]) -> None:
+    common = _dict(cfg.get("common"))
+    current_auth = _dict(common.get("feishu_auth"))
+    current_app_id = str(current_auth.get("app_id", "") or "").strip()
+    current_app_secret = str(current_auth.get("app_secret", "") or "").strip()
+    if current_app_id and current_app_secret:
+        cfg["common"] = common
+        return
+
+    candidates: List[Dict[str, Any]] = []
+    common_legacy = _dict(common.get("feishu"))
+    if common_legacy:
+        candidates.append(common_legacy)
+    top_level_legacy = _dict(cfg.get("feishu"))
+    if top_level_legacy:
+        candidates.append(top_level_legacy)
+
+    for candidate in candidates:
+        app_id = str(candidate.get("app_id", "") or "").strip()
+        app_secret = str(candidate.get("app_secret", "") or "").strip()
+        if not app_id or not app_secret:
+            continue
+        current_auth["app_id"] = app_id
+        current_auth["app_secret"] = app_secret
+        for key in ("request_retry_count", "request_retry_interval_sec", "timeout"):
+            if key in candidate:
+                current_auth[key] = candidate.get(key)
+        common["feishu_auth"] = current_auth
+        break
+    cfg["common"] = common
+
+
 def _apply_single_root_paths(common: Dict[str, Any], features: Dict[str, Any]) -> None:
     common_paths = _dict(common.get("paths"))
     business_root = _resolve_business_root(common_paths)
@@ -421,6 +453,7 @@ def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
     raw = copy.deepcopy(raw_cfg) if isinstance(raw_cfg, dict) else {}
     if is_v3_config(raw):
         cfg = deep_merge_defaults(raw, DEFAULT_CONFIG_V3)
+        _backfill_common_feishu_auth_from_legacy(cfg)
         common = _dict(cfg.get("common"))
         features = _dict(cfg.get("features"))
         deployment = deep_merge_defaults(_dict(common.get("deployment")), _dict(DEFAULT_CONFIG_V3["common"].get("deployment")))

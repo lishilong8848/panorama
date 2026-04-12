@@ -23,6 +23,12 @@ function normalizeDashboardRoleMode(roleMode) {
   return resolveDeploymentRoleMode(roleMode) || "external";
 }
 
+function isAbortLikeText(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return false;
+  return text.includes("aborterror") || text.includes("signal is aborted") || text === "abort";
+}
+
 function filterDashboardMenuGroupsByRole(roleMode) {
   const normalized = normalizeDashboardRoleMode(roleMode);
   const groups = getDashboardMenuGroupsForRole(normalized);
@@ -159,9 +165,52 @@ function mapCloudSheetSyncVm(raw) {
   return { text: "云表未执行", tone: "neutral", url, error };
 }
 
-function buildHandoverReviewRowSnapshot(reviewRows, reviewLinks) {
+function extractHandoverRecipientOpenIds(rawItems) {
+  const rows = Array.isArray(rawItems) ? rawItems : [];
+  const seen = new Set();
+  const openIds = [];
+  rows.forEach((raw) => {
+    const openId = typeof raw === "string"
+      ? String(raw || "").trim()
+      : String(raw?.open_id || "").trim();
+    if (!openId || seen.has(openId)) return;
+    seen.add(openId);
+    openIds.push(openId);
+  });
+  return openIds.sort();
+}
+
+function buildHandoverRecipientStatusMap(recipientStatuses) {
+  const rows = Array.isArray(recipientStatuses) ? recipientStatuses : [];
+  return new Map(
+    rows
+      .filter((item) => item && typeof item === "object" && String(item.building || "").trim())
+      .map((item) => [
+        String(item.building || "").trim(),
+        {
+          hasRecipients: Boolean(item.has_recipients),
+          recipientCount: Number.parseInt(String(item.recipient_count || 0), 10) || 0,
+          openIds: extractHandoverRecipientOpenIds(item.open_ids || []),
+          statusText: String(item.status_text || "").trim(),
+          reason: String(item.reason || "").trim(),
+          revision: Number.parseInt(String(item.revision || 0), 10) || 0,
+        },
+      ]),
+  );
+}
+
+function buildHandoverReviewRowSnapshot(
+  reviewRows,
+  reviewLinks,
+  recipientStatuses,
+  recipientDraftMap,
+  currentConfigBuilding = "",
+) {
   const normalizedReviewRows = Array.isArray(reviewRows) ? reviewRows : [];
   const normalizedReviewLinks = Array.isArray(reviewLinks) ? reviewLinks : [];
+  const normalizedRecipientDraftMap = recipientDraftMap && typeof recipientDraftMap === "object" ? recipientDraftMap : {};
+  const persistedRecipientStatusMap = buildHandoverRecipientStatusMap(recipientStatuses);
+  const currentBuildingText = String(currentConfigBuilding || "").trim();
   const reviewMap = new Map();
   const linkMap = new Map();
   const orderedBuildings = [...INTERNAL_BUILDINGS];
@@ -219,6 +268,45 @@ function buildHandoverReviewRowSnapshot(reviewRows, reviewLinks) {
     }
 
     const cloudSheetSyncVm = mapCloudSheetSyncVm(reviewRow?.cloud_sheet_sync || {});
+    const delivery = reviewRow?.review_link_delivery && typeof reviewRow.review_link_delivery === "object"
+      ? reviewRow.review_link_delivery
+      : {};
+    const deliveryStatus = String(delivery.status || "").trim().toLowerCase();
+    const persistedRecipientStatus = persistedRecipientStatusMap.get(building) || null;
+    const persistedOpenIds = Array.isArray(persistedRecipientStatus?.openIds) ? persistedRecipientStatus.openIds : [];
+    const persistedHasConfiguredRecipients = Boolean(persistedRecipientStatus?.hasRecipients) || persistedOpenIds.length > 0;
+    const draftOpenIds = extractHandoverRecipientOpenIds(normalizedRecipientDraftMap?.[building] || []);
+    const hasLocalUnsavedRecipientDraft = building === currentBuildingText
+      && JSON.stringify(draftOpenIds) !== JSON.stringify(persistedOpenIds);
+    let deliveryText = "待发送";
+    let deliveryTone = "neutral";
+    if (deliveryStatus === "pending_access") {
+      deliveryText = "待审核地址就绪";
+      deliveryTone = "warning";
+    } else if (deliveryStatus === "unconfigured") {
+      if (hasLocalUnsavedRecipientDraft) {
+        deliveryText = "本地有未保存修改";
+        deliveryTone = "warning";
+      } else if (persistedHasConfiguredRecipients) {
+        deliveryText = "已保存，可发送";
+        deliveryTone = "info";
+      } else {
+        deliveryText = "当前楼未配置接收人";
+        deliveryTone = "neutral";
+      }
+    } else if (deliveryStatus === "success") {
+      deliveryText = "发送成功";
+      deliveryTone = "success";
+    } else if (deliveryStatus === "partial_failed") {
+      deliveryText = "部分失败";
+      deliveryTone = "warning";
+    } else if (deliveryStatus === "failed") {
+      deliveryText = "发送失败";
+      deliveryTone = "danger";
+    }
+    const deliveryError = String(delivery.error || "").trim();
+    const deliveryLastSentAt = String(delivery.last_sent_at || "").trim();
+    const deliveryLastAttemptAt = String(delivery.last_attempt_at || "").trim();
     return {
       building,
       reviewRow,
@@ -233,6 +321,14 @@ function buildHandoverReviewRowSnapshot(reviewRows, reviewLinks) {
       cloudSheetUrl: cloudSheetSyncVm.url,
       hasCloudSheetUrl: Boolean(cloudSheetSyncVm.url),
       cloudSheetError: cloudSheetSyncVm.error,
+      reviewLinkDeliveryText: deliveryText,
+      reviewLinkDeliveryTone: deliveryTone,
+      reviewLinkDeliveryError: deliveryError,
+      reviewLinkDeliveryLastSentAt: deliveryLastSentAt,
+      reviewLinkDeliveryLastAttemptAt: deliveryLastAttemptAt,
+      reviewLinkRecipientPersisted: persistedHasConfiguredRecipients,
+      reviewLinkRecipientDraftDirty: hasLocalUnsavedRecipientDraft,
+      reviewLinkRecipientCount: persistedOpenIds.length,
     };
   });
 }
@@ -701,6 +797,7 @@ export function createAppState(vueApi) {
           daily_report_status: "idle",
         },
       },
+      review_recipient_status_by_building: [],
       review_links: [],
       review_base_url: "",
       review_base_url_effective: "",
@@ -1037,6 +1134,31 @@ export function createAppState(vueApi) {
       mirror_manifest_path: "",
       last_publish_at: "",
       last_publish_error: "",
+      internal_peer: {
+        available: false,
+        online: false,
+        heartbeat_at: "",
+        node_id: "",
+        node_label: "",
+        local_version: "",
+        local_release_revision: 0,
+        last_check_at: "",
+        last_result: "",
+        last_error: "",
+        update_available: false,
+        restart_required: false,
+        command: {
+          exists: false,
+          command_id: "",
+          action: "",
+          status: "",
+          requested_at: "",
+          consumed_at: "",
+          finished_at: "",
+          message: "",
+          active: false,
+        },
+      },
     },
     system_logs: [],
   });
@@ -1278,10 +1400,10 @@ export function createAppState(vueApi) {
   });
   const initialLoadingStatusText = computed(() => {
     const loadingErrors = [];
-    if (!fullHealthLoaded.value && String(healthLoadError.value || "").trim()) {
+    if (!fullHealthLoaded.value && String(healthLoadError.value || "").trim() && !isAbortLikeText(healthLoadError.value)) {
       loadingErrors.push(`运行状态加载失败：${String(healthLoadError.value || "").trim()}`);
     }
-    if (!configLoaded.value && String(configLoadError.value || "").trim()) {
+    if (!configLoaded.value && String(configLoadError.value || "").trim() && !isAbortLikeText(configLoadError.value)) {
       loadingErrors.push(`配置加载失败：${String(configLoadError.value || "").trim()}`);
     }
     if (!bootstrapReady.value) return "页面正在启动...";
@@ -2868,6 +2990,65 @@ function normalizeInternalDownloadPoolSlot(slot) {
     const lastPublishAt = String(updater.last_publish_at || "").trim();
     const manifestPath = String(updater.mirror_manifest_path || "").trim();
     const errorText = String(updater.last_publish_error || "").trim();
+    const internalPeer = updater?.internal_peer && typeof updater.internal_peer === "object"
+      ? updater.internal_peer
+      : {};
+    const internalPeerAvailable = Boolean(internalPeer.available);
+    const internalPeerOnline = Boolean(internalPeer.online);
+    const internalPeerVersion = String(internalPeer.local_version || "").trim();
+    const internalPeerRevision = Number.parseInt(String(internalPeer.local_release_revision || 0), 10) || 0;
+    const internalPeerHeartbeatAt = String(internalPeer.heartbeat_at || "").trim();
+    const internalPeerCheckAt = String(internalPeer.last_check_at || "").trim();
+    const internalPeerUpdateAvailable = Boolean(internalPeer.update_available);
+    const internalPeerLastResult = String(internalPeer.last_result || "").trim().toLowerCase();
+    const internalPeerCommand = internalPeer?.command && typeof internalPeer.command === "object"
+      ? internalPeer.command
+      : {};
+    const internalPeerCommandAction = String(internalPeerCommand.action || "").trim().toLowerCase();
+    const internalPeerCommandStatus = String(internalPeerCommand.status || "").trim().toLowerCase();
+    const internalPeerCommandActive = Boolean(internalPeerCommand.active);
+    const internalPeerVersionText = internalPeerRevision > 0
+      ? `${internalPeerVersion || "-"} / r${internalPeerRevision}`
+      : (internalPeerVersion || (internalPeerAvailable ? "未上报" : "-"));
+    const internalPeerCommandLabel = (() => {
+      if (!internalPeerCommandActive) return "无待执行命令";
+      const actionText = internalPeerCommandAction === "apply" ? "开始更新" : internalPeerCommandAction === "check" ? "检查更新" : "更新命令";
+      const statusText = internalPeerCommandStatus === "pending"
+        ? "待执行"
+        : internalPeerCommandStatus === "accepted"
+          ? "已接收"
+          : internalPeerCommandStatus === "running"
+            ? "执行中"
+            : "处理中";
+      return `${actionText}（${statusText}）`;
+    })();
+    const internalPeerCheckText = (() => {
+      if (internalPeerCheckAt) return internalPeerCheckAt;
+      if (internalPeerCommandActive && internalPeerCommandAction === "check") {
+        return internalPeerOnline ? "等待内网执行检查" : "等待内网上线执行";
+      }
+      if (internalPeerHeartbeatAt) return `${internalPeerHeartbeatAt}（心跳）`;
+      return internalPeerAvailable ? "尚未检查" : "-";
+    })();
+    const internalPeerUpdateStatusText = (() => {
+      if (!internalPeerAvailable) return "未接入";
+      if (internalPeerCommandActive && internalPeerCommandAction === "check") {
+        return internalPeerOnline ? "待检查完成" : "待内网上线检查";
+      }
+      if (!internalPeerCheckAt && !internalPeerLastResult) return "尚未检查";
+      return internalPeerUpdateAvailable ? "已发现更新" : "未发现更新";
+    })();
+    const internalPeerStatusText = (() => {
+      if (!internalPeerAvailable) return "未接入";
+      if (internalPeerCommandActive) {
+        if (!internalPeerOnline) return "离线，已有待执行命令";
+        if (internalPeerCommandAction === "apply") return "在线，正在处理开始更新";
+        if (internalPeerCommandAction === "check") return "在线，正在处理检查更新";
+        return "在线，正在处理远程命令";
+      }
+      if (internalPeerOnline) return "在线";
+      return "离线";
+    })();
     if (!updaterEnabled && disabledReason === "source_python_run") {
       return {
         tone: "info",
@@ -2897,6 +3078,11 @@ function normalizeInternalDownloadPoolSlot(slot) {
             label: "共享镜像",
             value: "不检查",
             tone: "neutral",
+          },
+          {
+            label: "内网端状态",
+            value: internalPeerStatusText,
+            tone: internalPeerCommandActive ? "warning" : internalPeerOnline ? "success" : "neutral",
           },
         ],
       };
@@ -2931,6 +3117,16 @@ function normalizeInternalDownloadPoolSlot(slot) {
       statusText = "尚未发布批准版本";
       summaryText = "当前仍使用远端正式更新源；完成验证后会把批准版本发布到共享目录。";
     }
+    if (internalPeerCommandActive) {
+      const waitingText = internalPeerOnline ? "内网端已在线，正在处理远程命令。" : "内网端当前离线，待上线后会自动执行远程命令。";
+      if (internalPeerCommandAction === "check") {
+        summaryText = `${waitingText} 检查完成后才会刷新“内网端版本 / 最近检查 / 内网可更新”，完成前“开始更新”按钮保持不可点击。`;
+      } else if (internalPeerCommandAction === "apply") {
+        summaryText = `${waitingText} 开始更新命令完成前，不再接受新的远程更新命令。`;
+      } else {
+        summaryText = waitingText;
+      }
+    }
     return {
       tone,
       kicker: "更新镜像",
@@ -2960,7 +3156,48 @@ function normalizeInternalDownloadPoolSlot(slot) {
           value: lastPublishAt || "-",
           tone: lastPublishAt ? "info" : "neutral",
         },
+        {
+          label: "内网端状态",
+          value: internalPeerStatusText,
+          tone: internalPeerCommandActive ? "warning" : internalPeerOnline ? "success" : "neutral",
+        },
+        {
+          label: "内网端版本",
+          value: internalPeerVersionText,
+          tone: "neutral",
+        },
+        {
+          label: "内网端最近检查",
+          value: internalPeerCheckText,
+          tone: "neutral",
+        },
+        {
+          label: "远程命令",
+          value: internalPeerCommandLabel,
+          tone: internalPeerCommandActive ? "warning" : "neutral",
+        },
+        {
+          label: "内网可更新",
+          value: internalPeerUpdateStatusText,
+          tone: internalPeerUpdateAvailable
+            ? "warning"
+            : (internalPeerCommandActive && internalPeerCommandAction === "check") || (!internalPeerCheckAt && !internalPeerLastResult)
+              ? "info"
+              : "neutral",
+        },
       ],
+      internalPeer: {
+        available: internalPeerAvailable,
+        online: internalPeerOnline,
+        updateAvailable: internalPeerUpdateAvailable,
+        statusText: internalPeerStatusText,
+        command: {
+          active: internalPeerCommandActive,
+          action: internalPeerCommandAction,
+          status: internalPeerCommandStatus,
+          message: String(internalPeerCommand.message || "").trim(),
+        },
+      },
     };
   });
   const sharedRootDiagnosticOverview = computed(() => {
@@ -3061,6 +3298,11 @@ function normalizeInternalDownloadPoolSlot(slot) {
     buildHandoverReviewRowSnapshot(
       Array.isArray(health.handover?.review_status?.buildings) ? health.handover.review_status.buildings : [],
       Array.isArray(health.handover?.review_links) ? health.handover.review_links : [],
+      Array.isArray(health.handover?.review_recipient_status_by_building)
+        ? health.handover.review_recipient_status_by_building
+        : [],
+      config.value?.handover_log?.review_ui?.review_link_recipients_by_building || {},
+      handoverConfigBuilding.value,
     ),
   );
   const handoverReviewStatusItems = computed(() => {

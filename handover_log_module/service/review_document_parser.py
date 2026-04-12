@@ -12,6 +12,7 @@ from handover_log_module.core.footer_layout import (
     find_footer_inventory_layout,
 )
 from handover_log_module.core.section_layout import build_section_logical_columns, parse_category_sections
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 
 
 class ReviewDocumentParser:
@@ -297,7 +298,7 @@ class ReviewDocumentParser:
         return blocks
 
     def parse(self, output_file: str) -> Dict[str, Any]:
-        workbook = openpyxl.load_workbook(output_file)
+        workbook = load_workbook_quietly(output_file)
         try:
             sheet_name = self._sheet_name()
             ws = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 from handover_log_module.service.handover_daily_report_screenshot_service import (
     HandoverDailyReportScreenshotService,
@@ -171,6 +172,50 @@ def test_resolve_profile_directory_name_falls_back_to_default(tmp_path, monkeypa
     assert result == "Default"
 
 
+def test_profile_dir_uses_runtime_managed_browser_directory(tmp_path) -> None:
+    service = HandoverDailyReportScreenshotService(
+        {
+            "_global_paths": {
+                "runtime_state_root": str(tmp_path),
+            },
+            "daily_report_bitable_export": {},
+        }
+    )
+
+    result = service._profile_dir({"browser_kind": "edge"})
+
+    assert result == tmp_path / "handover" / "daily_report_browser" / "edge"
+
+
+def test_start_system_browser_uses_managed_runtime_user_data_dir(tmp_path, monkeypatch) -> None:
+    service = HandoverDailyReportScreenshotService(
+        {
+            "_global_paths": {
+                "runtime_state_root": str(tmp_path),
+            },
+            "daily_report_bitable_export": {},
+        }
+    )
+    edge_meta = service._build_browser_meta("edge", executable_path="msedge.exe")
+    captured: dict[str, object] = {}
+
+    class _FakePopen:
+        def __init__(self, command):  # noqa: ANN001
+            captured["command"] = list(command)
+
+    monkeypatch.setattr(service, "_resolve_system_browser", lambda prefer_running_debug=False: edge_meta)
+    monkeypatch.setattr(service, "_wait_for_debug_endpoint", lambda timeout_sec=15.0: True)
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    ok, error = service._start_system_browser(url="https://example.com", emit_log=lambda *_args: None)
+
+    assert ok is True
+    assert error == ""
+    command = [str(item) for item in (captured.get("command") or [])]
+    assert any(str(tmp_path / "handover" / "daily_report_browser" / "edge") in item for item in command)
+    assert "--remote-debugging-port=29333" in command
+
+
 def test_check_auth_status_preserves_debug_port_failure_state(tmp_path, monkeypatch) -> None:
     service = HandoverDailyReportScreenshotService(
         {
@@ -195,3 +240,22 @@ def test_check_auth_status_preserves_debug_port_failure_state(tmp_path, monkeypa
 
     assert result["status"] == "browser_unavailable"
     assert "browser_debug_port_unavailable" in str(result["error"])
+
+
+def test_open_login_browser_logs_failure_reason(monkeypatch) -> None:
+    service = _service()
+    browser_meta = service._build_browser_meta("edge", executable_path="msedge.exe")
+    logs: list[str] = []
+
+    monkeypatch.setattr(service, "_resolve_system_browser", lambda prefer_running_debug=True: browser_meta)
+
+    async def _failing_to_thread(func, *args, **kwargs):  # noqa: ANN001
+        return False, "browser_debug_port_unavailable: 调试端口当前被Google Chrome占用", ""
+
+    monkeypatch.setattr(asyncio, "to_thread", _failing_to_thread)
+
+    result = asyncio.run(service.open_login_browser_async(emit_log=logs.append))
+
+    assert result["ok"] is False
+    assert any("开始初始化" in line for line in logs)
+    assert any("初始化失败" in line and "browser_debug_port_unavailable" in line for line in logs)

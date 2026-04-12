@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from pipeline_utils import get_app_dir
 
@@ -241,17 +242,10 @@ class SystemAlertLogUploadService:
 
     def _build_client(self) -> FeishuBitableClient:
         config = self._config_getter() if callable(self._config_getter) else {}
-        common = config.get("common", {}) if isinstance(config, dict) else {}
-        feishu_auth = common.get("feishu_auth", {}) if isinstance(common, dict) else {}
-        if not isinstance(feishu_auth, dict):
-            feishu_auth = {}
-        app_id = str(feishu_auth.get("app_id", "") or "").strip()
-        app_secret = str(feishu_auth.get("app_secret", "") or "").strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+        feishu_auth = require_feishu_auth_settings(config)
         return FeishuBitableClient(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(feishu_auth.get("app_id", "") or "").strip(),
+            app_secret=str(feishu_auth.get("app_secret", "") or "").strip(),
             app_token=self.TARGET_APP_TOKEN,
             calc_table_id=self.TARGET_TABLE_ID,
             attachment_table_id=self.TARGET_TABLE_ID,

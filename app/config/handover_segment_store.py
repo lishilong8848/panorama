@@ -240,6 +240,15 @@ def _clear_segment_backed_handover_fields(handover: Dict[str, Any]) -> Dict[str,
         }
     else:
         review_ui["footer_inventory_defaults_by_building"] = {}
+    review_link_recipients = review_ui.get("review_link_recipients_by_building", {})
+    if isinstance(review_link_recipients, dict):
+        review_ui["review_link_recipients_by_building"] = {
+            key: copy.deepcopy(value)
+            for key, value in review_link_recipients.items()
+            if key not in HANDOVER_SEGMENT_BUILDINGS
+        }
+    else:
+        review_ui["review_link_recipients_by_building"] = {}
     return output
 
 
@@ -270,6 +279,9 @@ def extract_handover_building_data(cfg: Mapping[str, Any], building: str) -> Dic
     footer_defaults = (
         review_ui.get("footer_inventory_defaults_by_building", {}) if isinstance(review_ui, Mapping) else {}
     )
+    review_link_recipients = (
+        review_ui.get("review_link_recipients_by_building", {}) if isinstance(review_ui, Mapping) else {}
+    )
     cabinet_payload = (
         {building_name: copy.deepcopy(cabinet_defaults.get(building_name))}
         if isinstance(cabinet_defaults, Mapping) and building_name in cabinet_defaults
@@ -278,6 +290,11 @@ def extract_handover_building_data(cfg: Mapping[str, Any], building: str) -> Dic
     footer_payload = (
         {building_name: copy.deepcopy(footer_defaults.get(building_name))}
         if isinstance(footer_defaults, Mapping) and building_name in footer_defaults
+        else {}
+    )
+    review_link_recipients_payload = (
+        {building_name: copy.deepcopy(review_link_recipients.get(building_name))}
+        if isinstance(review_link_recipients, Mapping) and building_name in review_link_recipients
         else {}
     )
     return {
@@ -298,6 +315,7 @@ def extract_handover_building_data(cfg: Mapping[str, Any], building: str) -> Dic
         "review_ui": {
             "cabinet_power_defaults_by_building": cabinet_payload,
             "footer_inventory_defaults_by_building": footer_payload,
+            "review_link_recipients_by_building": review_link_recipients_payload,
         },
     }
 

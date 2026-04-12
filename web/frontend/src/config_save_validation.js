@@ -608,6 +608,8 @@ function validateAndNormalizeHandoverChangeManagementSection(payload) {
   sectionCfg.source.max_records = Number.parseInt(sectionCfg.source.max_records ?? 5000, 10);
 
   sectionCfg.fields.building = String(sectionCfg.fields.building || "").trim();
+  sectionCfg.fields.start_time = String(sectionCfg.fields.start_time || "").trim();
+  sectionCfg.fields.end_time = String(sectionCfg.fields.end_time || "").trim();
   sectionCfg.fields.updated_time = String(sectionCfg.fields.updated_time || "").trim();
   sectionCfg.fields.change_level = String(sectionCfg.fields.change_level || "").trim();
   sectionCfg.fields.process_updates = String(sectionCfg.fields.process_updates || "").trim();
@@ -662,13 +664,15 @@ function validateAndNormalizeHandoverChangeManagementSection(payload) {
   }
   if (
     !sectionCfg.fields.building ||
+    !sectionCfg.fields.start_time ||
+    !sectionCfg.fields.end_time ||
     !sectionCfg.fields.updated_time ||
     !sectionCfg.fields.change_level ||
     !sectionCfg.fields.process_updates ||
     !sectionCfg.fields.description ||
     !sectionCfg.fields.specialty
   ) {
-    return { ok: false, error: "变更管理字段映射（楼栋/更新时间/变更等级/过程更新时间/名称/专业）不能为空" };
+    return { ok: false, error: "变更管理字段映射（楼栋/变更开始时间/变更结束时间/更新时间回退/变更等级/过程更新时间/名称/专业）不能为空" };
   }
   if (
     !sectionCfg.monthly_report_fields.building ||
@@ -812,11 +816,11 @@ function validateAndNormalizeHandoverMaintenanceManagementSection(payload) {
   sectionCfg.source.max_records = Number.parseInt(sectionCfg.source.max_records ?? 5000, 10);
 
   sectionCfg.fields.building = String(sectionCfg.fields.building || "").trim();
+  sectionCfg.fields.start_time = String(sectionCfg.fields.start_time || "").trim();
   sectionCfg.fields.updated_time = String(sectionCfg.fields.updated_time || "").trim();
   sectionCfg.fields.actual_end_time = String(sectionCfg.fields.actual_end_time || "").trim();
   sectionCfg.fields.item = String(sectionCfg.fields.item || "").trim();
   sectionCfg.fields.specialty = String(sectionCfg.fields.specialty || "").trim();
-  delete sectionCfg.fields.start_time;
 
   sectionCfg.sections.maintenance_management = String(sectionCfg.sections.maintenance_management || "").trim();
   sectionCfg.fixed_values.vendor_internal = String(sectionCfg.fixed_values.vendor_internal || "").trim();
@@ -852,8 +856,8 @@ function validateAndNormalizeHandoverMaintenanceManagementSection(payload) {
   if (!Number.isInteger(sectionCfg.source.max_records) || sectionCfg.source.max_records <= 0) {
     return { ok: false, error: "维护管理 max_records 必须大于0" };
   }
-  if (!sectionCfg.fields.building || !sectionCfg.fields.updated_time || !sectionCfg.fields.actual_end_time || !sectionCfg.fields.item || !sectionCfg.fields.specialty) {
-    return { ok: false, error: "维护管理字段映射（楼栋/最新更新时间/实际结束时间/名称/专业）不能为空" };
+  if (!sectionCfg.fields.building || !sectionCfg.fields.start_time || !sectionCfg.fields.updated_time || !sectionCfg.fields.actual_end_time || !sectionCfg.fields.item || !sectionCfg.fields.specialty) {
+    return { ok: false, error: "维护管理字段映射（楼栋/实际开始时间/最新更新时间回退/实际结束时间/名称/专业）不能为空" };
   }
   if (!sectionCfg.sections.maintenance_management) {
     return { ok: false, error: "维护管理分类名不能为空" };
@@ -929,6 +933,7 @@ function validateAndNormalizeHandoverOtherImportantWorkSection(payload) {
     current.table_id = String(current.table_id || "").trim();
     current.fields = current.fields && typeof current.fields === "object" ? current.fields : {};
     current.fields.building = String(current.fields.building || "").trim();
+    current.fields.actual_start_time = String(current.fields.actual_start_time || "").trim();
     current.fields.actual_end_time = String(current.fields.actual_end_time || "").trim();
     current.fields.description = String(current.fields.description || "").trim();
     current.fields.completion = String(current.fields.completion || "").trim();
@@ -967,6 +972,7 @@ function validateAndNormalizeHandoverOtherImportantWorkSection(payload) {
     }
     if (
       !current.fields.building ||
+      !current.fields.actual_start_time ||
       !current.fields.actual_end_time ||
       !current.fields.description ||
       !current.fields.completion ||
@@ -1209,6 +1215,12 @@ function validateAndNormalizeHandoverReviewUi(payload) {
     !Array.isArray(reviewUi.footer_inventory_defaults_by_building)
       ? reviewUi.footer_inventory_defaults_by_building
       : {};
+  reviewUi.review_link_recipients_by_building =
+    reviewUi.review_link_recipients_by_building &&
+    typeof reviewUi.review_link_recipients_by_building === "object" &&
+    !Array.isArray(reviewUi.review_link_recipients_by_building)
+      ? reviewUi.review_link_recipients_by_building
+      : {};
   reviewUi.public_base_url = String(reviewUi.public_base_url || "").trim();
   if (reviewUi.public_base_url && !/^https?:\/\//i.test(reviewUi.public_base_url)) {
     reviewUi.public_base_url = `http://${reviewUi.public_base_url}`;
@@ -1261,6 +1273,24 @@ function validateAndNormalizeHandoverReviewUi(payload) {
     };
   }
   reviewUi.footer_inventory_defaults_by_building = normalizedFooterDefaults;
+
+  const normalizedReviewRecipients = {};
+  for (const [rawBuilding, rawItems] of Object.entries(reviewUi.review_link_recipients_by_building)) {
+    const building = String(rawBuilding || "").trim();
+    if (!building) continue;
+    const rows = [];
+    const seenOpenIds = new Set();
+    for (const rawItem of Array.isArray(rawItems) ? rawItems : []) {
+      if (!rawItem || typeof rawItem !== "object") continue;
+      const note = String(rawItem.note || "").trim();
+      const openId = String(rawItem.open_id || "").trim();
+      if (!openId || seenOpenIds.has(openId)) continue;
+      seenOpenIds.add(openId);
+      rows.push({ note, open_id: openId });
+    }
+    normalizedReviewRecipients[building] = rows;
+  }
+  reviewUi.review_link_recipients_by_building = normalizedReviewRecipients;
 
   const allowedCabinetCells = ["B13", "D13", "F13", "H13"];
   const normalizedCabinetDefaults = {};
@@ -1328,11 +1358,8 @@ function validateAndNormalizeAlarmExport(payload) {
   alarmExport.shared_source_upload.replace_existing_on_full =
     alarmExport.shared_source_upload.replace_existing_on_full !== false;
 
-  if (!alarmExport.feishu.app_token) {
-    return { ok: false, error: "告警信息上传配置不能为空：请填写告警多维 App Token" };
-  }
-  if (!alarmExport.feishu.table_id) {
-    return { ok: false, error: "告警信息上传配置不能为空：请填写告警多维 Table ID" };
+  if (Boolean(alarmExport.feishu.app_token) !== Boolean(alarmExport.feishu.table_id)) {
+    return { ok: false, error: "告警信息上传配置错误：App Token 与 Table ID 必须同时填写或同时留空" };
   }
   if (!alarmExport.scheduler.run_time) {
     return { ok: false, error: "告警信息上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS" };

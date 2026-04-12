@@ -6,7 +6,12 @@ import re
 from typing import Any, Callable, Dict, List, Tuple
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
+from handover_log_module.core.shift_interval_overlap import (
+    build_shift_interval_window,
+    interval_overlaps_filter_window,
+)
 from handover_log_module.core.shift_window import build_duty_window
 from handover_log_module.core.specialty_normalizer import normalize_specialty_text
 
@@ -187,6 +192,7 @@ class MaintenanceManagementRepository:
             },
             "fields": {
                 "building": "楼栋",
+                "start_time": "实际开始时间",
                 "updated_time": "最新更新时间",
                 "actual_end_time": "实际结束时间",
                 "item": "名称",
@@ -232,13 +238,7 @@ class MaintenanceManagementRepository:
         return self._normalize_cfg()
 
     def _new_client(self, cfg: Dict[str, Any]) -> FeishuBitableClient:
-        global_feishu = self.handover_cfg.get("_global_feishu", {})
-        if not isinstance(global_feishu, dict):
-            global_feishu = {}
-        app_id = str(global_feishu.get("app_id", "")).strip()
-        app_secret = str(global_feishu.get("app_secret", "")).strip()
-        if not app_id or not app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+        global_feishu = require_feishu_auth_settings(self.handover_cfg)
 
         source = cfg.get("source", {})
         app_token = str(source.get("app_token", "")).strip()
@@ -247,8 +247,8 @@ class MaintenanceManagementRepository:
             raise ValueError("维护管理多维配置缺失: app_token/table_id")
 
         return FeishuBitableClient(
-            app_id=app_id,
-            app_secret=app_secret,
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
             app_token=app_token,
             calc_table_id=table_id,
             attachment_table_id=table_id,
@@ -343,7 +343,6 @@ class MaintenanceManagementRepository:
                 "start_time_parse_fail": 0,
                 "start_time_out_of_shift_skipped": 0,
                 "end_time_parse_fail": 0,
-                "end_time_missing_for_history_skipped": 0,
                 "end_time_before_shift_skipped": 0,
                 "end_time_after_shift_skipped": 0,
                 "end_time_before_start_skipped": 0,
@@ -372,6 +371,11 @@ class MaintenanceManagementRepository:
         )
         start_dt = datetime.strptime(duty_window.start_time, "%Y-%m-%d %H:%M:%S")
         end_dt = datetime.strptime(duty_window.end_time, "%Y-%m-%d %H:%M:%S")
+        filter_window = build_shift_interval_window(
+            shift_start=start_dt,
+            shift_end=end_dt,
+            offset_hours=1,
+        )
         is_current_duty = _is_current_duty_context(duty_date=duty_date, duty_shift=duty_shift)
 
         emit_log(
@@ -379,6 +383,7 @@ class MaintenanceManagementRepository:
             f"table_id={table_id}, page_size={int(source.get('page_size', 500) or 500)}, "
             f"max_records={int(source.get('max_records', 5000) or 5000)}, "
             f"window={duty_window.start_time}~{duty_window.end_time}, "
+            f"filter_window={filter_window.filter_start.strftime('%Y-%m-%d %H:%M:%S')}~{filter_window.filter_end.strftime('%Y-%m-%d %H:%M:%S')}, "
             f"mode={'current' if is_current_duty else 'history'}"
         )
 
@@ -403,7 +408,6 @@ class MaintenanceManagementRepository:
         start_time_parse_fail = 0
         start_time_out_of_shift_skipped = 0
         end_time_parse_fail = 0
-        end_time_missing_for_history_skipped = 0
         end_time_before_shift_skipped = 0
         end_time_after_shift_skipped = 0
         end_time_before_start_skipped = 0
@@ -429,21 +433,23 @@ class MaintenanceManagementRepository:
             if actual_end_time is None and actual_end_time_text:
                 end_time_parse_fail += 1
                 continue
-            if actual_end_time is None and not is_current_duty:
-                end_time_missing_for_history_skipped += 1
-                continue
             if actual_end_time is not None and actual_end_time < start_time:
                 end_time_before_start_skipped += 1
                 continue
-            if actual_end_time is not None:
-                # 当前/历史交接班都按时间段是否与当前班次窗口重合判定；
-                # 当前交接班只额外允许“有开始、无结束”的进行中记录。
-                if actual_end_time < start_dt:
-                    end_time_before_shift_skipped += 1
-                    continue
-                if start_time > end_dt:
-                    start_time_out_of_shift_skipped += 1
-                    continue
+            if actual_end_time is not None and actual_end_time <= filter_window.filter_start:
+                end_time_before_shift_skipped += 1
+                continue
+            if start_time > filter_window.filter_end:
+                start_time_out_of_shift_skipped += 1
+                continue
+            if not interval_overlaps_filter_window(
+                start_time=start_time,
+                end_time=actual_end_time,
+                filter_start=filter_window.filter_start,
+                filter_end=filter_window.filter_end,
+            ):
+                end_time_after_shift_skipped += 1
+                continue
 
             item_text = _field_text(raw_fields.get(item_field))
             if not item_text:
@@ -471,7 +477,6 @@ class MaintenanceManagementRepository:
             "start_time_parse_fail": start_time_parse_fail,
             "start_time_out_of_shift_skipped": start_time_out_of_shift_skipped,
             "end_time_parse_fail": end_time_parse_fail,
-            "end_time_missing_for_history_skipped": end_time_missing_for_history_skipped,
             "end_time_before_shift_skipped": end_time_before_shift_skipped,
             "end_time_after_shift_skipped": end_time_after_shift_skipped,
             "end_time_before_start_skipped": end_time_before_start_skipped,
@@ -499,7 +504,6 @@ class MaintenanceManagementRepository:
             f"start_time_parse_fail={counters.get('start_time_parse_fail', 0)}, "
             f"start_time_out_of_shift_skipped={counters.get('start_time_out_of_shift_skipped', 0)}, "
             f"end_time_parse_fail={counters.get('end_time_parse_fail', 0)}, "
-            f"end_time_missing_for_history_skipped={counters.get('end_time_missing_for_history_skipped', 0)}, "
             f"end_time_before_shift_skipped={counters.get('end_time_before_shift_skipped', 0)}, "
             f"end_time_after_shift_skipped={counters.get('end_time_after_shift_skipped', 0)}, "
             f"end_time_before_start_skipped={counters.get('end_time_before_start_skipped', 0)}, "
@@ -542,7 +546,6 @@ class MaintenanceManagementRepository:
             f"start_time_parse_fail={counters.get('start_time_parse_fail', 0)}, "
             f"start_time_out_of_shift_skipped={counters.get('start_time_out_of_shift_skipped', 0)}, "
             f"end_time_parse_fail={counters.get('end_time_parse_fail', 0)}, "
-            f"end_time_missing_for_history_skipped={counters.get('end_time_missing_for_history_skipped', 0)}, "
             f"end_time_before_shift_skipped={counters.get('end_time_before_shift_skipped', 0)}, "
             f"end_time_after_shift_skipped={counters.get('end_time_after_shift_skipped', 0)}, "
             f"end_time_before_start_skipped={counters.get('end_time_before_start_skipped', 0)}, "

@@ -25,11 +25,17 @@ from app.modules.updater.service.manifest_client import (
     SharedMirrorManifestClient,
     SharedMirrorPendingError,
 )
+from app.modules.updater.service.remote_control_store import (
+    UpdaterRemoteControlStore,
+    empty_internal_peer_snapshot,
+)
 from app.modules.updater.service.runtime_dependency_sync_service import RuntimeDependencySyncService
 from app.modules.updater.service.update_applier import UpdateApplier
 
 
 _SOURCE_RUN_DISABLE_UPDATER_ENV = "QJPT_DISABLE_UPDATER_IN_SOURCE_RUN"
+_INTERNAL_PEER_HEARTBEAT_INTERVAL_SEC = 5
+_INTERNAL_PEER_HEARTBEAT_TIMEOUT_SEC = 15
 
 
 def _updater_disabled_reason_from_env() -> str:
@@ -117,6 +123,7 @@ class UpdaterService:
         self.state = self.state_store.load()
 
         self.shared_mirror_client = SharedMirrorManifestClient(self.shared_bridge_root) if self.shared_bridge_root else None
+        self.remote_control_store = UpdaterRemoteControlStore(self.shared_bridge_root) if self.shared_bridge_root else None
         if self.source_kind == "shared_mirror":
             self.client = self.shared_mirror_client
         else:
@@ -144,7 +151,9 @@ class UpdaterService:
         self._lock = threading.Lock()
         self._work_lock = threading.Lock()
         self._last_shared_mirror_signal: tuple[str, ...] = ()
+        self._last_internal_peer_status_sync_monotonic = 0.0
         mirror_runtime = self._mirror_runtime_snapshot()
+        internal_peer_runtime = self._internal_peer_runtime_snapshot()
         self.state.setdefault("source_kind", self.source_kind)
         self.state.setdefault("source_label", self.source_label)
         self.state.setdefault("enabled", bool(self.cfg["enabled"]))
@@ -198,10 +207,118 @@ class UpdaterService:
             "last_publish_error": str(
                 self.state.get("last_publish_error", mirror_runtime.get("last_publish_error", "")) or ""
             ),
+            "internal_peer": internal_peer_runtime,
         }
 
     def _log(self, text: str) -> None:
         self.emit_log(f"[Updater] {text}")
+
+    def _local_version_snapshot(self) -> tuple[str, int]:
+        local_version = str(self.state.get("local_version", "") or self.runtime.get("local_version", "") or "").strip()
+        local_revision = int(
+            self.state.get("local_release_revision", self.runtime.get("local_release_revision", 0)) or 0
+        )
+        if local_version or local_revision > 0:
+            return local_version, local_revision
+        local = normalize_local_version(load_local_build_meta(self.app_dir))
+        return (
+            str(local.get("display_version") or local.get("build_id") or "").strip(),
+            int(local.get("release_revision", 0) or 0),
+        )
+
+    def _internal_peer_runtime_snapshot(self) -> Dict[str, Any]:
+        if self.role_mode != "external" or not self.remote_control_store or not self.shared_bridge_root:
+            return empty_internal_peer_snapshot(available=False)
+        snapshot = self.remote_control_store.build_internal_peer_snapshot(
+            heartbeat_timeout_sec=_INTERNAL_PEER_HEARTBEAT_TIMEOUT_SEC,
+        )
+        snapshot["available"] = True
+        return snapshot
+
+    def _sync_internal_peer_runtime(self) -> Dict[str, Any]:
+        snapshot = self._internal_peer_runtime_snapshot()
+        self._set_runtime(internal_peer=snapshot)
+        return snapshot
+
+    def _write_internal_peer_status(
+        self,
+        *,
+        online: bool,
+        command: Dict[str, Any] | None = None,
+        force: bool = False,
+    ) -> None:
+        if self.role_mode != "internal" or not self.remote_control_store or not self.shared_bridge_root:
+            return
+        now_monotonic = time.monotonic()
+        if not force and (now_monotonic - self._last_internal_peer_status_sync_monotonic) < _INTERNAL_PEER_HEARTBEAT_INTERVAL_SEC:
+            return
+        current_status = self.remote_control_store.load_status()
+        local_version, local_revision = self._local_version_snapshot()
+        payload = {
+            **current_status,
+            "available": True,
+            "online": bool(online),
+            "heartbeat_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "node_id": self.node_id,
+            "node_label": "内网端",
+            "local_version": local_version,
+            "local_release_revision": local_revision,
+            "last_check_at": str(self.state.get("last_check_at", "") or ""),
+            "last_result": str(self.state.get("last_result", "") or ""),
+            "last_error": str(self.state.get("last_error", "") or ""),
+            "update_available": bool(self.state.get("update_available", False)),
+            "restart_required": bool(self.state.get("restart_required", False)),
+            "queued_apply": dict(self.state.get("queued_apply", self._empty_queue_payload()) or self._empty_queue_payload()),
+        }
+        if isinstance(command, dict):
+            payload.update(
+                {
+                    "last_command_id": str(command.get("command_id", "") or "").strip(),
+                    "last_command_action": str(command.get("action", "") or "").strip().lower(),
+                    "last_command_status": str(command.get("status", "") or "").strip().lower(),
+                    "last_command_message": str(command.get("message", "") or "").strip(),
+                }
+            )
+        self.remote_control_store.write_status(payload)
+        self._last_internal_peer_status_sync_monotonic = now_monotonic
+
+    def submit_internal_peer_command(self, *, action: str) -> Dict[str, Any]:
+        action_text = str(action or "").strip().lower()
+        if self.role_mode != "external":
+            raise RuntimeError("当前仅支持外网端下发内网更新命令。")
+        if action_text not in {"check", "apply"}:
+            raise RuntimeError("仅支持下发检查更新或开始更新命令。")
+        if not self.remote_control_store or not self.shared_bridge_root:
+            raise RuntimeError("共享目录未配置，无法向内网端下发更新命令。")
+        result = self.remote_control_store.submit_command(
+            command_id=uuid.uuid4().hex,
+            action=action_text,
+            requested_by_node_id=self.node_id,
+            requested_by_role=self.role_mode or "external",
+        )
+        internal_peer = self._sync_internal_peer_runtime()
+        command = result.get("command", {}) if isinstance(result.get("command", {}), dict) else {}
+        if result.get("accepted"):
+            message = "已下发内网端检查更新命令，等待内网端执行。"
+            if action_text == "apply":
+                message = "已下发内网端开始更新命令，等待内网端执行。"
+            self._log(
+                "已下发内网远程更新命令: "
+                f"action={action_text}, command_id={str(command.get('command_id', '') or '-').strip() or '-'}"
+            )
+        else:
+            pending_action = str(command.get("action", "") or "").strip().lower()
+            message = "已有待执行的内网端更新命令，请等待其完成。"
+            if pending_action == "check":
+                message = "已有待执行的内网端检查更新命令，请等待其完成。"
+            elif pending_action == "apply":
+                message = "已有待执行的内网端开始更新命令，请等待其完成。"
+        return {
+            **result,
+            "action": action_text,
+            "message": message,
+            "internal_peer": internal_peer,
+        }
 
     @staticmethod
     def _disabled_reason_text(raw: Any) -> str:
@@ -417,9 +534,15 @@ class UpdaterService:
             self._thread.join(timeout=2)
         self._thread = None
         self._set_runtime(running=False)
+        if self.role_mode == "internal":
+            self._write_internal_peer_status(online=False, force=True)
+        elif self.role_mode == "external":
+            self._sync_internal_peer_runtime()
         return {"stopped": True, "running": False, "reason": "stopped"}
 
     def get_runtime_snapshot(self) -> Dict[str, Any]:
+        if self.role_mode == "external":
+            self._sync_internal_peer_runtime()
         with self._lock:
             return dict(self.runtime)
 
@@ -1031,11 +1154,104 @@ class UpdaterService:
         except Exception as exc:  # noqa: BLE001
             self._record_failure("排队更新失败", exc)
 
+    def _try_process_internal_peer_command(self) -> None:
+        if self.role_mode != "internal" or not self.remote_control_store or not self.shared_bridge_root:
+            return
+        command = self.remote_control_store.load_command()
+        if str(command.get("status", "")).strip().lower() != "pending":
+            return
+        command_id = str(command.get("command_id", "") or "").strip()
+        action = str(command.get("action", "") or "").strip().lower()
+        if not command_id:
+            return
+
+        accepted = self.remote_control_store.update_command(
+            command_id=command_id,
+            status="accepted",
+            message="内网端已接收命令",
+        )
+        if not isinstance(accepted, dict):
+            return
+        self._write_internal_peer_status(online=True, command=accepted, force=True)
+        self._log(
+            "接收到外网远程更新命令: "
+            f"action={action or '-'}, command_id={command_id}"
+        )
+
+        running = self.remote_control_store.update_command(
+            command_id=command_id,
+            status="running",
+            message="内网端执行中",
+        )
+        if isinstance(running, dict):
+            self._write_internal_peer_status(online=True, command=running, force=True)
+        active_command = running if isinstance(running, dict) else accepted
+
+        try:
+            if action == "check":
+                result = self.check_now()
+            elif action == "apply":
+                result = self.apply_now(mode="normal", queue_if_busy=True)
+            else:
+                raise RuntimeError(f"不支持的远程命令动作: {action or '-'}")
+            result_key = str(result.get("last_result", "") or "").strip().lower()
+            queue_status = str(result.get("queue_status", "") or "").strip().lower()
+            if result_key == "failed":
+                raise RuntimeError(str(result.get("last_error", "") or result.get("message", "") or "远程命令执行失败"))
+
+            if action == "apply" and result_key == "queued_busy":
+                completion_message = "已加入内网端更新队列，等待当前任务结束后执行"
+            elif action == "apply" and queue_status == "queued":
+                completion_message = "内网端更新命令已排队执行"
+            elif action == "apply":
+                completion_message = "内网端开始更新命令执行完成"
+            else:
+                completion_message = "内网端检查更新命令执行完成"
+
+            completed = self.remote_control_store.update_command(
+                command_id=command_id,
+                status="completed",
+                message=completion_message,
+            )
+            self._write_internal_peer_status(
+                online=True,
+                command=completed if isinstance(completed, dict) else active_command,
+                force=True,
+            )
+            self._log(
+                "内网远程更新命令执行完成: "
+                f"action={action or '-'}, command_id={command_id}, result={result_key or '-'}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            failed = self.remote_control_store.update_command(
+                command_id=command_id,
+                status="failed",
+                message=str(exc),
+            )
+            self._write_internal_peer_status(
+                online=True,
+                command=failed if isinstance(failed, dict) else active_command,
+                force=True,
+            )
+            self._log(
+                "内网远程更新命令执行失败: "
+                f"action={action or '-'}, command_id={command_id}, error={exc}"
+            )
+
     def _loop(self) -> None:
         self._set_runtime(running=True)
+        if self.role_mode == "internal":
+            self._write_internal_peer_status(online=True, force=True)
+        elif self.role_mode == "external":
+            self._sync_internal_peer_runtime()
         self._log(f"更新线程已启动: interval={self.cfg['check_interval_sec']}s")
         next_check_monotonic = time.monotonic() + int(self.cfg["check_interval_sec"])
         while not self._stop.wait(1):
+            if self.role_mode == "internal":
+                self._write_internal_peer_status(online=True)
+                self._try_process_internal_peer_command()
+            elif self.role_mode == "external":
+                self._sync_internal_peer_runtime()
             self._try_process_queued_apply()
             if self._consume_shared_mirror_watch_trigger():
                 self._log("检测到共享目录批准版本变化，立即检查更新")

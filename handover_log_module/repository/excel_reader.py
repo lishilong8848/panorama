@@ -25,6 +25,29 @@ def _pick_sheet(
     return wb[wb.sheetnames[idx]]
 
 
+def load_workbook_quietly(path: str | Path, **kwargs: Any) -> openpyxl.Workbook:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Workbook contains no default style, apply openpyxl's default",
+            category=UserWarning,
+            module=r"openpyxl\.styles\.stylesheet",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message="Unknown extension is not supported and will be removed",
+            category=UserWarning,
+            module=r"openpyxl\.worksheet\._reader",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message="Conditional Formatting extension is not supported and will be removed",
+            category=UserWarning,
+            module=r"openpyxl\.worksheet\._reader",
+        )
+        return openpyxl.load_workbook(path, **kwargs)
+
+
 def load_rows(
     data_file: str,
     parsing_cfg: Dict[str, Any],
@@ -45,26 +68,7 @@ def load_rows(
     b_regex = str(normalize_cfg.get("b_extract_regex", "")).strip()
     c_regex = str(normalize_cfg.get("c_extract_regex", "")).strip()
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message="Workbook contains no default style, apply openpyxl's default",
-            category=UserWarning,
-            module=r"openpyxl\.styles\.stylesheet",
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message="Unknown extension is not supported and will be removed",
-            category=UserWarning,
-            module=r"openpyxl\.worksheet\._reader",
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message="Conditional Formatting extension is not supported and will be removed",
-            category=UserWarning,
-            module=r"openpyxl\.worksheet\._reader",
-        )
-        wb = openpyxl.load_workbook(path, data_only=True)
+    wb = load_workbook_quietly(path, data_only=True)
 
     try:
         sheet_name = str(parsing_cfg.get("sheet_name", "")).strip() or None
@@ -112,4 +116,3 @@ def load_rows(
         return rows
     finally:
         wb.close()
-
