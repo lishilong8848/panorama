@@ -7,15 +7,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.config.config_compat_cleanup import sanitize_day_metric_upload_config
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
+from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
+from app.modules.shared_bridge.service.shared_source_cache_service import SharedSourceCacheService
 from app.shared.utils.atomic_file import atomic_write_text
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
+from handover_log_module.service.day_metric_source_calc_service import DayMetricSourceCalcService
 from handover_log_module.service.handover_download_service import HandoverDownloadService
-from handover_log_module.service.handover_extract_service import HandoverExtractService
-from handover_log_module.service.handover_fill_service import HandoverFillService
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
 )
@@ -157,6 +159,45 @@ class DayMetricStandaloneUploadService:
     def _source_reuse_enabled(self) -> bool:
         return True
 
+    def _deployment_role_mode(self) -> str:
+        deployment = self.runtime_config.get("deployment", {})
+        if isinstance(deployment, dict):
+            role_mode = normalize_role_mode(deployment.get("role_mode"))
+            if role_mode:
+                return role_mode
+        return normalize_role_mode(self.handover_cfg.get("_deployment_role_mode"))
+
+    def _shared_bridge_cfg(self) -> Dict[str, Any]:
+        bridge_cfg = self.runtime_config.get("shared_bridge", {})
+        if isinstance(bridge_cfg, dict) and bridge_cfg:
+            return bridge_cfg
+        common = self.runtime_config.get("common", {})
+        if isinstance(common, dict):
+            bridge_cfg = common.get("shared_bridge", {})
+            if isinstance(bridge_cfg, dict):
+                return bridge_cfg
+        return {}
+
+    def _new_shared_source_cache_service(self, *, emit_log: Callable[[str], None]) -> SharedSourceCacheService | None:
+        bridge_cfg = self._shared_bridge_cfg()
+        if not isinstance(bridge_cfg, dict) or not bool(bridge_cfg.get("enabled", False)):
+            return None
+        resolved_bridge = resolve_shared_bridge_paths(bridge_cfg, self._deployment_role_mode())
+        root_dir = str(resolved_bridge.get("root_dir", "") or "").strip()
+        if not root_dir:
+            return None
+        store = SharedBridgeStore(
+            root_dir,
+            busy_timeout_ms=max(1000, _safe_int(resolved_bridge.get("sqlite_busy_timeout_ms", 5000), 5000)),
+        )
+        store.ensure_ready()
+        return SharedSourceCacheService(
+            runtime_config=self.runtime_config,
+            store=store,
+            download_browser_pool=self._download_browser_pool,
+            emit_log=emit_log,
+        )
+
     def _selected_buildings(self, *, building_scope: str, building: str | None) -> List[str]:
         if str(building_scope or "").strip() == "single":
             picked = str(building or "").strip()
@@ -297,11 +338,8 @@ class DayMetricStandaloneUploadService:
                 raise
             return HandoverDownloadService(self.handover_cfg)
 
-    def _new_extract_service(self) -> HandoverExtractService:
-        return HandoverExtractService(self.handover_cfg)
-
-    def _new_fill_service(self) -> HandoverFillService:
-        return HandoverFillService(self.handover_cfg)
+    def _new_source_calc_service(self) -> DayMetricSourceCalcService:
+        return DayMetricSourceCalcService(self.handover_cfg)
 
     def _new_attachment_service(self) -> SourceDataAttachmentBitableExportService:
         try:
@@ -536,7 +574,6 @@ class DayMetricStandaloneUploadService:
         mode: str,
         duty_date: str,
         building: str,
-        final_cell_values: Dict[str, Any],
         resolved_values_by_id: Dict[str, Any],
         metric_origin_context: Dict[str, Any],
         emit_log: Callable[[str], None],
@@ -571,7 +608,7 @@ class DayMetricStandaloneUploadService:
                 building=building,
                 duty_date=duty_date,
                 duty_shift="day",
-                filled_cell_values=final_cell_values,
+                filled_cell_values={},
                 resolved_values_by_id=resolved_values_by_id,
                 metric_origin_context=metric_origin_context,
                 emit_log=emit_log,
@@ -618,6 +655,34 @@ class DayMetricStandaloneUploadService:
             f"[12项独立上传] 单元开始: duty_date={duty_date}, building={building}, "
             f"start_stage={normalized_stage}, source_file={source_file}"
         )
+        emit_log(f"[12项独立上传] 源表直算开始: duty_date={duty_date}, building={building}")
+        try:
+            calc_result = self._new_source_calc_service().calculate(
+                building=building,
+                duty_date=duty_date,
+                data_file=source_file,
+            )
+        except Exception as exc:  # noqa: BLE001
+            row["status"] = "failed"
+            row["stage"] = "extract"
+            row["error"] = str(exc)
+            row["failed_at"] = _now_text()
+            row["retryable"] = bool(Path(source_file).exists()) if mode == "from_file" else True
+            row["network_side"] = ""
+            emit_log(
+                f"[12项独立上传] 源表直算失败: duty_date={duty_date}, building={building}, error={row['error']}"
+            )
+            return row
+
+        resolved_count = 0
+        if isinstance(calc_result, dict):
+            resolved_values = calc_result.get("resolved_metrics", {})
+            if isinstance(resolved_values, dict):
+                resolved_count = len(resolved_values)
+        emit_log(
+            f"[12项独立上传] 源表直算完成: duty_date={duty_date}, building={building}, metrics={resolved_count}"
+        )
+
         if normalized_stage == "attachment":
             emit_log(f"[12项独立上传] 附件阶段开始: duty_date={duty_date}, building={building}")
             attachment_ok, attachment_result, attachment_attempts = self._run_attachment_stage(
@@ -640,52 +705,13 @@ class DayMetricStandaloneUploadService:
                 )
                 return row
 
-        emit_log(f"[12项独立上传] 提取填充开始: duty_date={duty_date}, building={building}")
-        try:
-            extract_service = self._new_extract_service()
-            fill_service = self._new_fill_service()
-            extract_result = extract_service.extract(building=building, data_file=source_file)
-            fill_result = fill_service.fill(
-                building=building,
-                data_file=source_file,
-                hits=extract_result.get("hits", {}),
-                effective_config=extract_result.get("effective_config", {}),
-                date_ref_override=datetime.strptime(str(duty_date or "").strip(), "%Y-%m-%d"),
-                write_output_file=False,
-                emit_log=emit_log,
-            )
-        except Exception as exc:  # noqa: BLE001
-            row["status"] = "failed"
-            row["stage"] = "extract"
-            row["error"] = str(exc)
-            row["failed_at"] = _now_text()
-            row["retryable"] = bool(Path(source_file).exists()) if mode == "from_file" else True
-            row["network_side"] = ""
-            emit_log(
-                f"[12项独立上传] 提取填充失败: duty_date={duty_date}, building={building}, error={row['error']}"
-            )
-            return row
-
-        resolved_count = 0
-        if isinstance(fill_result, dict):
-            resolved_values = fill_result.get("resolved_values_by_id", {})
-            if isinstance(resolved_values, dict):
-                resolved_count = len(resolved_values)
-        emit_log(
-            f"[12项独立上传] 提取填充完成: duty_date={duty_date}, building={building}, metrics={resolved_count}"
-        )
-
         emit_log(f"[12项独立上传] 写入阶段开始: duty_date={duty_date}, building={building}")
         upload_ok, upload_result, upload_attempts = self._run_upload_stage(
             mode=mode,
             duty_date=duty_date,
             building=building,
-            final_cell_values=fill_result.get("final_cell_values", {}) if isinstance(fill_result, dict) else {},
-            resolved_values_by_id=fill_result.get("resolved_values_by_id", {}) if isinstance(fill_result, dict) else {},
-            metric_origin_context=self._new_export_service().serialize_metric_origin_context(
-                hits=extract_result.get("hits", {}) if isinstance(extract_result, dict) else {},
-                effective_config=extract_result.get("effective_config", {}) if isinstance(extract_result, dict) else {},
-            ),
+            resolved_values_by_id=calc_result.get("resolved_metrics", {}) if isinstance(calc_result, dict) else {},
+            metric_origin_context=calc_result.get("metric_origin_context", {}) if isinstance(calc_result, dict) else {},
             emit_log=emit_log,
         )
         row["attempts"] = max(row["attempts"], upload_attempts)
@@ -807,6 +833,92 @@ class DayMetricStandaloneUploadService:
             "results": grouped_rows,
             **summary,
         }
+
+    def _load_shared_cached_download_result(
+        self,
+        *,
+        selected_dates: List[str],
+        building_scope: str,
+        building: str | None,
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any] | None:
+        try:
+            cache_service = self._new_shared_source_cache_service(emit_log=emit_log)
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[12项独立上传] 共享按日缓存初始化失败，回退下载: {exc}")
+            return None
+        if cache_service is None:
+            return None
+
+        buildings = self._selected_buildings(building_scope=building_scope, building=building)
+        repair_fn = getattr(cache_service, "repair_day_metric_ready_entries", None)
+        if callable(repair_fn):
+            try:
+                repair_fn(
+                    selected_dates=selected_dates,
+                    buildings=buildings,
+                    emit_log=emit_log,
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[12项独立上传] 共享按日缓存运行前扫描失败，继续按现有缓存尝试: {exc}")
+        expected_count = len(selected_dates) * len(buildings)
+        emit_log("[12项独立上传] 共享按日缓存开始解析并收口源文件")
+        try:
+            cache_service.fill_day_metric_history(
+                selected_dates=selected_dates,
+                building_scope=building_scope,
+                building=building,
+                emit_log=emit_log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[12项独立上传] 共享按日缓存解析失败，回退下载: {exc}")
+            return None
+        cached_entries = cache_service.get_day_metric_by_date_entries(
+            selected_dates=selected_dates,
+            buildings=buildings,
+        )
+        if len(cached_entries) < expected_count:
+            return None
+
+        rows_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
+        downloaded_files: List[Dict[str, str]] = []
+        for item in cached_entries:
+            if not isinstance(item, dict):
+                continue
+            duty_date = str(item.get("duty_date", "") or "").strip()
+            building_name = str(item.get("building", "") or "").strip()
+            source_file = str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
+            if not duty_date or not building_name or not source_file:
+                continue
+            rows_by_key[(duty_date, building_name)] = self._download_success_row(
+                duty_date=duty_date,
+                building=building_name,
+                source_file=source_file,
+            )
+            downloaded_files.append(
+                {
+                    "duty_date": duty_date,
+                    "building": building_name,
+                    "source_file": source_file,
+                }
+            )
+
+        result = self._build_batch_result(
+            mode="from_download",
+            selected_dates=selected_dates,
+            buildings=buildings,
+            rows_by_key=rows_by_key,
+            building_scope=building_scope,
+            building=building,
+            auto_switch_enabled=self._network_auto_switch_enabled(),
+        )
+        result["downloaded_files"] = downloaded_files
+        result["downloaded_file_count"] = len(downloaded_files)
+        emit_log(
+            f"[12项独立上传] 命中共享按日缓存，跳过下载阶段: downloaded={len(downloaded_files)}, "
+            f"dates={','.join(selected_dates)}, buildings={','.join(buildings)}"
+        )
+        return result
 
     def run_download_only(
         self,
@@ -1057,12 +1169,19 @@ class DayMetricStandaloneUploadService:
         building: str | None,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
-        internal_result = self.run_download_only(
+        internal_result = self._load_shared_cached_download_result(
             selected_dates=selected_dates,
             building_scope=building_scope,
             building=building,
             emit_log=emit_log,
         )
+        if internal_result is None:
+            internal_result = self.run_download_only(
+                selected_dates=selected_dates,
+                building_scope=building_scope,
+                building=building,
+                emit_log=emit_log,
+            )
         buildings = (
             list(internal_result.get("selected_buildings", []))
             if isinstance(internal_result.get("selected_buildings", []), list)

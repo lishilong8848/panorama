@@ -6,6 +6,7 @@ import shutil
 import threading
 import time
 import uuid
+import warnings
 from pathlib import Path
 from typing import Callable
 
@@ -212,7 +213,14 @@ def validate_json_file(path: str | Path) -> None:
 def validate_excel_workbook_file(path: str | Path) -> None:
     target = Path(path)
     validate_non_empty_file(target)
-    workbook = openpyxl.load_workbook(target, read_only=True, data_only=False)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Workbook contains no default style, apply openpyxl's default",
+            category=UserWarning,
+            module=r"openpyxl\.styles\.stylesheet",
+        )
+        workbook = openpyxl.load_workbook(target, read_only=True, data_only=False)
     workbook.close()
 
 

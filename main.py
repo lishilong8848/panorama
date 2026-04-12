@@ -6,12 +6,20 @@ import socket
 import sys
 import threading
 import time
+import warnings
 import webbrowser
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+warnings.filterwarnings(
+    "ignore",
+    message="Workbook contains no default style, apply openpyxl's default",
+    category=UserWarning,
+    module=r"openpyxl\.styles\.stylesheet",
+)
 
 from app.modules.updater.service.runtime_dependency_sync_service import (  # noqa: E402
     RuntimeDependencySyncService,

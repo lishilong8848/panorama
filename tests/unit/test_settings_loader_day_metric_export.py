@@ -18,3 +18,12 @@ def test_day_metric_export_position_code_cannot_be_blank() -> None:
 
     with pytest.raises(ValueError, match="position_code"):
         _validate_day_metric_upload(cfg)
+
+
+def test_day_metric_export_ignores_legacy_target_types() -> None:
+    cfg = ensure_v3_config({})
+    cfg["features"]["day_metric_upload"]["target"]["types"] = [
+        {"name": "", "source": "cell", "cell": "BAD"},
+    ]
+
+    _validate_day_metric_upload(cfg)

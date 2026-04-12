@@ -29,6 +29,16 @@ def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _safe_datetime_text(value: Any) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        return datetime.min
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return datetime.min
+
+
 def _is_recoverable_review_store_error(exc: Exception) -> bool:
     if isinstance(exc, ReviewSessionStoreUnavailableError):
         return True
@@ -511,6 +521,8 @@ class ReviewSessionService:
             "prepared_at": str(payload.get("prepared_at", "")).strip(),
             "updated_at": str(payload.get("updated_at", "")).strip(),
             "error": str(payload.get("error", "")).strip(),
+            "first_full_cloud_sync_completed": bool(payload.get("first_full_cloud_sync_completed", False)),
+            "first_full_cloud_sync_at": str(payload.get("first_full_cloud_sync_at", "")).strip(),
         }
 
     def _cloud_sync_enabled(self) -> bool:
@@ -592,6 +604,7 @@ class ReviewSessionService:
             "error": str(payload.get("error", "")).strip(),
             "uploaded_at": str(payload.get("uploaded_at", "")).strip(),
             "uploaded_revision": int(payload.get("uploaded_revision", 0) or 0),
+            "frozen_after_first_full_cloud_sync": bool(payload.get("frozen_after_first_full_cloud_sync", False)),
         }
 
     @staticmethod
@@ -747,6 +760,8 @@ class ReviewSessionService:
             _reraise_review_store_error(exc)
         if not isinstance(state.get("review_cloud_batches", {}), dict):
             state["review_cloud_batches"] = {}
+        if not isinstance(state.get("review_latest_batch_key", ""), str):
+            state["review_latest_batch_key"] = ""
         sessions = state.get("review_sessions", {})
         latest_map = state.get("review_latest_by_building", {})
         changed = False
@@ -786,6 +801,12 @@ class ReviewSessionService:
                 state["review_latest_by_building"] = rebuilt_latest
                 self._save_state(state)
                 return state
+        derived_latest_batch_key = self._derive_latest_batch_key_from_state(state)
+        current_latest_batch_key = str(state.get("review_latest_batch_key", "") or "").strip()
+        if current_latest_batch_key != derived_latest_batch_key:
+            state["review_latest_batch_key"] = derived_latest_batch_key
+            self._save_state(state)
+            return state
         if refresh_changed:
             self._save_state(state)
             return state
@@ -861,9 +882,52 @@ class ReviewSessionService:
             }
         state["review_batch_status"] = batch_status
 
+    @staticmethod
+    def _derive_latest_batch_key_from_state(state: Dict[str, Any]) -> str:
+        sessions = state.get("review_sessions", {})
+        if not isinstance(sessions, dict):
+            return ""
+        best_session: Dict[str, Any] | None = None
+        for raw_session in list(sessions.values()):
+            if not isinstance(raw_session, dict):
+                continue
+            batch_key = str(raw_session.get("batch_key", "") or "").strip()
+            if not batch_key:
+                continue
+            if best_session is None:
+                best_session = raw_session
+                continue
+            current_key = (
+                str(best_session.get("duty_date", "") or "").strip(),
+                _safe_datetime_text(best_session.get("updated_at", "")),
+                int(best_session.get("revision", 0) or 0),
+                str(best_session.get("duty_shift", "") or "").strip().lower(),
+            )
+            candidate_key = (
+                str(raw_session.get("duty_date", "") or "").strip(),
+                _safe_datetime_text(raw_session.get("updated_at", "")),
+                int(raw_session.get("revision", 0) or 0),
+                str(raw_session.get("duty_shift", "") or "").strip().lower(),
+            )
+            if candidate_key >= current_key:
+                best_session = raw_session
+        if not isinstance(best_session, dict):
+            return ""
+        return str(best_session.get("batch_key", "") or "").strip()
+
+    @staticmethod
+    def _set_latest_batch_key(state: Dict[str, Any], batch_key: str) -> None:
+        target_batch = str(batch_key or "").strip()
+        if target_batch:
+            state["review_latest_batch_key"] = target_batch
+
     def _save_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
         self._rebuild_latest_by_building(state)
         self._rebuild_batch_status(state)
+        latest_batch_key = str(state.get("review_latest_batch_key", "") or "").strip()
+        batch_status = state.get("review_batch_status", {})
+        if not latest_batch_key or not isinstance(batch_status, dict) or latest_batch_key not in batch_status:
+            state["review_latest_batch_key"] = self._derive_latest_batch_key_from_state(state)
         try:
             return self._review_state_store.save_state(state)
         except Exception as exc:  # noqa: BLE001
@@ -1185,31 +1249,14 @@ class ReviewSessionService:
         state = self._load_state()
         self._rebuild_batch_status(state)
 
-        latest_map = state.get("review_latest_by_building", {})
-        sessions = state.get("review_sessions", {})
         batch_status = state.get("review_batch_status", {})
-        if not isinstance(latest_map, dict) or not isinstance(sessions, dict) or not isinstance(batch_status, dict):
+        if not isinstance(batch_status, dict):
             return self.get_batch_status("")
 
-        latest_sessions: List[Dict[str, Any]] = []
-        for session_id in latest_map.values():
-            raw_session = sessions.get(str(session_id or "").strip(), {})
-            if not isinstance(raw_session, dict):
-                continue
-            latest_sessions.append(self._normalize_session(raw_session))
-
-        if not latest_sessions:
-            return self.get_batch_status("")
-
-        latest_session = max(
-            latest_sessions,
-            key=lambda item: (
-                str(item.get("duty_date", "")),
-                str(item.get("duty_shift", "")),
-                self._parse_updated_at(str(item.get("updated_at", ""))),
-            ),
-        )
-        latest_batch_key = str(latest_session.get("batch_key", "")).strip()
+        latest_batch_key = str(state.get("review_latest_batch_key", "") or "").strip()
+        if latest_batch_key and isinstance(batch_status.get(latest_batch_key), dict):
+            return dict(batch_status[latest_batch_key])
+        latest_batch_key = self._derive_latest_batch_key_from_state(state)
         if latest_batch_key and isinstance(batch_status.get(latest_batch_key), dict):
             return dict(batch_status[latest_batch_key])
         return self.get_batch_status(latest_batch_key)
@@ -1258,6 +1305,35 @@ class ReviewSessionService:
         if not normalized.get("batch_key"):
             normalized["batch_key"] = target_batch
         return normalized
+
+    def is_first_full_cloud_sync_completed(self, batch_key: str) -> bool:
+        batch_meta = self.get_cloud_batch(batch_key)
+        if not isinstance(batch_meta, dict):
+            return False
+        return bool(batch_meta.get("first_full_cloud_sync_completed", False))
+
+    def mark_first_full_cloud_sync_completed(self, *, batch_key: str) -> Dict[str, Any] | None:
+        target_batch = str(batch_key or "").strip()
+        if not target_batch:
+            return None
+        state = self._load_state()
+        cloud_batches = state.get("review_cloud_batches", {})
+        if not isinstance(cloud_batches, dict):
+            return None
+        raw = cloud_batches.get(target_batch, {})
+        if not isinstance(raw, dict):
+            return None
+        batch_meta = self._normalize_cloud_batch(raw)
+        if bool(batch_meta.get("first_full_cloud_sync_completed", False)):
+            return batch_meta
+        now_text = _now_text()
+        batch_meta["first_full_cloud_sync_completed"] = True
+        batch_meta["first_full_cloud_sync_at"] = now_text
+        batch_meta["updated_at"] = now_text
+        cloud_batches[target_batch] = batch_meta
+        state["review_cloud_batches"] = cloud_batches
+        self._save_state(state)
+        return dict(batch_meta)
 
     def attach_cloud_batch_to_session(self, *, session_id: str, batch_key: str, building: str) -> Dict[str, Any]:
         target_session_id = str(session_id or "").strip()
@@ -1362,6 +1438,7 @@ class ReviewSessionService:
         latest_map[building_name] = session_id
         state["review_sessions"] = sessions
         state["review_latest_by_building"] = latest_map
+        self._set_latest_batch_key(state, batch_key)
         self._save_state(state)
         return dict(session)
 
@@ -1419,6 +1496,7 @@ class ReviewSessionService:
         session["updated_at"] = _now_text()
         sessions[target_session_id] = session
         state["review_sessions"] = sessions
+        self._set_latest_batch_key(state, session["batch_key"])
         self._save_state(state)
         return dict(session), self.get_batch_status(session["batch_key"])
 
@@ -1448,6 +1526,7 @@ class ReviewSessionService:
             updated_sessions.append(dict(session))
 
         state["review_sessions"] = sessions
+        self._set_latest_batch_key(state, target_batch)
         self._save_state(state)
         return updated_sessions, self.get_batch_status(target_batch)
 
@@ -1463,6 +1542,7 @@ class ReviewSessionService:
         session["updated_at"] = _now_text()
         sessions[target_session_id] = session
         state["review_sessions"] = sessions
+        self._set_latest_batch_key(state, session["batch_key"])
         self._save_state(state)
         return dict(session)
 
@@ -1485,6 +1565,7 @@ class ReviewSessionService:
         session["updated_at"] = _now_text()
         sessions[target_session_id] = session
         state["review_sessions"] = sessions
+        self._set_latest_batch_key(state, session["batch_key"])
         self._save_state(state)
         return dict(session)
 
@@ -1499,6 +1580,7 @@ class ReviewSessionService:
         target_session_id = str(session_id or "").strip()
         state = self._load_state()
         sessions = state.get("review_sessions", {})
+        cloud_batches = state.get("review_cloud_batches", {})
         if not isinstance(sessions, dict) or target_session_id not in sessions:
             raise ReviewSessionNotFoundError("review session not found")
 
@@ -1515,17 +1597,31 @@ class ReviewSessionService:
         session["confirmed_by"] = ""
         session["updated_at"] = _now_text()
 
-        attachment_state = self._normalize_source_data_attachment_export(
-            session.get("source_data_attachment_export", {})
+        batch_cloud = (
+            self._normalize_cloud_batch(cloud_batches.get(session["batch_key"], {}))
+            if isinstance(cloud_batches, dict)
+            else self._normalize_cloud_batch({})
         )
-        if attachment_state.get("reason") not in {"disabled", "missing_duty_context", "night_shift_disabled"}:
-            attachment_state["status"] = "pending_review"
-            attachment_state["reason"] = "await_all_confirmed"
-            attachment_state["uploaded_count"] = 0
-            attachment_state["error"] = ""
-            attachment_state["uploaded_at"] = ""
-            attachment_state["uploaded_revision"] = 0
-        session["source_data_attachment_export"] = attachment_state
+        if not bool(batch_cloud.get("first_full_cloud_sync_completed", False)):
+            attachment_state = self._normalize_source_data_attachment_export(
+                session.get("source_data_attachment_export", {})
+            )
+            attachment_state["frozen_after_first_full_cloud_sync"] = False
+            if attachment_state.get("reason") not in {"disabled", "missing_duty_context", "night_shift_disabled"}:
+                attachment_state["status"] = "pending_review"
+                attachment_state["reason"] = "await_all_confirmed"
+                attachment_state["uploaded_count"] = 0
+                attachment_state["error"] = ""
+                attachment_state["uploaded_at"] = ""
+                attachment_state["uploaded_revision"] = 0
+            session["source_data_attachment_export"] = attachment_state
+        else:
+            attachment_state = self._normalize_source_data_attachment_export(
+                session.get("source_data_attachment_export", {})
+            )
+            if str(attachment_state.get("status", "")).strip().lower() in {"ok", "success", "skipped"}:
+                attachment_state["frozen_after_first_full_cloud_sync"] = True
+            session["source_data_attachment_export"] = attachment_state
 
         cloud_state = self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
         if str(cloud_state.get("status", "")).strip().lower() != "disabled":
@@ -1539,6 +1635,7 @@ class ReviewSessionService:
 
         sessions[target_session_id] = session
         state["review_sessions"] = sessions
+        self._set_latest_batch_key(state, session["batch_key"])
         self._save_state(state)
         return dict(session), self.get_batch_status(session["batch_key"])
 
@@ -1578,5 +1675,6 @@ class ReviewSessionService:
 
         sessions[target_session_id] = session
         state["review_sessions"] = sessions
+        self._set_latest_batch_key(state, session["batch_key"])
         self._save_state(state)
         return dict(session), self.get_batch_status(session["batch_key"])

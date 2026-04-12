@@ -541,11 +541,9 @@ def _resolve_internal_source_sites(common: Dict[str, Any], features: Dict[str, A
 
 def _has_day_metric_target_config(target: Dict[str, Any]) -> bool:
     source = _dict(target.get("source"))
-    types = _list(target.get("types"))
     return bool(
         str(source.get("app_token", "") or "").strip()
         or str(source.get("table_id", "") or "").strip()
-        or types
     )
 
 
@@ -564,7 +562,6 @@ def _migrate_legacy_day_metric_upload_config(
             "source": copy.deepcopy(_dict(legacy_export.get("source"))),
             "fields": copy.deepcopy(_dict(legacy_export.get("fields"))),
             "missing_value_policy": str(legacy_export.get("missing_value_policy", "") or "").strip() or "zero",
-            "types": copy.deepcopy(_list(legacy_export.get("types"))),
         }
     return migrated
 

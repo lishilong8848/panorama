@@ -18,6 +18,7 @@ export function cleanupDayMetricUploadCompat(raw, options = {}) {
   cfg.target.source = ensurePlainObject(cfg.target.source);
   delete cfg.target.source.base_url;
   delete cfg.target.source.wiki_url;
+  delete cfg.target.types;
   return cfg;
 }
 

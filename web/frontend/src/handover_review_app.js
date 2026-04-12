@@ -31,6 +31,7 @@ const DEFAULT_POLL_INTERVAL_MS = 5000;
 const REVIEW_LOCK_HEARTBEAT_MS = 15000;
 const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
 const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
+const HANDOVER_REVIEW_STATUS_BROADCAST_KEY = "handover_review_status_broadcast_v1";
 
 function shiftTextFromCode(shift) {
   const normalized = String(shift || "").trim().toLowerCase();
@@ -101,6 +102,27 @@ function ensureReviewClientIdentity() {
       clientId: fallbackId,
       holderLabel: buildLabel(fallbackId),
     };
+  }
+}
+
+function broadcastHandoverReviewStatusChange(payload = {}) {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    const sessionPayload = payload?.session && typeof payload.session === "object" ? payload.session : {};
+    const batchPayload = payload?.batch_status && typeof payload.batch_status === "object" ? payload.batch_status : {};
+    window.localStorage.setItem(
+      HANDOVER_REVIEW_STATUS_BROADCAST_KEY,
+      JSON.stringify({
+        ts: Date.now(),
+        building: String(sessionPayload.building || "").trim(),
+        session_id: String(sessionPayload.session_id || "").trim(),
+        batch_key: String(batchPayload.batch_key || sessionPayload.batch_key || "").trim(),
+        revision: Number(sessionPayload.revision || 0),
+        confirmed: Boolean(sessionPayload.confirmed),
+      }),
+    );
+  } catch (_error) {
+    // ignore cross-tab sync failures
   }
 }
 
@@ -1041,6 +1063,7 @@ export function mountHandoverReviewApp(Vue) {
             document: cloneDeep(documentRef.value),
           });
           applyPayloadMeta(response || {});
+          broadcastHandoverReviewStatusChange(response || {});
           lastSavedSnapshot.value = payloadSnapshot;
           dirty.value = serializeDocument(documentRef.value) !== lastSavedSnapshot.value;
           pendingFailureRetryCount.value = 0;
@@ -1135,6 +1158,7 @@ export function mountHandoverReviewApp(Vue) {
             ? await unconfirmHandoverReviewApi(buildingCode, request)
             : await confirmHandoverReviewApi(buildingCode, request);
           applyPayloadMeta(response || {});
+          broadcastHandoverReviewStatusChange(response || {});
           staleRevisionConflict.value = false;
           needsRefresh.value = false;
           statusText.value = session.value?.confirmed ? "已确认当前楼栋" : "已撤销确认";
@@ -1172,6 +1196,7 @@ export function mountHandoverReviewApp(Vue) {
             if (job.status === "success") {
               const result = job?.result && typeof job.result === "object" ? job.result : {};
               applyPayloadMeta(result || {});
+              broadcastHandoverReviewStatusChange(result || {});
               const retryStatus = String(result.status || "").trim().toLowerCase();
               if (retryStatus === "ok" || retryStatus === "success") {
                 statusText.value = "云表上传成功";
@@ -1213,6 +1238,7 @@ export function mountHandoverReviewApp(Vue) {
             session_id: session.value.session_id,
           });
           applyPayloadMeta(response || {});
+          broadcastHandoverReviewStatusChange(response || {});
           const updateStatus = String(response.status || "").trim().toLowerCase();
           if (updateStatus === "ok" || updateStatus === "success") {
             statusText.value = "历史云文档已更新";

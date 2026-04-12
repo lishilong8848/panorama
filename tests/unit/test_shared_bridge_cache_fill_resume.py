@@ -3,12 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import openpyxl
+
 from app.modules.shared_bridge.service import shared_bridge_runtime_service as runtime_module
 
 
 def _touch_file(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"ok")
+    if path.suffix.lower() == ".xlsx":
+        workbook = openpyxl.Workbook()
+        workbook.active["A1"] = "ok"
+        workbook.save(path)
+    else:
+        path.write_bytes(b"ok")
     return path
 
 
@@ -373,6 +380,44 @@ def test_day_metric_cache_fill_waits_for_sync_then_resumes_success(monkeypatch, 
     assert captured["building_scope"] == "single"
     assert captured["building"] == "A楼"
     assert captured["source_units"] == [
+        {
+            "duty_date": "2026-04-07",
+            "building": "A楼",
+            "source_file": str(cache.day_metric_file),
+        }
+    ]
+
+
+def test_day_metric_from_download_internal_prefers_shared_history_cache(monkeypatch, tmp_path: Path) -> None:
+    class _UnexpectedDayMetricService:
+        def __init__(self, *_args, **_kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def run_download_only(self, **_kwargs):  # noqa: ANN003
+            raise AssertionError("共享桥接 day_metric_from_download 内网阶段不应再重新下载 noon 源表")
+
+    monkeypatch.setattr(runtime_module, "DayMetricStandaloneUploadService", _UnexpectedDayMetricService)
+
+    internal, external, cache = _build_services(tmp_path)
+    task = external.create_day_metric_from_download_task(
+        selected_dates=["2026-04-07"],
+        building_scope="single",
+        building="A楼",
+        requested_by="manual",
+    )
+
+    internal._process_one_task_if_needed()
+
+    updated = external.get_task(task["task_id"])
+    assert updated is not None
+    assert updated["status"] == "ready_for_external"
+    assert (
+        "fill_day_metric_history",
+        {"selected_dates": ["2026-04-07"], "building_scope": "single", "building": "A楼"},
+    ) in cache.calls
+    internal_result = updated.get("result", {}).get("internal", {})
+    assert internal_result.get("downloaded_file_count") == 1
+    assert internal_result.get("downloaded_files") == [
         {
             "duty_date": "2026-04-07",
             "building": "A楼",

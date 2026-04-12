@@ -91,61 +91,50 @@ class _FakeDownloadService:
         return {"success_files": success_files, "failed": failed}
 
 
-class _FakeExtractService:
-    def __init__(self, cfg):  # noqa: ANN001
-        self.cfg = cfg
-
-    def extract(self, *, building, data_file):  # noqa: ANN001
-        return {
-            "hits": {
-                "city_power": {
-                    "row_index": 12,
-                    "b_norm": "A-401",
-                    "c_norm": "R01",
-                    "b_text": "A-401",
-                    "c_text": "R01",
-                }
-            },
-            "effective_config": {
-                "building": building,
-                "data_file": data_file,
-                "cell_mapping": {"city_power": "D6"},
-            },
-        }
-
-
-class _FakeFillService:
+class _FakeSourceCalcService:
     calls: list[dict] = []
 
     def __init__(self, cfg):  # noqa: ANN001
         self.cfg = cfg
 
-    def fill(
+    def calculate(
         self,
         *,
         building,
         data_file,
-        hits,
-        effective_config,
-        date_ref_override,
-        write_output_file,
-        emit_log,  # noqa: ANN001
+        duty_date,
     ):
         self.__class__.calls.append(
             {
                 "building": building,
                 "data_file": data_file,
-                "date_ref_override": date_ref_override,
-                "write_output_file": write_output_file,
+                "duty_date": duty_date,
             }
         )
         return {
-            "output_file": "",
-            "resolved_values_by_id": {"day_metric": 1},
-            "final_cell_values": {"D6": 11},
-            "hits": hits,
-            "effective_config": effective_config,
-            "source_file": data_file,
+            "resolved_metrics": {"city_power": 11, "it_power": 22},
+            "metric_origin_context": {
+                "by_metric_id": {
+                    "city_power": {
+                        "metric_key": "city_power",
+                        "row_index": 12,
+                        "b_norm": "A-401",
+                        "c_norm": "",
+                        "b_text": "A-401",
+                        "c_text": "R01",
+                        "d_name": "总负荷",
+                    },
+                    "it_power": {
+                        "metric_key": "it_power",
+                        "row_index": 13,
+                        "b_norm": "A-402",
+                        "c_norm": "",
+                        "b_text": "A-402",
+                        "c_text": "R02",
+                        "d_name": "IT总负荷",
+                    },
+                }
+            },
         }
 
 
@@ -178,17 +167,11 @@ class _FakeSourceDataAttachmentExportService:
 
 class _FakeDayMetricExportService:
     run_calls: list[dict] = []
-    serialize_calls: list[dict] = []
     workflow_log: list[str] = []
     remaining_failures_by_key: dict[tuple[str, str], int] = {}
 
     def __init__(self, cfg):  # noqa: ANN001
         self.cfg = cfg
-
-    def serialize_metric_origin_context(self, *, hits, effective_config):  # noqa: ANN001
-        payload = {"by_metric_id": hits, "by_target_cell": effective_config.get("cell_mapping", {})}
-        self.__class__.serialize_calls.append({"hits": hits, "effective_config": effective_config, "payload": payload})
-        return payload
 
     def run(self, **kwargs):
         self.__class__.run_calls.append(dict(kwargs))
@@ -267,18 +250,16 @@ def _patch_services(monkeypatch) -> None:  # noqa: ANN001
     _FakeDownloadService.run_calls = []
     _FakeDownloadService.workflow_log = []
     _FakeDownloadService.failed_buildings_by_date = {}
-    _FakeFillService.calls = []
+    _FakeSourceCalcService.calls = []
     _FakeSourceDataAttachmentExportService.calls = []
     _FakeSourceDataAttachmentExportService.workflow_log = []
     _FakeSourceDataAttachmentExportService.remaining_failures_by_key = {}
     _FakeDayMetricExportService.run_calls = []
-    _FakeDayMetricExportService.serialize_calls = []
     _FakeDayMetricExportService.workflow_log = []
     _FakeDayMetricExportService.remaining_failures_by_key = {}
     monkeypatch.setattr(module, "WebhookNotifyService", _FakeNotifyService)
     monkeypatch.setattr(module, "HandoverDownloadService", _FakeDownloadService)
-    monkeypatch.setattr(module, "HandoverExtractService", _FakeExtractService)
-    monkeypatch.setattr(module, "HandoverFillService", _FakeFillService)
+    monkeypatch.setattr(module, "DayMetricSourceCalcService", _FakeSourceCalcService)
     monkeypatch.setattr(module, "SourceDataAttachmentBitableExportService", _FakeSourceDataAttachmentExportService)
     monkeypatch.setattr(module, "DayMetricBitableExportService", _FakeDayMetricExportService)
 
@@ -306,7 +287,7 @@ def test_run_from_download_switches_network_once_and_downloads_before_processing
     assert _FakeDownloadService.run_calls[0]["end_time"] == "2026-03-20 12:20:00"
     assert len(_FakeSourceDataAttachmentExportService.calls) == 2
     assert len(_FakeDayMetricExportService.run_calls) == 2
-    assert all(call["write_output_file"] is False for call in _FakeFillService.calls)
+    assert len(_FakeSourceCalcService.calls) == 2
     assert result["results"][0]["buildings"][0]["output_file"] == ""
 
 
@@ -361,6 +342,96 @@ def test_run_from_download_retries_attachment_failure_five_times_and_alerts(monk
     assert _FakeNotifyService.calls[-1]["category"] == "upload"
 
 
+def test_run_from_download_prefers_shared_day_cache_before_download(monkeypatch, tmp_path: Path) -> None:
+    _patch_services(monkeypatch)
+    shared_source = tmp_path / "shared_cache" / "A_2026-03-20.xlsx"
+    shared_source.parent.mkdir(parents=True, exist_ok=True)
+    shared_source.write_bytes(b"demo")
+
+    class _FakeSharedBridgeStore:
+        def __init__(self, *_args, **_kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def ensure_ready(self):  # noqa: D401
+            return None
+
+    class _FakeSharedSourceCacheService:
+        get_calls: list[dict] = []
+        fill_calls: list[dict] = []
+
+        def __init__(self, *, runtime_config, store, download_browser_pool, emit_log):  # noqa: ANN001
+            self.runtime_config = runtime_config
+            self.store = store
+            self.download_browser_pool = download_browser_pool
+            self.emit_log = emit_log
+
+        def get_day_metric_by_date_entries(self, *, selected_dates, buildings):  # noqa: ANN001
+            self.__class__.get_calls.append({"selected_dates": list(selected_dates), "buildings": list(buildings)})
+            return [
+                {
+                    "duty_date": "2026-03-20",
+                    "building": "A",
+                    "file_path": str(shared_source),
+                }
+            ]
+
+        def fill_day_metric_history(self, *, selected_dates, building_scope, building, emit_log):  # noqa: ANN001
+            self.__class__.fill_calls.append(
+                {
+                    "selected_dates": list(selected_dates),
+                    "building_scope": building_scope,
+                    "building": building,
+                }
+            )
+            return [
+                {
+                    "duty_date": "2026-03-20",
+                    "building": "A",
+                    "file_path": str(shared_source),
+                }
+            ]
+
+    _FakeSharedSourceCacheService.get_calls = []
+    _FakeSharedSourceCacheService.fill_calls = []
+    monkeypatch.setattr(module, "SharedBridgeStore", _FakeSharedBridgeStore)
+    monkeypatch.setattr(module, "SharedSourceCacheService", _FakeSharedSourceCacheService)
+
+    cfg = _runtime_cfg(tmp_path, auto_switch=False)
+    cfg["deployment"] = {"role_mode": "external"}
+    cfg["shared_bridge"] = {"enabled": True, "root_dir": str(tmp_path / "shared")}
+    service = module.DayMetricStandaloneUploadService(cfg)
+
+    result = service.run_from_download(
+        selected_dates=["2026-03-20"],
+        building_scope="single",
+        building="A",
+        emit_log=lambda *_args: None,
+    )
+
+    assert result["status"] == "ok"
+    assert result["internal"]["downloaded_file_count"] == 1
+    assert result["internal"]["downloaded_files"] == [
+        {
+            "duty_date": "2026-03-20",
+            "building": "A",
+            "source_file": str(shared_source),
+        }
+    ]
+    assert _FakeSharedSourceCacheService.fill_calls == [
+        {
+            "selected_dates": ["2026-03-20"],
+            "building_scope": "single",
+            "building": "A",
+        }
+    ]
+    assert _FakeSharedSourceCacheService.get_calls == [{"selected_dates": ["2026-03-20"], "buildings": ["A"]}]
+    assert _FakeDownloadService.run_calls == []
+    assert _FakeDownloadService.ensure_internal_calls == 0
+    assert len(_FakeSourceDataAttachmentExportService.calls) == 1
+    assert len(_FakeDayMetricExportService.run_calls) == 1
+    assert len(_FakeSourceCalcService.calls) == 1
+
+
 def test_retry_unit_reuses_persisted_source_file_for_upload_stage(monkeypatch, tmp_path: Path) -> None:
     _patch_services(monkeypatch)
     _FakeDayMetricExportService.remaining_failures_by_key = {("2026-03-20", "A"): 5}
@@ -412,5 +483,43 @@ def test_run_from_file_uses_direct_export_without_output_file(monkeypatch, tmp_p
     assert row["output_file"] == ""
     assert row["retryable"] is False
     assert _FakeSourceDataAttachmentExportService.calls[0]["data_file"] == str(source_file)
-    assert _FakeFillService.calls[0]["write_output_file"] is False
-    assert _FakeDayMetricExportService.run_calls[0]["metric_origin_context"]["by_target_cell"] == {"city_power": "D6"}
+    assert _FakeSourceCalcService.calls[0]["duty_date"] == "2026-03-24"
+    assert "city_power" in _FakeDayMetricExportService.run_calls[0]["metric_origin_context"]["by_metric_id"]
+
+
+def test_run_from_file_skips_attachment_when_source_calc_fails(monkeypatch, tmp_path: Path) -> None:
+    _patch_services(monkeypatch)
+
+    class _FailingSourceCalcService:
+        calls: list[dict] = []
+
+        def __init__(self, cfg):  # noqa: ANN001
+            self.cfg = cfg
+
+        def calculate(self, *, building, data_file, duty_date):  # noqa: ANN001
+            self.__class__.calls.append(
+                {
+                    "building": building,
+                    "data_file": data_file,
+                    "duty_date": duty_date,
+                }
+            )
+            raise ValueError("交接班源文件E列无有效数据")
+
+    source_file = tmp_path / "input.xlsx"
+    source_file.write_bytes(b"demo")
+    monkeypatch.setattr(module, "DayMetricSourceCalcService", _FailingSourceCalcService)
+    service = module.DayMetricStandaloneUploadService(_runtime_cfg(tmp_path, auto_switch=False))
+
+    result = service.run_from_file(
+        building="A",
+        duty_date="2026-03-24",
+        file_path=str(source_file),
+        emit_log=lambda *_args: None,
+    )
+
+    row = result["results"][0]["buildings"][0]
+    assert result["status"] == "failed"
+    assert row["stage"] == "extract"
+    assert _FakeSourceDataAttachmentExportService.calls == []
+    assert _FakeDayMetricExportService.run_calls == []

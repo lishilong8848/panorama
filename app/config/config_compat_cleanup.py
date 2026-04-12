@@ -24,6 +24,7 @@ def sanitize_day_metric_upload_config(day_metric_upload: Dict[str, Any] | None) 
     source.pop("base_url", None)
     source.pop("wiki_url", None)
     target["source"] = source
+    target.pop("types", None)
     sanitized["target"] = target
     return sanitized
 

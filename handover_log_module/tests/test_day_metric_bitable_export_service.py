@@ -53,10 +53,6 @@ def _cfg():
                 "date": "日期",
                 "value": "数值",
             },
-            "types": [
-                {"name": "总负荷（KW）", "source": "cell", "cell": "D6"},
-                {"name": "IT总负荷（KW）", "source": "cell", "cell": "F6"},
-            ],
         }
     }
 
@@ -111,33 +107,30 @@ def test_serialize_metric_origin_context_maps_metric_and_target_cell() -> None:
 
 def test_prepare_records_writes_position_code_for_metric_and_cell() -> None:
     cfg = _cfg()
-    cfg["day_metric_export"]["types"] = [
-        {"name": "冷通道最高温度（℃）", "source": "metric", "metric_id": "cold_temp_max"},
-        {"name": "总负荷（KW）", "source": "cell", "cell": "D6"},
-        {"name": "UPS负载率（MAX）", "source": "cell_percent", "cell": "D10"},
-    ]
     service = DayMetricBitableExportService(cfg)
 
     records, _preview = service._prepare_records(
         cfg=service._normalize_cfg(),
         building="A楼",
         duty_date="2026-03-24",
-        cell_values={"D6": 11, "D10": "55%"},
-        resolved_values_by_id={"cold_temp_max": 31.2},
+        cell_values={},
+        resolved_values_by_id={"cold_temp_max": 31.2, "city_power": 11, "ups_load_max": 55},
         metric_origin_context={
             "by_metric_id": {
                 "cold_temp_max": {"b_norm": "E-301", "c_norm": "C3-2"},
-            },
-            "by_target_cell": {
-                "D6": {"metric_key": "city_power", "b_norm": "A-401", "c_norm": "", "c_text": "1#总配"},
-                "D10": {"metric_key": "ups_load_max", "b_norm": "", "c_norm": "", "c_text": "UPS-3"},
+                "city_power": {"metric_key": "city_power", "b_norm": "A-401", "c_norm": "", "c_text": "1#总配"},
+                "ups_load_max": {"metric_key": "ups_load_max", "b_norm": "", "c_norm": "", "c_text": "UPS-3"},
             },
         },
     )
 
-    assert records[0]["位置/编号"] == "E-301 C3-2"
-    assert records[1]["位置/编号"] == "1#总配"
-    assert records[2]["位置/编号"] == "UPS-3"
+    by_type = {item["类型"]: item for item in records}
+    assert by_type["冷通道最高温度（℃）"]["数值"] == 31.2
+    assert by_type["冷通道最高温度（℃）"]["位置/编号"] == "E-301 C3-2"
+    assert by_type["总负荷（KW）"]["数值"] == 11
+    assert by_type["总负荷（KW）"]["位置/编号"] == "pue能耗数据计算"
+    assert by_type["UPS负载率（MAX）"]["数值"] == 55
+    assert by_type["UPS负载率（MAX）"]["位置/编号"] == "UPS-3"
 
 
 def test_list_existing_records_for_unit_filters_building_date_and_type(monkeypatch) -> None:
@@ -152,7 +145,8 @@ def test_list_existing_records_for_unit_filters_building_date_and_type(monkeypat
             {"record_id": "rec_4", "fields": {"楼栋": "A楼", "日期": other_ms, "类型": "IT总负荷（KW）"}},
         ]
     )
-    monkeypatch.setattr(service, "_new_client", lambda _cfg: fake_client)
+    monkeypatch.setattr(service, "_resolve_target", lambda _cfg: {"app_token": "app", "table_id": "tbl_demo"})
+    monkeypatch.setattr(service, "_new_client", lambda _cfg, **kwargs: fake_client)
 
     matched = service.list_existing_records_for_unit(building="A楼", duty_date="2026-03-24")
 
@@ -168,8 +162,8 @@ def test_rewrite_from_output_file_deletes_then_recreates(monkeypatch) -> None:
             {"record_id": "rec_2", "fields": {"楼栋": "A楼", "日期": target_ms, "类型": "IT总负荷（KW）"}},
         ]
     )
-    monkeypatch.setattr(service, "_new_client", lambda _cfg: fake_client)
-    monkeypatch.setattr(service, "_load_workbook_cell_values", lambda output_file, cfg: {"D6": 11, "F6": 22})  # noqa: ARG005
+    monkeypatch.setattr(service, "_resolve_target", lambda _cfg: {"app_token": "app", "table_id": "tbl_demo"})
+    monkeypatch.setattr(service, "_new_client", lambda _cfg, **kwargs: fake_client)
     monkeypatch.setattr(
         service,
         "_prepare_records",
@@ -187,7 +181,7 @@ def test_rewrite_from_output_file_deletes_then_recreates(monkeypatch) -> None:
         duty_date="2026-03-24",
         duty_shift="day",
         output_file="demo.xlsx",
-        metric_values_by_id={},
+        metric_values_by_id={"city_power": 11, "it_power": 22},
         metric_origin_context={},
         emit_log=lambda *_args: None,
     )

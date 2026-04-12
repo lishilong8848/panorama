@@ -1187,20 +1187,15 @@ def _validate_day_metric_upload(cfg: Dict[str, Any]) -> None:
 
     source = target.get("source", {})
     fields = target.get("fields", {})
-    types = target.get("types", [])
     if not isinstance(source, dict):
         raise ValueError("配置错误: features.day_metric_upload.target.source 必须是对象")
     if not isinstance(fields, dict):
         raise ValueError("配置错误: features.day_metric_upload.target.fields 必须是对象")
-    if not isinstance(types, list):
-        raise ValueError("配置错误: features.day_metric_upload.target.types 必须是数组")
 
     missing_policy = str(target.get("missing_value_policy", "zero")).strip().lower()
     if missing_policy != "zero":
         raise ValueError("配置错误: features.day_metric_upload.target.missing_value_policy 仅支持 zero")
 
-    if not types:
-        raise ValueError("配置错误: features.day_metric_upload.target.types 不能为空")
     if not str(source.get("app_token", "")).strip():
         raise ValueError("配置错误: features.day_metric_upload.target.source.app_token 不能为空")
     if not str(source.get("table_id", "")).strip():
@@ -1210,35 +1205,6 @@ def _validate_day_metric_upload(cfg: Dict[str, Any]) -> None:
     for key in ("type", "building", "date", "value", "position_code"):
         if not str(fields.get(key, "")).strip():
             raise ValueError(f"配置错误: features.day_metric_upload.target.fields.{key} 不能为空")
-
-    valid_source = {"cell", "metric", "cell_percent", "cell_min_pair"}
-    cell_pattern = re.compile(r"^[A-Z]+[1-9]\d*$")
-    for idx, raw_item in enumerate(types, 1):
-        if not isinstance(raw_item, dict):
-            raise ValueError(f"配置错误: features.day_metric_upload.target.types 第{idx}项必须是对象")
-        name = str(raw_item.get("name", "")).strip()
-        source_type = str(raw_item.get("source", "")).strip().lower()
-        if not name:
-            raise ValueError(f"配置错误: features.day_metric_upload.target.types 第{idx}项 name 不能为空")
-        if source_type not in valid_source:
-            raise ValueError(
-                "配置错误: features.day_metric_upload.target.types "
-                f"第{idx}项 source 仅支持 cell/metric/cell_percent/cell_min_pair"
-            )
-        if source_type in {"cell", "cell_percent", "cell_min_pair"}:
-            cell_text = str(raw_item.get("cell", "")).strip().upper()
-            if not cell_pattern.fullmatch(cell_text):
-                raise ValueError(
-                    "配置错误: features.day_metric_upload.target.types "
-                    f"第{idx}项 cell 必须是合法单元格（如 D6）"
-                )
-        if source_type == "metric":
-            metric_id = str(raw_item.get("metric_id", "")).strip()
-            if not metric_id:
-                raise ValueError(
-                    "配置错误: features.day_metric_upload.target.types "
-                    f"第{idx}项 metric_id 不能为空"
-                )
     _validate_feature_daily_scheduler(
         "features.day_metric_upload.scheduler",
         upload_cfg.get("scheduler", {}),
@@ -1930,8 +1896,7 @@ def _has_meaningful_day_metric_upload(cfg: Dict[str, Any]) -> bool:
         return False
     target = feature_cfg.get("target", {})
     source = target.get("source", {}) if isinstance(target, dict) else {}
-    types = target.get("types", []) if isinstance(target, dict) else []
-    return bool(_text(source.get("app_token")) and _text(source.get("table_id")) and isinstance(types, list) and len(types) > 0)
+    return bool(_text(source.get("app_token")) and _text(source.get("table_id")))
 
 
 def _extract_day_metric_repair_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1949,8 +1914,7 @@ def _has_meaningful_day_metric_repair_payload(payload: Dict[str, Any]) -> bool:
         return False
     target = payload.get("target", {})
     source = target.get("source", {}) if isinstance(target, dict) else {}
-    types = target.get("types", []) if isinstance(target, dict) else []
-    return bool(_text(_dict(source).get("app_token")) and _text(_dict(source).get("table_id")) and isinstance(types, list) and len(types) > 0)
+    return bool(_text(_dict(source).get("app_token")) and _text(_dict(source).get("table_id")))
 
 
 def _apply_day_metric_repair_payload(cfg: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2343,28 +2307,9 @@ def repair_day_metric_related_settings(
     cfg: Dict[str, Any],
     config_path: str | Path | None = None,
 ) -> tuple[Dict[str, Any], List[str], bool]:
+    _ = config_path
     current = ensure_v3_config(copy.deepcopy(cfg))
-    repaired, notes = _repair_critical_settings_from_backups(current, config_path)
-
-    # Repair button should also reconcile 12-item runtime profile from latest valid backup,
-    # even when current config is not the global default.
-    current_payload = _extract_day_metric_repair_payload(repaired)
-    backup_payload, payload_source = _pick_day_metric_repair_payload_from_backups(config_path)
-    if backup_payload and _has_meaningful_day_metric_repair_payload(backup_payload):
-        if current_payload != backup_payload:
-            repaired = _apply_day_metric_repair_payload(repaired, backup_payload)
-            if payload_source:
-                notes.append(f"12项配置轮廓 <- {payload_source}")
-            else:
-                notes.append("12项配置轮廓 <- 已知模板")
-
-    changed = (
-        _normalized_day_metric_upload(current) != _normalized_day_metric_upload(repaired)
-        or _dict(_dict(current.get("common")).get("feishu_auth"))
-        != _dict(_dict(repaired.get("common")).get("feishu_auth"))
-        or _normalized_notify_config(current) != _normalized_notify_config(repaired)
-    )
-    return repaired, notes, changed
+    return current, [], False
 
 
 def save_settings(

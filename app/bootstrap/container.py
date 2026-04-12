@@ -1131,6 +1131,9 @@ class AppContainer:
                 "node_count": 0,
                 "node_heartbeat_ok": False,
                 "agent_status": "stopped" if bridge_active else "disabled",
+                "background_task_count": 0,
+                "background_running_count": 0,
+                "background_tasks": [],
                 "heartbeat_interval_sec": 5,
                 "poll_interval_sec": 2,
                 "internal_alert_status": {

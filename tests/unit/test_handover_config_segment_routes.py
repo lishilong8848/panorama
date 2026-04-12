@@ -176,25 +176,13 @@ def test_day_metric_config_repair_route_applies_and_reloads(tmp_path: Path, monk
     monkeypatch.setattr(routes, "_materialize_review_access_snapshot", lambda _container: {"configured": False})
     monkeypatch.setattr(routes, "_persist_manual_review_access_snapshot", lambda _container: {"configured": True})
 
-    repaired_cfg = copy.deepcopy(container.config)
-    repaired_cfg["common"]["feishu_auth"]["app_id"] = "cli_test"
-    repaired_cfg["common"]["feishu_auth"]["app_secret"] = "sec_test"
-    repaired_cfg["features"]["day_metric_upload"]["target"]["source"]["app_token"] = "app_test"
-    repaired_cfg["features"]["day_metric_upload"]["target"]["source"]["table_id"] = "tbl_test"
-
-    def _fake_repair(_cfg, _config_path):
-        return copy.deepcopy(repaired_cfg), ["12项独立上传配置 <- backup"], True
-
-    monkeypatch.setattr(routes, "repair_day_metric_related_settings", _fake_repair)
-
     response = routes.post_repair_day_metric_upload_config(request)
 
     assert response["ok"] is True
-    assert response["repaired"] is True
-    assert response["notes"] == ["12项独立上传配置 <- backup"]
-    assert container.config["common"]["feishu_auth"]["app_id"] == "cli_test"
-    assert container.config["features"]["day_metric_upload"]["target"]["source"]["app_token"] == "app_test"
-    assert any("12项配置修复完成" in item for item in container.logs)
+    assert response["repaired"] is False
+    assert response["notes"] == ["12项规则已内置，无需修复"]
+    assert container.config == load_settings(config_path)
+    assert any("无需修复" in item for item in container.logs)
 
 
 def test_day_metric_config_repair_route_no_change_does_not_save(tmp_path: Path, monkeypatch) -> None:
@@ -205,11 +193,6 @@ def test_day_metric_config_repair_route_no_change_does_not_save(tmp_path: Path, 
 
     monkeypatch.setattr(routes, "_materialize_review_access_snapshot", lambda _container: {"configured": False})
     monkeypatch.setattr(routes, "_persist_manual_review_access_snapshot", lambda _container: {"configured": True})
-    monkeypatch.setattr(
-        routes,
-        "repair_day_metric_related_settings",
-        lambda cfg, config_path=None: (copy.deepcopy(cfg), [], False),
-    )
 
     def _fail_save_settings(*_args, **_kwargs):
         raise AssertionError("changed=False 时不应调用 save_settings")

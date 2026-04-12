@@ -1039,6 +1039,9 @@ export function createAppState(vueApi) {
       node_count: 0,
       node_heartbeat_ok: false,
       agent_status: "disabled",
+      background_task_count: 0,
+      background_running_count: 0,
+      background_tasks: [],
       heartbeat_interval_sec: 5,
       poll_interval_sec: 2,
       internal_download_pool: {
@@ -3362,6 +3365,11 @@ function normalizeInternalDownloadPoolSlot(slot) {
             : health.shared_bridge.agent_status === "disabled"
               ? "neutral"
               : "warning",
+      },
+      {
+        label: "后台任务",
+        value: `${health.shared_bridge.background_running_count || 0} / ${health.shared_bridge.background_task_count || 0}`,
+        tone: (health.shared_bridge.background_running_count || 0) > 0 ? "info" : "neutral",
       },
     ];
     const lastBridgeError = formatSharedBridgeRuntimeError(health.shared_bridge.last_error);

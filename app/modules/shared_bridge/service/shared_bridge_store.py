@@ -2033,6 +2033,38 @@ class SharedBridgeStore:
             ).fetchall()
         return [self._row_to_artifact_dict(row) for row in rows]
 
+    def list_artifacts(
+        self,
+        *,
+        artifact_kind: str = "",
+        status: str = "",
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
+        kind_text = str(artifact_kind or "").strip()
+        status_text = str(status or "").strip()
+        if kind_text:
+            clauses.append("artifact_kind=?")
+            params.append(kind_text)
+        if status_text:
+            clauses.append("status=?")
+            params.append(status_text)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT artifact_id, task_id, stage_id, artifact_kind, building, relative_path, status,
+                       size_bytes, metadata_json, created_at, updated_at
+                FROM bridge_artifacts
+                {where_sql}
+                ORDER BY updated_at DESC, created_at DESC, artifact_id DESC
+                LIMIT ?
+                """,
+                [*params, max(1, int(limit or 500))],
+            ).fetchall()
+        return [self._row_to_artifact_dict(row) for row in rows]
+
     def update_artifact_status(
         self,
         artifact_id: str,
@@ -2090,6 +2122,30 @@ class SharedBridgeStore:
             if task_id_text:
                 self._sync_task_mailbox_from_conn(conn, task_id_text)
         return self._row_to_artifact_dict(updated_row) if updated_row else None
+
+    def delete_artifact(self, artifact_id: str) -> bool:
+        artifact_text = str(artifact_id or "").strip()
+        if not artifact_text:
+            return False
+        deleted_task_id = ""
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT task_id
+                FROM bridge_artifacts
+                WHERE artifact_id=?
+                """,
+                (artifact_text,),
+            ).fetchone()
+            if row:
+                deleted_task_id = str(row["task_id"] or "").strip()
+            deleted = conn.execute(
+                "DELETE FROM bridge_artifacts WHERE artifact_id=?",
+                (artifact_text,),
+            )
+            if deleted_task_id and int(deleted.rowcount or 0) > 0:
+                self._sync_task_mailbox_from_conn(conn, deleted_task_id)
+        return bool(int(deleted.rowcount or 0) > 0)
 
     def upsert_source_cache_entry(
         self,

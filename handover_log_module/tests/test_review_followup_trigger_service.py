@@ -110,6 +110,18 @@ class FakeReviewService:
             return deepcopy(self.batch_meta)
         return None
 
+    def is_first_full_cloud_sync_completed(self, batch_key: str) -> bool:
+        if not self.batch_meta or self.batch_meta.get("batch_key") != batch_key:
+            return False
+        return bool(self.batch_meta.get("first_full_cloud_sync_completed", False))
+
+    def mark_first_full_cloud_sync_completed(self, *, batch_key: str) -> dict | None:
+        if not self.batch_meta or self.batch_meta.get("batch_key") != batch_key:
+            return None
+        self.batch_meta["first_full_cloud_sync_completed"] = True
+        self.batch_meta["first_full_cloud_sync_at"] = "2026-03-24 10:00:00"
+        return deepcopy(self.batch_meta)
+
     def register_cloud_batch(self, *, batch_key: str, duty_date: str, duty_shift: str, cloud_batch: dict) -> dict:
         normalized = {
             "batch_key": batch_key,
@@ -423,6 +435,8 @@ def prepared_batch_meta() -> dict:
         "prepared_at": "2026-03-22 02:00:00",
         "updated_at": "2026-03-22 02:00:00",
         "error": "",
+        "first_full_cloud_sync_completed": False,
+        "first_full_cloud_sync_at": "",
     }
 
 
@@ -444,6 +458,7 @@ def test_trigger_batch_runs_daily_report_export_after_cloud_success() -> None:
     assert result["daily_report_record_export"]["summary_screenshot_source_used"] == "auto"
     assert result["daily_report_record_export"]["external_screenshot_source_used"] == "auto"
     assert trigger._daily_report_bitable_export_service.calls[0]["spreadsheet_url"] == "https://vnet.feishu.cn/wiki/wiki_token_1"  # type: ignore[attr-defined]
+    assert review_service.batch_meta["first_full_cloud_sync_completed"] is True
 
 
 def test_followup_attachment_export_falls_back_to_cached_source_file() -> None:
@@ -584,6 +599,87 @@ def test_trigger_batch_uploads_all_confirmed_buildings_once() -> None:
     assert review_service.get_latest_session("A")["cloud_sheet_sync"]["status"] == "success"
     assert review_service.get_latest_session("A")["cloud_sheet_sync"]["synced_revision"] == 2
     assert review_service.get_latest_session("B")["cloud_sheet_sync"]["synced_revision"] == 3
+    assert review_service.batch_meta["first_full_cloud_sync_completed"] is True
+
+
+def test_trigger_after_single_confirm_uses_single_building_cloud_sync_after_first_full_upload() -> None:
+    sessions = [
+        make_session("A", revision=3, synced_revision=2),
+        make_session("B", revision=2, cloud_status="success", synced_revision=2),
+    ]
+    sessions[0]["source_data_attachment_export"]["uploaded_revision"] = 2
+    sessions[0]["source_data_attachment_export"]["frozen_after_first_full_cloud_sync"] = True
+    batch_meta = prepared_batch_meta()
+    batch_meta["first_full_cloud_sync_completed"] = True
+    batch_meta["first_full_cloud_sync_at"] = "2026-03-24 09:00:00"
+    review_service = FakeReviewService(sessions, ready=True, batch_meta=batch_meta)
+    cloud_service = FakeCloudSyncService()
+    trigger = build_trigger(review_service, cloud_service)
+    trigger._daily_report_state_service = FakeDailyReportStateService()  # type: ignore[attr-defined]
+    trigger._daily_report_screenshot_service = FakeDailyReportScreenshotService()  # type: ignore[attr-defined]
+    trigger._daily_report_bitable_export_service = FakeDailyReportBitableExportService()  # type: ignore[attr-defined]
+
+    result = trigger.trigger_after_single_confirm(
+        batch_key="2026-03-22|night",
+        building="A",
+        session_id="A|2026-03-22|night",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    assert result["status"] == "ok"
+    assert result["cloud_sheet_sync"]["uploaded_buildings"] == ["A"]
+    assert len(cloud_service.sync_calls) == 1
+    assert cloud_service.sync_calls[0]["building_items"] == [
+        {"building": "A", "output_file": "D:\\handover\\A_交接班日志.xlsx", "revision": 3},
+    ]
+    assert trigger._source_data_attachment_export_service.calls == []  # type: ignore[attr-defined]
+    assert trigger._daily_report_screenshot_service.summary_calls == []  # type: ignore[attr-defined]
+    assert trigger._daily_report_bitable_export_service.calls == []  # type: ignore[attr-defined]
+    assert result["daily_report_record_export"]["status"] == "success"
+    assert result["followup_progress"]["attachment_pending_count"] == 0
+
+
+def test_trigger_after_single_confirm_waits_until_all_buildings_confirmed_before_first_full_upload() -> None:
+    sessions = [make_session("A")]
+    review_service = FakeReviewService(sessions, ready=False, batch_meta=prepared_batch_meta())
+    cloud_service = FakeCloudSyncService()
+    trigger = build_trigger(review_service, cloud_service)
+    trigger._daily_report_state_service = FakeDailyReportStateService()  # type: ignore[attr-defined]
+    trigger._daily_report_screenshot_service = FakeDailyReportScreenshotService()  # type: ignore[attr-defined]
+    trigger._daily_report_bitable_export_service = FakeDailyReportBitableExportService()  # type: ignore[attr-defined]
+
+    result = trigger.trigger_after_single_confirm(
+        batch_key="2026-03-22|night",
+        building="A",
+        session_id="A|2026-03-22|night",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    assert result["status"] == "await_all_confirmed"
+    assert trigger._source_data_attachment_export_service.calls == []  # type: ignore[attr-defined]
+    assert len(trigger._daily_report_screenshot_service.summary_calls) == 0  # type: ignore[attr-defined]
+    assert len(trigger._daily_report_bitable_export_service.calls) == 0  # type: ignore[attr-defined]
+
+
+def test_trigger_after_single_confirm_runs_full_trigger_when_all_buildings_just_confirmed() -> None:
+    sessions = [make_session("A")]
+    review_service = FakeReviewService(sessions, ready=True, batch_meta=prepared_batch_meta())
+    cloud_service = FakeCloudSyncService()
+    trigger = build_trigger(review_service, cloud_service)
+    trigger._daily_report_state_service = FakeDailyReportStateService()  # type: ignore[attr-defined]
+    trigger._daily_report_screenshot_service = FakeDailyReportScreenshotService()  # type: ignore[attr-defined]
+    trigger._daily_report_bitable_export_service = FakeDailyReportBitableExportService()  # type: ignore[attr-defined]
+
+    result = trigger.trigger_after_single_confirm(
+        batch_key="2026-03-22|night",
+        building="A",
+        session_id="A|2026-03-22|night",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    assert result["status"] == "ok"
+    assert len(trigger._daily_report_screenshot_service.summary_calls) == 1  # type: ignore[attr-defined]
+    assert len(trigger._daily_report_bitable_export_service.calls) == 1  # type: ignore[attr-defined]
 
 
 def test_retry_failed_cloud_sheet_in_batch_only_retries_failed_buildings() -> None:

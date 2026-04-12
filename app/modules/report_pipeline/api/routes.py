@@ -25,7 +25,6 @@ from app.config.settings_loader import (
     get_handover_building_segment,
     get_handover_common_segment,
     preserve_segmented_handover_config,
-    repair_day_metric_related_settings,
     save_handover_building_segment,
     save_handover_common_segment,
     save_settings,
@@ -1630,17 +1629,10 @@ def get_config(request: Request) -> Dict[str, Any]:
 def post_repair_day_metric_upload_config(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
     try:
-        repaired, notes, changed = repair_day_metric_related_settings(container.config, container.config_path)
-        if changed:
-            saved = save_settings(repaired, container.config_path)
-            container.reload_config(saved)
-            if notes:
-                container.add_system_log(f"[配置修复] 12项配置修复完成: {'；'.join(notes)}")
-            else:
-                container.add_system_log("[配置修复] 12项配置修复完成")
-        else:
-            saved = copy.deepcopy(container.config)
-            container.add_system_log("[配置修复] 12项配置修复检查完成，无需修复")
+        saved = copy.deepcopy(container.config)
+        notes = ["12项规则已内置，无需修复"]
+        changed = False
+        container.add_system_log("[配置修复] 12项配置修复检查完成，无需修复")
 
         review_cfg = (
             saved.get("features", {}).get("handover_log", {}).get("review_ui", {})

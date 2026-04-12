@@ -438,3 +438,70 @@ def test_touch_session_after_history_save_only_resets_cloud_sync(tmp_path: Path,
     assert updated["cloud_sheet_sync"]["success"] is False
     assert updated["cloud_sheet_sync"]["last_attempt_revision"] == 1
     assert batch_status["batch_key"] == "2026-03-22|day"
+
+
+def test_touch_session_after_save_keeps_attachment_state_after_first_full_cloud_sync(tmp_path: Path, monkeypatch) -> None:
+    service = _build_service(tmp_path)
+    monkeypatch.setattr(service, "_is_legacy_test_output_file", lambda _output: False)
+    output_file = tmp_path / "outputs" / "A楼_20260322_交接班日志.xlsx"
+    _create_output_file(output_file, shift_text="白班")
+
+    registered = service.register_generated_output(
+        building="A楼",
+        duty_date="2026-03-22",
+        duty_shift="day",
+        data_file=r"D:\handover\A楼源数据.xlsx",
+        output_file=str(output_file),
+        source_mode="from_file",
+    )
+    service.register_cloud_batch(
+        batch_key="2026-03-22|day",
+        duty_date="2026-03-22",
+        duty_shift="day",
+        cloud_batch={
+            "status": "prepared",
+            "spreadsheet_token": "sheet_token_1",
+            "spreadsheet_url": "https://vnet.feishu.cn/wiki/wiki_token_1",
+            "spreadsheet_title": "日报云文档",
+            "first_full_cloud_sync_completed": True,
+            "first_full_cloud_sync_at": "2026-03-22 10:00:00",
+        },
+    )
+    service.update_source_data_attachment_export(
+        session_id=registered["session_id"],
+        source_data_attachment_export={
+            "status": "success",
+            "uploaded_count": 1,
+            "uploaded_revision": 1,
+            "reason": "",
+            "uploaded_at": "2026-03-22 10:00:00",
+        },
+    )
+    service.update_cloud_sheet_sync(
+        session_id=registered["session_id"],
+        cloud_sheet_sync={
+            "attempted": True,
+            "success": True,
+            "status": "success",
+            "synced_revision": 1,
+            "last_attempt_revision": 1,
+            "sheet_title": "A楼",
+        },
+    )
+    current = service.get_session_by_id(registered["session_id"])
+    assert current is not None
+
+    updated, batch_status = service.touch_session_after_save(
+        building="A楼",
+        session_id=registered["session_id"],
+        base_revision=int(current["revision"]),
+    )
+
+    assert updated["confirmed"] is False
+    assert updated["revision"] == int(current["revision"]) + 1
+    assert updated["source_data_attachment_export"]["status"] == "success"
+    assert updated["source_data_attachment_export"]["uploaded_revision"] == 1
+    assert updated["source_data_attachment_export"]["frozen_after_first_full_cloud_sync"] is True
+    assert updated["cloud_sheet_sync"]["status"] == "pending_upload"
+    assert updated["cloud_sheet_sync"]["attempted"] is False
+    assert batch_status["batch_key"] == "2026-03-22|day"

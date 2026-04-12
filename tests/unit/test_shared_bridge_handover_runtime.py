@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -10,6 +12,17 @@ from app.modules.shared_bridge.service import shared_bridge_runtime_service as r
 def _write_workbook(path: Path) -> None:
     workbook = Workbook()
     workbook.active["A1"] = "ok"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(path)
+    workbook.close()
+
+
+def _write_handover_source_workbook(path: Path, *, e_value: float | None = 123.4) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["D4"] = "市电总功率"
+    if e_value is not None:
+        sheet["E4"] = e_value
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)
     workbook.close()
@@ -286,10 +299,136 @@ def test_external_handover_bridge_stage_fails_when_artifact_file_missing(monkeyp
     assert updated is not None
     assert updated["status"] == "failed"
     assert "不存在或不可访问" in str(updated.get("error", "") or updated.get("last_error", "") or updated.get("task_error", "") or "")
-    repaired_artifact = next(
-        item
+    assert not any(
+        str(item.get("artifact_kind", "")).strip() == "source_file"
         for item in updated["artifacts"]
-        if str(item.get("artifact_kind", "")).strip() == "source_file"
     )
-    assert repaired_artifact["status"] == "failed"
-    assert repaired_artifact["metadata"]["error"] == "共享任务产物缺失或不可访问"
+
+
+def test_background_self_heal_scan_downgrades_invalid_ready_source_artifact(tmp_path: Path) -> None:
+    service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    assert service._store is not None
+    service._store.ensure_ready()
+
+    invalid_source = (
+        tmp_path
+        / "artifacts"
+        / "day_metric"
+        / "task-invalid"
+        / "source_files"
+        / "2026-04-11"
+        / "A楼"
+        / "20260411--白班--交接班日志源文件--A楼.xlsx"
+    )
+    _write_handover_source_workbook(invalid_source, e_value=None)
+    service._store.upsert_artifact(
+        task_id="task-invalid",
+        stage_id="internal_download",
+        artifact_kind="source_file",
+        building="A楼",
+        relative_path=invalid_source.relative_to(tmp_path).as_posix(),
+        status="ready",
+        metadata={"duty_date": "2026-04-11", "building": "A楼"},
+        sync_mailbox=False,
+    )
+
+    service._run_background_self_heal_scan()
+
+    artifacts = service._store.list_artifacts(artifact_kind="source_file", status="failed", limit=20)
+    assert len(artifacts) == 1
+    assert artifacts[0]["building"] == "A楼"
+    assert artifacts[0]["metadata"]["validated_by"] == "background_sweep"
+
+
+def test_background_self_heal_scan_removes_missing_ready_source_artifact(tmp_path: Path) -> None:
+    service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    assert service._store is not None
+    service._store.ensure_ready()
+
+    missing_relative = "artifacts/day_metric/task-missing/source_files/2026-04-11/A楼/missing.xlsx"
+    service._store.upsert_artifact(
+        task_id="task-missing",
+        stage_id="internal_download",
+        artifact_kind="source_file",
+        building="A楼",
+        relative_path=missing_relative,
+        status="ready",
+        metadata={"duty_date": "2026-04-11", "building": "A楼"},
+        sync_mailbox=False,
+    )
+
+    service._run_background_self_heal_scan()
+
+    ready_artifacts = service._store.list_artifacts(artifact_kind="source_file", status="ready", limit=20)
+    failed_artifacts = service._store.list_artifacts(artifact_kind="source_file", status="failed", limit=20)
+    assert ready_artifacts == []
+    assert failed_artifacts == []
+
+
+def test_background_task_scheduler_defers_when_business_task_running(tmp_path: Path) -> None:
+    service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    assert service._store is not None
+    service._store.ensure_ready()
+
+    service._business_task_started()
+    try:
+        next_due = service._schedule_background_task_if_due(
+            task_key="source_cache_sweep",
+            target=lambda: {"status": "success", "summary": "ok"},
+            interval_sec=300,
+        )
+    finally:
+        service._business_task_finished()
+
+    assert next_due > time.monotonic()
+    snapshot = service.get_health_snapshot()
+    task_row = next(item for item in snapshot["background_tasks"] if item["task_key"] == "source_cache_sweep")
+    assert task_row["running"] is False
+    assert task_row["status"] == "deferred"
+    assert "让路" in str(task_row["last_summary"] or "")
+
+
+def test_background_task_scheduler_starts_worker_without_blocking(tmp_path: Path) -> None:
+    service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    assert service._store is not None
+    service._store.ensure_ready()
+    started = threading.Event()
+
+    def _target() -> dict:
+        started.set()
+        time.sleep(0.2)
+        return {"status": "success", "summary": "ok"}
+
+    begin = time.monotonic()
+    next_due = service._schedule_background_task_if_due(
+        task_key="artifact_self_heal",
+        target=_target,
+        interval_sec=300,
+    )
+    elapsed = time.monotonic() - begin
+
+    assert elapsed < 0.1
+    assert next_due > begin
+    assert started.wait(timeout=1.0) is True
+    time.sleep(0.35)
+    snapshot = service.get_health_snapshot()
+    task_row = next(item for item in snapshot["background_tasks"] if item["task_key"] == "artifact_self_heal")
+    assert task_row["running"] is False
+    assert task_row["status"] == "success"
+    assert str(task_row["last_summary"] or "").strip() == "ok"

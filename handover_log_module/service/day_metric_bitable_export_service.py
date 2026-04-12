@@ -13,6 +13,7 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClien
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.report_pipeline.core.metrics_rules import DERIVED_CATEGORY_HINT
+from handover_log_module.core.day_metric_direct_rules import DAY_METRIC_DIRECT_TYPE_DEFINITIONS
 from handover_log_module.core.models import MetricHit
 
 
@@ -66,21 +67,11 @@ class DayMetricBitableExportService:
                 "position_code": "位置/编号",
             },
             "missing_value_policy": "zero",
-            "types": [
-                {"name": "总负荷（KW）", "source": "cell", "cell": "D6"},
-                {"name": "IT总负荷（KW）", "source": "cell", "cell": "F6"},
-                {"name": "室外湿球最高温度（℃）", "source": "cell", "cell": "D7"},
-                {"name": "冷水系统供水最高温度（℃）", "source": "metric", "metric_id": "chilled_supply_temp_max"},
-                {"name": "蓄水池后备最短时间（H）", "source": "cell", "cell": "D8"},
-                {"name": "蓄冷罐后备最短时间（min）", "source": "cell_min_pair", "cell": "F8"},
-                {"name": "供油可用时长（H）", "source": "cell", "cell": "H6"},
-                {"name": "冷通道最高温度（℃）", "source": "metric", "metric_id": "cold_temp_max"},
-                {"name": "冷通道最高湿度（%）", "source": "metric", "metric_id": "cold_humi_max"},
-                {"name": "变压器负载率（MAX）", "source": "cell_percent", "cell": "B10"},
-                {"name": "UPS负载率（MAX）", "source": "cell_percent", "cell": "D10"},
-                {"name": "HVDC负载率（MAX）", "source": "metric", "metric_id": "hvdc_load_max"},
-            ],
         }
+
+    @staticmethod
+    def _type_definitions() -> List[Dict[str, str]]:
+        return [copy.deepcopy(item) for item in DAY_METRIC_DIRECT_TYPE_DEFINITIONS]
 
     def _runtime_day_metric_cfg(self) -> Dict[str, Any] | None:
         if "day_metric_upload" in self.config and isinstance(self.config.get("day_metric_upload"), dict):
@@ -121,13 +112,10 @@ class DayMetricBitableExportService:
 
         source = cfg.get("source", {})
         fields = cfg.get("fields", {})
-        types = cfg.get("types", [])
         if not isinstance(source, dict):
             source = {}
         if not isinstance(fields, dict):
             fields = {}
-        if not isinstance(types, list):
-            types = []
 
         source["app_token"] = str(source.get("app_token", "")).strip()
         source["table_id"] = str(source.get("table_id", "")).strip()
@@ -146,20 +134,6 @@ class DayMetricBitableExportService:
         fields["position_code"] = str(fields.get("position_code", "位置/编号")).strip() or "位置/编号"
         cfg["fields"] = fields
 
-        normalized_types: List[Dict[str, Any]] = []
-        for raw_item in types:
-            if not isinstance(raw_item, dict):
-                continue
-            item = {
-                "name": str(raw_item.get("name", "")).strip(),
-                "source": str(raw_item.get("source", "cell")).strip().lower() or "cell",
-                "cell": str(raw_item.get("cell", "")).strip().upper(),
-                "metric_id": str(raw_item.get("metric_id", "")).strip(),
-            }
-            if item["name"]:
-                normalized_types.append(item)
-
-        cfg["types"] = normalized_types
         cfg["missing_value_policy"] = str(cfg.get("missing_value_policy", "zero")).strip().lower() or "zero"
         return cfg
 
@@ -309,14 +283,9 @@ class DayMetricBitableExportService:
         return out
 
     def build_metric_context(self, resolved_values_by_id: Dict[str, Any] | None) -> Dict[str, Any]:
-        cfg = self._normalize_cfg()
         resolved = resolved_values_by_id if isinstance(resolved_values_by_id, dict) else {}
         out: Dict[str, Any] = {}
-        for item in cfg.get("types", []):
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("source", "")).strip().lower() != "metric":
-                continue
+        for item in self._type_definitions():
             metric_id = str(item.get("metric_id", "")).strip()
             if not metric_id:
                 continue
@@ -453,7 +422,7 @@ class DayMetricBitableExportService:
         pue_hint = str(DERIVED_CATEGORY_HINT.get("PUE", "pue能耗数据计算")).strip() or "pue能耗数据计算"
         if type_name in {"总负荷（KW）", "IT总负荷（KW）"} or metric_key in {"city_power", "it_power"}:
             return pue_hint
-        if type_name == "蓄水池后备最短时间（H）" or metric_key == "water_pool_backup_time":
+        if type_name == "蓄水池后备最短时间（H）" or metric_key in {"water_pool_backup_time", "water_backup_shortest"}:
             for candidate in (d_name, c_text, c_norm, b_text, b_norm):
                 if "负载率" in candidate:
                     return candidate
@@ -485,8 +454,11 @@ class DayMetricBitableExportService:
         metric_origin_context: Dict[str, Any],
     ) -> Dict[str, Any]:
         source_type = str(type_item.get("source", "")).strip().lower()
+        metric_id = str(type_item.get("metric_id", "")).strip()
+        if metric_id:
+            payload = metric_origin_context.get("by_metric_id", {}).get(metric_id, {})
+            return payload if isinstance(payload, dict) else {}
         if source_type == "metric":
-            metric_id = str(type_item.get("metric_id", "")).strip()
             payload = metric_origin_context.get("by_metric_id", {}).get(metric_id, {})
             return payload if isinstance(payload, dict) else {}
         if source_type in {"cell", "cell_percent", "cell_min_pair"}:
@@ -548,9 +520,14 @@ class DayMetricBitableExportService:
         cell_values: Dict[str, Any],
         resolved_values_by_id: Dict[str, Any],
     ) -> Optional[float]:
+        metric_id = str(type_item.get("metric_id", "")).strip()
+        if metric_id:
+            raw = resolved_values_by_id.get(metric_id)
+            numbers = _extract_numbers(raw)
+            return numbers[0] if numbers else None
+
         source_type = str(type_item.get("source", "")).strip().lower()
         if source_type == "metric":
-            metric_id = str(type_item.get("metric_id", "")).strip()
             raw = resolved_values_by_id.get(metric_id)
             numbers = _extract_numbers(raw)
             return numbers[0] if numbers else None
@@ -581,7 +558,7 @@ class DayMetricBitableExportService:
         records: List[Dict[str, Any]] = []
         preview: List[Dict[str, Any]] = []
 
-        for item in cfg.get("types", []):
+        for item in self._type_definitions():
             if not isinstance(item, dict):
                 continue
 
@@ -628,11 +605,7 @@ class DayMetricBitableExportService:
         date_field = str(fields.get("date", "日期")).strip()
         target_building = str(building or "").strip()
         target_date_ms = self._midnight_timestamp_ms(duty_date)
-        allowed_types = {
-            str(item.get("name", "")).strip()
-            for item in cfg.get("types", [])
-            if isinstance(item, dict) and str(item.get("name", "")).strip()
-        }
+        allowed_types = {str(item.get("name", "")).strip() for item in self._type_definitions() if str(item.get("name", "")).strip()}
         matched: List[Dict[str, Any]] = []
         for item in existing_records:
             if not isinstance(item, dict):
@@ -837,94 +810,17 @@ class DayMetricBitableExportService:
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cfg = self._normalize_cfg()
-        try:
-            cell_values = self._load_workbook_cell_values(output_file, cfg)
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[12项独立上传] 读取成品失败: {exc}")
-            return {
-                "status": "failed",
-                "uploaded_count": 0,
-                "created_records": 0,
-                "deleted_records": 0,
-                "error": str(exc),
-            }
-
         resolved = metric_values_by_id if isinstance(metric_values_by_id, dict) else {}
-        source = cfg.get("source", {})
-        resolved_target = self._resolve_target(cfg)
-        table_id = str(resolved_target.get("table_id", "")).strip()
-        batch_size = int(source.get("create_batch_size", 200) or 200)
-        records, preview = self._prepare_records(
+        return self._run_with_values(
             cfg=cfg,
             building=building,
             duty_date=duty_date,
-            cell_values=cell_values,
+            duty_shift=duty_shift,
+            cell_values={},
             resolved_values_by_id=resolved,
             metric_origin_context=metric_origin_context,
+            emit_log=emit_log,
         )
-
-        try:
-            client = self._new_client(cfg, resolved_target=resolved_target)
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[12项独立上传] 初始化失败: {exc}")
-            return {
-                "status": "failed",
-                "uploaded_count": 0,
-                "created_records": 0,
-                "deleted_records": 0,
-                "error": str(exc),
-            }
-
-        emit_log(f"[12项独立上传] 开始重写 building={building}, duty_date={duty_date}, records={len(records)}")
-        try:
-            existing_records = client.list_records(
-                table_id=table_id,
-                page_size=int(source.get("page_size", 500) or 500),
-                max_records=int(source.get("max_records", 5000) or 5000),
-            )
-            matched = self._matching_existing_records(
-                existing_records=existing_records,
-                building=building,
-                duty_date=duty_date,
-                cfg=cfg,
-            )
-            record_ids = [
-                str(item.get("record_id", "")).strip()
-                for item in matched
-                if str(item.get("record_id", "")).strip()
-            ]
-            deleted_count = 0
-            if record_ids:
-                deleted_count = client.batch_delete_records(
-                    table_id=table_id,
-                    record_ids=record_ids,
-                    batch_size=int(source.get("delete_batch_size", 200) or 200),
-                )
-            emit_log(
-                f"[12项独立上传] 删除旧记录完成 building={building}, duty_date={duty_date}, count={deleted_count}"
-            )
-            client.batch_create_records(table_id=table_id, fields_list=records, batch_size=batch_size)
-            emit_log(
-                f"[12项独立上传] 重写完成 building={building}, duty_date={duty_date}, created={len(records)}"
-            )
-            return {
-                "status": "ok",
-                "uploaded_count": len(records),
-                "created_records": len(records),
-                "deleted_records": deleted_count,
-                "records_preview": preview,
-                "error": "",
-            }
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[12项独立上传] 重写失败 error={exc}")
-            return {
-                "status": "failed",
-                "uploaded_count": 0,
-                "created_records": 0,
-                "deleted_records": 0,
-                "records_preview": preview,
-                "error": str(exc),
-            }
 
     def run_from_output_file(
         self,

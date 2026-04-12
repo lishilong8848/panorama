@@ -85,6 +85,7 @@ const ACTION_KEY_HANDOVER_CONFIG_COMMON_SAVE = "handover_config:common_save";
 const ACTION_KEY_HANDOVER_CONFIG_BUILDING_SAVE = "handover_config:building_save";
 const ACTION_KEY_DAY_METRIC_CONFIG_REPAIR = "day_metric_upload:config_repair";
 const ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX = "handover_review:link_send:";
+const HANDOVER_REVIEW_STATUS_BROADCAST_KEY = "handover_review_status_broadcast_v1";
 const SOURCE_CACHE_FAMILY_LABELS = {
   handover_log_family: "交接班日志源文件",
   handover_capacity_report_family: "交接班容量报表源文件",
@@ -163,6 +164,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   let updaterReconnectTimer = null;
   let updaterQueueMonitorTimer = null;
   let updaterHealthHydratedOnce = false;
+  let handoverReviewStatusBroadcastBound = false;
   const BRIDGE_TASKS_FETCH_COOLDOWN_MS = 1200;
 
   function isUpdaterTrafficPaused() {
@@ -1298,6 +1300,17 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
       return false;
     }
+  }
+
+  function bindHandoverReviewStatusBroadcast() {
+    if (handoverReviewStatusBroadcastBound) return;
+    if (typeof window === "undefined" || !window.addEventListener) return;
+    handoverReviewStatusBroadcastBound = true;
+    window.addEventListener("storage", (event) => {
+      if (String(event?.key || "").trim() !== HANDOVER_REVIEW_STATUS_BROADCAST_KEY) return;
+      if (!String(event?.newValue || "").trim()) return;
+      void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+    });
   }
 
   function patchAlarmUploadRunningState(data, fallbackMode, fallbackScope) {
@@ -3268,6 +3281,8 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
     return runner();
   }
+
+  bindHandoverReviewStatusBroadcast();
 
   return {
     appendLog,

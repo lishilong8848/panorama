@@ -998,9 +998,9 @@ function validateAndNormalizeDayMetricUploadTarget(payload) {
   exportCfg.source = exportCfg.source && typeof exportCfg.source === "object" ? exportCfg.source : {};
   exportCfg.fields = exportCfg.fields && typeof exportCfg.fields === "object" ? exportCfg.fields : {};
   exportCfg.missing_value_policy = String(exportCfg.missing_value_policy || "zero").trim().toLowerCase() || "zero";
-  exportCfg.types = Array.isArray(exportCfg.types) ? exportCfg.types : [];
 
   cleanupDayMetricUploadCompat(payload.day_metric_upload);
+  delete exportCfg.types;
 
   exportCfg.source.app_token = String(exportCfg.source.app_token || "").trim();
   exportCfg.source.table_id = String(exportCfg.source.table_id || "").trim();
@@ -1012,38 +1012,8 @@ function validateAndNormalizeDayMetricUploadTarget(payload) {
   exportCfg.fields.value = String(exportCfg.fields.value || "").trim();
   exportCfg.fields.position_code = String(exportCfg.fields.position_code || "").trim();
 
-  const validSource = new Set(["cell", "metric", "cell_percent", "cell_min_pair"]);
-  const cellPattern = /^[A-Z]+[1-9]\d*$/;
-  exportCfg.types = exportCfg.types
-    .map((item) => (item && typeof item === "object" ? { ...item } : null))
-    .filter(Boolean)
-    .map((item) => ({
-      name: String(item.name || "").trim(),
-      source: String(item.source || "cell").trim().toLowerCase() || "cell",
-      cell: String(item.cell || "").trim().toUpperCase(),
-      metric_id: String(item.metric_id || "").trim(),
-    }));
-
   if (exportCfg.missing_value_policy !== "zero") {
     return { ok: false, error: "12项目标缺失值策略仅支持 zero" };
-  }
-
-  for (let i = 0; i < exportCfg.types.length; i += 1) {
-    const row = exportCfg.types[i];
-    if (!row.name) return { ok: false, error: `12项目标第${i + 1}项类型名称不能为空` };
-    if (!validSource.has(row.source)) {
-      return { ok: false, error: `12项目标第${i + 1}项来源类型非法` };
-    }
-    if ((row.source === "cell" || row.source === "cell_percent" || row.source === "cell_min_pair") && !cellPattern.test(row.cell)) {
-      return { ok: false, error: `12项目标第${i + 1}项单元格格式错误（示例 D6）` };
-    }
-    if (row.source === "metric" && !row.metric_id) {
-      return { ok: false, error: `12项目标第${i + 1}项 metric_id 不能为空` };
-    }
-  }
-
-  if (!exportCfg.types.length) {
-    return { ok: false, error: "12项目标“类型列表”不能为空" };
   }
   if (!exportCfg.source.app_token || !exportCfg.source.table_id) {
     return { ok: false, error: "12项目标配置不能为空，请填写 app_token 和 table_id" };

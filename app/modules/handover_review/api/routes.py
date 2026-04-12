@@ -1419,7 +1419,12 @@ def handover_review_confirm(
         )
         target_batch_key = str(session.get("batch_key", "")).strip()
         try:
-            followup_result = followup.trigger_batch(target_batch_key, emit_log=container.add_system_log)
+            followup_result = followup.trigger_after_single_confirm(
+                batch_key=target_batch_key,
+                building=building,
+                session_id=str(session.get("session_id", "")).strip(),
+                emit_log=container.add_system_log,
+            )
         except Exception as exc:  # noqa: BLE001
             container.add_system_log(f"[交接班][确认后上传] 失败 batch={target_batch_key}, 错误={exc}")
             followup_result = _build_followup_failure_result(

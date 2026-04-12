@@ -762,15 +762,6 @@ function applyHandoverDefaults(cfg) {
       ? reviewUi.footer_inventory_defaults_by_building
       : {};
   if (
-    (!Array.isArray(dayMetricTarget.types) || !dayMetricTarget.types.length)
-    && legacyDayMetricExport
-    && typeof legacyDayMetricExport === "object"
-    && Array.isArray(legacyDayMetricExport.types)
-    && legacyDayMetricExport.types.length
-  ) {
-    dayMetricTarget.types = legacyDayMetricExport.types.map((item) => ({ ...(item || {}) }));
-  }
-  if (
     !(dayMetricTarget.source && (dayMetricTarget.source.app_token || dayMetricTarget.source.table_id))
     && legacyDayMetricExport
     && typeof legacyDayMetricExport === "object"
@@ -801,22 +792,7 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(dayMetricTarget.fields, "date", "日期");
   setStringDefault(dayMetricTarget.fields, "value", "数值");
   setStringDefault(dayMetricTarget.fields, "position_code", "位置/编号");
-  if (!Array.isArray(dayMetricTarget.types) || !dayMetricTarget.types.length) {
-    dayMetricTarget.types = [
-      { name: "总负荷（KW）", source: "cell", cell: "D6" },
-      { name: "IT总负荷（KW）", source: "cell", cell: "F6" },
-      { name: "室外湿球最高温度（℃）", source: "cell", cell: "D7" },
-      { name: "冷水系统供水最高温度（℃）", source: "metric", metric_id: "chilled_supply_temp_max" },
-      { name: "蓄水池后备最短时间（H）", source: "cell", cell: "D8" },
-      { name: "蓄冷罐后备最短时间（min）", source: "cell_min_pair", cell: "F8" },
-      { name: "供油可用时长（H）", source: "cell", cell: "H6" },
-      { name: "冷通道最高温度（℃）", source: "metric", metric_id: "cold_temp_max" },
-      { name: "冷通道最高湿度（%）", source: "metric", metric_id: "cold_humi_max" },
-      { name: "变压器负载率（MAX）", source: "cell_percent", cell: "B10" },
-      { name: "UPS负载率（MAX）", source: "cell_percent", cell: "D10" },
-      { name: "HVDC负载率（MAX）", source: "metric", metric_id: "hvdc_load_max" },
-    ];
-  }
+  delete dayMetricTarget.types;
 
   setBooleanDefault(sourceDataAttachmentExport, "enabled", true);
   setBooleanDefault(sourceDataAttachmentExport, "upload_night_shift", true);
@@ -1164,23 +1140,7 @@ function applyDayMetricUploadDefaults(cfg) {
   setStringDefault(targetFields, "date", "日期");
   setStringDefault(targetFields, "value", "数值");
   setStringDefault(targetFields, "position_code", "位置/编号");
-
-  if (!Array.isArray(target.types) || !target.types.length) {
-    target.types = [
-      { name: "总负荷（KW）", source: "cell", cell: "D6" },
-      { name: "IT总负荷（KW）", source: "cell", cell: "F6" },
-      { name: "室外湿球最高温度（℃）", source: "cell", cell: "D7" },
-      { name: "冷水系统供水最高温度（℃）", source: "metric", metric_id: "chilled_supply_temp_max" },
-      { name: "蓄水池后备最短时间（H）", source: "cell", cell: "D8" },
-      { name: "蓄冷罐后备最短时间（min）", source: "cell_min_pair", cell: "F8" },
-      { name: "供油可用时长（H）", source: "cell", cell: "H6" },
-      { name: "冷通道最高温度（℃）", source: "metric", metric_id: "cold_temp_max" },
-      { name: "冷通道最高湿度（%）", source: "metric", metric_id: "cold_humi_max" },
-      { name: "变压器负载率（MAX）", source: "cell_percent", cell: "B10" },
-      { name: "UPS负载率（MAX）", source: "cell_percent", cell: "D10" },
-      { name: "HVDC负载率（MAX）", source: "metric", metric_id: "hvdc_load_max" },
-    ];
-  }
+  delete target.types;
 }
 
 function applySchedulerDefaults(cfg) {

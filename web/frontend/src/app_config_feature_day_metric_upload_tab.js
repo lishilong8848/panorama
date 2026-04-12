@@ -19,15 +19,7 @@ export const CONFIG_FEATURE_DAY_METRIC_UPLOAD_TAB_TEMPLATE = `
     <div class="hint-stack">
       <div class="hint">本页只维护 12 项独立上传本身的目标多维表和重试参数，不进入交接班审核链路。</div>
       <div class="hint">调度只在业务控制台配置；这里不再提供调度入口、功能开关或白夜班判断。</div>
-    </div>
-    <div class="btn-line" style="margin-top:10px;">
-      <button
-        class="btn btn-secondary"
-        @click="repairDayMetricUploadConfig"
-        :disabled="isActionLocked(actionKeyDayMetricConfigRepair)"
-      >
-        {{ isActionLocked(actionKeyDayMetricConfigRepair) ? '修复中...' : '修复12项配置' }}
-      </button>
+      <div class="hint">12 项计算口径已内置到程序代码中，这里不再提供类型映射、规则 ID 或修复按钮。</div>
     </div>
   </div>
 
@@ -72,56 +64,8 @@ export const CONFIG_FEATURE_DAY_METRIC_UPLOAD_TAB_TEMPLATE = `
           <input type="text" v-model="config.day_metric_upload.target.missing_value_policy" />
         </div>
       </div>
-      <div class="btn-line" style="margin:8px 0;">
-        <button class="btn btn-secondary" @click="config.day_metric_upload.target.types.push({ name: '', source: 'cell', cell: '', metric_id: '' })">新增指标类型</button>
-      </div>
-      <div class="config-editor-scroll">
-        <table class="site-table config-editor-table" style="margin-bottom:0;">
-          <thead>
-            <tr>
-              <th style="width:220px;">类型名称</th>
-              <th style="width:140px;">来源</th>
-              <th style="width:140px;">单元格</th>
-              <th style="width:200px;">规则ID(metric_id)</th>
-              <th style="width:90px;">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(row, idx) in (config.day_metric_upload.target.types || [])" :key="'day-metric-type-' + idx">
-              <td><input type="text" v-model="row.name" /></td>
-              <td>
-                <select v-model="row.source">
-                  <option value="cell">cell</option>
-                  <option value="metric">metric</option>
-                  <option value="cell_percent">cell_percent</option>
-                  <option value="cell_min_pair">cell_min_pair</option>
-                </select>
-              </td>
-              <td>
-                <input
-                  type="text"
-                  v-model="row.cell"
-                  :disabled="row.source === 'metric'"
-                  placeholder="如 D6"
-                />
-              </td>
-              <td>
-                <input
-                  type="text"
-                  v-model="row.metric_id"
-                  :disabled="row.source !== 'metric'"
-                  placeholder="如 cold_temp_max"
-                />
-              </td>
-              <td><button class="btn btn-danger" @click="config.day_metric_upload.target.types.splice(idx, 1)">删除</button></td>
-            </tr>
-            <tr v-if="!(config.day_metric_upload.target.types || []).length" class="config-editor-empty-row">
-              <td colspan="5" class="hint">暂无指标类型，请点击“新增指标类型”。</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="hint">12 项目标多维表配置已从交接班日志中剥离，后续只在本页维护。</div>
+      <div class="hint">12 项目标多维表配置已从交接班日志中剥离，后续只在本页维护目标表、字段名和重试参数。</div>
+      <div class="hint">固定上传项：总负荷、IT总负荷、室外湿球、冷水系统供水最高温度、蓄水池后备、蓄冷罐后备、供油可用时长、冷通道最高温湿、变压器负载率、UPS负载率、HVDC负载率。</div>
     </div>
 
     <div class="content-card config-panel-card config-panel-card-wide">

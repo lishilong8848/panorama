@@ -130,14 +130,13 @@ def test_repair_critical_settings_falls_back_to_template_when_backup_missing(tmp
     assert any("飞书应用凭据 <- 表格计算配置.template.json" == item for item in notes)
 
 
-def test_repair_day_metric_related_settings_restores_day_metric_profile_from_backup(tmp_path) -> None:
+def test_repair_day_metric_related_settings_is_now_noop_even_with_backup(tmp_path) -> None:
     config_path = tmp_path / "settings.json"
     current = ensure_v3_config({})
     current["common"]["feishu_auth"]["app_id"] = "cli_current"
     current["common"]["feishu_auth"]["app_secret"] = "secret_current"
     current["features"]["day_metric_upload"]["target"]["source"]["app_token"] = "current_app_token"
     current["features"]["day_metric_upload"]["target"]["source"]["table_id"] = "current_table"
-    current["features"]["day_metric_upload"]["target"]["types"][0]["name"] = "当前值"
     _write_json(config_path, current)
 
     backup = ensure_v3_config({})
@@ -145,55 +144,40 @@ def test_repair_day_metric_related_settings_restores_day_metric_profile_from_bac
     backup["common"]["feishu_auth"]["app_secret"] = "secret_current"
     backup["features"]["day_metric_upload"]["target"]["source"]["app_token"] = "backup_app_token"
     backup["features"]["day_metric_upload"]["target"]["source"]["table_id"] = "backup_table"
-    backup["features"]["day_metric_upload"]["target"]["types"][0]["name"] = "备份值"
     _write_json(tmp_path / "settings.backup.20260411-060000.json", backup)
 
-    from app.config import settings_loader
+    repaired, notes, changed = repair_day_metric_related_settings(current, config_path)
 
-    original_candidates = settings_loader._day_metric_repair_baseline_candidates
-    settings_loader._day_metric_repair_baseline_candidates = lambda _config_path=None: []  # type: ignore[assignment]
-    try:
-        repaired, notes, changed = repair_day_metric_related_settings(current, config_path)
-    finally:
-        settings_loader._day_metric_repair_baseline_candidates = original_candidates  # type: ignore[assignment]
-
-    assert changed is True
-    assert repaired["features"]["day_metric_upload"]["target"]["source"]["app_token"] == "backup_app_token"
-    assert repaired["features"]["day_metric_upload"]["target"]["source"]["table_id"] == "backup_table"
-    assert repaired["features"]["day_metric_upload"]["target"]["types"][0]["name"] == "备份值"
-    assert any("12项配置轮廓 <- settings.backup.20260411-060000.json" == item for item in notes)
+    assert changed is False
+    assert repaired["features"]["day_metric_upload"]["target"]["source"]["app_token"] == "current_app_token"
+    assert repaired["features"]["day_metric_upload"]["target"]["source"]["table_id"] == "current_table"
+    assert notes == []
 
 
-def test_repair_day_metric_related_settings_prefers_fixed_baseline(tmp_path) -> None:
+def test_repair_day_metric_related_settings_ignores_fixed_baseline(tmp_path) -> None:
     config_path = tmp_path / "settings.json"
     current = ensure_v3_config({})
     current["common"]["feishu_auth"]["app_id"] = "cli_current"
     current["common"]["feishu_auth"]["app_secret"] = "secret_current"
     current["features"]["day_metric_upload"]["target"]["source"]["app_token"] = "current_app_token"
     current["features"]["day_metric_upload"]["target"]["source"]["table_id"] = "current_table"
-    current["features"]["day_metric_upload"]["target"]["types"][0]["name"] = "当前值"
     _write_json(config_path, current)
 
-    # 普通备份（应被固定修复基线覆盖）
     backup = ensure_v3_config({})
     backup["features"]["day_metric_upload"]["target"]["source"]["app_token"] = "backup_app_token"
     backup["features"]["day_metric_upload"]["target"]["source"]["table_id"] = "backup_table"
-    backup["features"]["day_metric_upload"]["target"]["types"][0]["name"] = "普通备份值"
     _write_json(tmp_path / "settings.backup.20260411-060000.json", backup)
 
-    # 固定修复基线
     baseline_name = "表格计算配置.backup.20260409-145808.json"
     baseline = ensure_v3_config({})
     baseline["features"]["day_metric_upload"]["target"]["source"]["app_token"] = "baseline_app_token"
     baseline["features"]["day_metric_upload"]["target"]["source"]["table_id"] = "baseline_table"
-    baseline["features"]["day_metric_upload"]["target"]["types"][0]["name"] = "固定基线值"
     baseline_path = tmp_path / baseline_name
     _write_json(baseline_path, baseline)
 
     repaired, notes, changed = repair_day_metric_related_settings(current, config_path)
 
-    assert changed is True
-    assert repaired["features"]["day_metric_upload"]["target"]["source"]["app_token"] == "baseline_app_token"
-    assert repaired["features"]["day_metric_upload"]["target"]["source"]["table_id"] == "baseline_table"
-    assert repaired["features"]["day_metric_upload"]["target"]["types"][0]["name"] == "固定基线值"
-    assert any(f"12项配置轮廓 <- {baseline_name}" == item for item in notes)
+    assert changed is False
+    assert repaired["features"]["day_metric_upload"]["target"]["source"]["app_token"] == "current_app_token"
+    assert repaired["features"]["day_metric_upload"]["target"]["source"]["table_id"] == "current_table"
+    assert notes == []
