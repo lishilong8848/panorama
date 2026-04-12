@@ -410,6 +410,10 @@ class ReviewLinkDeliveryService:
         source_text = str(source or "auto").strip().lower() or "auto"
         delivery_state = _normalize_delivery_state(normalized_session.get("review_link_delivery", {}))
         if source_text == "auto" and delivery_state["auto_attempted"] and not force:
+            emit_log(
+                "[交接班][审核链接发送] 跳过自动发送 "
+                f"building={building}, session_id={session_id}, reason=当前会话已自动发送过"
+            )
             return delivery_state
 
         recipient_snapshot = self._recipient_snapshot_for_building(building)
@@ -550,7 +554,7 @@ class ReviewLinkDeliveryService:
                 state = self.send_for_session(
                     review_session,
                     source="auto",
-                    force=False,
+                    force=True,
                     emit_log=emit_log,
                     review_access_snapshot=snapshot,
                 )

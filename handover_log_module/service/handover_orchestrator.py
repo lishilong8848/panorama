@@ -986,7 +986,7 @@ class HandoverOrchestrator:
                         delivery_state = self._review_link_delivery_service.send_for_session(
                             review_session,
                             source="auto",
-                            force=False,
+                            force=True,
                             emit_log=emit_log,
                         )
                         review_session["review_link_delivery"] = delivery_state

@@ -52,19 +52,6 @@ def test_run_from_existing_file_registers_managed_source_file_cache(tmp_path: Pa
     monkeypatch.setattr(orchestrator._fill_service, "fill", _fake_fill)
     monkeypatch.setattr(orchestrator, "_build_shift_roster_fixed_values", lambda **_kwargs: {})
     monkeypatch.setattr(
-        orchestrator._day_metric_export_service,
-        "build_deferred_state",
-        lambda **_kwargs: {
-            "status": "pending_review",
-            "reason": "await_all_confirmed",
-            "uploaded_count": 0,
-            "error": "",
-            "uploaded_at": "",
-            "uploaded_revision": 0,
-            "metric_values_by_id": {},
-        },
-    )
-    monkeypatch.setattr(
         orchestrator._source_data_attachment_export_service,
         "build_deferred_state",
         lambda **_kwargs: {
@@ -249,3 +236,84 @@ def test_run_from_existing_file_external_keeps_shared_source_path(tmp_path: Path
     assert session["data_file"] == str(input_file)
     assert session["source_file_cache"]["managed"] is False
     assert session["source_file_cache"]["stored_path"] == ""
+
+
+def test_run_from_existing_file_auto_sends_review_link_with_force(tmp_path: Path, monkeypatch) -> None:
+    orchestrator = _build_orchestrator(tmp_path)
+    input_file = tmp_path / "temp" / "input.xlsx"
+    _build_workbook(input_file)
+    output_file = tmp_path / "outputs" / "A楼_20260324_交接班日志.xlsx"
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        orchestrator._extract_service,
+        "extract",
+        lambda **_kwargs: {"hits": {}, "effective_config": {}},
+    )
+
+    def _fake_fill(**_kwargs):
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_bytes(b"filled")
+        return {
+            "output_file": str(output_file),
+            "fills": {},
+            "missing_metric_to_cell": {},
+            "resolved_values_by_id": {},
+        }
+
+    monkeypatch.setattr(orchestrator._fill_service, "fill", _fake_fill)
+    monkeypatch.setattr(orchestrator, "_build_shift_roster_fixed_values", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        orchestrator._day_metric_export_service,
+        "build_deferred_state",
+        lambda **_kwargs: {
+            "status": "pending_review",
+            "reason": "await_all_confirmed",
+            "uploaded_count": 0,
+            "error": "",
+            "uploaded_at": "",
+            "uploaded_revision": 0,
+            "metric_values_by_id": {},
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator._source_data_attachment_export_service,
+        "build_deferred_state",
+        lambda **_kwargs: {
+            "status": "pending_review",
+            "reason": "await_all_confirmed",
+            "uploaded_count": 0,
+            "error": "",
+            "uploaded_at": "",
+            "uploaded_revision": 0,
+        },
+    )
+
+    def _fake_send_for_session(session, *, source, force, emit_log):
+        captured["session_id"] = str(session.get("session_id", "")).strip()
+        captured["source"] = source
+        captured["force"] = force
+        return {"status": "success", "source": source, "auto_attempted": True}
+
+    monkeypatch.setattr(
+        orchestrator._review_link_delivery_service,
+        "send_for_session",
+        _fake_send_for_session,
+    )
+
+    summary = orchestrator.run_from_existing_file(
+        building="A楼",
+        data_file=str(input_file),
+        duty_date="2026-03-24",
+        duty_shift="day",
+        fixed_cell_values={},
+        category_payloads={},
+        source_mode="from_file",
+        emit_log=lambda *_args: None,
+    )
+
+    row = summary["results"][0]
+    assert captured["session_id"] == row["review_session"]["session_id"]
+    assert captured["source"] == "auto"
+    assert captured["force"] is True
+    assert row["review_session"]["review_link_delivery"]["status"] == "success"
