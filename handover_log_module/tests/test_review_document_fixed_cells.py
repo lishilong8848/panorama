@@ -5,6 +5,7 @@ from pathlib import Path
 import openpyxl
 
 from app.config.config_adapter import ensure_v3_config
+import handover_log_module.service.review_document_writer as review_document_writer_module
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_writer import ReviewDocumentWriter
 
@@ -106,3 +107,44 @@ def test_review_document_parser_and_writer_support_paired_fixed_cells(tmp_path: 
         assert worksheet["B6"].value == "1.42"
     finally:
         workbook.close()
+
+
+def test_review_document_writer_uses_dirty_regions_to_skip_section_and_footer_writes(tmp_path: Path, monkeypatch) -> None:
+    output_file = tmp_path / "handover.xlsx"
+    _build_workbook(output_file)
+    config = {
+        "template": {"sheet_name": SHEET_NAME},
+        "review_ui": {"fixed_cells": {"metrics_summary": [{"label_cell": "A6", "value_cell": "B6"}]}},
+    }
+    calls = {"sections": 0, "footer": 0}
+
+    monkeypatch.setattr(
+        review_document_writer_module,
+        "write_category_sections",
+        lambda **_kwargs: calls.__setitem__("sections", calls["sections"] + 1),
+    )
+    monkeypatch.setattr(
+        review_document_writer_module,
+        "write_footer_inventory_table",
+        lambda **_kwargs: calls.__setitem__("footer", calls["footer"] + 1),
+    )
+
+    writer = ReviewDocumentWriter(config)
+    writer.write(
+        output_file=str(output_file),
+        document={
+            "title": "title",
+            "fixed_blocks": [{"id": "metrics_summary", "fields": [{"cell": "B6", "value": "1.88"}]}],
+            "sections": [{"name": "新事件处理", "rows": [{"cells": {"B": "x"}}]}],
+            "footer_blocks": [{"id": "handover_inventory_table", "type": "inventory_table", "rows": []}],
+        },
+        dirty_regions={"fixed_blocks": True, "sections": False, "footer_inventory": False},
+    )
+
+    workbook = openpyxl.load_workbook(output_file)
+    try:
+        worksheet = workbook[SHEET_NAME]
+        assert worksheet["B6"].value == "1.88"
+    finally:
+        workbook.close()
+    assert calls == {"sections": 0, "footer": 0}

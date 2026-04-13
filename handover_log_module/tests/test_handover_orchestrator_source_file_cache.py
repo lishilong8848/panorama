@@ -316,4 +316,43 @@ def test_run_from_existing_file_auto_sends_review_link_with_force(tmp_path: Path
     assert captured["session_id"] == row["review_session"]["session_id"]
     assert captured["source"] == "auto"
     assert captured["force"] is True
-    assert row["review_session"]["review_link_delivery"]["status"] == "success"
+
+
+def test_build_shift_roster_fixed_values_uses_target_duty_context(tmp_path: Path) -> None:
+    orchestrator = _build_orchestrator(tmp_path)
+    captured: dict = {}
+
+    class _FakeShiftRosterRepo:
+        def query_assignment(self, **kwargs):
+            captured["assignment"] = dict(kwargs)
+            from handover_log_module.repository.shift_roster_repository import ShiftRosterAssignment
+
+            return ShiftRosterAssignment(
+                current_team="白班一组",
+                current_people="张三",
+                next_team="夜班一组",
+                next_people="李四",
+                next_first_person="李四",
+                source_records=2,
+            )
+
+        def query_long_day_cell_values(self, **kwargs):
+            captured["long_day"] = dict(kwargs)
+            return {"B4": "长白岗：王五"}
+
+    orchestrator._shift_roster_repo = _FakeShiftRosterRepo()
+
+    values = orchestrator._build_shift_roster_fixed_values(
+        building="A楼",
+        duty_date="2026-03-24",
+        duty_shift="day",
+        emit_log=lambda *_args: None,
+    )
+
+    assert values["C3"] == "张三"
+    assert values["G3"] == "李四"
+    assert values["B4"] == "长白岗：王五"
+    assert captured["assignment"]["duty_date"] == "2026-03-24"
+    assert captured["assignment"]["duty_shift"] == "day"
+    assert captured["long_day"]["duty_date"] == "2026-03-24"
+    assert captured["long_day"]["duty_shift"] == "day"

@@ -49,8 +49,10 @@ class _FakeMaintenanceRepo:
 class _FakeShiftRosterRepo:
     def __init__(self, rows):
         self._rows = rows
+        self.calls = []
 
     def list_engineer_directory(self, **_kwargs):
+        self.calls.append(dict(_kwargs))
         return list(self._rows)
 
 
@@ -279,6 +281,60 @@ def test_maintenance_management_builder_normalizes_specialty_for_executor_match(
     assert payload["维护管理"] == [
         {"cells": {"B": "A楼配电维护", "C": "自维", "D": "已完成", "H": "汪根尚"}}
     ]
+
+
+def test_maintenance_management_builder_uses_target_duty_for_engineer_directory(tmp_path: Path) -> None:
+    template_path = tmp_path / "maintenance_template_context.xlsx"
+    _build_maintenance_template(template_path)
+    cfg = {
+        "enabled": True,
+        "sections": {"maintenance_management": "维护管理"},
+        "fixed_values": {"vendor_internal": "自维", "vendor_external": "厂维", "completion": "已完成"},
+        "column_mapping": {
+            "resolve_by_header": True,
+            "header_alias": {
+                "maintenance_item": ["维护总项"],
+                "maintenance_party": ["维护执行方"],
+                "completion": ["维护完成情况"],
+                "executor": ["执行人"],
+            },
+            "fallback_cols": {
+                "maintenance_item": "B",
+                "maintenance_party": "C",
+                "completion": "D",
+                "executor": "H",
+            },
+        },
+    }
+    rows = [
+        MaintenanceManagementRow(
+            record_id="rec-duty-context",
+            building_values=["A楼"],
+            updated_time=datetime(2026, 3, 14, 9, 0, 0),
+            item_text="A楼日常维护",
+            specialty_text="电气",
+            raw_fields={},
+        ),
+    ]
+    fake_shift_repo = _FakeShiftRosterRepo(
+        [{"building": "A楼", "specialty": "电气", "supervisor": "汪根尚"}]
+    )
+    builder = MaintenanceManagementPayloadBuilder(
+        {"template": {"source_path": str(template_path), "sheet_name": "交接班日志"}},
+        repository=_FakeMaintenanceRepo(cfg, rows),
+        shift_roster_repo=fake_shift_repo,
+    )
+
+    builder.build(
+        building="A楼",
+        duty_date="2026-03-14",
+        duty_shift="day",
+        emit_log=lambda *_args: None,
+    )
+
+    assert fake_shift_repo.calls
+    assert fake_shift_repo.calls[-1]["duty_date"] == "2026-03-14"
+    assert fake_shift_repo.calls[-1]["duty_shift"] == "day"
 
 
 def test_maintenance_management_builder_dedupes_duplicate_items(tmp_path: Path) -> None:

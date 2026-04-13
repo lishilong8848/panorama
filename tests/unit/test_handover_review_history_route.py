@@ -82,8 +82,8 @@ def test_handover_review_save_history_skips_default_persistence(monkeypatch):
     touched_history_calls = []
 
     class _Writer:
-        def write(self, *, output_file, document):
-            writer_calls.append((output_file, document))
+        def write(self, *, output_file, document, dirty_regions=None):
+            writer_calls.append((output_file, document, dirty_regions))
 
     class _Service:
         def get_latest_session_id(self, building):
@@ -146,10 +146,105 @@ def test_handover_review_save_history_skips_default_persistence(monkeypatch):
         },
     )
 
-    assert writer_calls == [("history.xlsx", {"fixed_blocks": [], "sections": [], "footer_blocks": []})]
+    assert writer_calls == [
+        (
+            "history.xlsx",
+            {"fixed_blocks": [], "sections": [], "footer_blocks": []},
+            {"fixed_blocks": True, "sections": True, "footer_inventory": True},
+        )
+    ]
     assert persisted_default_calls == []
     assert touched_history_calls == [("A楼", "A楼|2026-03-22|day", 4)]
     assert payload["history"]["selected_is_latest"] is False
+
+
+def test_handover_review_save_latest_passes_dirty_regions_and_returns_save_profile(monkeypatch):
+    writer_calls = []
+    persisted_defaults_calls = []
+    touched_latest_calls = []
+
+    class _Writer:
+        def write(self, *, output_file, document, dirty_regions=None):
+            writer_calls.append((output_file, document, dirty_regions))
+
+    class _Service:
+        def get_latest_session_id(self, building):
+            assert building == "A楼"
+            return "A楼|2026-03-23|night"
+
+        def touch_session_after_save(self, *, building, session_id, base_revision):
+            touched_latest_calls.append((building, session_id, base_revision))
+            return (
+                {
+                    "session_id": session_id,
+                    "building": building,
+                    "revision": base_revision + 1,
+                    "updated_at": "2026-03-23 22:00:00",
+                    "output_file": "latest.xlsx",
+                    "batch_key": "2026-03-23|night",
+                },
+                {"batch_key": "2026-03-23|night"},
+            )
+
+        def touch_session_after_history_save(self, **_kwargs):
+            raise AssertionError("history save branch should not run")
+
+    monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), None, _Writer(), None))
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(
+        routes,
+        "_load_target_session_or_404",
+        lambda _service, **_kwargs: {
+            "session_id": "A楼|2026-03-23|night",
+            "building": "A楼",
+            "revision": 7,
+            "output_file": "latest.xlsx",
+            "batch_key": "2026-03-23|night",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_persist_review_defaults",
+        lambda *_args, **kwargs: persisted_defaults_calls.append(kwargs.get("dirty_regions")) or {
+            "footer_inventory_rows": 1,
+            "cabinet_power_fields": 4,
+            "config_updated": False,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_build_history_payload",
+        lambda _service, **_kwargs: {
+            "latest_session_id": "A楼|2026-03-23|night",
+            "selected_session_id": "A楼|2026-03-23|night",
+            "selected_is_latest": True,
+            "sessions": [],
+        },
+    )
+
+    payload = routes.handover_review_save(
+        "a",
+        _fake_request(),
+        {
+            "session_id": "A楼|2026-03-23|night",
+            "base_revision": 7,
+            "document": {"fixed_blocks": [], "sections": [], "footer_blocks": []},
+            "dirty_regions": {"fixed_blocks": True, "sections": False, "footer_inventory": False},
+        },
+    )
+
+    assert writer_calls == [
+        (
+            "latest.xlsx",
+            {"fixed_blocks": [], "sections": [], "footer_blocks": []},
+            {"fixed_blocks": True, "sections": False, "footer_inventory": False},
+        )
+    ]
+    assert persisted_defaults_calls == [{"fixed_blocks": True, "sections": False, "footer_inventory": False}]
+    assert touched_latest_calls == [("A楼", "A楼|2026-03-23|night", 7)]
+    assert payload["history"]["selected_is_latest"] is True
+    assert set(payload["save_profile"].keys()) == {"write_ms", "defaults_ms", "session_ms", "total_ms"}
+    assert all(isinstance(payload["save_profile"][key], int) for key in payload["save_profile"])
 
 
 def test_handover_review_update_cloud_sync_uses_history_session(monkeypatch):

@@ -875,6 +875,8 @@ class ShiftRosterRepository:
     def list_engineer_directory(
         self,
         *,
+        duty_date: str | None = None,
+        duty_shift: str | None = None,
         emit_log: Callable[[str], None] = print,
     ) -> List[Dict[str, str]]:
         cfg = self._normalize_cfg()
@@ -892,8 +894,8 @@ class ShiftRosterRepository:
             source_cfg=source_cfg,
             fallback_cfg=cfg,
             stage="工程师目录",
-            duty_date=None,
-            duty_shift=None,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
             emit_log=emit_log,
         )
 

@@ -199,7 +199,11 @@ class OtherImportantWorkPayloadBuilder:
             rows = list(preloaded_rows_by_building.get(building, []))
 
         try:
-            engineers = self.shift_roster_repo.list_engineer_directory(emit_log=emit_log)
+            engineers = self.shift_roster_repo.list_engineer_directory(
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                emit_log=emit_log,
+            )
         except Exception as exc:  # noqa: BLE001
             emit_log(f"[交接班][其他重要工作] 工程师目录读取失败，执行人按 / 继续: {exc}")
             engineers = []

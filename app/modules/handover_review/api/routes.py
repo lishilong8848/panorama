@@ -2,13 +2,14 @@
 
 import asyncio
 import inspect
+import time
 from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
-from app.config.handover_segment_store import building_code_from_name
+from app.config.handover_segment_store import building_code_from_name, handover_building_segment_path
 from app.config.settings_loader import (
     get_handover_building_segment,
     save_handover_building_segment,
@@ -441,21 +442,83 @@ def _persist_footer_inventory_defaults(container, *, building: str, document: Di
     if aggregate_refresh_error:
         container.add_system_log(
             f"[交接班][审核模板默认] 楼栋分段已保存，但聚合配置刷新失败: building={building}, error={aggregate_refresh_error}"
-        )
+    )
     return len(rows)
 
 
-def _persist_review_defaults(container, *, building: str, document: Dict[str, Any]) -> Dict[str, int]:
+def _normalize_review_dirty_regions(raw: Any) -> Dict[str, bool]:
+    if not isinstance(raw, dict):
+        return {
+            "fixed_blocks": True,
+            "sections": True,
+            "footer_inventory": True,
+        }
+    return {
+        "fixed_blocks": bool(raw.get("fixed_blocks")),
+        "sections": bool(raw.get("sections")),
+        "footer_inventory": bool(raw.get("footer_inventory")),
+    }
+
+
+def _normalized_review_defaults_snapshot(
+    *,
+    footer_service: FooterInventoryDefaultsService,
+    cabinet_service: CabinetPowerDefaultsService,
+    config: Dict[str, Any],
+    building: str,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    footer_rows = footer_service.get_building_defaults(config, building)
+    cabinet_cells = cabinet_service.get_building_defaults(config, building)
+    return (
+        footer_service.normalize_rows(footer_rows if footer_rows is not None else []),
+        cabinet_service.normalize_cells(cabinet_cells if cabinet_cells is not None else {}),
+    )
+
+
+def _persist_review_defaults(
+    container,
+    *,
+    building: str,
+    document: Dict[str, Any],
+    dirty_regions: Dict[str, bool] | None = None,
+) -> Dict[str, int | bool]:
     footer_defaults_service = FooterInventoryDefaultsService()
     cabinet_defaults_service = CabinetPowerDefaultsService()
+    normalized_dirty = _normalize_review_dirty_regions(dirty_regions)
+    footer_dirty = bool(normalized_dirty.get("footer_inventory"))
+    cabinet_dirty = bool(normalized_dirty.get("fixed_blocks"))
+    if not footer_dirty and not cabinet_dirty:
+        return {
+            "footer_inventory_rows": 0,
+            "cabinet_power_fields": 0,
+            "config_updated": False,
+        }
 
-    footer_rows = footer_defaults_service.extract_rows_from_document(document)
-    cabinet_cells = cabinet_defaults_service.extract_cells_from_document(document)
+    footer_rows = footer_defaults_service.extract_rows_from_document(document) if footer_dirty else []
+    cabinet_cells = cabinet_defaults_service.extract_cells_from_document(document) if cabinet_dirty else {}
     building_code = building_code_from_name(building)
+    building_segment_path = handover_building_segment_path(container.config_path, building_code)
     current_doc = get_handover_building_segment(building_code, container.config_path)
     current_data = current_doc.get("data", {}) if isinstance(current_doc.get("data", {}), dict) else {}
-    updated_config = footer_defaults_service.set_building_defaults(current_data, building, footer_rows)
-    updated_config = cabinet_defaults_service.set_building_defaults(updated_config, building, cabinet_cells)
+    current_footer_rows, current_cabinet_cells = _normalized_review_defaults_snapshot(
+        footer_service=footer_defaults_service,
+        cabinet_service=cabinet_defaults_service,
+        config=current_data,
+        building=building,
+    )
+    footer_changed = footer_dirty and (not building_segment_path.exists() or current_footer_rows != footer_rows)
+    cabinet_changed = cabinet_dirty and (not building_segment_path.exists() or current_cabinet_cells != cabinet_cells)
+    if not footer_changed and not cabinet_changed:
+        return {
+            "footer_inventory_rows": len(footer_rows),
+            "cabinet_power_fields": len(cabinet_cells),
+            "config_updated": False,
+        }
+    updated_config = current_data
+    if footer_changed:
+        updated_config = footer_defaults_service.set_building_defaults(updated_config, building, footer_rows)
+    if cabinet_changed:
+        updated_config = cabinet_defaults_service.set_building_defaults(updated_config, building, cabinet_cells)
     saved_config, _document, aggregate_refresh_error = save_handover_building_segment(
         building_code,
         updated_config,
@@ -470,6 +533,7 @@ def _persist_review_defaults(container, *, building: str, document: Dict[str, An
     return {
         "footer_inventory_rows": len(footer_rows),
         "cabinet_power_fields": len(cabinet_cells),
+        "config_updated": True,
     }
 
 
@@ -1323,20 +1387,39 @@ def handover_review_save(
     if base_revision != latest_revision:
         raise HTTPException(status_code=409, detail="审核内容已被其他人修改，请刷新后重试")
     batch_key = str(target.get("batch_key", "")).strip()
+    dirty_regions = _normalize_review_dirty_regions(payload.get("dirty_regions"))
+    save_started = time.perf_counter()
+    write_elapsed_ms = 0
+    defaults_elapsed_ms = 0
+    session_elapsed_ms = 0
     with container.job_service.resource_guard(
         name=f"handover_save:{batch_key or building}:{session_id}",
         resource_keys=_handover_resource_keys(batch_key=batch_key),
     ):
-        writer.write(output_file=target["output_file"], document=document)
+        write_started = time.perf_counter()
+        writer.write(
+            output_file=target["output_file"],
+            document=document,
+            dirty_regions=dirty_regions,
+        )
+        write_elapsed_ms = int((time.perf_counter() - write_started) * 1000)
         try:
             latest_session_id = service.get_latest_session_id(building)
         except ReviewSessionStoreUnavailableError as exc:
             _raise_review_store_http_error(exc, saved_document=True)
         is_latest_session = bool(latest_session_id and latest_session_id == session_id)
-        persisted_defaults = {"footer_inventory_rows": 0, "cabinet_power_fields": 0}
+        persisted_defaults = {"footer_inventory_rows": 0, "cabinet_power_fields": 0, "config_updated": False}
         if is_latest_session:
-            persisted_defaults = _persist_review_defaults(container, building=building, document=document)
+            defaults_started = time.perf_counter()
+            persisted_defaults = _persist_review_defaults(
+                container,
+                building=building,
+                document=document,
+                dirty_regions=dirty_regions,
+            )
+            defaults_elapsed_ms = int((time.perf_counter() - defaults_started) * 1000)
         try:
+            session_started = time.perf_counter()
             if is_latest_session:
                 session, batch_status = service.touch_session_after_save(
                     building=building,
@@ -1349,6 +1432,7 @@ def handover_review_save(
                     session_id=session_id,
                     base_revision=base_revision,
                 )
+            session_elapsed_ms = int((time.perf_counter() - session_started) * 1000)
         except ReviewSessionConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
@@ -1356,19 +1440,30 @@ def handover_review_save(
         except ReviewSessionStoreUnavailableError as exc:
             _raise_review_store_http_error(exc, saved_document=True)
 
+    total_elapsed_ms = int((time.perf_counter() - save_started) * 1000)
     if is_latest_session:
         container.add_system_log(
-            f"[交接班][审核保存] building={building}, session_id={session_id}, revision={session.get('revision', '-')}"
+            f"[交接班][审核保存] building={building}, session_id={session_id}, revision={session.get('revision', '-')}, "
+            f"写文件耗时={write_elapsed_ms}ms, 默认值耗时={defaults_elapsed_ms}ms, 状态更新耗时={session_elapsed_ms}ms, 总耗时={total_elapsed_ms}ms"
         )
-        container.add_system_log(
-            f"[交接班][审核模板默认] 已跳过默认值回写: building={building}, "
-            f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0) if isinstance(persisted_defaults, dict) else 0}, "
-            f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}, "
-            f"config={container.config_path}"
-        )
+        if isinstance(persisted_defaults, dict) and persisted_defaults.get("config_updated"):
+            container.add_system_log(
+                f"[交接班][审核模板默认] 已写回楼栋默认值: building={building}, "
+                f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0)}, "
+                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0)}, "
+                f"config={container.config_path}"
+            )
+        else:
+            container.add_system_log(
+                f"[交接班][审核模板默认] 楼栋默认值无变化，已跳过配置写回: building={building}, "
+                f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0) if isinstance(persisted_defaults, dict) else 0}, "
+                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}, "
+                f"config={container.config_path}"
+            )
     else:
         container.add_system_log(
-            f"[交接班][历史模式保存] building={building}, session_id={session_id}, revision={session.get('revision', '-')}"
+            f"[交接班][历史模式保存] building={building}, session_id={session_id}, revision={session.get('revision', '-')}, "
+            f"写文件耗时={write_elapsed_ms}ms, 状态更新耗时={session_elapsed_ms}ms, 总耗时={total_elapsed_ms}ms"
         )
         container.add_system_log(
             f"[交接班][审核模板默认] 已跳过历史模式默认值更新: building={building}, session_id={session_id}"
@@ -1388,6 +1483,12 @@ def handover_review_save(
             emit_log=container.add_system_log,
         ),
         "batch_status": batch_status,
+        "save_profile": {
+            "write_ms": int(write_elapsed_ms or 0),
+            "defaults_ms": int(defaults_elapsed_ms or 0),
+            "session_ms": int(session_elapsed_ms or 0),
+            "total_ms": int(total_elapsed_ms or 0),
+        },
         "history": _build_history_payload_safe(
             service,
             building=building,

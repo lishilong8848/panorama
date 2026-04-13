@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 1,
-  "updated_at": "2026-04-10T20:17:06+08:00",
+  "revision": 7,
+  "updated_at": "2026-04-13T20:43:51+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -13,8 +13,32 @@
       }
     },
     "review_ui": {
-      "cabinet_power_defaults_by_building": {},
-      "footer_inventory_defaults_by_building": {}
+      "cabinet_power_defaults_by_building": {
+        "C楼": {
+          "cells": {
+            "B13": "222222",
+            "D13": "222",
+            "F13": "",
+            "H13": ""
+          }
+        }
+      },
+      "footer_inventory_defaults_by_building": {
+        "C楼": {
+          "rows": [
+            {
+              "cells": {
+                "B": "",
+                "C": "",
+                "E": "",
+                "F": "",
+                "G": ""
+              }
+            }
+          ]
+        }
+      },
+      "review_link_recipients_by_building": {}
     }
   }
 }

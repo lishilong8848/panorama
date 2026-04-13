@@ -23,6 +23,23 @@ class ReviewDocumentWriter:
         return str(template_cfg.get("sheet_name", "")).strip()
 
     @staticmethod
+    def _normalize_dirty_regions(dirty_regions: Dict[str, Any] | None) -> Dict[str, bool]:
+        if not isinstance(dirty_regions, dict):
+            return {
+                "fixed_blocks": True,
+                "sections": True,
+                "footer_inventory": True,
+            }
+        normalized = {
+            "fixed_blocks": bool(dirty_regions.get("fixed_blocks")),
+            "sections": bool(dirty_regions.get("sections")),
+            "footer_inventory": bool(dirty_regions.get("footer_inventory")),
+        }
+        if not any(normalized.values()):
+            return normalized
+        return normalized
+
+    @staticmethod
     def _fixed_cells_from_document(document: Dict[str, Any]) -> Dict[str, str]:
         fixed_cells: Dict[str, str] = {}
         fixed_blocks = document.get("fixed_blocks", [])
@@ -136,31 +153,36 @@ class ReviewDocumentWriter:
         *,
         output_file: str,
         document: Dict[str, Any],
+        dirty_regions: Dict[str, Any] | None = None,
     ) -> None:
+        normalized_dirty = self._normalize_dirty_regions(dirty_regions)
         workbook = load_workbook_quietly(output_file)
         try:
             sheet_name = self._sheet_name()
             ws = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active
 
-            fixed_cells = self._fixed_cells_from_document(document)
-            for cell_name, value in fixed_cells.items():
-                ws[cell_name] = value
+            if normalized_dirty.get("fixed_blocks"):
+                fixed_cells = self._fixed_cells_from_document(document)
+                for cell_name, value in fixed_cells.items():
+                    ws[cell_name] = value
 
-            sections = parse_category_sections(ws)
-            snapshots = capture_section_snapshots(ws, sections)
-            write_category_sections(
-                ws=ws,
-                sections=sections,
-                category_payloads=self._category_payloads_from_document(document),
-                snapshots=snapshots,
-                empty_section_mode="single_blank_row",
-                preserve_template_values=False,
-            )
+            if normalized_dirty.get("sections"):
+                sections = parse_category_sections(ws)
+                snapshots = capture_section_snapshots(ws, sections)
+                write_category_sections(
+                    ws=ws,
+                    sections=sections,
+                    category_payloads=self._category_payloads_from_document(document),
+                    snapshots=snapshots,
+                    empty_section_mode="single_blank_row",
+                    preserve_template_values=False,
+                )
 
-            write_footer_inventory_table(
-                ws=ws,
-                inventory_block=self._inventory_footer_block(document),
-            )
+            if normalized_dirty.get("footer_inventory"):
+                write_footer_inventory_table(
+                    ws=ws,
+                    inventory_block=self._inventory_footer_block(document),
+                )
             atomic_save_workbook(workbook, output_file, temp_suffix=".tmp")
         finally:
             workbook.close()

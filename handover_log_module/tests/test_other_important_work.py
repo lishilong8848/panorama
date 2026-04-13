@@ -46,8 +46,10 @@ class _FakeOtherWorkRepo:
 class _FakeShiftRosterRepo:
     def __init__(self, rows):
         self._rows = rows
+        self.calls = []
 
     def list_engineer_directory(self, **_kwargs):
+        self.calls.append(dict(_kwargs))
         return list(self._rows)
 
 
@@ -391,3 +393,58 @@ def test_other_important_work_builder_dedupes_duplicate_descriptions(tmp_path: P
     assert payload["其他重要工作记录"] == [
         {"cells": {"B": "重复事项", "F": "已完成", "H": "汪根尚"}},
     ]
+
+
+def test_other_important_work_builder_uses_target_duty_for_engineer_directory(tmp_path: Path) -> None:
+    template_path = tmp_path / "other_work_context_template.xlsx"
+    _build_other_work_template(template_path)
+    cfg = {
+        "enabled": True,
+        "sections": {"other_important_work": "其他重要工作记录"},
+        "column_mapping": {
+            "resolve_by_header": True,
+            "header_alias": {
+                "description": ["描述"],
+                "completion": ["完成情况"],
+                "executor": ["执行人"],
+            },
+            "fallback_cols": {
+                "description": "B",
+                "completion": "F",
+                "executor": "H",
+            },
+        },
+    }
+    rows = [
+        OtherImportantWorkRow(
+            source_key="device_patrol",
+            source_label="设备轮巡",
+            record_id="rec-duty-context",
+            building_values=["A楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 0, 0),
+            actual_end_time=None,
+            description_text="轮巡事项",
+            completion_text="已完成",
+            specialty_text="电气",
+            raw_fields={},
+        ),
+    ]
+    fake_shift_repo = _FakeShiftRosterRepo(
+        [{"building": "A楼", "specialty": "电气", "supervisor": "汪根尚"}]
+    )
+    builder = OtherImportantWorkPayloadBuilder(
+        {"template": {"source_path": str(template_path), "sheet_name": "交接班日志"}},
+        repository=_FakeOtherWorkRepo(cfg, rows),
+        shift_roster_repo=fake_shift_repo,
+    )
+
+    builder.build(
+        building="A楼",
+        duty_date="2026-03-14",
+        duty_shift="day",
+        emit_log=lambda *_args: None,
+    )
+
+    assert fake_shift_repo.calls
+    assert fake_shift_repo.calls[-1]["duty_date"] == "2026-03-14"
+    assert fake_shift_repo.calls[-1]["duty_shift"] == "day"

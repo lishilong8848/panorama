@@ -418,8 +418,8 @@ export async function activateStartupRuntimeApi(payload = {}) {
   });
 }
 
-export async function getHandoverReviewApi(buildingCode, params = {}) {
-  return apiJson(appendQuery(`/api/handover/review/${buildingCode}`, params));
+export async function getHandoverReviewApi(buildingCode, params = {}, options = {}) {
+  return apiJson(appendQuery(`/api/handover/review/${buildingCode}`, params), options);
 }
 
 export async function claimHandoverReviewLockApi(buildingCode, payload = {}) {

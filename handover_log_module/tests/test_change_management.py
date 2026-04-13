@@ -40,8 +40,10 @@ class _FakeChangeRepo:
 class _FakeShiftRosterRepo:
     def __init__(self, rows):
         self._rows = rows
+        self.calls = []
 
     def list_engineer_directory(self, **_kwargs):
+        self.calls.append(dict(_kwargs))
         return list(self._rows)
 
 
@@ -248,3 +250,59 @@ def test_change_management_builder_dedupes_duplicate_descriptions(tmp_path: Path
     assert payload["变更管理"] == [
         {"cells": {"B": "低", "D": "重复变更", "E": "09:10-18:30", "H": "汪根尚"}}
     ]
+
+
+def test_change_management_builder_uses_target_duty_for_engineer_directory(tmp_path: Path) -> None:
+    template_path = tmp_path / "change_template_context.xlsx"
+    _build_change_template(template_path)
+    cfg = {
+        "enabled": True,
+        "sections": {"change_management": "变更管理"},
+        "column_mapping": {
+            "resolve_by_header": True,
+            "header_alias": {
+                "change_level": ["变更等级"],
+                "work_window": ["作业时间段"],
+                "description": ["描述"],
+                "executor": ["执行人"],
+            },
+            "fallback_cols": {
+                "change_level": "B",
+                "work_window": "E",
+                "description": "D",
+                "executor": "H",
+            },
+        },
+    }
+    rows = [
+        ChangeManagementRow(
+            record_id="rec-duty-context",
+            building_values=["A楼"],
+            start_time=datetime(2026, 3, 14, 9, 0, 0),
+            end_time=None,
+            change_level="低",
+            process_updates_text="2026-03-14 09:10:00",
+            description="变更描述",
+            specialty_text="电气",
+            raw_fields={},
+        ),
+    ]
+    fake_shift_repo = _FakeShiftRosterRepo(
+        [{"building": "A楼", "specialty": "电气", "supervisor": "汪根尚"}]
+    )
+    builder = ChangeManagementPayloadBuilder(
+        {"template": {"source_path": str(template_path), "sheet_name": "交接班日志"}},
+        repository=_FakeChangeRepo(cfg, rows),
+        shift_roster_repo=fake_shift_repo,
+    )
+
+    builder.build(
+        building="A楼",
+        duty_date="2026-03-14",
+        duty_shift="day",
+        emit_log=lambda *_args: None,
+    )
+
+    assert fake_shift_repo.calls
+    assert fake_shift_repo.calls[-1]["duty_date"] == "2026-03-14"
+    assert fake_shift_repo.calls[-1]["duty_shift"] == "day"
