@@ -118,6 +118,20 @@ def _split_metric_pair(value: Any) -> tuple[str, str]:
     return _text(left), _text(right)
 
 
+def _parse_tank_backup_pair(value: Any) -> tuple[str, str]:
+    text = _text(value)
+    if not text:
+        return "", ""
+    west_match = re.search(r"西区\s*([+-]?\d+(?:\.\d+)?)", text)
+    east_match = re.search(r"东区\s*([+-]?\d+(?:\.\d+)?)", text)
+    if west_match and east_match:
+        return _text(west_match.group(1)), _text(east_match.group(1))
+    numbers = re.findall(r"[+-]?\d+(?:\.\d+)?", text)
+    if len(numbers) >= 2:
+        return _text(numbers[0]), _text(numbers[1])
+    return "", ""
+
+
 def _extract_building_code(building: Any) -> str:
     match = re.search(r"([A-Za-z])", _text(building))
     return match.group(1).upper() if match else ""
@@ -397,6 +411,15 @@ def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]
     current_alarm = context.get("current_alarm_summary", {}) if isinstance(context.get("current_alarm_summary", {}), dict) else {}
     oil_previous = context.get("oil_previous", {}) if isinstance(context.get("oil_previous", {}), dict) else {}
     oil_current = context.get("oil_current", {}) if isinstance(context.get("oil_current", {}), dict) else {}
+    weather_text = _text(context.get("weather_text"))
+    water_summary = (
+        context.get("capacity_water_summary", {})
+        if isinstance(context.get("capacity_water_summary", {}), dict)
+        else {}
+    )
+    if not water_summary and isinstance(context.get("night_water_summary", {}), dict):
+        water_summary = context.get("night_water_summary", {})
+    tank_west, tank_east = _parse_tank_backup_pair(handover_cells.get("F8"))
     h16_left, h16_right = _split_metric_pair(handover_cells.get("B10"))
     h17_left, h17_right = _split_metric_pair(context.get("hvdc_text"))
     h18_left, h18_right = _split_metric_pair(handover_cells.get("D10"))
@@ -426,14 +449,19 @@ def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]
         "X12": _text(oil_previous.get("second")),
         "U13": _text(oil_current.get("first")),
         "X13": _text(oil_current.get("second")),
+        "U15": _text(handover_cells.get("H6")),
+        "AD22": tank_west,
+        "AD23": tank_east,
+        "V60": _text(handover_cells.get("B6")),
+        "O60": _text(handover_cells.get("D6")),
+        "S60": _text(handover_cells.get("F6")),
+        "AB56": _text(handover_cells.get("B13")),
+        "AC56": _text(handover_cells.get("D13")),
+        "L2": weather_text,
+        "O57": _text(water_summary.get("latest_daily_total")),
+        "AC25": _text(water_summary.get("month_total")),
+        "R57": _text(water_summary.get("month_total")),
     }
-    if duty_shift == "night":
-        night_water = context.get("night_water_summary", {}) if isinstance(context.get("night_water_summary", {}), dict) else {}
-        cell_values["O57"] = _text(night_water.get("latest_daily_total"))
-        cell_values["R57"] = _text(night_water.get("month_total"))
-        cell_values["O60"] = _text(handover_cells.get("D6"))
-        cell_values["S60"] = _text(handover_cells.get("F6"))
-        cell_values["V60"] = _text(handover_cells.get("B6"))
     if duty_shift == "day":
         cell_values["G7"] = _text(handover_cells.get("B4")) or "/"
     return {cell: value for cell, value in cell_values.items() if value != ""}

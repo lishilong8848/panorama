@@ -20,7 +20,7 @@
           <button
             class="btn btn-secondary btn-mini"
             @click="downloadCurrentCapacityReviewFile"
-            :disabled="syncingRemoteRevision || capacityDownloading || !session || !session.session_id || !session.capacity_output_file"
+            :disabled="capacityDownloadDisabled"
           >
             {{ capacityDownloading ? "下载中..." : "下载交接班容量报表" }}
           </button>

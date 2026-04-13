@@ -20,6 +20,7 @@ from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from handover_log_module.service.handover_daily_report_asset_service import HandoverDailyReportAssetService
+from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
 from handover_log_module.service.handover_daily_report_screenshot_service import (
     HandoverDailyReportScreenshotService,
 )
@@ -458,6 +459,120 @@ def _normalize_review_dirty_regions(raw: Any) -> Dict[str, bool]:
         "sections": bool(raw.get("sections")),
         "footer_inventory": bool(raw.get("footer_inventory")),
     }
+
+
+def _extract_review_fixed_cells(document: Dict[str, Any]) -> Dict[str, str]:
+    output: Dict[str, str] = {}
+    fixed_blocks = document.get("fixed_blocks", []) if isinstance(document, dict) else []
+    if not isinstance(fixed_blocks, list):
+        return output
+    for block in fixed_blocks:
+        if not isinstance(block, dict):
+            continue
+        for field in block.get("fields", []):
+            if not isinstance(field, dict):
+                continue
+            cell_name = str(field.get("cell", "") or "").strip().upper()
+            if not cell_name:
+                continue
+            output[cell_name] = str(field.get("value", "") or "").strip()
+    return output
+
+
+def _extract_capacity_tracked_cells(document: Dict[str, Any]) -> Dict[str, str]:
+    fixed_cells = _extract_review_fixed_cells(document)
+    return {
+        cell: str(fixed_cells.get(cell, "") or "").strip()
+        for cell in HandoverCapacityReportService.tracked_cells()
+    }
+
+
+def _should_sync_capacity_after_review_save(
+    *,
+    previous_session: Dict[str, Any] | None,
+    dirty_regions: Dict[str, bool],
+    tracked_cells: Dict[str, str],
+) -> bool:
+    if not bool((dirty_regions or {}).get("fixed_blocks")):
+        return False
+    previous = previous_session if isinstance(previous_session, dict) else {}
+    previous_sync = previous.get("capacity_sync", {}) if isinstance(previous.get("capacity_sync", {}), dict) else {}
+    previous_signature = str(previous_sync.get("input_signature", "") or "").strip()
+    next_signature = HandoverCapacityReportService.capacity_input_signature(tracked_cells)
+    if previous_signature != next_signature:
+        return True
+    status = str(previous_sync.get("status", "") or "").strip().lower()
+    return status in {"pending_input", "missing_file", "failed"}
+
+
+def _sync_capacity_overlay_after_review_save(
+    *,
+    container,
+    review_service: ReviewSessionService,
+    previous_session: Dict[str, Any],
+    saved_session: Dict[str, Any],
+    document: Dict[str, Any],
+    dirty_regions: Dict[str, bool],
+) -> Dict[str, Any]:
+    if not callable(getattr(review_service, "update_capacity_sync", None)):
+        return saved_session
+    runtime_cfg = getattr(container, "runtime_config", None)
+    if not isinstance(runtime_cfg, dict):
+        return saved_session
+    tracked_cells = _extract_capacity_tracked_cells(document)
+    if not _should_sync_capacity_after_review_save(
+        previous_session=previous_session,
+        dirty_regions=dirty_regions,
+        tracked_cells=tracked_cells,
+    ):
+        return saved_session
+
+    building = str(saved_session.get("building", "")).strip()
+    duty_date = str(saved_session.get("duty_date", "")).strip()
+    duty_shift = str(saved_session.get("duty_shift", "")).strip().lower()
+    if not building or not duty_date or duty_shift not in {"day", "night"}:
+        return saved_session
+
+    handover_cfg = _handover_cfg(container)
+    capacity_service = HandoverCapacityReportService(handover_cfg)
+    template_cfg = handover_cfg.get("template", {}) if isinstance(handover_cfg.get("template", {}), dict) else {}
+    handover_sheet_name = str(template_cfg.get("sheet_name", "") or "").strip()
+    sync_payload = capacity_service.sync_overlay_for_existing_report(
+        building=building,
+        duty_date=duty_date,
+        duty_shift=duty_shift,
+        handover_output_file=str(saved_session.get("output_file", "")).strip(),
+        capacity_output_file=str(saved_session.get("capacity_output_file", "")).strip(),
+        handover_sheet_name=handover_sheet_name,
+        emit_log=container.add_system_log,
+    )
+    sync_status = str(sync_payload.get("status", "")).strip().lower()
+    if sync_status == "ready":
+        capacity_status = "success"
+        capacity_error = ""
+    elif sync_status == "pending_input":
+        capacity_status = "pending_input"
+        capacity_error = str(sync_payload.get("error", "")).strip()
+    elif sync_status == "missing_file":
+        capacity_status = "missing_file"
+        capacity_error = str(sync_payload.get("error", "")).strip()
+    else:
+        capacity_status = "failed"
+        capacity_error = str(sync_payload.get("error", "")).strip()
+
+    updated_session = review_service.update_capacity_sync(
+        session_id=str(saved_session.get("session_id", "")).strip(),
+        capacity_sync=sync_payload if isinstance(sync_payload, dict) else {},
+        capacity_status=capacity_status,
+        capacity_error=capacity_error,
+    )
+    container.add_system_log(
+        "[交接班][容量报表][审核联动] 保存后补写状态 "
+        f"building={updated_session.get('building', '-')}, "
+        f"session_id={updated_session.get('session_id', '-')}, "
+        f"status={sync_status or '-'}"
+    )
+    return updated_session
 
 
 def _normalized_review_defaults_snapshot(
@@ -1354,6 +1469,11 @@ def handover_review_capacity_download(building_code: str, request: Request, sess
         raise HTTPException(status_code=404, detail="当前交接班容量报表尚未生成")
     if not output_file.exists():
         raise HTTPException(status_code=404, detail="交接班容量报表文件不存在，请重新生成")
+    capacity_sync = target.get("capacity_sync", {}) if isinstance(target.get("capacity_sync", {}), dict) else {}
+    capacity_sync_status = str(capacity_sync.get("status", "")).strip().lower()
+    if capacity_sync_status != "ready":
+        detail = str(capacity_sync.get("error", "")).strip() or "容量报表待补写完成后才能下载"
+        raise HTTPException(status_code=409, detail=detail)
 
     container.add_system_log(
         f"[交接班][下载容量报表] building={building}, session_id={session_id_text}, file={output_file}"
@@ -1439,6 +1559,19 @@ def handover_review_save(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ReviewSessionStoreUnavailableError as exc:
             _raise_review_store_http_error(exc, saved_document=True)
+        try:
+            session = _sync_capacity_overlay_after_review_save(
+                container=container,
+                review_service=service,
+                previous_session=target,
+                saved_session=session,
+                document=document,
+                dirty_regions=dirty_regions,
+            )
+        except ReviewSessionStoreUnavailableError as exc:
+            _raise_review_store_http_error(exc, saved_document=True)
+        except ReviewSessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     total_elapsed_ms = int((time.perf_counter() - save_started) * 1000)
     if is_latest_session:

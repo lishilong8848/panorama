@@ -32,6 +32,7 @@ const REVIEW_LOCK_HEARTBEAT_MS = 15000;
 const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
 const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
 const HANDOVER_REVIEW_STATUS_BROADCAST_KEY = "handover_review_status_broadcast_v1";
+const CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "B13", "D13"];
 
 function shiftTextFromCode(shift) {
   const normalized = String(shift || "").trim().toLowerCase();
@@ -393,6 +394,23 @@ function cloneDirtyRegions(dirtyRegions) {
   };
 }
 
+function normalizeCapacitySync(raw) {
+  const status = String(raw?.status || "").trim().toLowerCase();
+  const normalizedStatus = ["ready", "pending_input", "missing_file", "failed"].includes(status)
+    ? status
+    : "failed";
+  const trackedCells = Array.isArray(raw?.tracked_cells) && raw.tracked_cells.length
+    ? raw.tracked_cells
+    : CAPACITY_SYNC_TRACKED_CELLS;
+  return {
+    status: normalizedStatus,
+    updated_at: String(raw?.updated_at || "").trim(),
+    error: String(raw?.error || "").trim(),
+    tracked_cells: trackedCells.map((item) => String(item || "").trim().toUpperCase()).filter(Boolean),
+    input_signature: String(raw?.input_signature || "").trim(),
+  };
+}
+
 function hasInventoryFooterBlock(document) {
   const footerBlocks = Array.isArray(document?.footer_blocks) ? document.footer_blocks : [];
   return footerBlocks.some((block) => String(block?.type || "").trim() === "inventory_table");
@@ -529,6 +547,7 @@ export function mountHandoverReviewApp(Vue) {
       const updatingHistoryCloudSync = ref(false);
       const dirty = ref(false);
       const dirtyRegions = ref(emptyDirtyRegions());
+      const capacityLinkedDirty = ref(false);
       const needsRefresh = ref(false);
       const errorText = ref("");
       const statusText = ref("");
@@ -563,6 +582,8 @@ export function mountHandoverReviewApp(Vue) {
       let activeLoadController = null;
 
       const cloudSyncBusy = computed(() => retryingCloudSync.value || updatingHistoryCloudSync.value);
+      const capacitySync = computed(() => normalizeCapacitySync(session.value?.capacity_sync || {}));
+      const capacityTrackedCellSet = computed(() => new Set(capacitySync.value.tracked_cells || CAPACITY_SYNC_TRACKED_CELLS));
       const selectedSessionId = computed(() => String(historyState.value?.selected_session_id || session.value?.session_id || "").trim());
       const latestSessionId = computed(() => String(historyState.value?.latest_session_id || "").trim());
       const isHistoryMode = computed(() => Boolean(session.value) && !Boolean(historyState.value?.selected_is_latest));
@@ -658,6 +679,15 @@ export function mountHandoverReviewApp(Vue) {
         }
         return badges;
       });
+      const capacityDownloadDisabled = computed(() => Boolean(
+        syncingRemoteRevision.value
+        || capacityDownloading.value
+        || !session.value
+        || !session.value.session_id
+        || !String(session.value.capacity_output_file || "").trim()
+        || String(capacitySync.value.status || "").trim().toLowerCase() !== "ready"
+        || capacityLinkedDirty.value
+      ));
 
       const reviewStatusBanners = computed(() => {
         const rows = [];
@@ -964,6 +994,7 @@ export function mountHandoverReviewApp(Vue) {
         applyPayloadMeta(payload);
         dirtyRegions.value = emptyDirtyRegions();
         dirty.value = false;
+        capacityLinkedDirty.value = false;
         staleRevisionConflict.value = false;
         errorText.value = "";
         if (!fromBackground) {
@@ -1143,6 +1174,7 @@ export function mountHandoverReviewApp(Vue) {
           lastSavedSnapshot.value = payloadSnapshot;
           if (serializeDocument(documentRef.value) === payloadSnapshot) {
             dirtyRegions.value = emptyDirtyRegions();
+            capacityLinkedDirty.value = false;
           }
           dirty.value = serializeDocument(documentRef.value) !== lastSavedSnapshot.value;
           pendingFailureRetryCount.value = 0;
@@ -1376,8 +1408,17 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       async function downloadCurrentCapacityReviewFile() {
-        if (syncingRemoteRevision.value) {
-          statusText.value = "请先等待远端修订同步完成后再下载。";
+        if (capacityDownloadDisabled.value) {
+          const syncStatus = String(capacitySync.value?.status || "").trim().toLowerCase();
+          if (syncingRemoteRevision.value) {
+            statusText.value = "请先等待远端修订同步完成后再下载。";
+          } else if (capacityLinkedDirty.value) {
+            statusText.value = "容量关联字段已修改，请先保存并等待容量报表补写完成。";
+          } else if (syncStatus && syncStatus !== "ready") {
+            statusText.value = capacitySync.value?.error || "容量报表待补写完成后才能下载。";
+          } else {
+            statusText.value = "当前没有可下载的交接班容量报表";
+          }
           return;
         }
         const sessionId = String(session.value?.session_id || "").trim();
@@ -1412,6 +1453,10 @@ export function mountHandoverReviewApp(Vue) {
         if (!field) return;
         touchEditingIntent();
         dirtyRegions.value.fixed_blocks = true;
+        const cellName = String(field.cell || "").trim().toUpperCase();
+        if (capacityTrackedCellSet.value.has(cellName)) {
+          capacityLinkedDirty.value = true;
+        }
         field.value = String(value ?? "");
       }
 
@@ -1573,6 +1618,8 @@ export function mountHandoverReviewApp(Vue) {
         reviewConfirmBadge,
         reviewCloudSheetVm,
         reviewCloudSheetUrl,
+        capacitySync,
+        capacityDownloadDisabled,
         canRetryCloudSync,
         reviewHeaderBadges,
         reviewStatusBanners,

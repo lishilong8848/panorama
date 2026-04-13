@@ -4,6 +4,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 import openpyxl
 from openpyxl.utils import get_column_letter, range_boundaries
@@ -15,7 +17,7 @@ from app.modules.sheet_import.core.field_value_converter import parse_timestamp_
 from app.shared.utils.atomic_file import atomic_save_workbook
 from app.shared.utils.artifact_naming import OUTPUT_TYPE_HANDOVER_CAPACITY, build_output_base_path
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
-from handover_log_module.core.shift_window import build_duty_window, parse_duty_date
+from handover_log_module.core.shift_window import parse_duty_date
 from handover_log_module.core.normalizers import format_number
 from handover_log_module.repository.excel_reader import load_rows, load_workbook_quietly
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
@@ -32,7 +34,7 @@ _BUILDER_BY_BUILDING = {
     "E楼": capacity_report_e.build_capacity_cells,
 }
 _RUNNING_MODE_TEXTS = {"制冷", "预冷", "板换"}
-_NIGHT_WATER_SOURCE = {
+_CAPACITY_WATER_SOURCE = {
     "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
     "table_id": "tblz4TkZqrUJB90y",
     "page_size": 500,
@@ -40,9 +42,28 @@ _NIGHT_WATER_SOURCE = {
     "fields": {
         "date": "执行日期",
         "building": "楼栋",
-        "water_total": "当日耗水总量（实际）",
+        "water_total": "当日耗水总量（修正）",
     },
 }
+_CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
+_CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
+_WEATHER_PHENOMENON_PRIORITY = (
+    "暴雨",
+    "大雨",
+    "中雨",
+    "小雨",
+    "雷阵雨",
+    "阵雨",
+    "雨夹雪",
+    "大雪",
+    "中雪",
+    "小雪",
+    "多云",
+    "阴",
+    "晴",
+    "雾",
+    "霾",
+)
 
 
 def _text(value: Any) -> str:
@@ -170,6 +191,8 @@ class HandoverCapacityReportService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
         self._oil_cache_service = HandoverCapacityOilCacheService(self.config)
+        self._weather_text_cache: Dict[str, str] = {}
+        self._water_summary_cache: Dict[tuple[str, str], Dict[str, str]] = {}
 
     def _capacity_cfg(self) -> Dict[str, Any]:
         raw = self.config.get("capacity_report", {})
@@ -431,7 +454,7 @@ class HandoverCapacityReportService:
         try:
             field_defs = client.list_fields(table_id=table_id, page_size=200)
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][容量报表][夜班耗水] 字段定义读取失败 building=全局, error={exc}")
+            emit_log(f"[交接班][容量报表][耗水摘要] 字段定义读取失败 building=全局, error={exc}")
             return {}
         output: Dict[str, Dict[str, str]] = {}
         for field_def in field_defs:
@@ -448,12 +471,155 @@ class HandoverCapacityReportService:
             output[field_name] = self._extract_option_map_from_field(field_def)
         return output
 
-    def _new_night_water_client(self) -> FeishuBitableClient:
+    @staticmethod
+    def tracked_cells() -> List[str]:
+        return list(_CAPACITY_TRACKED_CELLS)
+
+    @staticmethod
+    def _extract_fixed_cells_from_document(document: Dict[str, Any]) -> Dict[str, str]:
+        output: Dict[str, str] = {}
+        fixed_blocks = document.get("fixed_blocks", []) if isinstance(document, dict) else []
+        if not isinstance(fixed_blocks, list):
+            return output
+        for block in fixed_blocks:
+            if not isinstance(block, dict):
+                continue
+            for field in block.get("fields", []):
+                if not isinstance(field, dict):
+                    continue
+                cell_name = _text(field.get("cell")).upper()
+                if not cell_name:
+                    continue
+                output[cell_name] = _text(field.get("value"))
+        return output
+
+    @classmethod
+    def extract_tracked_cells_from_review_document(cls, document: Dict[str, Any]) -> Dict[str, str]:
+        fixed_cells = cls._extract_fixed_cells_from_document(document if isinstance(document, dict) else {})
+        return {cell: _text(fixed_cells.get(cell)) for cell in _CAPACITY_TRACKED_CELLS}
+
+    @staticmethod
+    def capacity_input_signature(cells: Dict[str, Any] | None) -> str:
+        payload = cells if isinstance(cells, dict) else {}
+        return "|".join(f"{cell}={_text(payload.get(cell))}" for cell in _CAPACITY_TRACKED_CELLS)
+
+    @staticmethod
+    def _normalize_capacity_sync_payload(raw: Dict[str, Any] | None) -> Dict[str, Any]:
+        payload = raw if isinstance(raw, dict) else {}
+        status = _text(payload.get("status")).lower()
+        if status not in {"ready", "pending_input", "missing_file", "failed"}:
+            status = "failed"
+        return {
+            "status": status,
+            "updated_at": _text(payload.get("updated_at")) or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "error": _text(payload.get("error")),
+            "tracked_cells": list(_CAPACITY_TRACKED_CELLS),
+            "input_signature": _text(payload.get("input_signature")),
+        }
+
+    @staticmethod
+    def _build_capacity_sync_payload(
+        *,
+        status: str,
+        error: str = "",
+        input_signature: str = "",
+    ) -> Dict[str, Any]:
+        return HandoverCapacityReportService._normalize_capacity_sync_payload(
+            {
+                "status": status,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "error": error,
+                "input_signature": input_signature,
+            }
+        )
+
+    @staticmethod
+    def _month_window_for_duty_date(duty_date: str) -> tuple[datetime, datetime]:
+        duty_day = parse_duty_date(duty_date)
+        month_start_dt = datetime(duty_day.year, duty_day.month, 1, 0, 0, 0)
+        if duty_day.month == 12:
+            month_end_dt = datetime(duty_day.year + 1, 1, 1, 0, 0, 0)
+        else:
+            month_end_dt = datetime(duty_day.year, duty_day.month + 1, 1, 0, 0, 0)
+        return month_start_dt, month_end_dt
+
+    @staticmethod
+    def _derive_tank_pair_from_f8(value: Any) -> tuple[str, str]:
+        text = _text(value)
+        if not text:
+            return "", ""
+        west_match = re.search(r"西区\s*([+-]?\d+(?:\.\d+)?)", text)
+        east_match = re.search(r"东区\s*([+-]?\d+(?:\.\d+)?)", text)
+        if west_match and east_match:
+            return _text(west_match.group(1)), _text(east_match.group(1))
+        numbers = re.findall(r"[+-]?\d+(?:\.\d+)?", text)
+        if len(numbers) >= 2:
+            return _text(numbers[0]), _text(numbers[1])
+        return "", ""
+
+    @staticmethod
+    def _weather_keyword_from_html(html: str) -> str:
+        text = str(html or "")
+        match = re.search(r"天气的关键词是[“\"]([^”\"<]{1,20})", text)
+        if match:
+            source = _text(match.group(1))
+        else:
+            source = ""
+        if not source:
+            source = _text(text)
+        for keyword in _WEATHER_PHENOMENON_PRIORITY:
+            if keyword in source:
+                return keyword
+            if keyword in text:
+                return keyword
+        return ""
+
+    def _fetch_weather_text_for_duty_date(
+        self,
+        *,
+        duty_date: str,
+        emit_log: Callable[[str], None],
+    ) -> str:
+        duty_date_text = _text(duty_date)
+        if not duty_date_text:
+            return ""
+        if duty_date_text in self._weather_text_cache:
+            return self._weather_text_cache[duty_date_text]
+        try:
+            duty_day = parse_duty_date(duty_date_text)
+            date_token = duty_day.strftime("%Y%m%d")
+            url = f"https://www.tianqi.com/tianqi/chongchuanqu/{date_token}.html"
+            req = Request(url=url, headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(req, timeout=8) as resp:  # noqa: S310
+                content = resp.read().decode("utf-8", errors="ignore")
+            weather_text = self._weather_keyword_from_html(content)
+            if weather_text:
+                emit_log(
+                    "[交接班][容量报表][天气] 查询完成 "
+                    f"duty_date={duty_date_text}, weather={weather_text}"
+                )
+                self._weather_text_cache[duty_date_text] = weather_text
+                return weather_text
+            emit_log(
+                "[交接班][容量报表][天气] 查询失败 "
+                f"duty_date={duty_date_text}, reason=页面未解析到天气现象"
+            )
+            self._weather_text_cache[duty_date_text] = ""
+            return ""
+        except (ValueError, OSError, TimeoutError, URLError) as exc:
+            emit_log(
+                "[交接班][容量报表][天气] 查询失败 "
+                f"duty_date={duty_date_text}, error={exc}"
+            )
+            self._weather_text_cache[duty_date_text] = ""
+            return ""
+
+    def _new_capacity_water_client(self) -> FeishuBitableClient:
         global_feishu = require_feishu_auth_settings(self.config)
-        app_token = str(_NIGHT_WATER_SOURCE.get("app_token", "") or "").strip()
-        table_id = str(_NIGHT_WATER_SOURCE.get("table_id", "") or "").strip()
+        app_token = str(_CAPACITY_WATER_SOURCE.get("app_token", "") or "").strip()
+        table_id = str(_CAPACITY_WATER_SOURCE.get("table_id", "") or "").strip()
         if not app_token or not table_id:
-            raise ValueError("夜班耗水多维配置缺失: app_token/table_id")
+            raise ValueError("容量报表耗水多维配置缺失: app_token/table_id")
         return FeishuBitableClient(
             app_id=str(global_feishu.get("app_id", "") or "").strip(),
             app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
@@ -481,38 +647,31 @@ class HandoverCapacityReportService:
             and _extract_building_code(record_text) == _extract_building_code(target_text)
         )
 
-    def _query_night_water_summary(
+    def _query_capacity_water_summary(
         self,
         *,
         building: str,
         duty_date: str,
-        duty_shift: str,
         emit_log: Callable[[str], None],
     ) -> Dict[str, str]:
-        if _text(duty_shift).lower() != "night":
-            return {}
+        building_text = _text(building)
+        duty_date_text = _text(duty_date)
+        cache_key = (building_text, duty_date_text)
+        if cache_key in self._water_summary_cache:
+            return dict(self._water_summary_cache[cache_key])
 
-        download_cfg = self.config.get("download", {})
-        shift_windows = download_cfg.get("shift_windows", {}) if isinstance(download_cfg, dict) else {}
-        duty_window = build_duty_window(
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            shift_windows=shift_windows,
-        )
-        duty_day = parse_duty_date(duty_date)
-        month_start_dt = datetime(duty_day.year, duty_day.month, 1, 0, 0, 0)
-        duty_end_dt = datetime.strptime(duty_window.end_time, "%Y-%m-%d %H:%M:%S")
+        month_start_dt, month_end_dt = self._month_window_for_duty_date(duty_date_text)
 
-        fields_cfg = _NIGHT_WATER_SOURCE.get("fields", {})
+        fields_cfg = _CAPACITY_WATER_SOURCE.get("fields", {})
         if not isinstance(fields_cfg, dict):
             fields_cfg = {}
         date_field = str(fields_cfg.get("date", "") or "").strip()
         building_field = str(fields_cfg.get("building", "") or "").strip()
         water_total_field = str(fields_cfg.get("water_total", "") or "").strip()
-        table_id = str(_NIGHT_WATER_SOURCE.get("table_id", "") or "").strip()
+        table_id = str(_CAPACITY_WATER_SOURCE.get("table_id", "") or "").strip()
 
         try:
-            client = self._new_night_water_client()
+            client = self._new_capacity_water_client()
             option_maps = self._load_field_option_maps(
                 client=client,
                 table_id=table_id,
@@ -521,13 +680,13 @@ class HandoverCapacityReportService:
             )
             records = client.list_records(
                 table_id=table_id,
-                page_size=max(1, int(_NIGHT_WATER_SOURCE.get("page_size", 500) or 500)),
-                max_records=max(1, int(_NIGHT_WATER_SOURCE.get("max_records", 20000) or 20000)),
+                page_size=max(1, int(_CAPACITY_WATER_SOURCE.get("page_size", 500) or 500)),
+                max_records=max(1, int(_CAPACITY_WATER_SOURCE.get("max_records", 20000) or 20000)),
             )
         except Exception as exc:  # noqa: BLE001
             emit_log(
-                "[交接班][容量报表][夜班耗水] 查询失败 "
-                f"building={building}, duty={duty_date}/{duty_shift}, error={exc}"
+                "[交接班][容量报表][耗水摘要] 查询失败 "
+                f"building={building_text}, duty_date={duty_date_text}, error={exc}"
             )
             return {}
 
@@ -543,10 +702,10 @@ class HandoverCapacityReportService:
             if not isinstance(fields, dict):
                 continue
             record_dt = _parse_datetime(fields.get(date_field))
-            if record_dt is None or record_dt < month_start_dt or record_dt > duty_end_dt:
+            if record_dt is None or record_dt < month_start_dt or record_dt >= month_end_dt:
                 continue
             record_building = _field_text_with_option_map(fields.get(building_field), building_option_map)
-            if not self._matches_building(record_building, building):
+            if not self._matches_building(record_building, building_text):
                 continue
             water_total = _to_float(fields.get(water_total_field))
             if water_total is None:
@@ -561,12 +720,124 @@ class HandoverCapacityReportService:
             "month_total": format_number(month_total),
             "latest_daily_total": format_number(latest_daily_total),
         }
+        self._water_summary_cache[cache_key] = dict(summary)
         emit_log(
-            "[交接班][容量报表][夜班耗水] 查询完成 "
-            f"building={building}, window={month_start_dt.strftime('%Y-%m-%d %H:%M:%S')}~{duty_end_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
-            f"matched={matched_records}, O57={summary.get('latest_daily_total', '') or '-'}, R57={summary.get('month_total', '') or '-'}"
+            "[交接班][容量报表][耗水摘要] 查询完成 "
+            f"building={building_text}, window={month_start_dt.strftime('%Y-%m-%d')}~{month_end_dt.strftime('%Y-%m-%d')}, "
+            f"matched={matched_records}, O57={summary.get('latest_daily_total', '') or '-'}, AC25={summary.get('month_total', '') or '-'}"
         )
         return summary
+
+    def _build_capacity_overlay_values(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        handover_cells: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, str]:
+        handover = handover_cells if isinstance(handover_cells, dict) else {}
+        water_summary = self._query_capacity_water_summary(
+            building=building,
+            duty_date=duty_date,
+            emit_log=emit_log,
+        )
+        weather_text = self._fetch_weather_text_for_duty_date(
+            duty_date=duty_date,
+            emit_log=emit_log,
+        )
+        west_tank, east_tank = self._derive_tank_pair_from_f8(handover.get("F8"))
+        overlay = {
+            "U15": _text(handover.get("H6")),
+            "AD22": west_tank,
+            "AD23": east_tank,
+            "V60": _text(handover.get("B6")),
+            "O60": _text(handover.get("D6")),
+            "S60": _text(handover.get("F6")),
+            "AB56": _text(handover.get("B13")),
+            "AC56": _text(handover.get("D13")),
+            "L2": weather_text,
+            "AC25": _text(water_summary.get("month_total")),
+            "O57": _text(water_summary.get("latest_daily_total")),
+        }
+        return {cell: value for cell, value in overlay.items() if value != ""}
+
+    def _validate_capacity_overlay_inputs(self, handover_cells: Dict[str, Any]) -> tuple[bool, str]:
+        handover = handover_cells if isinstance(handover_cells, dict) else {}
+        missing_cells = [cell for cell in _CAPACITY_SYNC_REQUIRED_CELLS if not _text(handover.get(cell))]
+        if missing_cells:
+            return False, f"容量报表待补写输入不完整: 缺少{','.join(missing_cells)}"
+        west_tank, east_tank = self._derive_tank_pair_from_f8(handover.get("F8"))
+        if not west_tank or not east_tank:
+            return False, "容量报表待补写输入不完整: F8 未解析出西区/东区数字"
+        return True, ""
+
+    def sync_overlay_for_existing_report(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        handover_output_file: str,
+        capacity_output_file: str,
+        handover_sheet_name: str = "",
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        handover_cells = self._read_handover_cells(
+            handover_output_file,
+            list(_CAPACITY_TRACKED_CELLS),
+            sheet_name=handover_sheet_name,
+        )
+        input_signature = self.capacity_input_signature(handover_cells)
+        capacity_output_path = Path(_text(capacity_output_file))
+        if not _text(capacity_output_file) or not capacity_output_path.exists():
+            return self._build_capacity_sync_payload(
+                status="missing_file",
+                error="交接班容量报表文件不存在，请重新生成",
+                input_signature=input_signature,
+            )
+        valid, error = self._validate_capacity_overlay_inputs(handover_cells)
+        if not valid:
+            return self._build_capacity_sync_payload(
+                status="pending_input",
+                error=error,
+                input_signature=input_signature,
+            )
+
+        try:
+            workbook = load_workbook_quietly(capacity_output_path)
+            try:
+                sheet_name = self._sheet_name(workbook, _text(self._template_cfg().get("sheet_name")))
+                sheet = workbook[sheet_name]
+                overlay_values = self._build_capacity_overlay_values(
+                    building=building,
+                    duty_date=duty_date,
+                    handover_cells=handover_cells,
+                    emit_log=emit_log,
+                )
+                _write_cells_with_merged_support(sheet, overlay_values)
+                atomic_save_workbook(workbook, capacity_output_path)
+            finally:
+                workbook.close()
+        except Exception as exc:  # noqa: BLE001
+            emit_log(
+                "[交接班][容量报表][补写] 失败 "
+                f"building={building}, duty={duty_date}/{duty_shift}, error={exc}"
+            )
+            return self._build_capacity_sync_payload(
+                status="failed",
+                error=f"容量报表补写失败: {exc}",
+                input_signature=input_signature,
+            )
+
+        emit_log(
+            "[交接班][容量报表][补写] 完成 "
+            f"building={building}, duty={duty_date}/{duty_shift}, output={capacity_output_path}"
+        )
+        return self._build_capacity_sync_payload(
+            status="ready",
+            input_signature=input_signature,
+        )
 
     def generate(
         self,
@@ -609,7 +880,26 @@ class HandoverCapacityReportService:
         )
         handover_cells = self._read_handover_cells(
             handover_output_file,
-            ["B4", "F4", "B6", "D6", "F6", "C3", "G3", "B7", "D7", "B10", "D10", "B15", "D15", "F15"],
+            [
+                "B4",
+                "F4",
+                "B6",
+                "D6",
+                "F6",
+                "H6",
+                "F8",
+                "B13",
+                "D13",
+                "C3",
+                "G3",
+                "B7",
+                "D7",
+                "B10",
+                "D10",
+                "B15",
+                "D15",
+                "F15",
+            ],
             sheet_name=handover_sheet_name,
         )
         capacity_rows = self._load_capacity_rows(capacity_source_file)
@@ -625,10 +915,13 @@ class HandoverCapacityReportService:
 
         current_alarm = self._normalize_alarm_summary(current_alarm_summary)
         previous_alarm = self._normalize_alarm_summary(previous_alarm_summary)
-        night_water_summary = self._query_night_water_summary(
+        capacity_water_summary = self._query_capacity_water_summary(
             building=building_text,
             duty_date=duty_date_text,
-            duty_shift=duty_shift_text,
+            emit_log=emit_log,
+        )
+        weather_text = self._fetch_weather_text_for_duty_date(
+            duty_date=duty_date_text,
             emit_log=emit_log,
         )
         builder = _BUILDER_BY_BUILDING.get(building_text)
@@ -667,7 +960,9 @@ class HandoverCapacityReportService:
                 "previous_alarm_summary": previous_alarm,
                 "oil_previous": oil_previous,
                 "oil_current": oil_current,
-                "night_water_summary": night_water_summary,
+                "capacity_water_summary": capacity_water_summary,
+                "night_water_summary": capacity_water_summary,
+                "weather_text": weather_text,
                 "hvdc_text": hvdc_debug.get("formatted", ""),
                 "capacity_rows": capacity_rows,
                 "running_units": running_units,
@@ -676,6 +971,14 @@ class HandoverCapacityReportService:
             }
             cell_values = builder(context)
             cell_values.update(_build_fixed_header_cells(building_text))
+            cell_values.update(
+                self._build_capacity_overlay_values(
+                    building=building_text,
+                    duty_date=duty_date_text,
+                    handover_cells=handover_cells,
+                    emit_log=emit_log,
+                )
+            )
             _write_cells_with_merged_support(sheet, cell_values)
             atomic_save_workbook(workbook, output_file)
         finally:
@@ -694,11 +997,25 @@ class HandoverCapacityReportService:
             "[交接班][容量报表] 生成完成 "
             f"building={building_text}, duty_date={duty_date_text}, duty_shift={duty_shift_text}, output={output_file}"
         )
+        input_signature = self.capacity_input_signature({cell: handover_cells.get(cell, "") for cell in _CAPACITY_TRACKED_CELLS})
+        valid, validation_error = self._validate_capacity_overlay_inputs(handover_cells)
+        if valid:
+            capacity_sync = self._build_capacity_sync_payload(
+                status="ready",
+                input_signature=input_signature,
+            )
+        else:
+            capacity_sync = self._build_capacity_sync_payload(
+                status="pending_input",
+                error=validation_error,
+                input_signature=input_signature,
+            )
         return {
             "status": "success",
             "output_file": str(output_file),
             "warnings": warnings,
             "error": "",
+            "capacity_sync": capacity_sync,
         }
 
 

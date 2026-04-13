@@ -104,6 +104,9 @@ def _normalize_review_link_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any
     }
 
 
+_CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "B13", "D13"]
+
+
 class ReviewSessionService:
     DEFAULT_BUILDINGS = [
         {"code": "a", "name": "A楼"},
@@ -625,6 +628,55 @@ class ReviewSessionService:
             "cleanup_at": str(payload.get("cleanup_at", "")).strip(),
         }
 
+    @staticmethod
+    def _derive_capacity_sync_from_legacy_fields(raw: Dict[str, Any] | None) -> Dict[str, Any]:
+        payload = raw if isinstance(raw, dict) else {}
+        capacity_output_file = str(payload.get("capacity_output_file", "") or "").strip()
+        capacity_status = str(payload.get("capacity_status", "") or "").strip().lower()
+        capacity_error = str(payload.get("capacity_error", "") or "").strip()
+        if not capacity_output_file:
+            status = "missing_file"
+            error = capacity_error or "交接班容量报表尚未生成"
+        elif capacity_status in {"ok", "success"}:
+            status = "ready"
+            error = ""
+        elif capacity_status in {"pending_input", "missing_file", "failed"}:
+            status = capacity_status
+            error = capacity_error
+        elif capacity_status == "skipped":
+            status = "missing_file"
+            error = capacity_error or "交接班容量报表尚未生成"
+        else:
+            status = "failed"
+            error = capacity_error
+        return {
+            "status": status,
+            "updated_at": str(payload.get("updated_at", "") or "").strip(),
+            "error": error,
+            "tracked_cells": list(_CAPACITY_SYNC_TRACKED_CELLS),
+            "input_signature": str(payload.get("capacity_input_signature", "") or "").strip(),
+        }
+
+    @staticmethod
+    def _normalize_capacity_sync(raw: Dict[str, Any] | None, fallback: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        source = raw if isinstance(raw, dict) else {}
+        backup = fallback if isinstance(fallback, dict) else {}
+        merged: Dict[str, Any] = {}
+        merged.update(backup)
+        merged.update(source)
+        status = str(merged.get("status", "") or "").strip().lower()
+        if status not in {"ready", "pending_input", "missing_file", "failed"}:
+            status = str(backup.get("status", "") or "failed").strip().lower()
+            if status not in {"ready", "pending_input", "missing_file", "failed"}:
+                status = "failed"
+        return {
+            "status": status,
+            "updated_at": str(merged.get("updated_at", "") or "").strip(),
+            "error": str(merged.get("error", "") or "").strip(),
+            "tracked_cells": list(_CAPACITY_SYNC_TRACKED_CELLS),
+            "input_signature": str(merged.get("input_signature", "") or "").strip(),
+        }
+
     def _normalize_session(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         building = str(raw.get("building", "")).strip()
         duty_date = str(raw.get("duty_date", "")).strip()
@@ -634,6 +686,8 @@ class ReviewSessionService:
             building_code = self._building_to_code().get(building, "")
         batch_key = str(raw.get("batch_key", "")).strip() or self.build_batch_key(duty_date, duty_shift)
         session_id = str(raw.get("session_id", "")).strip() or self.build_session_id(building, duty_date, duty_shift)
+        legacy_capacity_sync = self._derive_capacity_sync_from_legacy_fields(raw)
+        capacity_sync = self._normalize_capacity_sync(raw.get("capacity_sync", {}), fallback=legacy_capacity_sync)
         return {
             "session_id": session_id,
             "building": building,
@@ -650,6 +704,7 @@ class ReviewSessionService:
                 for item in (raw.get("capacity_warnings", []) if isinstance(raw.get("capacity_warnings", []), list) else [])
                 if str(item or "").strip()
             ],
+            "capacity_sync": capacity_sync,
             "data_file": str(raw.get("data_file", "")).strip(),
             "source_mode": str(raw.get("source_mode", "")).strip(),
             "revision": int(raw.get("revision", 1) or 1),
@@ -1370,6 +1425,7 @@ class ReviewSessionService:
         capacity_status: str = "",
         capacity_error: str = "",
         capacity_warnings: List[str] | None = None,
+        capacity_sync: Dict[str, Any] | None = None,
         source_mode: str,
         source_file_cache: Dict[str, Any] | None = None,
         source_data_attachment_export: Dict[str, Any] | None = None,
@@ -1414,6 +1470,16 @@ class ReviewSessionService:
                 for item in (capacity_warnings if isinstance(capacity_warnings, list) else [])
                 if str(item or "").strip()
             ],
+            "capacity_sync": self._normalize_capacity_sync(
+                capacity_sync,
+                fallback=self._derive_capacity_sync_from_legacy_fields(
+                    {
+                        "capacity_output_file": capacity_output_file,
+                        "capacity_status": capacity_status,
+                        "capacity_error": capacity_error,
+                    }
+                ),
+            ),
             "source_mode": str(source_mode or "").strip(),
             "revision": previous_revision + 1 if previous_revision > 0 else 1,
             "confirmed": False,
@@ -1539,6 +1605,41 @@ class ReviewSessionService:
 
         session = self._normalize_session(sessions[target_session_id])
         session["cloud_sheet_sync"] = self._normalize_cloud_sheet_sync(cloud_sheet_sync)
+        session["updated_at"] = _now_text()
+        sessions[target_session_id] = session
+        state["review_sessions"] = sessions
+        self._set_latest_batch_key(state, session["batch_key"])
+        self._save_state(state)
+        return dict(session)
+
+    def update_capacity_sync(
+        self,
+        *,
+        session_id: str,
+        capacity_sync: Dict[str, Any],
+        capacity_status: str = "",
+        capacity_error: str = "",
+    ) -> Dict[str, Any]:
+        target_session_id = str(session_id or "").strip()
+        state = self._load_state()
+        sessions = state.get("review_sessions", {})
+        if not isinstance(sessions, dict) or target_session_id not in sessions:
+            raise ReviewSessionNotFoundError("review session not found")
+
+        session = self._normalize_session(sessions[target_session_id])
+        fallback_sync = self._derive_capacity_sync_from_legacy_fields(
+            {
+                "capacity_output_file": session.get("capacity_output_file", ""),
+                "capacity_status": capacity_status or session.get("capacity_status", ""),
+                "capacity_error": capacity_error or session.get("capacity_error", ""),
+                "updated_at": _now_text(),
+            }
+        )
+        session["capacity_sync"] = self._normalize_capacity_sync(capacity_sync, fallback=fallback_sync)
+        if str(capacity_status or "").strip():
+            session["capacity_status"] = str(capacity_status or "").strip().lower()
+        if capacity_error is not None:
+            session["capacity_error"] = str(capacity_error or "").strip()
         session["updated_at"] = _now_text()
         sessions[target_session_id] = session
         state["review_sessions"] = sessions
