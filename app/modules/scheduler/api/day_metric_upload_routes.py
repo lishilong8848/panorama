@@ -6,6 +6,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config.settings_loader import save_settings
+from app.modules.scheduler.api._config_persistence import persist_scheduler_toggle
 
 
 router = APIRouter(prefix="/api/scheduler/day-metric-upload", tags=["scheduler-day-metric-upload"])
@@ -57,6 +58,7 @@ def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Di
 @router.post("/start")
 def day_metric_upload_scheduler_start(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
+    persist_scheduler_toggle(container, path=("features", "day_metric_upload", "scheduler"), auto_start_in_gui=True)
     action = container.start_day_metric_upload_scheduler()
     return _build_payload(container, action_result=action)
 
@@ -64,6 +66,7 @@ def day_metric_upload_scheduler_start(request: Request) -> Dict[str, Any]:
 @router.post("/stop")
 def day_metric_upload_scheduler_stop(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
+    persist_scheduler_toggle(container, path=("features", "day_metric_upload", "scheduler"), auto_start_in_gui=False)
     action = container.stop_day_metric_upload_scheduler()
     return _build_payload(container, action_result=action)
 

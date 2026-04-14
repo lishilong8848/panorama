@@ -6,6 +6,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config.settings_loader import save_settings
+from app.modules.scheduler.api._config_persistence import persist_scheduler_toggle
 
 
 router = APIRouter(prefix="/api/scheduler/alarm-event-upload", tags=["scheduler-alarm-event-upload"])
@@ -55,6 +56,7 @@ def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Di
 @router.post("/start")
 def alarm_event_upload_scheduler_start(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
+    persist_scheduler_toggle(container, path=("features", "alarm_export", "scheduler"), auto_start_in_gui=True)
     action = container.start_alarm_event_upload_scheduler()
     return _build_payload(container, action_result=action)
 
@@ -62,6 +64,7 @@ def alarm_event_upload_scheduler_start(request: Request) -> Dict[str, Any]:
 @router.post("/stop")
 def alarm_event_upload_scheduler_stop(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
+    persist_scheduler_toggle(container, path=("features", "alarm_export", "scheduler"), auto_start_in_gui=False)
     action = container.stop_alarm_event_upload_scheduler()
     return _build_payload(container, action_result=action)
 

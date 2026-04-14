@@ -24,6 +24,14 @@ function formatWetBulbSchedulerActionReason(reason) {
   return String(reason || "").trim() || "已完成";
 }
 
+function syncLocalWetBulbSchedulerAutoStart(targetScheduler, autoStart, options = {}) {
+  if (!targetScheduler || typeof targetScheduler !== "object") return;
+  targetScheduler.auto_start_in_gui = Boolean(autoStart);
+  if (options.enableOnStart && autoStart) {
+    targetScheduler.enabled = true;
+  }
+}
+
 export function createDashboardWetBulbCollectionActions(ctx) {
   const {
     canRun,
@@ -160,6 +168,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
       async () => {
         try {
           const data = await startWetBulbCollectionSchedulerApi();
+          syncLocalWetBulbSchedulerAutoStart(config.value?.wet_bulb_collection?.scheduler, true, { enableOnStart: true });
           applyWetBulbSchedulerSnapshotFromAction(data);
           await fetchHealth();
           message.value = `湿球温度定时采集调度启动结果: ${formatWetBulbSchedulerActionReason(data?.action?.reason)}`;
@@ -181,6 +190,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
       async () => {
         try {
           const data = await stopWetBulbCollectionSchedulerApi();
+          syncLocalWetBulbSchedulerAutoStart(config.value?.wet_bulb_collection?.scheduler, false);
           applyWetBulbSchedulerSnapshotFromAction(data);
           await fetchHealth();
           message.value = `湿球温度定时采集调度停止结果: ${formatWetBulbSchedulerActionReason(data?.action?.reason)}`;
@@ -202,7 +212,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
     const scheduler = wet.scheduler || {};
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       interval_minutes: Number.parseInt(String(scheduler.interval_minutes ?? 60), 10) || 60,
       check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
       retry_failed_on_next_tick: Boolean(scheduler.retry_failed_on_next_tick),

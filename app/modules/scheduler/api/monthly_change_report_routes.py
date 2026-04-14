@@ -6,6 +6,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config.settings_loader import save_settings
+from app.modules.scheduler.api._config_persistence import persist_scheduler_toggle
 
 
 router = APIRouter(prefix="/api/scheduler/monthly-change-report", tags=["scheduler-monthly-change-report"])
@@ -60,6 +61,7 @@ def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Di
 @router.post("/start")
 def monthly_change_report_scheduler_start(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
+    persist_scheduler_toggle(container, path=("features", "handover_log", "monthly_change_report", "scheduler"), auto_start_in_gui=True)
     action = container.start_monthly_change_report_scheduler()
     return _build_payload(container, action_result=action)
 
@@ -67,6 +69,7 @@ def monthly_change_report_scheduler_start(request: Request) -> Dict[str, Any]:
 @router.post("/stop")
 def monthly_change_report_scheduler_stop(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
+    persist_scheduler_toggle(container, path=("features", "handover_log", "monthly_change_report", "scheduler"), auto_start_in_gui=False)
     action = container.stop_monthly_change_report_scheduler()
     return _build_payload(container, action_result=action)
 

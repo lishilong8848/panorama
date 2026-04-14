@@ -46,6 +46,14 @@ function formatSchedulerActionReason(reason) {
   return String(reason || "").trim() || "已完成";
 }
 
+function syncLocalSchedulerAutoStart(targetScheduler, autoStart, options = {}) {
+  if (!targetScheduler || typeof targetScheduler !== "object") return;
+  targetScheduler.auto_start_in_gui = Boolean(autoStart);
+  if (options.enableOnStart && autoStart) {
+    targetScheduler.enabled = true;
+  }
+}
+
 export function createDashboardSchedulerActions(ctx) {
   const {
     health,
@@ -72,6 +80,7 @@ export function createDashboardSchedulerActions(ctx) {
       async () => {
         try {
           const data = await startSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.scheduler, true, { enableOnStart: true });
           await fetchHealth();
           message.value = `调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
@@ -87,7 +96,7 @@ export function createDashboardSchedulerActions(ctx) {
     const scheduler = config.value.scheduler || {};
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       interval_minutes: toPositiveInt(scheduler.interval_minutes, 60),
       check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
       retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,
@@ -129,6 +138,7 @@ export function createDashboardSchedulerActions(ctx) {
       async () => {
         try {
           const data = await stopSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.scheduler, false);
           await fetchHealth();
           message.value = `调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
@@ -145,6 +155,7 @@ export function createDashboardSchedulerActions(ctx) {
       async () => {
         try {
           const data = await startHandoverSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.handover_log?.scheduler, true, { enableOnStart: true });
           await fetchHealth();
           message.value = `交接班调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
@@ -161,6 +172,7 @@ export function createDashboardSchedulerActions(ctx) {
       async () => {
         try {
           const data = await stopHandoverSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.handover_log?.scheduler, false);
           await fetchHealth();
           message.value = `交接班调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
@@ -182,7 +194,7 @@ export function createDashboardSchedulerActions(ctx) {
     }
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(handoverScheduler.auto_start_in_gui),
       morning_time: morningTime,
       afternoon_time: afternoonTime,
       check_interval_sec: Number.parseInt(String(handoverScheduler.check_interval_sec ?? 30), 10) || 30,
@@ -247,6 +259,7 @@ export function createDashboardSchedulerActions(ctx) {
       async () => {
         try {
           const data = await startDayMetricUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.day_metric_upload?.scheduler, true, { enableOnStart: true });
           applySchedulerSnapshot(health?.day_metric_upload?.scheduler, data);
           await fetchHealth();
           message.value = `12项独立上传调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
@@ -264,6 +277,7 @@ export function createDashboardSchedulerActions(ctx) {
       async () => {
         try {
           const data = await stopDayMetricUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.day_metric_upload?.scheduler, false);
           applySchedulerSnapshot(health?.day_metric_upload?.scheduler, data);
           await fetchHealth();
           message.value = `12项独立上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
@@ -280,7 +294,7 @@ export function createDashboardSchedulerActions(ctx) {
     const scheduler = config.value?.day_metric_upload?.scheduler || {};
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       interval_minutes: toPositiveInt(scheduler.interval_minutes, 60),
       check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
       retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,
@@ -318,6 +332,7 @@ export function createDashboardSchedulerActions(ctx) {
       async () => {
         try {
           const data = await startAlarmEventUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.alarm_export?.scheduler, true, { enableOnStart: true });
           applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, data);
           await fetchHealth();
           message.value = `告警信息上传调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
@@ -335,6 +350,7 @@ export function createDashboardSchedulerActions(ctx) {
       async () => {
         try {
           const data = await stopAlarmEventUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.alarm_export?.scheduler, false);
           applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, data);
           await fetchHealth();
           message.value = `告警信息上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
@@ -352,7 +368,7 @@ export function createDashboardSchedulerActions(ctx) {
     const runTime = normalizeRunTimeText(scheduler.run_time);
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       run_time: runTime,
       state_file: String(scheduler.state_file || "").trim(),
     };
