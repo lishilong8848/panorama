@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 7,
-  "updated_at": "2026-04-13T20:43:51+08:00",
+  "revision": 8,
+  "updated_at": "2026-04-14T23:45:03+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -38,7 +38,14 @@
           ]
         }
       },
-      "review_link_recipients_by_building": {}
+      "review_link_recipients_by_building": {
+        "C楼": [
+          {
+            "note": "李世龙C",
+            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+          }
+        ]
+      }
     }
   }
 }

@@ -134,6 +134,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     handoverDutyDate,
     handoverDutyShift,
     configAutoSaveSuspendDepth,
+    configAutoSaveStatus,
     timers,
     streamController,
     runSingleFlight,
@@ -799,13 +800,24 @@ export function createRuntimeHealthConfigActions(ctx) {
     return { ok: true, v3Payload, signature };
   }
 
+  function syncConfigAutoSaveSignature(signature = "", { pending = true } = {}) {
+    if (!configAutoSaveStatus || typeof configAutoSaveStatus !== "object") return;
+    const normalizedSignature = String(signature || "");
+    configAutoSaveStatus.saved_signature = normalizedSignature;
+    if (pending) {
+      configAutoSaveStatus.pending_signature = normalizedSignature;
+    }
+  }
+
   function setLastSavedSignatureFromPreparedPayload() {
     const payloadState = buildPreparedSavePayload();
     if (!payloadState.ok) {
       lastSavedConfigSignature = "";
+      syncConfigAutoSaveSignature("", { pending: true });
       return;
     }
     lastSavedConfigSignature = payloadState.signature || "";
+    syncConfigAutoSaveSignature(lastSavedConfigSignature, { pending: true });
   }
 
   function withAutoSaveSuspended(applyFn) {
@@ -2477,6 +2489,10 @@ export function createRuntimeHealthConfigActions(ctx) {
         if (configLoadError) {
           configLoadError.value = "";
         }
+        if (configAutoSaveStatus && typeof configAutoSaveStatus === "object") {
+          configAutoSaveStatus.mode = "idle";
+          configAutoSaveStatus.last_error = "";
+        }
         void fetchHandoverCommonConfigSegment({ silentMessage: true });
         void fetchHandoverBuildingConfigSegment(handoverConfigBuilding?.value, { silentMessage: true });
         return true;
@@ -2670,10 +2686,16 @@ export function createRuntimeHealthConfigActions(ctx) {
     return runner();
   }
 
-  async function saveConfigInternal({ auto = false, skipPostSaveHealthRefresh = false } = {}) {
+  async function saveConfigInternal({
+    auto = false,
+    skipPostSaveHealthRefresh = false,
+    responseMode = "",
+    skipHydrateOnSuccess = false,
+    silentErrorMessage = false,
+  } = {}) {
     const payloadState = buildPreparedSavePayload();
     if (!payloadState.ok) {
-      if (!auto) {
+      if (!auto && !silentErrorMessage) {
         message.value = payloadState.error || "配置校验失败";
       }
       return {
@@ -2686,17 +2708,33 @@ export function createRuntimeHealthConfigActions(ctx) {
     const { v3Payload, signature } = payloadState;
     const requestPayload = mergeConfigWithServerSnapshot(serverConfigSnapshot, v3Payload);
     if (auto && signature && signature === lastSavedConfigSignature) {
-      return { saved: false, reason: "unchanged", restartRequired: false };
+      syncConfigAutoSaveSignature(signature, { pending: true });
+      return { saved: false, reason: "unchanged", restartRequired: false, signature };
     }
 
     try {
-      const data = await putConfigApi(requestPayload);
-      serverConfigSnapshot = clone(data?.config || requestPayload);
-      const normalized = ensureConfigShape(convertV3ConfigToLegacy(data?.config || requestPayload));
-      withAutoSaveSuspended(() => {
-        hydrateConfigView(normalized);
-        setLastSavedSignatureFromPreparedPayload();
-      });
+      const normalizedResponseMode = String(responseMode || "").trim().toLowerCase();
+      const finalRequestPayload = normalizedResponseMode
+        ? {
+            ...requestPayload,
+            _meta: {
+              ...(requestPayload?._meta && typeof requestPayload._meta === "object" ? requestPayload._meta : {}),
+              response_mode: normalizedResponseMode,
+            },
+          }
+        : requestPayload;
+      const data = await putConfigApi(finalRequestPayload);
+      const returnedConfig = data?.config && typeof data.config === "object" ? data.config : requestPayload;
+      serverConfigSnapshot = clone(returnedConfig);
+      lastSavedConfigSignature = signature || "";
+      syncConfigAutoSaveSignature(lastSavedConfigSignature, { pending: true });
+      if (!skipHydrateOnSuccess) {
+        const normalized = ensureConfigShape(convertV3ConfigToLegacy(returnedConfig));
+        withAutoSaveSuspended(() => {
+          hydrateConfigView(normalized);
+          setLastSavedSignatureFromPreparedPayload();
+        });
+      }
       if (configLoaded) {
         configLoaded.value = true;
       }
@@ -2720,13 +2758,15 @@ export function createRuntimeHealthConfigActions(ctx) {
         saved: true,
         reason: "saved",
         restartRequired: Boolean(data?.restart_required),
+        signature: lastSavedConfigSignature,
+        warnings: Array.isArray(data?.warnings) ? data.warnings.filter(Boolean) : [],
         data,
       };
     } catch (err) {
-      if (!auto) {
+      if (!auto && !silentErrorMessage) {
         message.value = `保存配置失败: ${err}`;
       }
-      return { saved: false, reason: "error", error: String(err), restartRequired: false };
+      return { saved: false, reason: "error", error: String(err), restartRequired: false, signature };
     }
   }
 
@@ -2784,6 +2824,9 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => saveConfigInternal({
       auto: false,
       skipPostSaveHealthRefresh: Boolean(options?.skipPostSaveHealthRefresh),
+      responseMode: String(options?.responseMode || ""),
+      skipHydrateOnSuccess: Boolean(options?.skipHydrateOnSuccess),
+      silentErrorMessage: Boolean(options?.silentErrorMessage),
     });
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_SAVE_CONFIG, runner, { cooldownMs: 500 });
@@ -2795,7 +2838,13 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => saveConfigInternal({
       auto: true,
       skipPostSaveHealthRefresh: Boolean(options?.skipPostSaveHealthRefresh),
+      responseMode: String(options?.responseMode || ""),
+      skipHydrateOnSuccess: Boolean(options?.skipHydrateOnSuccess),
+      silentErrorMessage: Boolean(options?.silentErrorMessage),
     });
+    if (options?.bypassSingleFlight) {
+      return runner();
+    }
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_SAVE_CONFIG, runner, { cooldownMs: 500 });
     }
@@ -3539,6 +3588,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     scheduleEngineerDirectoryPrefetch,
     saveConfig,
     savePartialConfig,
+    getPreparedConfigPayloadState: buildPreparedSavePayload,
     repairDayMetricUploadConfig,
     saveHandoverCommonConfig,
     saveHandoverReviewBaseUrlQuickConfig,

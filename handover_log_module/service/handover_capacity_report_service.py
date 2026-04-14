@@ -45,7 +45,7 @@ _CAPACITY_WATER_SOURCE = {
         "water_total": "当日耗水总量（修正）",
     },
 }
-_CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
+_CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13")
 _CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
 _WEATHER_PHENOMENON_PRIORITY = (
     "暴雨",
@@ -191,7 +191,7 @@ class HandoverCapacityReportService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
         self._oil_cache_service = HandoverCapacityOilCacheService(self.config)
-        self._weather_text_cache: Dict[str, str] = {}
+        self._weather_payload_cache: Dict[str, Dict[str, str]] = {}
         self._water_summary_cache: Dict[tuple[str, str], Dict[str, str]] = {}
 
     def _capacity_cfg(self) -> Dict[str, Any]:
@@ -574,17 +574,28 @@ class HandoverCapacityReportService:
                 return keyword
         return ""
 
-    def _fetch_weather_text_for_duty_date(
+    @staticmethod
+    def _weather_humidity_from_html(html: str) -> str:
+        text = str(html or "")
+        match = re.search(r"湿度\s*([0-9]{1,3}\s*%)", text)
+        if match:
+            return _text(match.group(1)).replace(" ", "")
+        match = re.search(r"相对.*?湿度\s*([0-9]{1,3}\s*%)", text, flags=re.DOTALL)
+        if match:
+            return _text(match.group(1)).replace(" ", "")
+        return ""
+
+    def _fetch_weather_payload_for_duty_date(
         self,
         *,
         duty_date: str,
         emit_log: Callable[[str], None],
-    ) -> str:
+    ) -> Dict[str, str]:
         duty_date_text = _text(duty_date)
         if not duty_date_text:
-            return ""
-        if duty_date_text in self._weather_text_cache:
-            return self._weather_text_cache[duty_date_text]
+            return {"text": "", "humidity": ""}
+        if duty_date_text in self._weather_payload_cache:
+            return dict(self._weather_payload_cache[duty_date_text])
         try:
             duty_day = parse_duty_date(duty_date_text)
             date_token = duty_day.strftime("%Y%m%d")
@@ -592,27 +603,38 @@ class HandoverCapacityReportService:
             req = Request(url=url, headers={"User-Agent": "Mozilla/5.0"})
             with urlopen(req, timeout=8) as resp:  # noqa: S310
                 content = resp.read().decode("utf-8", errors="ignore")
-            weather_text = self._weather_keyword_from_html(content)
-            if weather_text:
+            payload = {
+                "text": self._weather_keyword_from_html(content),
+                "humidity": self._weather_humidity_from_html(content),
+            }
+            if payload["text"] or payload["humidity"]:
                 emit_log(
                     "[交接班][容量报表][天气] 查询完成 "
-                    f"duty_date={duty_date_text}, weather={weather_text}"
+                    f"duty_date={duty_date_text}, weather={payload.get('text') or '-'}, humidity={payload.get('humidity') or '-'}"
                 )
-                self._weather_text_cache[duty_date_text] = weather_text
-                return weather_text
+                self._weather_payload_cache[duty_date_text] = dict(payload)
+                return payload
             emit_log(
                 "[交接班][容量报表][天气] 查询失败 "
-                f"duty_date={duty_date_text}, reason=页面未解析到天气现象"
+                f"duty_date={duty_date_text}, reason=页面未解析到天气现象/湿度"
             )
-            self._weather_text_cache[duty_date_text] = ""
-            return ""
+            self._weather_payload_cache[duty_date_text] = {"text": "", "humidity": ""}
+            return {"text": "", "humidity": ""}
         except (ValueError, OSError, TimeoutError, URLError) as exc:
             emit_log(
                 "[交接班][容量报表][天气] 查询失败 "
                 f"duty_date={duty_date_text}, error={exc}"
             )
-            self._weather_text_cache[duty_date_text] = ""
-            return ""
+            self._weather_payload_cache[duty_date_text] = {"text": "", "humidity": ""}
+            return {"text": "", "humidity": ""}
+
+    def _fetch_weather_text_for_duty_date(
+        self,
+        *,
+        duty_date: str,
+        emit_log: Callable[[str], None],
+    ) -> str:
+        return _text(self._fetch_weather_payload_for_duty_date(duty_date=duty_date, emit_log=emit_log).get("text"))
 
     def _new_capacity_water_client(self) -> FeishuBitableClient:
         global_feishu = require_feishu_auth_settings(self.config)
@@ -746,8 +768,12 @@ class HandoverCapacityReportService:
             duty_date=duty_date,
             emit_log=emit_log,
         )
+        weather_humidity = _text(
+            self._fetch_weather_payload_for_duty_date(duty_date=duty_date, emit_log=emit_log).get("humidity")
+        )
         west_tank, east_tank = self._derive_tank_pair_from_f8(handover.get("F8"))
         overlay = {
+            "AC24": _text(handover.get("D8")),
             "U15": _text(handover.get("H6")),
             "AD22": west_tank,
             "AD23": east_tank,
@@ -757,6 +783,7 @@ class HandoverCapacityReportService:
             "AB56": _text(handover.get("B13")),
             "AC56": _text(handover.get("D13")),
             "L2": weather_text,
+            "X2": weather_humidity,
             "AC25": _text(water_summary.get("month_total")),
             "O57": _text(water_summary.get("latest_daily_total")),
         }
@@ -887,6 +914,7 @@ class HandoverCapacityReportService:
                 "D6",
                 "F6",
                 "H6",
+                "D8",
                 "F8",
                 "B13",
                 "D13",
@@ -920,10 +948,12 @@ class HandoverCapacityReportService:
             duty_date=duty_date_text,
             emit_log=emit_log,
         )
-        weather_text = self._fetch_weather_text_for_duty_date(
+        weather_payload = self._fetch_weather_payload_for_duty_date(
             duty_date=duty_date_text,
             emit_log=emit_log,
         )
+        weather_text = _text(weather_payload.get("text"))
+        weather_humidity = _text(weather_payload.get("humidity"))
         builder = _BUILDER_BY_BUILDING.get(building_text)
         if builder is None:
             raise ValueError(f"不支持的容量报表楼栋: {building_text}")
@@ -963,6 +993,7 @@ class HandoverCapacityReportService:
                 "capacity_water_summary": capacity_water_summary,
                 "night_water_summary": capacity_water_summary,
                 "weather_text": weather_text,
+                "weather_humidity": weather_humidity,
                 "hvdc_text": hvdc_debug.get("formatted", ""),
                 "capacity_rows": capacity_rows,
                 "running_units": running_units,

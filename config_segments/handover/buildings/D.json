@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 1,
-  "updated_at": "2026-04-10T20:17:06+08:00",
+  "revision": 2,
+  "updated_at": "2026-04-14T23:45:46+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -583,7 +583,15 @@
     },
     "review_ui": {
       "cabinet_power_defaults_by_building": {},
-      "footer_inventory_defaults_by_building": {}
+      "footer_inventory_defaults_by_building": {},
+      "review_link_recipients_by_building": {
+        "D楼": [
+          {
+            "note": "李世龙D",
+            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+          }
+        ]
+      }
     }
   }
 }

@@ -79,7 +79,7 @@ def test_put_config_marks_restart_required_when_role_mode_changes(monkeypatch) -
     )
     monkeypatch.setattr(routes, "save_settings", lambda settings, _path: settings)
     monkeypatch.setattr(routes, "_materialize_review_access_snapshot", lambda _container: {"configured": False})
-    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None)
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
 
     response = routes.put_config(incoming, _make_request(container))
 
@@ -99,7 +99,7 @@ def test_put_config_marks_restart_required_when_shared_bridge_changes(monkeypatc
     )
     monkeypatch.setattr(routes, "save_settings", lambda settings, _path: settings)
     monkeypatch.setattr(routes, "_materialize_review_access_snapshot", lambda _container: {"configured": False})
-    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None)
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
 
     response = routes.put_config(incoming, _make_request(container))
 
@@ -119,7 +119,7 @@ def test_put_config_keeps_restart_required_false_when_role_signature_unchanged(m
     )
     monkeypatch.setattr(routes, "save_settings", lambda settings, _path: settings)
     monkeypatch.setattr(routes, "_materialize_review_access_snapshot", lambda _container: {"configured": False})
-    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None)
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
 
     response = routes.put_config(incoming, _make_request(container))
 
@@ -177,3 +177,25 @@ def test_put_config_skips_restart_when_target_role_matches_last_started_role(mon
 
     assert response["ok"] is True
     assert response["restart_required"] is False
+
+
+def test_put_config_minimal_response_omits_config(monkeypatch) -> None:
+    current = _make_config(role_mode="", last_started_role_mode="", bridge_enabled=False, bridge_root_dir="")
+    incoming = _make_config(role_mode="", last_started_role_mode="", bridge_enabled=False, bridge_root_dir="")
+    incoming["_meta"] = {"response_mode": "minimal"}
+    container = _make_container(current)
+
+    monkeypatch.setattr(
+        routes,
+        "merge_user_config_payload",
+        lambda payload, _current, clear_paths=None, force_overwrite=False: SimpleNamespace(merged=payload),
+    )
+    monkeypatch.setattr(routes, "save_settings", lambda settings, _path: settings)
+    monkeypatch.setattr(routes, "_materialize_review_access_snapshot", lambda _container: {"configured": False})
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
+
+    response = routes.put_config(incoming, _make_request(container))
+
+    assert response["ok"] is True
+    assert response["restart_required"] is False
+    assert "config" not in response

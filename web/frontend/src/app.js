@@ -553,6 +553,7 @@ createApp({
       monthlyEventReportSchedulerQuickSaving,
       monthlyChangeReportSchedulerQuickSaving,
       configAutoSaveSuspendDepth,
+      configAutoSaveStatus,
       autoResumeState,
       buildingsText,
       sheetRuleRows,
@@ -2225,6 +2226,7 @@ createApp({
       scheduleEngineerDirectoryPrefetch,
       saveConfig,
       savePartialConfig,
+      getPreparedConfigPayloadState,
       repairDayMetricUploadConfig,
       saveHandoverCommonConfig,
       saveHandoverReviewBaseUrlQuickConfig,
@@ -3464,11 +3466,92 @@ createApp({
     let configAutoSaveTimer = null;
     let handoverConfigAutoSaveTimer = null;
     let startupRouteFallbackTimer = null;
+    let configAutoSaveInFlightPromise = null;
+    let configAutoSaveQueued = false;
+    let configAutoSaveFailureCount = 0;
+    let pendingConfigAutoSaveKind = "choice";
+    let lastConfigAutoSaveInteractionAt = 0;
     let lastSavedHandoverCommonSignature = "";
     const lastSavedHandoverBuildingSignatures = Object.create(null);
-    const scheduleAutoSaveConfig = () => {
+    function updateConfigAutoSaveStatus(patch = {}) {
+      if (!configAutoSaveStatus || typeof configAutoSaveStatus !== "object") return;
+      Object.assign(configAutoSaveStatus, patch);
+    }
+
+    function currentConfigAutoSaveTimestamp() {
+      try {
+        return new Date().toLocaleString("zh-CN", { hour12: false });
+      } catch (_err) {
+        return new Date().toISOString();
+      }
+    }
+
+    function classifyConfigAutoSaveInteraction(event) {
+      const target = event?.target;
+      const tagName = String(target?.tagName || "").trim().toUpperCase();
+      const inputType = String(target?.type || "").trim().toLowerCase();
+      if (tagName === "TEXTAREA") return "text";
+      if (tagName === "SELECT") return "choice";
+      if (["checkbox", "radio", "number", "range", "time", "date", "datetime-local", "month"].includes(inputType)) {
+        return "choice";
+      }
+      return "text";
+    }
+
+    function onConfigAutoSaveInteraction(event) {
+      pendingConfigAutoSaveKind = classifyConfigAutoSaveInteraction(event);
+      lastConfigAutoSaveInteractionAt = Date.now();
+    }
+
+    function resolveConfigAutoSaveDelayMs() {
+      const activeKind = Date.now() - lastConfigAutoSaveInteractionAt <= 250
+        ? pendingConfigAutoSaveKind
+        : "choice";
+      const isHandoverTab = currentView.value === "config" && String(activeConfigTab.value || "").trim() === "feature_handover";
+      if (activeKind === "text") {
+        return isHandoverTab ? 4000 : 2500;
+      }
+      return 600;
+    }
+
+    function buildCurrentConfigAutoSaveSignature() {
+      if (currentView.value === "config" && String(activeConfigTab.value || "").trim() === "feature_handover") {
+        return buildHandoverConfigAutoSaveSignature();
+      }
+      const payloadState = typeof getPreparedConfigPayloadState === "function"
+        ? getPreparedConfigPayloadState()
+        : null;
+      if (!payloadState?.ok) return "";
+      return String(payloadState.signature || "");
+    }
+
+    function buildHandoverConfigAutoSaveSignature(building = handoverConfigBuilding.value) {
+      const buildingText = String(building || "").trim() || "A楼";
+      return JSON.stringify({
+        common: serializeCurrentHandoverCommonDraft(),
+        building: buildingText,
+        buildingDraft: serializeCurrentHandoverBuildingDraft(buildingText),
+      });
+    }
+
+    function syncConfigAutoSaveSavedSignature(signature = "") {
+      const normalizedSignature = String(signature || "");
+      updateConfigAutoSaveStatus({
+        saved_signature: normalizedSignature,
+        pending_signature: normalizedSignature,
+      });
+    }
+
+    function scheduleAutoSaveConfig() {
       if (!config.value) return;
       if ((configAutoSaveSuspendDepth?.value || 0) > 0) return;
+      const pendingSignature = buildCurrentConfigAutoSaveSignature();
+      if (pendingSignature) {
+        updateConfigAutoSaveStatus({
+          mode: configAutoSaveInFlightPromise ? "queued" : "idle",
+          pending_signature: pendingSignature,
+        });
+      }
       if (currentView.value === "config" && String(activeConfigTab.value || "").trim() === "feature_handover") {
         if (configAutoSaveTimer) {
           window.clearTimeout(configAutoSaveTimer);
@@ -3482,9 +3565,9 @@ createApp({
       }
       configAutoSaveTimer = window.setTimeout(() => {
         configAutoSaveTimer = null;
-        autoSaveConfig();
-      }, 1200);
-    };
+        void queueConfigAutoSave();
+      }, resolveConfigAutoSaveDelayMs());
+    }
 
     function serializeCurrentHandoverCommonDraft() {
       const handover = config.value?.handover_log && typeof config.value.handover_log === "object"
@@ -3593,10 +3676,8 @@ createApp({
       }
       handoverConfigAutoSaveTimer = window.setTimeout(() => {
         handoverConfigAutoSaveTimer = null;
-        void flushPendingHandoverConfigAutoSave({
-          silentSuccess: true,
-        });
-      }, 5000);
+        void queueConfigAutoSave();
+      }, resolveConfigAutoSaveDelayMs());
     }
 
     async function flushPendingHandoverConfigAutoSave(options = {}) {
@@ -3622,7 +3703,7 @@ createApp({
         const commonResult = await saveHandoverCommonConfig({
           silentSuccess: true,
           silentConflictMessage: false,
-          silentErrorMessage: false,
+          silentErrorMessage: true,
           skipConfigRefresh: true,
         });
         if (!commonResult?.saved) {
@@ -3633,7 +3714,7 @@ createApp({
         const buildingResult = await saveHandoverBuildingConfig(currentBuilding, {
           silentSuccess: true,
           silentConflictMessage: false,
-          silentErrorMessage: false,
+          silentErrorMessage: true,
           skipConfigRefresh: true,
         });
         if (!buildingResult?.saved) {
@@ -3642,10 +3723,8 @@ createApp({
       }
       syncSavedHandoverCommonSignature();
       syncSavedHandoverBuildingSignature(currentBuilding);
-      await fetchConfig({ silentMessage: true });
-      await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
       if (!options?.silentSuccess) {
-        message.value = "交接班配置已自动保存";
+        message.value = "交接班配置已保存";
       }
       return {
         saved: true,
@@ -3656,19 +3735,175 @@ createApp({
       };
     }
 
+    async function executeConfigAutoSavePass() {
+      if (currentView.value === "config" && String(activeConfigTab.value || "").trim() === "feature_handover") {
+        return flushPendingHandoverConfigAutoSave({
+          force: true,
+          silentSuccess: true,
+        });
+      }
+      return autoSaveConfig({
+        bypassSingleFlight: true,
+        skipPostSaveHealthRefresh: true,
+        responseMode: "minimal",
+        skipHydrateOnSuccess: true,
+        silentErrorMessage: true,
+      });
+    }
+
+    async function queueConfigAutoSave() {
+      const pendingSignature = buildCurrentConfigAutoSaveSignature();
+      if (pendingSignature) {
+        updateConfigAutoSaveStatus({
+          mode: configAutoSaveInFlightPromise ? "queued" : "idle",
+          pending_signature: pendingSignature,
+        });
+      }
+      if (configAutoSaveInFlightPromise) {
+        configAutoSaveQueued = true;
+        updateConfigAutoSaveStatus({ mode: "queued" });
+        return configAutoSaveInFlightPromise;
+      }
+      const runner = (async () => {
+        let lastResult = null;
+        do {
+          configAutoSaveQueued = false;
+          updateConfigAutoSaveStatus({
+            mode: "saving",
+            last_error: "",
+            pending_signature: buildCurrentConfigAutoSaveSignature(),
+          });
+          lastResult = await executeConfigAutoSavePass();
+          if (lastResult?.saved === false && lastResult?.reason !== "unchanged") {
+            configAutoSaveFailureCount += 1;
+            updateConfigAutoSaveStatus({
+              mode: "error",
+              last_error: String(lastResult?.error || "自动保存失败"),
+            });
+            if (configAutoSaveFailureCount >= 2) {
+              message.value = `自动保存失败: ${String(lastResult?.error || "请稍后重试")}`;
+            }
+          } else {
+            configAutoSaveFailureCount = 0;
+            const savedSignature = buildCurrentConfigAutoSaveSignature();
+            syncConfigAutoSaveSavedSignature(savedSignature);
+            updateConfigAutoSaveStatus({
+              mode: configAutoSaveQueued ? "queued" : "idle",
+              last_error: "",
+              last_saved_at: lastResult?.reason === "saved" ? currentConfigAutoSaveTimestamp() : configAutoSaveStatus.last_saved_at,
+            });
+          }
+        } while (configAutoSaveQueued);
+        return lastResult;
+      })();
+      configAutoSaveInFlightPromise = runner.finally(() => {
+        configAutoSaveInFlightPromise = null;
+        if (configAutoSaveStatus.mode === "saving") {
+          updateConfigAutoSaveStatus({ mode: "idle" });
+        }
+      });
+      return configAutoSaveInFlightPromise;
+    }
+
+    async function flushConfigAutoSaveQueue(options = {}) {
+      if (configAutoSaveTimer) {
+        window.clearTimeout(configAutoSaveTimer);
+        configAutoSaveTimer = null;
+      }
+      if (handoverConfigAutoSaveTimer) {
+        window.clearTimeout(handoverConfigAutoSaveTimer);
+        handoverConfigAutoSaveTimer = null;
+      }
+      if (configAutoSaveInFlightPromise) {
+        await configAutoSaveInFlightPromise;
+      }
+      if (options?.handoverOnly || (currentView.value === "config" && String(activeConfigTab.value || "").trim() === "feature_handover")) {
+        const result = await flushPendingHandoverConfigAutoSave({
+          force: true,
+          silentSuccess: Boolean(options?.silentSuccess),
+        });
+        if (result?.saved !== false) {
+          syncConfigAutoSaveSavedSignature(buildHandoverConfigAutoSaveSignature(options?.building || handoverConfigBuilding.value));
+          updateConfigAutoSaveStatus({
+            mode: "idle",
+            last_error: "",
+            last_saved_at: result?.reason === "saved" ? currentConfigAutoSaveTimestamp() : configAutoSaveStatus.last_saved_at,
+          });
+        }
+        return result;
+      }
+      const payloadState = typeof getPreparedConfigPayloadState === "function" ? getPreparedConfigPayloadState() : null;
+      if (!payloadState?.ok) {
+        updateConfigAutoSaveStatus({
+          mode: "error",
+          last_error: String(payloadState?.error || "配置校验失败"),
+        });
+        message.value = payloadState?.error || "配置校验失败";
+        return { saved: false, reason: "invalid", error: payloadState?.error || "配置校验失败" };
+      }
+      if (String(payloadState.signature || "") === String(configAutoSaveStatus.saved_signature || "")) {
+        updateConfigAutoSaveStatus({ mode: "idle", last_error: "" });
+        return { saved: true, reason: "unchanged", signature: payloadState.signature };
+      }
+      updateConfigAutoSaveStatus({
+        mode: "saving",
+        pending_signature: String(payloadState.signature || ""),
+        last_error: "",
+      });
+      const result = await saveConfig();
+      if (result?.saved) {
+        syncConfigAutoSaveSavedSignature(String(result.signature || payloadState.signature || ""));
+        updateConfigAutoSaveStatus({
+          mode: "idle",
+          last_error: "",
+          last_saved_at: currentConfigAutoSaveTimestamp(),
+        });
+      } else if (result?.saved === false) {
+        updateConfigAutoSaveStatus({
+          mode: "error",
+          last_error: String(result?.error || "保存失败"),
+        });
+      }
+      return result;
+    }
+
+    const configAutoSaveStateText = computed(() => {
+      const pendingSignature = String(configAutoSaveStatus.pending_signature || "");
+      const savedSignature = String(configAutoSaveStatus.saved_signature || "");
+      if (configAutoSaveStatus.mode === "error") return "自动保存失败";
+      if (configAutoSaveStatus.mode === "saving") return "正在自动保存...";
+      if (pendingSignature && pendingSignature !== savedSignature) return "未保存修改";
+      if (configAutoSaveStatus.last_saved_at) return "已自动保存";
+      return "";
+    });
+
+    const configAutoSaveStateDetail = computed(() => {
+      if (configAutoSaveStatus.mode === "error") {
+        return String(configAutoSaveStatus.last_error || "").trim();
+      }
+      if (configAutoSaveStateText.value === "已自动保存") {
+        return String(configAutoSaveStatus.last_saved_at || "").trim();
+      }
+      return "";
+    });
+
+    const configAutoSaveButtonLocked = computed(() => String(configAutoSaveStatus.mode || "").trim() === "saving");
+
     const isConfigSaveLocked = computed(() => {
       if (String(activeConfigTab.value || "").trim() === "feature_handover") {
-        return isActionLocked(actionKeyHandoverConfigCommonSave) || isActionLocked(actionKeyHandoverConfigBuildingSave);
+        return configAutoSaveButtonLocked.value
+          || isActionLocked(actionKeyHandoverConfigCommonSave)
+          || isActionLocked(actionKeyHandoverConfigBuildingSave);
       }
-      return isActionLocked(actionKeyConfigSave);
+      return configAutoSaveButtonLocked.value || isActionLocked(actionKeyConfigSave);
     });
 
     const configSaveButtonText = computed(() => (isConfigSaveLocked.value ? "保存中..." : "保存配置"));
 
     async function saveActiveConfig() {
       if (String(activeConfigTab.value || "").trim() === "feature_handover") {
-        const result = await flushPendingHandoverConfigAutoSave({
-          force: true,
+        const result = await flushConfigAutoSaveQueue({
+          handoverOnly: true,
           silentSuccess: false,
         });
         if (!result) {
@@ -3684,13 +3919,17 @@ createApp({
         }
         return result;
       }
-      return saveConfig();
+      const result = await flushConfigAutoSaveQueue();
+      if (result?.reason === "unchanged") {
+        message.value = "配置已是最新";
+      }
+      return result;
     }
 
     async function sendHandoverReviewLink(building, options = {}) {
       const targetBuilding = String(building || "").trim() || String(handoverConfigBuilding.value || "").trim() || "A楼";
-      const flushResult = await flushPendingHandoverConfigAutoSave({
-        force: true,
+      const flushResult = await flushConfigAutoSaveQueue({
+        handoverOnly: true,
         silentSuccess: true,
       });
       if (flushResult && flushResult.saved === false) {
@@ -3726,8 +3965,8 @@ createApp({
 
     async function onHandoverConfigBuildingChange(nextBuilding) {
       const targetBuilding = String(nextBuilding || "").trim() || String(handoverConfigBuilding.value || "").trim() || "A楼";
-      await flushPendingHandoverConfigAutoSave({
-        force: true,
+      await flushConfigAutoSaveQueue({
+        handoverOnly: true,
         silentSuccess: true,
       });
       await fetchHandoverBuildingConfigSegment(targetBuilding);
@@ -4094,8 +4333,8 @@ createApp({
         const isHandoverTab = view === "config" && tab === "feature_handover";
         const wasHandoverTab = prevView === "config" && prevTab === "feature_handover";
         if (wasHandoverTab && !isHandoverTab) {
-          void flushPendingHandoverConfigAutoSave({
-            force: true,
+          void flushConfigAutoSaveQueue({
+            handoverOnly: true,
             silentSuccess: true,
           });
         }
@@ -4789,6 +5028,8 @@ createApp({
       actionKeyConfigSave,
       isConfigSaveLocked,
       configSaveButtonText,
+      configAutoSaveStateText,
+      configAutoSaveStateDetail,
       actionKeyUpdaterCheck,
       actionKeyUpdaterApply,
       actionKeySourceCacheRefreshCurrentHour,
@@ -4818,6 +5059,7 @@ createApp({
       isHomeQuickActionLocked,
       switchConfigTab,
       setDashboardActiveModule,
+      onConfigAutoSaveInteraction,
       openDashboardSchedulerOverviewTarget,
       openDashboardMenuDrawer,
       closeDashboardMenuDrawer,

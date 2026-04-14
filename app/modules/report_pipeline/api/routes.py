@@ -1914,6 +1914,7 @@ def put_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
         meta = payload_copy.pop("_meta", {}) if isinstance(payload_copy.get("_meta"), dict) else {}
         clear_paths = meta.get("clear_paths", []) if isinstance(meta, dict) else []
         force_overwrite = bool(meta.get("force_overwrite", False)) if isinstance(meta, dict) else False
+        response_mode = str(meta.get("response_mode", "") or "").strip().lower() if isinstance(meta, dict) else ""
         warnings = _collect_config_warnings(payload_copy)
         merge_result = merge_user_config_payload(
             payload_copy,
@@ -1954,13 +1955,15 @@ def put_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
             if configured_base_url
             else _materialize_review_access_snapshot(container)
         )
-        return {
+        response_payload = {
             "ok": True,
-            "config": mask_settings(saved),
             "warnings": warnings,
             "handover_review_access": handover_review_access,
             "restart_required": restart_required,
         }
+        if response_mode != "minimal":
+            response_payload["config"] = mask_settings(saved)
+        return response_payload
     except ConfigValueLossError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001

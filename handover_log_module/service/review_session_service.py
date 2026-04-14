@@ -104,7 +104,7 @@ def _normalize_review_link_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any
     }
 
 
-_CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "B13", "D13"]
+_CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13"]
 
 
 class ReviewSessionService:

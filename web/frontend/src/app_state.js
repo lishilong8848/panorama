@@ -1240,6 +1240,13 @@ export function createAppState(vueApi) {
   const monthlyEventReportSchedulerQuickSaving = ref(false);
   const monthlyChangeReportSchedulerQuickSaving = ref(false);
   const configAutoSaveSuspendDepth = ref(0);
+  const configAutoSaveStatus = reactive({
+    mode: "idle",
+    last_saved_at: "",
+    last_error: "",
+    pending_signature: "",
+    saved_signature: "",
+  });
   const autoResumeState = reactive({
     inProgress: false,
     lastRunId: "",
@@ -4130,6 +4137,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
     monthlyEventReportSchedulerQuickSaving,
     monthlyChangeReportSchedulerQuickSaving,
     configAutoSaveSuspendDepth,
+    configAutoSaveStatus,
     autoResumeState,
     buildingsText,
     sheetRuleRows,

@@ -53,6 +53,12 @@ _AIRCON_TARGET_CELLS = {
     (4, "east", "south"): "AE172",
     (4, "east", "north"): "AE182",
 }
+_AIRCON_ZONE_DIRECTION_BY_AREA = {
+    "1": ("east", "south"),
+    "2": ("east", "north"),
+    "3": ("west", "south"),
+    "4": ("west", "north"),
+}
 _DEFAULT_PRIMARY_PUMP_ALIASES = {
     "A楼": ["冷冻水一次泵变频反馈"],
     "B楼": ["冷冻水一次泵变频反馈"],
@@ -76,7 +82,7 @@ _DEFAULT_REGION_ALIAS_GROUPS = {
     "plate_chilled_in_pressure": ["冷冻水侧板换进口压力", "板换冷冻水进口压力"],
     "plate_chilled_out_pressure": ["冷冻水侧板换出口压力", "板换冷冻水出口压力"],
     "cooling_out_temp": ["冷机侧冷却水出水温度", "冷冻单元-冷却水出水温度", "冷机冷却水出水温度", "冷却水出水温度（相对于冷机）"],
-    "cooling_tower_out_temp": ["冷却塔出口温度"],
+    "cooling_tower_out_temp": ["冷却塔出口温度", "冷却塔出水温度"],
     "ph": ["ph"],
     "conductivity": ["加药装置_电导率信号", "加药装置_电导率", "冷却水电导率", "towercondtor"],
 }
@@ -85,6 +91,13 @@ _FLOW_ALIASES = {
     "secondary": ["二侧总流量", "二次总流量", "二次侧流量"],
     "tank": ["盈亏管1流量计流量", "蓄冷罐流量", "蓄冷罐总管道流量"],
 }
+_CAPACITY_SOURCE_DIRECT_ALIASES = {
+    "storage_total": ["蓄水池总储水量"],
+    "oil_amount": ["油量"],
+}
+_CAPACITY_SOURCE_DIRECT_EXCLUDES = {
+    "oil_amount": ["油量后备时间", "燃油后备时间"],
+}
 _E_BUILDING_FLOW_ALIASES = {
     "return_1": ["冷冻水回水流量_1"],
     "return_2": ["冷冻水回水流量_2"],
@@ -92,6 +105,15 @@ _E_BUILDING_FLOW_ALIASES = {
 }
 _SECONDARY_PUMP_ALIASES = ["冷冻水二次泵变频反馈", "二次冷冻泵频率反馈", "二次泵频率反馈", "冷冻水二次泵频率反馈"]
 _TANK_LEVEL_ALIASES = ["水池液位", "蓄水罐液位", "补水罐液位"]
+_ACTIVE_CHILLER_MODE_TEXTS = {"制冷", "预冷"}
+_E_BUILDING_CHILLER_SKIP_KEYS = {
+    "current_or_power",
+    "chilled_out_temp",
+    "cooling_in_temp",
+    "condenser_pressure",
+    "evaporator_delta",
+    "condenser_delta",
+}
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -130,6 +152,16 @@ def _parse_tank_backup_pair(value: Any) -> tuple[str, str]:
     if len(numbers) >= 2:
         return _text(numbers[0]), _text(numbers[1])
     return "", ""
+
+
+def _to_float_text(value: Any) -> float | None:
+    text = _text(value).replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def _extract_building_code(building: Any) -> str:
@@ -412,6 +444,7 @@ def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]
     oil_previous = context.get("oil_previous", {}) if isinstance(context.get("oil_previous", {}), dict) else {}
     oil_current = context.get("oil_current", {}) if isinstance(context.get("oil_current", {}), dict) else {}
     weather_text = _text(context.get("weather_text"))
+    weather_humidity = _text(context.get("weather_humidity"))
     water_summary = (
         context.get("capacity_water_summary", {})
         if isinstance(context.get("capacity_water_summary", {}), dict)
@@ -458,6 +491,7 @@ def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]
         "AB56": _text(handover_cells.get("B13")),
         "AC56": _text(handover_cells.get("D13")),
         "L2": weather_text,
+        "X2": weather_humidity,
         "O57": _text(water_summary.get("latest_daily_total")),
         "AC25": _text(water_summary.get("month_total")),
         "R57": _text(water_summary.get("month_total")),
@@ -485,6 +519,29 @@ def _build_meter_values(query: CapacitySourceQuery) -> Dict[str, str]:
     return {cell: value for cell, value in values.items() if value != ""}
 
 
+def _first_text_by_d_contains(
+    query: CapacitySourceQuery,
+    needles: Sequence[str],
+    *,
+    excludes: Sequence[str] | None = None,
+) -> str:
+    normalized_needles = [_casefold(item) for item in needles if _text(item)]
+    normalized_excludes = [_casefold(item) for item in (excludes or []) if _text(item)]
+    if not normalized_needles:
+        return ""
+    for needle in normalized_needles:
+        for row in query.rows:
+            d_name = _casefold(getattr(row, "d_name", ""))
+            if not d_name or needle not in d_name:
+                continue
+            if normalized_excludes and any(token in d_name for token in normalized_excludes):
+                continue
+            value_text = _text(getattr(row, "e_raw", None))
+            if value_text:
+                return value_text
+    return ""
+
+
 def _resolve_public_flow_values(query: CapacitySourceQuery, *, zone: str, context: Dict[str, Any]) -> Dict[str, str]:
     building = _text(context.get("building"))
     cells = _WEST_PUBLIC_CELLS if zone == "west" else _EAST_PUBLIC_CELLS
@@ -506,6 +563,12 @@ def _resolve_public_flow_values(query: CapacitySourceQuery, *, zone: str, contex
     return {cells["first"]: first_text, cells["second"]: second_text, cells["tank"]: tank_text}
 
 
+def _resolve_primary_flow_number(query: CapacitySourceQuery, *, zone: str, context: Dict[str, Any]) -> float | None:
+    cells = _WEST_PUBLIC_CELLS if zone == "west" else _EAST_PUBLIC_CELLS
+    public_values = _resolve_public_flow_values(query, zone=zone, context=context)
+    return _to_float_text(public_values.get(cells["first"]))
+
+
 def _region_summary_cells(zone: str) -> Dict[str, str]:
     if zone == "west":
         return {"redundancy": "D42", "secondary_value": "D48", "secondary_redundancy": "D49", "tank_level": "AC27"}
@@ -524,6 +587,100 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
     return {cell: value for cell, value in results.items() if value != ""}
 
 
+def _select_active_chiller_unit(
+    query: CapacitySourceQuery,
+    *,
+    zone: str,
+    running_units: Dict[str, List[Dict[str, Any]]],
+    context: Dict[str, Any],
+) -> Dict[str, Any] | None:
+    alias_groups = _default_alias_groups(context)
+    candidates: List[tuple[bool, float, int, Dict[str, Any]]] = []
+    for unit_info in list(running_units.get(zone, [])):
+        mode_text = _text(unit_info.get("mode_text"))
+        if mode_text not in _ACTIVE_CHILLER_MODE_TEXTS:
+            continue
+        unit_number = int(unit_info.get("unit", 0) or 0)
+        if unit_number <= 0:
+            continue
+        chilled_out_temp = query.first_number_by_d_aliases(
+            alias_groups["chilled_out_temp"],
+            zone=zone,
+            unit=unit_number,
+            allow_global=False,
+        )
+        sort_temp = float(chilled_out_temp) if chilled_out_temp is not None else float("inf")
+        candidates.append(
+            (
+                chilled_out_temp is None,
+                sort_temp,
+                unit_number,
+                {
+                    "unit": unit_number,
+                    "mode_text": mode_text,
+                    "chilled_out_temp": chilled_out_temp,
+                },
+            )
+        )
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+    return dict(candidates[0][3])
+
+
+def _build_capacity_source_direct_values(query: CapacitySourceQuery, *, context: Dict[str, Any]) -> Dict[str, str]:
+    alias_groups = _default_alias_groups(context)
+    running_units = context.get("running_units", {}) if isinstance(context.get("running_units", {}), dict) else {}
+    values: Dict[str, str] = {}
+
+    storage_total = _first_text_by_d_contains(
+        query,
+        _CAPACITY_SOURCE_DIRECT_ALIASES["storage_total"],
+    )
+    if storage_total:
+        values["AC29"] = storage_total
+
+    oil_amount = _first_text_by_d_contains(
+        query,
+        _CAPACITY_SOURCE_DIRECT_ALIASES["oil_amount"],
+        excludes=_CAPACITY_SOURCE_DIRECT_EXCLUDES["oil_amount"],
+    )
+    if oil_amount:
+        values["U16"] = oil_amount
+
+    def _zone_capacity(zone: str) -> float | None:
+        primary_flow = _resolve_primary_flow_number(query, zone=zone, context=context)
+        plate_cooling_in_temp = query.first_number_by_d_aliases(
+            alias_groups["plate_cooling_in_temp"],
+            zone=zone,
+            allow_global=True,
+        )
+        if primary_flow is None or plate_cooling_in_temp is None:
+            return None
+        selected_unit = _select_active_chiller_unit(query, zone=zone, running_units=running_units, context=context)
+        if selected_unit is not None:
+            source_temp = selected_unit.get("chilled_out_temp")
+        else:
+            source_temp = query.first_number_by_d_aliases(
+                alias_groups["plate_chilled_out_temp"],
+                zone=zone,
+                allow_global=True,
+            )
+        if source_temp is None:
+            return None
+        return abs(float(source_temp) - float(plate_cooling_in_temp)) * 4.2 * 1000 / 3600 * float(primary_flow)
+
+    west_capacity = _zone_capacity("west")
+    if west_capacity is not None:
+        values["D22"] = format_number(west_capacity)
+
+    east_capacity = _zone_capacity("east")
+    if east_capacity is not None:
+        values["Q22"] = format_number(east_capacity)
+
+    return values
+
+
 def _block_cell_map(zone: str, position: int) -> Dict[str, str]:
     row_offset = _BLOCK_ROW_OFFSET * int(position)
     col_offset = _BLOCK_COL_OFFSET if zone == "east" else 0
@@ -531,7 +688,12 @@ def _block_cell_map(zone: str, position: int) -> Dict[str, str]:
 
 
 def _fan_values(query: CapacitySourceQuery, *, zone: str, unit: int) -> Dict[int, str]:
-    matched_rows = query.rows_by_d_regexes([r"冷却塔\d风机变频反馈", r"冷塔/\d#风机频率反馈", r"冷却塔\d号风扇频率反馈"], zone=zone, unit=unit, allow_global=False)
+    matched_rows = query.rows_by_d_regexes(
+        [r"冷却塔\d风机变频反馈", r"冷塔/\d#风机频率反馈", r"冷塔\d#风机频率反馈", r"冷却塔\d号风扇频率反馈"],
+        zone=zone,
+        unit=unit,
+        allow_global=False,
+    )
     values: Dict[int, str] = {}
     for row in matched_rows:
         match = re.search(r"(\d)", _text(getattr(row, "d_name", "")))
@@ -555,6 +717,7 @@ def _default_alias_groups(context: Dict[str, Any]) -> Dict[str, List[str]]:
 def _build_zone_unit_values(query: CapacitySourceQuery, *, zone: str, running_units: Dict[str, List[Dict[str, Any]]], context: Dict[str, Any]) -> Dict[str, str]:
     alias_groups = _default_alias_groups(context)
     results: Dict[str, str] = {}
+    building = _text(context.get("building"))
     active_units = list(running_units.get(zone, []))[:2]
     for position, unit_info in enumerate(active_units):
         unit_number = int(unit_info.get("unit", 0) or 0)
@@ -562,8 +725,11 @@ def _build_zone_unit_values(query: CapacitySourceQuery, *, zone: str, running_un
             continue
         block = _block_cell_map(zone, position)
         results[block["title"]] = f"{unit_number}号制冷单元→{_text(unit_info.get('mode_text'))}"
+        skip_chiller_values = building == "E楼" and _text(unit_info.get("mode_text")) == "板换"
         for key, aliases in alias_groups.items():
             if key == "primary_pump_freq" and not aliases:
+                continue
+            if skip_chiller_values and key in _E_BUILDING_CHILLER_SKIP_KEYS:
                 continue
             value_text = query.first_text_by_d_aliases(aliases, zone=zone, unit=unit_number, allow_global=False)
             if not value_text:
@@ -632,6 +798,8 @@ def _build_hvdc_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> 
             cell_text = query.first_text_by_identifier(identifier_tokens=tokens, search_column="c", d_aliases=aliases)
             if cell_text:
                 values[f"{column_letter}{row_idx}"] = cell_text
+            elif column_letter in {"R", "U"}:
+                values[f"{column_letter}{row_idx}"] = "0"
     return values
 
 
@@ -646,20 +814,37 @@ def _build_rpp_values(snapshot: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _aircon_quadrant(row: RawRow, *, building_code: str) -> tuple[int, str, str] | None:
+    _ = building_code
     b_text = _text(getattr(row, "b_text", ""))
-    if "空调" not in b_text:
+    c_text = _text(getattr(row, "c_text", ""))
+    combined = f"{b_text} {c_text}"
+    if "空调" not in combined:
         return None
-    match = re.search(r".*([234])\d{2}.*", b_text)
-    if not match:
+    floor_match = re.search(r"([234])层", combined)
+    code_match = re.search(r"([234](?:11|12|40|41))", combined)
+    area_match = re.search(r"空调区([1-4])", combined)
+    floor_token = _text(floor_match.group(1)) if floor_match else ""
+    if not floor_token and code_match:
+        floor_token = _text(code_match.group(1))[:1]
+    if not floor_token:
         return None
-    floor = int(match.group(1))
-    zone = "west" if ("41" in b_text or "40" in b_text) else "east"
-    south_flag = ("41" in b_text) or ("12" in b_text)
-    if building_code in {"A", "B"}:
-        direction = "south" if south_flag else "north"
-    else:
-        direction = "north" if south_flag else "south"
-    return floor, zone, direction
+    if area_match:
+        mapping = _AIRCON_ZONE_DIRECTION_BY_AREA.get(_text(area_match.group(1)))
+        if mapping:
+            zone, direction = mapping
+            return int(floor_token), zone, direction
+    if code_match:
+        suffix = _text(code_match.group(1))[1:]
+        mapping = {
+            "12": ("east", "south"),
+            "11": ("east", "north"),
+            "41": ("west", "south"),
+            "40": ("west", "north"),
+        }.get(suffix)
+        if mapping:
+            zone, direction = mapping
+            return int(floor_token), zone, direction
+    return None
 
 
 def _build_aircon_matrix_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> Dict[str, str]:
@@ -687,6 +872,7 @@ def build_capacity_cells_with_config(context: Dict[str, Any], config: Dict[str, 
     values.update(_build_meter_values(query))
     values.update(_resolve_public_flow_values(query, zone="west", context=context))
     values.update(_resolve_public_flow_values(query, zone="east", context=context))
+    values.update(_build_capacity_source_direct_values(query, context=context))
     values.update(_build_zone_unit_values(query, zone="west", running_units=running_units, context=context))
     values.update(_build_zone_unit_values(query, zone="east", running_units=running_units, context=context))
     values.update(_build_zone_summary_values(query, zone="west", running_units=running_units))
