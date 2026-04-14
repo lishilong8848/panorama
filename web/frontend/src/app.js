@@ -538,6 +538,9 @@ createApp({
       configLoaded,
       healthLoadError,
       configLoadError,
+      internalRuntimeSummary,
+      internalBuildingRuntimeStatusMap,
+      runtimeWarmupReady,
       engineerDirectoryLoaded,
       initialLoadingPhase,
       initialLoadingStatusText,
@@ -2170,6 +2173,7 @@ createApp({
       handoverDutyDate,
       handoverDutyShift,
       canRun,
+      timers,
       streamController,
       runSingleFlight,
       bootstrapReady,
@@ -2177,6 +2181,9 @@ createApp({
       configLoaded,
       healthLoadError,
       configLoadError,
+      internalRuntimeSummary,
+      internalBuildingRuntimeStatusMap,
+      runtimeWarmupReady,
       engineerDirectoryLoaded,
       updaterUiOverlayVisible,
       updaterUiOverlayTitle,
@@ -2206,6 +2213,10 @@ createApp({
       uploadAlarmSourceCacheBuilding,
       openAlarmEventUploadTarget,
       fetchRuntimeResources,
+      fetchInternalRuntimeSummary,
+      fetchInternalRuntimeBuildingRuntimeStatus,
+      fetchAllInternalBuildingRuntimeStatuses,
+      scheduleInternalRuntimeStatusRefresh,
       fetchConfig,
       fetchHandoverCommonConfigSegment,
       fetchHandoverBuildingConfigSegment,
@@ -4007,41 +4018,50 @@ createApp({
       { immediate: false },
     );
 
+    const runtimeRequestsReady = computed(() => (
+      !shouldPauseRuntimeRequests.value
+      && bootstrapReady.value
+      && Boolean(health.runtime_activated)
+      && Boolean(health.startup_role_confirmed)
+    ));
+
     const shouldFetchHealth = computed(() => {
-      if (shouldPauseRuntimeRequests.value) return false;
+      if (!runtimeRequestsReady.value) return false;
       const view = String(currentView.value || "").trim().toLowerCase();
       return view === "dashboard" || view === "status";
     });
 
     const shouldPollJobPanel = computed(() => {
-      if (shouldPauseRuntimeRequests.value) return false;
+      if (!runtimeRequestsReady.value) return false;
       const view = String(currentView.value || "").trim().toLowerCase();
       return view === "dashboard";
     });
     const shouldFetchPendingResumeRuns = computed(() => {
-      if (shouldPauseRuntimeRequests.value) return false;
+      if (!runtimeRequestsReady.value) return false;
       if (!fullHealthLoaded.value) return false;
       if (deploymentRoleMode.value === "internal") return false;
       const view = String(currentView.value || "").trim().toLowerCase();
       return view === "dashboard";
     });
     const healthPollIntervalMs = computed(() => {
-      if (shouldPauseRuntimeRequests.value) return 5000;
-      const view = String(currentView.value || "").trim().toLowerCase();
-      if (deploymentRoleMode.value === "internal" && view === "status") {
-        return 2000;
-      }
-      return 5000;
+      if (shouldPauseRuntimeRequests.value) return 60000;
+      return 60000;
     });
     const shouldPollBridgeTasks = computed(() => {
-      if (shouldPauseRuntimeRequests.value) return false;
+      if (!runtimeRequestsReady.value) return false;
       if (!bridgeTasksEnabled.value) return false;
+      const view = String(currentView.value || "").trim().toLowerCase();
+      return view === "dashboard" || view === "status";
+    });
+    const shouldPollInternalRuntimeStatus = computed(() => {
+      if (!runtimeRequestsReady.value) return false;
+      if (deploymentRoleMode.value !== "internal") return false;
       const view = String(currentView.value || "").trim().toLowerCase();
       return view === "dashboard" || view === "status";
     });
 
     const shouldIncludeHandoverHealthContext = computed(() => {
-      if (shouldPauseRuntimeRequests.value) return false;
+      if (!runtimeRequestsReady.value) return false;
       if (deploymentRoleMode.value === "internal") return false;
       const view = String(currentView.value || "").trim().toLowerCase();
       const moduleId = String(dashboardActiveModule.value || "").trim();
@@ -4133,7 +4153,7 @@ createApp({
     );
 
     const shouldPollHandoverDailyReportContext = computed(() => {
-      if (shouldPauseRuntimeRequests.value) return false;
+      if (!runtimeRequestsReady.value) return false;
       if (deploymentRoleMode.value === "internal") return false;
       const view = String(currentView.value || "").trim().toLowerCase();
       const moduleId = String(dashboardActiveModule.value || "").trim();
@@ -4148,12 +4168,72 @@ createApp({
     });
 
     const shouldLoadEngineerDirectory = computed(() => {
-      if (shouldPauseRuntimeRequests.value) return false;
+      if (!runtimeRequestsReady.value) return false;
       if (deploymentRoleMode.value === "internal") return false;
       const moduleId = String(dashboardActiveModule.value || "").trim();
       const configTab = String(activeConfigTab.value || "").trim();
       return moduleId === "handover_log" || configTab === "feature_handover";
     });
+
+    watch(
+      () => ({
+        runtimeReady: runtimeRequestsReady.value,
+        role: deploymentRoleMode.value,
+        shouldFetchHealth: shouldFetchHealth.value,
+        shouldPollJobPanel: shouldPollJobPanel.value,
+        shouldPollBridgeTasks: shouldPollBridgeTasks.value,
+        shouldPollDailyReport: shouldPollHandoverDailyReportContext.value,
+        shouldFetchPendingResumeRuns: shouldFetchPendingResumeRuns.value,
+        shouldLoadEngineerDirectory: shouldLoadEngineerDirectory.value,
+        shouldPollInternalRuntime: shouldPollInternalRuntimeStatus.value,
+      }),
+      (state) => {
+        runtimeWarmupReady.value = Boolean(state.runtimeReady && state.role === "internal");
+        if (state.role !== "internal") {
+          internalRuntimeSummary.value = null;
+          internalBuildingRuntimeStatusMap.value = Object.fromEntries(
+            ["A楼", "B楼", "C楼", "D楼", "E楼"].map((building) => [
+              building,
+              {
+                updated_at: "",
+                building,
+                building_code: building.replace("楼", "").toLowerCase(),
+                page_slot: { building },
+                source_families: {},
+                pool: { browser_ready: false, last_error: "" },
+              },
+            ]),
+          );
+        }
+        if (!state.runtimeReady) {
+          return;
+        }
+        if (state.shouldFetchHealth) {
+          void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        }
+        if (state.shouldPollJobPanel) {
+          void fetchJobs({ silentMessage: true });
+          void fetchRuntimeResources({ silentMessage: true });
+        }
+        if (state.shouldPollBridgeTasks) {
+          void fetchBridgeTasks({ silentMessage: true });
+        }
+        if (state.shouldPollDailyReport) {
+          void fetchHandoverDailyReportContext({ silentTransientNetworkError: true, silentMessage: true });
+        }
+        if (state.shouldFetchPendingResumeRuns) {
+          void fetchPendingResumeRuns({ silentMessage: true });
+        }
+        if (state.shouldLoadEngineerDirectory) {
+          scheduleEngineerDirectoryPrefetch(300);
+        }
+        if (state.shouldPollInternalRuntime) {
+          void fetchInternalRuntimeSummary({ silentMessage: true });
+          void fetchAllInternalBuildingRuntimeStatuses({ silentMessage: true });
+        }
+      },
+      { immediate: true, deep: false },
+    );
 
     watch(
       () => [dashboardActiveModule.value, activeConfigTab.value],
@@ -4394,6 +4474,9 @@ createApp({
         await fetchJobs({ silentMessage: true });
         await fetchRuntimeResources({ silentMessage: true });
         await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        if (shouldPollInternalRuntimeStatus.value) {
+          scheduleInternalRuntimeStatusRefresh({ delayMs: 120 });
+        }
         if (shouldFetchPendingResumeRuns.value) {
           await fetchPendingResumeRuns({ silentMessage: true });
         }
@@ -4403,6 +4486,9 @@ createApp({
         await fetchJobs({ silentMessage: true });
         await fetchRuntimeResources({ silentMessage: true });
         await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        if (shouldPollInternalRuntimeStatus.value) {
+          scheduleInternalRuntimeStatusRefresh({ delayMs: 120 });
+        }
       },
     });
     Object.assign(streamController, realStreamController);
@@ -4415,6 +4501,8 @@ createApp({
         fetchJobs,
         fetchBridgeTasks,
         fetchRuntimeResources,
+        fetchInternalRuntimeSummary,
+        fetchAllInternalBuildingRuntimeStatuses,
         fetchHandoverDailyReportContext,
         fetchConfig,
         syncHandoverDutyFromNow,
@@ -4422,6 +4510,7 @@ createApp({
         shouldFetchPendingResumeRuns: () => shouldFetchPendingResumeRuns.value,
         shouldPollHandoverDailyReportContext: () => shouldPollHandoverDailyReportContext.value,
         shouldPollBridgeTasks: () => shouldPollBridgeTasks.value,
+        shouldPollInternalRuntimeStatus: () => shouldPollInternalRuntimeStatus.value,
         shouldFetchHealth: () => shouldFetchHealth.value,
         shouldPollJobPanel: () => shouldPollJobPanel.value,
         shouldLoadEngineerDirectory: () => shouldLoadEngineerDirectory.value,
@@ -4433,6 +4522,7 @@ createApp({
         streamController,
         timers,
         bootstrapReady,
+        runtimeWarmupReady,
         getHealthPollIntervalMs: () => healthPollIntervalMs.value,
       },
     );

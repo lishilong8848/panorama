@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import copy
+from datetime import datetime
 from typing import Any, Callable, Dict
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -54,6 +55,18 @@ _LATEST_REFRESHABLE_SOURCE_FAMILIES = {
     "alarm_event_family": "告警信息源文件",
 }
 
+_INTERNAL_RUNTIME_BUILDINGS = {
+    "a": "A楼",
+    "b": "B楼",
+    "c": "C楼",
+    "d": "D楼",
+    "e": "E楼",
+}
+
+
+def _now_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def _deployment_role_mode(request: Request) -> str:
     container = request.app.state.container
@@ -61,6 +74,177 @@ def _deployment_role_mode(request: Request) -> str:
     if not isinstance(snapshot, dict):
         return ""
     return normalize_role_mode(snapshot.get("role_mode"))
+
+
+def _ensure_internal_bridge_runtime_allowed(request: Request) -> None:
+    if _deployment_role_mode(request) != "internal":
+        raise HTTPException(status_code=409, detail="当前仅内网端提供实时浏览器与下载状态接口。")
+
+
+def _normalize_internal_runtime_building(building_code: str) -> tuple[str, str]:
+    raw = str(building_code or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="缺少楼栋参数")
+    lowered = raw.lower()
+    if lowered in _INTERNAL_RUNTIME_BUILDINGS:
+        return lowered, _INTERNAL_RUNTIME_BUILDINGS[lowered]
+    normalized = raw.upper()
+    if normalized in _INTERNAL_RUNTIME_BUILDINGS.values():
+        code = next((key for key, value in _INTERNAL_RUNTIME_BUILDINGS.items() if value == normalized), "")
+        if code:
+            return code, normalized
+    if len(lowered) == 1 and lowered in _INTERNAL_RUNTIME_BUILDINGS:
+        return lowered, _INTERNAL_RUNTIME_BUILDINGS[lowered]
+    raise HTTPException(status_code=404, detail="楼栋不存在，仅支持 A楼 到 E楼")
+
+
+def _normalize_internal_runtime_family_summary(payload: Any, *, fallback_bucket: str = "") -> Dict[str, Any]:
+    row = payload if isinstance(payload, dict) else {}
+    return {
+        "ready_count": int(row.get("ready_count", 0) or 0),
+        "failed_buildings": [str(item or "").strip() for item in (row.get("failed_buildings", []) or []) if str(item or "").strip()],
+        "blocked_buildings": [str(item or "").strip() for item in (row.get("blocked_buildings", []) or []) if str(item or "").strip()],
+        "last_success_at": str(row.get("last_success_at", "") or "").strip(),
+        "current_bucket": str(row.get("current_bucket", "") or "").strip() or str(fallback_bucket or "").strip(),
+    }
+
+
+def _normalize_internal_runtime_building_row(payload: Any, *, building: str, fallback_bucket: str = "") -> Dict[str, Any]:
+    row = payload if isinstance(payload, dict) else {}
+    return {
+        "building": str(row.get("building", "") or "").strip() or building,
+        "bucket_key": str(row.get("bucket_key", "") or "").strip() or str(fallback_bucket or "").strip(),
+        "status": str(row.get("status", "") or "").strip().lower() or "waiting",
+        "ready": bool(row.get("ready", False)),
+        "downloaded_at": str(row.get("downloaded_at", "") or "").strip(),
+        "last_error": _bridge_text(row.get("last_error", "")),
+        "relative_path": str(row.get("relative_path", "") or "").strip(),
+        "resolved_file_path": str(row.get("resolved_file_path", "") or "").strip(),
+        "started_at": str(row.get("started_at", "") or "").strip(),
+        "blocked": bool(row.get("blocked", False)),
+        "blocked_reason": _bridge_text(row.get("blocked_reason", "")),
+        "next_probe_at": str(row.get("next_probe_at", "") or "").strip(),
+    }
+
+
+def _select_internal_runtime_building_row(payload: Any, *, building: str, fallback_bucket: str = "") -> Dict[str, Any]:
+    family = payload if isinstance(payload, dict) else {}
+    rows = family.get("buildings", []) if isinstance(family.get("buildings", []), list) else []
+    matched = next(
+        (
+            item
+            for item in rows
+            if isinstance(item, dict) and str(item.get("building", "") or "").strip() == building
+        ),
+        {},
+    )
+    return _normalize_internal_runtime_building_row(
+        matched,
+        building=building,
+        fallback_bucket=str(family.get("current_bucket", "") or "").strip() or str(fallback_bucket or "").strip(),
+    )
+
+
+def _build_internal_runtime_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    raw_snapshot = snapshot if isinstance(snapshot, dict) else {}
+    raw_pool = raw_snapshot.get("internal_download_pool", {}) if isinstance(raw_snapshot.get("internal_download_pool", {}), dict) else {}
+    raw_cache = raw_snapshot.get("internal_source_cache", {}) if isinstance(raw_snapshot.get("internal_source_cache", {}), dict) else {}
+    current_bucket = str(raw_cache.get("current_hour_bucket", "") or "").strip()
+    return {
+        "updated_at": _now_text(),
+        "role_mode": normalize_role_mode(raw_snapshot.get("role_mode")),
+        "bridge_enabled": bool(raw_snapshot.get("enabled", False)),
+        "agent_status": str(raw_snapshot.get("agent_status", "") or "").strip(),
+        "db_status": str(raw_snapshot.get("db_status", "") or "").strip(),
+        "last_error": _bridge_text(raw_snapshot.get("last_error", "")),
+        "last_poll_at": str(raw_snapshot.get("last_poll_at", "") or "").strip(),
+        "queue": {
+            "pending_internal": int(raw_snapshot.get("pending_internal", 0) or 0),
+            "pending_external": int(raw_snapshot.get("pending_external", 0) or 0),
+            "problematic": int(raw_snapshot.get("problematic", 0) or 0),
+            "task_count": int(raw_snapshot.get("task_count", 0) or 0),
+        },
+        "pool": {
+            "enabled": bool(raw_pool.get("enabled", False)),
+            "browser_ready": bool(raw_pool.get("browser_ready", False)),
+            "active_buildings": [str(item or "").strip() for item in (raw_pool.get("active_buildings", []) or []) if str(item or "").strip()],
+            "last_error": _bridge_text(raw_pool.get("last_error", "")),
+        },
+        "source_cache": {
+            "enabled": bool(raw_cache.get("enabled", False)),
+            "scheduler_running": bool(raw_cache.get("scheduler_running", False)),
+            "current_hour_bucket": current_bucket,
+            "last_run_at": str(raw_cache.get("last_run_at", "") or "").strip(),
+            "last_success_at": str(raw_cache.get("last_success_at", "") or "").strip(),
+            "last_error": _bridge_text(raw_cache.get("last_error", "")),
+            "cache_root": str(raw_cache.get("cache_root", "") or "").strip(),
+            "current_hour_refresh": copy.deepcopy(raw_cache.get("current_hour_refresh", {}) if isinstance(raw_cache.get("current_hour_refresh", {}), dict) else {}),
+            "handover_log_family": _normalize_internal_runtime_family_summary(
+                raw_cache.get("handover_log_family", {}),
+                fallback_bucket=current_bucket,
+            ),
+            "handover_capacity_report_family": _normalize_internal_runtime_family_summary(
+                raw_cache.get("handover_capacity_report_family", {}),
+                fallback_bucket=current_bucket,
+            ),
+            "monthly_report_family": _normalize_internal_runtime_family_summary(
+                raw_cache.get("monthly_report_family", {}),
+                fallback_bucket=current_bucket,
+            ),
+            "alarm_event_family": _normalize_internal_runtime_family_summary(
+                raw_cache.get("alarm_event_family", {}),
+                fallback_bucket=str(raw_cache.get("alarm_event_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
+            ),
+        },
+    }
+
+
+def _build_internal_runtime_building_status(snapshot: Dict[str, Any], *, building: str, building_code: str) -> Dict[str, Any]:
+    raw_snapshot = snapshot if isinstance(snapshot, dict) else {}
+    raw_pool = raw_snapshot.get("internal_download_pool", {}) if isinstance(raw_snapshot.get("internal_download_pool", {}), dict) else {}
+    raw_cache = raw_snapshot.get("internal_source_cache", {}) if isinstance(raw_snapshot.get("internal_source_cache", {}), dict) else {}
+    slot_rows = raw_pool.get("page_slots", []) if isinstance(raw_pool.get("page_slots", []), list) else []
+    matched_slot = next(
+        (
+            item
+            for item in slot_rows
+            if isinstance(item, dict) and str(item.get("building", "") or "").strip() == building
+        ),
+        {"building": building},
+    )
+    current_bucket = str(raw_cache.get("current_hour_bucket", "") or "").strip()
+    return {
+        "updated_at": _now_text(),
+        "building": building,
+        "building_code": building_code,
+        "page_slot": copy.deepcopy(matched_slot if isinstance(matched_slot, dict) else {"building": building}),
+        "source_families": {
+            "handover_log_family": _select_internal_runtime_building_row(
+                raw_cache.get("handover_log_family", {}),
+                building=building,
+                fallback_bucket=current_bucket,
+            ),
+            "handover_capacity_report_family": _select_internal_runtime_building_row(
+                raw_cache.get("handover_capacity_report_family", {}),
+                building=building,
+                fallback_bucket=current_bucket,
+            ),
+            "monthly_report_family": _select_internal_runtime_building_row(
+                raw_cache.get("monthly_report_family", {}),
+                building=building,
+                fallback_bucket=current_bucket,
+            ),
+            "alarm_event_family": _select_internal_runtime_building_row(
+                raw_cache.get("alarm_event_family", {}),
+                building=building,
+                fallback_bucket=str(raw_cache.get("alarm_event_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
+            ),
+        },
+        "pool": {
+            "browser_ready": bool(raw_pool.get("browser_ready", False)),
+            "last_error": _bridge_text(raw_pool.get("last_error", "")),
+        },
+    }
 
 
 def _ensure_bridge_write_allowed(request: Request) -> None:
@@ -331,6 +515,39 @@ def bridge_health(request: Request) -> Dict[str, Any]:
         "ok": True,
         "deployment": container.deployment_snapshot(),
         "shared_bridge": container.shared_bridge_snapshot(),
+    }
+
+
+@router.get("/api/bridge/internal-runtime-status")
+def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
+    _ensure_internal_bridge_runtime_allowed(request)
+    container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
+    if service is None or not hasattr(service, "get_health_snapshot"):
+        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    snapshot = service.get_health_snapshot(mode="internal_light")
+    return {
+        "ok": True,
+        "summary": _build_internal_runtime_summary(snapshot if isinstance(snapshot, dict) else {}),
+    }
+
+
+@router.get("/api/bridge/internal-runtime-status/buildings/{building_code}")
+def bridge_internal_runtime_status_building(building_code: str, request: Request) -> Dict[str, Any]:
+    _ensure_internal_bridge_runtime_allowed(request)
+    normalized_code, building = _normalize_internal_runtime_building(building_code)
+    container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
+    if service is None or not hasattr(service, "get_health_snapshot"):
+        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    snapshot = service.get_health_snapshot(mode="internal_light")
+    return {
+        "ok": True,
+        "status": _build_internal_runtime_building_status(
+            snapshot if isinstance(snapshot, dict) else {},
+            building=building,
+            building_code=normalized_code,
+        ),
     }
 
 

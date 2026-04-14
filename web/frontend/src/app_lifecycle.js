@@ -6,6 +6,8 @@
     fetchJobs,
     fetchBridgeTasks,
     fetchRuntimeResources,
+    fetchInternalRuntimeSummary,
+    fetchAllInternalBuildingRuntimeStatuses,
     fetchHandoverDailyReportContext,
     fetchConfig,
     syncHandoverDutyFromNow,
@@ -13,6 +15,7 @@
     shouldFetchPendingResumeRuns,
     shouldPollHandoverDailyReportContext,
     shouldPollBridgeTasks,
+    shouldPollInternalRuntimeStatus,
     shouldFetchHealth,
     shouldPollJobPanel,
     shouldLoadEngineerDirectory,
@@ -24,6 +27,7 @@
     streamController,
     timers,
     bootstrapReady,
+    runtimeWarmupReady,
     getHealthPollIntervalMs,
   } = ctx;
 
@@ -43,6 +47,10 @@
     const canPollBridgeTasks = () =>
       typeof shouldPollBridgeTasks === "function"
         ? Boolean(shouldPollBridgeTasks())
+        : false;
+    const canPollInternalRuntimeStatus = () =>
+      typeof shouldPollInternalRuntimeStatus === "function"
+        ? Boolean(shouldPollInternalRuntimeStatus())
         : false;
     const canFetchPendingResumeRuns = () =>
       typeof shouldFetchPendingResumeRuns === "function"
@@ -79,21 +87,22 @@
         scheduleHealthPoll(resolveHealthPollIntervalMs());
       }, delayMs);
     };
-    const scheduleJobPanelPoll = (delayMs = 5000) => {
+    const jobPanelPollIntervalMs = 60000;
+    const scheduleJobPanelPoll = (delayMs = jobPanelPollIntervalMs) => {
       if (timers.jobsTimer) clearTimeout(timers.jobsTimer);
       timers.jobsTimer = window.setTimeout(async () => {
         if (isRuntimeTrafficPaused()) {
-          scheduleJobPanelPoll(5000);
+          scheduleJobPanelPoll(jobPanelPollIntervalMs);
           return;
         }
         if (canPollJobPanel()) {
           await fetchJobs({ silentMessage: true });
           await fetchRuntimeResources({ silentMessage: true });
         }
-        scheduleJobPanelPoll(5000);
+        scheduleJobPanelPoll(jobPanelPollIntervalMs);
       }, delayMs);
     };
-    const bridgeTasksPollIntervalMs = 10000;
+    const bridgeTasksPollIntervalMs = 60000;
     const scheduleBridgeTasksPoll = (delayMs = bridgeTasksPollIntervalMs) => {
       if (timers.bridgeTasksTimer) clearTimeout(timers.bridgeTasksTimer);
       timers.bridgeTasksTimer = window.setTimeout(async () => {
@@ -105,6 +114,23 @@
           await fetchBridgeTasks({ silentMessage: true });
         }
         scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
+      }, delayMs);
+    };
+    const internalRuntimePollIntervalMs = 10000;
+    const scheduleInternalRuntimePoll = (delayMs = internalRuntimePollIntervalMs) => {
+      if (timers.internalRuntimeTimer) clearTimeout(timers.internalRuntimeTimer);
+      timers.internalRuntimeTimer = window.setTimeout(async () => {
+        if (isRuntimeTrafficPaused()) {
+          scheduleInternalRuntimePoll(internalRuntimePollIntervalMs);
+          return;
+        }
+        if (canPollInternalRuntimeStatus()) {
+          await Promise.all([
+            fetchInternalRuntimeSummary({ silentMessage: true }),
+            fetchAllInternalBuildingRuntimeStatuses({ silentMessage: true }),
+          ]);
+        }
+        scheduleInternalRuntimePoll(internalRuntimePollIntervalMs);
       }, delayMs);
     };
     const scheduleDailyReportContextPoll = (delayMs = 30000) => {
@@ -128,7 +154,18 @@
     void fetchBootstrapHealth({ silentMessage: true });
     void fetchConfig({ silentMessage: true });
     if (!isRuntimeTrafficPaused() && canFetchHealth()) {
-      void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+      void fetchHealth({
+        silentTransientNetworkError: true,
+        silentMessage: true,
+        lightweight: true,
+      });
+      if (timers.healthWarmupTimer) clearTimeout(timers.healthWarmupTimer);
+      timers.healthWarmupTimer = window.setTimeout(() => {
+        timers.healthWarmupTimer = null;
+        if (!isRuntimeTrafficPaused() && canFetchHealth()) {
+          void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        }
+      }, 0);
     }
     if (!isRuntimeTrafficPaused() && canPollJobPanel()) {
       void fetchJobs({ silentMessage: true });
@@ -140,6 +177,10 @@
     if (!isRuntimeTrafficPaused() && canPollHandoverDailyReportContext()) {
       void fetchHandoverDailyReportContext({ silentTransientNetworkError: true, silentMessage: true });
     }
+    if (!isRuntimeTrafficPaused() && canPollInternalRuntimeStatus()) {
+      void fetchInternalRuntimeSummary({ silentMessage: true });
+      void fetchAllInternalBuildingRuntimeStatuses({ silentMessage: true });
+    }
     if (!isRuntimeTrafficPaused() && canFetchPendingResumeRuns()) {
       void fetchPendingResumeRuns({ silentMessage: true });
     }
@@ -147,8 +188,9 @@
       scheduleEngineerDirectoryPrefetch(3000);
     }
     scheduleHealthPoll(resolveHealthPollIntervalMs());
-    scheduleJobPanelPoll(5000);
+    scheduleJobPanelPoll(jobPanelPollIntervalMs);
     scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
+    scheduleInternalRuntimePoll(internalRuntimePollIntervalMs);
     scheduleDailyReportContextPoll(30000);
     timers.handoverDutyTimer = setInterval(() => {
       syncHandoverDutyFromNow(false);
@@ -174,6 +216,9 @@
     streamController.dispose();
     if (timers.pollTimer) clearInterval(timers.pollTimer);
     if (timers.healthTimer) clearTimeout(timers.healthTimer);
+    if (timers.healthWarmupTimer) clearTimeout(timers.healthWarmupTimer);
+    if (timers.configRetryTimer) clearTimeout(timers.configRetryTimer);
+    if (timers.internalRuntimeTimer) clearTimeout(timers.internalRuntimeTimer);
     if (timers.jobsTimer) clearTimeout(timers.jobsTimer);
     if (timers.bridgeTasksTimer) clearTimeout(timers.bridgeTasksTimer);
     if (timers.dailyReportContextTimer) clearTimeout(timers.dailyReportContextTimer);

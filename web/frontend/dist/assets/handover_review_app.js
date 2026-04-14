@@ -680,7 +680,11 @@ export function mountHandoverReviewApp(Vue) {
         return badges;
       });
       const capacityDownloadDisabled = computed(() => Boolean(
-        syncingRemoteRevision.value
+        loading.value
+        || saving.value
+        || confirming.value
+        || cloudSyncBusy.value
+        || syncingRemoteRevision.value
         || capacityDownloading.value
         || !session.value
         || !session.value.session_id
@@ -1379,31 +1383,19 @@ export function mountHandoverReviewApp(Vue) {
         errorText.value = "";
         try {
           const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId);
-          const response = await fetch(url, { method: "GET" });
-          if (!response.ok) {
-            const payload = await response.json().catch(() => null);
-            throw new Error(payload?.detail || `下载失败: HTTP ${response.status}`);
-          }
-          const blob = await response.blob();
-          const objectUrl = window.URL.createObjectURL(blob);
           const anchor = document.createElement("a");
-          anchor.href = objectUrl;
-          anchor.download =
-            basenameFromPath(session.value?.output_file || "") ||
-            `${String(building.value || buildingCode || "handover").trim()}.xlsx`;
+          anchor.href = `${url}&ts=${Date.now()}`;
+          anchor.style.display = "none";
           document.body.appendChild(anchor);
           anchor.click();
           anchor.remove();
-          window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 0);
           statusText.value = "交接班日志下载已开始";
         } catch (error) {
-          const message = String(error?.message || error || "下载失败");
-          errorText.value = message;
-          if (message.includes("新生成")) {
-            needsRefresh.value = true;
-          }
+          errorText.value = String(error?.message || error || "下载失败");
         } finally {
-          downloading.value = false;
+          window.setTimeout(() => {
+            downloading.value = false;
+          }, 1500);
         }
       }
 
@@ -1524,6 +1516,10 @@ export function mountHandoverReviewApp(Vue) {
 
       async function refreshData() {
         clearSaveTimers();
+        if (dirty.value) {
+          const saved = await saveDocument({ reason: "switch" });
+          if (!saved) return;
+        }
         needsRefresh.value = false;
         await loadReviewData({ background: false });
       }

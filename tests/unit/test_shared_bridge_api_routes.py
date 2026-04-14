@@ -10,6 +10,7 @@ from app.modules.shared_bridge.api import routes
 
 class _FakeBridgeService:
     def __init__(self) -> None:
+        self.health_modes: list[str] = []
         self.list_tasks_error: Exception | None = None
         self.get_task_error: Exception | None = None
         self.cancel_error: Exception | None = None
@@ -128,6 +129,98 @@ class _FakeBridgeService:
             "events": [],
             "artifacts": [],
         }
+        self.health_snapshot = {
+            "enabled": True,
+            "role_mode": "internal",
+            "db_status": "ok",
+            "agent_status": "running",
+            "last_error": "",
+            "last_poll_at": "2026-04-14 10:00:00",
+            "pending_internal": 1,
+            "pending_external": 0,
+            "problematic": 0,
+            "task_count": 2,
+            "internal_download_pool": {
+                "enabled": True,
+                "browser_ready": True,
+                "active_buildings": ["A楼"],
+                "last_error": "",
+                "page_slots": [
+                    {
+                        "building": "A楼",
+                        "page_ready": True,
+                        "in_use": True,
+                        "login_state": "ready",
+                        "last_used_at": "2026-04-14 10:00:00",
+                    },
+                    {
+                        "building": "B楼",
+                        "page_ready": True,
+                        "in_use": False,
+                        "login_state": "ready",
+                        "last_used_at": "",
+                    },
+                ],
+            },
+            "internal_source_cache": {
+                "enabled": True,
+                "scheduler_running": True,
+                "current_hour_bucket": "2026-04-14 10",
+                "last_run_at": "2026-04-14 10:00:00",
+                "last_success_at": "2026-04-14 10:00:03",
+                "last_error": "",
+                "cache_root": "D:/QJPT_Shared/cache",
+                "current_hour_refresh": {
+                    "running": True,
+                    "running_buildings": ["A楼"],
+                    "completed_buildings": ["B楼"],
+                    "failed_buildings": [],
+                    "blocked_buildings": [],
+                },
+                "handover_log_family": {
+                    "ready_count": 1,
+                    "failed_buildings": [],
+                    "blocked_buildings": [],
+                    "last_success_at": "2026-04-14 10:00:03",
+                    "current_bucket": "2026-04-14 10",
+                    "buildings": [
+                        {"building": "A楼", "bucket_key": "2026-04-14 10", "status": "downloading", "ready": False},
+                        {"building": "B楼", "bucket_key": "2026-04-14 10", "status": "ready", "ready": True, "downloaded_at": "2026-04-14 10:00:03"},
+                    ],
+                },
+                "handover_capacity_report_family": {
+                    "ready_count": 1,
+                    "failed_buildings": [],
+                    "blocked_buildings": [],
+                    "last_success_at": "2026-04-14 10:00:03",
+                    "current_bucket": "2026-04-14 10",
+                    "buildings": [
+                        {"building": "A楼", "bucket_key": "2026-04-14 10", "status": "waiting", "ready": False},
+                        {"building": "B楼", "bucket_key": "2026-04-14 10", "status": "ready", "ready": True},
+                    ],
+                },
+                "monthly_report_family": {
+                    "ready_count": 0,
+                    "failed_buildings": ["A楼"],
+                    "blocked_buildings": [],
+                    "last_success_at": "",
+                    "current_bucket": "2026-04-14 10",
+                    "buildings": [
+                        {"building": "A楼", "bucket_key": "2026-04-14 10", "status": "failed", "ready": False, "last_error": "页面超时"},
+                    ],
+                },
+                "alarm_event_family": {
+                    "ready_count": 0,
+                    "failed_buildings": [],
+                    "blocked_buildings": ["A楼"],
+                    "last_success_at": "",
+                    "current_bucket": "2026-04-14 10",
+                    "buildings": [
+                        {"building": "A楼", "bucket_key": "2026-04-14 10", "status": "waiting", "ready": False, "blocked": True, "blocked_reason": "等待恢复"},
+                    ],
+                },
+            },
+        }
 
     def list_tasks(self, limit: int = 100):  # noqa: ANN001
         if self.list_tasks_error is not None:
@@ -213,6 +306,10 @@ class _FakeBridgeService:
             "ready_limit_per_family": ready_limit_per_family,
         }
 
+    def get_health_snapshot(self, *, mode: str = "external_full"):
+        self.health_modes.append(mode)
+        return self.health_snapshot
+
 
 class _FakeJob:
     def __init__(self, payload):
@@ -283,6 +380,42 @@ def test_bridge_health_returns_snapshots() -> None:
     assert response["ok"] is True
     assert response["deployment"]["role_mode"] == "external"
     assert response["shared_bridge"]["root_dir"] == "D:/QJPT_Shared"
+
+
+def test_internal_runtime_status_returns_light_summary_for_internal_role() -> None:
+    service = _FakeBridgeService()
+    request = _fake_request(service, role_mode="internal")
+
+    response = routes.bridge_internal_runtime_status(request)
+
+    assert response["ok"] is True
+    assert response["summary"]["role_mode"] == "internal"
+    assert response["summary"]["pool"]["browser_ready"] is True
+    assert response["summary"]["source_cache"]["current_hour_bucket"] == "2026-04-14 10"
+    assert service.health_modes == ["internal_light"]
+
+
+def test_internal_runtime_status_building_returns_single_building_payload() -> None:
+    service = _FakeBridgeService()
+    request = _fake_request(service, role_mode="internal")
+
+    response = routes.bridge_internal_runtime_status_building("a", request)
+
+    assert response["ok"] is True
+    assert response["status"]["building"] == "A楼"
+    assert response["status"]["building_code"] == "a"
+    assert response["status"]["page_slot"]["in_use"] is True
+    assert response["status"]["source_families"]["monthly_report_family"]["status"] == "failed"
+    assert response["status"]["source_families"]["alarm_event_family"]["blocked"] is True
+
+
+def test_internal_runtime_status_rejects_external_role() -> None:
+    request = _fake_request(_FakeBridgeService(), role_mode="external")
+
+    with pytest.raises(HTTPException) as excinfo:
+        routes.bridge_internal_runtime_status(request)
+
+    assert excinfo.value.status_code == 409
 
 
 def test_bridge_shared_root_self_check_returns_diagnostics() -> None:

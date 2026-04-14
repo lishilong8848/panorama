@@ -153,7 +153,10 @@ export function createRuntimeHealthConfigActions(ctx) {
   let lastSavedConfigSignature = "";
   let serverConfigSnapshot = null;
   let engineerDirectoryPrefetchTimer = null;
-  let healthRequestInFlight = null;
+  const healthRequestInFlight = {
+    lite: null,
+    full: null,
+  };
   let dailyReportContextRequestInFlight = null;
   let bridgeTasksRequestInFlight = null;
   let bridgeTaskDetailRequestInFlight = null;
@@ -1192,7 +1195,6 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   async function fetchHealth(options = {}) {
     if (isUpdaterTrafficPaused()) return false;
-    if (healthRequestInFlight) return healthRequestInFlight;
     const silentTransientNetworkError = Boolean(options?.silentTransientNetworkError);
     const silentMessage = Boolean(options?.silentMessage);
     const includeHandoverContext =
@@ -1201,7 +1203,12 @@ export function createRuntimeHealthConfigActions(ctx) {
         : typeof shouldIncludeHandoverHealthContext === "function"
           ? Boolean(shouldIncludeHandoverHealthContext())
           : true;
-    healthRequestInFlight = (async () => {
+    const lightweight = Boolean(options?.lightweight);
+    const requestKey = lightweight ? "lite" : "full";
+    if (healthRequestInFlight[requestKey]) {
+      return healthRequestInFlight[requestKey];
+    }
+    healthRequestInFlight[requestKey] = (async () => {
       try {
         const previousUpdaterSnapshot = clone(health?.updater || {});
         const params = includeHandoverContext
@@ -1210,11 +1217,17 @@ export function createRuntimeHealthConfigActions(ctx) {
               handover_duty_shift: String(handoverDutyShift?.value || "").trim().toLowerCase(),
             }
           : {};
+        if (lightweight) {
+          params.health_mode = "lite";
+        }
         const data = await getHealthApi(params);
+        if (lightweight && fullHealthLoaded?.value) {
+          return true;
+        }
         applyHealthSnapshot(data);
         handleUpdaterRuntimeSideEffects(previousUpdaterSnapshot, health?.updater || {});
         updaterHealthHydratedOnce = true;
-        if (fullHealthLoaded) {
+        if (!lightweight && fullHealthLoaded) {
           fullHealthLoaded.value = true;
         }
         if (healthLoadError) {
@@ -1232,10 +1245,10 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         return false;
       } finally {
-        healthRequestInFlight = null;
+        healthRequestInFlight[requestKey] = null;
       }
     })();
-    return healthRequestInFlight;
+    return healthRequestInFlight[requestKey];
   }
 
   async function fetchJobs(options = {}) {

@@ -684,7 +684,7 @@ export function mountHandoverReviewApp(Vue) {
         || saving.value
         || confirming.value
         || cloudSyncBusy.value
-        syncingRemoteRevision.value
+        || syncingRemoteRevision.value
         || capacityDownloading.value
         || !session.value
         || !session.value.session_id

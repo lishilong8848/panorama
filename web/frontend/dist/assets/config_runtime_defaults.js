@@ -1118,10 +1118,9 @@ function applyDayMetricUploadDefaults(cfg) {
 
   setBooleanDefault(scheduler, "enabled", true);
   setBooleanDefault(scheduler, "auto_start_in_gui", false);
-  setStringDefault(scheduler, "run_time", "08:00:00");
+  setNumberDefault(scheduler, "interval_minutes", 60);
   setNumberDefault(scheduler, "check_interval_sec", 30);
-  setBooleanDefault(scheduler, "catch_up_if_missed", false);
-  setBooleanDefault(scheduler, "retry_failed_in_same_period", true);
+  setBooleanDefault(scheduler, "retry_failed_on_next_tick", true);
   setStringDefault(scheduler, "state_file", "day_metric_upload_scheduler_state.json");
 
   setNumberDefault(behavior, "basic_retry_attempts", 3);
@@ -1146,10 +1145,9 @@ function applyDayMetricUploadDefaults(cfg) {
 function applySchedulerDefaults(cfg) {
   setBooleanDefault(cfg.scheduler, "enabled", true);
   setBooleanDefault(cfg.scheduler, "auto_start_in_gui", false);
-  setStringDefault(cfg.scheduler, "run_time", "00:10:00");
+  setNumberDefault(cfg.scheduler, "interval_minutes", 60);
   setNumberDefault(cfg.scheduler, "check_interval_sec", 30);
-  setBooleanDefault(cfg.scheduler, "catch_up_if_missed", false);
-  setBooleanDefault(cfg.scheduler, "retry_failed_in_same_period", true);
+  setBooleanDefault(cfg.scheduler, "retry_failed_on_next_tick", true);
   setStringDefault(cfg.scheduler, "state_file", "daily_scheduler_state.json");
 }
 

@@ -4026,12 +4026,8 @@ createApp({
       return view === "dashboard";
     });
     const healthPollIntervalMs = computed(() => {
-      if (shouldPauseRuntimeRequests.value) return 5000;
-      const view = String(currentView.value || "").trim().toLowerCase();
-      if (deploymentRoleMode.value === "internal" && view === "status") {
-        return 2000;
-      }
-      return 5000;
+      if (shouldPauseRuntimeRequests.value) return 60000;
+      return 60000;
     });
     const shouldPollBridgeTasks = computed(() => {
       if (shouldPauseRuntimeRequests.value) return false;

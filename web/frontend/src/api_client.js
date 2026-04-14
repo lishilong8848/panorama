@@ -125,6 +125,19 @@ export async function getBridgeTasksApi(params = {}) {
   return apiJson(appendQuery("/api/bridge/tasks", params));
 }
 
+export async function getInternalRuntimeStatusApi() {
+  return apiJsonWithTimeout("/api/bridge/internal-runtime-status", {}, 8000);
+}
+
+export async function getInternalRuntimeBuildingStatusApi(buildingCode) {
+  const codeText = String(buildingCode || "").trim();
+  return apiJsonWithTimeout(
+    `/api/bridge/internal-runtime-status/buildings/${encodeURIComponent(codeText)}`,
+    {},
+    8000,
+  );
+}
+
 export async function getBridgeTaskApi(taskId) {
   return apiJson(`/api/bridge/tasks/${encodeURIComponent(String(taskId || "").trim())}`);
 }

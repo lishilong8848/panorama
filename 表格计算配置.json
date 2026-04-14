@@ -6,10 +6,10 @@
       "runtime_state_root": ".runtime"
     },
     "deployment": {
-      "role_mode": "external",
+      "role_mode": "internal",
       "last_started_role_mode": "external",
       "node_id": "",
-      "node_label": "外网端"
+      "node_label": "内网端"
     },
     "shared_bridge": {
       "enabled": true,
@@ -76,11 +76,13 @@
     "scheduler": {
       "enabled": true,
       "auto_start_in_gui": false,
-      "run_time": "10:31:18",
+      "interval_minutes": 60,
       "check_interval_sec": 30,
+      "retry_failed_on_next_tick": true,
+      "state_file": "daily_scheduler_state.json",
       "catch_up_if_missed": false,
       "retry_failed_in_same_period": true,
-      "state_file": "daily_scheduler_state.json"
+      "run_time": "10:31:18"
     },
     "notify": {
       "enable_webhook": true,
@@ -127,47 +129,47 @@
       "enable_sse": true
     },
     "network_switch": {
-      "require_saved_profiles": true,
-      "switch_back_to_original": false,
-      "scan_attempts": 3,
-      "hard_recovery_enabled": true,
-      "fail_fast_on_netsh_error": true,
-      "post_switch_probe_external_port": 443,
-      "internal_probe_timeout_ms": 1200,
-      "switch_timeout_sec": 30,
-      "post_switch_probe_internal_port": 80,
-      "hard_recovery_after_scan_failures": 2,
-      "auto_disconnect_before_connect": true,
-      "post_switch_stabilize_sec": 3,
+      "connect_with_ssid_param": true,
       "external_ssid": "ALBB-EA118-2F",
+      "hard_recovery_cooldown_sec": 20,
+      "internal_probe_count": 1,
+      "internal_probe_parallelism": 5,
+      "retry_count": 3,
+      "external_probe_cache_ttl_sec": 2,
+      "switch_back_to_original": false,
+      "fail_fast_on_netsh_error": true,
+      "scan_before_connect": true,
+      "internal_probe_timeout_ms": 1200,
+      "hard_recovery_after_scan_failures": 2,
+      "post_switch_stabilize_sec": 3,
       "require_admin_for_hard_recovery": true,
       "strict_target_visible_before_connect": true,
-      "internal_profile_name": "",
-      "post_switch_probe_timeout_sec": 2,
-      "scan_before_connect": true,
-      "post_switch_probe_enabled": false,
-      "retry_count": 3,
-      "post_switch_probe_retries": 3,
-      "internal_probe_count": 1,
-      "connect_poll_interval_sec": 1,
-      "internal_ssid": "H-DH",
-      "connect_with_ssid_param": true,
-      "role_mode": "external",
-      "external_profile_name": "",
-      "retry_interval_sec": 2,
-      "post_switch_probe_external_host": "open.feishu.cn",
-      "internal_probe_cache_ttl_sec": 2,
-      "internal_probe_parallelism": 5,
       "preferred_interface": "",
-      "post_switch_probe_internal_host": "",
+      "hard_recovery_enabled": true,
+      "post_switch_probe_retries": 3,
+      "scan_attempts": 3,
+      "switch_timeout_sec": 30,
+      "post_switch_probe_external_host": "open.feishu.cn",
+      "scan_wait_sec": 2,
       "hard_recovery_steps": [
         "toggle_adapter",
         "restart_wlansvc"
       ],
+      "external_profile_name": "",
+      "post_switch_probe_enabled": false,
+      "post_switch_probe_timeout_sec": 2,
+      "internal_probe_cache_ttl_sec": 2,
+      "connect_poll_interval_sec": 1,
+      "internal_ssid": "H-DH",
+      "require_saved_profiles": true,
+      "retry_interval_sec": 2,
+      "auto_disconnect_before_connect": true,
+      "post_switch_probe_internal_port": 80,
       "post_switch_probe_interval_sec": 1,
-      "scan_wait_sec": 2,
-      "external_probe_cache_ttl_sec": 2,
-      "hard_recovery_cooldown_sec": 20
+      "post_switch_probe_internal_host": "",
+      "post_switch_probe_external_port": 443,
+      "internal_profile_name": "",
+      "role_mode": "external"
     }
   },
   "features": {
@@ -4377,11 +4379,13 @@
       "scheduler": {
         "enabled": true,
         "auto_start_in_gui": false,
-        "run_time": "08:00:00",
+        "interval_minutes": 60,
         "check_interval_sec": 30,
+        "retry_failed_on_next_tick": true,
+        "state_file": "day_metric_upload_scheduler_state.json",
         "catch_up_if_missed": false,
         "retry_failed_in_same_period": true,
-        "state_file": "day_metric_upload_scheduler_state.json"
+        "run_time": "08:00:00"
       },
       "behavior": {
         "basic_retry_attempts": 3,
@@ -4423,65 +4427,65 @@
         "delete_batch_size": 500,
         "create_batch_size": 200,
         "clear_before_upload": true,
-        "list_page_size": 500,
-        "timeout": 30
+        "timeout": 30,
+        "list_page_size": 500
       },
       "shared_source_upload": {
         "replace_existing_on_full": true
       },
-      "resume": {
-        "enabled": true,
-        "root_dir": "alarm_export_resume",
-        "max_retry": 3,
-        "reuse_extracted_rows": true,
-        "state_file": "alarm_export_resume_state.json",
-        "retry_interval_sec": 2
-      },
-      "level_mapping": {
-        "4": "次要",
-        "1": "紧急",
-        "2": "严重",
-        "3": "重要"
+      "fields": {
+        "process_suggestion": "process_suggestion",
+        "event_level": "event_level",
+        "accept_user": "accept_user",
+        "confirm_description": "confirm_description",
+        "recover_status": "recover_status",
+        "confirm_user": "confirm_user",
+        "content": "content",
+        "trigger_value": "trigger_value",
+        "accept_description": "accept_description",
+        "accept_time": "accept_time",
+        "confirm_time": "confirm_time",
+        "alarm_type": "alarm_type",
+        "event_source": "event_source",
+        "event_time": "event_time",
+        "recover_time": "recover_time",
+        "process_status": "process_status"
       },
       "test_db": {
-        "port": 3306,
-        "table_mode": "fixed",
-        "password": "123456",
         "building_label": "测试楼栋",
         "user": "root",
-        "host": "127.0.0.1",
+        "database": "e_event",
+        "password": "123456",
         "fixed_table": "event_2026_02",
-        "enabled": true,
+        "table_mode": "fixed",
+        "host": "127.0.0.1",
         "time_field_mode": "auto",
-        "database": "e_event"
+        "enabled": true,
+        "port": 3306
       },
-      "window_days": 35,
-      "run_with_scheduler": true,
       "alarm_category_default": "真实告警",
+      "run_with_scheduler": true,
       "skip_levels": [
         5
       ],
-      "enabled": true,
-      "fields": {
-        "trigger_value": "trigger_value",
-        "process_suggestion": "process_suggestion",
-        "confirm_user": "confirm_user",
-        "event_source": "event_source",
-        "accept_user": "accept_user",
-        "accept_description": "accept_description",
-        "alarm_type": "alarm_type",
-        "event_time": "event_time",
-        "recover_time": "recover_time",
-        "confirm_time": "confirm_time",
-        "process_status": "process_status",
-        "content": "content",
-        "event_level": "event_level",
-        "recover_status": "recover_status",
-        "confirm_description": "confirm_description",
-        "accept_time": "accept_time"
+      "level_mapping": {
+        "2": "严重",
+        "1": "紧急",
+        "3": "重要",
+        "4": "次要"
       },
+      "window_end_time": "00:00:00",
       "snapshot_mode": "clear_and_rebuild",
-      "window_end_time": "00:00:00"
+      "enabled": true,
+      "resume": {
+        "reuse_extracted_rows": true,
+        "max_retry": 3,
+        "retry_interval_sec": 2,
+        "enabled": true,
+        "state_file": "alarm_export_resume_state.json",
+        "root_dir": "alarm_export_resume"
+      },
+      "window_days": 35
     },
     "manual_upload_gui": {
       "enabled": true
