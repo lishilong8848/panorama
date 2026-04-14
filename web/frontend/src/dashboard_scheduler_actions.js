@@ -14,6 +14,11 @@ import {
 } from "./api_client.js";
 import { normalizeRunTimeText } from "./config_helpers.js";
 
+function toPositiveInt(value, fallback) {
+  const n = Number.parseInt(String(value ?? ""), 10);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
 const ACTION_KEYS = {
   schedulerStart: "scheduler:start",
   schedulerStop: "scheduler:stop",
@@ -80,16 +85,16 @@ export function createDashboardSchedulerActions(ctx) {
   async function saveSchedulerQuickConfig() {
     if (!config.value) return;
     const scheduler = config.value.scheduler || {};
-    const runTime = normalizeRunTimeText(scheduler.run_time);
     const payload = {
       enabled: true,
       auto_start_in_gui: false,
-      run_time: runTime,
-      catch_up_if_missed: Boolean(scheduler.catch_up_if_missed),
-      retry_failed_in_same_period: Boolean(scheduler.retry_failed_in_same_period),
+      interval_minutes: toPositiveInt(scheduler.interval_minutes, 60),
+      check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
+      retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,
+      state_file: String(scheduler.state_file || "daily_scheduler_state.json").trim(),
     };
-    if (!payload.run_time) {
-      message.value = "调度时间格式错误，必须是 HH:MM 或 HH:MM:SS";
+    if (!payload.state_file) {
+      message.value = "调度状态文件不能为空";
       return;
     }
     return guardedRun(
@@ -103,11 +108,7 @@ export function createDashboardSchedulerActions(ctx) {
           }
           await fetchHealth();
           const executorBound = data?.executor_bound_after_reload !== false;
-          if (data?.run_time_changed && executorBound) {
-            message.value = data?.message || "调度配置已更新；检测到每日执行时间变化，已自动重置今日调度状态，执行器已绑定";
-          } else if (data?.run_time_changed && !executorBound) {
-            message.value = "调度时间已更新并重置今日状态，但执行器未绑定，自动调度暂不可用";
-          } else if (!executorBound) {
+          if (!executorBound) {
             message.value = "调度配置已更新，但执行器未绑定，自动调度暂不可用";
           } else {
             message.value = data?.message || "调度配置已更新";
@@ -277,17 +278,14 @@ export function createDashboardSchedulerActions(ctx) {
   async function saveDayMetricUploadSchedulerQuickConfig() {
     if (!config.value) return;
     const scheduler = config.value?.day_metric_upload?.scheduler || {};
-    const runTime = normalizeRunTimeText(scheduler.run_time);
     const payload = {
       enabled: true,
       auto_start_in_gui: false,
-      run_time: runTime,
-      state_file: String(scheduler.state_file || "").trim(),
+      interval_minutes: toPositiveInt(scheduler.interval_minutes, 60),
+      check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
+      retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,
+      state_file: String(scheduler.state_file || "day_metric_upload_scheduler_state.json").trim(),
     };
-    if (!payload.run_time) {
-      message.value = "12项独立上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS";
-      return;
-    }
     if (!payload.state_file) {
       message.value = "12项独立上传调度状态文件不能为空";
       return;

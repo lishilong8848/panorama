@@ -1439,8 +1439,11 @@ def handover_review_download(building_code: str, request: Request, session_id: s
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
 
-    output_file = Path(str(target.get("output_file", "")).strip())
-    if not output_file.exists():
+    output_file_text = str(target.get("output_file", "")).strip()
+    if not output_file_text:
+        raise HTTPException(status_code=404, detail="最新交接班文件不存在，请重新生成")
+    output_file = Path(output_file_text)
+    if not output_file.exists() or not output_file.is_file():
         raise HTTPException(status_code=404, detail="最新交接班文件不存在，请重新生成")
 
     container.add_system_log(
@@ -1464,10 +1467,11 @@ def handover_review_capacity_download(building_code: str, request: Request, sess
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
 
-    output_file = Path(str(target.get("capacity_output_file", "")).strip())
-    if not str(output_file).strip():
+    output_file_text = str(target.get("capacity_output_file", "")).strip()
+    if not output_file_text:
         raise HTTPException(status_code=404, detail="当前交接班容量报表尚未生成")
-    if not output_file.exists():
+    output_file = Path(output_file_text)
+    if not output_file.exists() or not output_file.is_file():
         raise HTTPException(status_code=404, detail="交接班容量报表文件不存在，请重新生成")
     capacity_sync = target.get("capacity_sync", {}) if isinstance(target.get("capacity_sync", {}), dict) else {}
     capacity_sync_status = str(capacity_sync.get("status", "")).strip().lower()

@@ -1593,14 +1593,11 @@ export function prepareConfigPayloadForSave({
   payload.download.save_dir = businessRoot;
 
   payload.scheduler = payload.scheduler || {};
-  const normalizedSchedulerRunTime = normalizeRunTimeText(payload.scheduler.run_time);
-  if (!normalizedSchedulerRunTime) {
-    return { ok: false, error: "每日执行时间格式错误，必须是 HH:MM 或 HH:MM:SS" };
-  }
-  payload.scheduler.run_time = normalizedSchedulerRunTime;
+  payload.scheduler.interval_minutes = Number.parseInt(payload.scheduler.interval_minutes ?? 60, 10);
   payload.scheduler.enabled = true;
   payload.scheduler.auto_start_in_gui = false;
   payload.scheduler.check_interval_sec = Number.parseInt(payload.scheduler.check_interval_sec ?? 30, 10);
+  payload.scheduler.retry_failed_on_next_tick = payload.scheduler.retry_failed_on_next_tick !== false;
 
   // 路径收敛：调度状态/续传/告警恢复统一使用内部固定 .runtime 子路径
   payload.scheduler.state_file = "daily_scheduler_state.json";
@@ -1614,22 +1611,30 @@ export function prepareConfigPayloadForSave({
       : {};
   payload.day_metric_upload.scheduler.enabled = true;
   payload.day_metric_upload.scheduler.auto_start_in_gui = false;
-  payload.day_metric_upload.scheduler.run_time =
-    normalizeRunTimeText(payload.day_metric_upload.scheduler.run_time) || "08:00:00";
+  payload.day_metric_upload.scheduler.interval_minutes = Number.parseInt(
+    payload.day_metric_upload.scheduler.interval_minutes ?? 60,
+    10,
+  );
   payload.day_metric_upload.scheduler.check_interval_sec = Number.parseInt(
     payload.day_metric_upload.scheduler.check_interval_sec ?? 30,
     10,
   );
-  payload.day_metric_upload.scheduler.catch_up_if_missed = Boolean(
-    payload.day_metric_upload.scheduler.catch_up_if_missed,
-  );
-  payload.day_metric_upload.scheduler.retry_failed_in_same_period =
-    payload.day_metric_upload.scheduler.retry_failed_in_same_period !== false;
+  payload.day_metric_upload.scheduler.retry_failed_on_next_tick =
+    payload.day_metric_upload.scheduler.retry_failed_on_next_tick !== false;
   payload.day_metric_upload.scheduler.state_file = String(
     payload.day_metric_upload.scheduler.state_file || "day_metric_upload_scheduler_state.json",
   ).trim();
-  if (!payload.day_metric_upload.scheduler.run_time) {
-    return { ok: false, error: "12项独立上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS" };
+  if (!Number.isInteger(payload.scheduler.interval_minutes) || payload.scheduler.interval_minutes < 1) {
+    return { ok: false, error: "自动流程调度间隔必须大于0分钟" };
+  }
+  if (!Number.isInteger(payload.scheduler.check_interval_sec) || payload.scheduler.check_interval_sec <= 0) {
+    return { ok: false, error: "自动流程调度检查间隔必须大于0秒" };
+  }
+  if (!payload.scheduler.state_file) {
+    return { ok: false, error: "自动流程调度状态文件不能为空" };
+  }
+  if (!Number.isInteger(payload.day_metric_upload.scheduler.interval_minutes) || payload.day_metric_upload.scheduler.interval_minutes < 1) {
+    return { ok: false, error: "12项独立上传调度间隔必须大于0分钟" };
   }
   if (
     !Number.isInteger(payload.day_metric_upload.scheduler.check_interval_sec) ||

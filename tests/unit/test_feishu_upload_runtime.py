@@ -24,6 +24,23 @@ class _FakeClient:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.calls: List[tuple] = []
+        self.calc_records: List[Dict[str, Any]] = []
+        self.attachment_records: List[Dict[str, Any]] = []
+
+    def _to_feishu_date(self, date_text: str) -> str:
+        return date_text
+
+    def list_records(self, table_id: str, page_size: int = 500, max_records: int = 0) -> List[Dict[str, Any]]:
+        self.calls.append(("list_records", table_id, page_size, max_records))
+        if table_id == "calc_table":
+            return list(self.calc_records)
+        if table_id == "attach_table":
+            return list(self.attachment_records)
+        return []
+
+    def batch_delete_records(self, table_id: str, record_ids: List[str], batch_size: int = 500) -> int:
+        self.calls.append(("batch_delete_records", table_id, list(record_ids), batch_size))
+        return len(record_ids)
 
     def upload_calc_records(self, records: List[Dict[str, Any]], **kwargs: Any) -> None:
         self.calls.append(("upload_calc_records", records, kwargs))
@@ -77,6 +94,18 @@ def test_upload_results_to_feishu_success_flow(tmp_path: Path) -> None:
 
     def _factory(**kwargs: Any) -> _FakeClient:
         c = _FakeClient(**kwargs)
+        c.calc_records = [
+            {
+                "record_id": "rec_calc_1",
+                "fields": {"楼栋": "A楼", "日期": "2026-03-01"},
+            }
+        ]
+        c.attachment_records = [
+            {
+                "record_id": "rec_attach_1",
+                "fields": {"类型": "全景平台月报", "楼栋": "A楼", "日期": "2026-03-01"},
+            }
+        ]
         clients.append(c)
         return c
 
@@ -101,6 +130,10 @@ def test_upload_results_to_feishu_success_flow(tmp_path: Path) -> None:
     assert len(clients) == 1
     client_calls = [c[0] for c in clients[0].calls]
     assert client_calls == [
+        "list_records",
+        "batch_delete_records",
+        "list_records",
+        "batch_delete_records",
         "upload_calc_records",
         "upload_attachment",
         "upload_attachment_record",

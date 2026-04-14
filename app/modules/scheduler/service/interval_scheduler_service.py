@@ -4,7 +4,7 @@ import json
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List
 
 from pipeline_utils import get_app_dir
 
@@ -41,6 +41,9 @@ class IntervalSchedulerService:
             "last_trigger_at": "",
             "last_trigger_result": "",
         }
+        self._diag_lock = threading.Lock()
+        self._diag_logs: List[str] = []
+        self._max_diag_logs = 200
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -81,7 +84,13 @@ class IntervalSchedulerService:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def _log(self, text: str) -> None:
-        self.emit_log(f"[{self.source_name}] {text}")
+        line = f"[{self.source_name}] {text}"
+        self.emit_log(line)
+        with self._diag_lock:
+            self._diag_logs.append(line)
+            overflow = len(self._diag_logs) - self._max_diag_logs
+            if overflow > 0:
+                del self._diag_logs[:overflow]
 
     def _load_state(self) -> Dict[str, Any]:
         default = {
@@ -208,6 +217,16 @@ class IntervalSchedulerService:
             "last_error": str(self.state.get("last_error", "")),
             "last_source": str(self.state.get("last_source", "")),
             "last_duration_ms": int(self.state.get("last_duration_ms", 0) or 0),
+        }
+
+    def get_diagnostics(self, limit: int = 50) -> Dict[str, Any]:
+        with self._diag_lock:
+            logs = list(self._diag_logs[-max(1, int(limit)):])
+        return {
+            "config": dict(self.cfg),
+            "runtime": self.get_runtime_snapshot(),
+            "state": dict(self.state),
+            "logs": logs,
         }
 
     def _loop(self) -> None:

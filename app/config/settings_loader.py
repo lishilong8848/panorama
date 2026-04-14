@@ -290,10 +290,12 @@ def _validate_scheduler(cfg: Dict[str, Any]) -> None:
     scheduler_cfg = cfg.get("common", {}).get("scheduler", {})
     if not isinstance(scheduler_cfg, dict):
         raise ValueError("配置错误: common.scheduler 缺失或格式错误")
-    if not _valid_time(str(scheduler_cfg.get("run_time", ""))):
-        raise ValueError("配置错误: common.scheduler.run_time 必须是 HH:MM:SS")
+    if int(scheduler_cfg.get("interval_minutes", 0)) <= 0:
+        raise ValueError("配置错误: common.scheduler.interval_minutes 必须大于0")
     if int(scheduler_cfg.get("check_interval_sec", 0)) <= 0:
         raise ValueError("配置错误: common.scheduler.check_interval_sec 必须大于0")
+    if not isinstance(scheduler_cfg.get("retry_failed_on_next_tick", True), bool):
+        raise ValueError("配置错误: common.scheduler.retry_failed_on_next_tick 必须是布尔值")
     if not str(scheduler_cfg.get("state_file", "")).strip():
         raise ValueError("配置错误: common.scheduler.state_file 不能为空")
 
@@ -364,6 +366,23 @@ def _validate_feature_daily_scheduler(section_name: str, scheduler_cfg: Any) -> 
         raise ValueError(f"配置错误: {section_name}.catch_up_if_missed 必须是布尔值")
     if not isinstance(scheduler_cfg.get("retry_failed_in_same_period", True), bool):
         raise ValueError(f"配置错误: {section_name}.retry_failed_in_same_period 必须是布尔值")
+    if not str(scheduler_cfg.get("state_file", "") or "").strip():
+        raise ValueError(f"配置错误: {section_name}.state_file 不能为空")
+
+
+def _validate_feature_interval_scheduler(section_name: str, scheduler_cfg: Any) -> None:
+    if not isinstance(scheduler_cfg, dict):
+        raise ValueError(f"配置错误: {section_name} 缺失或格式错误")
+    if not isinstance(scheduler_cfg.get("enabled", False), bool):
+        raise ValueError(f"配置错误: {section_name}.enabled 必须是布尔值")
+    if not isinstance(scheduler_cfg.get("auto_start_in_gui", False), bool):
+        raise ValueError(f"配置错误: {section_name}.auto_start_in_gui 必须是布尔值")
+    if int(scheduler_cfg.get("interval_minutes", 0) or 0) <= 0:
+        raise ValueError(f"配置错误: {section_name}.interval_minutes 必须大于0")
+    if int(scheduler_cfg.get("check_interval_sec", 0) or 0) <= 0:
+        raise ValueError(f"配置错误: {section_name}.check_interval_sec 必须大于0")
+    if not isinstance(scheduler_cfg.get("retry_failed_on_next_tick", True), bool):
+        raise ValueError(f"配置错误: {section_name}.retry_failed_on_next_tick 必须是布尔值")
     if not str(scheduler_cfg.get("state_file", "") or "").strip():
         raise ValueError(f"配置错误: {section_name}.state_file 不能为空")
 
@@ -1206,7 +1225,7 @@ def _validate_day_metric_upload(cfg: Dict[str, Any]) -> None:
     for key in ("type", "building", "date", "value", "position_code"):
         if not str(fields.get(key, "")).strip():
             raise ValueError(f"配置错误: features.day_metric_upload.target.fields.{key} 不能为空")
-    _validate_feature_daily_scheduler(
+    _validate_feature_interval_scheduler(
         "features.day_metric_upload.scheduler",
         upload_cfg.get("scheduler", {}),
     )

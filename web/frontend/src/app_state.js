@@ -3456,7 +3456,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
         focusKey: "",
         ...normalizeSchedulerStatusVm({
           running: health.scheduler.running,
-          configured: Boolean(String(config.value?.scheduler?.run_time || "").trim()),
+          configured: Number.parseInt(String(config.value?.scheduler?.interval_minutes || 0), 10) > 0,
           status: health.scheduler.status,
           lastTriggerResult: health.scheduler.last_trigger_result,
           lastDecision: health.scheduler.last_decision,
@@ -3464,8 +3464,11 @@ function normalizeInternalDownloadPoolSlot(slot) {
         summaryText: schedulerDecisionText.value || schedulerTriggerText.value || "标准月报主流程调度",
         parts: [
           {
-            label: "每日调度",
-            runTimeText: normalizeSchedulerText(config.value?.scheduler?.run_time, "未设置"),
+            label: "循环调度",
+            runTimeText:
+              Number.parseInt(String(config.value?.scheduler?.interval_minutes || 0), 10) > 0
+                ? `每 ${config.value?.scheduler?.interval_minutes} 分钟`
+                : "未设置",
             nextRunText: normalizeSchedulerDateText(health.scheduler.next_run_time),
             lastTriggerText: normalizeSchedulerDateText(health.scheduler.last_trigger_at, "暂无记录"),
             resultText: schedulerTriggerText.value || "暂无记录",
@@ -3517,7 +3520,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
         focusKey: "",
         ...normalizeSchedulerStatusVm({
           running: health.day_metric_upload?.scheduler?.running,
-          configured: Boolean(String(config.value?.day_metric_upload?.scheduler?.run_time || "").trim()),
+          configured: Number.parseInt(String(config.value?.day_metric_upload?.scheduler?.interval_minutes || 0), 10) > 0,
           status: health.day_metric_upload?.scheduler?.status,
           lastTriggerResult: health.day_metric_upload?.scheduler?.last_trigger_result,
           lastDecision: health.day_metric_upload?.scheduler?.last_decision,
@@ -3525,8 +3528,11 @@ function normalizeInternalDownloadPoolSlot(slot) {
         summaryText: dayMetricUploadSchedulerDecisionText.value || dayMetricUploadSchedulerTriggerText.value || "固定处理当天、全部启用楼栋",
         parts: [
           {
-            label: "每日调度",
-            runTimeText: normalizeSchedulerText(config.value?.day_metric_upload?.scheduler?.run_time, "未设置"),
+            label: "循环调度",
+            runTimeText:
+              Number.parseInt(String(config.value?.day_metric_upload?.scheduler?.interval_minutes || 0), 10) > 0
+                ? `每 ${config.value?.day_metric_upload?.scheduler?.interval_minutes} 分钟`
+                : "未设置",
             nextRunText: normalizeSchedulerDateText(health.day_metric_upload?.scheduler?.next_run_time),
             lastTriggerText: normalizeSchedulerDateText(health.day_metric_upload?.scheduler?.last_trigger_at, "暂无记录"),
             resultText: dayMetricUploadSchedulerTriggerText.value || "暂无记录",

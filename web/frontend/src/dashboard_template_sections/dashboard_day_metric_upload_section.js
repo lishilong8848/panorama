@@ -27,8 +27,8 @@
             <div class="hint">调度固定处理当天、全部启用楼栋；缺共享文件时会显示等待内网补采同步。</div>
             <div class="task-grid two-col">
               <div class="form-row">
-                <label class="label">每日执行时间</label>
-                <input type="time" step="1" v-model="config.day_metric_upload.scheduler.run_time" @change="saveDayMetricUploadSchedulerQuickConfig" />
+                <label class="label">执行间隔（分钟）</label>
+                <input type="number" min="1" step="1" v-model.number="config.day_metric_upload.scheduler.interval_minutes" @change="saveDayMetricUploadSchedulerQuickConfig" />
               </div>
               <div class="form-row">
                 <label class="label">最近结果</label>
@@ -55,7 +55,7 @@
                 {{ isActionLocked(actionKeyDayMetricUploadSchedulerStop) ? '停止中...' : '停止调度' }}
               </button>
             </div>
-            <div class="hint">{{ dayMetricUploadSchedulerQuickSaving ? '12项独立上传调度配置保存中...' : '修改每日执行时间后自动保存。' }}</div>
+            <div class="hint">{{ dayMetricUploadSchedulerQuickSaving ? '12项独立上传调度配置保存中...' : '修改执行间隔后自动保存。' }}</div>
           </article>
           <div class="day-metric-shell">
             <div class="day-metric-top-grid dashboard-module-primary-grid">

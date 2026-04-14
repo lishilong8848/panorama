@@ -47,10 +47,9 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
         "scheduler": {
             "enabled": True,
             "auto_start_in_gui": False,
-            "run_time": "00:10:00",
+            "interval_minutes": 60,
             "check_interval_sec": 30,
-            "catch_up_if_missed": False,
-            "retry_failed_in_same_period": True,
+            "retry_failed_on_next_tick": True,
             "state_file": "daily_scheduler_state.json",
         },
         "notify": {
@@ -1159,10 +1158,9 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "scheduler": {
                 "enabled": False,
                 "auto_start_in_gui": False,
-                "run_time": "08:00:00",
+                "interval_minutes": 60,
                 "check_interval_sec": 30,
-                "catch_up_if_missed": False,
-                "retry_failed_in_same_period": True,
+                "retry_failed_on_next_tick": True,
                 "state_file": "day_metric_upload_scheduler_state.json",
             },
             "behavior": {

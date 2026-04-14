@@ -1,7 +1,6 @@
 ﻿from __future__ import annotations
 
 import copy
-import re
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
@@ -10,11 +9,6 @@ from app.config.settings_loader import save_settings
 
 
 router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
-
-
-
-def _valid_time(value: str) -> bool:
-    return bool(re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(value or "").strip()))
 
 
 def _scheduler_cfg_from_v3(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -60,8 +54,6 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
         raise HTTPException(status_code=400, detail="请求体必须是JSON对象")
 
     container = request.app.state.container
-    old_scheduler_cfg = _scheduler_cfg_from_v3(container.config)
-    old_run_time = str(old_scheduler_cfg.get("run_time", "")).strip()
 
     merged = copy.deepcopy(container.config)
     common_cfg = merged.get("common")
@@ -76,20 +68,23 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
     allowed = {
         "enabled",
         "auto_start_in_gui",
-        "run_time",
-        "catch_up_if_missed",
-        "retry_failed_in_same_period",
+        "interval_minutes",
+        "check_interval_sec",
+        "retry_failed_on_next_tick",
         "state_file",
     }
     for key in allowed:
         if key not in payload:
             continue
         value = payload.get(key)
-        if key == "run_time":
-            text = str(value or "").strip()
-            if not _valid_time(text):
-                raise HTTPException(status_code=400, detail="run_time 必须是 HH:MM:SS")
-            scheduler_cfg[key] = text
+        if key in {"interval_minutes", "check_interval_sec"}:
+            try:
+                number = int(value)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=400, detail=f"{key} 必须是整数") from exc
+            if number < 1:
+                raise HTTPException(status_code=400, detail=f"{key} 必须大于等于1")
+            scheduler_cfg[key] = number
         elif key == "state_file":
             text = str(value or "").strip()
             if not text:
@@ -105,24 +100,15 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     new_scheduler_cfg = _scheduler_cfg_from_v3(container.config)
-    new_run_time = str(new_scheduler_cfg.get("run_time", "")).strip()
-    run_time_changed = old_run_time != new_run_time
-    state_reset: Dict[str, Any] = {"changed": False, "period": "", "reset_keys": [], "state_path": ""}
-    if run_time_changed and container.scheduler:
-        state_reset = container.scheduler.reset_today_state_for_run_time_change()
-
     runtime = container.scheduler.get_runtime_snapshot() if container.scheduler else {}
     executor_bound = bool(container.is_scheduler_executor_bound())
-    if run_time_changed:
-        message = "调度配置已更新；检测到每日执行时间变化，已自动重置今日调度状态"
-    else:
-        message = "调度配置已更新并热重载"
+    message = "调度配置已更新并热重载"
 
     return {
         "ok": True,
         "message": message,
-        "run_time_changed": run_time_changed,
-        "state_reset": state_reset,
+        "run_time_changed": False,
+        "state_reset": {"changed": False, "period": "", "reset_keys": [], "state_path": ""},
         "executor_bound_after_reload": executor_bound,
         "callback_name": container.scheduler_executor_name(),
         "scheduler_config": {k: new_scheduler_cfg.get(k) for k in sorted(allowed)},

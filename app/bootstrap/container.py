@@ -60,13 +60,13 @@ class AppContainer:
     frontend_assets_dir: Path
     job_service: JobService
     wifi_service: WifiSwitchService | None = None
-    scheduler: DailyAutoSchedulerService | None = None
+    scheduler: IntervalSchedulerService | None = None
     scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     handover_scheduler_manager: HandoverSchedulerManager | None = None
     handover_scheduler_callback: Callable[[str, str], tuple[bool, str]] | None = None
     wet_bulb_collection_scheduler: IntervalSchedulerService | None = None
     wet_bulb_collection_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
-    day_metric_upload_scheduler: DailyAutoSchedulerService | None = None
+    day_metric_upload_scheduler: IntervalSchedulerService | None = None
     day_metric_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     alarm_event_upload_scheduler: DailyAutoSchedulerService | None = None
     alarm_event_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
@@ -274,12 +274,22 @@ class AppContainer:
                 if int(item.get("id", 0) or 0) in target_ids:
                     item["uploaded"] = True
 
-    def _build_scheduler(self) -> DailyAutoSchedulerService:
-        return DailyAutoSchedulerService(
-            config=self.runtime_config,
+    def _build_scheduler(self) -> IntervalSchedulerService:
+        scheduler_cfg = self.runtime_config.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        paths_cfg = self.runtime_config.get("paths", {})
+        if not isinstance(paths_cfg, dict):
+            paths_cfg = {}
+        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
+        return IntervalSchedulerService(
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=runtime_state_root or "runtime_state",
             emit_log=self.add_system_log,
             run_callback=self.scheduler_callback or self._scheduler_run_callback,
             is_busy=lambda: False,
+            thread_name="daily-auto-flow-interval-scheduler",
+            source_name="每日用电明细自动流程",
         )
 
     def _build_handover_scheduler_manager(self) -> HandoverSchedulerManager:
@@ -307,21 +317,25 @@ class AppContainer:
             source_name="湿球温度定时采集",
         )
 
-    def _build_day_metric_upload_scheduler(self) -> DailyAutoSchedulerService:
+    def _build_day_metric_upload_scheduler(self) -> IntervalSchedulerService:
         day_metric_cfg = self.runtime_config.get("day_metric_upload", {})
         if not isinstance(day_metric_cfg, dict):
             day_metric_cfg = {}
         paths_cfg = self.runtime_config.get("paths", {})
         if not isinstance(paths_cfg, dict):
             paths_cfg = {}
-        return DailyAutoSchedulerService(
-            config={
-                "scheduler": day_metric_cfg.get("scheduler", {}),
-                "paths": paths_cfg,
-            },
+        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
+        scheduler_cfg = day_metric_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        return IntervalSchedulerService(
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=runtime_state_root or "runtime_state",
             emit_log=self.add_system_log,
             run_callback=self.day_metric_upload_scheduler_callback or self._day_metric_upload_scheduler_run_callback,
             is_busy=self.job_service.has_incomplete_jobs,
+            thread_name="day-metric-upload-interval-scheduler",
+            source_name="12项独立上传",
         )
 
     def _build_alarm_event_upload_scheduler(self) -> DailyAutoSchedulerService:

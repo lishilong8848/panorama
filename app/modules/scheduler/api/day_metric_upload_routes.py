@@ -14,7 +14,9 @@ router = APIRouter(prefix="/api/scheduler/day-metric-upload", tags=["scheduler-d
 ALLOWED_KEYS = {
     "enabled",
     "auto_start_in_gui",
-    "run_time",
+    "interval_minutes",
+    "check_interval_sec",
+    "retry_failed_on_next_tick",
     "state_file",
 }
 
@@ -96,19 +98,21 @@ def day_metric_upload_scheduler_config(payload: Dict[str, Any], request: Request
         if key not in payload:
             continue
         value = payload.get(key)
-        if key in {"enabled", "auto_start_in_gui"}:
+        if key in {"enabled", "auto_start_in_gui", "retry_failed_on_next_tick"}:
             scheduler_cfg[key] = bool(value)
-        elif key == "run_time":
-            text = str(value or "").strip()
-            if not text:
-                raise HTTPException(status_code=400, detail="run_time 不能为空")
-            scheduler_cfg[key] = text
+        elif key in {"interval_minutes", "check_interval_sec"}:
+            try:
+                number = int(value)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=400, detail=f"{key} 必须是整数") from exc
+            if number < 1:
+                raise HTTPException(status_code=400, detail=f"{key} 必须大于等于1")
+            scheduler_cfg[key] = number
         elif key == "state_file":
             text = str(value or "").strip()
             if not text:
                 raise HTTPException(status_code=400, detail="state_file 不能为空")
             scheduler_cfg[key] = text
-
     try:
         saved = save_settings(merged, container.config_path)
         container.reload_config(saved)
