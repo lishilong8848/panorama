@@ -38,6 +38,14 @@ function formatSchedulerActionReason(reason) {
   return String(reason || "").trim() || "已完成";
 }
 
+function syncLocalMonthlySchedulerAutoStart(targetScheduler, autoStart, options = {}) {
+  if (!targetScheduler || typeof targetScheduler !== "object") return;
+  targetScheduler.auto_start_in_gui = Boolean(autoStart);
+  if (options.enableOnStart && autoStart) {
+    targetScheduler.enabled = true;
+  }
+}
+
 export function createDashboardMonthlyEventReportActions(ctx) {
   const {
     canRun,
@@ -54,7 +62,24 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     fetchHealth,
     fetchJobs,
     runSingleFlight,
+    setSchedulerToggleState,
   } = ctx;
+  let healthRefreshTimer = null;
+
+  function scheduleHealthRefresh(delayMs = 800) {
+    if (healthRefreshTimer) {
+      window.clearTimeout(healthRefreshTimer);
+    }
+    healthRefreshTimer = window.setTimeout(() => {
+      healthRefreshTimer = null;
+      void fetchHealth({ silentMessage: true });
+    }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
+  }
+
+  function markSchedulerToggle(key, mode, runningOverride) {
+    if (typeof setSchedulerToggleState !== "function") return;
+    setSchedulerToggleState(key, { mode, runningOverride });
+  }
 
   function isInternalRole() {
     return String(config?.value?.deployment?.role_mode || "").trim().toLowerCase() === "internal";
@@ -269,12 +294,16 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     return guardedRun(
       ACTION_KEYS.schedulerStart,
       async () => {
+        markSchedulerToggle("monthly_event_report", "starting", true);
         try {
           const data = await startMonthlyEventReportSchedulerApi();
+          syncLocalMonthlySchedulerAutoStart(config.value?.handover_log?.monthly_event_report?.scheduler, true, { enableOnStart: true });
           applySchedulerSnapshot(health?.monthly_event_report?.scheduler, data);
-          await fetchHealth();
+          markSchedulerToggle("monthly_event_report", "idle", true);
+          scheduleHealthRefresh();
           message.value = `月度事件统计表调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("monthly_event_report", "idle", null);
           message.value = formatError(err, "启动月度事件统计表调度");
         }
       },
@@ -290,12 +319,16 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     return guardedRun(
       ACTION_KEYS.schedulerStop,
       async () => {
+        markSchedulerToggle("monthly_event_report", "stopping", false);
         try {
           const data = await stopMonthlyEventReportSchedulerApi();
+          syncLocalMonthlySchedulerAutoStart(config.value?.handover_log?.monthly_event_report?.scheduler, false);
           applySchedulerSnapshot(health?.monthly_event_report?.scheduler, data);
-          await fetchHealth();
+          markSchedulerToggle("monthly_event_report", "idle", false);
+          scheduleHealthRefresh();
           message.value = `月度事件统计表调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("monthly_event_report", "idle", null);
           message.value = formatError(err, "停止月度事件统计表调度");
         }
       },
@@ -313,7 +346,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     const scheduler = monthly.scheduler || {};
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       day_of_month: Number.parseInt(String(scheduler.day_of_month ?? 1), 10) || 1,
       run_time: String(scheduler.run_time || "").trim(),
       check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
@@ -364,12 +397,16 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     return guardedRun(
       ACTION_KEYS.changeSchedulerStart,
       async () => {
+        markSchedulerToggle("monthly_change_report", "starting", true);
         try {
           const data = await startMonthlyChangeReportSchedulerApi();
+          syncLocalMonthlySchedulerAutoStart(config.value?.handover_log?.monthly_change_report?.scheduler, true, { enableOnStart: true });
           applySchedulerSnapshot(health?.monthly_change_report?.scheduler, data);
-          await fetchHealth();
+          markSchedulerToggle("monthly_change_report", "idle", true);
+          scheduleHealthRefresh();
           message.value = `月度变更统计表调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("monthly_change_report", "idle", null);
           message.value = formatError(err, "启动月度变更统计表调度");
         }
       },
@@ -385,12 +422,16 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     return guardedRun(
       ACTION_KEYS.changeSchedulerStop,
       async () => {
+        markSchedulerToggle("monthly_change_report", "stopping", false);
         try {
           const data = await stopMonthlyChangeReportSchedulerApi();
+          syncLocalMonthlySchedulerAutoStart(config.value?.handover_log?.monthly_change_report?.scheduler, false);
           applySchedulerSnapshot(health?.monthly_change_report?.scheduler, data);
-          await fetchHealth();
+          markSchedulerToggle("monthly_change_report", "idle", false);
+          scheduleHealthRefresh();
           message.value = `月度变更统计表调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("monthly_change_report", "idle", null);
           message.value = formatError(err, "停止月度变更统计表调度");
         }
       },
@@ -408,7 +449,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     const scheduler = monthly.scheduler || {};
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       day_of_month: Number.parseInt(String(scheduler.day_of_month ?? 1), 10) || 1,
       run_time: String(scheduler.run_time || "").trim(),
       check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,

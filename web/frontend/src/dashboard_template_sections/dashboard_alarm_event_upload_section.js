@@ -38,21 +38,21 @@
                         <div class="btn-line">
                           <button
                             class="btn btn-success"
-                            :disabled="health.alarm_event_upload.scheduler.running || isActionLocked(actionKeyAlarmEventUploadSchedulerStart)"
+                            :disabled="getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.running) || isActionLocked(actionKeyAlarmEventUploadSchedulerStart) || isActionLocked(actionKeyAlarmEventUploadSchedulerStop) || isSchedulerTogglePending('alarm_event_upload')"
                             @click="startAlarmEventUploadScheduler"
                           >
                             {{
-                              isActionLocked(actionKeyAlarmEventUploadSchedulerStart)
+                              getSchedulerToggleMode('alarm_event_upload') === 'starting'
                                 ? '启动中...'
-                                : (health.alarm_event_upload.scheduler.running ? '已启动调度' : '启动调度')
+                                : (getSchedulerToggleMode('alarm_event_upload') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.running) ? '已启动调度' : '启动调度'))
                             }}
                           </button>
                           <button
                             class="btn btn-danger"
-                            :disabled="!health.alarm_event_upload.scheduler.running || isActionLocked(actionKeyAlarmEventUploadSchedulerStop)"
+                            :disabled="!getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.running) || isActionLocked(actionKeyAlarmEventUploadSchedulerStop) || isActionLocked(actionKeyAlarmEventUploadSchedulerStart) || isSchedulerTogglePending('alarm_event_upload')"
                             @click="stopAlarmEventUploadScheduler"
                           >
-                            {{ isActionLocked(actionKeyAlarmEventUploadSchedulerStop) ? '停止中...' : '停止调度' }}
+                            {{ getSchedulerToggleMode('alarm_event_upload') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('alarm_event_upload') === 'starting' ? '处理中...' : '停止调度') }}
                           </button>
                         </div>
                         <div class="hint">{{ alarmEventUploadSchedulerQuickSaving ? '告警信息上传调度配置保存中...' : '修改每日执行时间后自动保存。' }}</div>

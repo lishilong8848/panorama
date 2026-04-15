@@ -1239,6 +1239,15 @@ export function createAppState(vueApi) {
   const alarmEventUploadSchedulerQuickSaving = ref(false);
   const monthlyEventReportSchedulerQuickSaving = ref(false);
   const monthlyChangeReportSchedulerQuickSaving = ref(false);
+  const schedulerToggleState = reactive({
+    scheduler: { mode: "idle", runningOverride: null },
+    handover: { mode: "idle", runningOverride: null },
+    wet_bulb: { mode: "idle", runningOverride: null },
+    day_metric_upload: { mode: "idle", runningOverride: null },
+    alarm_event_upload: { mode: "idle", runningOverride: null },
+    monthly_event_report: { mode: "idle", runningOverride: null },
+    monthly_change_report: { mode: "idle", runningOverride: null },
+  });
   const configAutoSaveSuspendDepth = ref(0);
   const configAutoSaveStatus = reactive({
     mode: "idle",
@@ -4136,6 +4145,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
     alarmEventUploadSchedulerQuickSaving,
     monthlyEventReportSchedulerQuickSaving,
     monthlyChangeReportSchedulerQuickSaving,
+    schedulerToggleState,
     configAutoSaveSuspendDepth,
     configAutoSaveStatus,
     autoResumeState,

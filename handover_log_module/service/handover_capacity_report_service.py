@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 from urllib.error import URLError
@@ -22,7 +22,7 @@ from handover_log_module.core.normalizers import format_number
 from handover_log_module.repository.excel_reader import load_rows, load_workbook_quietly
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
 from handover_log_module.service.capacity_report_common import build_capacity_template_snapshot
-from handover_log_module.service.handover_capacity_oil_cache_service import HandoverCapacityOilCacheService
+from handover_log_module.service.review_session_service import ReviewSessionService
 from pipeline_utils import get_app_dir
 
 
@@ -190,7 +190,7 @@ def _write_cells_with_merged_support(sheet: Any, cell_values: Dict[str, Any]) ->
 class HandoverCapacityReportService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
-        self._oil_cache_service = HandoverCapacityOilCacheService(self.config)
+        self._review_session_service = ReviewSessionService(self.config)
         self._weather_payload_cache: Dict[str, Dict[str, str]] = {}
         self._water_summary_cache: Dict[tuple[str, str], Dict[str, str]] = {}
 
@@ -309,6 +309,142 @@ class HandoverCapacityReportService:
             return ""
 
         return {"first": _find_value(first_candidates), "second": _find_value(second_candidates)}
+
+    @staticmethod
+    def _previous_duty_context(*, duty_date: str, duty_shift: str) -> tuple[str, str]:
+        duty_day = parse_duty_date(duty_date)
+        shift_text = _text(duty_shift).lower()
+        if shift_text == "day":
+            return (duty_day - timedelta(days=1)).strftime("%Y-%m-%d"), "night"
+        return duty_day.strftime("%Y-%m-%d"), "day"
+
+    @staticmethod
+    def _scale_ab_oil_value(raw_value: Any) -> str:
+        number = _to_float(raw_value)
+        if number is None:
+            return _text(raw_value)
+        return format_number(number * 1000 / 0.84)
+
+    def _extract_current_oil_display_values(
+        self,
+        *,
+        building: str,
+        rows: List[Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, str]:
+        building_text = _text(building)
+        raw_values = self._extract_oil_values(rows)
+        if building_text == "D楼":
+            raw_values = {
+                "first": self._extract_specific_oil_value(rows, ["1#油罐体积"]),
+                "second": self._extract_specific_oil_value(rows, ["2#油罐体积"]),
+            }
+        display_values = dict(raw_values)
+        if building_text in {"A楼", "B楼"}:
+            display_values = {
+                "first": self._scale_ab_oil_value(raw_values.get("first")),
+                "second": self._scale_ab_oil_value(raw_values.get("second")),
+            }
+        emit_log(
+            "[交接班][容量报表][燃油] 当前班次取值 "
+            f"building={building_text}, raw_first={_text(raw_values.get('first')) or '-'}, "
+            f"raw_second={_text(raw_values.get('second')) or '-'}, "
+            f"display_first={_text(display_values.get('first')) or '-'}, "
+            f"display_second={_text(display_values.get('second')) or '-'}"
+        )
+        return {
+            "first": _text(display_values.get("first")),
+            "second": _text(display_values.get("second")),
+        }
+
+    def _extract_specific_oil_value(self, rows: List[Any], aliases: List[str]) -> str:
+        for candidate in aliases:
+            for row in rows:
+                if _text(getattr(row, "c_text", "")) != "燃油自控系统":
+                    continue
+                if _text(getattr(row, "d_name", "")) != candidate:
+                    continue
+                value_text = self._raw_value_text(getattr(row, "e_raw", None))
+                if value_text:
+                    return value_text
+        return ""
+
+    def _load_previous_capacity_display_oil_values(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        current_display_values: Dict[str, str],
+        emit_log: Callable[[str], None],
+    ) -> tuple[Dict[str, str], str]:
+        previous_date, previous_shift = self._previous_duty_context(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+        )
+        try:
+            previous_session = self._review_session_service.get_latest_session_for_context(
+                building=building,
+                duty_date=previous_date,
+                duty_shift=previous_shift,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warning = f"上一班容量文件查询失败，已回退当前班次值: {exc}"
+            emit_log(
+                "[交接班][容量报表][燃油] 上一班容量文件查询失败 "
+                f"building={building}, duty={previous_date}/{previous_shift}, error={exc}"
+            )
+            return dict(current_display_values), warning
+
+        previous_capacity_output = ""
+        if isinstance(previous_session, dict):
+            previous_capacity_output = _text(previous_session.get("capacity_output_file"))
+        if not previous_capacity_output:
+            warning = "上一班容量文件未命中，已回退当前班次值"
+            emit_log(
+                "[交接班][容量报表][燃油] 上一班容量文件未命中 "
+                f"building={building}, duty={previous_date}/{previous_shift}"
+            )
+            return dict(current_display_values), warning
+
+        emit_log(
+            "[交接班][容量报表][燃油] 上一班容量文件命中 "
+            f"building={building}, duty={previous_date}/{previous_shift}, output={previous_capacity_output}"
+        )
+        previous_capacity_path = Path(previous_capacity_output)
+        if not previous_capacity_path.exists() or not previous_capacity_path.is_file():
+            warning = "上一班容量文件不存在，已回退当前班次值"
+            emit_log(
+                "[交接班][容量报表][燃油] 上一班容量文件不存在 "
+                f"building={building}, duty={previous_date}/{previous_shift}, output={previous_capacity_output}"
+            )
+            return dict(current_display_values), warning
+        try:
+            previous_values = self._read_handover_cells(
+                previous_capacity_output,
+                ["U13", "X13"],
+                sheet_name=_text(self._template_cfg().get("sheet_name")),
+            )
+        except Exception as exc:  # noqa: BLE001
+            warning = f"上一班容量文件读取失败，已回退当前班次值: {exc}"
+            emit_log(
+                "[交接班][容量报表][燃油] 上一班容量文件读取失败 "
+                f"building={building}, duty={previous_date}/{previous_shift}, output={previous_capacity_output}, error={exc}"
+            )
+            return dict(current_display_values), warning
+        previous_first = _text(previous_values.get("U13"))
+        previous_second = _text(previous_values.get("X13"))
+        if not previous_first and not previous_second:
+            warning = "上一班容量文件U13/X13为空，已回退当前班次值"
+            emit_log(
+                "[交接班][容量报表][燃油] 上一班容量文件U13/X13为空 "
+                f"building={building}, duty={previous_date}/{previous_shift}, output={previous_capacity_output}"
+            )
+            return dict(current_display_values), warning
+        return {
+            "first": previous_first or _text(current_display_values.get("first")),
+            "second": previous_second or _text(current_display_values.get("second")),
+        }, ""
 
     def _normalize_alarm_summary(self, payload: Dict[str, Any] | None) -> Dict[str, Any]:
         data = payload if isinstance(payload, dict) else {}
@@ -931,15 +1067,21 @@ class HandoverCapacityReportService:
             sheet_name=handover_sheet_name,
         )
         capacity_rows = self._load_capacity_rows(capacity_source_file)
-        oil_current = self._extract_oil_values(capacity_rows)
-        oil_previous = self._oil_cache_service.load_previous_values(
+        oil_current = self._extract_current_oil_display_values(
+            building=building_text,
+            rows=capacity_rows,
+            emit_log=emit_log,
+        )
+        oil_previous, previous_oil_warning = self._load_previous_capacity_display_oil_values(
             building=building_text,
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
+            current_display_values=oil_current,
+            emit_log=emit_log,
         )
         warnings: List[str] = []
-        if not oil_previous.get("first") and not oil_previous.get("second"):
-            warnings.append("上一班燃油自控系统缓存不存在")
+        if previous_oil_warning:
+            warnings.append(previous_oil_warning)
 
         current_alarm = self._normalize_alarm_summary(current_alarm_summary)
         previous_alarm = self._normalize_alarm_summary(previous_alarm_summary)
@@ -1014,15 +1156,6 @@ class HandoverCapacityReportService:
             atomic_save_workbook(workbook, output_file)
         finally:
             workbook.close()
-
-        if oil_current.get("first") or oil_current.get("second"):
-            self._oil_cache_service.save_current_values(
-                building=building_text,
-                duty_date=duty_date_text,
-                duty_shift=duty_shift_text,
-                first=_text(oil_current.get("first")),
-                second=_text(oil_current.get("second")),
-            )
 
         emit_log(
             "[交接班][容量报表] 生成完成 "

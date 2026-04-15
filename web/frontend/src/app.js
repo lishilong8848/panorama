@@ -552,6 +552,7 @@ createApp({
       alarmEventUploadSchedulerQuickSaving,
       monthlyEventReportSchedulerQuickSaving,
       monthlyChangeReportSchedulerQuickSaving,
+      schedulerToggleState,
       configAutoSaveSuspendDepth,
       configAutoSaveStatus,
       autoResumeState,
@@ -873,6 +874,79 @@ createApp({
     const externalAlarmUploadBuilding = ref("全部楼栋");
     const monthlyReportTestReceiveIdDraftEvent = ref("");
     const monthlyReportTestReceiveIdDraftChange = ref("");
+    const schedulerToggleTimers = new Map();
+    const SCHEDULER_TOGGLE_SETTLE_MS = 5000;
+
+    function clearSchedulerToggleTimer(key) {
+      const timer = schedulerToggleTimers.get(key);
+      if (timer) {
+        window.clearTimeout(timer);
+        schedulerToggleTimers.delete(key);
+      }
+    }
+
+    function scheduleSchedulerToggleAutoClear(key) {
+      clearSchedulerToggleTimer(key);
+      const timer = window.setTimeout(() => {
+        schedulerToggleTimers.delete(key);
+        const entry = schedulerToggleState?.[key];
+        if (!entry || typeof entry !== "object") return;
+        entry.mode = "idle";
+        entry.runningOverride = null;
+      }, SCHEDULER_TOGGLE_SETTLE_MS);
+      schedulerToggleTimers.set(key, timer);
+    }
+
+    function setSchedulerToggleState(key, patch = {}) {
+      const name = String(key || "").trim();
+      const entry = schedulerToggleState?.[name];
+      if (!entry || typeof entry !== "object") return;
+      if (Object.prototype.hasOwnProperty.call(patch, "mode")) {
+        entry.mode = String(patch.mode || "idle").trim() || "idle";
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, "runningOverride")) {
+        entry.runningOverride = typeof patch.runningOverride === "boolean" ? patch.runningOverride : null;
+      }
+      if (entry.mode === "idle" && entry.runningOverride === null) {
+        clearSchedulerToggleTimer(name);
+        return;
+      }
+      scheduleSchedulerToggleAutoClear(name);
+    }
+
+    function syncSchedulerToggleStateWithHealth(key, actualRunning) {
+      const name = String(key || "").trim();
+      const entry = schedulerToggleState?.[name];
+      if (!entry || typeof entry !== "object") return;
+      const actual = Boolean(actualRunning);
+      if (typeof entry.runningOverride === "boolean" && entry.runningOverride === actual) {
+        entry.runningOverride = null;
+      }
+      if (entry.mode !== "idle" && entry.runningOverride === null) {
+        entry.mode = "idle";
+      }
+      if (entry.mode === "idle" && entry.runningOverride === null) {
+        clearSchedulerToggleTimer(name);
+      }
+    }
+
+    function getSchedulerToggleMode(key) {
+      const entry = schedulerToggleState?.[String(key || "").trim()];
+      return String(entry?.mode || "idle").trim() || "idle";
+    }
+
+    function getSchedulerEffectiveRunning(key, actualRunning) {
+      const entry = schedulerToggleState?.[String(key || "").trim()];
+      if (typeof entry?.runningOverride === "boolean") {
+        return entry.runningOverride;
+      }
+      return Boolean(actualRunning);
+    }
+
+    function isSchedulerTogglePending(key) {
+      const mode = getSchedulerToggleMode(key);
+      return mode === "starting" || mode === "stopping";
+    }
     const isAlarmSourceCacheUploadRunning = computed(() => Boolean(externalAlarmReadinessFamily.value?.uploadRunning));
     const isSourceCacheUploadAlarmFullLocked = computed(() =>
       isAlarmSourceCacheUploadRunning.value || isActionLocked(actionKeySourceCacheUploadAlarmFull),
@@ -4557,6 +4631,14 @@ createApp({
       { immediate: true },
     );
 
+    watch(() => health.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("scheduler", value), { immediate: true });
+    watch(() => health.handover_scheduler.running, (value) => syncSchedulerToggleStateWithHealth("handover", value), { immediate: true });
+    watch(() => health.wet_bulb_collection.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("wet_bulb", value), { immediate: true });
+    watch(() => health.day_metric_upload.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("day_metric_upload", value), { immediate: true });
+    watch(() => health.alarm_event_upload.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("alarm_event_upload", value), { immediate: true });
+    watch(() => health.monthly_event_report.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("monthly_event_report", value), { immediate: true });
+    watch(() => health.monthly_change_report.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("monthly_change_report", value), { immediate: true });
+
     watch(
       () => shouldPollBridgeTasks.value,
       (enabled) => {
@@ -4623,11 +4705,13 @@ createApp({
       sharedBridgeSelfCheckResult,
       streamController,
       fetchHealth,
+      fetchConfig,
       fetchJobs,
       fetchBridgeTasks,
       fetchBridgeTaskDetail,
       syncHandoverDutyFromNow,
       runSingleFlight,
+      setSchedulerToggleState,
     });
 
     const {
@@ -4780,6 +4864,7 @@ createApp({
         window.clearTimeout(dashboardSchedulerOverviewFocusTimer);
         dashboardSchedulerOverviewFocusTimer = null;
       }
+      Array.from(schedulerToggleTimers.keys()).forEach((key) => clearSchedulerToggleTimer(key));
     });
 
     return {
@@ -4997,6 +5082,10 @@ createApp({
       customAbsoluteEndLocal,
       canRun,
       handoverGenerationBusy,
+      schedulerToggleState,
+      getSchedulerToggleMode,
+      getSchedulerEffectiveRunning,
+      isSchedulerTogglePending,
       isActionLocked,
       actionKeyAutoOnce,
       actionKeyMultiDate,

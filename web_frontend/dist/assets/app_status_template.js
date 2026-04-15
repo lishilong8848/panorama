@@ -224,7 +224,7 @@
             </div>
           </div>
           <div class="hint">{{ internalRuntimeOverview.summaryText }}</div>
-          <div class="hint">每 2 秒自动刷新一次，实时显示 A楼 / B楼 / C楼 / D楼 / E楼 的页面、占用和登录状态，以及四组共享文件状态。</div>
+          <div class="hint">收到内网下载、共享桥接和楼栋浏览器相关事件时会即时刷新，并保留每 10 秒一次的兜底刷新。</div>
           <div class="status-list" v-if="internalRuntimeOverview.items && internalRuntimeOverview.items.length">
             <div
               class="status-list-row"

@@ -1,3 +1,5 @@
+import openpyxl
+
 from handover_log_module.core.models import RawRow
 from handover_log_module.service.capacity_report_common import build_capacity_cells_with_config
 from handover_log_module.service.handover_capacity_report_service import (
@@ -92,6 +94,95 @@ def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
     assert values["AC24"] == "9.8"
     assert values["X2"] == "96%"
     assert "D8" in service.tracked_cells()
+
+
+def test_ab_building_current_oil_values_are_scaled() -> None:
+    service = HandoverCapacityReportService({})
+    rows = [
+        RawRow(1, "", "燃油自控系统", "1#油罐容积", "10", 10.0),
+        RawRow(2, "", "燃油自控系统", "2#油罐容积", "20", 20.0),
+    ]
+
+    values = service._extract_current_oil_display_values(
+        building="A楼",
+        rows=rows,
+        emit_log=lambda _msg: None,
+    )
+
+    assert values["first"] == "11904.76"
+    assert values["second"] == "23809.52"
+
+
+def test_d_building_current_oil_values_use_specific_tank_volume_aliases() -> None:
+    service = HandoverCapacityReportService({})
+    rows = [
+        RawRow(1, "", "燃油自控系统", "1#油罐容积", "10", 10.0),
+        RawRow(2, "", "燃油自控系统", "2#油罐容积", "20", 20.0),
+        RawRow(3, "", "燃油自控系统", "1#油罐体积", "31", 31.0),
+        RawRow(4, "", "燃油自控系统", "2#油罐体积", "41", 41.0),
+    ]
+
+    values = service._extract_current_oil_display_values(
+        building="D楼",
+        rows=rows,
+        emit_log=lambda _msg: None,
+    )
+
+    assert values["first"] == "31"
+    assert values["second"] == "41"
+
+
+def test_previous_capacity_values_read_from_previous_capacity_file(tmp_path) -> None:
+    service = HandoverCapacityReportService({"capacity_report": {"template": {"sheet_name": "Sheet"}}})
+    previous_file = tmp_path / "previous_capacity.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Sheet"
+    sheet["U13"] = "123"
+    sheet["X13"] = "456"
+    workbook.save(previous_file)
+    workbook.close()
+
+    class _FakeReviewService:
+        def get_latest_session_for_context(self, **kwargs):
+            assert kwargs["building"] == "A楼"
+            assert kwargs["duty_date"] == "2026-04-10"
+            assert kwargs["duty_shift"] == "night"
+            return {"capacity_output_file": str(previous_file), "revision": 2, "updated_at": "2026-04-11 09:00:00"}
+
+    service._review_session_service = _FakeReviewService()
+
+    values, warning = service._load_previous_capacity_display_oil_values(
+        building="A楼",
+        duty_date="2026-04-11",
+        duty_shift="day",
+        current_display_values={"first": "11", "second": "22"},
+        emit_log=lambda _msg: None,
+    )
+
+    assert warning == ""
+    assert values == {"first": "123", "second": "456"}
+
+
+def test_previous_capacity_values_fallback_to_current_when_previous_missing() -> None:
+    service = HandoverCapacityReportService({})
+
+    class _FakeReviewService:
+        def get_latest_session_for_context(self, **kwargs):
+            return None
+
+    service._review_session_service = _FakeReviewService()
+
+    values, warning = service._load_previous_capacity_display_oil_values(
+        building="B楼",
+        duty_date="2026-04-11",
+        duty_shift="day",
+        current_display_values={"first": "33", "second": "44"},
+        emit_log=lambda _msg: None,
+    )
+
+    assert warning == "上一班容量文件未命中，已回退当前班次值"
+    assert values == {"first": "33", "second": "44"}
 
 
 def test_d_building_cooling_tower_out_temp_alias_fills_f30() -> None:

@@ -21,6 +21,8 @@ import {
   triggerInternalPeerUpdaterCheckApi,
   getBridgeTaskApi,
   getBridgeTasksApi,
+  getInternalRuntimeBuildingStatusApi,
+  getInternalRuntimeStatusApi,
   buildHandoverDailyReportCaptureAssetUrl,
   getBootstrapHealthApi,
   getConfigApi,
@@ -132,6 +134,8 @@ export function createRuntimeHealthConfigActions(ctx) {
     handoverDutyDate,
     handoverDutyShift,
     configAutoSaveSuspendDepth,
+    configAutoSaveStatus,
+    timers,
     streamController,
     runSingleFlight,
     bootstrapReady,
@@ -139,6 +143,9 @@ export function createRuntimeHealthConfigActions(ctx) {
     configLoaded,
     healthLoadError,
     configLoadError,
+    internalRuntimeSummary,
+    internalBuildingRuntimeStatusMap,
+    runtimeWarmupReady,
     engineerDirectoryLoaded,
     updaterUiOverlayVisible,
     updaterUiOverlayTitle,
@@ -153,6 +160,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   let lastSavedConfigSignature = "";
   let serverConfigSnapshot = null;
   let engineerDirectoryPrefetchTimer = null;
+  let configRequestInFlight = null;
   const healthRequestInFlight = {
     lite: null,
     full: null,
@@ -168,7 +176,106 @@ export function createRuntimeHealthConfigActions(ctx) {
   let updaterQueueMonitorTimer = null;
   let updaterHealthHydratedOnce = false;
   let handoverReviewStatusBroadcastBound = false;
+  let internalRuntimeSummaryRequestInFlight = null;
+  const internalRuntimeBuildingRequestsInFlight = new Map();
+  let internalRuntimeRefreshDebounceTimer = null;
+  let internalRuntimeRefreshAllPending = false;
+  const internalRuntimeRefreshBuildingsPending = new Set();
   const BRIDGE_TASKS_FETCH_COOLDOWN_MS = 1200;
+  const INTERNAL_RUNTIME_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"];
+
+  function resolveCurrentRoleMode() {
+    return String(health?.deployment?.role_mode || config?.value?.deployment?.role_mode || "").trim().toLowerCase();
+  }
+
+  function canUseInternalRuntimeStatus() {
+    return resolveCurrentRoleMode() === "internal" && Boolean(runtimeWarmupReady?.value);
+  }
+
+  function normalizeInternalRuntimeBuildingName(building) {
+    const raw = String(building || "").trim().toUpperCase();
+    if (INTERNAL_RUNTIME_BUILDINGS.includes(raw)) return raw;
+    const compact = raw.replace("楼", "");
+    if (["A", "B", "C", "D", "E"].includes(compact)) {
+      return `${compact}楼`;
+    }
+    return "A楼";
+  }
+
+  function normalizeInternalRuntimeBuildingCode(building) {
+    return normalizeInternalRuntimeBuildingName(building).replace("楼", "").toLowerCase();
+  }
+
+  function resetInternalBuildingRuntimeStatusMap() {
+    if (!internalBuildingRuntimeStatusMap?.value || typeof internalBuildingRuntimeStatusMap.value !== "object") {
+      return;
+    }
+    internalBuildingRuntimeStatusMap.value = Object.fromEntries(
+      INTERNAL_RUNTIME_BUILDINGS.map((building) => [
+        building,
+        {
+          updated_at: "",
+          building,
+          building_code: normalizeInternalRuntimeBuildingCode(building),
+          page_slot: { building },
+          source_families: {},
+          pool: { browser_ready: false, last_error: "" },
+        },
+      ]),
+    );
+  }
+
+  function scheduleInternalRuntimeStatusRefresh(options = {}) {
+    if (!canUseInternalRuntimeStatus()) return;
+    const buildingText = String(options?.building || "").trim();
+    if (buildingText) {
+      internalRuntimeRefreshBuildingsPending.add(normalizeInternalRuntimeBuildingName(buildingText));
+    } else {
+      internalRuntimeRefreshAllPending = true;
+    }
+    if (internalRuntimeRefreshDebounceTimer) {
+      window.clearTimeout(internalRuntimeRefreshDebounceTimer);
+    }
+    const delayMs = Math.max(0, Number.parseInt(String(options?.delayMs || 250), 10) || 250);
+    internalRuntimeRefreshDebounceTimer = window.setTimeout(() => {
+      const refreshAll = internalRuntimeRefreshAllPending || internalRuntimeRefreshBuildingsPending.size <= 0;
+      const buildingTargets = refreshAll ? [] : Array.from(internalRuntimeRefreshBuildingsPending);
+      internalRuntimeRefreshDebounceTimer = null;
+      internalRuntimeRefreshAllPending = false;
+      internalRuntimeRefreshBuildingsPending.clear();
+      if (!canUseInternalRuntimeStatus()) return;
+      void fetchInternalRuntimeSummary({ silentMessage: true, force: true });
+      if (refreshAll) {
+        void fetchAllInternalBuildingRuntimeStatuses({ silentMessage: true, force: true });
+        return;
+      }
+      buildingTargets.forEach((building) => {
+        void fetchInternalRuntimeBuildingRuntimeStatus(building, { silentMessage: true, force: true });
+      });
+    }, delayMs);
+  }
+
+  function triggerInternalRuntimeStatusRefreshFromLogLine(line) {
+    const text = String(line || "").trim();
+    if (!text || !canUseInternalRuntimeStatus()) return;
+    const normalized = text.toLowerCase();
+    if (
+      !normalized.includes("[共享桥接]")
+      && !normalized.includes("[共享缓存]")
+      && !normalized.includes("浏览器池")
+      && !normalized.includes("楼栋浏览器")
+      && !normalized.includes("内网下载")
+      && !normalized.includes("补采")
+      && !normalized.includes("页池")
+    ) {
+      return;
+    }
+    const matchedBuilding = INTERNAL_RUNTIME_BUILDINGS.find((building) => text.includes(building)) || "";
+    scheduleInternalRuntimeStatusRefresh({
+      building: matchedBuilding,
+      delayMs: matchedBuilding ? 180 : 300,
+    });
+  }
 
   function isUpdaterTrafficPaused() {
     return Boolean(updaterUiOverlayVisible?.value || updaterAwaitingRestartRecovery?.value);
@@ -179,6 +286,22 @@ export function createRuntimeHealthConfigActions(ctx) {
       window.clearTimeout(bootstrapRetryTimer);
       bootstrapRetryTimer = null;
     }
+  }
+
+  function clearConfigRetryTimer() {
+    if (timers?.configRetryTimer) {
+      window.clearTimeout(timers.configRetryTimer);
+      timers.configRetryTimer = null;
+    }
+  }
+
+  function scheduleConfigRetry() {
+    if (configLoaded?.value) return;
+    clearConfigRetryTimer();
+    timers.configRetryTimer = window.setTimeout(() => {
+      timers.configRetryTimer = null;
+      void fetchConfig({ silentMessage: true });
+    }, 1000);
   }
 
   function scheduleBootstrapHealthRetry() {
@@ -677,13 +800,24 @@ export function createRuntimeHealthConfigActions(ctx) {
     return { ok: true, v3Payload, signature };
   }
 
+  function syncConfigAutoSaveSignature(signature = "", { pending = true } = {}) {
+    if (!configAutoSaveStatus || typeof configAutoSaveStatus !== "object") return;
+    const normalizedSignature = String(signature || "");
+    configAutoSaveStatus.saved_signature = normalizedSignature;
+    if (pending) {
+      configAutoSaveStatus.pending_signature = normalizedSignature;
+    }
+  }
+
   function setLastSavedSignatureFromPreparedPayload() {
     const payloadState = buildPreparedSavePayload();
     if (!payloadState.ok) {
       lastSavedConfigSignature = "";
+      syncConfigAutoSaveSignature("", { pending: true });
       return;
     }
     lastSavedConfigSignature = payloadState.signature || "";
+    syncConfigAutoSaveSignature(lastSavedConfigSignature, { pending: true });
   }
 
   function withAutoSaveSuspended(applyFn) {
@@ -702,6 +836,16 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function appendLog(payload) {
+    const logLine = String(
+      payload?.line
+      || payload?.message
+      || payload?.payload?.message
+      || payload?.payload?.error
+      || "",
+    ).trim();
+    if (logLine) {
+      triggerInternalRuntimeStatusRefreshFromLogLine(logLine);
+    }
     const entry = normalizeLogEntry(payload);
     if (!entry || !["warning", "error"].includes(entry.level)) return;
     if (entry.id > 0 && logs.value.some((item) => Number.parseInt(String(item?.id || 0), 10) === entry.id)) {
@@ -1313,6 +1457,79 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
       return false;
     }
+  }
+
+  async function fetchInternalRuntimeSummary(options = {}) {
+    if (isUpdaterTrafficPaused() || !canUseInternalRuntimeStatus()) return false;
+    const silentMessage = Boolean(options?.silentMessage);
+    if (internalRuntimeSummaryRequestInFlight) {
+      return internalRuntimeSummaryRequestInFlight;
+    }
+    internalRuntimeSummaryRequestInFlight = (async () => {
+      try {
+        const data = await getInternalRuntimeStatusApi();
+        const summary = data?.summary && typeof data.summary === "object" ? data.summary : null;
+        internalRuntimeSummary.value = summary;
+        return true;
+      } catch (err) {
+        if (!silentMessage) {
+          message.value = `读取内网运行状态失败: ${err}`;
+        }
+        return false;
+      } finally {
+        internalRuntimeSummaryRequestInFlight = null;
+      }
+    })();
+    return internalRuntimeSummaryRequestInFlight;
+  }
+
+  async function fetchInternalRuntimeBuildingRuntimeStatus(building, options = {}) {
+    if (isUpdaterTrafficPaused() || !canUseInternalRuntimeStatus()) return false;
+    const buildingText = normalizeInternalRuntimeBuildingName(building);
+    const buildingCode = normalizeInternalRuntimeBuildingCode(buildingText);
+    const silentMessage = Boolean(options?.silentMessage);
+    const currentInFlight = internalRuntimeBuildingRequestsInFlight.get(buildingCode);
+    if (currentInFlight) {
+      return currentInFlight;
+    }
+    const request = (async () => {
+      try {
+        const data = await getInternalRuntimeBuildingStatusApi(buildingCode);
+        const status = data?.status && typeof data.status === "object" ? data.status : null;
+        if (!status || !internalBuildingRuntimeStatusMap?.value || typeof internalBuildingRuntimeStatusMap.value !== "object") {
+          return false;
+        }
+        internalBuildingRuntimeStatusMap.value = {
+          ...internalBuildingRuntimeStatusMap.value,
+          [buildingText]: {
+            ...(internalBuildingRuntimeStatusMap.value?.[buildingText] || {}),
+            ...status,
+            building: status.building || buildingText,
+            building_code: status.building_code || buildingCode,
+          },
+        };
+        return true;
+      } catch (err) {
+        if (!silentMessage) {
+          message.value = `读取 ${buildingText} 内网状态失败: ${err}`;
+        }
+        return false;
+      } finally {
+        internalRuntimeBuildingRequestsInFlight.delete(buildingCode);
+      }
+    })();
+    internalRuntimeBuildingRequestsInFlight.set(buildingCode, request);
+    return request;
+  }
+
+  async function fetchAllInternalBuildingRuntimeStatuses(options = {}) {
+    if (isUpdaterTrafficPaused() || !canUseInternalRuntimeStatus()) return false;
+    const results = await Promise.all(
+      INTERNAL_RUNTIME_BUILDINGS.map((building) =>
+        fetchInternalRuntimeBuildingRuntimeStatus(building, options),
+      ),
+    );
+    return results.every(Boolean);
   }
 
   function bindHandoverReviewStatusBroadcast() {
@@ -2254,34 +2471,45 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchConfig(options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (configRequestInFlight) return configRequestInFlight;
     const silentMessage = Boolean(options?.silentMessage);
-    try {
-      const data = await getConfigApi();
-      serverConfigSnapshot = clone(data || {});
-      const normalized = ensureConfigShape(convertV3ConfigToLegacy(data || {}));
-      withAutoSaveSuspended(() => {
-        hydrateConfigView(normalized);
-        setLastSavedSignatureFromPreparedPayload();
-      });
-      if (configLoaded) {
-        configLoaded.value = true;
+    configRequestInFlight = (async () => {
+      try {
+        const data = await getConfigApi();
+        serverConfigSnapshot = clone(data || {});
+        const normalized = ensureConfigShape(convertV3ConfigToLegacy(data || {}));
+        withAutoSaveSuspended(() => {
+          hydrateConfigView(normalized);
+          setLastSavedSignatureFromPreparedPayload();
+        });
+        clearConfigRetryTimer();
+        if (configLoaded) {
+          configLoaded.value = true;
+        }
+        if (configLoadError) {
+          configLoadError.value = "";
+        }
+        if (configAutoSaveStatus && typeof configAutoSaveStatus === "object") {
+          configAutoSaveStatus.mode = "idle";
+          configAutoSaveStatus.last_error = "";
+        }
+        void fetchHandoverCommonConfigSegment({ silentMessage: true });
+        void fetchHandoverBuildingConfigSegment(handoverConfigBuilding?.value, { silentMessage: true });
+        return true;
+      } catch (err) {
+        if (configLoadError) {
+          configLoadError.value = String(err || "").trim();
+        }
+        scheduleConfigRetry();
+        if (!silentMessage) {
+          message.value = `读取配置失败: ${err}`;
+        }
+        return false;
+      } finally {
+        configRequestInFlight = null;
       }
-      if (configLoadError) {
-        configLoadError.value = "";
-      }
-      void fetchHandoverCommonConfigSegment({ silentMessage: true });
-      void fetchHandoverBuildingConfigSegment(handoverConfigBuilding?.value, { silentMessage: true });
-      return true;
-    } catch (err) {
-      if (configLoadError) {
-        configLoadError.value = String(err || "").trim();
-      }
-      if (!silentMessage) {
-        message.value = `读取配置失败: ${err}`;
-      }
-      return false;
-    }
+    })();
+    return configRequestInFlight;
   }
 
   async function saveHandoverCommonConfig(options = {}) {
@@ -2458,10 +2686,16 @@ export function createRuntimeHealthConfigActions(ctx) {
     return runner();
   }
 
-  async function saveConfigInternal({ auto = false, skipPostSaveHealthRefresh = false } = {}) {
+  async function saveConfigInternal({
+    auto = false,
+    skipPostSaveHealthRefresh = false,
+    responseMode = "",
+    skipHydrateOnSuccess = false,
+    silentErrorMessage = false,
+  } = {}) {
     const payloadState = buildPreparedSavePayload();
     if (!payloadState.ok) {
-      if (!auto) {
+      if (!auto && !silentErrorMessage) {
         message.value = payloadState.error || "配置校验失败";
       }
       return {
@@ -2474,17 +2708,33 @@ export function createRuntimeHealthConfigActions(ctx) {
     const { v3Payload, signature } = payloadState;
     const requestPayload = mergeConfigWithServerSnapshot(serverConfigSnapshot, v3Payload);
     if (auto && signature && signature === lastSavedConfigSignature) {
-      return { saved: false, reason: "unchanged", restartRequired: false };
+      syncConfigAutoSaveSignature(signature, { pending: true });
+      return { saved: false, reason: "unchanged", restartRequired: false, signature };
     }
 
     try {
-      const data = await putConfigApi(requestPayload);
-      serverConfigSnapshot = clone(data?.config || requestPayload);
-      const normalized = ensureConfigShape(convertV3ConfigToLegacy(data?.config || requestPayload));
-      withAutoSaveSuspended(() => {
-        hydrateConfigView(normalized);
-        setLastSavedSignatureFromPreparedPayload();
-      });
+      const normalizedResponseMode = String(responseMode || "").trim().toLowerCase();
+      const finalRequestPayload = normalizedResponseMode
+        ? {
+            ...requestPayload,
+            _meta: {
+              ...(requestPayload?._meta && typeof requestPayload._meta === "object" ? requestPayload._meta : {}),
+              response_mode: normalizedResponseMode,
+            },
+          }
+        : requestPayload;
+      const data = await putConfigApi(finalRequestPayload);
+      const returnedConfig = data?.config && typeof data.config === "object" ? data.config : requestPayload;
+      serverConfigSnapshot = clone(returnedConfig);
+      lastSavedConfigSignature = signature || "";
+      syncConfigAutoSaveSignature(lastSavedConfigSignature, { pending: true });
+      if (!skipHydrateOnSuccess) {
+        const normalized = ensureConfigShape(convertV3ConfigToLegacy(returnedConfig));
+        withAutoSaveSuspended(() => {
+          hydrateConfigView(normalized);
+          setLastSavedSignatureFromPreparedPayload();
+        });
+      }
       if (configLoaded) {
         configLoaded.value = true;
       }
@@ -2508,13 +2758,15 @@ export function createRuntimeHealthConfigActions(ctx) {
         saved: true,
         reason: "saved",
         restartRequired: Boolean(data?.restart_required),
+        signature: lastSavedConfigSignature,
+        warnings: Array.isArray(data?.warnings) ? data.warnings.filter(Boolean) : [],
         data,
       };
     } catch (err) {
-      if (!auto) {
+      if (!auto && !silentErrorMessage) {
         message.value = `保存配置失败: ${err}`;
       }
-      return { saved: false, reason: "error", error: String(err), restartRequired: false };
+      return { saved: false, reason: "error", error: String(err), restartRequired: false, signature };
     }
   }
 
@@ -2572,6 +2824,9 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => saveConfigInternal({
       auto: false,
       skipPostSaveHealthRefresh: Boolean(options?.skipPostSaveHealthRefresh),
+      responseMode: String(options?.responseMode || ""),
+      skipHydrateOnSuccess: Boolean(options?.skipHydrateOnSuccess),
+      silentErrorMessage: Boolean(options?.silentErrorMessage),
     });
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_SAVE_CONFIG, runner, { cooldownMs: 500 });
@@ -2583,7 +2838,13 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => saveConfigInternal({
       auto: true,
       skipPostSaveHealthRefresh: Boolean(options?.skipPostSaveHealthRefresh),
+      responseMode: String(options?.responseMode || ""),
+      skipHydrateOnSuccess: Boolean(options?.skipHydrateOnSuccess),
+      silentErrorMessage: Boolean(options?.silentErrorMessage),
     });
+    if (options?.bypassSingleFlight) {
+      return runner();
+    }
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_SAVE_CONFIG, runner, { cooldownMs: 500 });
     }
@@ -3314,6 +3575,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     uploadAlarmSourceCacheBuilding,
     openAlarmEventUploadTarget,
     fetchRuntimeResources,
+    fetchInternalRuntimeSummary,
+    fetchInternalRuntimeBuildingRuntimeStatus,
+    fetchAllInternalBuildingRuntimeStatuses,
+    scheduleInternalRuntimeStatusRefresh,
     fetchHandoverDailyReportContext,
     fetchConfig,
     fetchHandoverCommonConfigSegment,
@@ -3323,6 +3588,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     scheduleEngineerDirectoryPrefetch,
     saveConfig,
     savePartialConfig,
+    getPreparedConfigPayloadState: buildPreparedSavePayload,
     repairDayMetricUploadConfig,
     saveHandoverCommonConfig,
     saveHandoverReviewBaseUrlQuickConfig,

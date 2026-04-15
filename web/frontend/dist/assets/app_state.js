@@ -57,6 +57,25 @@ function buildRoleDashboardState(roleMode, preferredId = "") {
 const DASHBOARD_MODULE_STORAGE_KEY = "dashboard_active_module";
 const INTERNAL_BUILDINGS = Object.freeze(["A楼", "B楼", "C楼", "D楼", "E楼"]);
 
+function createEmptyInternalBuildingRuntimeStatusMap() {
+  return Object.fromEntries(
+    INTERNAL_BUILDINGS.map((building) => [
+      building,
+      {
+        updated_at: "",
+        building,
+        building_code: building.replace("楼", "").toLowerCase(),
+        page_slot: { building },
+        source_families: {},
+        pool: {
+          browser_ready: false,
+          last_error: "",
+        },
+      },
+    ]),
+  );
+}
+
 function basenameFromPath(input) {
   const text = String(input || "").trim();
   if (!text) return "";
@@ -1208,6 +1227,9 @@ export function createAppState(vueApi) {
   const configLoaded = ref(false);
   const healthLoadError = ref("");
   const configLoadError = ref("");
+  const internalRuntimeSummary = ref(null);
+  const internalBuildingRuntimeStatusMap = ref(createEmptyInternalBuildingRuntimeStatusMap());
+  const runtimeWarmupReady = ref(false);
   const engineerDirectoryLoaded = ref(false);
   const pendingResumeRuns = ref([]);
   const schedulerQuickSaving = ref(false);
@@ -1217,7 +1239,23 @@ export function createAppState(vueApi) {
   const alarmEventUploadSchedulerQuickSaving = ref(false);
   const monthlyEventReportSchedulerQuickSaving = ref(false);
   const monthlyChangeReportSchedulerQuickSaving = ref(false);
+  const schedulerToggleState = reactive({
+    scheduler: { mode: "idle", runningOverride: null },
+    handover: { mode: "idle", runningOverride: null },
+    wet_bulb: { mode: "idle", runningOverride: null },
+    day_metric_upload: { mode: "idle", runningOverride: null },
+    alarm_event_upload: { mode: "idle", runningOverride: null },
+    monthly_event_report: { mode: "idle", runningOverride: null },
+    monthly_change_report: { mode: "idle", runningOverride: null },
+  });
   const configAutoSaveSuspendDepth = ref(0);
+  const configAutoSaveStatus = reactive({
+    mode: "idle",
+    last_saved_at: "",
+    last_error: "",
+    pending_signature: "",
+    saved_signature: "",
+  });
   const autoResumeState = reactive({
     inProgress: false,
     lastRunId: "",
@@ -1333,6 +1371,8 @@ export function createAppState(vueApi) {
     pollTimer: null,
     healthTimer: null,
     healthWarmupTimer: null,
+    configRetryTimer: null,
+    internalRuntimeTimer: null,
     jobsTimer: null,
     bridgeTasksTimer: null,
     dailyReportContextTimer: null,
@@ -2334,6 +2374,79 @@ function normalizeInternalDownloadPoolSlot(slot) {
       todaySelectedCount,
     };
   }
+  const internalRuntimeBridgeSnapshot = computed(() => {
+    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
+    if (roleMode !== "internal" || !internalRuntimeSummary.value || typeof internalRuntimeSummary.value !== "object") {
+      return health.shared_bridge || {};
+    }
+    const summary = internalRuntimeSummary.value;
+    const buildingMap = internalBuildingRuntimeStatusMap.value && typeof internalBuildingRuntimeStatusMap.value === "object"
+      ? internalBuildingRuntimeStatusMap.value
+      : {};
+    const sourceCacheSummary = summary.source_cache && typeof summary.source_cache === "object" ? summary.source_cache : {};
+    const poolSummary = summary.pool && typeof summary.pool === "object" ? summary.pool : {};
+    const buildFamilyRows = (familyKey, fallbackBucket = "") =>
+      INTERNAL_BUILDINGS.map((building) => {
+        const rawRow = buildingMap?.[building]?.source_families?.[familyKey];
+        return normalizeSourceCacheBuildingStatus(
+          rawRow && typeof rawRow === "object"
+            ? rawRow
+            : { building, bucket_key: fallbackBucket },
+          fallbackBucket,
+        );
+      });
+    const currentHourBucket = String(sourceCacheSummary.current_hour_bucket || "").trim();
+    const alarmBucket = String(sourceCacheSummary.alarm_event_family?.current_bucket || "").trim() || currentHourBucket;
+    return {
+      ...health.shared_bridge,
+      internal_download_pool: {
+        enabled: Boolean(poolSummary.enabled),
+        browser_ready: Boolean(poolSummary.browser_ready),
+        page_slots: INTERNAL_BUILDINGS.map((building) => {
+          const rawSlot = buildingMap?.[building]?.page_slot;
+          return rawSlot && typeof rawSlot === "object" ? rawSlot : { building };
+        }),
+        active_buildings: Array.isArray(poolSummary.active_buildings) ? poolSummary.active_buildings : [],
+        last_error: String(poolSummary.last_error || "").trim(),
+      },
+      internal_source_cache: {
+        enabled: Boolean(sourceCacheSummary.enabled),
+        scheduler_running: Boolean(sourceCacheSummary.scheduler_running),
+        current_hour_bucket: currentHourBucket,
+        last_run_at: String(sourceCacheSummary.last_run_at || "").trim(),
+        last_success_at: String(sourceCacheSummary.last_success_at || "").trim(),
+        last_error: String(sourceCacheSummary.last_error || "").trim(),
+        cache_root: String(sourceCacheSummary.cache_root || "").trim(),
+        current_hour_refresh: sourceCacheSummary.current_hour_refresh && typeof sourceCacheSummary.current_hour_refresh === "object"
+          ? sourceCacheSummary.current_hour_refresh
+          : {},
+        handover_log_family: {
+          ...(sourceCacheSummary.handover_log_family && typeof sourceCacheSummary.handover_log_family === "object"
+            ? sourceCacheSummary.handover_log_family
+            : {}),
+          buildings: buildFamilyRows("handover_log_family", currentHourBucket),
+        },
+        handover_capacity_report_family: {
+          ...(sourceCacheSummary.handover_capacity_report_family && typeof sourceCacheSummary.handover_capacity_report_family === "object"
+            ? sourceCacheSummary.handover_capacity_report_family
+            : {}),
+          buildings: buildFamilyRows("handover_capacity_report_family", currentHourBucket),
+        },
+        monthly_report_family: {
+          ...(sourceCacheSummary.monthly_report_family && typeof sourceCacheSummary.monthly_report_family === "object"
+            ? sourceCacheSummary.monthly_report_family
+            : {}),
+          buildings: buildFamilyRows("monthly_report_family", currentHourBucket),
+        },
+        alarm_event_family: {
+          ...(sourceCacheSummary.alarm_event_family && typeof sourceCacheSummary.alarm_event_family === "object"
+            ? sourceCacheSummary.alarm_event_family
+            : {}),
+          buildings: buildFamilyRows("alarm_event_family", alarmBucket),
+        },
+      },
+    };
+  });
   const internalDownloadPoolOverview = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
     if (roleMode !== "internal") {
@@ -2349,7 +2462,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
         slots: [],
       };
     }
-    const rawPool = health.shared_bridge?.internal_download_pool || {};
+    const rawPool = internalRuntimeBridgeSnapshot.value?.internal_download_pool || {};
     const enabled = Boolean(rawPool.enabled);
     const browserReady = Boolean(rawPool.browser_ready);
     const lastError = formatInternalDownloadPoolError(rawPool.last_error);
@@ -2382,7 +2495,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
         ? `当前占用楼栋：${activeBuildings.join(" / ")}`
         : readyLoginCount === slots.length && slots.length
           ? "5个楼状态实时展示，下载前会先刷新，只有登录失效时才重新登录。"
-          : `5个楼状态实时展示中，已登录 ${readyLoginCount}/${slots.length || 5}，页面每5秒自动刷新。`;
+          : `5个楼状态实时展示中，已登录 ${readyLoginCount}/${slots.length || 5}，收到相关事件会即时刷新，并保留10秒兜底刷新。`;
     } else if (lastError) {
       tone = "danger";
       statusText = "页池异常";
@@ -2429,7 +2542,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
         families: [],
       };
     }
-    const rawCache = health.shared_bridge?.internal_source_cache || {};
+    const rawCache = internalRuntimeBridgeSnapshot.value?.internal_source_cache || {};
     const enabled = Boolean(rawCache.enabled);
     const running = Boolean(rawCache.scheduler_running);
     const currentHourBucket = String(rawCache.current_hour_bucket || "").trim();
@@ -2619,7 +2732,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
   });
   const currentHourRefreshOverview = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    const rawCache = health.shared_bridge?.internal_source_cache || {};
+    const rawCache = internalRuntimeBridgeSnapshot.value?.internal_source_cache || {};
     const payload = rawCache.current_hour_refresh && typeof rawCache.current_hour_refresh === "object"
       ? rawCache.current_hour_refresh
       : {};
@@ -2842,7 +2955,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
   });
   const sharedSourceCacheReadinessOverview = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    const rawCache = health.shared_bridge?.internal_source_cache || {};
+    const rawCache = internalRuntimeBridgeSnapshot.value?.internal_source_cache || {};
     const lastError = formatSharedBridgeRuntimeError(rawCache.last_error);
     const gatingFamilies = [
       normalizeLatestSelectionOverview({
@@ -4020,6 +4133,9 @@ function normalizeInternalDownloadPoolSlot(slot) {
     configLoaded,
     healthLoadError,
     configLoadError,
+    internalRuntimeSummary,
+    internalBuildingRuntimeStatusMap,
+    runtimeWarmupReady,
     engineerDirectoryLoaded,
     pendingResumeRuns,
     schedulerQuickSaving,
@@ -4029,7 +4145,9 @@ function normalizeInternalDownloadPoolSlot(slot) {
     alarmEventUploadSchedulerQuickSaving,
     monthlyEventReportSchedulerQuickSaving,
     monthlyChangeReportSchedulerQuickSaving,
+    schedulerToggleState,
     configAutoSaveSuspendDepth,
+    configAutoSaveStatus,
     autoResumeState,
     buildingsText,
     sheetRuleRows,
@@ -4120,6 +4238,7 @@ function normalizeInternalDownloadPoolSlot(slot) {
     dashboardSystemStatusItems,
     schedulerOverviewItems,
     schedulerOverviewSummary,
+    internalRuntimeBridgeSnapshot,
     internalDownloadPoolOverview,
     internalSourceCacheOverview,
     internalRealtimeSourceFamilies,

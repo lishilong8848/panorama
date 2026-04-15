@@ -38,21 +38,21 @@
             <div class="btn-line">
               <button
                 class="btn btn-success"
-                :disabled="isInternalDeploymentRole || health.day_metric_upload.scheduler.running || isActionLocked(actionKeyDayMetricUploadSchedulerStart)"
+                :disabled="isInternalDeploymentRole || getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.running) || isActionLocked(actionKeyDayMetricUploadSchedulerStart) || isActionLocked(actionKeyDayMetricUploadSchedulerStop) || isSchedulerTogglePending('day_metric_upload')"
                 @click="startDayMetricUploadScheduler"
               >
                 {{
-                  isActionLocked(actionKeyDayMetricUploadSchedulerStart)
+                  getSchedulerToggleMode('day_metric_upload') === 'starting'
                     ? '启动中...'
-                    : (health.day_metric_upload.scheduler.running ? '已启动调度' : '启动调度')
+                    : (getSchedulerToggleMode('day_metric_upload') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.running) ? '已启动调度' : '启动调度'))
                 }}
               </button>
               <button
                 class="btn btn-danger"
-                :disabled="isInternalDeploymentRole || !health.day_metric_upload.scheduler.running || isActionLocked(actionKeyDayMetricUploadSchedulerStop)"
+                :disabled="isInternalDeploymentRole || !getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.running) || isActionLocked(actionKeyDayMetricUploadSchedulerStop) || isActionLocked(actionKeyDayMetricUploadSchedulerStart) || isSchedulerTogglePending('day_metric_upload')"
                 @click="stopDayMetricUploadScheduler"
               >
-                {{ isActionLocked(actionKeyDayMetricUploadSchedulerStop) ? '停止中...' : '停止调度' }}
+                {{ getSchedulerToggleMode('day_metric_upload') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('day_metric_upload') === 'starting' ? '处理中...' : '停止调度') }}
               </button>
             </div>
             <div class="hint">{{ dayMetricUploadSchedulerQuickSaving ? '12项独立上传调度配置保存中...' : '修改执行间隔后自动保存。' }}</div>

@@ -1095,6 +1095,41 @@ class ReviewSessionService:
             return None
         return self._normalize_session(raw_session)
 
+    def get_latest_session_for_context(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+    ) -> Dict[str, Any] | None:
+        building_name = str(building or "").strip()
+        duty_date_text = str(duty_date or "").strip()
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        if not building_name or not duty_date_text or duty_shift_text not in {"day", "night"}:
+            return None
+        candidates: List[Dict[str, Any]] = []
+        for session in self.list_sessions():
+            if not isinstance(session, dict):
+                continue
+            if str(session.get("building", "")).strip() != building_name:
+                continue
+            if str(session.get("duty_date", "")).strip() != duty_date_text:
+                continue
+            if str(session.get("duty_shift", "")).strip().lower() != duty_shift_text:
+                continue
+            candidates.append(session)
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda item: (
+                int(item.get("revision", 0) or 0),
+                self._parse_updated_at(str(item.get("updated_at", ""))),
+                str(item.get("session_id", "")),
+            ),
+            reverse=True,
+        )
+        return candidates[0]
+
     def get_session_by_id(self, session_id: str) -> Dict[str, Any] | None:
         target_session_id = str(session_id or "").strip()
         if not target_session_id:

@@ -2473,15 +2473,19 @@ export function createRuntimeHealthConfigActions(ctx) {
   async function fetchConfig(options = {}) {
     if (configRequestInFlight) return configRequestInFlight;
     const silentMessage = Boolean(options?.silentMessage);
+    const applyToDraft = options?.applyToDraft !== false;
+    const loadHandoverSegments = options?.loadHandoverSegments !== false;
     configRequestInFlight = (async () => {
       try {
         const data = await getConfigApi();
         serverConfigSnapshot = clone(data || {});
-        const normalized = ensureConfigShape(convertV3ConfigToLegacy(data || {}));
-        withAutoSaveSuspended(() => {
-          hydrateConfigView(normalized);
-          setLastSavedSignatureFromPreparedPayload();
-        });
+        if (applyToDraft) {
+          const normalized = ensureConfigShape(convertV3ConfigToLegacy(data || {}));
+          withAutoSaveSuspended(() => {
+            hydrateConfigView(normalized);
+            setLastSavedSignatureFromPreparedPayload();
+          });
+        }
         clearConfigRetryTimer();
         if (configLoaded) {
           configLoaded.value = true;
@@ -2489,12 +2493,14 @@ export function createRuntimeHealthConfigActions(ctx) {
         if (configLoadError) {
           configLoadError.value = "";
         }
-        if (configAutoSaveStatus && typeof configAutoSaveStatus === "object") {
+        if (applyToDraft && configAutoSaveStatus && typeof configAutoSaveStatus === "object") {
           configAutoSaveStatus.mode = "idle";
           configAutoSaveStatus.last_error = "";
         }
-        void fetchHandoverCommonConfigSegment({ silentMessage: true });
-        void fetchHandoverBuildingConfigSegment(handoverConfigBuilding?.value, { silentMessage: true });
+        if (applyToDraft && loadHandoverSegments) {
+          void fetchHandoverCommonConfigSegment({ silentMessage: true });
+          void fetchHandoverBuildingConfigSegment(handoverConfigBuilding?.value, { silentMessage: true });
+        }
         return true;
       } catch (err) {
         if (configLoadError) {
@@ -2763,6 +2769,17 @@ export function createRuntimeHealthConfigActions(ctx) {
         data,
       };
     } catch (err) {
+      if (Number.parseInt(String(err?.httpStatus || 0), 10) === 409) {
+        await fetchConfig({
+          silentMessage: true,
+          applyToDraft: false,
+          loadHandoverSegments: false,
+        });
+        if (!auto && !silentErrorMessage) {
+          message.value = `保存配置失败: ${String(err || "").trim() || "配置已被其他操作更新，请稍后重试"}`;
+        }
+        return { saved: false, reason: "conflict", error: String(err), restartRequired: false, signature };
+      }
       if (!auto && !silentErrorMessage) {
         message.value = `保存配置失败: ${err}`;
       }
@@ -2813,6 +2830,17 @@ export function createRuntimeHealthConfigActions(ctx) {
         data,
       };
     } catch (err) {
+      if (Number.parseInt(String(err?.httpStatus || 0), 10) === 409) {
+        await fetchConfig({
+          silentMessage: true,
+          applyToDraft: false,
+          loadHandoverSegments: false,
+        });
+        if (!options?.silentErrorMessage) {
+          message.value = `保存配置失败: ${String(err || "").trim() || "配置已被其他操作更新，请稍后重试"}`;
+        }
+        return { saved: false, reason: "conflict", error: String(err), restartRequired: false };
+      }
       if (!options?.silentErrorMessage) {
         message.value = `保存配置失败: ${err}`;
       }

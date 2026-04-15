@@ -60,21 +60,21 @@
                               <div class="btn-line">
                                 <button
                                   class="btn btn-success"
-                                  :disabled="health.monthly_event_report.scheduler.running || isActionLocked(actionKeyMonthlyEventReportSchedulerStart)"
+                                  :disabled="getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.running) || isActionLocked(actionKeyMonthlyEventReportSchedulerStart) || isActionLocked(actionKeyMonthlyEventReportSchedulerStop) || isSchedulerTogglePending('monthly_event_report')"
                                   @click="startMonthlyEventReportScheduler"
                                 >
                                   {{
-                                    isActionLocked(actionKeyMonthlyEventReportSchedulerStart)
+                                    getSchedulerToggleMode('monthly_event_report') === 'starting'
                                       ? '启动中...'
-                                      : (health.monthly_event_report.scheduler.running ? '已启动调度' : '启动调度')
+                                      : (getSchedulerToggleMode('monthly_event_report') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.running) ? '已启动调度' : '启动调度'))
                                   }}
                                 </button>
                                 <button
                                   class="btn btn-danger"
-                                  :disabled="!health.monthly_event_report.scheduler.running || isActionLocked(actionKeyMonthlyEventReportSchedulerStop)"
+                                  :disabled="!getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.running) || isActionLocked(actionKeyMonthlyEventReportSchedulerStop) || isActionLocked(actionKeyMonthlyEventReportSchedulerStart) || isSchedulerTogglePending('monthly_event_report')"
                                   @click="stopMonthlyEventReportScheduler"
                                 >
-                                  {{ isActionLocked(actionKeyMonthlyEventReportSchedulerStop) ? '停止中...' : '停止调度' }}
+                                  {{ getSchedulerToggleMode('monthly_event_report') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('monthly_event_report') === 'starting' ? '处理中...' : '停止调度') }}
                                 </button>
                               </div>
                               <div class="hint">{{ monthlyEventReportSchedulerQuickSaving ? '事件月报调度配置保存中...' : '修改日期、时间或检查间隔后自动保存。' }}</div>
@@ -446,21 +446,21 @@
                               <div class="btn-line">
                                 <button
                                   class="btn btn-success"
-                                  :disabled="health.monthly_change_report.scheduler.running || isActionLocked(actionKeyMonthlyChangeReportSchedulerStart)"
+                                  :disabled="getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.running) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStart) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) || isSchedulerTogglePending('monthly_change_report')"
                                   @click="startMonthlyChangeReportScheduler"
                                 >
                                   {{
-                                    isActionLocked(actionKeyMonthlyChangeReportSchedulerStart)
+                                    getSchedulerToggleMode('monthly_change_report') === 'starting'
                                       ? '启动中...'
-                                      : (health.monthly_change_report.scheduler.running ? '已启动调度' : '启动调度')
+                                      : (getSchedulerToggleMode('monthly_change_report') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.running) ? '已启动调度' : '启动调度'))
                                   }}
                                 </button>
                                 <button
                                   class="btn btn-danger"
-                                  :disabled="!health.monthly_change_report.scheduler.running || isActionLocked(actionKeyMonthlyChangeReportSchedulerStop)"
+                                  :disabled="!getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.running) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStart) || isSchedulerTogglePending('monthly_change_report')"
                                   @click="stopMonthlyChangeReportScheduler"
                                 >
-                                  {{ isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) ? '停止中...' : '停止调度' }}
+                                  {{ getSchedulerToggleMode('monthly_change_report') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('monthly_change_report') === 'starting' ? '处理中...' : '停止调度') }}
                                 </button>
                               </div>
                               <div class="hint">{{ monthlyChangeReportSchedulerQuickSaving ? '变更月报调度配置保存中...' : '修改日期、时间或检查间隔后自动保存。' }}</div>

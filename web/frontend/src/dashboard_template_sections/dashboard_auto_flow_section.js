@@ -29,11 +29,11 @@
                 <input style="width:120px" type="number" min="1" step="1" v-model.number="config.scheduler.interval_minutes" @change="saveSchedulerQuickConfig" />
               </div>
               <div class="btn-line">
-                <button class="btn btn-success" :disabled="health.scheduler.running || isActionLocked(actionKeySchedulerStart)" @click="startScheduler">
-                  {{ isActionLocked(actionKeySchedulerStart) ? '启动中...' : (health.scheduler.running ? '已启动调度' : '启动调度') }}
+                <button class="btn btn-success" :disabled="getSchedulerEffectiveRunning('scheduler', health.scheduler.running) || isActionLocked(actionKeySchedulerStart) || isActionLocked(actionKeySchedulerStop) || isSchedulerTogglePending('scheduler')" @click="startScheduler">
+                  {{ getSchedulerToggleMode('scheduler') === 'starting' ? '启动中...' : (getSchedulerToggleMode('scheduler') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('scheduler', health.scheduler.running) ? '已启动调度' : '启动调度')) }}
                 </button>
-                <button class="btn btn-danger" :disabled="!health.scheduler.running || isActionLocked(actionKeySchedulerStop)" @click="stopScheduler">
-                  {{ isActionLocked(actionKeySchedulerStop) ? '停止中...' : '停止调度' }}
+                <button class="btn btn-danger" :disabled="!getSchedulerEffectiveRunning('scheduler', health.scheduler.running) || isActionLocked(actionKeySchedulerStop) || isActionLocked(actionKeySchedulerStart) || isSchedulerTogglePending('scheduler')" @click="stopScheduler">
+                  {{ getSchedulerToggleMode('scheduler') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('scheduler') === 'starting' ? '处理中...' : '停止调度') }}
                 </button>
               </div>
               <div class="hint">{{ schedulerQuickSaving ? '调度配置保存中...' : '修改执行间隔后自动保存。' }}</div>

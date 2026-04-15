@@ -46,6 +46,14 @@ function formatSchedulerActionReason(reason) {
   return String(reason || "").trim() || "已完成";
 }
 
+function syncLocalSchedulerAutoStart(targetScheduler, autoStart, options = {}) {
+  if (!targetScheduler || typeof targetScheduler !== "object") return;
+  targetScheduler.auto_start_in_gui = Boolean(autoStart);
+  if (options.enableOnStart && autoStart) {
+    targetScheduler.enabled = true;
+  }
+}
+
 export function createDashboardSchedulerActions(ctx) {
   const {
     health,
@@ -57,7 +65,24 @@ export function createDashboardSchedulerActions(ctx) {
     alarmEventUploadSchedulerQuickSaving,
     fetchHealth,
     runSingleFlight,
+    setSchedulerToggleState,
   } = ctx;
+  let healthRefreshTimer = null;
+
+  function scheduleHealthRefresh(delayMs = 800) {
+    if (healthRefreshTimer) {
+      window.clearTimeout(healthRefreshTimer);
+    }
+    healthRefreshTimer = window.setTimeout(() => {
+      healthRefreshTimer = null;
+      void fetchHealth({ silentMessage: true });
+    }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
+  }
+
+  function markSchedulerToggle(key, mode, runningOverride) {
+    if (typeof setSchedulerToggleState !== "function") return;
+    setSchedulerToggleState(key, { mode, runningOverride });
+  }
 
   async function guardedRun(actionKey, taskFn, options = {}) {
     if (typeof runSingleFlight === "function") {
@@ -70,11 +95,16 @@ export function createDashboardSchedulerActions(ctx) {
     return guardedRun(
       ACTION_KEYS.schedulerStart,
       async () => {
+        markSchedulerToggle("scheduler", "starting", true);
         try {
           const data = await startSchedulerApi();
-          await fetchHealth();
+          syncLocalSchedulerAutoStart(config.value?.scheduler, true, { enableOnStart: true });
+          applySchedulerSnapshot(health?.scheduler, { ...data, enabled: true, running: true });
+          markSchedulerToggle("scheduler", "idle", true);
+          scheduleHealthRefresh();
           message.value = `调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("scheduler", "idle", null);
           message.value = `启动调度失败: ${err}`;
         }
       },
@@ -87,7 +117,7 @@ export function createDashboardSchedulerActions(ctx) {
     const scheduler = config.value.scheduler || {};
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       interval_minutes: toPositiveInt(scheduler.interval_minutes, 60),
       check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
       retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,
@@ -127,11 +157,16 @@ export function createDashboardSchedulerActions(ctx) {
     return guardedRun(
       ACTION_KEYS.schedulerStop,
       async () => {
+        markSchedulerToggle("scheduler", "stopping", false);
         try {
           const data = await stopSchedulerApi();
-          await fetchHealth();
+          syncLocalSchedulerAutoStart(config.value?.scheduler, false);
+          applySchedulerSnapshot(health?.scheduler, { ...data, running: false });
+          markSchedulerToggle("scheduler", "idle", false);
+          scheduleHealthRefresh();
           message.value = `调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("scheduler", "idle", null);
           message.value = `停止调度失败: ${err}`;
         }
       },
@@ -143,11 +178,16 @@ export function createDashboardSchedulerActions(ctx) {
     return guardedRun(
       ACTION_KEYS.handoverSchedulerStart,
       async () => {
+        markSchedulerToggle("handover", "starting", true);
         try {
           const data = await startHandoverSchedulerApi();
-          await fetchHealth();
+          syncLocalSchedulerAutoStart(config.value?.handover_log?.scheduler, true, { enableOnStart: true });
+          applyHandoverSchedulerSnapshot(health?.handover_scheduler, { ...data, enabled: true, running: true });
+          markSchedulerToggle("handover", "idle", true);
+          scheduleHealthRefresh();
           message.value = `交接班调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("handover", "idle", null);
           message.value = `启动交接班调度失败: ${err}`;
         }
       },
@@ -159,11 +199,16 @@ export function createDashboardSchedulerActions(ctx) {
     return guardedRun(
       ACTION_KEYS.handoverSchedulerStop,
       async () => {
+        markSchedulerToggle("handover", "stopping", false);
         try {
           const data = await stopHandoverSchedulerApi();
-          await fetchHealth();
+          syncLocalSchedulerAutoStart(config.value?.handover_log?.scheduler, false);
+          applyHandoverSchedulerSnapshot(health?.handover_scheduler, { ...data, running: false });
+          markSchedulerToggle("handover", "idle", false);
+          scheduleHealthRefresh();
           message.value = `交接班调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("handover", "idle", null);
           message.value = `停止交接班调度失败: ${err}`;
         }
       },
@@ -182,7 +227,7 @@ export function createDashboardSchedulerActions(ctx) {
     }
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(handoverScheduler.auto_start_in_gui),
       morning_time: morningTime,
       afternoon_time: afternoonTime,
       check_interval_sec: Number.parseInt(String(handoverScheduler.check_interval_sec ?? 30), 10) || 30,
@@ -226,31 +271,75 @@ export function createDashboardSchedulerActions(ctx) {
   function applySchedulerSnapshot(targetScheduler, data) {
     if (!targetScheduler || typeof targetScheduler !== "object" || !data || typeof data !== "object") return;
     Object.assign(targetScheduler, {
-      enabled: Boolean(data.enabled),
-      running: Boolean(data.running),
-      status: String(data.status || ""),
-      next_run_time: String(data.next_run_time || ""),
-      last_check_at: String(data.last_check_at || ""),
-      last_decision: String(data.last_decision || ""),
-      last_trigger_at: String(data.last_trigger_at || ""),
-      last_trigger_result: String(data.last_trigger_result || ""),
-      state_path: String(data.state_path || ""),
-      state_exists: Boolean(data.state_exists),
-      executor_bound: Boolean(data.executor_bound),
-      callback_name: String(data.callback_name || ""),
+      enabled: typeof data.enabled === "boolean" ? data.enabled : Boolean(targetScheduler.enabled),
+      running: typeof data.running === "boolean" ? data.running : Boolean(targetScheduler.running),
+      status: Object.prototype.hasOwnProperty.call(data, "status")
+        ? String(data.status || "")
+        : String(targetScheduler.status || ""),
+      next_run_time: Object.prototype.hasOwnProperty.call(data, "next_run_time")
+        ? String(data.next_run_time || "")
+        : String(targetScheduler.next_run_time || ""),
+      last_check_at: Object.prototype.hasOwnProperty.call(data, "last_check_at")
+        ? String(data.last_check_at || "")
+        : String(targetScheduler.last_check_at || ""),
+      last_decision: Object.prototype.hasOwnProperty.call(data, "last_decision")
+        ? String(data.last_decision || "")
+        : String(targetScheduler.last_decision || ""),
+      last_trigger_at: Object.prototype.hasOwnProperty.call(data, "last_trigger_at")
+        ? String(data.last_trigger_at || "")
+        : String(targetScheduler.last_trigger_at || ""),
+      last_trigger_result: Object.prototype.hasOwnProperty.call(data, "last_trigger_result")
+        ? String(data.last_trigger_result || "")
+        : String(targetScheduler.last_trigger_result || ""),
+      state_path: Object.prototype.hasOwnProperty.call(data, "state_path")
+        ? String(data.state_path || "")
+        : String(targetScheduler.state_path || ""),
+      state_exists: typeof data.state_exists === "boolean" ? data.state_exists : Boolean(targetScheduler.state_exists),
+      executor_bound: typeof data.executor_bound === "boolean" ? data.executor_bound : Boolean(targetScheduler.executor_bound),
+      callback_name: Object.prototype.hasOwnProperty.call(data, "callback_name")
+        ? String(data.callback_name || "")
+        : String(targetScheduler.callback_name || ""),
     });
+  }
+
+  function applyHandoverSchedulerSnapshot(targetScheduler, data) {
+    if (!targetScheduler || typeof targetScheduler !== "object" || !data || typeof data !== "object") return;
+    Object.assign(targetScheduler, {
+      enabled: typeof data.enabled === "boolean" ? data.enabled : Boolean(targetScheduler.enabled),
+      running: typeof data.running === "boolean" ? data.running : Boolean(targetScheduler.running),
+      status: Object.prototype.hasOwnProperty.call(data, "status")
+        ? String(data.status || "")
+        : String(targetScheduler.status || ""),
+      executor_bound: typeof data.executor_bound === "boolean" ? data.executor_bound : Boolean(targetScheduler.executor_bound),
+      callback_name: Object.prototype.hasOwnProperty.call(data, "callback_name")
+        ? String(data.callback_name || "")
+        : String(targetScheduler.callback_name || ""),
+      state_paths: data.state_paths && typeof data.state_paths === "object"
+        ? { ...data.state_paths }
+        : (targetScheduler.state_paths && typeof targetScheduler.state_paths === "object" ? { ...targetScheduler.state_paths } : {}),
+    });
+    if (data.morning && typeof data.morning === "object" && targetScheduler.morning && typeof targetScheduler.morning === "object") {
+      Object.assign(targetScheduler.morning, data.morning);
+    }
+    if (data.afternoon && typeof data.afternoon === "object" && targetScheduler.afternoon && typeof targetScheduler.afternoon === "object") {
+      Object.assign(targetScheduler.afternoon, data.afternoon);
+    }
   }
 
   async function startDayMetricUploadScheduler() {
     return guardedRun(
       ACTION_KEYS.dayMetricUploadSchedulerStart,
       async () => {
+        markSchedulerToggle("day_metric_upload", "starting", true);
         try {
           const data = await startDayMetricUploadSchedulerApi();
-          applySchedulerSnapshot(health?.day_metric_upload?.scheduler, data);
-          await fetchHealth();
+          syncLocalSchedulerAutoStart(config.value?.day_metric_upload?.scheduler, true, { enableOnStart: true });
+          applySchedulerSnapshot(health?.day_metric_upload?.scheduler, { ...data, enabled: true, running: true });
+          markSchedulerToggle("day_metric_upload", "idle", true);
+          scheduleHealthRefresh();
           message.value = `12项独立上传调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("day_metric_upload", "idle", null);
           message.value = `启动12项独立上传调度失败: ${err}`;
         }
       },
@@ -262,12 +351,16 @@ export function createDashboardSchedulerActions(ctx) {
     return guardedRun(
       ACTION_KEYS.dayMetricUploadSchedulerStop,
       async () => {
+        markSchedulerToggle("day_metric_upload", "stopping", false);
         try {
           const data = await stopDayMetricUploadSchedulerApi();
-          applySchedulerSnapshot(health?.day_metric_upload?.scheduler, data);
-          await fetchHealth();
+          syncLocalSchedulerAutoStart(config.value?.day_metric_upload?.scheduler, false);
+          applySchedulerSnapshot(health?.day_metric_upload?.scheduler, { ...data, running: false });
+          markSchedulerToggle("day_metric_upload", "idle", false);
+          scheduleHealthRefresh();
           message.value = `12项独立上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("day_metric_upload", "idle", null);
           message.value = `停止12项独立上传调度失败: ${err}`;
         }
       },
@@ -280,7 +373,7 @@ export function createDashboardSchedulerActions(ctx) {
     const scheduler = config.value?.day_metric_upload?.scheduler || {};
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       interval_minutes: toPositiveInt(scheduler.interval_minutes, 60),
       check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
       retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,
@@ -316,12 +409,16 @@ export function createDashboardSchedulerActions(ctx) {
     return guardedRun(
       ACTION_KEYS.alarmEventUploadSchedulerStart,
       async () => {
+        markSchedulerToggle("alarm_event_upload", "starting", true);
         try {
           const data = await startAlarmEventUploadSchedulerApi();
-          applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, data);
-          await fetchHealth();
+          syncLocalSchedulerAutoStart(config.value?.alarm_export?.scheduler, true, { enableOnStart: true });
+          applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, { ...data, enabled: true, running: true });
+          markSchedulerToggle("alarm_event_upload", "idle", true);
+          scheduleHealthRefresh();
           message.value = `告警信息上传调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("alarm_event_upload", "idle", null);
           message.value = `启动告警信息上传调度失败: ${err}`;
         }
       },
@@ -333,12 +430,16 @@ export function createDashboardSchedulerActions(ctx) {
     return guardedRun(
       ACTION_KEYS.alarmEventUploadSchedulerStop,
       async () => {
+        markSchedulerToggle("alarm_event_upload", "stopping", false);
         try {
           const data = await stopAlarmEventUploadSchedulerApi();
-          applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, data);
-          await fetchHealth();
+          syncLocalSchedulerAutoStart(config.value?.alarm_export?.scheduler, false);
+          applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, { ...data, running: false });
+          markSchedulerToggle("alarm_event_upload", "idle", false);
+          scheduleHealthRefresh();
           message.value = `告警信息上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
+          markSchedulerToggle("alarm_event_upload", "idle", null);
           message.value = `停止告警信息上传调度失败: ${err}`;
         }
       },
@@ -352,7 +453,7 @@ export function createDashboardSchedulerActions(ctx) {
     const runTime = normalizeRunTimeText(scheduler.run_time);
     const payload = {
       enabled: true,
-      auto_start_in_gui: false,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       run_time: runTime,
       state_file: String(scheduler.state_file || "").trim(),
     };

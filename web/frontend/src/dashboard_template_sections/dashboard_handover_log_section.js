@@ -41,21 +41,21 @@
             <div class="btn-line" style="margin-top:10px;">
               <button
                 class="btn btn-success"
-                :disabled="isInternalDeploymentRole || health.handover_scheduler.running || isActionLocked(actionKeyHandoverSchedulerStart)"
+                :disabled="isInternalDeploymentRole || getSchedulerEffectiveRunning('handover', health.handover_scheduler.running) || isActionLocked(actionKeyHandoverSchedulerStart) || isActionLocked(actionKeyHandoverSchedulerStop) || isSchedulerTogglePending('handover')"
                 @click="startHandoverScheduler"
               >
                 {{
-                  isActionLocked(actionKeyHandoverSchedulerStart)
+                  getSchedulerToggleMode('handover') === 'starting'
                     ? '启动中...'
-                    : (health.handover_scheduler.running ? '已启动调度' : '启动调度')
+                    : (getSchedulerToggleMode('handover') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('handover', health.handover_scheduler.running) ? '已启动调度' : '启动调度'))
                 }}
               </button>
               <button
                 class="btn btn-danger"
-                :disabled="isInternalDeploymentRole || !health.handover_scheduler.running || isActionLocked(actionKeyHandoverSchedulerStop)"
+                :disabled="isInternalDeploymentRole || !getSchedulerEffectiveRunning('handover', health.handover_scheduler.running) || isActionLocked(actionKeyHandoverSchedulerStop) || isActionLocked(actionKeyHandoverSchedulerStart) || isSchedulerTogglePending('handover')"
                 @click="stopHandoverScheduler"
               >
-                {{ isActionLocked(actionKeyHandoverSchedulerStop) ? '停止中...' : '停止调度' }}
+                {{ getSchedulerToggleMode('handover') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('handover') === 'starting' ? '处理中...' : '停止调度') }}
               </button>
             </div>
             <div class="hint">{{ handoverSchedulerQuickSaving ? '交接班调度配置保存中...' : '修改上午或下午时间后自动保存。' }}</div>

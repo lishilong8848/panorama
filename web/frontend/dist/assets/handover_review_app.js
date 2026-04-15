@@ -32,7 +32,7 @@ const REVIEW_LOCK_HEARTBEAT_MS = 15000;
 const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
 const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
 const HANDOVER_REVIEW_STATUS_BROADCAST_KEY = "handover_review_status_broadcast_v1";
-const CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "B13", "D13"];
+const CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13"];
 
 function shiftTextFromCode(shift) {
   const normalized = String(shift || "").trim().toLowerCase();
