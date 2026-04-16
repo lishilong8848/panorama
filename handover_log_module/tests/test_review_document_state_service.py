@@ -162,6 +162,94 @@ def test_review_document_state_save_enqueues_sync_job_atomically(tmp_path: Path)
     assert sync["pending_revision"] == 2
 
 
+def test_force_sync_session_uses_saved_dirty_regions(tmp_path: Path, monkeypatch) -> None:
+    output_file = tmp_path / "handover.xlsx"
+    _build_workbook(output_file)
+    service = ReviewDocumentStateService(_config(tmp_path), emit_log=lambda *_: None)
+    session = _session(output_file)
+
+    document, _loaded_session = service.load_document(session)
+    _set_fixed_value(document, "B13", "新规划")
+    service.save_document(
+        session=session,
+        document=document,
+        base_revision=1,
+        dirty_regions={"fixed_blocks": True, "sections": False, "footer_inventory": False},
+    )
+
+    captured: list[dict] = []
+
+    def _fake_write(*, output_file: str, document: dict, dirty_regions: dict | None = None) -> None:
+        captured.append(
+            {
+                "output_file": output_file,
+                "dirty_regions": dict(dirty_regions or {}),
+                "title": document.get("title", ""),
+            }
+        )
+
+    monkeypatch.setattr(service.writer, "write", _fake_write)
+
+    sync = service.force_sync_session(
+        building="A楼",
+        session_id=session["session_id"],
+        target_revision=2,
+        reason="test",
+    )
+
+    assert sync["status"] == "synced"
+    assert captured == [
+        {
+            "output_file": str(output_file),
+            "dirty_regions": {"fixed_blocks": True, "sections": False, "footer_inventory": False},
+            "title": "原标题",
+        }
+    ]
+
+
+def test_ensure_document_reimports_when_excel_fingerprint_changes_without_path_change(tmp_path: Path) -> None:
+    output_file = tmp_path / "handover.xlsx"
+    _build_workbook(output_file)
+    service = ReviewDocumentStateService(_config(tmp_path), emit_log=lambda *_: None)
+    session = _session(output_file)
+
+    document, _loaded_session = service.load_document(session)
+    assert _fixed_value(document, "B13") == "旧规划"
+
+    wb = openpyxl.load_workbook(output_file)
+    try:
+        ws = wb["交接班日志"]
+        ws["B13"] = "覆盖后规划"
+        wb.save(output_file)
+    finally:
+        wb.close()
+
+    reloaded_document, _reloaded_session = service.load_document(session)
+    assert _fixed_value(reloaded_document, "B13") == "覆盖后规划"
+
+
+def test_worker_loop_recovers_after_claim_exception(tmp_path: Path) -> None:
+    logs: list[str] = []
+    service = ReviewDocumentStateService(_config(tmp_path), emit_log=logs.append)
+
+    class _Store:
+        def __init__(self):
+            self.calls = 0
+
+        def claim_next_job(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary sqlite fault")
+            return None
+
+    store = _Store()
+    service._store = lambda _building: store  # type: ignore[method-assign]
+
+    service._worker_loop("A楼")
+
+    assert any("后台Excel同步线程异常，已自动恢复" in message for message in logs)
+
+
 def test_finish_job_success_keeps_newer_pending_revision(tmp_path: Path) -> None:
     output_file = tmp_path / "handover.xlsx"
     _build_workbook(output_file)

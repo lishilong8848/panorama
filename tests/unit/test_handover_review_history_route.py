@@ -1,6 +1,9 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
+from fastapi import BackgroundTasks, HTTPException
+
 from app.modules.handover_review.api import routes
 
 
@@ -19,6 +22,10 @@ def _fake_request():
         job_service=_DummyJobService(),
     )
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
+
+
+def _background_tasks():
+    return BackgroundTasks()
 
 
 def test_handover_review_data_prefers_session_id_and_returns_history(monkeypatch):
@@ -138,6 +145,7 @@ def test_handover_review_save_history_skips_default_persistence(monkeypatch):
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), None, None, None))
     monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
     monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(routes, "_ensure_session_lock_held_or_409", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         routes,
         "_load_target_session_or_404",
@@ -168,6 +176,7 @@ def test_handover_review_save_history_skips_default_persistence(monkeypatch):
     payload = routes.handover_review_save(
         "a",
         _fake_request(),
+        _background_tasks(),
         {
             "session_id": "A楼|2026-03-22|day",
             "base_revision": 4,
@@ -231,6 +240,7 @@ def test_handover_review_save_latest_passes_dirty_regions_and_returns_save_profi
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), None, None, None))
     monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
     monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(routes, "_ensure_session_lock_held_or_409", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         routes,
         "_load_target_session_or_404",
@@ -249,6 +259,9 @@ def test_handover_review_save_latest_passes_dirty_regions_and_returns_save_profi
             "footer_inventory_rows": 1,
             "cabinet_power_fields": 4,
             "config_updated": False,
+            "config_sync_required": True,
+            "config_building_code": "A",
+            "config_data": {"review_ui": {"cabinet_power_defaults_by_building": {"A楼": {"cells": {"B13": "10"}}}}},
         },
     )
     monkeypatch.setattr(
@@ -265,6 +278,7 @@ def test_handover_review_save_latest_passes_dirty_regions_and_returns_save_profi
     payload = routes.handover_review_save(
         "a",
         _fake_request(),
+        _background_tasks(),
         {
             "session_id": "A楼|2026-03-23|night",
             "base_revision": 7,
@@ -278,6 +292,8 @@ def test_handover_review_save_latest_passes_dirty_regions_and_returns_save_profi
     assert payload["history"]["selected_is_latest"] is True
     assert {"write_ms", "defaults_ms", "session_ms", "total_ms"}.issubset(payload["save_profile"].keys())
     assert all(isinstance(payload["save_profile"][key], int) for key in {"write_ms", "defaults_ms", "session_ms", "total_ms"})
+    assert payload["save_profile"]["defaults_config_async"] is True
+    assert payload["save_profile"]["defaults_config_status"] == "queued"
 
 
 def test_handover_review_update_cloud_sync_uses_history_session(monkeypatch):
@@ -286,6 +302,9 @@ def test_handover_review_update_cloud_sync_uses_history_session(monkeypatch):
     class _Service:
         def get_batch_status(self, batch_key):
             return {"batch_key": batch_key}
+
+        def get_session_concurrency(self, **_kwargs):
+            return {"client_holds_lock": True}
 
     class _Followup:
         def force_update_cloud_sheet_for_session(self, session_id, emit_log):
@@ -328,7 +347,7 @@ def test_handover_review_update_cloud_sync_uses_history_session(monkeypatch):
     payload = routes.handover_review_update_cloud_sync(
         "a",
         _fake_request(),
-        {"session_id": "A楼|2026-03-22|day"},
+        {"session_id": "A楼|2026-03-22|day", "client_id": "review-a001"},
     )
 
     assert followup_calls == ["A楼|2026-03-22|day"]
@@ -363,15 +382,6 @@ def test_persist_review_defaults_writes_back_building_segment_for_latest_session
             "data": {"review_ui": {}},
         },
     )
-
-    def _fake_save(building_code, data, *, base_revision, config_path):
-        captured["building_code"] = building_code
-        captured["data"] = data
-        captured["base_revision"] = base_revision
-        captured["config_path"] = config_path
-        return ({"saved": True}, {"revision": 6, "data": data}, "")
-
-    monkeypatch.setattr(routes, "save_handover_building_segment", _fake_save)
 
     result = routes._persist_review_defaults(
         container,
@@ -410,11 +420,10 @@ def test_persist_review_defaults_writes_back_building_segment_for_latest_session
     )
 
     assert result["defaults_updated"] is True
-    assert result["config_updated"] is True
-    assert captured["building_code"] == "A"
-    assert captured["base_revision"] == 5
-    assert captured["config_path"] == "config.json"
-    review_ui = captured["data"]["review_ui"]
+    assert result["config_updated"] is False
+    assert result["config_sync_required"] is True
+    assert result["config_building_code"] == "A"
+    review_ui = result["config_data"]["review_ui"]
     assert review_ui["cabinet_power_defaults_by_building"]["A楼"]["cells"] == {
         "B13": "10",
         "D13": "11",
@@ -428,7 +437,7 @@ def test_persist_review_defaults_writes_back_building_segment_for_latest_session
         "F": "否",
         "G": "无",
     }
-    assert captured["reloaded"] == {"saved": True}
+    assert "reloaded" not in captured
 
 
 def test_persist_review_defaults_skips_building_segment_write_when_only_sections_dirty(monkeypatch):
@@ -458,3 +467,207 @@ def test_persist_review_defaults_skips_building_segment_write_when_only_sections
 
     assert result["defaults_updated"] is False
     assert result["config_updated"] is False
+
+
+def test_handover_review_status_returns_lightweight_payload(monkeypatch):
+    class _Parser:
+        config = {"review_ui": {"poll_interval_sec": 9}}
+
+    class _Service:
+        def get_batch_status(self, batch_key):
+            return {"batch_key": batch_key}
+
+    class _DocumentState:
+        def attach_excel_sync(self, session):
+            return {**session, "excel_sync": {"status": "synced"}}
+
+    monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), _Parser(), None, None))
+    monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(
+        routes,
+        "_load_target_session_or_404",
+        lambda _service, **_kwargs: {
+            "session_id": "A楼|2026-03-23|night",
+            "building": "A楼",
+            "revision": 8,
+            "batch_key": "2026-03-23|night",
+        },
+    )
+    monkeypatch.setattr(routes, "_get_session_concurrency_safe", lambda *_args, **_kwargs: {"client_holds_lock": True})
+    monkeypatch.setattr(routes, "_build_history_payload_safe", lambda *_args, **_kwargs: {"sessions": [], "selected_session_id": "A楼|2026-03-23|night"})
+
+    payload = routes.handover_review_status("a", _fake_request(), client_id="review-a001")
+
+    assert payload["ok"] is True
+    assert payload["building"] == "A楼"
+    assert "document" not in payload
+    assert payload["review_ui"]["poll_interval_sec"] == 9
+    assert payload["session"]["excel_sync"]["status"] == "synced"
+
+
+def test_handover_review_save_requires_active_lock(monkeypatch):
+    class _Service:
+        def get_session_concurrency(self, **_kwargs):
+            return {
+                "client_holds_lock": False,
+                "active_editor": {"client_id": "review-other"},
+                "current_revision": 3,
+            }
+
+    monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), None, None, None))
+    monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(
+        routes,
+        "_load_target_session_or_404",
+        lambda _service, **_kwargs: {
+            "session_id": "A楼|2026-03-23|night",
+            "building": "A楼",
+            "revision": 3,
+            "batch_key": "2026-03-23|night",
+            "output_file": "latest.xlsx",
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes.handover_review_save(
+            "a",
+            _fake_request(),
+            _background_tasks(),
+            {
+                "session_id": "A楼|2026-03-23|night",
+                "base_revision": 3,
+                "client_id": "review-b001",
+                "document": {"fixed_blocks": [], "sections": [], "footer_blocks": []},
+            },
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "其他终端编辑" in str(exc_info.value.detail)
+
+
+def test_handover_review_confirm_requires_active_lock(monkeypatch):
+    class _Service:
+        def get_session_by_id(self, session_id):
+            return {
+                "session_id": session_id,
+                "building": "A楼",
+                "revision": 3,
+                "batch_key": "2026-03-23|night",
+                "output_file": "latest.xlsx",
+            }
+
+        def get_latest_session_id(self, _building):
+            return "A楼|2026-03-23|night"
+
+        def get_session_concurrency(self, **_kwargs):
+            return {"client_holds_lock": False}
+
+    monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), None, None, None))
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(
+        routes,
+        "_load_target_session_or_404",
+        lambda _service, **_kwargs: {
+            "session_id": "A楼|2026-03-23|night",
+            "building": "A楼",
+            "revision": 3,
+            "batch_key": "2026-03-23|night",
+            "output_file": "latest.xlsx",
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes.handover_review_confirm(
+            "a",
+            _fake_request(),
+            {
+                "session_id": "A楼|2026-03-23|night",
+                "base_revision": 3,
+                "client_id": "review-b001",
+            },
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "其他终端编辑" in str(exc_info.value.detail)
+
+
+def test_handover_review_unconfirm_requires_active_lock(monkeypatch):
+    class _Service:
+        def get_session_by_id(self, session_id):
+            return {
+                "session_id": session_id,
+                "building": "A楼",
+                "revision": 4,
+                "confirmed": True,
+                "batch_key": "2026-03-23|night",
+                "output_file": "latest.xlsx",
+            }
+
+        def get_latest_session_id(self, _building):
+            return "A楼|2026-03-23|night"
+
+        def get_session_concurrency(self, **_kwargs):
+            return {"client_holds_lock": False}
+
+    monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), None, None, None))
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(
+        routes,
+        "_load_target_session_or_404",
+        lambda _service, **_kwargs: {
+            "session_id": "A楼|2026-03-23|night",
+            "building": "A楼",
+            "revision": 4,
+            "confirmed": True,
+            "batch_key": "2026-03-23|night",
+            "output_file": "latest.xlsx",
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes.handover_review_unconfirm(
+            "a",
+            _fake_request(),
+            {
+                "session_id": "A楼|2026-03-23|night",
+                "base_revision": 4,
+                "client_id": "review-b001",
+            },
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "其他终端编辑" in str(exc_info.value.detail)
+
+
+def test_handover_review_cloud_sync_update_requires_active_lock(monkeypatch):
+    class _Service:
+        def get_session_concurrency(self, **_kwargs):
+            return {"client_holds_lock": False}
+
+    monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), None, None, SimpleNamespace()))
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(
+        routes,
+        "_load_target_session_or_404",
+        lambda _service, **_kwargs: {
+            "session_id": "A楼|2026-03-22|day",
+            "building": "A楼",
+            "batch_key": "2026-03-22|day",
+            "output_file": "history.xlsx",
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes.handover_review_update_cloud_sync(
+            "a",
+            _fake_request(),
+            {
+                "session_id": "A楼|2026-03-22|day",
+                "client_id": "review-b001",
+            },
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "其他终端编辑" in str(exc_info.value.detail)

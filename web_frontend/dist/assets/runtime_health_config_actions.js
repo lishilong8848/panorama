@@ -183,6 +183,8 @@ export function createRuntimeHealthConfigActions(ctx) {
   let updaterHealthHydratedOnce = false;
   let handoverReviewStatusBroadcastBound = false;
   let internalRuntimeSummaryRequestInFlight = null;
+  let runtimeRoleConflictRecoveryInFlight = null;
+  let runtimeRoleConflictReloadAt = 0;
   const internalRuntimeBuildingRequestsInFlight = new Map();
   let internalRuntimeRefreshDebounceTimer = null;
   let internalRuntimeRefreshAllPending = false;
@@ -304,6 +306,44 @@ export function createRuntimeHealthConfigActions(ctx) {
       || "",
     ).trim();
     return text.includes("请先在角色选择页进入系统");
+  }
+
+  async function tryRecoverFromRoleSelectionConflict() {
+    if (typeof window === "undefined") return false;
+    const now = Date.now();
+    if (runtimeRoleConflictRecoveryInFlight) {
+      return runtimeRoleConflictRecoveryInFlight;
+    }
+    if (runtimeRoleConflictReloadAt && now - runtimeRoleConflictReloadAt < 3000) {
+      return true;
+    }
+    runtimeRoleConflictRecoveryInFlight = (async () => {
+      await fetchBootstrapHealth({ silentMessage: true });
+      const roleMode = resolveCurrentRoleMode();
+      const roleReady = roleMode === "internal" || roleMode === "external";
+      const restorable = Boolean(
+        health?.runtime_activated
+        || health?.startup_role_confirmed
+        || !health?.role_selection_required,
+      );
+      if (!bootstrapReady?.value || !roleReady || !restorable) {
+        return false;
+      }
+      runtimeRoleConflictReloadAt = Date.now();
+      if (healthLoadError) {
+        healthLoadError.value = "";
+      }
+      if (configLoadError) {
+        configLoadError.value = "";
+      }
+      window.setTimeout(() => {
+        window.location.reload();
+      }, 120);
+      return true;
+    })().finally(() => {
+      runtimeRoleConflictRecoveryInFlight = null;
+    });
+    return runtimeRoleConflictRecoveryInFlight;
   }
 
   function clearBootstrapRetryTimer() {
@@ -1576,10 +1616,13 @@ export function createRuntimeHealthConfigActions(ctx) {
         return true;
       } catch (err) {
         if (isAbortError(err)) return false;
+        if (isRoleSelectionConflictError(err)) {
+          await tryRecoverFromRoleSelectionConflict();
+          return false;
+        }
         if (healthLoadError) {
           healthLoadError.value = String(err || "").trim();
         }
-        if (isRoleSelectionConflictError(err)) return false;
         if (silentTransientNetworkError && isTransientNetworkError(err)) return false;
         if (!silentMessage) {
           message.value = `健康检查失败: ${err}`;
@@ -1631,7 +1674,10 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
       return true;
     } catch (err) {
-      if (isRoleSelectionConflictError(err)) return false;
+      if (isRoleSelectionConflictError(err)) {
+        await tryRecoverFromRoleSelectionConflict();
+        return false;
+      }
       if (!silentMessage) {
         message.value = `读取任务列表失败: ${err}`;
       }
@@ -1650,7 +1696,10 @@ export function createRuntimeHealthConfigActions(ctx) {
           : { network: {}, controlled_browser: { holder_job_id: "", queue_length: 0 }, batch_locks: [], resources: [] };
       return true;
     } catch (err) {
-      if (isRoleSelectionConflictError(err)) return false;
+      if (isRoleSelectionConflictError(err)) {
+        await tryRecoverFromRoleSelectionConflict();
+        return false;
+      }
       if (!silentMessage) {
         message.value = `读取资源状态失败: ${err}`;
       }
@@ -1671,7 +1720,10 @@ export function createRuntimeHealthConfigActions(ctx) {
         internalRuntimeSummary.value = summary;
         return true;
       } catch (err) {
-        if (isRoleSelectionConflictError(err)) return false;
+        if (isRoleSelectionConflictError(err)) {
+          await tryRecoverFromRoleSelectionConflict();
+          return false;
+        }
         if (!silentMessage) {
           message.value = `读取内网运行状态失败: ${err}`;
         }
@@ -1710,7 +1762,10 @@ export function createRuntimeHealthConfigActions(ctx) {
         };
         return true;
       } catch (err) {
-        if (isRoleSelectionConflictError(err)) return false;
+        if (isRoleSelectionConflictError(err)) {
+          await tryRecoverFromRoleSelectionConflict();
+          return false;
+        }
         if (!silentMessage) {
           message.value = `读取 ${buildingText} 内网状态失败: ${err}`;
         }
@@ -1834,7 +1889,10 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         return true;
       } catch (err) {
-        if (isRoleSelectionConflictError(err)) return false;
+        if (isRoleSelectionConflictError(err)) {
+          await tryRecoverFromRoleSelectionConflict();
+          return false;
+        }
         if (!silentMessage) {
           message.value = `读取共享任务失败: ${err}`;
         }

@@ -74,12 +74,13 @@ def test_handover_review_confirm_returns_503_when_store_temporarily_unavailable(
             raise ReviewSessionStoreUnavailableError("审核状态存储暂时不可用，请稍后重试")
 
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), None, None, None))
+    monkeypatch.setattr(routes, "_ensure_session_lock_held_or_409", lambda *_args, **_kwargs: None)
 
     with pytest.raises(HTTPException) as exc_info:
         routes.handover_review_confirm(
             "a",
             _fake_request(),
-            {"session_id": "A楼|2026-04-10|day", "base_revision": 1},
+            {"session_id": "A楼|2026-04-10|day", "base_revision": 1, "client_id": "review-a001"},
         )
 
     assert exc_info.value.status_code == 503

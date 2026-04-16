@@ -28,6 +28,23 @@ def _json_loads(text: Any, fallback: Any) -> Any:
         return fallback
 
 
+def _source_excel_fingerprint(path_value: str | Path | None) -> tuple[str, int]:
+    try:
+        path = Path(str(path_value or "").strip())
+    except Exception:  # noqa: BLE001
+        return "", 0
+    if not path.exists() or not path.is_file():
+        return "", 0
+    try:
+        stat = path.stat()
+    except Exception:  # noqa: BLE001
+        return "", 0
+    mtime_value = getattr(stat, "st_mtime_ns", None)
+    if mtime_value is None:
+        mtime_value = int(getattr(stat, "st_mtime", 0) or 0)
+    return str(mtime_value), int(getattr(stat, "st_size", 0) or 0)
+
+
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: Dict[str, threading.RLock] = {}
 
@@ -118,6 +135,8 @@ class ReviewBuildingDocumentStore:
                 document_json TEXT NOT NULL,
                 dirty_regions_json TEXT NOT NULL DEFAULT '{}',
                 source_excel_path TEXT NOT NULL DEFAULT '',
+                source_excel_mtime TEXT NOT NULL DEFAULT '',
+                source_excel_size INTEGER NOT NULL DEFAULT 0,
                 imported_from_excel INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -153,6 +172,14 @@ class ReviewBuildingDocumentStore:
                 ON sync_jobs(status, updated_at);
             """
         )
+        columns = {
+            str(row["name"] or "").strip().lower()
+            for row in conn.execute("PRAGMA table_info(review_documents)").fetchall()
+        }
+        if "source_excel_mtime" not in columns:
+            conn.execute("ALTER TABLE review_documents ADD COLUMN source_excel_mtime TEXT NOT NULL DEFAULT ''")
+        if "source_excel_size" not in columns:
+            conn.execute("ALTER TABLE review_documents ADD COLUMN source_excel_size INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _row_to_document(row: sqlite3.Row | None) -> Dict[str, Any] | None:
@@ -168,6 +195,8 @@ class ReviewBuildingDocumentStore:
             "document": _json_loads(row["document_json"], {}),
             "dirty_regions": _json_loads(row["dirty_regions_json"], {}),
             "source_excel_path": str(row["source_excel_path"] or ""),
+            "source_excel_mtime": str(row["source_excel_mtime"] or ""),
+            "source_excel_size": int(row["source_excel_size"] or 0),
             "imported_from_excel": bool(row["imported_from_excel"]),
             "created_at": str(row["created_at"] or ""),
             "updated_at": str(row["updated_at"] or ""),
@@ -211,6 +240,8 @@ class ReviewBuildingDocumentStore:
         now = _now_text()
         session_id = str(session.get("session_id", "") or "").strip()
         revision = int(session.get("revision", 0) or 0)
+        source_excel_path = str(session.get("output_file", "") or "").strip()
+        source_excel_mtime, source_excel_size = _source_excel_fingerprint(source_excel_path)
         with self.connect() as conn:
             existing = conn.execute(
                 "SELECT * FROM review_documents WHERE session_id=?",
@@ -222,8 +253,9 @@ class ReviewBuildingDocumentStore:
                     INSERT INTO review_documents(
                         session_id, building, duty_date, duty_shift, batch_key,
                         revision, document_json, dirty_regions_json,
-                        source_excel_path, imported_from_excel, created_at, updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                        source_excel_path, source_excel_mtime, source_excel_size,
+                        imported_from_excel, created_at, updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         session_id,
@@ -234,7 +266,9 @@ class ReviewBuildingDocumentStore:
                         revision,
                         _json_dumps(document if isinstance(document, dict) else {}),
                         "{}",
-                        str(session.get("output_file", "") or "").strip(),
+                        source_excel_path,
+                        source_excel_mtime,
+                        source_excel_size,
                         1 if imported_from_excel else 0,
                         now,
                         now,
@@ -267,6 +301,8 @@ class ReviewBuildingDocumentStore:
         session_id = str(session.get("session_id", "") or "").strip()
         next_revision = int(base_revision or 0) + 1
         now = _now_text()
+        source_excel_path = str(session.get("output_file", "") or "").strip()
+        source_excel_mtime, source_excel_size = _source_excel_fingerprint(source_excel_path)
         with self.connect() as conn:
             previous_row = conn.execute(
                 "SELECT * FROM review_documents WHERE session_id=?",
@@ -285,6 +321,8 @@ class ReviewBuildingDocumentStore:
                        document_json=?,
                        dirty_regions_json=?,
                        source_excel_path=?,
+                       source_excel_mtime=?,
+                       source_excel_size=?,
                        updated_at=?
                  WHERE session_id=?
                 """,
@@ -292,7 +330,9 @@ class ReviewBuildingDocumentStore:
                     next_revision,
                     _json_dumps(document if isinstance(document, dict) else {}),
                     _json_dumps(dirty_regions if isinstance(dirty_regions, dict) else {}),
-                    str(session.get("output_file", "") or "").strip(),
+                    source_excel_path,
+                    source_excel_mtime,
+                    source_excel_size,
                     now,
                     session_id,
                 ),
@@ -332,6 +372,8 @@ class ReviewBuildingDocumentStore:
                        document_json=?,
                        dirty_regions_json=?,
                        source_excel_path=?,
+                       source_excel_mtime=?,
+                       source_excel_size=?,
                        imported_from_excel=?,
                        updated_at=?
                  WHERE session_id=?
@@ -341,6 +383,8 @@ class ReviewBuildingDocumentStore:
                     _json_dumps(previous.get("document", {}) if isinstance(previous.get("document", {}), dict) else {}),
                     _json_dumps(previous.get("dirty_regions", {}) if isinstance(previous.get("dirty_regions", {}), dict) else {}),
                     str(previous.get("source_excel_path", "") or ""),
+                    str(previous.get("source_excel_mtime", "") or ""),
+                    int(previous.get("source_excel_size", 0) or 0),
                     1 if previous.get("imported_from_excel") else 0,
                     now,
                     str(previous.get("session_id", "") or ""),

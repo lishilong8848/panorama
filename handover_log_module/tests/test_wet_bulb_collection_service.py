@@ -5,7 +5,7 @@ from datetime import datetime
 import pytest
 
 import handover_log_module.service.wet_bulb_collection_service as wet_bulb_collection_module
-from handover_log_module.core.models import MetricHit
+from handover_log_module.core.models import MetricHit, RawRow
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 
 
@@ -116,6 +116,26 @@ def test_resolve_wet_bulb_value_accepts_metric_text_with_unit() -> None:
     value = service._resolve_wet_bulb_value(hits=hits, effective_config={})  # noqa: SLF001
 
     assert value == pytest.approx(26.4)
+
+
+def test_resolve_wet_bulb_value_falls_back_to_source_rows() -> None:
+    service = WetBulbCollectionService({})
+    rows = [
+        RawRow(
+            row_index=1,
+            b_text="",
+            c_text="",
+            d_name="E-124-DDC-100_室外温度1",
+            e_raw=14.11,
+            value=14.11,
+            b_norm="",
+            c_norm="",
+        )
+    ]
+
+    value = service._resolve_wet_bulb_value(hits={}, effective_config={}, rows=rows)  # noqa: SLF001
+
+    assert value == pytest.approx(14.11)
 
 
 @pytest.mark.parametrize(

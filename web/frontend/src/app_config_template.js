@@ -8,7 +8,7 @@ const CONFIG_TEMPLATE_PREFIX = `<section v-if="isConfigView" class="config-shell
             <div class="task-block-kicker">配置中心</div>
             <h3 class="card-title" style="margin:0;">{{ configShellTitle }}</h3>
             <div class="hint">{{ configShellDescription }}</div>
-            <div class="hint" v-if="activeConfigTab === 'feature_handover'">当前页公共配置与当前楼栋配置会在空闲 4 秒后自动保存。</div>
+            <div class="hint" v-if="activeConfigTab === 'feature_handover'">当前页公共配置与当前楼栋配置需手动点击“保存配置”后才会生效。</div>
             <div class="hint" v-if="configAutoSaveStateText">
               {{ configAutoSaveStateText }}<template v-if="configAutoSaveStateDetail"> · {{ configAutoSaveStateDetail }}</template>
             </div>

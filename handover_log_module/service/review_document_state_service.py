@@ -81,12 +81,30 @@ class ReviewDocumentStateService:
         if isinstance(existing, dict):
             current_output_file = self._output_file(session)
             existing_output_file = str(existing.get("source_excel_path", "") or "").strip()
-            if current_output_file and existing_output_file != current_output_file:
+            current_path = Path(current_output_file) if current_output_file else None
+            current_mtime = ""
+            current_size = 0
+            if current_path is not None and current_path.exists() and current_path.is_file():
+                try:
+                    stat = current_path.stat()
+                    current_mtime = str(getattr(stat, "st_mtime_ns", None) or int(getattr(stat, "st_mtime", 0) or 0))
+                    current_size = int(getattr(stat, "st_size", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    current_mtime = ""
+                    current_size = 0
+            existing_mtime = str(existing.get("source_excel_mtime", "") or "").strip()
+            existing_size = int(existing.get("source_excel_size", 0) or 0)
+            path_changed = bool(current_output_file and existing_output_file != current_output_file)
+            fingerprint_changed = bool(
+                current_mtime
+                and (existing_mtime != current_mtime or existing_size != current_size)
+            )
+            if path_changed or fingerprint_changed:
                 store.delete_document(session_id)
                 self.emit_log(
                     f"[交接班][审核SQLite] 检测到会话输出文件已切换，已丢弃旧审核文档: "
                     f"building={building}, session_id={session_id}, old={existing_output_file or '-'}, "
-                    f"new={current_output_file}"
+                    f"new={current_output_file}, fingerprint_changed={'是' if fingerprint_changed else '否'}"
                 )
             else:
                 return existing
@@ -199,49 +217,66 @@ class ReviewDocumentStateService:
             if worker is not None and worker.is_alive():
                 return
             worker = threading.Thread(
-                target=self._worker_loop,
-                args=(building,),
+                target=self._run_worker,
+                args=(building, key),
                 name=f"handover-review-excel-sync-{building}",
                 daemon=True,
             )
             self._workers[key] = worker
             worker.start()
 
+    def _run_worker(self, building: str, key: str) -> None:
+        try:
+            self._worker_loop(building)
+        finally:
+            with self._worker_guard:
+                current = self._workers.get(key)
+                if current is threading.current_thread():
+                    self._workers.pop(key, None)
+            self.emit_log(f"[交接班][审核SQLite] 后台Excel同步线程已退出，等待下次任务拉起: building={building}")
+
     def _worker_loop(self, building: str) -> None:
         store = self._store(building)
         while True:
-            job = store.claim_next_job()
-            if not isinstance(job, dict):
-                return
-            session_id = str(job.get("session_id", "") or "").strip()
-            target_revision = int(job.get("target_revision", 0) or 0)
             try:
-                sync_state = self.force_sync_session(
-                    building=building,
-                    session_id=session_id,
-                    target_revision=target_revision,
-                    reason="background",
-                    reconcile_sync_job=False,
-                )
-                store.finish_job(
-                    session_id=session_id,
-                    success=True,
-                    claimed_target_revision=target_revision,
-                    synced_revision=int(sync_state.get("synced_revision", 0) or 0),
-                )
+                job = store.claim_next_job()
+                if not isinstance(job, dict):
+                    return
+                session_id = str(job.get("session_id", "") or "").strip()
+                target_revision = int(job.get("target_revision", 0) or 0)
+                try:
+                    sync_state = self.force_sync_session(
+                        building=building,
+                        session_id=session_id,
+                        target_revision=target_revision,
+                        reason="background",
+                        reconcile_sync_job=False,
+                    )
+                    store.finish_job(
+                        session_id=session_id,
+                        success=True,
+                        claimed_target_revision=target_revision,
+                        synced_revision=int(sync_state.get("synced_revision", 0) or 0),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    sync_state = store.finish_job(
+                        session_id=session_id,
+                        success=False,
+                        claimed_target_revision=target_revision,
+                        error=str(exc),
+                    )
+                    self.emit_log(
+                        f"[交接班][审核SQLite] 后台Excel同步失败 building={building}, "
+                        f"session_id={session_id}, revision={target_revision}, "
+                        f"状态={sync_state.get('status', '-')}, error={exc}"
+                    )
+                time.sleep(0.05)
             except Exception as exc:  # noqa: BLE001
-                sync_state = store.finish_job(
-                    session_id=session_id,
-                    success=False,
-                    claimed_target_revision=target_revision,
-                    error=str(exc),
-                )
                 self.emit_log(
-                    f"[交接班][审核SQLite] 后台Excel同步失败 building={building}, "
-                    f"session_id={session_id}, revision={target_revision}, "
-                    f"状态={sync_state.get('status', '-')}, error={exc}"
+                    f"[交接班][审核SQLite] 后台Excel同步线程异常，已自动恢复: "
+                    f"building={building}, error={exc}"
                 )
-            time.sleep(0.05)
+                time.sleep(1.0)
 
     def force_sync_session(
         self,
@@ -268,6 +303,7 @@ class ReviewDocumentStateService:
         output_path = Path(output_file)
         if not output_path.exists() or not output_path.is_file():
             raise ReviewDocumentStateError(f"交接班文件不存在，无法同步最新审核内容: {output_path}")
+        dirty_regions = state.get("dirty_regions", {}) if isinstance(state.get("dirty_regions", {}), dict) else {}
 
         store.update_sync_state(
             session_id=session_id,
@@ -281,7 +317,7 @@ class ReviewDocumentStateService:
                 self.writer.write(
                     output_file=output_file,
                     document=state.get("document", {}) if isinstance(state.get("document", {}), dict) else {},
-                    dirty_regions={"fixed_blocks": True, "sections": True, "footer_inventory": True},
+                    dirty_regions=dirty_regions,
                 )
         except Exception as exc:  # noqa: BLE001
             if reconcile_sync_job:

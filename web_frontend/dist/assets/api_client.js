@@ -442,6 +442,10 @@ export async function getHandoverReviewApi(buildingCode, params = {}, options = 
   return apiJson(appendQuery(`/api/handover/review/${buildingCode}`, params), options);
 }
 
+export async function getHandoverReviewStatusApi(buildingCode, params = {}, options = {}) {
+  return apiJson(appendQuery(`/api/handover/review/${buildingCode}/status`, params), options);
+}
+
 export async function claimHandoverReviewLockApi(buildingCode, payload = {}) {
   return apiJson(`/api/handover/review/${buildingCode}/lock/claim`, {
     method: "POST",

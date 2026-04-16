@@ -11,7 +11,7 @@ from app.modules.feishu.service.bitable_target_resolver import BitableTargetReso
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.core.formatter import build_metric_text
-from handover_log_module.core.models import MetricHit
+from handover_log_module.core.models import MetricHit, RawRow
 from handover_log_module.service.handover_download_service import HandoverDownloadService
 from handover_log_module.service.handover_extract_service import HandoverExtractService
 
@@ -334,7 +334,13 @@ class WetBulbCollectionService:
                 matched.append(record_id)
         return matched
 
-    def _resolve_wet_bulb_value(self, *, hits: Dict[str, MetricHit], effective_config: Dict[str, Any]) -> float:
+    def _resolve_wet_bulb_value(
+        self,
+        *,
+        hits: Dict[str, MetricHit],
+        effective_config: Dict[str, Any],
+        rows: List[RawRow] | None = None,
+    ) -> float:
         hit = hits.get("wet_bulb")
         if hit is not None and hit.value is not None:
             try:
@@ -348,6 +354,43 @@ class WetBulbCollectionService:
         numbers = self._extract_numbers(rendered)
         if numbers:
             return float(numbers[0])
+        fallback_keywords: List[str] = []
+        rule_rows = effective_config.get("rule_rows", [])
+        if isinstance(rule_rows, list):
+            for item in rule_rows:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("id", "")).strip() != "wet_bulb":
+                    continue
+                keywords = item.get("d_keywords", [])
+                if isinstance(keywords, list):
+                    fallback_keywords.extend(str(keyword).strip() for keyword in keywords if str(keyword).strip())
+        fallback_keywords.extend(
+            [
+                "室外湿球温度",
+                "室外温度1",
+                "E-124-DDC-100_室外温度1",
+                "E-124-DDC-100_室外湿球温度",
+            ]
+        )
+        seen_keywords: set[str] = set()
+        normalized_keywords: List[str] = []
+        for keyword in fallback_keywords:
+            lowered = str(keyword).strip().casefold()
+            if not lowered or lowered in seen_keywords:
+                continue
+            seen_keywords.add(lowered)
+            normalized_keywords.append(lowered)
+        for row in rows or []:
+            d_name = str(getattr(row, "d_name", "") or "").strip()
+            if not d_name:
+                continue
+            lowered_name = d_name.casefold()
+            if not any(keyword in lowered_name for keyword in normalized_keywords):
+                continue
+            numbers = self._extract_numbers(getattr(row, "e_raw", None))
+            if numbers:
+                return float(numbers[0])
         raise ValueError("invalid_wet_bulb_temp")
 
     def _resolve_cooling_mode_value(
@@ -469,7 +512,8 @@ class WetBulbCollectionService:
         result = extract_service.extract(building=building, data_file=file_path)
         hits = result.get("hits", {}) if isinstance(result.get("hits", {}), dict) else {}
         effective_config = result.get("effective_config", {}) if isinstance(result.get("effective_config", {}), dict) else {}
-        wet_bulb = self._resolve_wet_bulb_value(hits=hits, effective_config=effective_config)
+        rows = result.get("rows", []) if isinstance(result.get("rows", []), list) else []
+        wet_bulb = self._resolve_wet_bulb_value(hits=hits, effective_config=effective_config, rows=rows)
         cooling = self._resolve_cooling_mode_value(hits=hits, effective_config=effective_config, cfg=cfg)
         emit_log(
             f"[湿球温度定时采集][{building}] 提取完成: 湿球温度={wet_bulb}, 模式={cooling['source_text']}->{cooling['upload_text']}"

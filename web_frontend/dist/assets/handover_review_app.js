@@ -5,6 +5,7 @@ import {
   confirmHandoverReviewApi,
   getJobApi,
   getHandoverReviewApi,
+  getHandoverReviewStatusApi,
   heartbeatHandoverReviewLockApi,
   releaseHandoverReviewLockApi,
   retryHandoverReviewCloudSyncApi,
@@ -76,37 +77,18 @@ function parseDownloadFilename(contentDisposition = "", fallbackName = "") {
   return basenameFromPath(fallbackName) || "download.xlsx";
 }
 
-async function downloadBlobFile(url, fallbackName = "") {
-  const response = await window.fetch(String(url || ""), {
-    credentials: "same-origin",
-  });
-  if (!response.ok) {
-    let detail = "";
-    const contentType = String(response.headers.get("content-type") || "").trim().toLowerCase();
-    try {
-      if (contentType.includes("application/json")) {
-        const payload = await response.json();
-        detail = String(payload?.detail || payload?.message || "").trim();
-      } else {
-        detail = String(await response.text()).trim();
-      }
-    } catch (_error) {
-      detail = "";
-    }
-    throw new Error(detail || `下载失败（${response.status}）`);
-  }
-  const blob = await response.blob();
-  const blobUrl = window.URL.createObjectURL(blob);
+function triggerBrowserDownload(url, fallbackName = "") {
   const anchor = document.createElement("a");
-  anchor.href = blobUrl;
-  anchor.download = parseDownloadFilename(response.headers.get("content-disposition"), fallbackName);
+  anchor.href = String(url || "");
+  const downloadName = basenameFromPath(fallbackName);
+  if (downloadName) {
+    anchor.download = downloadName;
+  }
+  anchor.rel = "noopener";
   anchor.style.display = "none";
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  window.setTimeout(() => {
-    window.URL.revokeObjectURL(blobUrl);
-  }, 5000);
 }
 
 function badgeVm(text, tone = "neutral", emphasis = "soft", icon = "dot") {
@@ -1101,7 +1083,7 @@ export function mountHandoverReviewApp(Vue) {
         activeLoadController = typeof AbortController === "function" ? new AbortController() : null;
         try {
           if (!background) loading.value = true;
-          const payload = await getHandoverReviewApi(
+          const payload = await (background ? getHandoverReviewStatusApi : getHandoverReviewApi)(
             buildingCode,
             buildLoadParams(),
             activeLoadController
@@ -1211,19 +1193,7 @@ export function mountHandoverReviewApp(Vue) {
         errorText.value = "";
         await ensureEditingLock();
         const payloadDirtyRegions = cloneDirtyRegions(dirtyRegions.value);
-        if (reason === "confirm") {
-          statusText.value = "正在保存并确认...";
-        } else if (reason === "switch") {
-          statusText.value = "正在保存并切换...";
-        } else if (reason === "cloud_update") {
-          statusText.value = "正在保存并更新云文档...";
-        } else if (reason === "download") {
-          statusText.value = "正在保存并准备下载...";
-        } else if (reason === "capacity_download") {
-          statusText.value = "正在保存并准备下载容量报表...";
-        } else {
-          statusText.value = "正在保存...";
-        }
+        statusText.value = "正在保存审核内容...";
         try {
           const response = await saveHandoverReviewApi(buildingCode, {
             session_id: session.value.session_id,
@@ -1313,6 +1283,7 @@ export function mountHandoverReviewApp(Vue) {
         }
         confirming.value = true;
         errorText.value = "";
+        statusText.value = "正在同步交接班文件并执行确认上传...";
         try {
           const request = {
             session_id: session.value.session_id,
@@ -1326,7 +1297,17 @@ export function mountHandoverReviewApp(Vue) {
           broadcastHandoverReviewStatusChange(response || {});
           staleRevisionConflict.value = false;
           needsRefresh.value = false;
-          statusText.value = session.value?.confirmed ? "已确认当前楼栋" : "已撤销确认";
+          const followupStatus = String(response?.followup_result?.status || "").trim().toLowerCase();
+          const cloudStatus = String(response?.followup_result?.cloud_sheet_sync?.status || "").trim().toLowerCase();
+          if (followupStatus === "await_all_confirmed") {
+            statusText.value = "等待五个楼栋全部确认";
+          } else if (followupStatus === "ok" || followupStatus === "success") {
+            statusText.value = "已触发首次全量上传";
+          } else if (cloudStatus === "ok" || cloudStatus === "success") {
+            statusText.value = "已进入单楼云表重传";
+          } else {
+            statusText.value = session.value?.confirmed ? "已确认当前楼栋" : "已撤销确认";
+          }
         } catch (error) {
           if (isRevisionConflictError(error)) {
             beginRemoteSaveRefresh();
@@ -1401,6 +1382,7 @@ export function mountHandoverReviewApp(Vue) {
         try {
           const response = await updateHandoverReviewCloudSyncApi(buildingCode, {
             session_id: session.value.session_id,
+            client_id: reviewClientId,
           });
           applyPayloadMeta(response || {});
           broadcastHandoverReviewStatusChange(response || {});
@@ -1435,10 +1417,11 @@ export function mountHandoverReviewApp(Vue) {
         }
         downloading.value = true;
         errorText.value = "";
+        statusText.value = "正在同步交接班文件...";
         try {
           const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId);
-          await downloadBlobFile(`${url}&ts=${Date.now()}`, session.value?.output_file || "交接班日志.xlsx");
-          statusText.value = "交接班日志下载已开始";
+          triggerBrowserDownload(`${url}&ts=${Date.now()}`, session.value?.output_file || "交接班日志.xlsx");
+          statusText.value = "交接班文件已同步，正在开始下载...";
         } catch (error) {
           errorText.value = String(error?.message || error || "下载失败");
         } finally {
@@ -1478,10 +1461,11 @@ export function mountHandoverReviewApp(Vue) {
         }
         capacityDownloading.value = true;
         errorText.value = "";
+        statusText.value = "容量报表已就绪，正在开始下载...";
         try {
           const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId);
-          await downloadBlobFile(`${url}&ts=${Date.now()}`, capacityOutputFile || "交接班容量报表.xlsx");
-          statusText.value = "交接班容量报表下载已开始";
+          triggerBrowserDownload(`${url}&ts=${Date.now()}`, capacityOutputFile || "交接班容量报表.xlsx");
+          statusText.value = "容量报表已就绪，正在开始下载...";
         } catch (error) {
           errorText.value = String(error?.message || error || "下载失败");
         } finally {

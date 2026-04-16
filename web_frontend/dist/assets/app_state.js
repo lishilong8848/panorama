@@ -1477,11 +1477,14 @@ export function createAppState(vueApi) {
   });
   const initialLoadingStatusText = computed(() => {
     const loadingErrors = [];
-    if (!fullHealthLoaded.value && String(healthLoadError.value || "").trim() && !isAbortLikeText(healthLoadError.value)) {
-      loadingErrors.push(`运行状态加载失败：${String(healthLoadError.value || "").trim()}`);
+    const healthErrorText = String(healthLoadError.value || "").trim();
+    const configErrorText = String(configLoadError.value || "").trim();
+    const isRoleSelectionConflictText = (text) => String(text || "").includes("请先在角色选择页进入系统");
+    if (!fullHealthLoaded.value && healthErrorText && !isAbortLikeText(healthErrorText) && !isRoleSelectionConflictText(healthErrorText)) {
+      loadingErrors.push(`运行状态加载失败：${healthErrorText}`);
     }
-    if (!configLoaded.value && String(configLoadError.value || "").trim() && !isAbortLikeText(configLoadError.value)) {
-      loadingErrors.push(`配置加载失败：${String(configLoadError.value || "").trim()}`);
+    if (!configLoaded.value && configErrorText && !isAbortLikeText(configErrorText) && !isRoleSelectionConflictText(configErrorText)) {
+      loadingErrors.push(`配置加载失败：${configErrorText}`);
     }
     if (!bootstrapReady.value) return "页面正在启动...";
     if (!configLoaded.value && !fullHealthLoaded.value) {

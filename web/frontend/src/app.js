@@ -3712,28 +3712,18 @@ createApp({
     function scheduleAutoSaveConfig() {
       if (!config.value) return;
       if ((configAutoSaveSuspendDepth?.value || 0) > 0) return;
+      if (String(currentView.value || "").trim() !== "config") return;
       const pendingSignature = buildCurrentConfigAutoSaveSignature();
       if (pendingSignature) {
         updateConfigAutoSaveStatus({
-          mode: configAutoSaveInFlightPromise ? "queued" : "idle",
+          mode: "idle",
           pending_signature: pendingSignature,
         });
       }
-      if (currentView.value === "config" && String(activeConfigTab.value || "").trim() === "feature_handover") {
-        if (configAutoSaveTimer) {
-          window.clearTimeout(configAutoSaveTimer);
-          configAutoSaveTimer = null;
-        }
-        scheduleHandoverConfigAutoSave();
-        return;
-      }
       if (configAutoSaveTimer) {
         window.clearTimeout(configAutoSaveTimer);
-      }
-      configAutoSaveTimer = window.setTimeout(() => {
         configAutoSaveTimer = null;
-        void queueConfigAutoSave();
-      }, resolveConfigAutoSaveDelayMs());
+      }
     }
 
     function serializeCurrentHandoverCommonDraft() {
@@ -3833,18 +3823,19 @@ createApp({
     }
 
     function scheduleHandoverConfigAutoSave() {
-      if (!config.value) return;
-      if (!configLoaded.value) return;
-      if ((configAutoSaveSuspendDepth?.value || 0) > 0) return;
-      if (currentView.value !== "config") return;
-      if (String(activeConfigTab.value || "").trim() !== "feature_handover") return;
       if (handoverConfigAutoSaveTimer) {
         window.clearTimeout(handoverConfigAutoSaveTimer);
-      }
-      handoverConfigAutoSaveTimer = window.setTimeout(() => {
         handoverConfigAutoSaveTimer = null;
-        void queueConfigAutoSave();
-      }, resolveConfigAutoSaveDelayMs());
+      }
+    }
+
+    function hasPendingHandoverConfigChanges(building = handoverConfigBuilding.value) {
+      const currentBuilding = String(building || "").trim() || "A楼";
+      const currentCommonSignature = serializeCurrentHandoverCommonDraft();
+      const currentBuildingSignature = serializeCurrentHandoverBuildingDraft(currentBuilding);
+      const savedBuildingSignature = String(lastSavedHandoverBuildingSignatures[currentBuilding] || "");
+      return currentCommonSignature !== lastSavedHandoverCommonSignature
+        || currentBuildingSignature !== savedBuildingSignature;
     }
 
     async function flushPendingHandoverConfigAutoSave(options = {}) {
@@ -4037,10 +4028,10 @@ createApp({
     const configAutoSaveStateText = computed(() => {
       const pendingSignature = String(configAutoSaveStatus.pending_signature || "");
       const savedSignature = String(configAutoSaveStatus.saved_signature || "");
-      if (configAutoSaveStatus.mode === "error") return "自动保存失败";
-      if (configAutoSaveStatus.mode === "saving") return "正在自动保存...";
+      if (configAutoSaveStatus.mode === "error") return "保存失败";
+      if (configAutoSaveStatus.mode === "saving") return "正在保存...";
       if (pendingSignature && pendingSignature !== savedSignature) return "未保存修改";
-      if (configAutoSaveStatus.last_saved_at) return "已自动保存";
+      if (configAutoSaveStatus.last_saved_at) return "已保存";
       return "";
     });
 
@@ -4048,7 +4039,7 @@ createApp({
       if (configAutoSaveStatus.mode === "error") {
         return String(configAutoSaveStatus.last_error || "").trim();
       }
-      if (configAutoSaveStateText.value === "已自动保存") {
+      if (configAutoSaveStateText.value === "已保存") {
         return String(configAutoSaveStatus.last_saved_at || "").trim();
       }
       return "";
@@ -4095,15 +4086,12 @@ createApp({
 
     async function sendHandoverReviewLink(building, options = {}) {
       const targetBuilding = String(building || "").trim() || String(handoverConfigBuilding.value || "").trim() || "A楼";
-      const flushResult = await flushConfigAutoSaveQueue({
-        handoverOnly: true,
-        silentSuccess: true,
-      });
-      if (flushResult && flushResult.saved === false) {
+      if (hasPendingHandoverConfigChanges(targetBuilding)) {
+        message.value = "当前交接班配置有未保存修改，请先点击保存配置";
         return {
           accepted: false,
-          reason: String(flushResult.reason || "save_failed"),
-          error: String(flushResult.error || "").trim(),
+          reason: "pending_manual_save",
+          error: "当前交接班配置有未保存修改，请先点击保存配置",
         };
       }
       const draftOpenIds = collectCurrentHandoverReviewRecipientOpenIds(targetBuilding);
@@ -4132,10 +4120,10 @@ createApp({
 
     async function onHandoverConfigBuildingChange(nextBuilding) {
       const targetBuilding = String(nextBuilding || "").trim() || String(handoverConfigBuilding.value || "").trim() || "A楼";
-      await flushConfigAutoSaveQueue({
-        handoverOnly: true,
-        silentSuccess: true,
-      });
+      if (hasPendingHandoverConfigChanges(handoverConfigBuilding.value)) {
+        message.value = "当前交接班配置有未保存修改，请先点击保存配置";
+        return;
+      }
       await fetchHandoverBuildingConfigSegment(targetBuilding);
     }
 
@@ -4517,14 +4505,20 @@ createApp({
     });
 
     watch(
-      () => bootstrapReady.value,
-      (ready) => {
-        if (!ready) return;
-        if (configLoaded.value) return;
-        if (!health.runtime_activated || !health.startup_role_confirmed || startupRoleSelectorVisible.value) return;
+      () => ({
+        bootstrapReady: Boolean(bootstrapReady.value),
+        runtimeActivated: Boolean(health.runtime_activated),
+        startupRoleConfirmed: Boolean(health.startup_role_confirmed),
+        selectorVisible: Boolean(startupRoleSelectorVisible.value),
+        configLoaded: Boolean(configLoaded.value),
+      }),
+      (state) => {
+        if (!state.bootstrapReady) return;
+        if (state.configLoaded) return;
+        if (!state.runtimeActivated || !state.startupRoleConfirmed || state.selectorVisible) return;
         void fetchConfig({ silentMessage: true });
       },
-      { immediate: true },
+      { immediate: true, deep: false },
     );
 
     watch(
@@ -4547,13 +4541,6 @@ createApp({
       () => [String(currentView.value || "").trim(), String(activeConfigTab.value || "").trim()],
       ([view, tab], [prevView, prevTab]) => {
         const isHandoverTab = view === "config" && tab === "feature_handover";
-        const wasHandoverTab = prevView === "config" && prevTab === "feature_handover";
-        if (wasHandoverTab && !isHandoverTab) {
-          void flushConfigAutoSaveQueue({
-            handoverOnly: true,
-            silentSuccess: true,
-          });
-        }
         if (!isHandoverTab) return;
         if (configAutoSaveTimer) {
           window.clearTimeout(configAutoSaveTimer);

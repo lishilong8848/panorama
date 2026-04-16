@@ -3,11 +3,12 @@
 import asyncio
 import copy
 import inspect
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
 from app.config.handover_segment_store import building_code_from_name, handover_building_segment_path
@@ -43,6 +44,8 @@ from handover_log_module.service.review_session_service import (
 
 
 router = APIRouter(tags=["handover_review"])
+_REVIEW_DEFAULT_CONFIG_LOCK_GUARD = threading.Lock()
+_REVIEW_DEFAULT_CONFIG_LOCKS: dict[str, threading.RLock] = {}
 
 
 def _raise_review_store_http_error(
@@ -66,6 +69,16 @@ def _empty_concurrency(current_revision: int = 0) -> Dict[str, Any]:
     }
 
 
+def _review_default_config_lock(building_code: str) -> threading.RLock:
+    key = str(building_code or "").strip().lower() or "unknown"
+    with _REVIEW_DEFAULT_CONFIG_LOCK_GUARD:
+        lock = _REVIEW_DEFAULT_CONFIG_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _REVIEW_DEFAULT_CONFIG_LOCKS[key] = lock
+        return lock
+
+
 def _get_session_concurrency_safe(
     service: ReviewSessionService,
     *,
@@ -78,6 +91,31 @@ def _get_session_concurrency_safe(
     getter = getattr(service, "get_session_concurrency", None)
     if not callable(getter):
         return _empty_concurrency(current_revision=current_revision)
+
+
+def _ensure_session_lock_held_or_409(
+    service: ReviewSessionService,
+    *,
+    building: str,
+    session_id: str,
+    client_id: str,
+) -> Dict[str, Any]:
+    client_id_text = str(client_id or "").strip()
+    if not client_id_text:
+        raise HTTPException(status_code=400, detail="client_id 不能为空")
+    try:
+        concurrency = service.get_session_concurrency(
+            building=building,
+            session_id=session_id,
+            client_id=client_id_text,
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    except ReviewSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not bool(concurrency.get("client_holds_lock", False)):
+        raise HTTPException(status_code=409, detail="当前审核页正在其他终端编辑，请等待或刷新后重试")
+    return concurrency
     try:
         return getter(
             building=building,
@@ -137,12 +175,17 @@ def _empty_followup_progress() -> Dict[str, Any]:
     }
 
 
-def _handover_resource_keys(*resource_keys: str, batch_key: str = "") -> list[str]:
+def _handover_resource_keys(*resource_keys: str, batch_key: str = "", building: str = "") -> list[str]:
     keys: list[str] = []
     for item in resource_keys:
         text = str(item or "").strip()
         if text and text not in keys:
             keys.append(text)
+    building_text = str(building or "").strip()
+    if building_text:
+        resource_key = f"handover_building:{building_text}"
+        if resource_key not in keys:
+            keys.append(resource_key)
     batch_text = str(batch_key or "").strip()
     if batch_text:
         resource_key = f"handover_batch:{batch_text}"
@@ -632,6 +675,7 @@ def _persist_review_defaults(
         "defaults_updated": bool(persisted.get("defaults_updated", False)),
         "config_updated": False,
         "aggregate_refresh_error": "",
+        "config_sync_required": False,
     }
     if not dirty.get("footer_inventory") and not dirty.get("fixed_blocks"):
         return result
@@ -663,20 +707,54 @@ def _persist_review_defaults(
     if updated_data == current_data:
         return result
 
-    try:
-        saved_config, _document, aggregate_refresh_error = save_handover_building_segment(
-            building_code,
-            updated_data,
-            base_revision=int(current_doc.get("revision", 0) or 0),
-            config_path=container.config_path,
-        )
-        container.reload_config(saved_config)
-        result["config_updated"] = True
-        result["aggregate_refresh_error"] = str(aggregate_refresh_error or "").strip()
-    except Exception as exc:  # noqa: BLE001
-        result["config_updated"] = False
-        result["config_error"] = str(exc)
+    result["config_sync_required"] = True
+    result["config_building_code"] = building_code
+    result["config_data"] = updated_data
     return result
+
+
+def _persist_review_defaults_config_async(
+    container,
+    *,
+    building: str,
+    building_code: str,
+    updated_data: Dict[str, Any],
+) -> None:
+    lock = _review_default_config_lock(building_code)
+    with lock:
+        try:
+            current_doc = get_handover_building_segment(building_code, container.config_path)
+            current_data = (
+                copy.deepcopy(current_doc.get("data", {}))
+                if isinstance(current_doc.get("data", {}), dict)
+                else {}
+            )
+            if updated_data == current_data:
+                container.add_system_log(
+                    f"[交接班][审核模板默认] 楼栋分段默认值无变化，已跳过后台回写: building={building}"
+                )
+                return
+            saved_config, _document, aggregate_refresh_error = save_handover_building_segment(
+                building_code,
+                updated_data,
+                base_revision=int(current_doc.get("revision", 0) or 0),
+                config_path=container.config_path,
+            )
+            container.reload_config(saved_config)
+            aggregate_refresh_error_text = str(aggregate_refresh_error or "").strip()
+            if aggregate_refresh_error_text:
+                container.add_system_log(
+                    f"[交接班][审核模板默认] 楼栋分段默认值后台回写成功，但聚合配置刷新失败: "
+                    f"building={building}, error={aggregate_refresh_error_text}"
+                )
+            else:
+                container.add_system_log(
+                    f"[交接班][审核模板默认] 楼栋分段默认值后台回写成功: building={building}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            container.add_system_log(
+                f"[交接班][审核模板默认] 楼栋分段默认值后台回写失败: building={building}, error={exc}"
+            )
 
 
 def _resolve_building_or_404(service: ReviewSessionService, building_code: str) -> str:
@@ -1453,6 +1531,61 @@ def handover_review_data(
     }
 
 
+@router.get("/api/handover/review/{building_code}/status")
+def handover_review_status(
+    building_code: str,
+    request: Request,
+    duty_date: str = "",
+    duty_shift: str = "",
+    session_id: str = "",
+    client_id: str = "",
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service, parser, writer, _ = _build_review_services(container)
+    document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
+    building = _resolve_building_or_404(service, building_code)
+    session = _load_target_session_or_404(
+        service,
+        building=building,
+        duty_date=duty_date,
+        duty_shift=duty_shift,
+        session_id=session_id,
+    )
+    session = document_state.attach_excel_sync(session)
+    try:
+        batch_status = service.get_batch_status(session["batch_key"])
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    review_ui = parser.config.get("review_ui", {}) if isinstance(parser.config, dict) else {}
+    poll_interval_sec = 5
+    if isinstance(review_ui, dict):
+        try:
+            poll_interval_sec = max(1, int(review_ui.get("poll_interval_sec", 5) or 5))
+        except Exception:  # noqa: BLE001
+            poll_interval_sec = 5
+    return {
+        "ok": True,
+        "building": building,
+        "session": session,
+        "batch_status": batch_status,
+        "concurrency": _get_session_concurrency_safe(
+            service,
+            building=building,
+            session_id=str(session.get("session_id", "")).strip(),
+            client_id=str(client_id or "").strip(),
+            current_revision=int(session.get("revision", 0) or 0),
+            emit_log=container.add_system_log,
+        ),
+        "review_ui": {"poll_interval_sec": poll_interval_sec},
+        "history": _build_history_payload_safe(
+            service,
+            building=building,
+            selected_session_id=str(session.get("session_id", "")).strip(),
+            emit_log=container.add_system_log,
+        ),
+    }
+
+
 @router.get("/api/handover/review/{building_code}/download")
 def handover_review_download(building_code: str, request: Request, session_id: str = "") -> FileResponse:
     container = request.app.state.container
@@ -1527,6 +1660,7 @@ def handover_review_capacity_download(building_code: str, request: Request, sess
 def handover_review_save(
     building_code: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(...),
 ) -> Dict[str, Any]:
     container = request.app.state.container
@@ -1542,6 +1676,12 @@ def handover_review_save(
     if not isinstance(document, dict):
         raise HTTPException(status_code=400, detail="document 格式错误")
     target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    _ensure_session_lock_held_or_409(
+        service,
+        building=building,
+        session_id=session_id,
+        client_id=str(payload.get("client_id", "")).strip(),
+    )
     try:
         document_state.ensure_document_for_session(target)
     except ReviewDocumentStateError as exc:
@@ -1554,9 +1694,11 @@ def handover_review_save(
     capacity_elapsed_ms = 0
     session_elapsed_ms = 0
     queued_excel_sync = False
+    defaults_config_async = False
+    defaults_config_status = "skipped"
     with container.job_service.resource_guard(
         name=f"handover_save:{batch_key or building}:{session_id}",
-        resource_keys=_handover_resource_keys(batch_key=batch_key),
+        resource_keys=_handover_resource_keys(building=building),
     ):
         write_started = time.perf_counter()
         previous_document_state: Dict[str, Any] | None = None
@@ -1594,12 +1736,27 @@ def handover_review_save(
                     "cabinet_power_fields": 0,
                     "config_updated": False,
                     "defaults_updated": False,
+                    "config_sync_required": False,
                     "error": str(exc),
                 }
                 container.add_system_log(
                     f"[交接班][审核模板默认] SQLite默认值写入失败，已保留审核文档保存结果: building={building}, error={exc}"
                 )
             defaults_elapsed_ms = int((time.perf_counter() - defaults_started) * 1000)
+            if isinstance(persisted_defaults, dict) and bool(persisted_defaults.get("config_sync_required", False)):
+                defaults_config_async = True
+                defaults_config_status = "queued"
+                background_tasks.add_task(
+                    _persist_review_defaults_config_async,
+                    container,
+                    building=building,
+                    building_code=str(persisted_defaults.get("config_building_code", "")).strip(),
+                    updated_data=copy.deepcopy(
+                        persisted_defaults.get("config_data", {})
+                        if isinstance(persisted_defaults.get("config_data", {}), dict)
+                        else {}
+                    ),
+                )
         try:
             session_started = time.perf_counter()
             if is_latest_session:
@@ -1679,21 +1836,9 @@ def handover_review_save(
                 f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0) if isinstance(persisted_defaults, dict) else 0}, "
                 f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}"
             )
-        if isinstance(persisted_defaults, dict) and persisted_defaults.get("config_updated"):
-            aggregate_refresh_error = str(persisted_defaults.get("aggregate_refresh_error", "") or "").strip()
-            if aggregate_refresh_error:
-                container.add_system_log(
-                    f"[交接班][审核模板默认] 已回写楼栋分段默认值，但聚合配置刷新失败: "
-                    f"building={building}, error={aggregate_refresh_error}"
-                )
-            else:
-                container.add_system_log(
-                    f"[交接班][审核模板默认] 已回写楼栋分段默认值: building={building}"
-                )
-        elif isinstance(persisted_defaults, dict) and str(persisted_defaults.get("config_error", "") or "").strip():
+        if defaults_config_status == "queued":
             container.add_system_log(
-                f"[交接班][审核模板默认] 楼栋分段默认值回写失败，已保留SQLite默认值: "
-                f"building={building}, error={persisted_defaults.get('config_error', '')}"
+                f"[交接班][审核模板默认] 楼栋分段默认值已进入后台回写队列: building={building}"
             )
     else:
         container.add_system_log(
@@ -1727,6 +1872,8 @@ def handover_review_save(
             "session_ms": int(session_elapsed_ms or 0),
             "queued_excel_sync": bool(queued_excel_sync),
             "excel_sync_status": str(session.get("excel_sync", {}).get("status", "") if isinstance(session.get("excel_sync", {}), dict) else ""),
+            "defaults_config_async": bool(defaults_config_async),
+            "defaults_config_status": str(defaults_config_status or "skipped"),
             "total_ms": int(total_elapsed_ms or 0),
         },
         "history": _build_history_payload_safe(
@@ -1753,6 +1900,12 @@ def handover_review_confirm(
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     _load_target_session_or_404(service, building=building, session_id=session_id)
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id)
+    _ensure_session_lock_held_or_409(
+        service,
+        building=building,
+        session_id=session_id,
+        client_id=str(payload.get("client_id", "")).strip(),
+    )
     target_session = _load_target_session_or_404(service, building=building, session_id=session_id)
     target_batch_key = str(target_session.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
@@ -1835,11 +1988,17 @@ def handover_review_unconfirm(
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     _load_target_session_or_404(service, building=building, session_id=session_id)
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id)
+    _ensure_session_lock_held_or_409(
+        service,
+        building=building,
+        session_id=session_id,
+        client_id=str(payload.get("client_id", "")).strip(),
+    )
     target_session = _load_target_session_or_404(service, building=building, session_id=session_id)
     target_batch_key = str(target_session.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
         name=f"handover_unconfirm:{target_batch_key}:{building}",
-        resource_keys=_handover_resource_keys(batch_key=target_batch_key),
+        resource_keys=_handover_resource_keys(building=building),
     ):
         try:
             session, batch_status = service.mark_confirmed(
@@ -2041,6 +2200,12 @@ def handover_review_update_cloud_sync(
     target = _load_target_session_or_404(service, building=building, session_id=session_id)
     if str(target.get("building", "")).strip() != building:
         raise HTTPException(status_code=400, detail="session building mismatch")
+    _ensure_session_lock_held_or_409(
+        service,
+        building=building,
+        session_id=session_id,
+        client_id=str(payload.get("client_id", "")).strip(),
+    )
     target_batch_key = str(target.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
         name=f"handover_cloud_update:{target_batch_key}:{building}",

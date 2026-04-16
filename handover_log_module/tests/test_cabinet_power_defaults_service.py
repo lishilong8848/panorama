@@ -147,12 +147,13 @@ def test_persist_review_defaults_updates_cabinet_and_footer_defaults(tmp_path: P
 
     persisted = _persist_review_defaults(container, building="A楼", document=document)
 
-    assert persisted == {
-        "footer_inventory_rows": 1,
-        "cabinet_power_fields": 4,
-        "config_updated": False,
-        "defaults_updated": True,
-    }
+    assert persisted["footer_inventory_rows"] == 1
+    assert persisted["cabinet_power_fields"] == 4
+    assert persisted["config_updated"] is False
+    assert persisted["defaults_updated"] is True
+    assert persisted["config_sync_required"] is True
+    assert persisted["config_building_code"] == "A"
+    assert isinstance(persisted["config_data"], dict)
     assert container.reload_calls == 0
     state_service = _build_review_document_state_service(container)
     store = state_service._store("A楼")
@@ -202,11 +203,12 @@ def test_persist_review_defaults_skips_config_write_when_defaults_unchanged(tmp_
 
     assert first["config_updated"] is False
     assert first["defaults_updated"] is True
-    assert second == {
-        "footer_inventory_rows": 1,
-        "cabinet_power_fields": 4,
-        "config_updated": False,
-        "defaults_updated": False,
-    }
+    assert second["footer_inventory_rows"] == 1
+    assert second["cabinet_power_fields"] == 4
+    assert second["config_updated"] is False
+    assert second["defaults_updated"] is False
+    assert second["config_sync_required"] is True
+    assert second["config_building_code"] == "A"
+    assert isinstance(second["config_data"], dict)
     assert container.reload_calls == 0
     assert second_config == first_config

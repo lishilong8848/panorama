@@ -1,6 +1,8 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+from fastapi import BackgroundTasks
+
 from app.modules.handover_review.api import routes
 
 
@@ -19,6 +21,10 @@ def _fake_request():
         job_service=_DummyJobService(),
     )
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
+
+
+def _background_tasks():
+    return BackgroundTasks()
 
 
 def test_load_target_session_allows_missing_output_file_when_session_exists():
@@ -77,6 +83,7 @@ def test_handover_review_save_returns_ok_when_enqueue_excel_sync_fails(monkeypat
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), None, None, None))
     monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
     monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(routes, "_ensure_session_lock_held_or_409", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         routes,
         "_load_target_session_or_404",
@@ -104,6 +111,7 @@ def test_handover_review_save_returns_ok_when_enqueue_excel_sync_fails(monkeypat
     payload = routes.handover_review_save(
         "a",
         _fake_request(),
+        _background_tasks(),
         {
             "session_id": "A楼|2026-04-15|day",
             "base_revision": 3,
