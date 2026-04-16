@@ -275,7 +275,8 @@
         "target_cell": "",
         "rule_type": "direct",
         "d_keywords": [
-          "1号冷机模式"
+          "1号冷机模式",
+          "1号冷机运行模式"
         ],
         "match_mode": "contains_casefold",
         "agg": "first",
@@ -289,7 +290,8 @@
         "target_cell": "",
         "rule_type": "direct",
         "d_keywords": [
-          "2号冷机模式"
+          "2号冷机模式",
+          "2号冷机运行模式"
         ],
         "match_mode": "contains_casefold",
         "agg": "first",
@@ -303,7 +305,8 @@
         "target_cell": "",
         "rule_type": "direct",
         "d_keywords": [
-          "3号冷机模式"
+          "3号冷机模式",
+          "3号冷机运行模式"
         ],
         "match_mode": "contains_casefold",
         "agg": "first",
@@ -317,7 +320,8 @@
         "target_cell": "",
         "rule_type": "direct",
         "d_keywords": [
-          "4号冷机模式"
+          "4号冷机模式",
+          "4号冷机运行模式"
         ],
         "match_mode": "contains_casefold",
         "agg": "first",
@@ -331,7 +335,8 @@
         "target_cell": "",
         "rule_type": "direct",
         "d_keywords": [
-          "5号冷机模式"
+          "5号冷机模式",
+          "5号冷机运行模式"
         ],
         "match_mode": "contains_casefold",
         "agg": "first",
@@ -345,7 +350,8 @@
         "target_cell": "",
         "rule_type": "direct",
         "d_keywords": [
-          "6号冷机模式"
+          "6号冷机模式",
+          "6号冷机运行模式"
         ],
         "match_mode": "contains_casefold",
         "agg": "first",

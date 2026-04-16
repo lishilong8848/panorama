@@ -64,6 +64,7 @@
       typeof shouldPauseRuntimeRequests === "function"
         ? Boolean(shouldPauseRuntimeRequests())
         : false;
+    const isBootstrapReady = () => Boolean(bootstrapReady?.value);
 
     const resolveHealthPollIntervalMs = () =>
       typeof getHealthPollIntervalMs === "function"
@@ -73,6 +74,10 @@
     const scheduleHealthPoll = (delayMs = 5000) => {
       if (timers.healthTimer) clearTimeout(timers.healthTimer);
       timers.healthTimer = window.setTimeout(async () => {
+        if (!isBootstrapReady()) {
+          scheduleHealthPoll(resolveHealthPollIntervalMs());
+          return;
+        }
         if (isRuntimeTrafficPaused()) {
           scheduleHealthPoll(resolveHealthPollIntervalMs());
           return;
@@ -91,6 +96,10 @@
     const scheduleJobPanelPoll = (delayMs = jobPanelPollIntervalMs) => {
       if (timers.jobsTimer) clearTimeout(timers.jobsTimer);
       timers.jobsTimer = window.setTimeout(async () => {
+        if (!isBootstrapReady()) {
+          scheduleJobPanelPoll(jobPanelPollIntervalMs);
+          return;
+        }
         if (isRuntimeTrafficPaused()) {
           scheduleJobPanelPoll(jobPanelPollIntervalMs);
           return;
@@ -106,6 +115,10 @@
     const scheduleBridgeTasksPoll = (delayMs = bridgeTasksPollIntervalMs) => {
       if (timers.bridgeTasksTimer) clearTimeout(timers.bridgeTasksTimer);
       timers.bridgeTasksTimer = window.setTimeout(async () => {
+        if (!isBootstrapReady()) {
+          scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
+          return;
+        }
         if (isRuntimeTrafficPaused()) {
           scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
           return;
@@ -120,6 +133,10 @@
     const scheduleInternalRuntimePoll = (delayMs = internalRuntimePollIntervalMs) => {
       if (timers.internalRuntimeTimer) clearTimeout(timers.internalRuntimeTimer);
       timers.internalRuntimeTimer = window.setTimeout(async () => {
+        if (!isBootstrapReady()) {
+          scheduleInternalRuntimePoll(internalRuntimePollIntervalMs);
+          return;
+        }
         if (isRuntimeTrafficPaused()) {
           scheduleInternalRuntimePoll(internalRuntimePollIntervalMs);
           return;
@@ -136,6 +153,10 @@
     const scheduleDailyReportContextPoll = (delayMs = 30000) => {
       if (timers.dailyReportContextTimer) clearTimeout(timers.dailyReportContextTimer);
       timers.dailyReportContextTimer = window.setTimeout(async () => {
+        if (!isBootstrapReady()) {
+          scheduleDailyReportContextPoll(30000);
+          return;
+        }
         if (isRuntimeTrafficPaused()) {
           scheduleDailyReportContextPoll(30000);
           return;
@@ -164,6 +185,9 @@
       syncHandoverDutyFromNow(false);
     }, 30000);
     timers.pollTimer = setInterval(() => {
+      if (!isBootstrapReady()) {
+        return;
+      }
       if (isRuntimeTrafficPaused()) {
         return;
       }

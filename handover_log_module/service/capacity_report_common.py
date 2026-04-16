@@ -39,19 +39,37 @@ _WEST_BLOCK_BASE_CELLS = {
     "ph": "I30",
     "conductivity": "I31",
 }
-_AIRCON_TARGET_CELLS = {
-    (2, "west", "south"): "AE72",
-    (2, "west", "north"): "AE82",
-    (2, "east", "south"): "AE92",
-    (2, "east", "north"): "AE102",
-    (3, "west", "south"): "AE112",
-    (3, "west", "north"): "AE122",
-    (3, "east", "south"): "AE132",
-    (3, "east", "north"): "AE142",
-    (4, "west", "south"): "AE152",
-    (4, "west", "north"): "AE162",
-    (4, "east", "south"): "AE172",
-    (4, "east", "north"): "AE182",
+_TEMPLATE_FAMILY_OTHER_BUILDINGS = "other_buildings"
+_TEMPLATE_FAMILY_E_BUILDING = "e_building"
+_AIRCON_TARGET_CELLS_BY_TEMPLATE_FAMILY = {
+    _TEMPLATE_FAMILY_OTHER_BUILDINGS: {
+        (2, "west", "south"): "AE70",
+        (2, "west", "north"): "AE75",
+        (2, "east", "south"): "AE80",
+        (2, "east", "north"): "AE85",
+        (3, "west", "south"): "AE91",
+        (3, "west", "north"): "AE98",
+        (3, "east", "south"): "AE105",
+        (3, "east", "north"): "AE112",
+        (4, "west", "south"): "AE118",
+        (4, "west", "north"): "AE123",
+        (4, "east", "south"): "AE128",
+        (4, "east", "north"): "AE133",
+    },
+    _TEMPLATE_FAMILY_E_BUILDING: {
+        (2, "west", "south"): "AE72",
+        (2, "west", "north"): "AE82",
+        (2, "east", "south"): "AE92",
+        (2, "east", "north"): "AE102",
+        (3, "west", "south"): "AE112",
+        (3, "west", "north"): "AE122",
+        (3, "east", "south"): "AE132",
+        (3, "east", "north"): "AE142",
+        (4, "west", "south"): "AE152",
+        (4, "west", "north"): "AE162",
+        (4, "east", "south"): "AE172",
+        (4, "east", "north"): "AE182",
+    },
 }
 _AIRCON_ZONE_DIRECTION_BY_AREA = {
     "1": ("east", "south"),
@@ -380,20 +398,36 @@ def _tr_replacement_search_tokens(identifier: str) -> List[str]:
     text = _text(identifier).upper()
     if not text:
         return []
-    transformed = text
-    if "-TR-" in transformed:
-        transformed = transformed.replace("-TR-", "-TRB-", 1)
-    elif "-TR" in transformed:
-        transformed = transformed.replace("-TR", "-TRB", 1)
-    if transformed.endswith("-201"):
-        transformed = f"{transformed[:-4]}101"
-    elif transformed.endswith("-202") or transformed.endswith("-102"):
-        transformed = f"{transformed[:-4]}201"
-    tokens: List[str] = [transformed]
-    if "-TRB-" in transformed:
-        tokens.append(transformed.replace("-TRB-", "-TRB", 1))
-    elif "-TRB" in transformed:
-        tokens.append(transformed.replace("-TRB", "-TRB-", 1))
+    transformed = re.sub(r"-TR-?", "-TRB", text, count=1)
+    match = re.search(r"^(.*-TRB)-?(101|102|201|202)$", transformed)
+    if not match:
+        return [transformed] if transformed else []
+    prefix = match.group(1)
+    suffix = match.group(2)
+    mapped_suffix = {
+        "101": "101",
+        "201": "101",
+        "102": "201",
+        "202": "201",
+    }.get(suffix, suffix)
+    tokens: List[str] = [f"{prefix}{mapped_suffix}", f"{prefix}-{mapped_suffix}"]
+    deduped: List[str] = []
+    for token in tokens:
+        if token and token not in deduped:
+            deduped.append(token)
+    return deduped
+
+
+def _hvdc_search_tokens(identifier: str, *, template_family: str) -> List[str]:
+    text = _text(identifier).upper()
+    if not text:
+        return []
+    tokens: List[str] = []
+    if template_family == _TEMPLATE_FAMILY_OTHER_BUILDINGS:
+        shifted = re.sub(r"(\d)$", "2", text)
+        if shifted and shifted != text:
+            tokens.append(shifted)
+    tokens.append(text)
     deduped: List[str] = []
     for token in tokens:
         if token and token not in deduped:
@@ -403,8 +437,14 @@ def _tr_replacement_search_tokens(identifier: str) -> List[str]:
 
 def build_capacity_template_snapshot(sheet: Worksheet, building: str) -> Dict[str, Any]:
     building_code = _extract_building_code(building)
-    tr_anchor_rows = [67, 77, 87, 97, 107, 117, 127, 137, 147, 157, 167, 177, 187, 192, 197, 202]
-    ups_anchor_rows = [67, 87, 107, 127, 147, 167, 187, 192, 197, 202]
+    template_family = (
+        _TEMPLATE_FAMILY_E_BUILDING if _text(building) == "E楼" else _TEMPLATE_FAMILY_OTHER_BUILDINGS
+    )
+
+    def _search_tokens_for(identifier: str, *, kind: str) -> List[str]:
+        if kind == "hvdc":
+            return _hvdc_search_tokens(identifier, template_family=template_family)
+        return _identifier_search_tokens(identifier, kind=kind)
 
     def _collect(column_letter: str, start_row: int, end_row: int, *, kind: str) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
@@ -413,7 +453,7 @@ def build_capacity_template_snapshot(sheet: Worksheet, building: str) -> Dict[st
             if not raw_text:
                 continue
             identifier = _prefix_building_identifier(raw_text, building_code)
-            items.append({"row": row_idx, "identifier": identifier, "search_tokens": _identifier_search_tokens(identifier, kind=kind)})
+            items.append({"row": row_idx, "identifier": identifier, "search_tokens": _search_tokens_for(identifier, kind=kind)})
         return items
 
     def _collect_rows(column_letter: str, rows: Sequence[int], *, kind: str) -> List[Dict[str, Any]]:
@@ -423,13 +463,35 @@ def build_capacity_template_snapshot(sheet: Worksheet, building: str) -> Dict[st
             if not raw_text:
                 continue
             identifier = _prefix_building_identifier(raw_text, building_code)
-            items.append({"row": row_idx, "identifier": identifier, "search_tokens": _identifier_search_tokens(identifier, kind=kind)})
+            items.append({"row": row_idx, "identifier": identifier, "search_tokens": _search_tokens_for(identifier, kind=kind)})
         return items
+
+    def _collect_merged_anchor_rows(column_letter: str, start_row: int, end_row: int, *, kind: str) -> List[Dict[str, Any]]:
+        target_col = column_index_from_string(column_letter)
+        anchor_rows: List[int] = []
+        for merged_range in getattr(sheet.merged_cells, "ranges", []):
+            min_col, min_row, max_col, max_row = merged_range.bounds
+            if min_col != target_col or max_col != target_col:
+                continue
+            if min_row < start_row or min_row > end_row:
+                continue
+            if max_row < start_row:
+                continue
+            raw_text = _text(sheet[f"{column_letter}{min_row}"].value)
+            if not raw_text:
+                continue
+            if min_row not in anchor_rows:
+                anchor_rows.append(min_row)
+        anchor_rows.sort()
+        if anchor_rows:
+            return _collect_rows(column_letter, anchor_rows, kind=kind)
+        return _collect_rows(column_letter, list(range(start_row, end_row + 1)), kind=kind)
 
     return {
         "building_code": building_code,
-        "tr_entries": _collect_rows("B", tr_anchor_rows, kind="tr"),
-        "ups_entries": _collect_rows("I", ups_anchor_rows, kind="ups"),
+        "template_family": template_family,
+        "tr_entries": _collect_merged_anchor_rows("B", 67, 202, kind="tr"),
+        "ups_entries": _collect_merged_anchor_rows("I", 67, 202, kind="ups"),
         "hvdc_entries": _collect("O", 67, 186, kind="hvdc"),
         "rpp_entries": _collect("S", 67, 186, kind="rpp"),
     }
@@ -785,7 +847,7 @@ def _build_ups_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> D
 
 def _build_hvdc_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> Dict[str, str]:
     values: Dict[str, str] = {}
-    alias_map = {"P": ["电池组电压"], "Q": ["直流电压"], "R": ["直流总功率"], "U": ["支路总功率"]}
+    alias_map = {"P": ["电池组电压"], "Q": ["直流电压"], "R": ["直流总功率"]}
     for entry in [item for item in snapshot.get("hvdc_entries", []) if isinstance(item, dict)]:
         row_idx = int(entry.get("row", 0) or 0)
         identifier = _text(entry.get("identifier"))
@@ -798,7 +860,7 @@ def _build_hvdc_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> 
             cell_text = query.first_text_by_identifier(identifier_tokens=tokens, search_column="c", d_aliases=aliases)
             if cell_text:
                 values[f"{column_letter}{row_idx}"] = cell_text
-            elif column_letter in {"R", "U"}:
+            elif column_letter == "R":
                 values[f"{column_letter}{row_idx}"] = "0"
     return values
 
@@ -849,15 +911,23 @@ def _aircon_quadrant(row: RawRow, *, building_code: str) -> tuple[int, str, str]
 
 def _build_aircon_matrix_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> Dict[str, str]:
     building_code = _text(snapshot.get("building_code")).upper()
+    template_family = _text(snapshot.get("template_family")) or _TEMPLATE_FAMILY_OTHER_BUILDINGS
+    target_cells = _AIRCON_TARGET_CELLS_BY_TEMPLATE_FAMILY.get(
+        template_family,
+        _AIRCON_TARGET_CELLS_BY_TEMPLATE_FAMILY[_TEMPLATE_FAMILY_OTHER_BUILDINGS],
+    )
     values: Dict[str, str] = {}
     for row in query.rows:
         key = _aircon_quadrant(row, building_code=building_code)
         if key is None:
             continue
-        target_cell = _AIRCON_TARGET_CELLS.get(key)
-        if not target_cell or target_cell in values:
+        target_cell = target_cells.get(key)
+        value_text = _text(getattr(row, "e_raw", None))
+        if not target_cell or not value_text:
             continue
-        values[target_cell] = _text(getattr(row, "e_raw", None))
+        if target_cell in values and _text(values.get(target_cell)):
+            continue
+        values[target_cell] = value_text
     return {cell: value for cell, value in values.items() if value != ""}
 
 

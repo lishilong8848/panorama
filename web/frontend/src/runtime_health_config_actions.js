@@ -155,6 +155,11 @@ export function createRuntimeHealthConfigActions(ctx) {
     updaterUiOverlayKicker,
     updaterAwaitingRestartRecovery,
     markRestartRecoveryIntent,
+    clearRestartRecoveryIntent,
+    readUpdaterRecoveryIntent,
+    writeUpdaterRecoveryIntent,
+    clearUpdaterRecoveryIntent,
+    nextTick,
     shouldIncludeHandoverHealthContext,
     shouldLoadEngineerDirectory,
   } = ctx;
@@ -282,6 +287,25 @@ export function createRuntimeHealthConfigActions(ctx) {
     return Boolean(updaterUiOverlayVisible?.value || updaterAwaitingRestartRecovery?.value);
   }
 
+  function isRuntimeApiReady() {
+    return Boolean(
+      bootstrapReady?.value
+      && health?.runtime_activated
+      && health?.startup_role_confirmed,
+    );
+  }
+
+  function isRoleSelectionConflictError(err) {
+    if (Number.parseInt(String(err?.httpStatus || 0), 10) !== 409) return false;
+    const text = String(
+      err?.responseText
+      || err?.message
+      || err
+      || "",
+    ).trim();
+    return text.includes("请先在角色选择页进入系统");
+  }
+
   function clearBootstrapRetryTimer() {
     if (bootstrapRetryTimer) {
       window.clearTimeout(bootstrapRetryTimer);
@@ -377,10 +401,101 @@ export function createRuntimeHealthConfigActions(ctx) {
     };
   }
 
+  function normalizeUpdaterRecoveryStage(value) {
+    const stage = String(value || "").trim().toLowerCase();
+    if (["queued", "applying", "restarting", "reloading"].includes(stage)) {
+      return stage;
+    }
+    return "applying";
+  }
+
+  function resolveUpdaterRecoveryRoleMode(explicitRoleMode = "") {
+    return String(explicitRoleMode || resolveCurrentRoleMode() || "").trim().toLowerCase();
+  }
+
+  function buildUpdaterRecoveryIntent(stage, source = "", options = {}) {
+    return {
+      role_mode: resolveUpdaterRecoveryRoleMode(options?.targetRoleMode),
+      path: typeof window !== "undefined" ? window.location.pathname : "/",
+      requested_at: Date.now(),
+      stage: normalizeUpdaterRecoveryStage(stage),
+      source: String(source || options?.source || "").trim().toLowerCase(),
+      startup_token: String(options?.startupToken || health?.startup_time || "").trim(),
+    };
+  }
+
+  function persistUpdaterRecoveryIntent(stage, source = "", options = {}) {
+    if (typeof writeUpdaterRecoveryIntent !== "function") return;
+    writeUpdaterRecoveryIntent(buildUpdaterRecoveryIntent(stage, source, options));
+  }
+
+  function clearPersistedUpdaterRecoveryIntent() {
+    if (typeof clearUpdaterRecoveryIntent === "function") {
+      clearUpdaterRecoveryIntent();
+    }
+  }
+
+  async function flushUpdaterOverlayPaint() {
+    if (typeof nextTick === "function") {
+      await nextTick();
+    }
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      return;
+    }
+    await new Promise((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    });
+  }
+
+  function startUpdaterBootstrapRecoveryWatch(options = {}) {
+    clearUpdaterReconnectTimer();
+    const previousStartupToken = String(options?.startupToken || health?.startup_time || "").trim();
+    const source = String(options?.source || "updater_apply").trim().toLowerCase();
+    const kicker = String(options?.kicker || "").trim();
+    const reloadTitle = String(options?.reloadTitle || "服务已恢复");
+    const reloadSubtitle = String(options?.reloadSubtitle || "正在刷新当前页面并接入新版本。");
+    const targetRoleMode = String(options?.targetRoleMode || "").trim().toLowerCase();
+    const poll = async () => {
+      const ok = await fetchBootstrapHealth({ silentMessage: true });
+      if (ok) {
+        const nextStartupToken = String(health?.startup_time || "").trim();
+        if (previousStartupToken && nextStartupToken && nextStartupToken === previousStartupToken) {
+          updaterReconnectTimer = window.setTimeout(poll, 2500);
+          return;
+        }
+        if (typeof markRestartRecoveryIntent === "function") {
+          markRestartRecoveryIntent(targetRoleMode);
+        }
+        persistUpdaterRecoveryIntent("reloading", source, {
+          targetRoleMode,
+          source,
+        });
+        if (updaterAwaitingRestartRecovery) updaterAwaitingRestartRecovery.value = true;
+        setUpdaterOverlay(true, {
+          title: reloadTitle,
+          subtitle: reloadSubtitle,
+          stage: "reloading",
+          kicker,
+        });
+        window.setTimeout(() => {
+          window.location.reload();
+        }, 350);
+        return;
+      }
+      updaterReconnectTimer = window.setTimeout(poll, 2500);
+    };
+    updaterReconnectTimer = window.setTimeout(poll, 2500);
+  }
+
   function startUpdaterRuntimeMonitor(options = {}) {
     clearUpdaterQueueMonitorTimer();
     pauseRuntimeTraffic();
     setUpdaterOverlay(true, buildAutomaticUpdaterOverlayPayload(health.updater || {}, options));
+    const startedAt = Date.now();
+    const initialGraceMs = Math.max(0, Number.parseInt(String(options?.initialGraceMs || 0), 10) || 0);
+    let observedActive = false;
 
     const poll = async () => {
       try {
@@ -389,6 +504,14 @@ export function createRuntimeHealthConfigActions(ctx) {
         Object.assign(health.updater, runtime);
         const lastResult = normalizeUpdaterLastResult(runtime);
         const queued = Boolean(runtime?.queued_apply?.queued);
+        const applying = isUpdaterApplyingRuntime(runtime);
+        const requestPending = typeof options?.isRequestPending === "function"
+          ? Boolean(options.isRequestPending())
+          : false;
+
+        if (queued || runtime?.running || applying) {
+          observedActive = true;
+        }
 
         if (lastResult === "failed") {
           hideUpdaterOverlay();
@@ -399,10 +522,14 @@ export function createRuntimeHealthConfigActions(ctx) {
           beginUpdaterRestartRecovery();
           return;
         }
-        if (isUpdaterApplyingRuntime(runtime)) {
+        if (applying) {
           setUpdaterOverlay(true, buildAutomaticUpdaterOverlayPayload(runtime, options));
         }
-        if (!queued && !runtime?.running && !isUpdaterApplyingRuntime(runtime)) {
+        if (!queued && !runtime?.running && !applying) {
+          if (requestPending || (!observedActive && Date.now() - startedAt < initialGraceMs)) {
+            updaterQueueMonitorTimer = window.setTimeout(poll, 1500);
+            return;
+          }
           hideUpdaterOverlay();
           return;
         }
@@ -475,10 +602,13 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (updaterUiOverlayKicker) updaterUiOverlayKicker.value = String(kicker || "");
   }
 
-  function hideUpdaterOverlay() {
+  function hideUpdaterOverlay(options = {}) {
     clearUpdaterReconnectTimer();
     clearUpdaterQueueMonitorTimer();
     if (updaterAwaitingRestartRecovery) updaterAwaitingRestartRecovery.value = false;
+    if (options?.clearRecoveryIntent !== false) {
+      clearPersistedUpdaterRecoveryIntent();
+    }
     setUpdaterOverlay(false, { title: "", subtitle: "", stage: "", kicker: "" });
     resumeRuntimeTraffic();
   }
@@ -487,9 +617,20 @@ export function createRuntimeHealthConfigActions(ctx) {
     clearUpdaterReconnectTimer();
     clearUpdaterQueueMonitorTimer();
     pauseRuntimeTraffic();
+    const recoveryIntent = typeof readUpdaterRecoveryIntent === "function" ? readUpdaterRecoveryIntent() : null;
+    const startupToken = String(
+      options?.startupToken
+      || recoveryIntent?.startup_token
+      || health?.startup_time
+      || "",
+    ).trim();
     if (typeof markRestartRecoveryIntent === "function") {
       markRestartRecoveryIntent(String(options?.targetRoleMode || "").trim().toLowerCase());
     }
+    persistUpdaterRecoveryIntent("restarting", options?.source || "updater_apply", {
+      ...options,
+      startupToken,
+    });
     if (updaterAwaitingRestartRecovery) updaterAwaitingRestartRecovery.value = true;
     setUpdaterOverlay(true, {
       title: String(options?.title || "更新完成，正在重启服务"),
@@ -497,26 +638,15 @@ export function createRuntimeHealthConfigActions(ctx) {
       stage: String(options?.stage || "restarting"),
       kicker: String(options?.kicker || ""),
     });
-
-    const poll = async () => {
-      const ok = await fetchBootstrapHealth({ silentMessage: true });
-      if (ok) {
-        if (updaterAwaitingRestartRecovery) updaterAwaitingRestartRecovery.value = false;
-        setUpdaterOverlay(true, {
-          title: String(options?.reloadTitle || "服务已恢复"),
-          subtitle: String(options?.reloadSubtitle || "正在刷新当前页面并接入新版本。"),
-          stage: "reloading",
-          kicker: String(options?.reloadKicker || options?.kicker || ""),
-        });
-        window.setTimeout(() => {
-          window.location.reload();
-        }, 350);
-        return;
-      }
-      updaterReconnectTimer = window.setTimeout(poll, 2500);
-    };
-
-    updaterReconnectTimer = window.setTimeout(poll, 2500);
+    startUpdaterBootstrapRecoveryWatch({
+      ...options,
+      source: options?.source || "updater_apply",
+      startupToken,
+      targetRoleMode: String(options?.targetRoleMode || "").trim().toLowerCase(),
+      kicker: String(options?.kicker || ""),
+      reloadTitle: String(options?.reloadTitle || "服务已恢复"),
+      reloadSubtitle: String(options?.reloadSubtitle || "正在刷新当前页面并接入新版本。"),
+    });
   }
 
   function handoffUpdaterToRestartRecovery(
@@ -537,7 +667,41 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function startQueuedUpdaterMonitor() {
+    persistUpdaterRecoveryIntent("queued", "updater_apply");
     startUpdaterRuntimeMonitor({ queued: true });
+  }
+
+  async function resumeUpdaterRecoveryIfNeeded() {
+    const intent = typeof readUpdaterRecoveryIntent === "function" ? readUpdaterRecoveryIntent() : null;
+    if (!intent) return false;
+    const stage = normalizeUpdaterRecoveryStage(intent.stage);
+    const source = String(intent.source || "").trim().toLowerCase();
+    if (stage === "restarting" || stage === "reloading") {
+      pauseRuntimeTraffic();
+      if (updaterAwaitingRestartRecovery) updaterAwaitingRestartRecovery.value = true;
+      setUpdaterOverlay(true, {
+        title: "更新完成，正在恢复服务",
+        subtitle: "检测到程序仍在恢复，服务可用后会自动继续进入当前页面。",
+        stage: "restarting",
+        kicker: source === "updater_restart" ? "程序重启恢复中" : "程序更新恢复中",
+      });
+      startUpdaterBootstrapRecoveryWatch({
+        source,
+        startupToken: String(intent.startup_token || "").trim(),
+        targetRoleMode: String(intent.role_mode || "").trim().toLowerCase(),
+        kicker: source === "updater_restart" ? "程序重启恢复中" : "程序更新恢复中",
+        reloadTitle: "服务已恢复",
+        reloadSubtitle: "正在刷新当前页面并恢复当前系统。",
+      });
+      return true;
+    }
+    startUpdaterBootstrapRecoveryWatch({
+      source,
+      startupToken: String(intent.startup_token || "").trim(),
+      targetRoleMode: String(intent.role_mode || "").trim().toLowerCase(),
+    });
+    startUpdaterRuntimeMonitor({ queued: stage === "queued" });
+    return true;
   }
 
   function mergeConfigWithServerSnapshot(baseConfig, changedConfig) {
@@ -1370,7 +1534,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchHealth(options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
     const silentTransientNetworkError = Boolean(options?.silentTransientNetworkError);
     const silentMessage = Boolean(options?.silentMessage);
     const includeHandoverContext =
@@ -1415,6 +1579,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         if (healthLoadError) {
           healthLoadError.value = String(err || "").trim();
         }
+        if (isRoleSelectionConflictError(err)) return false;
         if (silentTransientNetworkError && isTransientNetworkError(err)) return false;
         if (!silentMessage) {
           message.value = `健康检查失败: ${err}`;
@@ -1428,7 +1593,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchJobs(options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
     const silentMessage = Boolean(options?.silentMessage);
     try {
       const data = await getJobsApi({ limit: 60 });
@@ -1466,6 +1631,7 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
       return true;
     } catch (err) {
+      if (isRoleSelectionConflictError(err)) return false;
       if (!silentMessage) {
         message.value = `读取任务列表失败: ${err}`;
       }
@@ -1474,7 +1640,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchRuntimeResources(options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
     const silentMessage = Boolean(options?.silentMessage);
     try {
       const data = await getRuntimeResourcesApi();
@@ -1484,6 +1650,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           : { network: {}, controlled_browser: { holder_job_id: "", queue_length: 0 }, batch_locks: [], resources: [] };
       return true;
     } catch (err) {
+      if (isRoleSelectionConflictError(err)) return false;
       if (!silentMessage) {
         message.value = `读取资源状态失败: ${err}`;
       }
@@ -1492,7 +1659,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchInternalRuntimeSummary(options = {}) {
-    if (isUpdaterTrafficPaused() || !canUseInternalRuntimeStatus()) return false;
+    if (isUpdaterTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
     const silentMessage = Boolean(options?.silentMessage);
     if (internalRuntimeSummaryRequestInFlight) {
       return internalRuntimeSummaryRequestInFlight;
@@ -1504,6 +1671,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         internalRuntimeSummary.value = summary;
         return true;
       } catch (err) {
+        if (isRoleSelectionConflictError(err)) return false;
         if (!silentMessage) {
           message.value = `读取内网运行状态失败: ${err}`;
         }
@@ -1516,7 +1684,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchInternalRuntimeBuildingRuntimeStatus(building, options = {}) {
-    if (isUpdaterTrafficPaused() || !canUseInternalRuntimeStatus()) return false;
+    if (isUpdaterTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
     const buildingText = normalizeInternalRuntimeBuildingName(building);
     const buildingCode = normalizeInternalRuntimeBuildingCode(buildingText);
     const silentMessage = Boolean(options?.silentMessage);
@@ -1542,6 +1710,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         };
         return true;
       } catch (err) {
+        if (isRoleSelectionConflictError(err)) return false;
         if (!silentMessage) {
           message.value = `读取 ${buildingText} 内网状态失败: ${err}`;
         }
@@ -1625,7 +1794,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchBridgeTasks(options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
     if (bridgeTasksRequestInFlight) return bridgeTasksRequestInFlight;
     const force = Boolean(options?.force);
     const now = Date.now();
@@ -1665,6 +1834,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         return true;
       } catch (err) {
+        if (isRoleSelectionConflictError(err)) return false;
         if (!silentMessage) {
           message.value = `读取共享任务失败: ${err}`;
         }
@@ -2955,6 +3125,16 @@ export function createRuntimeHealthConfigActions(ctx) {
   async function checkUpdaterNow(options = {}) {
     const autoApplyIfAvailable = Boolean(options?.autoApplyIfAvailable);
     const runner = async () => {
+      if (autoApplyIfAvailable) {
+        pauseRuntimeTraffic();
+        setUpdaterOverlay(true, {
+          title: "正在检查更新",
+          subtitle: "正在确认是否存在可用更新，请保持当前页面打开。",
+          stage: "applying",
+          kicker: "更新准备中",
+        });
+        await flushUpdaterOverlayPaint();
+      }
       try {
         const data = await checkUpdaterApi();
         const result = data?.result || {};
@@ -2977,13 +3157,6 @@ export function createRuntimeHealthConfigActions(ctx) {
         const restartRequiredAfterCheck = Boolean(
           result?.restart_required ?? runtimeAfterCheck?.restart_required ?? health.updater?.restart_required,
         );
-        try {
-          await fetchHealth();
-        } catch (err) {
-          if (!autoApplyIfAvailable || !updateAvailableAfterCheck || restartRequiredAfterCheck) {
-            throw err;
-          }
-        }
         if (
           autoApplyIfAvailable
           && !restartRequiredAfterCheck
@@ -2992,16 +3165,29 @@ export function createRuntimeHealthConfigActions(ctx) {
           await applyUpdaterPatch();
           return data;
         }
+        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
         const resultKey = String(result?.last_result || "").trim();
         if (resultKey === "failed") {
+          if (autoApplyIfAvailable) {
+            hideUpdaterOverlay();
+          }
           message.value = `更新检查失败: ${mapUpdaterResultText(resultKey)}`;
         } else if (resultKey === "mirror_pending_publish" || resultKey === "ahead_of_mirror") {
+          if (autoApplyIfAvailable) {
+            hideUpdaterOverlay();
+          }
           message.value = buildUpdaterApplyMessage(result);
         } else {
+          if (autoApplyIfAvailable) {
+            hideUpdaterOverlay();
+          }
           // 成功时不占用全局提示区，避免与顶部版本状态重复显示
           message.value = "";
         }
       } catch (err) {
+        if (autoApplyIfAvailable) {
+          hideUpdaterOverlay();
+        }
         message.value = `手动检查更新失败: ${err}`;
       }
     };
@@ -3022,17 +3208,30 @@ export function createRuntimeHealthConfigActions(ctx) {
             : "normal",
     ).trim();
     const runner = async () => {
+      let requestPending = true;
       pauseRuntimeTraffic();
       setUpdaterOverlay(true, {
         title: "正在更新程序",
         subtitle: "请保持当前页面打开，更新完成后会自动恢复。",
         stage: "applying",
       });
+      persistUpdaterRecoveryIntent("applying", "updater_apply");
+      await flushUpdaterOverlayPaint();
+      startUpdaterBootstrapRecoveryWatch({
+        source: "updater_apply",
+        startupToken: String(health?.startup_time || "").trim(),
+      });
+      startUpdaterRuntimeMonitor({
+        queued: false,
+        initialGraceMs: 15000,
+        isRequestPending: () => requestPending,
+      });
       try {
         const data = await applyUpdaterApi({
           mode: requestedMode,
           queue_if_busy: true,
         });
+        requestPending = false;
         const result = data?.result || {};
         Object.assign(health.updater, data?.runtime || {}, {
           last_result: String(result?.last_result || health.updater.last_result || ""),
@@ -3044,15 +3243,18 @@ export function createRuntimeHealthConfigActions(ctx) {
           return data;
         }
         if (finalResult === "updated_restart_scheduled") {
-          beginUpdaterRestartRecovery();
+          beginUpdaterRestartRecovery({ source: "updater_apply" });
           return data;
         }
-        await fetchHealth();
+        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
         hideUpdaterOverlay();
         return data;
       } catch (err) {
+        requestPending = false;
         if (isTransientNetworkError(err)) {
-          return handoffUpdaterToRestartRecovery("更新已开始，服务正在重启，正在等待恢复。");
+          return handoffUpdaterToRestartRecovery("更新已开始，服务正在重启，正在等待恢复。", {
+            source: "updater_apply",
+          });
         }
         hideUpdaterOverlay();
         message.value = `应用更新失败: ${err}`;
@@ -3066,24 +3268,42 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   async function restartUpdaterApp() {
     const runner = async () => {
+      let requestPending = true;
       pauseRuntimeTraffic();
       setUpdaterOverlay(true, {
         title: "正在重启程序",
         subtitle: "请保持当前页面打开，服务恢复后会自动刷新。",
         stage: "restarting",
       });
+      persistUpdaterRecoveryIntent("restarting", "updater_restart");
+      await flushUpdaterOverlayPaint();
+      startUpdaterBootstrapRecoveryWatch({
+        source: "updater_restart",
+        startupToken: String(health?.startup_time || "").trim(),
+        kicker: "程序重启恢复中",
+        reloadSubtitle: "正在刷新当前页面并恢复当前系统。",
+      });
+      startUpdaterRuntimeMonitor({
+        queued: false,
+        initialGraceMs: 8000,
+        isRequestPending: () => requestPending,
+      });
       try {
         const data = await restartUpdaterApi();
+        requestPending = false;
         const result = data?.result || {};
         Object.assign(health.updater, data?.runtime || {}, {
           last_result: String(result?.last_result || health.updater.last_result || ""),
         });
         message.value = buildUpdaterApplyMessage(result?.last_result ? result : "updated_restart_scheduled");
-        beginUpdaterRestartRecovery();
+        beginUpdaterRestartRecovery({ source: "updater_restart" });
         return data;
       } catch (err) {
+        requestPending = false;
         if (isTransientNetworkError(err)) {
-          return handoffUpdaterToRestartRecovery("重启已触发，正在等待服务恢复。");
+          return handoffUpdaterToRestartRecovery("重启已触发，正在等待服务恢复。", {
+            source: "updater_restart",
+          });
         }
         hideUpdaterOverlay();
         message.value = `触发重启失败: ${err}`;
@@ -3158,6 +3378,16 @@ export function createRuntimeHealthConfigActions(ctx) {
         subtitle,
         stage: "restarting",
         kicker,
+      });
+      persistUpdaterRecoveryIntent("restarting", String(options?.source || "manual_restart"), options);
+      await flushUpdaterOverlayPaint();
+      startUpdaterBootstrapRecoveryWatch({
+        source: String(options?.source || "manual_restart"),
+        startupToken: String(health?.startup_time || "").trim(),
+        kicker,
+        targetRoleMode: String(options?.targetRoleMode || "").trim().toLowerCase(),
+        reloadTitle: String(options?.reloadTitle || "服务已恢复"),
+        reloadSubtitle: String(options?.reloadSubtitle || "正在刷新当前页面并接入新的运行角色。"),
       });
       try {
         const data = await restartAppApi({
@@ -3697,6 +3927,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     checkUpdaterNow,
     applyUpdaterPatch,
     restartUpdaterApp,
+    resumeUpdaterRecoveryIfNeeded,
     triggerInternalPeerUpdaterCheck,
     triggerInternalPeerUpdaterApply,
     confirmAllHandoverReview,

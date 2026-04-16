@@ -36,15 +36,15 @@ async function apiJsonWithTimeout(url, options = {}, timeoutMs = 0) {
 }
 
 export async function getHealthApi(params = {}) {
-  return apiJsonWithTimeout(appendQuery("/api/health", params), {}, 15000);
+  return apiJsonWithTimeout(appendQuery("/api/health", { ...params, _t: Date.now() }), {}, 15000);
 }
 
 export async function getBootstrapHealthApi() {
-  return apiJsonWithTimeout("/api/health/bootstrap", {}, 8000);
+  return apiJsonWithTimeout(`/api/health/bootstrap?_t=${Date.now()}`, {}, 8000);
 }
 
 export async function getConfigApi() {
-  return apiJsonWithTimeout("/api/config", {}, 8000);
+  return apiJsonWithTimeout(`/api/config?_t=${Date.now()}`, {}, 8000);
 }
 
 export async function putConfigApi(v3Config) {

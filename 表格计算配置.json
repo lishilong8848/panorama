@@ -129,47 +129,47 @@
       "enable_sse": true
     },
     "network_switch": {
-      "internal_probe_parallelism": 5,
-      "auto_disconnect_before_connect": true,
-      "post_switch_probe_internal_host": "",
-      "internal_probe_count": 1,
-      "post_switch_probe_external_host": "open.feishu.cn",
-      "internal_profile_name": "",
-      "switch_timeout_sec": 30,
-      "external_probe_cache_ttl_sec": 2,
-      "post_switch_probe_interval_sec": 1,
-      "hard_recovery_after_scan_failures": 2,
-      "connect_poll_interval_sec": 1,
-      "scan_attempts": 3,
-      "scan_wait_sec": 2,
-      "preferred_interface": "",
-      "post_switch_probe_external_port": 443,
-      "connect_with_ssid_param": true,
-      "post_switch_probe_retries": 3,
-      "external_profile_name": "",
-      "require_saved_profiles": true,
-      "retry_interval_sec": 2,
-      "internal_probe_timeout_ms": 1200,
-      "internal_ssid": "H-DH",
-      "post_switch_probe_timeout_sec": 2,
-      "role_mode": "external",
-      "post_switch_probe_enabled": false,
-      "hard_recovery_enabled": true,
       "switch_back_to_original": false,
+      "internal_profile_name": "",
+      "connect_poll_interval_sec": 1,
       "internal_probe_cache_ttl_sec": 2,
       "hard_recovery_steps": [
         "toggle_adapter",
         "restart_wlansvc"
       ],
-      "require_admin_for_hard_recovery": true,
-      "scan_before_connect": true,
-      "fail_fast_on_netsh_error": true,
-      "strict_target_visible_before_connect": true,
       "post_switch_stabilize_sec": 3,
-      "retry_count": 3,
+      "retry_interval_sec": 2,
+      "internal_probe_count": 1,
+      "connect_with_ssid_param": true,
+      "require_saved_profiles": true,
+      "strict_target_visible_before_connect": true,
+      "require_admin_for_hard_recovery": true,
+      "post_switch_probe_internal_host": "",
+      "role_mode": "external",
+      "auto_disconnect_before_connect": true,
+      "post_switch_probe_enabled": false,
+      "fail_fast_on_netsh_error": true,
+      "post_switch_probe_external_host": "open.feishu.cn",
+      "internal_probe_parallelism": 5,
       "hard_recovery_cooldown_sec": 20,
+      "hard_recovery_enabled": true,
       "post_switch_probe_internal_port": 80,
-      "external_ssid": "ALBB-EA118-2F"
+      "post_switch_probe_interval_sec": 1,
+      "post_switch_probe_external_port": 443,
+      "retry_count": 3,
+      "external_probe_cache_ttl_sec": 2,
+      "switch_timeout_sec": 30,
+      "preferred_interface": "",
+      "scan_before_connect": true,
+      "scan_attempts": 3,
+      "external_ssid": "ALBB-EA118-2F",
+      "post_switch_probe_retries": 3,
+      "internal_probe_timeout_ms": 1200,
+      "post_switch_probe_timeout_sec": 2,
+      "scan_wait_sec": 2,
+      "external_profile_name": "",
+      "internal_ssid": "H-DH",
+      "hard_recovery_after_scan_failures": 2
     }
   },
   "features": {
@@ -1189,8 +1189,8 @@
         "cabinet_power_defaults_by_building": {
           "A楼": {
             "cells": {
-              "B13": "1272",
-              "D13": "2",
+              "B13": "1272345",
+              "D13": "234",
               "F13": "0",
               "H13": "0"
             }
@@ -1218,7 +1218,7 @@
               {
                 "cells": {
                   "B": "值班手机",
-                  "C": "E-112值班室",
+                  "C": "A11244值班室",
                   "E": "1",
                   "F": "否",
                   "G": "无"
@@ -1227,7 +1227,7 @@
               {
                 "cells": {
                   "B": "对讲机",
-                  "C": "E-112值班室",
+                  "C": "D112值班室",
                   "E": "5",
                   "F": "否",
                   "G": "无"
@@ -1236,7 +1236,7 @@
               {
                 "cells": {
                   "B": "钥匙",
-                  "C": "E-112值班室钥匙箱",
+                  "C": "DDD112值班室钥匙箱",
                   "E": "4",
                   "F": "否",
                   "G": "无"
@@ -1553,7 +1553,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "1号冷机模式"
+              "1号冷机模式",
+              "1号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -1573,7 +1574,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "2号冷机模式"
+              "2号冷机模式",
+              "2号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -1593,7 +1595,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "3号冷机模式"
+              "3号冷机模式",
+              "3号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -1613,7 +1616,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "4号冷机模式"
+              "4号冷机模式",
+              "4号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -1633,7 +1637,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "5号冷机模式"
+              "5号冷机模式",
+              "5号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -1653,7 +1658,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "6号冷机模式"
+              "6号冷机模式",
+              "6号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -2169,7 +2175,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "1号冷机模式"
+                "1号冷机模式",
+                "1号冷机运行模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2189,7 +2196,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "2号冷机模式"
+                "2号冷机模式",
+                "2号冷机运行模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2209,7 +2217,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "3号冷机模式"
+                "3号冷机模式",
+                "3号冷机运行模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2229,7 +2238,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "4号冷机模式"
+                "4号冷机模式",
+                "4号冷机运行模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2249,7 +2259,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "5号冷机模式"
+                "5号冷机模式",
+                "5号冷机运行模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2269,7 +2280,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "6号冷机模式"
+                "6号冷机模式",
+                "6号冷机运行模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2777,7 +2789,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "1号冷机运行模式"
+                "1号冷机运行模式",
+                "1号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2797,7 +2810,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "2号冷机运行模式"
+                "2号冷机运行模式",
+                "2号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2817,7 +2831,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "3号冷机运行模式"
+                "3号冷机运行模式",
+                "3号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2837,7 +2852,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "4号冷机运行模式"
+                "4号冷机运行模式",
+                "4号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2857,7 +2873,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "5号冷机运行模式"
+                "5号冷机运行模式",
+                "5号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -2877,7 +2894,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "6号冷机运行模式"
+                "6号冷机运行模式",
+                "6号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -3386,7 +3404,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "1号冷机运行模式"
+                "1号冷机运行模式",
+                "1号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -3406,7 +3425,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "2号冷机运行模式"
+                "2号冷机运行模式",
+                "2号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -3426,7 +3446,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "3号冷机运行模式"
+                "3号冷机运行模式",
+                "3号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -3446,7 +3467,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "4号冷机运行模式"
+                "4号冷机运行模式",
+                "4号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -3466,7 +3488,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "5号冷机运行模式"
+                "5号冷机运行模式",
+                "5号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -3486,7 +3509,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "6号冷机运行模式"
+                "6号冷机运行模式",
+                "6号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -3956,7 +3980,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "1号冷机运行模式"
+                "1号冷机运行模式",
+                "1号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -3976,7 +4001,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "2号冷机运行模式"
+                "2号冷机运行模式",
+                "2号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -3996,7 +4022,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "3号冷机运行模式"
+                "3号冷机运行模式",
+                "3号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -4016,7 +4043,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "4号冷机运行模式"
+                "4号冷机运行模式",
+                "4号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -4036,7 +4064,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "5号冷机运行模式"
+                "5号冷机运行模式",
+                "5号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -4056,7 +4085,8 @@
               "target_cell": "",
               "rule_type": "direct",
               "d_keywords": [
-                "6号冷机运行模式"
+                "6号冷机运行模式",
+                "6号冷机模式"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",
@@ -4457,58 +4487,58 @@
       "shared_source_upload": {
         "replace_existing_on_full": true
       },
-      "window_end_time": "00:00:00",
       "alarm_category_default": "真实告警",
-      "level_mapping": {
-        "3": "重要",
-        "2": "严重",
-        "1": "紧急",
-        "4": "次要"
-      },
-      "fields": {
-        "event_source": "event_source",
-        "accept_user": "accept_user",
-        "accept_description": "accept_description",
-        "confirm_user": "confirm_user",
-        "alarm_type": "alarm_type",
-        "confirm_description": "confirm_description",
-        "event_time": "event_time",
-        "recover_status": "recover_status",
-        "confirm_time": "confirm_time",
-        "content": "content",
-        "accept_time": "accept_time",
-        "event_level": "event_level",
-        "process_status": "process_status",
-        "trigger_value": "trigger_value",
-        "recover_time": "recover_time",
-        "process_suggestion": "process_suggestion"
-      },
-      "snapshot_mode": "clear_and_rebuild",
-      "enabled": true,
       "skip_levels": [
         5
       ],
       "resume": {
-        "root_dir": "alarm_export_resume",
-        "retry_interval_sec": 2,
-        "state_file": "alarm_export_resume_state.json",
         "reuse_extracted_rows": true,
         "enabled": true,
+        "root_dir": "alarm_export_resume",
+        "state_file": "alarm_export_resume_state.json",
+        "retry_interval_sec": 2,
         "max_retry": 3
       },
+      "snapshot_mode": "clear_and_rebuild",
       "run_with_scheduler": true,
+      "fields": {
+        "accept_time": "accept_time",
+        "event_source": "event_source",
+        "confirm_time": "confirm_time",
+        "process_status": "process_status",
+        "content": "content",
+        "recover_status": "recover_status",
+        "accept_description": "accept_description",
+        "process_suggestion": "process_suggestion",
+        "event_level": "event_level",
+        "recover_time": "recover_time",
+        "event_time": "event_time",
+        "trigger_value": "trigger_value",
+        "confirm_description": "confirm_description",
+        "accept_user": "accept_user",
+        "confirm_user": "confirm_user",
+        "alarm_type": "alarm_type"
+      },
+      "enabled": true,
       "window_days": 35,
+      "window_end_time": "00:00:00",
       "test_db": {
         "fixed_table": "event_2026_02",
-        "time_field_mode": "auto",
-        "password": "123456",
-        "table_mode": "fixed",
         "port": 3306,
         "user": "root",
+        "password": "123456",
+        "database": "e_event",
+        "enabled": true,
         "host": "127.0.0.1",
         "building_label": "测试楼栋",
-        "enabled": true,
-        "database": "e_event"
+        "table_mode": "fixed",
+        "time_field_mode": "auto"
+      },
+      "level_mapping": {
+        "4": "次要",
+        "1": "紧急",
+        "3": "重要",
+        "2": "严重"
       }
     },
     "manual_upload_gui": {

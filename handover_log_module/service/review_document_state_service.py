@@ -79,7 +79,17 @@ class ReviewDocumentStateService:
         store = self._store(building)
         existing = store.get_document(session_id)
         if isinstance(existing, dict):
-            return existing
+            current_output_file = self._output_file(session)
+            existing_output_file = str(existing.get("source_excel_path", "") or "").strip()
+            if current_output_file and existing_output_file != current_output_file:
+                store.delete_document(session_id)
+                self.emit_log(
+                    f"[交接班][审核SQLite] 检测到会话输出文件已切换，已丢弃旧审核文档: "
+                    f"building={building}, session_id={session_id}, old={existing_output_file or '-'}, "
+                    f"new={current_output_file}"
+                )
+            else:
+                return existing
 
         output_file = self._output_file(session)
         if not output_file:

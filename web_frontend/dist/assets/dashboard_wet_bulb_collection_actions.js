@@ -154,7 +154,8 @@ export function createDashboardWetBulbCollectionActions(ctx) {
             && typeof response.job === "object"
               ? response.job
               : response;
-          const isBridgeJob = String(wrappedJob?.kind || "").trim().toLowerCase() === "bridge";
+          const hasBridgeTask = Boolean(response?.bridge_task && typeof response.bridge_task === "object");
+          const isBridgeJob = hasBridgeTask || String(wrappedJob?.kind || "").trim().toLowerCase() === "bridge";
           const isWaitingSharedBridge = String(wrappedJob?.wait_reason || "").trim().toLowerCase() === "waiting:shared_bridge";
           const bridgeTaskId = String(response?.bridge_task?.task_id || "").trim();
           const job = wrappedJob;

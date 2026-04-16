@@ -64,6 +64,15 @@ _WEATHER_PHENOMENON_PRIORITY = (
     "雾",
     "霾",
 )
+_LEGACY_CAPACITY_TEMPLATE_NAME = "交接班容量报表空模板.xlsx"
+_CAPACITY_TEMPLATE_BY_FAMILY = {
+    "other_buildings": "其他楼交接班容量报表空模板.xlsx",
+    "e_building": "E楼交接班容量报表空模板.xlsx",
+}
+_CAPACITY_TEMPLATE_FAMILY_BY_FILENAME = {
+    "其他楼交接班容量报表空模板.xlsx": "other_buildings",
+    "E楼交接班容量报表空模板.xlsx": "e_building",
+}
 
 
 def _text(value: Any) -> str:
@@ -217,11 +226,29 @@ class HandoverCapacityReportService:
             return path
         return Path(__file__).resolve().parents[2] / path
 
-    def resolve_template_path(self) -> Path:
+    @staticmethod
+    def _default_template_family_for_building(building: str) -> str:
+        return "e_building" if _text(building) == "E楼" else "other_buildings"
+
+    def resolve_template_selection(self, *, building: str) -> Dict[str, Any]:
         source_path = _text(self._template_cfg().get("source_path"))
-        if not source_path:
-            raise ValueError("handover_log.capacity_report.template.source_path 未配置")
-        return self._resolve_template_path(source_path)
+        default_family = self._default_template_family_for_building(building)
+        if source_path and source_path != _LEGACY_CAPACITY_TEMPLATE_NAME:
+            resolved_path = self._resolve_template_path(source_path)
+            return {
+                "path": resolved_path,
+                "template_family": _CAPACITY_TEMPLATE_FAMILY_BY_FILENAME.get(resolved_path.name, default_family),
+                "source": "config_override",
+            }
+        default_template_name = _CAPACITY_TEMPLATE_BY_FAMILY[default_family]
+        return {
+            "path": self._resolve_template_path(default_template_name),
+            "template_family": default_family,
+            "source": "dual_default",
+        }
+
+    def resolve_template_path(self, *, building: str) -> Path:
+        return self.resolve_template_selection(building=building)["path"]
 
     def resolve_output_dir(self) -> Path:
         output_dir = Path(_text(self._template_cfg().get("output_dir")))
@@ -1049,7 +1076,8 @@ class HandoverCapacityReportService:
             duty_shift=duty_shift_text,
         )
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        template_path = self.resolve_template_path()
+        template_selection = self.resolve_template_selection(building=building_text)
+        template_path = template_selection["path"]
         if not template_path.exists():
             raise FileNotFoundError(f"交接班容量报表模板不存在: {template_path}")
 
@@ -1137,6 +1165,7 @@ class HandoverCapacityReportService:
             sheet_name = self._sheet_name(workbook, _text(self._template_cfg().get("sheet_name")))
             sheet = workbook[sheet_name]
             template_snapshot = build_capacity_template_snapshot(sheet, building_text)
+            template_snapshot["template_family"] = _text(template_selection.get("template_family"))
             running_units = self._resolve_running_units(resolved_values_by_id)
             context = {
                 "building": building_text,

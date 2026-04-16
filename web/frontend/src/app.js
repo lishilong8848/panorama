@@ -17,6 +17,7 @@ const STARTUP_ROLE_RESTART_PENDING_KEY = "startup_role_restart_pending_v1";
 const STARTUP_ROLE_RESTART_RESUME_KEY = "startup_role_restart_resume_v1";
 const STARTUP_ROLE_SESSION_KEY = "startup_role_session_v1";
 const STARTUP_RUNTIME_RECOVERY_KEY = "startup_runtime_recovery_v1";
+const UPDATER_RECOVERY_INTENT_KEY = "updater_recovery_intent_v1";
 const STARTUP_ROLE_RESTART_PENDING_TTL_MS = 5 * 60 * 1000;
 
 function normalizeBrowserPathname(pathname) {
@@ -501,6 +502,76 @@ function clearStartupRuntimeRecovery() {
   }
 }
 
+function normalizeUpdaterRecoveryStage(value) {
+  const stage = String(value || "").trim().toLowerCase();
+  if (["queued", "applying", "restarting", "reloading"].includes(stage)) {
+    return stage;
+  }
+  return "applying";
+}
+
+function readUpdaterRecoveryIntent() {
+  if (typeof window === "undefined" || !window.sessionStorage) return null;
+  try {
+    const raw = window.sessionStorage.getItem(UPDATER_RECOVERY_INTENT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const requestedAt = Number.parseInt(String(parsed?.requested_at || 0), 10);
+    if (!Number.isFinite(requestedAt) || requestedAt <= 0) {
+      window.sessionStorage.removeItem(UPDATER_RECOVERY_INTENT_KEY);
+      return null;
+    }
+    if (Date.now() - requestedAt > STARTUP_ROLE_RESTART_PENDING_TTL_MS) {
+      window.sessionStorage.removeItem(UPDATER_RECOVERY_INTENT_KEY);
+      return null;
+    }
+    return {
+      role_mode: normalizeDeploymentRoleMode(parsed?.role_mode),
+      path: normalizeBrowserPathname(parsed?.path || "/"),
+      requested_at: requestedAt,
+      stage: normalizeUpdaterRecoveryStage(parsed?.stage),
+      source: String(parsed?.source || "").trim().toLowerCase(),
+      startup_token: String(parsed?.startup_token || "").trim(),
+    };
+  } catch (_) {
+    try {
+      window.sessionStorage.removeItem(UPDATER_RECOVERY_INTENT_KEY);
+    } catch (_) {
+      // ignore sessionStorage errors
+    }
+    return null;
+  }
+}
+
+function writeUpdaterRecoveryIntent(payload = {}) {
+  if (typeof window === "undefined" || !window.sessionStorage) return;
+  const requestedAt = Number.parseInt(String(payload?.requested_at || Date.now()), 10);
+  try {
+    window.sessionStorage.setItem(
+      UPDATER_RECOVERY_INTENT_KEY,
+      JSON.stringify({
+        role_mode: normalizeDeploymentRoleMode(payload?.role_mode),
+        path: normalizeBrowserPathname(payload?.path || "/"),
+        requested_at: Number.isFinite(requestedAt) && requestedAt > 0 ? requestedAt : Date.now(),
+        stage: normalizeUpdaterRecoveryStage(payload?.stage),
+        source: String(payload?.source || "").trim().toLowerCase(),
+        startup_token: String(payload?.startup_token || "").trim(),
+      }),
+    );
+  } catch (_) {
+    // ignore sessionStorage errors
+  }
+}
+
+function clearUpdaterRecoveryIntent() {
+  if (typeof window === "undefined" || !window.sessionStorage) return;
+  try {
+    window.sessionStorage.removeItem(UPDATER_RECOVERY_INTENT_KEY);
+  } catch (_) {
+    // ignore sessionStorage errors
+  }
+}
+
 if (isHandoverReviewPath(window.location.pathname)) {
   mountHandoverReviewApp(Vue);
   finishAppBoot();
@@ -716,6 +787,26 @@ createApp({
         description: "统一发起协同任务，优先读取共享文件；缺失时再等待内网补采。",
       },
     ]);
+    const initialUpdaterRecoveryIntent = readUpdaterRecoveryIntent();
+    if (initialUpdaterRecoveryIntent) {
+      const initialUpdaterStage = normalizeUpdaterRecoveryStage(initialUpdaterRecoveryIntent.stage);
+      updaterUiOverlayVisible.value = true;
+      updaterUiOverlayStage.value = initialUpdaterStage;
+      updaterUiOverlayKicker.value = initialUpdaterRecoveryIntent.source === "updater_restart"
+        ? "程序重启恢复中"
+        : "程序更新恢复中";
+      if (initialUpdaterStage === "queued") {
+        updaterUiOverlayTitle.value = "等待任务结束后自动更新";
+        updaterUiOverlaySubtitle.value = "检测到上次更新请求仍在排队，页面会自动继续恢复。";
+      } else if (initialUpdaterStage === "restarting" || initialUpdaterStage === "reloading") {
+        updaterUiOverlayTitle.value = "更新完成，正在恢复服务";
+        updaterUiOverlaySubtitle.value = "检测到程序正在恢复，服务可用后会自动继续进入当前页面。";
+        updaterAwaitingRestartRecovery.value = true;
+      } else {
+        updaterUiOverlayTitle.value = "正在更新程序";
+        updaterUiOverlaySubtitle.value = "检测到程序更新仍在进行中，请保持当前页面打开。";
+      }
+    }
     const initialRuntimeRecoveryIntent = readStartupRuntimeRecovery();
     if (initialRuntimeRecoveryIntent) {
       startupRoleSelectorSelection.value = initialRuntimeRecoveryIntent.role_mode;
@@ -2325,6 +2416,11 @@ createApp({
       updaterUiOverlayKicker,
       updaterAwaitingRestartRecovery,
       markRestartRecoveryIntent: persistRuntimeRecoveryIntent,
+      clearRestartRecoveryIntent: clearStartupRuntimeRecovery,
+      readUpdaterRecoveryIntent,
+      writeUpdaterRecoveryIntent,
+      clearUpdaterRecoveryIntent,
+      nextTick,
       shouldIncludeHandoverHealthContext: () => shouldIncludeHandoverHealthContext.value,
       shouldLoadEngineerDirectory: () => shouldLoadEngineerDirectory.value,
     });
@@ -2370,6 +2466,7 @@ createApp({
       checkUpdaterNow,
       applyUpdaterPatch,
       restartUpdaterApp,
+      resumeUpdaterRecoveryIfNeeded,
       triggerInternalPeerUpdaterCheck,
       triggerInternalPeerUpdaterApply,
       confirmAllHandoverReview,
@@ -2407,6 +2504,8 @@ createApp({
       ACTION_KEY_DAY_METRIC_CONFIG_REPAIR,
       ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,
     } = runtimeActions;
+
+    void resumeUpdaterRecoveryIfNeeded();
 
     function getHandoverReviewLinkSendActionKey(building, batchKey = "") {
       const buildingText = String(building || "").trim();
@@ -2760,6 +2859,7 @@ createApp({
       }
       clearStartupRoleSession();
       clearStartupRuntimeRecovery();
+      clearUpdaterRecoveryIntent();
       clearLegacyStartupRoleRestartState();
       startupRoleAutoActivationKey.value = "";
       health.runtime_activated = false;
@@ -4177,6 +4277,7 @@ createApp({
             if (!activated) {
               suppressCurrentStartupHandoff();
               clearLegacyStartupRoleRestartState();
+              clearUpdaterRecoveryIntent();
               message.value = "服务已恢复，但后台运行时启动失败，请重新确认启动角色。";
               showStartupRoleSelector("后台运行时激活失败，请重新确认启动角色。");
               return;
@@ -4198,6 +4299,7 @@ createApp({
           startupRoleSelectorBusy.value = false;
           persistStartupRoleSession(activatedRole);
           clearStartupRuntimeRecovery();
+          clearUpdaterRecoveryIntent();
           clearLegacyStartupRoleRestartState();
           startupRoleSuppressedHandoffNonce.value = "";
           return;
@@ -4225,6 +4327,7 @@ createApp({
             startupRoleSelectorBusy.value = false;
             if (!activated) {
               clearStartupRuntimeRecovery();
+              clearUpdaterRecoveryIntent();
               showStartupRoleSelector("后台运行时激活失败，请重新确认启动角色。");
               return;
             }
@@ -4339,6 +4442,7 @@ createApp({
         hideStartupRoleLoading();
         clearStartupRoleSession();
         clearStartupRuntimeRecovery();
+        clearUpdaterRecoveryIntent();
         showStartupRoleSelector(savedRole ? "" : "请先选择有效角色。");
       },
       { immediate: true, deep: false },

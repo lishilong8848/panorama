@@ -57,6 +57,30 @@ def _build_default_row() -> Dict[str, Any]:
     }
 
 
+def _expand_compatible_d_keywords(row_id: str, keywords: List[str]) -> List[str]:
+    expanded: List[str] = []
+
+    def _append(value: str) -> None:
+        text = _norm_text(value)
+        if text and text not in expanded:
+            expanded.append(text)
+
+    for keyword in keywords:
+        _append(keyword)
+
+    if not re.fullmatch(r"chiller_mode_[1-6]", row_id):
+        return expanded
+
+    for keyword in list(expanded):
+        match = re.fullmatch(r"(\d+)号冷机(运行)?模式", keyword)
+        if not match:
+            continue
+        machine_no = match.group(1)
+        _append(f"{machine_no}号冷机模式")
+        _append(f"{machine_no}号冷机运行模式")
+    return expanded
+
+
 def normalize_row(raw: Dict[str, Any]) -> Dict[str, Any]:
     row = _build_default_row()
     if isinstance(raw, dict):
@@ -86,7 +110,7 @@ def normalize_row(raw: Dict[str, Any]) -> Dict[str, Any]:
         text = _norm_text(item)
         if text:
             keywords.append(text)
-    row["d_keywords"] = keywords
+    row["d_keywords"] = _expand_compatible_d_keywords(row["id"], keywords)
     return row
 
 

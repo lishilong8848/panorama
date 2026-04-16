@@ -247,6 +247,7 @@ export function createDashboardJobActions(ctx) {
   }
 
   async function applyAcceptedExecutionResponse(response, title) {
+    const hasBridgeTask = Boolean(response?.bridge_task && typeof response.bridge_task === "object");
     const wrappedJob =
       response
       && typeof response === "object"
@@ -255,7 +256,7 @@ export function createDashboardJobActions(ctx) {
       && typeof response.job === "object"
         ? response.job
         : response;
-    const isBridgeJob = String(wrappedJob?.kind || "").trim().toLowerCase() === "bridge";
+    const isBridgeJob = hasBridgeTask || String(wrappedJob?.kind || "").trim().toLowerCase() === "bridge";
     const isWaitingSharedBridge = String(wrappedJob?.wait_reason || "").trim().toLowerCase() === "waiting:shared_bridge";
     const bridgeTaskId = String(response?.bridge_task?.task_id || "").trim();
     if (isBridgeJob) {

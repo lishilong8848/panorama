@@ -283,3 +283,46 @@ def test_review_document_state_mirrors_and_clears_defaults_from_config(tmp_path:
     assert cleared["defaults_updated"] is True
     assert store.get_default("cabinet_power") is None
     assert store.get_default("footer_inventory") is None
+
+
+def test_review_document_state_reimports_when_session_output_file_changes(tmp_path: Path) -> None:
+    first_output = tmp_path / "handover_v1.xlsx"
+    second_output = tmp_path / "handover_v2.xlsx"
+    _build_workbook(first_output)
+    _build_workbook(second_output)
+    wb = openpyxl.load_workbook(second_output)
+    try:
+        ws = wb["交接班日志"]
+        ws["B13"] = "新版本规划"
+        ws["D13"] = "新版本上电"
+        wb.save(second_output)
+    finally:
+        wb.close()
+
+    service = ReviewDocumentStateService(_config(tmp_path), emit_log=lambda *_: None)
+    session_v1 = _session(first_output)
+    document_v1, loaded_session_v1 = service.load_document(session_v1)
+    assert loaded_session_v1["revision"] == 1
+    assert _fixed_value(document_v1, "B13") == "旧规划"
+
+    document_v1["title"] = "本地旧版本编辑"
+    _set_fixed_value(document_v1, "B13", "旧版本本地修改")
+    service.save_document(
+        session=session_v1,
+        document=document_v1,
+        base_revision=1,
+        dirty_regions={"fixed_blocks": True},
+    )
+
+    session_v2 = _session(second_output, revision=2)
+    document_v2, loaded_session_v2 = service.load_document(session_v2)
+
+    assert loaded_session_v2["revision"] == 2
+    assert document_v2["title"] == "原标题"
+    assert _fixed_value(document_v2, "B13") == "新版本规划"
+    assert _fixed_value(document_v2, "D13") == "新版本上电"
+
+    store = service._store("A楼")
+    state = store.get_document(session_v2["session_id"])
+    assert state is not None
+    assert state["source_excel_path"] == str(second_output)

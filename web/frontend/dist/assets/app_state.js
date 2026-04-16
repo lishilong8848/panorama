@@ -1303,7 +1303,7 @@ export function createAppState(vueApi) {
   const manualFile = ref(null);
   const manualUploadDate = ref(todayText());
   const sheetFile = ref(null);
-  const dayMetricUploadScope = ref("single");
+  const dayMetricUploadScope = ref("all_enabled");
   const dayMetricUploadBuilding = ref("");
   const dayMetricSelectedDate = ref(todayText());
   const dayMetricRangeStartDate = ref(todayText());
@@ -1316,7 +1316,7 @@ export function createAppState(vueApi) {
   const handoverFilesByBuilding = reactive({});
   const handoverDutyDate = ref(todayText());
   const handoverDutyShift = ref("day");
-  const handoverDownloadScope = ref("single");
+  const handoverDownloadScope = ref("all_enabled");
   const handoverEngineerDirectory = ref([]);
   const handoverEngineerLoading = ref(false);
   const handoverDailyReportContext = ref({
