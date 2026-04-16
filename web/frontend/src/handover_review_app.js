@@ -1137,6 +1137,12 @@ export function mountHandoverReviewApp(Vue) {
           applyConcurrencyState(payload?.concurrency, incomingRevision || currentRevision, incomingSessionId || currentSessionId);
 
           if (incomingSessionId && currentSessionId && incomingSessionId !== currentSessionId) {
+            if (Boolean(historyState.value?.selected_is_latest)) {
+              hydrateFromPayload(payload, { fromBackground: true });
+              needsRefresh.value = false;
+              statusText.value = "已切换到最新交接班日志";
+              return;
+            }
             applyPayloadMeta(payload);
             needsRefresh.value = true;
             statusText.value = "检测到新版本，请刷新后查看。";

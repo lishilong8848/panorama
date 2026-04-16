@@ -1101,7 +1101,10 @@ class HandoverOrchestrator:
         alarm_document_cache: Dict[str, Dict[str, Any]] | None = None
         if self._deployment_role_mode() == "external" and query_context.duty_date and query_context.duty_shift and selected_buildings:
             try:
-                alarm_selection_snapshot = self._alarm_json_repo.build_selection_snapshot(buildings=selected_buildings)
+                alarm_selection_snapshot = self._alarm_json_repo.build_selection_snapshot(
+                    buildings=selected_buildings,
+                    reference_date=parse_duty_date(query_context.duty_date),
+                )
                 alarm_document_cache = {}
             except Exception as exc:  # noqa: BLE001
                 emit_log(f"[交接班][告警JSON] 批量选源快照构建失败，后续按单楼兜底: {exc}")
@@ -1252,7 +1255,10 @@ class HandoverOrchestrator:
             alarm_document_cache: Dict[str, Dict[str, Any]] | None = None
             if self._deployment_role_mode() == "external" and duty_date_text and duty_shift_text and success_buildings:
                 try:
-                    alarm_selection_snapshot = self._alarm_json_repo.build_selection_snapshot(buildings=success_buildings)
+                    alarm_selection_snapshot = self._alarm_json_repo.build_selection_snapshot(
+                        buildings=success_buildings,
+                        reference_date=parse_duty_date(duty_date_text),
+                    )
                     alarm_document_cache = {}
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班][告警JSON] 选源快照构建失败，后续按单楼兜底: {exc}")

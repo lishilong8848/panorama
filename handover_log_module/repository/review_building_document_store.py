@@ -360,6 +360,16 @@ class ReviewBuildingDocumentStore:
                 (str(previous.get("session_id", "") or ""),),
             )
 
+    def delete_document(self, session_id: str) -> None:
+        target_session_id = str(session_id or "").strip()
+        if not target_session_id:
+            return
+        self.ensure_ready()
+        with self.connect() as conn:
+            conn.execute("DELETE FROM review_documents WHERE session_id=?", (target_session_id,))
+            conn.execute("DELETE FROM excel_sync_state WHERE session_id=?", (target_session_id,))
+            conn.execute("DELETE FROM sync_jobs WHERE session_id=?", (target_session_id,))
+
     def get_sync_state_from_conn(self, conn: sqlite3.Connection, session_id: str) -> Dict[str, Any]:
         row = conn.execute(
             "SELECT * FROM excel_sync_state WHERE session_id=?",

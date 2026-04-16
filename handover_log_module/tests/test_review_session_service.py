@@ -5,6 +5,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from app.config.config_adapter import ensure_v3_config
+from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.review_session_service import ReviewSessionService
 
 
@@ -553,3 +554,43 @@ def test_touch_session_after_save_keeps_attachment_state_after_first_full_cloud_
     assert updated["cloud_sheet_sync"]["status"] == "pending_upload"
     assert updated["cloud_sheet_sync"]["attempted"] is False
     assert batch_status["batch_key"] == "2026-03-22|day"
+
+
+def test_register_generated_output_discards_old_sqlite_review_document_for_same_duty_context(tmp_path: Path, monkeypatch) -> None:
+    service = _build_service(tmp_path)
+    monkeypatch.setattr(service, "_is_legacy_test_output_file", lambda _output: False)
+    store = ReviewBuildingDocumentStore(config=service.config, building="A楼")
+    old_output = tmp_path / "outputs" / "20260414--夜班--交接班日志--A楼.xlsx"
+    new_output = tmp_path / "outputs" / "20260414--夜班--交接班日志--A楼_3.xlsx"
+    _create_output_file(old_output, shift_text="夜班")
+    _create_output_file(new_output, shift_text="夜班")
+
+    first = service.register_generated_output(
+        building="A楼",
+        duty_date="2026-04-14",
+        duty_shift="night",
+        data_file="",
+        output_file=str(old_output),
+        source_mode="from_download",
+    )
+    imported = store.upsert_imported_document(
+        session=first,
+        document={"fixed_blocks": [{"id": "base", "title": "旧版", "fields": []}]},
+        imported_from_excel=True,
+    )
+    assert imported["source_excel_path"] == str(old_output)
+    assert store.get_document(first["session_id"]) is not None
+
+    second = service.register_generated_output(
+        building="A楼",
+        duty_date="2026-04-14",
+        duty_shift="night",
+        data_file="",
+        output_file=str(new_output),
+        source_mode="from_download",
+    )
+
+    assert second["session_id"] == first["session_id"]
+    assert second["output_file"] == str(new_output)
+    assert second["revision"] == int(first["revision"]) + 1
+    assert store.get_document(first["session_id"]) is None

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import time
 from pathlib import Path
@@ -618,12 +619,64 @@ def _persist_review_defaults(
     document: Dict[str, Any],
     dirty_regions: Dict[str, bool] | None = None,
 ) -> Dict[str, int | bool]:
+    dirty = _normalize_review_dirty_regions(dirty_regions)
     state_service = _build_review_document_state_service(container)
-    return state_service.persist_defaults_from_document(
+    persisted = state_service.persist_defaults_from_document(
         building=building,
         document=document,
-        dirty_regions=_normalize_review_dirty_regions(dirty_regions),
+        dirty_regions=dirty,
     )
+    result: Dict[str, int | bool | str] = {
+        "footer_inventory_rows": int(persisted.get("footer_inventory_rows", 0) or 0),
+        "cabinet_power_fields": int(persisted.get("cabinet_power_fields", 0) or 0),
+        "defaults_updated": bool(persisted.get("defaults_updated", False)),
+        "config_updated": False,
+        "aggregate_refresh_error": "",
+    }
+    if not dirty.get("footer_inventory") and not dirty.get("fixed_blocks"):
+        return result
+
+    footer_service = FooterInventoryDefaultsService()
+    cabinet_service = CabinetPowerDefaultsService()
+    building_code = building_code_from_name(building)
+    current_doc = get_handover_building_segment(building_code, container.config_path)
+    current_data = (
+        copy.deepcopy(current_doc.get("data", {}))
+        if isinstance(current_doc.get("data", {}), dict)
+        else {}
+    )
+    updated_data = copy.deepcopy(current_data)
+
+    if dirty.get("footer_inventory"):
+        updated_data = footer_service.set_building_defaults(
+            updated_data,
+            building,
+            footer_service.extract_rows_from_document(document),
+        )
+    if dirty.get("fixed_blocks"):
+        updated_data = cabinet_service.set_building_defaults(
+            updated_data,
+            building,
+            cabinet_service.extract_cells_from_document(document),
+        )
+
+    if updated_data == current_data:
+        return result
+
+    try:
+        saved_config, _document, aggregate_refresh_error = save_handover_building_segment(
+            building_code,
+            updated_data,
+            base_revision=int(current_doc.get("revision", 0) or 0),
+            config_path=container.config_path,
+        )
+        container.reload_config(saved_config)
+        result["config_updated"] = True
+        result["aggregate_refresh_error"] = str(aggregate_refresh_error or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        result["config_updated"] = False
+        result["config_error"] = str(exc)
+    return result
 
 
 def _resolve_building_or_404(service: ReviewSessionService, building_code: str) -> str:
@@ -1625,6 +1678,22 @@ def handover_review_save(
                 f"[交接班][审核模板默认] 楼栋SQLite默认值无变化，已跳过写入: building={building}, "
                 f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0) if isinstance(persisted_defaults, dict) else 0}, "
                 f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}"
+            )
+        if isinstance(persisted_defaults, dict) and persisted_defaults.get("config_updated"):
+            aggregate_refresh_error = str(persisted_defaults.get("aggregate_refresh_error", "") or "").strip()
+            if aggregate_refresh_error:
+                container.add_system_log(
+                    f"[交接班][审核模板默认] 已回写楼栋分段默认值，但聚合配置刷新失败: "
+                    f"building={building}, error={aggregate_refresh_error}"
+                )
+            else:
+                container.add_system_log(
+                    f"[交接班][审核模板默认] 已回写楼栋分段默认值: building={building}"
+                )
+        elif isinstance(persisted_defaults, dict) and str(persisted_defaults.get("config_error", "") or "").strip():
+            container.add_system_log(
+                f"[交接班][审核模板默认] 楼栋分段默认值回写失败，已保留SQLite默认值: "
+                f"building={building}, error={persisted_defaults.get('config_error', '')}"
             )
     else:
         container.add_system_log(

@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 from app.shared.utils.artifact_naming import handover_log_output_patterns
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.repository.excel_reader import load_workbook_quietly
+from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.repository.review_session_state_store import ReviewSessionStateStore
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
 from pipeline_utils import get_app_dir
@@ -1526,6 +1527,7 @@ class ReviewSessionService:
 
         previous = sessions.get(session_id, {})
         previous_revision = int(previous.get("revision", 0) or 0) if isinstance(previous, dict) else 0
+        previous_output_file = str(previous.get("output_file", "") or "").strip() if isinstance(previous, dict) else ""
         previous_cloud_sync = previous.get("cloud_sheet_sync", {}) if isinstance(previous, dict) else {}
         batch_cloud = cloud_batches.get(batch_key, {}) if isinstance(cloud_batches.get(batch_key, {}), dict) else {}
         session = {
@@ -1580,6 +1582,8 @@ class ReviewSessionService:
             latest_by_building={building_name: session_id},
             latest_batch_key=batch_key,
         )
+        if previous_revision > 0 and previous_output_file != str(output_file or "").strip():
+            ReviewBuildingDocumentStore(config=self.config, building=building_name).delete_document(session_id)
         return dict(session)
 
     def update_review_link_delivery(

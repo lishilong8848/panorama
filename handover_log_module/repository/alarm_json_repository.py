@@ -124,6 +124,7 @@ class AlarmJsonRepository:
         if query_end_dt >= end_dt:
             return {
                 "ok": True,
+                "full": True,
                 "mode": "full",
                 "available_end": query_end_dt.strftime("%Y-%m-%d %H:%M:%S"),
             }
@@ -135,11 +136,20 @@ class AlarmJsonRepository:
         if is_latest_like and is_current_shift:
             return {
                 "ok": True,
+                "full": False,
                 "mode": "partial_latest",
+                "available_end": query_end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        if query_end_dt > start_dt:
+            return {
+                "ok": True,
+                "full": False,
+                "mode": "partial_history",
                 "available_end": query_end_dt.strftime("%Y-%m-%d %H:%M:%S"),
             }
         return {
             "ok": False,
+            "full": False,
             "mode": "insufficient",
             "available_end": query_end_dt.strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -168,7 +178,15 @@ class AlarmJsonRepository:
         if not building_text:
             raise ValueError("building 不能为空")
 
-        snapshot = selection_snapshot if isinstance(selection_snapshot, dict) else self.build_selection_snapshot(buildings=[building_text])
+        if isinstance(selection_snapshot, dict):
+            snapshot = selection_snapshot
+        else:
+            snapshot = self.build_selection_snapshot(
+                buildings=[building_text],
+                reference_date=start_dt.date(),
+            )
+        if not isinstance(snapshot, dict):
+            snapshot = {}
         selected_by_building = snapshot.get("selected_by_building", {}) if isinstance(snapshot, dict) else {}
         selected = selected_by_building.get(building_text) if isinstance(selected_by_building, dict) else None
         if not isinstance(selected, dict):
@@ -203,6 +221,12 @@ class AlarmJsonRepository:
                 f"window={start_time}~{end_time}, "
                 f"query={payload.get('query_start', '')}~{payload.get('query_end', '')}"
             )
+        available_end_dt = _parse_datetime_text(coverage.get("available_end"))
+        effective_end_dt = (
+            min(end_dt, available_end_dt)
+            if isinstance(available_end_dt, datetime)
+            else end_dt
+        )
 
         total_count = 0
         unrecovered_count = 0
@@ -227,7 +251,7 @@ class AlarmJsonRepository:
                     parse_failed_count += 1
                 else:
                     parsed_time_count += 1
-            if not self._event_in_window(event_dt=event_dt, start_dt=start_dt, end_dt=end_dt):
+            if not self._event_in_window(event_dt=event_dt, start_dt=start_dt, end_dt=effective_end_dt):
                 continue
             window_hit_count += 1
             total_count += 1
@@ -251,6 +275,13 @@ class AlarmJsonRepository:
             f"building={building_text}, selected={selection_scope}/{source_kind}, downloaded_at={selected_downloaded_at}, "
             f"total={total_count}, unrecovered={unrecovered_count}, accept_desc={'有' if bool(accept_description) else '无'}"
         )
+        if not bool(coverage.get("full", False)):
+            emit_log(
+                "[交接班][告警JSON] "
+                f"building={building_text}, coverage部分命中，已按可用区间继续统计: "
+                f"window={start_time}~{end_time}, "
+                f"query={str(payload.get('query_start', '') or '').strip()}~{str(payload.get('query_end', '') or '').strip()}"
+            )
         emit_log(
             "[交接班][告警JSON][诊断] "
             f"building={building_text}, file={str(file_path)}, "
@@ -276,7 +307,7 @@ class AlarmJsonRepository:
             selected_downloaded_at=selected_downloaded_at,
             query_start=str(payload.get("query_start", "") or "").strip(),
             query_end=str(payload.get("query_end", "") or "").strip(),
-            coverage_ok=True,
+            coverage_ok=bool(coverage.get("full", False)),
             fallback_used=False,
             error="",
         )
