@@ -10,10 +10,20 @@ class _FakeContainer:
         self.config = config
         self.config_path = config_path
         self.reloaded = None
+        self.recorded_toggles = []
 
     def reload_config(self, saved: dict) -> None:
         self.config = saved
         self.reloaded = saved
+
+    def record_external_scheduler_toggle(self, *, path, auto_start_in_gui, source="") -> None:  # noqa: ANN001
+        self.recorded_toggles.append(
+            {
+                "path": tuple(path),
+                "auto_start_in_gui": bool(auto_start_in_gui),
+                "source": source,
+            }
+        )
 
 
 def test_persist_scheduler_toggle_start_enables_auto_start_and_enabled(monkeypatch, tmp_path: Path) -> None:
@@ -37,6 +47,13 @@ def test_persist_scheduler_toggle_start_enables_auto_start_and_enabled(monkeypat
     assert scheduler_cfg["enabled"] is True
     assert scheduler_cfg["auto_start_in_gui"] is True
     assert container.reloaded is not None
+    assert container.recorded_toggles == [
+        {
+            "path": ("features", "day_metric_upload", "scheduler"),
+            "auto_start_in_gui": True,
+            "source": "调度开关",
+        }
+    ]
 
 
 def test_persist_scheduler_toggle_stop_disables_auto_start_without_forcing_enabled_false(monkeypatch, tmp_path: Path) -> None:
@@ -60,3 +77,10 @@ def test_persist_scheduler_toggle_stop_disables_auto_start_without_forcing_enabl
     assert scheduler_cfg["enabled"] is True
     assert scheduler_cfg["auto_start_in_gui"] is False
     assert container.reloaded is not None
+    assert container.recorded_toggles == [
+        {
+            "path": ("common", "scheduler"),
+            "auto_start_in_gui": False,
+            "source": "调度开关",
+        }
+    ]

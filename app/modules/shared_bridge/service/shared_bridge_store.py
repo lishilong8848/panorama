@@ -765,6 +765,7 @@ class SharedBridgeStore:
             return False
         now_text = _now_text()
         changed = False
+        mailbox_payload: Dict[str, Any] | None = None
         with self.connect() as conn:
             row = conn.execute("SELECT status FROM bridge_tasks WHERE task_id=?", (task_text,)).fetchone()
             if not row:
@@ -794,12 +795,15 @@ class SharedBridgeStore:
                     payload={"message": "任务已取消"},
                 )
             if changed:
-                self._sync_task_mailbox_from_conn(conn, task_text)
+                mailbox_payload = self._sync_task_mailbox_from_conn(conn, task_text)
+        if mailbox_payload:
+            self._sync_task_mailbox(mailbox_payload)
         return True
     def retry_task(self, task_id: str, *, record_event: bool = True, sync_mailbox: bool = True) -> bool:
         task_text = str(task_id or "").strip()
         if not task_text:
             return False
+        mailbox_payload: Dict[str, Any] | None = None
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT status, result_json FROM bridge_tasks WHERE task_id=?",
@@ -877,7 +881,9 @@ class SharedBridgeStore:
                     },
                 )
             if sync_mailbox:
-                self._sync_task_mailbox_from_conn(conn, task_text)
+                mailbox_payload = self._sync_task_mailbox_from_conn(conn, task_text)
+        if mailbox_payload:
+            self._sync_task_mailbox(mailbox_payload)
         return True
     def create_handover_from_download_task(
         self,
@@ -994,6 +1000,8 @@ class SharedBridgeStore:
                 },
             )
             payload = self._task_payload_and_sync_from_conn(conn, task_id)
+        if payload:
+            self._sync_task_mailbox(payload)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1096,6 +1104,8 @@ class SharedBridgeStore:
                 },
             )
             payload = self._task_payload_and_sync_from_conn(conn, task_id)
+        if payload:
+            self._sync_task_mailbox(payload)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1195,6 +1205,8 @@ class SharedBridgeStore:
                 },
             )
             payload = self._task_payload_and_sync_from_conn(conn, task_id)
+        if payload:
+            self._sync_task_mailbox(payload)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1290,6 +1302,8 @@ class SharedBridgeStore:
                 },
             )
             payload = self._task_payload_and_sync_from_conn(conn, task_id)
+        if payload:
+            self._sync_task_mailbox(payload)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1378,6 +1392,8 @@ class SharedBridgeStore:
                 },
             )
             payload = self._task_payload_and_sync_from_conn(conn, task_id)
+        if payload:
+            self._sync_task_mailbox(payload)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1457,6 +1473,8 @@ class SharedBridgeStore:
                 },
             )
             payload = self._task_payload_and_sync_from_conn(conn, task_id)
+        if payload:
+            self._sync_task_mailbox(payload)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1565,6 +1583,8 @@ class SharedBridgeStore:
                 },
             )
             payload = self._task_payload_and_sync_from_conn(conn, task_id)
+        if payload:
+            self._sync_task_mailbox(payload)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1652,6 +1672,8 @@ class SharedBridgeStore:
                 },
             )
             payload = self._task_payload_and_sync_from_conn(conn, task_id)
+        if payload:
+            self._sync_task_mailbox(payload)
         if not payload:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
@@ -1750,6 +1772,8 @@ class SharedBridgeStore:
                 },
             )
             payload = self._task_payload_and_sync_from_conn(conn, task_id)
+        if payload:
+            self._sync_task_mailbox(payload)
         if not payload:
             raise RuntimeError(f"重新加载内网环境告警任务失败 {task_id}")
         return payload
@@ -1842,6 +1866,8 @@ class SharedBridgeStore:
             )
             payload = self._task_payload_and_sync_from_conn(conn, claimed_task_id, side_hint=role_text)
         if payload:
+            self._sync_task_mailbox(payload)
+        if payload:
             for item in payload.get("stages", []):
                 if str(item.get("stage_id", "")).strip() == claimed_stage_id:
                     item["claim_token"] = claim_token
@@ -1863,6 +1889,7 @@ class SharedBridgeStore:
         if not task_text or not stage_text or not token_text:
             return
         now_dt = datetime.now()
+        mailbox_payload: Dict[str, Any] | None = None
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1878,7 +1905,9 @@ class SharedBridgeStore:
                 ),
             )
             if sync_mailbox:
-                self._sync_task_mailbox_from_conn(conn, task_text)
+                mailbox_payload = self._sync_task_mailbox_from_conn(conn, task_text)
+        if mailbox_payload:
+            self._sync_task_mailbox(mailbox_payload)
 
     def sweep_expired_running_tasks(self, *, stale_task_timeout_sec: int) -> int:
         now_dt = datetime.now()
@@ -1887,6 +1916,7 @@ class SharedBridgeStore:
             "%Y-%m-%d %H:%M:%S"
         )
         expired_rows: List[sqlite3.Row] = []
+        mailbox_payloads: List[Dict[str, Any]] = []
         with self.connect() as conn:
             expired_rows = conn.execute(
                 """
@@ -1950,7 +1980,11 @@ class SharedBridgeStore:
                         "lease_expires_at": str(row["lease_expires_at"] or "").strip(),
                     },
                 )
-                self._sync_task_mailbox_from_conn(conn, task_id, side_hint="system")
+                mailbox_payload = self._sync_task_mailbox_from_conn(conn, task_id, side_hint="system")
+                if mailbox_payload:
+                    mailbox_payloads.append(mailbox_payload)
+        for mailbox_payload in mailbox_payloads:
+            self._sync_task_mailbox(mailbox_payload)
         return len(expired_rows)
 
     def upsert_artifact(
@@ -1975,6 +2009,7 @@ class SharedBridgeStore:
             return
         artifact_id = "|".join([task_text, stage_text or "-", kind_text, building_text or "-", rel_text])
         now_text = _now_text()
+        mailbox_payload: Dict[str, Any] | None = None
         with self.connect() as conn:
             conn.execute(
                 """
@@ -2003,7 +2038,9 @@ class SharedBridgeStore:
                 ),
             )
             if sync_mailbox:
-                self._sync_task_mailbox_from_conn(conn, task_text)
+                mailbox_payload = self._sync_task_mailbox_from_conn(conn, task_text)
+        if mailbox_payload:
+            self._sync_task_mailbox(mailbox_payload)
 
     def get_artifacts(self, task_id: str, *, artifact_kind: str = "", status: str = "") -> List[Dict[str, Any]]:
         task_text = str(task_id or "").strip()
@@ -2076,6 +2113,7 @@ class SharedBridgeStore:
         status_text = str(status or "").strip()
         if not artifact_text or not status_text:
             return None
+        mailbox_payload: Dict[str, Any] | None = None
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -2120,7 +2158,9 @@ class SharedBridgeStore:
             ).fetchone()
             task_id_text = str(row["task_id"] or "").strip()
             if task_id_text:
-                self._sync_task_mailbox_from_conn(conn, task_id_text)
+                mailbox_payload = self._sync_task_mailbox_from_conn(conn, task_id_text)
+        if mailbox_payload:
+            self._sync_task_mailbox(mailbox_payload)
         return self._row_to_artifact_dict(updated_row) if updated_row else None
 
     def delete_artifact(self, artifact_id: str) -> bool:
@@ -2128,6 +2168,7 @@ class SharedBridgeStore:
         if not artifact_text:
             return False
         deleted_task_id = ""
+        mailbox_payload: Dict[str, Any] | None = None
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -2144,7 +2185,9 @@ class SharedBridgeStore:
                 (artifact_text,),
             )
             if deleted_task_id and int(deleted.rowcount or 0) > 0:
-                self._sync_task_mailbox_from_conn(conn, deleted_task_id)
+                mailbox_payload = self._sync_task_mailbox_from_conn(conn, deleted_task_id)
+        if mailbox_payload:
+            self._sync_task_mailbox(mailbox_payload)
         return bool(int(deleted.rowcount or 0) > 0)
 
     def upsert_source_cache_entry(
@@ -2482,6 +2525,7 @@ class SharedBridgeStore:
         if not task_text or not stage_text or not token_text:
             return False
         now_text = _now_text()
+        mailbox_payload: Dict[str, Any] | None = None
         with self.connect() as conn:
             updated = conn.execute(
                 """
@@ -2537,7 +2581,9 @@ class SharedBridgeStore:
                     },
                 )
             if sync_mailbox:
-                self._sync_task_mailbox_from_conn(conn, task_text, side_hint=str(side or "").strip())
+                mailbox_payload = self._sync_task_mailbox_from_conn(conn, task_text, side_hint=str(side or "").strip())
+        if mailbox_payload:
+            self._sync_task_mailbox(mailbox_payload)
         return True
 
     def append_event(
@@ -2554,6 +2600,7 @@ class SharedBridgeStore:
         task_text = str(task_id or "").strip()
         if not task_text:
             return
+        mailbox_payload: Dict[str, Any] | None = None
         with self.connect() as conn:
             self._insert_event(
                 conn,
@@ -2565,7 +2612,9 @@ class SharedBridgeStore:
                 payload=payload or {},
             )
             if sync_mailbox:
-                self._sync_task_mailbox_from_conn(conn, task_text, side_hint=str(side or "").strip())
+                mailbox_payload = self._sync_task_mailbox_from_conn(conn, task_text, side_hint=str(side or "").strip())
+        if mailbox_payload:
+            self._sync_task_mailbox(mailbox_payload)
 
     def _insert_event(
         self,
@@ -2663,22 +2712,28 @@ class SharedBridgeStore:
         payload["events"] = [self._row_to_event_dict(row) for row in event_rows]
         return payload
 
-    def _sync_task_mailbox_from_conn(self, conn: sqlite3.Connection, task_id: str, *, side_hint: str = "") -> None:
+    def _sync_task_mailbox_from_conn(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        *,
+        side_hint: str = "",
+    ) -> Dict[str, Any] | None:
         payload = self._task_payload_from_conn(conn, task_id)
         if not isinstance(payload, dict):
-            return
-        self._mailbox_store.write_request(payload)
-        side = self._mailbox_side_for_task(payload, side_hint=side_hint)
-        if side:
-            self._mailbox_store.write_side_snapshot(task=payload, side=side)
+            return None
+        payload["_mailbox_side_hint"] = self._mailbox_side_for_task(payload, side_hint=side_hint)
+        return payload
 
     def _sync_task_mailbox(self, task: Dict[str, Any] | None, *, side_hint: str = "") -> None:
         if not isinstance(task, dict):
             return
-        self._mailbox_store.write_request(task)
-        side = self._mailbox_side_for_task(task, side_hint=side_hint)
+        side_override = str(task.pop("_mailbox_side_hint", "") or "").strip().lower()
+        payload = dict(task)
+        self._mailbox_store.write_request(payload)
+        side = side_override or self._mailbox_side_for_task(payload, side_hint=side_hint)
         if side:
-            self._mailbox_store.write_side_snapshot(task=task, side=side)
+            self._mailbox_store.write_side_snapshot(task=payload, side=side)
 
     def _task_payload_and_sync_from_conn(
         self,
@@ -2687,10 +2742,7 @@ class SharedBridgeStore:
         *,
         side_hint: str = "",
     ) -> Dict[str, Any] | None:
-        payload = self._task_payload_from_conn(conn, task_id)
-        if isinstance(payload, dict):
-            self._sync_task_mailbox(payload, side_hint=side_hint)
-        return payload
+        return self._sync_task_mailbox_from_conn(conn, task_id, side_hint=side_hint)
 
     @staticmethod
     def _loads(raw: Any) -> Any:

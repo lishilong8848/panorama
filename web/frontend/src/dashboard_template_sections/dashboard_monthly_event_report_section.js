@@ -1,4 +1,4 @@
-﻿export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'monthly_event_report'">
+export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'monthly_event_report'">
           <div class="dashboard-module-shell">
             <div class="dashboard-module-intro">
               <h3 class="card-title">体系月度统计表</h3>
@@ -60,18 +60,18 @@
                               <div class="btn-line">
                                 <button
                                   class="btn btn-success"
-                                  :disabled="getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.running) || isActionLocked(actionKeyMonthlyEventReportSchedulerStart) || isActionLocked(actionKeyMonthlyEventReportSchedulerStop) || isSchedulerTogglePending('monthly_event_report')"
+                                  :disabled="getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.remembered_enabled) || isActionLocked(actionKeyMonthlyEventReportSchedulerStart) || isActionLocked(actionKeyMonthlyEventReportSchedulerStop) || isSchedulerTogglePending('monthly_event_report')"
                                   @click="startMonthlyEventReportScheduler"
                                 >
                                   {{
                                     getSchedulerToggleMode('monthly_event_report') === 'starting'
                                       ? '启动中...'
-                                      : (getSchedulerToggleMode('monthly_event_report') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.running) ? '已启动调度' : '启动调度'))
+                                      : (getSchedulerToggleMode('monthly_event_report') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
                                   }}
                                 </button>
                                 <button
                                   class="btn btn-danger"
-                                  :disabled="!getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.running) || isActionLocked(actionKeyMonthlyEventReportSchedulerStop) || isActionLocked(actionKeyMonthlyEventReportSchedulerStart) || isSchedulerTogglePending('monthly_event_report')"
+                                  :disabled="!getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.remembered_enabled) || isActionLocked(actionKeyMonthlyEventReportSchedulerStop) || isActionLocked(actionKeyMonthlyEventReportSchedulerStart) || isSchedulerTogglePending('monthly_event_report')"
                                   @click="stopMonthlyEventReportScheduler"
                                 >
                                   {{ getSchedulerToggleMode('monthly_event_report') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('monthly_event_report') === 'starting' ? '处理中...' : '停止调度') }}
@@ -446,18 +446,18 @@
                               <div class="btn-line">
                                 <button
                                   class="btn btn-success"
-                                  :disabled="getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.running) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStart) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) || isSchedulerTogglePending('monthly_change_report')"
+                                  :disabled="getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.remembered_enabled) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStart) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) || isSchedulerTogglePending('monthly_change_report')"
                                   @click="startMonthlyChangeReportScheduler"
                                 >
                                   {{
                                     getSchedulerToggleMode('monthly_change_report') === 'starting'
                                       ? '启动中...'
-                                      : (getSchedulerToggleMode('monthly_change_report') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.running) ? '已启动调度' : '启动调度'))
+                                      : (getSchedulerToggleMode('monthly_change_report') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
                                   }}
                                 </button>
                                 <button
                                   class="btn btn-danger"
-                                  :disabled="!getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.running) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStart) || isSchedulerTogglePending('monthly_change_report')"
+                                  :disabled="!getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.remembered_enabled) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStart) || isSchedulerTogglePending('monthly_change_report')"
                                   @click="stopMonthlyChangeReportScheduler"
                                 >
                                   {{ getSchedulerToggleMode('monthly_change_report') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('monthly_change_report') === 'starting' ? '处理中...' : '停止调度') }}
@@ -777,3 +777,4 @@
                       </section>
 
 `;
+

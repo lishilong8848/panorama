@@ -313,10 +313,11 @@ class ReviewSessionService:
                 existing_output = str(existing_session.get("output_file", "")).strip()
                 if existing_output == candidate_text:
                     if latest_session_id != session_id:
-                        latest_map[building_name] = session_id
-                        state["review_latest_by_building"] = latest_map
                         try:
-                            self._save_state(state)
+                            self._apply_review_state_changes(
+                                latest_by_building={building_name: session_id},
+                                latest_batch_key=str(existing_session.get("batch_key", "")).strip() or None,
+                            )
                         except Exception:  # noqa: BLE001
                             pass
                     return existing_session
@@ -739,11 +740,11 @@ class ReviewSessionService:
                 references.add(stored_path)
         return references
 
-    def _refresh_source_file_cache_state(self, state: Dict[str, Any]) -> bool:
+    def _refresh_source_file_cache_state(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
         sessions = state.get("review_sessions", {})
         if not isinstance(sessions, dict):
-            return False
-        changed = False
+            return []
+        changed_sessions: List[Dict[str, Any]] = []
         for session_id, raw in list(sessions.items()):
             if not isinstance(raw, dict):
                 continue
@@ -763,10 +764,10 @@ class ReviewSessionService:
             source_cache["cleanup_at"] = _now_text()
             session["source_file_cache"] = source_cache
             sessions[session_id] = session
-            changed = True
-        if changed:
+            changed_sessions.append(session)
+        if changed_sessions:
             state["review_sessions"] = sessions
-        return changed
+        return changed_sessions
 
     def _rebuild_latest_by_building(self, state: Dict[str, Any]) -> None:
         sessions = state.get("review_sessions", {})
@@ -808,6 +809,25 @@ class ReviewSessionService:
             if str(session.get("session_id", "")).strip()
         }
 
+    @staticmethod
+    def _latest_by_building_delta(
+        current_latest: Dict[str, Any],
+        rebuilt_latest: Dict[str, Any],
+    ) -> Dict[str, str | None]:
+        current = current_latest if isinstance(current_latest, dict) else {}
+        rebuilt = rebuilt_latest if isinstance(rebuilt_latest, dict) else {}
+        delta: Dict[str, str | None] = {}
+        for building in sorted(set(current) | set(rebuilt)):
+            building_text = str(building or "").strip()
+            if not building_text:
+                continue
+            current_session_id = str(current.get(building_text, "") or "").strip()
+            rebuilt_session_id = str(rebuilt.get(building_text, "") or "").strip()
+            if current_session_id == rebuilt_session_id:
+                continue
+            delta[building_text] = rebuilt_session_id or None
+        return delta
+
     def _load_state(self) -> Dict[str, Any]:
         try:
             state = self._review_state_store.load_state()
@@ -818,28 +838,27 @@ class ReviewSessionService:
         if not isinstance(state.get("review_latest_batch_key", ""), str):
             state["review_latest_batch_key"] = ""
         sessions = state.get("review_sessions", {})
-        latest_map = state.get("review_latest_by_building", {})
-        changed = False
+        filtered_changed = False
+        removed_session_ids: List[str] = []
         if isinstance(sessions, dict):
             filtered_sessions: Dict[str, Any] = {}
-            removed_session_ids: set[str] = set()
             for session_id, raw_session in list(sessions.items()):
+                session_id_text = str(session_id or "").strip()
                 if not isinstance(raw_session, dict):
-                    removed_session_ids.add(str(session_id or "").strip())
-                    changed = True
+                    if session_id_text:
+                        removed_session_ids.append(session_id_text)
+                    filtered_changed = True
                     continue
                 output_file = str(raw_session.get("output_file", "")).strip()
                 if self._is_legacy_test_output_file(output_file):
-                    removed_session_ids.add(str(session_id or "").strip())
-                    changed = True
+                    if session_id_text:
+                        removed_session_ids.append(session_id_text)
+                    filtered_changed = True
                     continue
-                filtered_sessions[str(session_id or "").strip()] = raw_session
-            if changed:
+                filtered_sessions[session_id_text] = raw_session
+            if filtered_changed:
                 state["review_sessions"] = filtered_sessions
-                self._rebuild_latest_by_building(state)
-                self._save_state(state)
-                return state
-        refresh_changed = self._refresh_source_file_cache_state(state)
+        refreshed_sessions = self._refresh_source_file_cache_state(state)
         self._source_file_cache_service.cleanup_orphan_sources(
             referenced_paths=self._managed_source_file_references(state),
             emit_log=lambda *_args: None,
@@ -850,21 +869,22 @@ class ReviewSessionService:
             temp_state = {"review_sessions": rebuild_source}
             self._rebuild_latest_by_building(temp_state)
             rebuilt_latest = temp_state.get("review_latest_by_building", {})
-        if isinstance(rebuilt_latest, dict):
-            current_latest = state.get("review_latest_by_building", {})
-            if not isinstance(current_latest, dict) or current_latest != rebuilt_latest:
-                state["review_latest_by_building"] = rebuilt_latest
-                self._save_state(state)
-                return state
+        current_latest = state.get("review_latest_by_building", {})
+        latest_delta = self._latest_by_building_delta(current_latest, rebuilt_latest)
+        if latest_delta:
+            state["review_latest_by_building"] = rebuilt_latest
         derived_latest_batch_key = self._derive_latest_batch_key_from_state(state)
         current_latest_batch_key = str(state.get("review_latest_batch_key", "") or "").strip()
-        if current_latest_batch_key != derived_latest_batch_key:
+        latest_batch_key_changed = current_latest_batch_key != derived_latest_batch_key
+        if latest_batch_key_changed:
             state["review_latest_batch_key"] = derived_latest_batch_key
-            self._save_state(state)
-            return state
-        if refresh_changed:
-            self._save_state(state)
-            return state
+        if filtered_changed or refreshed_sessions or latest_delta or latest_batch_key_changed:
+            return self._apply_review_state_changes(
+                upsert_sessions=refreshed_sessions or None,
+                delete_session_ids=removed_session_ids or None,
+                latest_by_building=latest_delta or None,
+                latest_batch_key=derived_latest_batch_key if latest_batch_key_changed else None,
+            )
         return state
 
     def _rebuild_batch_status(self, state: Dict[str, Any]) -> None:
@@ -985,6 +1005,29 @@ class ReviewSessionService:
             state["review_latest_batch_key"] = self._derive_latest_batch_key_from_state(state)
         try:
             return self._review_state_store.save_state(state)
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+
+    def _apply_review_state_changes(
+        self,
+        *,
+        upsert_sessions: List[Dict[str, Any]] | None = None,
+        delete_session_ids: List[str] | None = None,
+        latest_by_building: Dict[str, str | None] | None = None,
+        upsert_cloud_batches: List[Dict[str, Any]] | None = None,
+        delete_cloud_batch_keys: List[str] | None = None,
+        latest_batch_key: str | None = None,
+    ) -> Dict[str, Any]:
+        meta_updates = {"review_latest_batch_key": latest_batch_key} if latest_batch_key is not None else None
+        try:
+            return self._review_state_store.apply_changes(
+                upsert_sessions=upsert_sessions,
+                delete_session_ids=delete_session_ids,
+                latest_by_building=latest_by_building,
+                upsert_cloud_batches=upsert_cloud_batches,
+                delete_cloud_batch_keys=delete_cloud_batch_keys,
+                meta_updates=meta_updates,
+            )
         except Exception as exc:  # noqa: BLE001
             _reraise_review_store_error(exc)
 
@@ -1375,9 +1418,10 @@ class ReviewSessionService:
                 "updated_at": _now_text(),
             }
         )
-        cloud_batches[target_batch] = normalized
-        state["review_cloud_batches"] = cloud_batches
-        self._save_state(state)
+        self._apply_review_state_changes(
+            upsert_cloud_batches=[normalized],
+            latest_batch_key=target_batch,
+        )
         return dict(normalized)
 
     def get_cloud_batch(self, batch_key: str) -> Dict[str, Any] | None:
@@ -1420,9 +1464,7 @@ class ReviewSessionService:
         batch_meta["first_full_cloud_sync_completed"] = True
         batch_meta["first_full_cloud_sync_at"] = now_text
         batch_meta["updated_at"] = now_text
-        cloud_batches[target_batch] = batch_meta
-        state["review_cloud_batches"] = cloud_batches
-        self._save_state(state)
+        self._apply_review_state_changes(upsert_cloud_batches=[batch_meta], latest_batch_key=target_batch)
         return dict(batch_meta)
 
     def attach_cloud_batch_to_session(self, *, session_id: str, batch_key: str, building: str) -> Dict[str, Any]:
@@ -1443,9 +1485,7 @@ class ReviewSessionService:
             batch_cloud=batch_cloud,
         )
         session["updated_at"] = _now_text()
-        sessions[target_session_id] = session
-        state["review_sessions"] = sessions
-        self._save_state(state)
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)
 
     def register_generated_output(
@@ -1535,12 +1575,11 @@ class ReviewSessionService:
                 previous.get("review_link_delivery", {}) if isinstance(previous, dict) else {}
             ),
         }
-        sessions[session_id] = session
-        latest_map[building_name] = session_id
-        state["review_sessions"] = sessions
-        state["review_latest_by_building"] = latest_map
-        self._set_latest_batch_key(state, batch_key)
-        self._save_state(state)
+        self._apply_review_state_changes(
+            upsert_sessions=[session],
+            latest_by_building={building_name: session_id},
+            latest_batch_key=batch_key,
+        )
         return dict(session)
 
     def update_review_link_delivery(
@@ -1562,9 +1601,7 @@ class ReviewSessionService:
         session = self._normalize_session(raw_session)
         session["review_link_delivery"] = _normalize_review_link_delivery(review_link_delivery)
         session["updated_at"] = _now_text()
-        sessions[target_session_id] = session
-        state["review_sessions"] = sessions
-        self._save_state(state)
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)
 
     def mark_confirmed(
@@ -1595,10 +1632,7 @@ class ReviewSessionService:
         session["confirmed_by"] = str(confirmed_by or "").strip() if confirmed else ""
         session["revision"] = current_revision + 1
         session["updated_at"] = _now_text()
-        sessions[target_session_id] = session
-        state["review_sessions"] = sessions
-        self._set_latest_batch_key(state, session["batch_key"])
-        self._save_state(state)
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session), self.get_batch_status(session["batch_key"])
 
     def confirm_all_in_batch(self, *, batch_key: str, confirmed_by: str = "") -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -1626,9 +1660,7 @@ class ReviewSessionService:
             sessions[session_id] = session
             updated_sessions.append(dict(session))
 
-        state["review_sessions"] = sessions
-        self._set_latest_batch_key(state, target_batch)
-        self._save_state(state)
+        self._apply_review_state_changes(upsert_sessions=updated_sessions, latest_batch_key=target_batch)
         return updated_sessions, self.get_batch_status(target_batch)
 
     def update_cloud_sheet_sync(self, *, session_id: str, cloud_sheet_sync: Dict[str, Any]) -> Dict[str, Any]:
@@ -1641,10 +1673,7 @@ class ReviewSessionService:
         session = self._normalize_session(sessions[target_session_id])
         session["cloud_sheet_sync"] = self._normalize_cloud_sheet_sync(cloud_sheet_sync)
         session["updated_at"] = _now_text()
-        sessions[target_session_id] = session
-        state["review_sessions"] = sessions
-        self._set_latest_batch_key(state, session["batch_key"])
-        self._save_state(state)
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)
 
     def update_capacity_sync(
@@ -1676,10 +1705,7 @@ class ReviewSessionService:
         if capacity_error is not None:
             session["capacity_error"] = str(capacity_error or "").strip()
         session["updated_at"] = _now_text()
-        sessions[target_session_id] = session
-        state["review_sessions"] = sessions
-        self._set_latest_batch_key(state, session["batch_key"])
-        self._save_state(state)
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)
 
     def update_source_data_attachment_export(
@@ -1699,10 +1725,7 @@ class ReviewSessionService:
             source_data_attachment_export
         )
         session["updated_at"] = _now_text()
-        sessions[target_session_id] = session
-        state["review_sessions"] = sessions
-        self._set_latest_batch_key(state, session["batch_key"])
-        self._save_state(state)
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)
 
     def touch_session_after_save(
@@ -1769,10 +1792,7 @@ class ReviewSessionService:
             cloud_state["error"] = ""
         session["cloud_sheet_sync"] = cloud_state
 
-        sessions[target_session_id] = session
-        state["review_sessions"] = sessions
-        self._set_latest_batch_key(state, session["batch_key"])
-        self._save_state(state)
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session), self.get_batch_status(session["batch_key"])
 
     def touch_session_after_history_save(
@@ -1809,8 +1829,5 @@ class ReviewSessionService:
             cloud_state["error"] = ""
         session["cloud_sheet_sync"] = cloud_state
 
-        sessions[target_session_id] = session
-        state["review_sessions"] = sessions
-        self._set_latest_batch_key(state, session["batch_key"])
-        self._save_state(state)
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session), self.get_batch_status(session["batch_key"])

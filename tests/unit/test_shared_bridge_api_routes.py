@@ -418,6 +418,101 @@ def test_internal_runtime_status_rejects_external_role() -> None:
     assert excinfo.value.status_code == 409
 
 
+def test_internal_runtime_status_prefers_runtime_status_sqlite_snapshot() -> None:
+    service = _FakeBridgeService()
+    service.health_snapshot["internal_download_pool"]["browser_ready"] = False
+
+    class _Coordinator:
+        @staticmethod
+        def is_running() -> bool:
+            return True
+
+        @staticmethod
+        def read_scope_snapshot(scope: str):
+            assert scope == "internal_runtime_summary"
+            return {
+                "payload": {
+                    "updated_at": "2026-04-15 09:00:00",
+                    "role_mode": "internal",
+                    "bridge_enabled": True,
+                    "agent_status": "running",
+                    "db_status": "ok",
+                    "last_error": "",
+                    "last_poll_at": "2026-04-15 09:00:00",
+                    "queue": {"pending_internal": 2, "pending_external": 0, "problematic": 0, "task_count": 2},
+                    "pool": {"enabled": True, "browser_ready": True, "active_buildings": ["A楼"], "last_error": ""},
+                    "source_cache": {
+                        "enabled": True,
+                        "scheduler_running": True,
+                        "current_hour_bucket": "2026-04-15 09",
+                        "last_run_at": "2026-04-15 09:00:00",
+                        "last_success_at": "2026-04-15 09:00:02",
+                        "last_error": "",
+                        "cache_root": "D:/QJPT_Shared/cache",
+                        "current_hour_refresh": {},
+                        "handover_log_family": {"ready_count": 1, "failed_buildings": [], "blocked_buildings": [], "last_success_at": "", "current_bucket": "2026-04-15 09"},
+                        "handover_capacity_report_family": {"ready_count": 1, "failed_buildings": [], "blocked_buildings": [], "last_success_at": "", "current_bucket": "2026-04-15 09"},
+                        "monthly_report_family": {"ready_count": 1, "failed_buildings": [], "blocked_buildings": [], "last_success_at": "", "current_bucket": "2026-04-15 09"},
+                        "alarm_event_family": {"ready_count": 1, "failed_buildings": [], "blocked_buildings": [], "last_success_at": "", "current_bucket": "2026-04-15 09"},
+                    },
+                }
+            }
+
+        @staticmethod
+        def request_refresh(*, reason: str = "") -> None:
+            raise AssertionError(f"should not request refresh when snapshot exists: {reason}")
+
+    request = _fake_request(service, role_mode="internal")
+    request.app.state.container.runtime_status_coordinator = _Coordinator()
+
+    response = routes.bridge_internal_runtime_status(request)
+
+    assert response["ok"] is True
+    assert response["summary"]["pool"]["browser_ready"] is True
+    assert service.health_modes == []
+
+
+def test_internal_runtime_building_prefers_runtime_status_sqlite_snapshot() -> None:
+    service = _FakeBridgeService()
+
+    class _Coordinator:
+        @staticmethod
+        def is_running() -> bool:
+            return True
+
+        @staticmethod
+        def read_building_snapshot(building: str):
+            assert building == "A楼"
+            return {
+                "payload": {
+                    "updated_at": "2026-04-15 09:00:00",
+                    "building": "A楼",
+                    "building_code": "a",
+                    "page_slot": {"building": "A楼", "in_use": False, "page_ready": True},
+                    "source_families": {
+                        "handover_log_family": {"building": "A楼", "status": "ready", "ready": True},
+                        "handover_capacity_report_family": {"building": "A楼", "status": "ready", "ready": True},
+                        "monthly_report_family": {"building": "A楼", "status": "ready", "ready": True},
+                        "alarm_event_family": {"building": "A楼", "status": "ready", "ready": True},
+                    },
+                    "pool": {"browser_ready": True, "last_error": ""},
+                }
+            }
+
+        @staticmethod
+        def request_refresh(*, reason: str = "") -> None:
+            raise AssertionError(f"should not request refresh when snapshot exists: {reason}")
+
+    request = _fake_request(service, role_mode="internal")
+    request.app.state.container.runtime_status_coordinator = _Coordinator()
+
+    response = routes.bridge_internal_runtime_status_building("a", request)
+
+    assert response["ok"] is True
+    assert response["status"]["page_slot"]["in_use"] is False
+    assert service.health_modes == []
+
+
 def test_bridge_shared_root_self_check_returns_diagnostics() -> None:
     request = _fake_request(_FakeBridgeService())
 

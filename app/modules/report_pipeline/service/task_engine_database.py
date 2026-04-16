@@ -18,6 +18,8 @@ def _json_ready(value: Any) -> Any:
 class TaskEngineDatabase:
     WRITE_QUEUE_MAXSIZE = 5000
     WRITE_PUT_TIMEOUT_SEC = 5.0
+    WRITE_DONE_TIMEOUT_SEC = 30.0
+    WRITER_RECOVERY_DELAY_SEC = 0.5
 
     def __init__(
         self,
@@ -33,9 +35,11 @@ class TaskEngineDatabase:
         self._closed = False
         self._close_sentinel = object()
         self._last_cleanup_at = ""
+        self._last_writer_error = ""
+        self._writer_lock = threading.Lock()
         self._init_db()
-        self._writer = threading.Thread(target=self._writer_loop, name="task-engine-sqlite-writer", daemon=True)
-        self._writer.start()
+        self._writer: threading.Thread | None = None
+        self._ensure_writer_alive()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=5.0, isolation_level=None, check_same_thread=False)
@@ -188,26 +192,73 @@ class TaskEngineDatabase:
         finally:
             conn.close()
 
+    @staticmethod
+    def _should_reconnect_writer(exc: Exception) -> bool:
+        if not isinstance(exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)):
+            return False
+        text = str(exc).lower()
+        return any(
+            token in text
+            for token in (
+                "closed",
+                "unable to open database file",
+                "disk i/o error",
+                "readonly database",
+                "database is locked",
+                "database table is locked",
+                "database disk image is malformed",
+            )
+        )
+
+    def _start_writer_locked(self) -> None:
+        if self._closed:
+            return
+        if self._writer is not None and self._writer.is_alive():
+            return
+        self._writer = threading.Thread(target=self._writer_loop, name="task-engine-sqlite-writer", daemon=True)
+        self._writer.start()
+
+    def _ensure_writer_alive(self) -> None:
+        if self._closed:
+            raise RuntimeError("TaskEngineDatabase 已关闭")
+        with self._writer_lock:
+            self._start_writer_locked()
+
     def _writer_loop(self) -> None:
-        conn = self._connect()
-        try:
-            while True:
-                item = self._writes.get()
-                if item is self._close_sentinel:
-                    return
-                callback, done, holder = item
-                try:
-                    holder["result"] = callback(conn)
-                except Exception as exc:  # noqa: BLE001
-                    holder["error"] = exc
-                finally:
-                    done.set()
-        finally:
-            conn.close()
+        while not self._closed:
+            conn: sqlite3.Connection | None = None
+            try:
+                conn = self._connect()
+                self._last_writer_error = ""
+                while not self._closed:
+                    item = self._writes.get()
+                    if item is self._close_sentinel:
+                        return
+                    callback, done, holder = item
+                    reconnect_requested = False
+                    try:
+                        holder["result"] = callback(conn)
+                    except Exception as exc:  # noqa: BLE001
+                        holder["error"] = exc
+                        if self._should_reconnect_writer(exc):
+                            reconnect_requested = True
+                            self._last_writer_error = f"{type(exc).__name__}: {exc}"
+                    finally:
+                        done.set()
+                    if reconnect_requested:
+                        break
+            except Exception as exc:  # noqa: BLE001
+                self._last_writer_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                if conn is not None:
+                    conn.close()
+            if not self._closed:
+                time.sleep(self.WRITER_RECOVERY_DELAY_SEC)
 
     def _write(self, callback: Callable[[sqlite3.Connection], Any]) -> Any:
         if self._closed:
             raise RuntimeError("TaskEngineDatabase 已关闭")
+        self._ensure_writer_alive()
         done = threading.Event()
         holder: dict[str, Any] = {}
         try:
@@ -216,7 +267,13 @@ class TaskEngineDatabase:
             raise RuntimeError(
                 f"任务引擎 SQLite 写队列已满，当前长度={self._writes.qsize()}，请检查长时间写入堆积"
             ) from exc
-        done.wait()
+        if not done.wait(timeout=self.WRITE_DONE_TIMEOUT_SEC):
+            writer = self._writer
+            writer_alive = bool(writer and writer.is_alive())
+            if not writer_alive and not self._closed:
+                self._ensure_writer_alive()
+            detail = f"，最近错误={self._last_writer_error}" if self._last_writer_error else ""
+            raise RuntimeError(f"任务引擎 SQLite 写入超时，writer_alive={writer_alive}{detail}")
         error = holder.get("error")
         if error is not None:
             raise error
@@ -716,6 +773,8 @@ class TaskEngineDatabase:
             "write_queue_length": int(self._writes.qsize()),
             "last_cleanup_at": str(self._last_cleanup_at or "").strip(),
             "closed": bool(self._closed),
+            "writer_alive": bool(self._writer and self._writer.is_alive()),
+            "last_writer_error": str(self._last_writer_error or "").strip(),
         }
 
     def close(self) -> None:

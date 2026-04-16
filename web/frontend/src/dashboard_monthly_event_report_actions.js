@@ -93,9 +93,9 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
   }
 
-  function markSchedulerToggle(key, mode, runningOverride) {
+  function markSchedulerToggle(key, mode, rememberedOverride) {
     if (typeof setSchedulerToggleState !== "function") return;
-    setSchedulerToggleState(key, { mode, runningOverride });
+    setSchedulerToggleState(key, { mode, rememberedOverride });
   }
 
   function isInternalRole() {
@@ -123,6 +123,15 @@ export function createDashboardMonthlyEventReportActions(ctx) {
       state_exists: Boolean(data.state_exists),
       executor_bound: Boolean(data.executor_bound),
       callback_name: String(data.callback_name || "-"),
+      remembered_enabled: Object.prototype.hasOwnProperty.call(data, "remembered_enabled")
+        ? Boolean(data.remembered_enabled)
+        : Boolean(targetScheduler.remembered_enabled),
+      effective_auto_start_in_gui: Object.prototype.hasOwnProperty.call(data, "effective_auto_start_in_gui")
+        ? Boolean(data.effective_auto_start_in_gui)
+        : Boolean(targetScheduler.effective_auto_start_in_gui),
+      memory_source: Object.prototype.hasOwnProperty.call(data, "memory_source")
+        ? String(data.memory_source || "")
+        : String(targetScheduler.memory_source || ""),
     });
   }
 

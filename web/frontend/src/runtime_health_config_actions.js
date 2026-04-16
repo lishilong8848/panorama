@@ -13,6 +13,7 @@ import {
   retryHandoverReviewBatchCloudSyncApi,
   applyUpdaterApi,
   activateStartupRuntimeApi,
+  exitCurrentRuntimeApi,
   checkUpdaterApi,
   getUpdaterStatusApi,
   restartUpdaterApi,
@@ -898,6 +899,11 @@ export function createRuntimeHealthConfigActions(ctx) {
         ? data.role_selection_required
         : health.role_selection_required,
     );
+    health.startup_role_user_exited = Boolean(
+      typeof data.startup_role_user_exited === "boolean"
+        ? data.startup_role_user_exited
+        : health.startup_role_user_exited,
+    );
     if (data.startup_handoff && typeof data.startup_handoff === "object") {
       Object.assign(health.startup_handoff, {
         active: Boolean(data.startup_handoff.active),
@@ -915,6 +921,20 @@ export function createRuntimeHealthConfigActions(ctx) {
         requested_at: "",
         reason: "",
         nonce: "",
+      });
+    }
+    if (data.startup_shared_bridge && typeof data.startup_shared_bridge === "object") {
+      Object.assign(health.startup_shared_bridge, {
+        enabled: Boolean(data.startup_shared_bridge.enabled),
+        root_dir: String(data.startup_shared_bridge.root_dir || "").trim(),
+        internal_root_dir: String(data.startup_shared_bridge.internal_root_dir || "").trim(),
+        external_root_dir: String(data.startup_shared_bridge.external_root_dir || "").trim(),
+        poll_interval_sec: data.startup_shared_bridge.poll_interval_sec,
+        heartbeat_interval_sec: data.startup_shared_bridge.heartbeat_interval_sec,
+        claim_lease_sec: data.startup_shared_bridge.claim_lease_sec,
+        stale_task_timeout_sec: data.startup_shared_bridge.stale_task_timeout_sec,
+        artifact_retention_days: data.startup_shared_bridge.artifact_retention_days,
+        sqlite_busy_timeout_ms: data.startup_shared_bridge.sqlite_busy_timeout_ms,
       });
     }
     health.runtime_activated = Boolean(
@@ -1179,6 +1199,9 @@ export function createRuntimeHealthConfigActions(ctx) {
           state_exists: Boolean(data.day_metric_upload.scheduler.state_exists),
           executor_bound: Boolean(data.day_metric_upload.scheduler.executor_bound),
           callback_name: String(data.day_metric_upload.scheduler.callback_name || ""),
+          remembered_enabled: Boolean(data.day_metric_upload.scheduler.remembered_enabled),
+          effective_auto_start_in_gui: Boolean(data.day_metric_upload.scheduler.effective_auto_start_in_gui),
+          memory_source: String(data.day_metric_upload.scheduler.memory_source || ""),
         });
       } else {
         Object.assign(health.day_metric_upload.scheduler, {
@@ -1194,6 +1217,9 @@ export function createRuntimeHealthConfigActions(ctx) {
           state_exists: false,
           executor_bound: false,
           callback_name: "",
+          remembered_enabled: false,
+          effective_auto_start_in_gui: false,
+          memory_source: "",
         });
       }
       if (data.day_metric_upload.target_preview && typeof data.day_metric_upload.target_preview === "object") {
@@ -1228,6 +1254,9 @@ export function createRuntimeHealthConfigActions(ctx) {
           state_exists: Boolean(data.alarm_event_upload.scheduler.state_exists),
           executor_bound: Boolean(data.alarm_event_upload.scheduler.executor_bound),
           callback_name: String(data.alarm_event_upload.scheduler.callback_name || ""),
+          remembered_enabled: Boolean(data.alarm_event_upload.scheduler.remembered_enabled),
+          effective_auto_start_in_gui: Boolean(data.alarm_event_upload.scheduler.effective_auto_start_in_gui),
+          memory_source: String(data.alarm_event_upload.scheduler.memory_source || ""),
         });
       } else {
         Object.assign(health.alarm_event_upload.scheduler, {
@@ -1243,6 +1272,9 @@ export function createRuntimeHealthConfigActions(ctx) {
           state_exists: false,
           executor_bound: false,
           callback_name: "",
+          remembered_enabled: false,
+          effective_auto_start_in_gui: false,
+          memory_source: "",
         });
       }
       if (data.alarm_event_upload.target_preview && typeof data.alarm_event_upload.target_preview === "object") {
@@ -2506,7 +2538,10 @@ export function createRuntimeHealthConfigActions(ctx) {
         if (configLoadError) {
           configLoadError.value = String(err || "").trim();
         }
-        scheduleConfigRetry();
+        const statusCode = Number.parseInt(String(err?.httpStatus || 0), 10) || 0;
+        if (!(statusCode === 409 && !health.runtime_activated)) {
+          scheduleConfigRetry();
+        }
         if (!silentMessage) {
           message.value = `读取配置失败: ${err}`;
         }
@@ -3167,15 +3202,26 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   async function activateStartupRuntime(options = {}) {
     try {
-      const data = await activateStartupRuntimeApi({
+      const payload = {
         source: String(options?.source || "").trim() || "启动角色确认",
         startup_handoff_nonce: String(options?.startupHandoffNonce || "").trim(),
-      });
+      };
+      const roleMode = String(options?.roleMode || options?.role_mode || "").trim();
+      if (roleMode) {
+        payload.role_mode = roleMode;
+      }
+      const sharedBridge = options?.sharedBridge || options?.shared_bridge;
+      if (sharedBridge && typeof sharedBridge === "object" && !Array.isArray(sharedBridge)) {
+        payload.shared_bridge = sharedBridge;
+      }
+      const data = await activateStartupRuntimeApi(payload);
       return {
         ok: data?.ok !== false,
         activated: Boolean(data?.activated),
         alreadyActive: Boolean(data?.already_active),
         roleMode: String(data?.role_mode || "").trim(),
+        savedRole: data?.saved_role && typeof data.saved_role === "object" ? data.saved_role : null,
+        phase: String(data?.phase || "").trim(),
         error: String(data?.error || "").trim(),
       };
     } catch (err) {
@@ -3184,7 +3230,30 @@ export function createRuntimeHealthConfigActions(ctx) {
         activated: false,
         alreadyActive: false,
         roleMode: "",
+        savedRole: null,
+        phase: "failed",
         error: String(err || "").trim() || "激活后台运行时失败",
+      };
+    }
+  }
+
+  async function exitCurrentRuntime(options = {}) {
+    try {
+      const data = await exitCurrentRuntimeApi({
+        source: String(options?.source || "").trim() || "退出当前系统",
+      });
+      return {
+        ok: data?.ok !== false,
+        deactivated: Boolean(data?.deactivated),
+        roleMode: String(data?.role_mode || "").trim(),
+        error: String(data?.error || "").trim(),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        deactivated: false,
+        roleMode: "",
+        error: String(err || "").trim() || "退出当前系统失败",
       };
     }
   }
@@ -3623,6 +3692,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     saveHandoverBuildingConfig,
     autoSaveConfig,
     activateStartupRuntime,
+    exitCurrentRuntime,
     restartApplication,
     checkUpdaterNow,
     applyUpdaterPatch,

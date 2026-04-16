@@ -39,6 +39,7 @@ class ReviewSessionStateStore:
         "review_latest_by_building": {},
         "review_cloud_batches": {},
         "review_batch_status": {},
+        "review_latest_batch_key": "",
         "updated_at": "",
     }
 
@@ -212,6 +213,7 @@ class ReviewSessionStateStore:
             else {}
         )
         state["review_batch_status"] = {}
+        state["review_latest_batch_key"] = str(raw.get("review_latest_batch_key", "")).strip()
         state["updated_at"] = str(raw.get("updated_at", "")).strip()
         return state
 
@@ -293,6 +295,83 @@ class ReviewSessionStateStore:
             "INSERT OR REPLACE INTO review_meta(key, value) VALUES('updated_at', ?)",
             (str(state.get("updated_at", "")).strip(),),
         )
+        conn.execute(
+            "INSERT OR REPLACE INTO review_meta(key, value) VALUES('review_latest_batch_key', ?)",
+            (str(payload.get("review_latest_batch_key", "")).strip(),),
+        )
+
+    @staticmethod
+    def _set_meta_value(conn: sqlite3.Connection, *, key: str, value: str) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO review_meta(key, value) VALUES(?, ?)",
+            (str(key or "").strip(), str(value or "").strip()),
+        )
+
+    @staticmethod
+    def _upsert_session_row(conn: sqlite3.Connection, session: Dict[str, Any]) -> str:
+        session_id = str(session.get("session_id", "") or "").strip()
+        if not session_id:
+            return ""
+        conn.execute(
+            """
+            INSERT INTO review_sessions(
+                session_id,
+                building,
+                duty_date,
+                duty_shift,
+                batch_key,
+                updated_at,
+                payload_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                building=excluded.building,
+                duty_date=excluded.duty_date,
+                duty_shift=excluded.duty_shift,
+                batch_key=excluded.batch_key,
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                session_id,
+                str(session.get("building", "")).strip(),
+                str(session.get("duty_date", "")).strip(),
+                str(session.get("duty_shift", "")).strip().lower(),
+                str(session.get("batch_key", "")).strip(),
+                str(session.get("updated_at", "")).strip(),
+                json.dumps(session, ensure_ascii=False),
+            ),
+        )
+        return session_id
+
+    @staticmethod
+    def _upsert_cloud_batch_row(conn: sqlite3.Connection, batch: Dict[str, Any]) -> str:
+        batch_key = str(batch.get("batch_key", "") or "").strip()
+        if not batch_key:
+            return ""
+        conn.execute(
+            """
+            INSERT INTO review_cloud_batches(
+                batch_key,
+                duty_date,
+                duty_shift,
+                updated_at,
+                payload_json
+            ) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(batch_key) DO UPDATE SET
+                duty_date=excluded.duty_date,
+                duty_shift=excluded.duty_shift,
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (
+                batch_key,
+                str(batch.get("duty_date", "")).strip(),
+                str(batch.get("duty_shift", "")).strip().lower(),
+                str(batch.get("updated_at", "")).strip(),
+                json.dumps(batch, ensure_ascii=False),
+            ),
+        )
+        return batch_key
 
     def load_state(self) -> Dict[str, Any]:
         self.ensure_ready()
@@ -326,8 +405,11 @@ class ReviewSessionStateStore:
             meta_row = conn.execute(
                 "SELECT value FROM review_meta WHERE key = 'updated_at'"
             ).fetchone()
+            latest_batch_row = conn.execute(
+                "SELECT value FROM review_meta WHERE key = 'review_latest_batch_key'"
+            ).fetchone()
             updated_at = str(meta_row["value"] or "").strip() if meta_row is not None else ""
-            return self._normalize_state(
+            state = self._normalize_state(
                 {
                     "review_sessions": sessions,
                     "review_latest_by_building": latest,
@@ -335,6 +417,10 @@ class ReviewSessionStateStore:
                     "updated_at": updated_at,
                 }
             )
+            state["review_latest_batch_key"] = (
+                str(latest_batch_row["value"] or "").strip() if latest_batch_row is not None else ""
+            )
+            return state
 
     def save_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         self.ensure_ready()
@@ -344,6 +430,81 @@ class ReviewSessionStateStore:
             conn.execute("BEGIN IMMEDIATE")
             self._write_state(conn, state)
         return state
+
+    def apply_changes(
+        self,
+        *,
+        upsert_sessions: list[Dict[str, Any]] | None = None,
+        delete_session_ids: list[str] | None = None,
+        latest_by_building: Dict[str, str | None] | None = None,
+        upsert_cloud_batches: list[Dict[str, Any]] | None = None,
+        delete_cloud_batch_keys: list[str] | None = None,
+        meta_updates: Dict[str, str | None] | None = None,
+    ) -> Dict[str, Any]:
+        self.ensure_ready()
+        updated_at = _now_text()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for session in upsert_sessions or []:
+                if isinstance(session, dict):
+                    self._upsert_session_row(conn, session)
+            for session_id in delete_session_ids or []:
+                session_text = str(session_id or "").strip()
+                if session_text:
+                    conn.execute("DELETE FROM review_sessions WHERE session_id=?", (session_text,))
+            for building, session_id in (latest_by_building or {}).items():
+                building_text = str(building or "").strip()
+                if not building_text:
+                    continue
+                session_text = str(session_id or "").strip()
+                if session_text:
+                    conn.execute(
+                        """
+                        INSERT INTO review_latest_by_building(building, session_id)
+                        VALUES(?, ?)
+                        ON CONFLICT(building) DO UPDATE SET session_id=excluded.session_id
+                        """,
+                        (building_text, session_text),
+                    )
+                else:
+                    conn.execute("DELETE FROM review_latest_by_building WHERE building=?", (building_text,))
+            for batch in upsert_cloud_batches or []:
+                if isinstance(batch, dict):
+                    self._upsert_cloud_batch_row(conn, batch)
+            for batch_key in delete_cloud_batch_keys or []:
+                batch_text = str(batch_key or "").strip()
+                if batch_text:
+                    conn.execute("DELETE FROM review_cloud_batches WHERE batch_key=?", (batch_text,))
+            for key, value in (meta_updates or {}).items():
+                key_text = str(key or "").strip()
+                if not key_text:
+                    continue
+                if value is None:
+                    conn.execute("DELETE FROM review_meta WHERE key=?", (key_text,))
+                else:
+                    self._set_meta_value(conn, key=key_text, value=str(value or "").strip())
+            self._set_meta_value(conn, key="updated_at", value=updated_at)
+        state = self.load_state()
+        state["updated_at"] = updated_at
+        return state
+
+    def upsert_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
+        return self.apply_changes(upsert_sessions=[session] if isinstance(session, dict) else [])
+
+    def delete_session(self, session_id: str) -> Dict[str, Any]:
+        return self.apply_changes(delete_session_ids=[session_id])
+
+    def upsert_cloud_batch(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+        return self.apply_changes(upsert_cloud_batches=[batch] if isinstance(batch, dict) else [])
+
+    def delete_cloud_batch(self, batch_key: str) -> Dict[str, Any]:
+        return self.apply_changes(delete_cloud_batch_keys=[batch_key])
+
+    def set_latest_by_building(self, *, building: str, session_id: str | None) -> Dict[str, Any]:
+        return self.apply_changes(latest_by_building={str(building or "").strip(): session_id})
+
+    def set_latest_batch_key(self, batch_key: str | None) -> Dict[str, Any]:
+        return self.apply_changes(meta_updates={"review_latest_batch_key": batch_key})
 
     @staticmethod
     def _lock_key(building: str, session_id: str) -> str:

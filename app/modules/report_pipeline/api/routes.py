@@ -60,6 +60,7 @@ from handover_log_module.service.day_metric_standalone_upload_service import Day
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
 from handover_log_module.service.monthly_report_delivery_service import MonthlyReportDeliveryService
+from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.review_session_service import ReviewSessionService
@@ -118,6 +119,43 @@ _HEALTH_CACHE_TTL_REVIEW_ACCESS_SEC = 3.0
 _HEALTH_CACHE_TTL_REVIEW_RECIPIENTS_SEC = 8.0
 _HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC = 10.0
 _HEALTH_CACHE_TTL_MONTHLY_DELIVERY_SEC = 12.0
+
+
+def _mirror_handover_review_defaults_to_sqlite(
+    container,
+    *,
+    saved_config: Dict[str, Any],
+    building_codes: list[str] | None = None,
+) -> None:
+    state_service = ReviewDocumentStateService(load_handover_config(saved_config))
+    code_filter = {
+        str(code or "").strip().upper()
+        for code in (building_codes if isinstance(building_codes, list) else [])
+        if str(code or "").strip()
+    }
+    for item in _DEFAULT_REVIEW_BUILDINGS:
+        code = str(item.get("code", "") or "").strip().upper()
+        building = str(item.get("name", "") or "").strip()
+        if code_filter and code not in code_filter:
+            continue
+        if not building:
+            continue
+        try:
+            mirrored = state_service.persist_defaults_from_config(
+                building=building,
+                config=saved_config,
+            )
+        except Exception as exc:  # noqa: BLE001
+            container.add_system_log(
+                f"[配置] 交接班{building}默认值镜像到SQLite失败: {exc}"
+            )
+            continue
+        if bool(mirrored.get("defaults_updated")):
+            container.add_system_log(
+                f"[配置] 交接班{building}默认值已镜像到SQLite: "
+                f"cabinet_power_fields={mirrored.get('cabinet_power_fields', 0)}, "
+                f"footer_inventory_rows={mirrored.get('footer_inventory_rows', 0)}"
+            )
 _THREAD_LOCK_TYPE = type(threading.Lock())
 
 
@@ -734,6 +772,68 @@ def _build_review_links_for_base_url(review_cfg: Dict[str, Any], effective_base_
     return links
 
 
+def _has_saved_startup_role_bridge_config(container, role_mode: str) -> bool:
+    normalized_role = str(role_mode or "").strip().lower()
+    if normalized_role not in {"internal", "external"}:
+        return False
+    config = getattr(container, "config", None)
+    if not isinstance(config, dict) or not config:
+        config = getattr(container, "runtime_config", None)
+    if not isinstance(config, dict):
+        return False
+    common_cfg = config.get("common", {}) if isinstance(config.get("common", {}), dict) else {}
+    shared_bridge_cfg = common_cfg.get("shared_bridge", {})
+    if not isinstance(shared_bridge_cfg, dict):
+        return False
+    try:
+        resolved_bridge = resolve_shared_bridge_paths(shared_bridge_cfg, normalized_role)
+    except Exception:
+        return False
+    if not bool(resolved_bridge.get("enabled", False)):
+        return False
+    role_root_key = "internal_root_dir" if normalized_role == "internal" else "external_root_dir"
+    role_root_dir = str(resolved_bridge.get(role_root_key, "") or "").strip()
+    active_root_dir = str(resolved_bridge.get("root_dir", "") or "").strip()
+    return bool(role_root_dir and active_root_dir)
+
+
+def _startup_shared_bridge_config_snapshot(container) -> Dict[str, Any]:
+    config = getattr(container, "config", None)
+    if not isinstance(config, dict) or not config:
+        config = getattr(container, "runtime_config", None)
+    if not isinstance(config, dict):
+        return {}
+    common_cfg = config.get("common", {}) if isinstance(config.get("common", {}), dict) else {}
+    raw = common_cfg.get("shared_bridge", {}) if isinstance(common_cfg, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    keys = (
+        "enabled",
+        "root_dir",
+        "internal_root_dir",
+        "external_root_dir",
+        "poll_interval_sec",
+        "heartbeat_interval_sec",
+        "claim_lease_sec",
+        "stale_task_timeout_sec",
+        "artifact_retention_days",
+        "sqlite_busy_timeout_ms",
+    )
+    snapshot: Dict[str, Any] = {}
+    for key in keys:
+        value = raw.get(key)
+        if key == "enabled":
+            snapshot[key] = bool(value)
+        elif key.endswith("_sec") or key.endswith("_days") or key.endswith("_ms"):
+            try:
+                snapshot[key] = int(value)
+            except Exception:
+                snapshot[key] = value
+        else:
+            snapshot[key] = str(value or "").strip()
+    return snapshot
+
+
 def _materialize_review_access_snapshot(
     container,
     *,
@@ -854,6 +954,7 @@ def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, An
     activation_phase = str(getattr(request.app.state, "runtime_activation_phase", "") or "").strip()
     activation_error = str(getattr(request.app.state, "runtime_activation_error", "") or "").strip()
     startup_role_confirmed = bool(getattr(request.app.state, "startup_role_confirmed", False))
+    startup_role_user_exited = bool(getattr(request.app.state, "startup_role_user_exited", False))
     startup_handoff = {
         "active": False,
         "mode": "",
@@ -878,6 +979,18 @@ def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, An
                 "nonce": str(handoff_payload.get("nonce", "") or "").strip(),
             }
     role_is_valid = role_mode in {"internal", "external"}
+    startup_handoff_role = str(startup_handoff.get("target_role_mode", "") or "").strip().lower()
+    startup_handoff_resume_ready = (
+        bool(startup_handoff.get("active", False))
+        and startup_handoff_role in {"internal", "external"}
+        and activation_phase != "failed"
+    )
+    saved_role_ready = role_is_valid and _has_saved_startup_role_bridge_config(container, role_mode)
+    startup_role_restorable = (
+        startup_handoff_resume_ready
+        or (saved_role_ready and activation_phase != "failed" and not startup_role_user_exited)
+    )
+    effective_startup_role_confirmed = startup_role_confirmed or startup_role_restorable
     has_active_resume = False
     if runtime_activated and role_mode == "external":
         try:
@@ -897,9 +1010,14 @@ def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, An
         "has_active_resume": has_active_resume,
         "startup_time": startup_time,
         "deployment": deployment_snapshot,
-        "startup_role_confirmed": startup_role_confirmed,
-        "role_selection_required": (not startup_role_confirmed) or (not role_is_valid),
+        "startup_role_confirmed": effective_startup_role_confirmed,
+        "role_selection_required": (
+            not startup_handoff_resume_ready
+            and ((not role_is_valid) or (not saved_role_ready) or activation_phase == "failed" or startup_role_user_exited)
+        ),
+        "startup_role_user_exited": startup_role_user_exited,
         "startup_handoff": startup_handoff,
+        "startup_shared_bridge": _startup_shared_bridge_config_snapshot(container),
         "runtime_activated": runtime_activated,
         "activation_phase": activation_phase,
         "activation_error": activation_error,
@@ -1159,6 +1277,17 @@ def health(
     role_mode = _deployment_role_mode(container)
     mode_text = str(health_mode or "").strip().lower()
     is_lite_mode = mode_text in {"lite", "fast", "initial"}
+    runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
+    if is_lite_mode and runtime_status_coordinator is not None:
+        try:
+            if callable(getattr(runtime_status_coordinator, "is_running", None)) and runtime_status_coordinator.is_running():
+                snapshot = runtime_status_coordinator.read_scope_snapshot("runtime_health_lite")
+                payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+                if isinstance(payload, dict) and payload:
+                    return payload
+                runtime_status_coordinator.request_refresh(reason="health_lite_route")
+        except Exception:
+            pass
     include_handover_runtime_context = role_mode != "internal" and not is_lite_mode
     include_network_probe = role_mode != "internal" and not is_lite_mode
     include_wet_bulb_target_preview = role_mode != "internal" and not is_lite_mode
@@ -1187,8 +1316,6 @@ def health(
     except Exception:  # noqa: BLE001
         wifi_name = None
 
-    scheduler = container.scheduler
-    scheduler_runtime = scheduler.get_runtime_snapshot() if scheduler else {}
     updater_runtime = container.updater_snapshot()
 
     def _safe_scheduler_snapshot(method_name: str) -> Dict[str, Any]:
@@ -1221,6 +1348,7 @@ def health(
         text = str(value or "").strip()
         return text if text else str(default)
 
+    scheduler_snapshot = _safe_scheduler_snapshot("scheduler_status")
     handover_scheduler_snapshot = container.handover_scheduler_status()
     wet_bulb_cfg = runtime_cfg.get("wet_bulb_collection", {}) if isinstance(runtime_cfg, dict) else {}
     if not isinstance(wet_bulb_cfg, dict):
@@ -1527,26 +1655,36 @@ def health(
         "task_engine": task_engine_snapshot,
         "system_alert_log_queue": alert_log_queue_snapshot,
             "scheduler": {
-                "enabled": bool(scheduler.enabled) if scheduler else False,
-                    "status": scheduler.status_text() if scheduler else "未初始化",
-                "next_run_time": scheduler.next_run_text() if scheduler else "",
+                "enabled": bool(scheduler_snapshot.get("enabled", False)),
+                "status": str(scheduler_snapshot.get("status", "未初始化")),
+                "next_run_time": str(scheduler_snapshot.get("next_run_time", "")),
                 "executor_bound": _safe_bool_method("is_scheduler_executor_bound"),
                 "callback_name": _safe_text_method("scheduler_executor_name"),
-                "running": bool(scheduler_runtime.get("running", False)),
-            "started_at": str(scheduler_runtime.get("started_at", "")),
-            "last_check_at": str(scheduler_runtime.get("last_check_at", "")),
-            "last_decision": str(scheduler_runtime.get("last_decision", "")),
-            "last_trigger_at": str(scheduler_runtime.get("last_trigger_at", "")),
-            "last_trigger_result": str(scheduler_runtime.get("last_trigger_result", "")),
-            "state_path": str(scheduler_runtime.get("state_path", "")),
-            "state_exists": bool(scheduler_runtime.get("state_exists", False)),
-        },
+                "running": bool(scheduler_snapshot.get("running", False)),
+                "started_at": str(scheduler_snapshot.get("started_at", "")),
+                "last_check_at": str(scheduler_snapshot.get("last_check_at", "")),
+                "last_decision": str(scheduler_snapshot.get("last_decision", "")),
+                "last_trigger_at": str(scheduler_snapshot.get("last_trigger_at", "")),
+                "last_trigger_result": str(scheduler_snapshot.get("last_trigger_result", "")),
+                "state_path": str(scheduler_snapshot.get("state_path", "")),
+                "state_exists": bool(scheduler_snapshot.get("state_exists", False)),
+                "remembered_enabled": bool(scheduler_snapshot.get("remembered_enabled", False)),
+                "effective_auto_start_in_gui": bool(
+                    scheduler_snapshot.get("effective_auto_start_in_gui", False)
+                ),
+                "memory_source": str(scheduler_snapshot.get("memory_source", "") or ""),
+            },
             "handover_scheduler": {
                 "enabled": bool(handover_scheduler_snapshot.get("enabled", False)),
                 "running": bool(handover_scheduler_snapshot.get("running", False)),
-                    "status": str(handover_scheduler_snapshot.get("status", "未初始化")),
+                "status": str(handover_scheduler_snapshot.get("status", "未初始化")),
                 "executor_bound": _safe_bool_method("is_handover_scheduler_executor_bound"),
                 "callback_name": _safe_text_method("handover_scheduler_executor_name"),
+                "remembered_enabled": bool(handover_scheduler_snapshot.get("remembered_enabled", False)),
+                "effective_auto_start_in_gui": bool(
+                    handover_scheduler_snapshot.get("effective_auto_start_in_gui", False)
+                ),
+                "memory_source": str(handover_scheduler_snapshot.get("memory_source", "") or ""),
             "morning": {
                 "next_run_time": str(handover_morning.get("next_run_time", "")),
                 "last_decision": str(handover_morning.get("last_decision", "")),
@@ -1610,6 +1748,11 @@ def health(
                 "last_trigger_result": str(wet_bulb_scheduler_snapshot.get("last_trigger_result", "")),
                 "state_path": str(wet_bulb_scheduler_snapshot.get("state_path", "")),
                 "state_exists": bool(wet_bulb_scheduler_snapshot.get("state_exists", False)),
+                "remembered_enabled": bool(wet_bulb_scheduler_snapshot.get("remembered_enabled", False)),
+                "effective_auto_start_in_gui": bool(
+                    wet_bulb_scheduler_snapshot.get("effective_auto_start_in_gui", False)
+                ),
+                "memory_source": str(wet_bulb_scheduler_snapshot.get("memory_source", "") or ""),
                     "executor_bound": _safe_bool_method("is_wet_bulb_collection_scheduler_executor_bound"),
                     "callback_name": _safe_text_method("wet_bulb_collection_scheduler_executor_name"),
                 },
@@ -1627,6 +1770,11 @@ def health(
                 "last_trigger_result": str(monthly_event_report_scheduler_snapshot.get("last_trigger_result", "")),
                 "state_path": str(monthly_event_report_scheduler_snapshot.get("state_path", "")),
                 "state_exists": bool(monthly_event_report_scheduler_snapshot.get("state_exists", False)),
+                "remembered_enabled": bool(monthly_event_report_scheduler_snapshot.get("remembered_enabled", False)),
+                "effective_auto_start_in_gui": bool(
+                    monthly_event_report_scheduler_snapshot.get("effective_auto_start_in_gui", False)
+                ),
+                "memory_source": str(monthly_event_report_scheduler_snapshot.get("memory_source", "") or ""),
                     "executor_bound": _safe_bool_method("is_monthly_event_report_scheduler_executor_bound"),
                     "callback_name": _safe_text_method("monthly_event_report_scheduler_executor_name"),
                 },
@@ -1645,6 +1793,11 @@ def health(
                 "last_trigger_result": str(monthly_change_report_scheduler_snapshot.get("last_trigger_result", "")),
                 "state_path": str(monthly_change_report_scheduler_snapshot.get("state_path", "")),
                 "state_exists": bool(monthly_change_report_scheduler_snapshot.get("state_exists", False)),
+                "remembered_enabled": bool(monthly_change_report_scheduler_snapshot.get("remembered_enabled", False)),
+                "effective_auto_start_in_gui": bool(
+                    monthly_change_report_scheduler_snapshot.get("effective_auto_start_in_gui", False)
+                ),
+                "memory_source": str(monthly_change_report_scheduler_snapshot.get("memory_source", "") or ""),
                     "executor_bound": _safe_bool_method("is_monthly_change_report_scheduler_executor_bound"),
                     "callback_name": _safe_text_method("monthly_change_report_scheduler_executor_name"),
                 },
@@ -1663,6 +1816,11 @@ def health(
                 "last_trigger_result": str(day_metric_upload_scheduler_snapshot.get("last_trigger_result", "")),
                 "state_path": str(day_metric_upload_scheduler_snapshot.get("state_path", "")),
                 "state_exists": bool(day_metric_upload_scheduler_snapshot.get("state_exists", False)),
+                "remembered_enabled": bool(day_metric_upload_scheduler_snapshot.get("remembered_enabled", False)),
+                "effective_auto_start_in_gui": bool(
+                    day_metric_upload_scheduler_snapshot.get("effective_auto_start_in_gui", False)
+                ),
+                "memory_source": str(day_metric_upload_scheduler_snapshot.get("memory_source", "") or ""),
                     "executor_bound": _safe_bool_method("is_day_metric_upload_scheduler_executor_bound"),
                     "callback_name": _safe_text_method("day_metric_upload_scheduler_executor_name"),
                 },
@@ -1683,6 +1841,11 @@ def health(
                 "last_trigger_result": str(alarm_event_upload_scheduler_snapshot.get("last_trigger_result", "")),
                 "state_path": str(alarm_event_upload_scheduler_snapshot.get("state_path", "")),
                 "state_exists": bool(alarm_event_upload_scheduler_snapshot.get("state_exists", False)),
+                "remembered_enabled": bool(alarm_event_upload_scheduler_snapshot.get("remembered_enabled", False)),
+                "effective_auto_start_in_gui": bool(
+                    alarm_event_upload_scheduler_snapshot.get("effective_auto_start_in_gui", False)
+                ),
+                "memory_source": str(alarm_event_upload_scheduler_snapshot.get("memory_source", "") or ""),
                     "executor_bound": _safe_bool_method("is_alarm_event_upload_scheduler_executor_bound"),
                     "callback_name": _safe_text_method("alarm_event_upload_scheduler_executor_name"),
                 },
@@ -1886,6 +2049,11 @@ def put_handover_building_config_segment(code: str, payload: Dict[str, Any], req
             config_path=container.config_path,
         )
         container.reload_config(saved_config)
+        _mirror_handover_review_defaults_to_sqlite(
+            container,
+            saved_config=saved_config,
+            building_codes=[normalized_code],
+        )
         building_text = f"{normalized_code}楼"
         if aggregate_refresh_error:
             container.add_system_log(
@@ -1941,6 +2109,10 @@ def put_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
         )
         saved = save_settings(merged, container.config_path)
         container.reload_config(saved)
+        _mirror_handover_review_defaults_to_sqlite(
+            container,
+            saved_config=saved,
+        )
         container.add_system_log("[配置] 已保存并重新加载")
         review_cfg = (
             saved.get("features", {}).get("handover_log", {}).get("review_ui", {})
@@ -3832,6 +4004,30 @@ def list_jobs(request: Request, limit: int = 50, statuses: str = "") -> Dict[str
         for item in str(statuses or "").split(",")
         if str(item or "").strip()
     ]
+    runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
+    if (
+        not normalized_statuses
+        and runtime_status_coordinator is not None
+        and callable(getattr(runtime_status_coordinator, "is_running", None))
+        and runtime_status_coordinator.is_running()
+    ):
+        try:
+            snapshot = runtime_status_coordinator.read_scope_snapshot("job_panel_summary")
+            payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+            if isinstance(payload, dict):
+                rows = payload.get("jobs", [])
+                if isinstance(rows, list):
+                    limited_rows = rows[: max(1, min(int(limit or 50), 200))]
+                    return {
+                        "jobs": limited_rows,
+                        "count": len(limited_rows),
+                        "active_job_ids": payload.get("active_job_ids", []) if isinstance(payload.get("active_job_ids", []), list) else [],
+                        "job_counts": payload.get("job_counts", {}) if isinstance(payload.get("job_counts", {}), dict) else {},
+                    }
+            runtime_status_coordinator.request_refresh(reason="jobs_route")
+            return {"jobs": [], "count": 0, "active_job_ids": [], "job_counts": {}}
+        except Exception:
+            pass
     try:
         jobs = container.job_service.list_jobs(limit=max(1, min(int(limit or 50), 200)), statuses=normalized_statuses)
         job_counts = container.job_service.job_counts()
@@ -3848,6 +4044,26 @@ def list_jobs(request: Request, limit: int = 50, statuses: str = "") -> Dict[str
 @router.get("/api/runtime/resources")
 def get_runtime_resources(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
+    runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
+    if (
+        runtime_status_coordinator is not None
+        and callable(getattr(runtime_status_coordinator, "is_running", None))
+        and runtime_status_coordinator.is_running()
+    ):
+        try:
+            snapshot = runtime_status_coordinator.read_scope_snapshot("runtime_resources_summary")
+            payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+            if isinstance(payload, dict):
+                return payload
+            runtime_status_coordinator.request_refresh(reason="runtime_resources_route")
+            return {
+                "network": {},
+                "controlled_browser": {"holder_job_id": "", "queue_length": 0},
+                "batch_locks": [],
+                "resources": [],
+            }
+        except Exception:
+            pass
     try:
         return container.job_service.get_resource_snapshot()
     except TaskEngineUnavailableError as exc:

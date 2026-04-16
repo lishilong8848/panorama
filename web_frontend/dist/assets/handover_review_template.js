@@ -11,9 +11,16 @@
             刷新
           </button>
           <button
+            class="btn btn-primary btn-mini"
+            @click="saveCurrentReview"
+            :disabled="saveActionVm.disabled"
+          >
+            {{ saveActionVm.text }}
+          </button>
+          <button
             class="btn btn-secondary btn-mini"
             @click="downloadCurrentReviewFile"
-            :disabled="loading || saving || dirty || syncingRemoteRevision || downloading || cloudSyncBusy || !session || !session.session_id"
+            :disabled="loading || saving || syncingRemoteRevision || downloading || cloudSyncBusy || !session || !session.session_id"
           >
             {{ downloading ? "下载中..." : "下载交接班日志" }}
           </button>
@@ -173,7 +180,7 @@
           <div class="review-card-head">
             <div>
               <h2>{{ section.name }}</h2>
-              <p class="review-card-subtitle">支持新增、删除、修改本分类内容，保存后自动回写 Excel。</p>
+              <p class="review-card-subtitle">支持新增、删除、修改本分类内容，保存后回写 Excel。</p>
             </div>
             <button class="btn btn-secondary btn-mini" @click="addSectionRow(sectionIndex)">
               新增一行

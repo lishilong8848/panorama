@@ -101,6 +101,70 @@ def test_runtime_resources_route_returns_resource_snapshot() -> None:
     assert payload["controlled_browser"]["queue_length"] == 1
 
 
+def test_list_jobs_route_prefers_runtime_status_snapshot_when_available() -> None:
+    request = _fake_request()
+
+    class _Coordinator:
+        @staticmethod
+        def is_running() -> bool:
+            return True
+
+        @staticmethod
+        def read_scope_snapshot(scope: str):
+            assert scope == "job_panel_summary"
+            return {
+                "payload": {
+                    "jobs": [{"job_id": "job-from-sqlite", "status": "running"}],
+                    "count": 1,
+                    "active_job_ids": ["job-from-sqlite"],
+                    "job_counts": {"running": 1},
+                }
+            }
+
+        @staticmethod
+        def request_refresh(*, reason: str = "") -> None:
+            raise AssertionError(f"unexpected refresh request: {reason}")
+
+    request.app.state.container.runtime_status_coordinator = _Coordinator()
+
+    payload = routes.list_jobs(request, limit=10, statuses="")
+
+    assert payload["count"] == 1
+    assert payload["jobs"][0]["job_id"] == "job-from-sqlite"
+
+
+def test_runtime_resources_route_prefers_runtime_status_snapshot_when_available() -> None:
+    request = _fake_request()
+
+    class _Coordinator:
+        @staticmethod
+        def is_running() -> bool:
+            return True
+
+        @staticmethod
+        def read_scope_snapshot(scope: str):
+            assert scope == "runtime_resources_summary"
+            return {
+                "payload": {
+                    "network": {"current_side": "internal"},
+                    "controlled_browser": {"holder_job_id": "job-from-sqlite", "queue_length": 0},
+                    "batch_locks": [],
+                    "resources": [],
+                }
+            }
+
+        @staticmethod
+        def request_refresh(*, reason: str = "") -> None:
+            raise AssertionError(f"unexpected refresh request: {reason}")
+
+    request.app.state.container.runtime_status_coordinator = _Coordinator()
+
+    payload = routes.get_runtime_resources(request)
+
+    assert payload["network"]["current_side"] == "internal"
+    assert payload["controlled_browser"]["holder_job_id"] == "job-from-sqlite"
+
+
 def test_get_job_route_returns_stage_details() -> None:
     payload = routes.get_job("job-running", _fake_request())
     assert payload["job_id"] == "job-running"

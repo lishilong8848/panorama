@@ -262,10 +262,26 @@ class FakeSourceAttachmentExportService:
         return {"status": "skipped", "reason": "already_uploaded", "uploaded_count": 0, "error": ""}
 
 
+class FakeReviewDocumentStateService:
+    def __init__(self) -> None:
+        self.force_sync_calls: list[dict] = []
+
+    def force_sync_session_dict(self, session: dict, *, reason: str = "") -> dict:
+        self.force_sync_calls.append({"session_id": session.get("session_id"), "reason": reason})
+        return {
+            "status": "synced",
+            "synced_revision": int(session.get("revision", 0) or 0),
+            "pending_revision": 0,
+            "error": "",
+            "updated_at": "2026-03-22 02:00:00",
+        }
+
+
 def build_trigger(review_service: FakeReviewService, cloud_service: FakeCloudSyncService) -> ReviewFollowupTriggerService:
     trigger = ReviewFollowupTriggerService({"network": {"enable_auto_switch_wifi": False}})
     trigger._review_service = review_service  # type: ignore[attr-defined]
     trigger._cloud_sheet_sync_service = cloud_service  # type: ignore[attr-defined]
+    trigger._review_document_state_service = FakeReviewDocumentStateService()  # type: ignore[attr-defined]
     trigger._day_metric_export_service = FakeDayMetricExportService()  # type: ignore[attr-defined]
     trigger._source_data_attachment_export_service = FakeSourceAttachmentExportService()  # type: ignore[attr-defined]
     trigger._daily_report_state_service = FakeDailyReportStateService()  # type: ignore[attr-defined]
@@ -494,7 +510,7 @@ def test_followup_attachment_export_falls_back_to_cached_source_file() -> None:
     assert trigger._source_data_attachment_export_service.calls[0]["data_file"] == r"D:\managed\C楼_源数据.xlsx"  # type: ignore[attr-defined]
 
 
-def test_trigger_batch_uses_day_metric_rewrite_semantics() -> None:
+def test_trigger_batch_does_not_run_day_metric_rewrite_from_review_followup() -> None:
     sessions = [make_session("A")]
     sessions[0]["day_metric_export"]["status"] = "failed"
     sessions[0]["day_metric_export"]["uploaded_revision"] = 0
@@ -509,13 +525,7 @@ def test_trigger_batch_uses_day_metric_rewrite_semantics() -> None:
     result = trigger.trigger_batch("2026-03-22|night", emit_log=lambda *_args, **_kwargs: None)
 
     assert result["status"] == "ok"
-    assert len(trigger._day_metric_export_service.calls) == 1  # type: ignore[attr-defined]
-    call = trigger._day_metric_export_service.calls[0]  # type: ignore[attr-defined]
-    assert call["building"] == "A"
-    assert call["duty_date"] == "2026-03-22"
-    assert call["duty_shift"] == "night"
-    assert call["output_file"] == sessions[0]["output_file"]
-    assert call["metric_origin_context"] == sessions[0]["day_metric_export"]["metric_origin_context"]
+    assert len(trigger._day_metric_export_service.calls) == 0  # type: ignore[attr-defined]
 
 
 def test_trigger_batch_daily_report_export_prefers_manual_assets() -> None:

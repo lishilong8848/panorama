@@ -7,6 +7,12 @@ from typing import Any, Callable, Dict
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.config.config_adapter import normalize_role_mode
+from app.modules.shared_bridge.service.internal_runtime_status_presenter import (
+    build_empty_internal_runtime_building_status,
+    build_empty_internal_runtime_summary,
+    build_internal_runtime_building_status as presenter_build_internal_runtime_building_status,
+    build_internal_runtime_summary as presenter_build_internal_runtime_summary,
+)
 
 
 router = APIRouter(tags=["shared-bridge"])
@@ -522,13 +528,24 @@ def bridge_health(request: Request) -> Dict[str, Any]:
 def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
     _ensure_internal_bridge_runtime_allowed(request)
     container = request.app.state.container
+    coordinator = getattr(container, "runtime_status_coordinator", None)
+    if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
+        snapshot = coordinator.read_scope_snapshot("internal_runtime_summary")
+        payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+        if isinstance(payload, dict):
+            return {"ok": True, "summary": payload}
+        try:
+            coordinator.request_refresh(reason="internal_runtime_summary_route")
+        except Exception:
+            pass
+        return {"ok": True, "summary": build_empty_internal_runtime_summary(role_mode="internal")}
     service = getattr(container, "shared_bridge_service", None)
     if service is None or not hasattr(service, "get_health_snapshot"):
         raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
     snapshot = service.get_health_snapshot(mode="internal_light")
     return {
         "ok": True,
-        "summary": _build_internal_runtime_summary(snapshot if isinstance(snapshot, dict) else {}),
+        "summary": presenter_build_internal_runtime_summary(snapshot if isinstance(snapshot, dict) else {}),
     }
 
 
@@ -537,13 +554,30 @@ def bridge_internal_runtime_status_building(building_code: str, request: Request
     _ensure_internal_bridge_runtime_allowed(request)
     normalized_code, building = _normalize_internal_runtime_building(building_code)
     container = request.app.state.container
+    coordinator = getattr(container, "runtime_status_coordinator", None)
+    if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
+        snapshot = coordinator.read_building_snapshot(building)
+        payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+        if isinstance(payload, dict):
+            return {"ok": True, "status": payload}
+        try:
+            coordinator.request_refresh(reason=f"internal_runtime_building_route:{building}")
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "status": build_empty_internal_runtime_building_status(
+                building=building,
+                building_code=normalized_code,
+            ),
+        }
     service = getattr(container, "shared_bridge_service", None)
     if service is None or not hasattr(service, "get_health_snapshot"):
         raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
     snapshot = service.get_health_snapshot(mode="internal_light")
     return {
         "ok": True,
-        "status": _build_internal_runtime_building_status(
+        "status": presenter_build_internal_runtime_building_status(
             snapshot if isinstance(snapshot, dict) else {},
             building=building,
             building_code=normalized_code,
@@ -860,6 +894,19 @@ def bridge_source_cache_refresh_today(request: Request) -> Dict[str, Any]:
 @router.get("/api/bridge/tasks")
 def bridge_tasks(request: Request, limit: int = Query(100, ge=1, le=500)) -> Dict[str, Any]:
     container = request.app.state.container
+    coordinator = getattr(container, "runtime_status_coordinator", None)
+    if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
+        snapshot = coordinator.read_scope_snapshot("bridge_tasks_summary")
+        payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+        rows = payload.get("tasks", []) if isinstance(payload, dict) else []
+        if isinstance(rows, list):
+            limited_tasks = rows[: max(1, min(int(limit or 100), 500))]
+            return {"ok": True, "tasks": [_bridge_present_task(task) for task in limited_tasks]}
+        try:
+            coordinator.request_refresh(reason="bridge_tasks_route")
+        except Exception:
+            pass
+        return {"ok": True, "tasks": []}
     service = getattr(container, "shared_bridge_service", None)
     try:
         tasks = service.list_tasks(limit=limit) if service else []

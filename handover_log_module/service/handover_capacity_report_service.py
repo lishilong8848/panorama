@@ -951,6 +951,25 @@ class HandoverCapacityReportService:
             list(_CAPACITY_TRACKED_CELLS),
             sheet_name=handover_sheet_name,
         )
+        return self.sync_overlay_for_existing_report_from_cells(
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            handover_cells=handover_cells,
+            capacity_output_file=capacity_output_file,
+            emit_log=emit_log,
+        )
+
+    def sync_overlay_for_existing_report_from_cells(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        handover_cells: Dict[str, Any],
+        capacity_output_file: str,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
         input_signature = self.capacity_input_signature(handover_cells)
         capacity_output_path = Path(_text(capacity_output_file))
         if not _text(capacity_output_file) or not capacity_output_path.exists():

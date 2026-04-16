@@ -96,9 +96,9 @@ export function createDashboardSchedulerActions(ctx) {
     }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
   }
 
-  function markSchedulerToggle(key, mode, runningOverride) {
+  function markSchedulerToggle(key, mode, rememberedOverride) {
     if (typeof setSchedulerToggleState !== "function") return;
-    setSchedulerToggleState(key, { mode, runningOverride });
+    setSchedulerToggleState(key, { mode, rememberedOverride });
   }
 
   async function guardedRun(actionKey, taskFn, options = {}) {
@@ -322,6 +322,15 @@ export function createDashboardSchedulerActions(ctx) {
       callback_name: Object.prototype.hasOwnProperty.call(data, "callback_name")
         ? String(data.callback_name || "")
         : String(targetScheduler.callback_name || ""),
+      remembered_enabled: Object.prototype.hasOwnProperty.call(data, "remembered_enabled")
+        ? Boolean(data.remembered_enabled)
+        : Boolean(targetScheduler.remembered_enabled),
+      effective_auto_start_in_gui: Object.prototype.hasOwnProperty.call(data, "effective_auto_start_in_gui")
+        ? Boolean(data.effective_auto_start_in_gui)
+        : Boolean(targetScheduler.effective_auto_start_in_gui),
+      memory_source: Object.prototype.hasOwnProperty.call(data, "memory_source")
+        ? String(data.memory_source || "")
+        : String(targetScheduler.memory_source || ""),
     });
   }
 
@@ -337,6 +346,15 @@ export function createDashboardSchedulerActions(ctx) {
       callback_name: Object.prototype.hasOwnProperty.call(data, "callback_name")
         ? String(data.callback_name || "")
         : String(targetScheduler.callback_name || ""),
+      remembered_enabled: Object.prototype.hasOwnProperty.call(data, "remembered_enabled")
+        ? Boolean(data.remembered_enabled)
+        : Boolean(targetScheduler.remembered_enabled),
+      effective_auto_start_in_gui: Object.prototype.hasOwnProperty.call(data, "effective_auto_start_in_gui")
+        ? Boolean(data.effective_auto_start_in_gui)
+        : Boolean(targetScheduler.effective_auto_start_in_gui),
+      memory_source: Object.prototype.hasOwnProperty.call(data, "memory_source")
+        ? String(data.memory_source || "")
+        : String(targetScheduler.memory_source || ""),
       state_paths: data.state_paths && typeof data.state_paths === "object"
         ? { ...data.state_paths }
         : (targetScheduler.state_paths && typeof targetScheduler.state_paths === "object" ? { ...targetScheduler.state_paths } : {}),

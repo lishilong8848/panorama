@@ -1,4 +1,4 @@
-﻿export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'auto_flow'">
+export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'auto_flow'">
           <div class="dashboard-module-shell">
             <article class="task-block task-block-compact dashboard-module-scheduler-card">
               <div class="task-block-head">
@@ -12,8 +12,8 @@
               </div>
               <div class="status-metric-grid status-metric-grid-compact">
                 <div class="status-metric">
-                  <div class="status-metric-label">每日时间</div>
-                  <strong class="status-metric-value">{{ config.scheduler.run_time || '-' }}</strong>
+                  <div class="status-metric-label">执行间隔</div>
+                  <strong class="status-metric-value">{{ Number(config.scheduler.interval_minutes || 0) > 0 ? ('每 ' + config.scheduler.interval_minutes + ' 分钟') : '-' }}</strong>
                 </div>
                 <div class="status-metric">
                   <div class="status-metric-label">最近决策</div>
@@ -25,18 +25,18 @@
                 </div>
               </div>
               <div class="btn-line">
-                <label class="label" style="min-width:unset;">每日执行时间</label>
-                <input style="width:120px" type="time" step="1" v-model="config.scheduler.run_time" @change="saveSchedulerQuickConfig" />
+                <label class="label" style="min-width:unset;">执行间隔（分钟）</label>
+                <input style="width:120px" type="number" min="1" step="1" v-model.number="config.scheduler.interval_minutes" @change="saveSchedulerQuickConfig" />
               </div>
               <div class="btn-line">
-                <button class="btn btn-success" :disabled="health.scheduler.running || isActionLocked(actionKeySchedulerStart)" @click="startScheduler">
-                  {{ isActionLocked(actionKeySchedulerStart) ? '启动中...' : (health.scheduler.running ? '已启动调度' : '启动调度') }}
+                <button class="btn btn-success" :disabled="getSchedulerEffectiveRunning('scheduler', health.scheduler.remembered_enabled) || isActionLocked(actionKeySchedulerStart) || isActionLocked(actionKeySchedulerStop) || isSchedulerTogglePending('scheduler')" @click="startScheduler">
+                  {{ getSchedulerToggleMode('scheduler') === 'starting' ? '启动中...' : (getSchedulerToggleMode('scheduler') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('scheduler', health.scheduler.remembered_enabled) ? '已记住开启' : '启动调度')) }}
                 </button>
-                <button class="btn btn-danger" :disabled="!health.scheduler.running || isActionLocked(actionKeySchedulerStop)" @click="stopScheduler">
-                  {{ isActionLocked(actionKeySchedulerStop) ? '停止中...' : '停止调度' }}
+                <button class="btn btn-danger" :disabled="!getSchedulerEffectiveRunning('scheduler', health.scheduler.remembered_enabled) || isActionLocked(actionKeySchedulerStop) || isActionLocked(actionKeySchedulerStart) || isSchedulerTogglePending('scheduler')" @click="stopScheduler">
+                  {{ getSchedulerToggleMode('scheduler') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('scheduler') === 'starting' ? '处理中...' : '停止调度') }}
                 </button>
               </div>
-              <div class="hint">{{ schedulerQuickSaving ? '调度配置保存中...' : '修改每日执行时间后自动保存。' }}</div>
+              <div class="hint">{{ schedulerQuickSaving ? '调度配置保存中...' : '修改执行间隔后自动保存。' }}</div>
             </article>
 
             <div class="dashboard-module-primary-grid">
@@ -147,3 +147,4 @@
         </section>
 
 `;
+

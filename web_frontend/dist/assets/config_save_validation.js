@@ -1307,7 +1307,7 @@ function validateAndNormalizeAlarmExport(payload) {
   alarmExport.feishu.app_token = String(alarmExport.feishu.app_token || "").trim();
   alarmExport.feishu.table_id = String(alarmExport.feishu.table_id || "").trim();
   alarmExport.scheduler.enabled = true;
-  alarmExport.scheduler.auto_start_in_gui = false;
+  alarmExport.scheduler.auto_start_in_gui = Boolean(alarmExport.scheduler.auto_start_in_gui);
   alarmExport.scheduler.run_time = normalizeRunTimeText(alarmExport.scheduler.run_time) || "08:10:00";
   alarmExport.scheduler.check_interval_sec = Number.parseInt(alarmExport.scheduler.check_interval_sec ?? 30, 10);
   alarmExport.scheduler.catch_up_if_missed = Boolean(alarmExport.scheduler.catch_up_if_missed);
@@ -1370,7 +1370,7 @@ function validateAndNormalizeMonthlyEventReport(payload) {
   monthly.template.output_dir = String(monthly.template.output_dir || "").trim();
   monthly.template.file_name_pattern = String(monthly.template.file_name_pattern || "").trim();
   monthly.scheduler.enabled = true;
-  monthly.scheduler.auto_start_in_gui = false;
+  monthly.scheduler.auto_start_in_gui = Boolean(monthly.scheduler.auto_start_in_gui);
   monthly.scheduler.day_of_month = Number.parseInt(monthly.scheduler.day_of_month ?? 1, 10);
   monthly.scheduler.run_time = String(monthly.scheduler.run_time || "").trim();
   monthly.scheduler.check_interval_sec = Number.parseInt(monthly.scheduler.check_interval_sec ?? 30, 10);
@@ -1427,7 +1427,7 @@ function validateAndNormalizeMonthlyChangeReport(payload) {
   monthly.template.output_dir = String(monthly.template.output_dir || "").trim();
   monthly.template.file_name_pattern = String(monthly.template.file_name_pattern || "").trim();
   monthly.scheduler.enabled = true;
-  monthly.scheduler.auto_start_in_gui = false;
+  monthly.scheduler.auto_start_in_gui = Boolean(monthly.scheduler.auto_start_in_gui);
   monthly.scheduler.day_of_month = Number.parseInt(monthly.scheduler.day_of_month ?? 1, 10);
   monthly.scheduler.run_time = String(monthly.scheduler.run_time || "").trim();
   monthly.scheduler.check_interval_sec = Number.parseInt(monthly.scheduler.check_interval_sec ?? 30, 10);
@@ -1470,7 +1470,7 @@ function validateAndNormalizeWetBulbCollection(payload) {
   wet.enabled = Boolean(wet.enabled);
 
   wet.scheduler.enabled = true;
-  wet.scheduler.auto_start_in_gui = false;
+  wet.scheduler.auto_start_in_gui = Boolean(wet.scheduler.auto_start_in_gui);
   wet.scheduler.interval_minutes = Number.parseInt(wet.scheduler.interval_minutes ?? 60, 10);
   wet.scheduler.check_interval_sec = Number.parseInt(wet.scheduler.check_interval_sec ?? 30, 10);
   wet.scheduler.retry_failed_on_next_tick = Boolean(wet.scheduler.retry_failed_on_next_tick);
@@ -1595,7 +1595,7 @@ export function prepareConfigPayloadForSave({
   payload.scheduler = payload.scheduler || {};
   payload.scheduler.interval_minutes = Number.parseInt(payload.scheduler.interval_minutes ?? 60, 10);
   payload.scheduler.enabled = true;
-  payload.scheduler.auto_start_in_gui = false;
+  payload.scheduler.auto_start_in_gui = Boolean(payload.scheduler.auto_start_in_gui);
   payload.scheduler.check_interval_sec = Number.parseInt(payload.scheduler.check_interval_sec ?? 30, 10);
   payload.scheduler.retry_failed_on_next_tick = payload.scheduler.retry_failed_on_next_tick !== false;
 
@@ -1610,7 +1610,7 @@ export function prepareConfigPayloadForSave({
       ? payload.day_metric_upload.scheduler
       : {};
   payload.day_metric_upload.scheduler.enabled = true;
-  payload.day_metric_upload.scheduler.auto_start_in_gui = false;
+  payload.day_metric_upload.scheduler.auto_start_in_gui = Boolean(payload.day_metric_upload.scheduler.auto_start_in_gui);
   payload.day_metric_upload.scheduler.interval_minutes = Number.parseInt(
     payload.day_metric_upload.scheduler.interval_minutes ?? 60,
     10,
@@ -1731,7 +1731,7 @@ export function prepareConfigPayloadForSave({
     return { ok: false, error: "交接班模板文件不能为空" };
   }
   payload.handover_log.scheduler.enabled = true;
-  payload.handover_log.scheduler.auto_start_in_gui = false;
+  payload.handover_log.scheduler.auto_start_in_gui = Boolean(payload.handover_log.scheduler.auto_start_in_gui);
   payload.handover_log.scheduler.catch_up_if_missed = Boolean(payload.handover_log.scheduler.catch_up_if_missed);
   payload.handover_log.scheduler.retry_failed_in_same_period = Boolean(
     payload.handover_log.scheduler.retry_failed_in_same_period,

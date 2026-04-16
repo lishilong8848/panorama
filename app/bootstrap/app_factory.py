@@ -31,6 +31,7 @@ from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import
     start_waiting_bridge_job,
 )
 from app.modules.shared_bridge.api.routes import router as shared_bridge_router
+from app.modules.shared_bridge.service.runtime_status_coordinator import RuntimeStatusCoordinator
 from app.modules.scheduler.api.handover_routes import router as handover_scheduler_router
 from app.modules.scheduler.api.day_metric_upload_routes import router as day_metric_upload_scheduler_router
 from app.modules.scheduler.api.alarm_event_upload_routes import router as alarm_event_upload_scheduler_router
@@ -47,6 +48,7 @@ from app.shared.utils.frontend_cache import (
     resolve_source_frontend_asset_path,
     source_frontend_no_cache_headers,
 )
+from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.handover_daily_report_screenshot_service import (
     HandoverDailyReportScreenshotService,
@@ -65,6 +67,19 @@ _EXTERNAL_REVIEW_ALLOWED_PREFIXES = (
 _EXTERNAL_REVIEW_ALLOWED_EXACT = {
     "/favicon.ico",
 }
+
+_ROLE_SELECTION_ALLOWED_EXACT = {
+    "/",
+    "/index.html",
+    "/favicon.ico",
+    "/api/health/bootstrap",
+    "/api/runtime/activate-startup",
+    "/api/runtime/exit-current",
+}
+_ROLE_SELECTION_ALLOWED_PREFIXES = (
+    "/assets/",
+    "/assets-src/",
+)
 
 
 class _SourceNoCacheStaticFiles(StaticFiles):
@@ -92,11 +107,41 @@ def _is_loopback_client(host: str) -> bool:
         return False
 
 
+def _is_private_or_link_local_host(host: str) -> bool:
+    raw = str(host or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = ip_address(raw)
+    except ValueError:
+        return False
+    return bool(parsed.is_private or parsed.is_link_local)
+
+
+def _is_lan_console_client(request: Request) -> bool:
+    client_host = request.client.host if request.client else ""
+    if _is_loopback_client(client_host):
+        return True
+    request_host = str(request.url.hostname or "").strip()
+    if not _is_private_or_link_local_host(client_host):
+        return False
+    if not request_host:
+        return True
+    return _is_private_or_link_local_host(request_host) or request_host == client_host
+
+
 def _is_externally_allowed_path(path: str) -> bool:
     text = str(path or "").strip() or "/"
     if text in _EXTERNAL_REVIEW_ALLOWED_EXACT:
         return True
     return any(text.startswith(prefix) for prefix in _EXTERNAL_REVIEW_ALLOWED_PREFIXES)
+
+
+def _is_role_selection_allowed_path(path: str) -> bool:
+    text = str(path or "").strip() or "/"
+    if text in _ROLE_SELECTION_ALLOWED_EXACT:
+        return True
+    return any(text.startswith(prefix) for prefix in _ROLE_SELECTION_ALLOWED_PREFIXES)
 
 
 def _install_windows_asyncio_exception_filter(container) -> None:
@@ -195,9 +240,97 @@ def _initialize_handover_daily_report_auth(container) -> None:
 def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     container = build_container()
 
+    def _role_label(role_mode: str) -> str:
+        role = normalize_role_mode(role_mode)
+        if role == "internal":
+            return "内网端"
+        if role == "external":
+            return "外网端"
+        return ""
+
+    def _ensure_config_dict_path(root: Dict[str, Any], *path: str) -> Dict[str, Any]:
+        current = root
+        for key in path:
+            next_value = current.get(key)
+            if not isinstance(next_value, dict):
+                next_value = {}
+                current[key] = next_value
+            current = next_value
+        return current
+
+    def _positive_int(value: Any, fallback: int) -> int:
+        try:
+            number = int(value)
+        except Exception:
+            return int(fallback)
+        return number if number > 0 else int(fallback)
+
+    def _apply_shared_bridge_role_patch(shared_bridge_cfg: Dict[str, Any], role_mode: str, payload: Dict[str, Any]) -> None:
+        bridge_payload = payload.get("shared_bridge", {}) if isinstance(payload.get("shared_bridge", {}), dict) else {}
+        role_root_key = "internal_root_dir" if role_mode == "internal" else "external_root_dir"
+        existing_root = str(
+            shared_bridge_cfg.get(role_root_key)
+            or shared_bridge_cfg.get("root_dir")
+            or "",
+        ).strip()
+        requested_root = str(
+            bridge_payload.get(role_root_key)
+            or bridge_payload.get("root_dir")
+            or existing_root
+            or "",
+        ).strip()
+        if not requested_root:
+            raise ValueError(f"{_role_label(role_mode)}共享目录不能为空")
+        shared_bridge_cfg["enabled"] = True
+        shared_bridge_cfg[role_root_key] = requested_root
+        shared_bridge_cfg["root_dir"] = requested_root
+
+        defaults = {
+            "poll_interval_sec": 2,
+            "heartbeat_interval_sec": 5,
+            "claim_lease_sec": 30,
+            "stale_task_timeout_sec": 1800,
+            "artifact_retention_days": 7,
+            "sqlite_busy_timeout_ms": 5000,
+        }
+        for key, fallback in defaults.items():
+            if key in bridge_payload or key not in shared_bridge_cfg:
+                shared_bridge_cfg[key] = _positive_int(bridge_payload.get(key), int(shared_bridge_cfg.get(key, fallback) or fallback))
+
     def _persist_last_started_role_mode(role_mode: str) -> None:
-        _ = role_mode
-        return
+        normalized = normalize_role_mode(role_mode)
+        if normalized not in {"internal", "external"}:
+            return
+        merged = copy.deepcopy(container.config if isinstance(container.config, dict) else {})
+        deployment = _ensure_config_dict_path(merged, "common", "deployment")
+        if deployment.get("last_started_role_mode") == normalized:
+            return
+        deployment["last_started_role_mode"] = normalized
+        saved = save_settings(merged, container.config_path)
+        container.config = copy.deepcopy(saved)
+        container.runtime_config = adapt_runtime_config(container.config)
+
+    def _persist_startup_role_selection(role_mode: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = normalize_role_mode(role_mode)
+        if normalized not in {"internal", "external"}:
+            raise ValueError("请选择有效角色: internal 或 external")
+
+        merged = copy.deepcopy(container.config if isinstance(container.config, dict) else {})
+        deployment = _ensure_config_dict_path(merged, "common", "deployment")
+        shared_bridge_cfg = _ensure_config_dict_path(merged, "common", "shared_bridge")
+
+        deployment["role_mode"] = normalized
+        deployment["last_started_role_mode"] = normalized
+        deployment["node_label"] = _role_label(normalized)
+        _apply_shared_bridge_role_patch(shared_bridge_cfg, normalized, payload)
+
+        saved = save_settings(merged, container.config_path)
+        container.reload_config(saved)
+        return {
+            "role_mode": normalized,
+            "node_label": deployment["node_label"],
+            "shared_bridge_root": str(shared_bridge_cfg.get("root_dir", "") or "").strip(),
+        }
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
@@ -206,11 +339,24 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         _app.state.runtime_activation_phase = "idle"
         _app.state.runtime_activation_error = ""
         _app.state.startup_role_confirmed = False
+        _app.state.startup_role_user_exited = False
         container.add_system_log("[启动] 等待启动角色确认完成后再激活后台运行时")
+        runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
+        if runtime_status_coordinator is not None:
+            try:
+                runtime_status_coordinator.start()
+            except Exception as exc:  # noqa: BLE001
+                container.add_system_log(f"[运行状态] 启动状态快照后台线程失败: {exc}")
 
         try:
             yield
         finally:
+            runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
+            if runtime_status_coordinator is not None:
+                try:
+                    runtime_status_coordinator.stop()
+                except Exception:  # noqa: BLE001
+                    pass
             if container.scheduler:
                 container.stop_scheduler(source="关闭自动")
             if container.handover_scheduler_manager:
@@ -247,13 +393,53 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     app.state.runtime_activation_phase = "idle"
     app.state.runtime_activation_error = ""
     app.state.startup_role_confirmed = False
+    app.state.startup_role_user_exited = False
+    runtime_state_root = resolve_runtime_state_root(
+        runtime_config=container.runtime_config,
+        app_dir=get_app_dir(),
+    )
+    container.runtime_status_coordinator = RuntimeStatusCoordinator(
+        container=container,
+        runtime_state_root=runtime_state_root,
+        app_state_getter=lambda: {
+            "runtime_activated": bool(getattr(app.state, "runtime_services_activated", False)),
+            "activation_phase": str(getattr(app.state, "runtime_activation_phase", "") or "").strip(),
+            "activation_error": str(getattr(app.state, "runtime_activation_error", "") or "").strip(),
+            "startup_role_confirmed": bool(getattr(app.state, "startup_role_confirmed", False)),
+            "startup_role_user_exited": bool(getattr(app.state, "startup_role_user_exited", False)),
+            "started_at": str(getattr(app.state, "started_at", "") or "").strip(),
+        },
+        emit_log=lambda text: container.add_system_log(text, suppress_alert_upload=True),
+        refresh_interval_sec=10.0,
+    )
 
     @app.middleware("http")
     async def restrict_external_access(request: Request, call_next):
-        client_host = request.client.host if request.client else ""
-        if _is_loopback_client(client_host) or _is_externally_allowed_path(request.url.path):
+        path = str(request.url.path or "").strip() or "/"
+        if (
+            _is_lan_console_client(request)
+            or _is_externally_allowed_path(path)
+            or (
+                not bool(getattr(app.state, "runtime_services_activated", False))
+                and _is_role_selection_allowed_path(path)
+            )
+        ):
             return await call_next(request)
         return Response(status_code=404)
+
+    @app.middleware("http")
+    async def guard_role_selection_only_runtime(request: Request, call_next):
+        path = str(request.url.path or "").strip() or "/"
+        if _is_role_selection_allowed_path(path):
+            return await call_next(request)
+        if not path.startswith("/api/"):
+            return await call_next(request)
+        if bool(getattr(app.state, "runtime_services_activated", False)):
+            return await call_next(request)
+        return JSONResponse(
+            content={"detail": "当前未进入内网端或外网端，请先在角色选择页进入系统。"},
+            status_code=409,
+        )
 
     _INTERNAL_BLOCKED_PREFIXES = (
         "/api/jobs/",
@@ -299,6 +485,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             }
         if bool(getattr(app.state, "runtime_services_activated", False)):
             app.state.startup_role_confirmed = True
+            app.state.startup_role_user_exited = False
             try:
                 _persist_last_started_role_mode(role_mode)
             except Exception as exc:  # noqa: BLE001
@@ -352,6 +539,13 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             app.state.runtime_activation_phase = "activated"
             app.state.runtime_activation_error = ""
             app.state.startup_role_confirmed = True
+            app.state.startup_role_user_exited = False
+            runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
+            if runtime_status_coordinator is not None:
+                try:
+                    runtime_status_coordinator.request_refresh(reason="runtime_activated")
+                except Exception:  # noqa: BLE001
+                    pass
             try:
                 _persist_last_started_role_mode(role_mode)
             except Exception as exc:  # noqa: BLE001
@@ -409,8 +603,30 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
         source = str(payload.get("source", "") or "").strip() or "启动角色确认"
         startup_handoff_nonce = str(payload.get("startup_handoff_nonce", "") or "").strip()
+
+        def _activate_from_payload() -> Dict[str, Any]:
+            requested_role = normalize_role_mode(
+                payload.get("role_mode") or payload.get("target_role_mode") or ""
+            )
+            saved_role: Dict[str, Any] | None = None
+            if requested_role in {"internal", "external"}:
+                current_role = _deployment_role_mode()
+                if bool(getattr(app.state, "runtime_services_activated", False)) and current_role != requested_role:
+                    container.stop_role_runtime_services(source=f"{source}-切换角色前停止当前系统")
+                    app.state.runtime_services_activated = False
+                    app.state.runtime_activation_phase = "idle"
+                    app.state.runtime_activation_error = ""
+                    app.state.startup_role_confirmed = False
+                saved_role = _persist_startup_role_selection(requested_role, payload)
+
+            result = _activate_runtime_services(source)
+            if saved_role is not None:
+                result["saved_role"] = saved_role
+            result["phase"] = str(getattr(app.state, "runtime_activation_phase", "") or "").strip()
+            return result
+
         try:
-            result = await asyncio.to_thread(_activate_runtime_services, source)
+            result = await asyncio.to_thread(_activate_from_payload)
             if bool(result.get("ok", False)):
                 get_startup_role_handoff = getattr(container, "get_startup_role_handoff", None)
                 clear_startup_role_handoff = getattr(container, "clear_startup_role_handoff", None)
@@ -428,9 +644,57 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 content={
                     "ok": False,
                     "activated": False,
+                    "phase": "failed",
                     "error": str(exc),
                     "role_mode": _deployment_role_mode(),
                 }
+            )
+
+    @app.post("/api/runtime/exit-current", response_model=None)
+    async def exit_current_runtime(request: Request) -> JSONResponse:
+        payload: Dict[str, Any] = {}
+        try:
+            incoming = await request.json()
+            if isinstance(incoming, dict):
+                payload = incoming
+        except Exception:
+            payload = {}
+        source = str(payload.get("source", "") or "").strip() or "退出当前系统"
+        try:
+            result = await asyncio.to_thread(container.stop_role_runtime_services, source)
+            app.state.runtime_services_activated = False
+            app.state.runtime_activation_phase = "idle"
+            app.state.runtime_activation_error = ""
+            app.state.startup_role_confirmed = False
+            app.state.startup_role_user_exited = True
+            clear_startup_role_handoff = getattr(container, "clear_startup_role_handoff", None)
+            if callable(clear_startup_role_handoff):
+                clear_startup_role_handoff()
+            runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
+            if runtime_status_coordinator is not None:
+                try:
+                    runtime_status_coordinator.request_refresh(reason="runtime_exited")
+                except Exception:  # noqa: BLE001
+                    pass
+            return JSONResponse(
+                content={
+                    "ok": True,
+                    "deactivated": True,
+                    "role_mode": _deployment_role_mode(),
+                    **(result if isinstance(result, dict) else {}),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            app.state.runtime_activation_phase = "failed"
+            app.state.runtime_activation_error = str(exc)
+            return JSONResponse(
+                content={
+                    "ok": False,
+                    "deactivated": False,
+                    "error": str(exc),
+                    "role_mode": _deployment_role_mode(),
+                },
+                status_code=500,
             )
 
     def _format_bucket_age_hours_text(value: Any) -> str:

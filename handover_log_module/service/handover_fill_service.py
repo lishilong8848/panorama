@@ -14,6 +14,7 @@ from handover_log_module.core.building_title_rules import HANDOVER_TITLE_CELL, b
 from handover_log_module.repository.template_writer import copy_template_and_fill
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
+from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 
 
 class HandoverFillService:
@@ -21,6 +22,7 @@ class HandoverFillService:
         self.config = config
         self._cabinet_power_defaults_service = CabinetPowerDefaultsService()
         self._footer_inventory_defaults_service = FooterInventoryDefaultsService()
+        self._review_document_state_service = ReviewDocumentStateService(config)
 
     def _inject_building_title(
         self,
@@ -46,13 +48,19 @@ class HandoverFillService:
         if not sheet_name:
             raise ValueError("template.sheet_name is required")
 
-        applied_rows = self._footer_inventory_defaults_service.apply_building_defaults_to_output(
-            config=self.config,
+        applied_rows = self._review_document_state_service.apply_footer_defaults_to_output(
             building=building,
             output_file=output_file,
-            sheet_name=sheet_name,
             emit_log=emit_log,
         )
+        if applied_rows is None:
+            applied_rows = self._footer_inventory_defaults_service.apply_building_defaults_to_output(
+                config=self.config,
+                building=building,
+                output_file=output_file,
+                sheet_name=sheet_name,
+                emit_log=emit_log,
+            )
         if applied_rows is None:
             emit_log(f"[交接班][工具表默认] 未配置楼栋默认工具表，保留模板内容: building={building}")
             return
@@ -72,13 +80,19 @@ class HandoverFillService:
         if not sheet_name:
             raise ValueError("template.sheet_name is required")
 
-        applied_fields = self._cabinet_power_defaults_service.apply_building_defaults_to_output(
-            config=self.config,
+        applied_fields = self._review_document_state_service.apply_cabinet_defaults_to_output(
             building=building,
             output_file=output_file,
-            sheet_name=sheet_name,
             emit_log=emit_log,
         )
+        if applied_fields is None:
+            applied_fields = self._cabinet_power_defaults_service.apply_building_defaults_to_output(
+                config=self.config,
+                building=building,
+                output_file=output_file,
+                sheet_name=sheet_name,
+                emit_log=emit_log,
+            )
         if applied_fields is None:
             emit_log(f"[交接班][机柜上下电默认] 未配置楼栋模板默认值，保留模板原值 building={building}")
             return

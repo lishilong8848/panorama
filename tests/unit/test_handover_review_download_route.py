@@ -24,8 +24,18 @@ def test_handover_review_download_returns_file_response(tmp_path, monkeypatch):
     output_file = tmp_path / "A楼交接班日志.xlsx"
     output_file.write_bytes(b"demo")
     container = _FakeContainer()
+    document_state_calls = []
+
+    class _DocumentState:
+        def ensure_document_for_session(self, session):
+            document_state_calls.append(("ensure", session["session_id"]))
+
+        def force_sync_session_dict(self, session, *, reason="manual"):
+            document_state_calls.append(("sync", session["session_id"], reason))
+            return {"status": "synced", "synced_revision": 1, "pending_revision": 0, "error": "", "updated_at": ""}
 
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (object(), None, None, None))
+    monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
     monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
     monkeypatch.setattr(
         routes,
@@ -38,6 +48,7 @@ def test_handover_review_download_returns_file_response(tmp_path, monkeypatch):
     assert Path(response.path) == output_file
     assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     assert "A楼交接班日志.xlsx" in unquote(response.headers.get("content-disposition", ""))
+    assert document_state_calls == [("ensure", "sess-1"), ("sync", "sess-1", "download")]
     assert any("[交接班][下载成品]" in message for message in container.logs)
 
 
@@ -59,7 +70,15 @@ def test_handover_review_download_uses_requested_session_id(monkeypatch, tmp_pat
     output_file.write_bytes(b"demo")
     container = _FakeContainer()
 
+    class _DocumentState:
+        def ensure_document_for_session(self, _session):
+            return None
+
+        def force_sync_session_dict(self, _session, *, reason="manual"):
+            return {"status": "synced"}
+
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (object(), None, None, None))
+    monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
     monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
 
     calls = []
@@ -80,7 +99,15 @@ def test_handover_review_download_rejects_missing_output_file(monkeypatch, tmp_p
     output_file = tmp_path / "missing.xlsx"
     container = _FakeContainer()
 
+    class _DocumentState:
+        def ensure_document_for_session(self, _session):
+            return None
+
+        def force_sync_session_dict(self, _session, *, reason="manual"):
+            raise AssertionError("should not sync when file missing")
+
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (object(), None, None, None))
+    monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
     monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
     monkeypatch.setattr(
         routes,
@@ -91,5 +118,5 @@ def test_handover_review_download_rejects_missing_output_file(monkeypatch, tmp_p
     with pytest.raises(HTTPException) as exc_info:
         routes.handover_review_download("a", _fake_request(container), session_id="sess-1")
 
-    assert exc_info.value.status_code == 404
-    assert exc_info.value.detail == "最新交接班文件不存在，请重新生成"
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "交接班文件不存在，无法同步最新审核内容"

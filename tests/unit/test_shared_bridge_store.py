@@ -401,6 +401,32 @@ def test_cancel_terminal_task_skips_redundant_mailbox_sync(tmp_path, monkeypatch
     assert sync_calls == []
 
 
+def test_cancel_task_writes_mailbox_after_sqlite_lock_released(tmp_path, monkeypatch) -> None:
+    store = SharedBridgeStore(tmp_path)
+    store.ensure_ready()
+    task = store.create_monthly_auto_once_task(
+        created_by_role="external",
+        created_by_node_id="ext-01",
+        requested_by="manual",
+    )
+    lock_states: list[bool] = []
+
+    def _track_request(payload):  # noqa: ANN001
+        lock_states.append(store._write_lock.locked())
+        return None
+
+    def _track_side_snapshot(*, task, side):  # noqa: ANN001
+        lock_states.append(store._write_lock.locked())
+        return None
+
+    monkeypatch.setattr(store._mailbox_store, "write_request", _track_request)
+    monkeypatch.setattr(store._mailbox_store, "write_side_snapshot", _track_side_snapshot)
+
+    assert store.cancel_task(task["task_id"]) is True
+    assert lock_states
+    assert all(locked is False for locked in lock_states)
+
+
 def test_write_connect_uses_delete_journal_mode(monkeypatch, tmp_path) -> None:
     store = SharedBridgeStore(tmp_path)
     captured: dict[str, object] = {}

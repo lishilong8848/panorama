@@ -1,4 +1,4 @@
-﻿export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'alarm_event_upload'">
+export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'alarm_event_upload'">
           <div class="dashboard-module-shell">
                       <article class="task-block dashboard-module-scheduler-card">
                         <div class="task-block-head">
@@ -38,18 +38,18 @@
                         <div class="btn-line">
                           <button
                             class="btn btn-success"
-                            :disabled="getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.running) || isActionLocked(actionKeyAlarmEventUploadSchedulerStart) || isActionLocked(actionKeyAlarmEventUploadSchedulerStop) || isSchedulerTogglePending('alarm_event_upload')"
+                            :disabled="getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.remembered_enabled) || isActionLocked(actionKeyAlarmEventUploadSchedulerStart) || isActionLocked(actionKeyAlarmEventUploadSchedulerStop) || isSchedulerTogglePending('alarm_event_upload')"
                             @click="startAlarmEventUploadScheduler"
                           >
                             {{
                               getSchedulerToggleMode('alarm_event_upload') === 'starting'
                                 ? '启动中...'
-                                : (getSchedulerToggleMode('alarm_event_upload') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.running) ? '已启动调度' : '启动调度'))
+                                : (getSchedulerToggleMode('alarm_event_upload') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
                             }}
                           </button>
                           <button
                             class="btn btn-danger"
-                            :disabled="!getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.running) || isActionLocked(actionKeyAlarmEventUploadSchedulerStop) || isActionLocked(actionKeyAlarmEventUploadSchedulerStart) || isSchedulerTogglePending('alarm_event_upload')"
+                            :disabled="!getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.remembered_enabled) || isActionLocked(actionKeyAlarmEventUploadSchedulerStop) || isActionLocked(actionKeyAlarmEventUploadSchedulerStart) || isSchedulerTogglePending('alarm_event_upload')"
                             @click="stopAlarmEventUploadScheduler"
                           >
                             {{ getSchedulerToggleMode('alarm_event_upload') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('alarm_event_upload') === 'starting' ? '处理中...' : '停止调度') }}
@@ -259,3 +259,4 @@
         </section>
 
 `;
+

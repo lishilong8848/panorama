@@ -152,38 +152,6 @@
       streamController.attachSystemStream();
     }
     void fetchBootstrapHealth({ silentMessage: true });
-    void fetchConfig({ silentMessage: true });
-    if (!isRuntimeTrafficPaused() && canFetchHealth()) {
-      void fetchHealth({
-        silentTransientNetworkError: true,
-        silentMessage: true,
-        lightweight: true,
-      });
-      if (timers.healthWarmupTimer) clearTimeout(timers.healthWarmupTimer);
-      timers.healthWarmupTimer = window.setTimeout(() => {
-        timers.healthWarmupTimer = null;
-        if (!isRuntimeTrafficPaused() && canFetchHealth()) {
-          void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
-        }
-      }, 0);
-    }
-    if (!isRuntimeTrafficPaused() && canPollJobPanel()) {
-      void fetchJobs({ silentMessage: true });
-      void fetchRuntimeResources({ silentMessage: true });
-    }
-    if (!isRuntimeTrafficPaused() && canPollBridgeTasks()) {
-      void fetchBridgeTasks({ silentMessage: true });
-    }
-    if (!isRuntimeTrafficPaused() && canPollHandoverDailyReportContext()) {
-      void fetchHandoverDailyReportContext({ silentTransientNetworkError: true, silentMessage: true });
-    }
-    if (!isRuntimeTrafficPaused() && canPollInternalRuntimeStatus()) {
-      void fetchInternalRuntimeSummary({ silentMessage: true });
-      void fetchAllInternalBuildingRuntimeStatuses({ silentMessage: true });
-    }
-    if (!isRuntimeTrafficPaused() && canFetchPendingResumeRuns()) {
-      void fetchPendingResumeRuns({ silentMessage: true });
-    }
     if (!isRuntimeTrafficPaused() && canLoadEngineerDirectory() && typeof scheduleEngineerDirectoryPrefetch === "function") {
       scheduleEngineerDirectoryPrefetch(3000);
     }

@@ -431,6 +431,13 @@ export async function activateStartupRuntimeApi(payload = {}) {
   });
 }
 
+export async function exitCurrentRuntimeApi(payload = {}) {
+  return apiJson("/api/runtime/exit-current", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export async function getHandoverReviewApi(buildingCode, params = {}, options = {}) {
   return apiJson(appendQuery(`/api/handover/review/${buildingCode}`, params), options);
 }

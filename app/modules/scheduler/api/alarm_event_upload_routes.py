@@ -6,7 +6,10 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config.settings_loader import save_settings
-from app.modules.scheduler.api._config_persistence import persist_scheduler_toggle
+from app.modules.scheduler.api._config_persistence import (
+    persist_scheduler_toggle,
+    record_scheduler_config_autostart,
+)
 
 
 router = APIRouter(prefix="/api/scheduler/alarm-event-upload", tags=["scheduler-alarm-event-upload"])
@@ -50,6 +53,9 @@ def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Di
         "state_exists": bool(snapshot.get("state_exists", False)),
         "executor_bound": bool(container.is_alarm_event_upload_scheduler_executor_bound()),
         "callback_name": container.alarm_event_upload_scheduler_executor_name(),
+        "remembered_enabled": bool(snapshot.get("remembered_enabled", False)),
+        "effective_auto_start_in_gui": bool(snapshot.get("effective_auto_start_in_gui", False)),
+        "memory_source": str(snapshot.get("memory_source", "") or ""),
     }
 
 
@@ -119,6 +125,11 @@ def alarm_event_upload_scheduler_config(payload: Dict[str, Any], request: Reques
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     new_cfg = _scheduler_cfg_from_v3(container.config)
+    record_scheduler_config_autostart(
+        container,
+        path=("features", "alarm_export", "scheduler"),
+        scheduler_cfg=new_cfg,
+    )
     data = _build_payload(container)
     data.update(
         {

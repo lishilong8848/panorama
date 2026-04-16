@@ -6,8 +6,7 @@ from pathlib import Path
 import openpyxl
 
 from app.config.config_adapter import ensure_v3_config
-from app.config.handover_segment_store import handover_building_segment_path
-from app.modules.handover_review.api.routes import _persist_review_defaults
+from app.modules.handover_review.api.routes import _build_review_document_state_service, _persist_review_defaults
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
 
 
@@ -33,6 +32,10 @@ class _DummyContainer:
         raw = json.loads(TEMPLATE_CONFIG.read_text(encoding="utf-8-sig"))
         self.config = ensure_v3_config(raw)
         self.config.setdefault("features", {}).setdefault("alarm_export", {})["window_days"] = 1
+        self.config.setdefault("common", {}).setdefault("paths", {})["runtime_state_root"] = str(
+            config_path.parent / ".runtime"
+        )
+        self.runtime_config = self.config
         self.config_path = config_path
         self.config_path.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8-sig")
         self.reload_calls = 0
@@ -144,29 +147,25 @@ def test_persist_review_defaults_updates_cabinet_and_footer_defaults(tmp_path: P
 
     persisted = _persist_review_defaults(container, building="A楼", document=document)
 
-    assert persisted == {"footer_inventory_rows": 1, "cabinet_power_fields": 4, "config_updated": True}
-    assert container.reload_calls == 1
-    building_segment = json.loads(
-        handover_building_segment_path(config_path, "A").read_text(encoding="utf-8-sig")
-    )
-    assert building_segment["revision"] == 1
-    assert (
-        building_segment["data"]["review_ui"]["cabinet_power_defaults_by_building"]["A楼"]["cells"]
-        == {"B13": "1272", "D13": "2", "F13": "1", "H13": "0"}
-    )
-    assert (
-        building_segment["data"]["review_ui"]["footer_inventory_defaults_by_building"]["A楼"]["rows"][0]["cells"]
-        == {"B": "对讲机", "C": "A楼值班室", "E": "5", "F": "否", "G": "无"}
-    )
+    assert persisted == {
+        "footer_inventory_rows": 1,
+        "cabinet_power_fields": 4,
+        "config_updated": False,
+        "defaults_updated": True,
+    }
+    assert container.reload_calls == 0
+    state_service = _build_review_document_state_service(container)
+    store = state_service._store("A楼")
+    assert store.get_default("cabinet_power") == {"B13": "1272", "D13": "2", "F13": "1", "H13": "0"}
+    assert store.get_default("footer_inventory")[0]["cells"] == {
+        "B": "对讲机",
+        "C": "A楼值班室",
+        "E": "5",
+        "F": "否",
+        "G": "无",
+    }
     saved = json.loads(config_path.read_text(encoding="utf-8-sig"))
-    assert (
-        saved["features"]["handover_log"]["review_ui"]["cabinet_power_defaults_by_building"]["A楼"]["cells"]
-        == {"B13": "1272", "D13": "2", "F13": "1", "H13": "0"}
-    )
-    assert (
-        saved["features"]["handover_log"]["review_ui"]["footer_inventory_defaults_by_building"]["A楼"]["rows"][0]["cells"]
-        == {"B": "对讲机", "C": "A楼值班室", "E": "5", "F": "否", "G": "无"}
-    )
+    assert saved == container.config
 
 
 def test_persist_review_defaults_skips_config_write_when_defaults_unchanged(tmp_path: Path) -> None:
@@ -196,16 +195,18 @@ def test_persist_review_defaults_skips_config_write_when_defaults_unchanged(tmp_
     }
 
     first = _persist_review_defaults(container, building="A楼", document=document)
-    segment_path = handover_building_segment_path(config_path, "A")
-    first_segment = json.loads(segment_path.read_text(encoding="utf-8-sig"))
     first_config = config_path.read_text(encoding="utf-8-sig")
 
     second = _persist_review_defaults(container, building="A楼", document=document)
-    second_segment = json.loads(segment_path.read_text(encoding="utf-8-sig"))
     second_config = config_path.read_text(encoding="utf-8-sig")
 
-    assert first["config_updated"] is True
-    assert second == {"footer_inventory_rows": 1, "cabinet_power_fields": 4, "config_updated": False}
-    assert container.reload_calls == 1
-    assert second_segment["revision"] == first_segment["revision"] == 1
+    assert first["config_updated"] is False
+    assert first["defaults_updated"] is True
+    assert second == {
+        "footer_inventory_rows": 1,
+        "cabinet_power_fields": 4,
+        "config_updated": False,
+        "defaults_updated": False,
+    }
+    assert container.reload_calls == 0
     assert second_config == first_config

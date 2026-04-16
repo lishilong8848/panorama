@@ -731,6 +731,7 @@ export function createAppState(vueApi) {
     startup_time: "",
     startup_role_confirmed: false,
     role_selection_required: false,
+    startup_role_user_exited: false,
     startup_handoff: {
       active: false,
       mode: "",
@@ -738,6 +739,18 @@ export function createAppState(vueApi) {
       requested_at: "",
       reason: "",
       nonce: "",
+    },
+    startup_shared_bridge: {
+      enabled: false,
+      root_dir: "",
+      internal_root_dir: "",
+      external_root_dir: "",
+      poll_interval_sec: 2,
+      heartbeat_interval_sec: 5,
+      claim_lease_sec: 30,
+      stale_task_timeout_sec: 1800,
+      artifact_retention_days: 7,
+      sqlite_busy_timeout_ms: 15000,
     },
     runtime_activated: false,
     activation_phase: "",
@@ -750,6 +763,9 @@ export function createAppState(vueApi) {
       next_run_time: "-",
       enabled: false,
       running: false,
+      remembered_enabled: false,
+      effective_auto_start_in_gui: false,
+      memory_source: "",
       started_at: "",
       last_check_at: "",
       last_decision: "",
@@ -761,6 +777,9 @@ export function createAppState(vueApi) {
     handover_scheduler: {
       enabled: false,
       running: false,
+      remembered_enabled: false,
+      effective_auto_start_in_gui: false,
+      memory_source: "",
       status: "-",
       executor_bound: false,
       callback_name: "-",
@@ -835,6 +854,9 @@ export function createAppState(vueApi) {
       enabled: false,
       scheduler: {
         running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
         status: "-",
         next_run_time: "",
         last_check_at: "",
@@ -862,6 +884,9 @@ export function createAppState(vueApi) {
       enabled: false,
       scheduler: {
         running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
         status: "-",
         next_run_time: "",
         last_check_at: "",
@@ -919,6 +944,9 @@ export function createAppState(vueApi) {
       enabled: false,
       scheduler: {
         running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
         status: "-",
         next_run_time: "",
         last_check_at: "",
@@ -976,6 +1004,9 @@ export function createAppState(vueApi) {
       scheduler: {
         enabled: false,
         running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
         status: "未初始化",
         next_run_time: "",
         last_check_at: "",
@@ -1004,6 +1035,9 @@ export function createAppState(vueApi) {
       scheduler: {
         enabled: false,
         running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
         status: "未初始化",
         next_run_time: "",
         last_check_at: "",
@@ -1240,13 +1274,13 @@ export function createAppState(vueApi) {
   const monthlyEventReportSchedulerQuickSaving = ref(false);
   const monthlyChangeReportSchedulerQuickSaving = ref(false);
   const schedulerToggleState = reactive({
-    scheduler: { mode: "idle", runningOverride: null },
-    handover: { mode: "idle", runningOverride: null },
-    wet_bulb: { mode: "idle", runningOverride: null },
-    day_metric_upload: { mode: "idle", runningOverride: null },
-    alarm_event_upload: { mode: "idle", runningOverride: null },
-    monthly_event_report: { mode: "idle", runningOverride: null },
-    monthly_change_report: { mode: "idle", runningOverride: null },
+    scheduler: { mode: "idle", rememberedOverride: null },
+    handover: { mode: "idle", rememberedOverride: null },
+    wet_bulb: { mode: "idle", rememberedOverride: null },
+    day_metric_upload: { mode: "idle", rememberedOverride: null },
+    alarm_event_upload: { mode: "idle", rememberedOverride: null },
+    monthly_event_report: { mode: "idle", rememberedOverride: null },
+    monthly_change_report: { mode: "idle", rememberedOverride: null },
   });
   const configAutoSaveSuspendDepth = ref(0);
   const configAutoSaveStatus = reactive({
@@ -1439,8 +1473,7 @@ export function createAppState(vueApi) {
   const isConfigView = computed(() => currentView.value === "config");
   const initialLoadingPhase = computed(() => {
     if (!bootstrapReady.value) return "bootstrapping";
-    if (!configLoaded.value || !fullHealthLoaded.value) return "background_loading";
-    return "ready";
+    return (!configLoaded.value || !fullHealthLoaded.value) ? "background_loading" : "ready";
   });
   const initialLoadingStatusText = computed(() => {
     const loadingErrors = [];

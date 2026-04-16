@@ -30,6 +30,7 @@ from handover_log_module.service.handover_source_file_cache_service import Hando
 from handover_log_module.service.maintenance_management_payload_builder import MaintenanceManagementPayloadBuilder
 from handover_log_module.service.other_important_work_payload_builder import OtherImportantWorkPayloadBuilder
 from handover_log_module.service.review_session_service import ReviewSessionService
+from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
@@ -983,6 +984,13 @@ class HandoverOrchestrator:
                         if isinstance(review_session.get("cloud_sheet_sync", {}), dict)
                         else {}
                     )
+                    try:
+                        ReviewDocumentStateService(self.config, emit_log=emit_log).ensure_document_for_session(review_session)
+                    except Exception as exc:  # noqa: BLE001
+                        emit_log(
+                            "[交接班][审核SQLite] 初始化失败 "
+                            f"building={building}, session_id={review_session.get('session_id', '-')}, error={exc}"
+                        )
                     result.alarm_summary = dict(resolved_alarm_summary or {})
                     emit_log(
                         "[交接班][审核会话] 已登记 "

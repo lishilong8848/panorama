@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List
 
 from app.config.config_adapter import adapt_runtime_config, normalize_role_mode, resolve_shared_bridge_paths
 from app.config.secret_masking import load_masked_settings
-from app.config.settings_loader import load_bootstrap_settings
+from app.config.settings_loader import load_bootstrap_settings, save_settings
 from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from app.modules.report_pipeline.service.job_service import JobService
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
@@ -39,6 +39,33 @@ from pipeline_utils import get_app_dir, get_bundle_dir
 APP_VERSION = "web-3.0.0"
 _STARTUP_ROLE_HANDOFF_FILE_NAME = "startup_role_handoff.json"
 _STARTUP_ROLE_HANDOFF_TTL = timedelta(minutes=5)
+_EXTERNAL_SCHEDULER_AUTOSTART_FILE_NAME = "external_scheduler_autostart_state.json"
+_EXTERNAL_SCHEDULER_AUTOSTART_ITEMS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("auto_flow", "每日用电明细自动流程", ("common", "scheduler")),
+    ("handover", "交接班调度", ("features", "handover_log", "scheduler")),
+    ("wet_bulb_collection", "湿球温度定时采集", ("features", "wet_bulb_collection", "scheduler")),
+    ("day_metric_upload", "12项独立上传", ("features", "day_metric_upload", "scheduler")),
+    ("alarm_event_upload", "告警信息上传", ("features", "alarm_export", "scheduler")),
+    ("monthly_change_report", "月度变更统计表", ("features", "handover_log", "monthly_change_report", "scheduler")),
+    ("monthly_event_report", "月度事件统计表", ("features", "handover_log", "monthly_event_report", "scheduler")),
+)
+_EXTERNAL_SCHEDULER_AUTOSTART_PATHS = {
+    key: path for key, _label, path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS
+}
+_EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
+    "auto_flow": "scheduler",
+    "handover": "handover_scheduler_manager",
+    "wet_bulb_collection": "wet_bulb_collection_scheduler",
+    "day_metric_upload": "day_metric_upload_scheduler",
+    "alarm_event_upload": "alarm_event_upload_scheduler",
+    "monthly_change_report": "monthly_change_report_scheduler",
+    "monthly_event_report": "monthly_event_report_scheduler",
+}
+_EXTERNAL_SCHEDULER_LEGACY_EXIT_SOURCE_HINTS = (
+    "退出快照",
+    "退出当前系统",
+    "用户退出当前系统",
+)
 _WARNING_RE = re.compile(r"(^|:)\s*(?:\w+)?Warning:", re.IGNORECASE)
 _ERROR_PATTERNS = (
     "traceback (most recent call last):",
@@ -78,10 +105,12 @@ class AppContainer:
     updater_restart_callback: Callable[[Dict[str, Any]], tuple[bool, str]] | None = None
     alert_log_uploader: SystemAlertLogUploadService | None = None
     shared_bridge_service: SharedBridgeRuntimeService | None = None
+    runtime_status_coordinator: Any | None = None
     system_logs: List[str] = field(default_factory=list)
     system_log_entries: List[Dict[str, Any]] = field(default_factory=list)
     version: str = APP_VERSION
     runtime_services_armed: bool = False
+    external_scheduler_autostart_runtime_state: Dict[str, Any] = field(default_factory=dict)
     _system_log_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _system_log_next_id: int = 0
 
@@ -245,6 +274,12 @@ class AppContainer:
         if level in {"warning", "error"} and self.alert_log_uploader and not suppress_alert_upload:
             try:
                 self.alert_log_uploader.enqueue_entry(entry)
+            except Exception:  # noqa: BLE001
+                pass
+        coordinator = getattr(self, "runtime_status_coordinator", None)
+        if coordinator is not None:
+            try:
+                coordinator.observe_log_line(raw_text)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -637,6 +672,280 @@ class AppContainer:
         )
         return runtime_state_root / _STARTUP_ROLE_HANDOFF_FILE_NAME
 
+    def _external_scheduler_autostart_path(self) -> Path:
+        runtime_state_root = resolve_runtime_state_root(
+            runtime_config=self.runtime_config,
+            app_dir=get_app_dir(),
+        )
+        return runtime_state_root / _EXTERNAL_SCHEDULER_AUTOSTART_FILE_NAME
+
+    @staticmethod
+    def _dict_path(root: Dict[str, Any], path: tuple[str, ...]) -> Dict[str, Any]:
+        current: Any = root
+        for key in path:
+            if not isinstance(current, dict):
+                return {}
+            current = current.get(key)
+        return current if isinstance(current, dict) else {}
+
+    def _external_scheduler_autostart_snapshot(self, config: Dict[str, Any] | None = None) -> Dict[str, bool]:
+        source = config if isinstance(config, dict) else self.config
+        states: Dict[str, bool] = {}
+        for key, _label, path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS:
+            cfg = self._dict_path(source, path)
+            states[key] = bool(cfg.get("auto_start_in_gui", False)) if isinstance(cfg, dict) else False
+        return states
+
+    def _normalize_external_scheduler_states(self, states: Dict[str, Any] | None = None) -> Dict[str, bool]:
+        raw = states if isinstance(states, dict) else {}
+        normalized: Dict[str, bool] = {}
+        for key, _label, _path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS:
+            normalized[key] = bool(raw.get(key, False))
+        return normalized
+
+    @staticmethod
+    def _is_external_scheduler_legacy_exit_source(source: str) -> bool:
+        text = str(source or "").strip().lower()
+        if not text:
+            return False
+        return any(hint.lower() in text for hint in _EXTERNAL_SCHEDULER_LEGACY_EXIT_SOURCE_HINTS)
+
+    def _write_external_scheduler_autostart_state(self, states: Dict[str, bool], *, source: str = "") -> Dict[str, Any]:
+        normalized_states = self._normalize_external_scheduler_states(states)
+        payload = {
+            "version": 1,
+            "role_mode": "external",
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": str(source or "").strip(),
+            "states": normalized_states,
+        }
+        atomic_write_text(
+            self._external_scheduler_autostart_path(),
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            validator=validate_json_file,
+        )
+        return payload
+
+    def _load_external_scheduler_autostart_payload(self) -> Dict[str, Any]:
+        path = self._external_scheduler_autostart_path()
+        if not path.exists():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            self.add_system_log(f"[调度] 读取外网端调度记忆失败，已忽略: {exc}")
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            "source": str(raw.get("source", "") or "").strip(),
+            "updated_at": str(raw.get("updated_at", "") or "").strip(),
+            "states": self._normalize_external_scheduler_states(raw.get("states")),
+        }
+
+    def resolve_external_scheduler_autostart_state(self, *, force_refresh: bool = False) -> Dict[str, Any]:
+        cached = self.external_scheduler_autostart_runtime_state
+        if not force_refresh and isinstance(cached, dict) and isinstance(cached.get("states"), dict):
+            return copy.deepcopy(cached)
+        config_snapshot = self._external_scheduler_autostart_snapshot()
+        payload = self._load_external_scheduler_autostart_payload()
+        loaded_states = self._normalize_external_scheduler_states(payload.get("states"))
+        memory_source = str(payload.get("source", "") or "").strip()
+        changed = False
+        if not payload:
+            loaded_states = dict(config_snapshot)
+            memory_source = "config_fallback"
+            changed = True
+        elif self._is_external_scheduler_legacy_exit_source(memory_source):
+            all_disabled = all(not bool(loaded_states.get(key, False)) for key in loaded_states)
+            any_config_enabled = any(bool(config_snapshot.get(key, False)) for key in config_snapshot)
+            if all_disabled and any_config_enabled:
+                loaded_states = dict(config_snapshot)
+                memory_source = "legacy_repair"
+                changed = True
+        if changed:
+            try:
+                self._write_external_scheduler_autostart_state(loaded_states, source=memory_source)
+            except Exception as exc:  # noqa: BLE001
+                self.add_system_log(f"[调度] 更新外网端调度记忆失败，不阻断主流程: {exc}")
+        result = {
+            "ok": True,
+            "states": self._normalize_external_scheduler_states(loaded_states),
+            "memory_source": memory_source or "config_fallback",
+            "changed": changed,
+        }
+        self.external_scheduler_autostart_runtime_state = copy.deepcopy(result)
+        return result
+
+    def persist_external_scheduler_autostart_state(
+        self,
+        source: str = "调度状态保存",
+        states: Dict[str, bool] | None = None,
+    ) -> Dict[str, Any]:
+        try:
+            snapshot = self._normalize_external_scheduler_states(
+                states if isinstance(states, dict) else self._external_scheduler_autostart_snapshot()
+            )
+            payload = self._write_external_scheduler_autostart_state(snapshot, source=source)
+            state = {
+                "ok": True,
+                "states": dict(payload.get("states", {})),
+                "memory_source": str(payload.get("source", "") or "").strip() or "config_fallback",
+                "changed": True,
+            }
+            self.external_scheduler_autostart_runtime_state = copy.deepcopy(state)
+            return {"ok": True, "state": payload, **state}
+        except Exception as exc:  # noqa: BLE001
+            self.add_system_log(f"[调度] 保存外网端调度记忆失败，不阻断主流程: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def persist_external_scheduler_autostart_state_on_exit(self, source: str = "退出当前系统") -> Dict[str, Any]:
+        resolved = self.resolve_external_scheduler_autostart_state(force_refresh=True)
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "exit_does_not_override_memory",
+            "source": source,
+            "states": resolved.get("states", {}),
+            "memory_source": resolved.get("memory_source", ""),
+        }
+
+    def record_external_scheduler_toggle(
+        self,
+        *,
+        path: tuple[str, ...],
+        auto_start_in_gui: bool,
+        source: str = "调度开关",
+    ) -> Dict[str, Any]:
+        try:
+            normalized_path = tuple(str(item) for item in path)
+            target_key = ""
+            for key, _label, item_path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS:
+                if item_path == normalized_path:
+                    target_key = key
+                    break
+            if not target_key:
+                return {"ok": True, "ignored": True, "reason": "path_not_mapped"}
+            resolved = self.resolve_external_scheduler_autostart_state(force_refresh=True)
+            states = self._normalize_external_scheduler_states(resolved.get("states"))
+            states[target_key] = bool(auto_start_in_gui)
+            return self.persist_external_scheduler_autostart_state(source=source, states=states)
+        except Exception as exc:  # noqa: BLE001
+            self.add_system_log(f"[调度] 记录外网端调度开关失败，不阻断主流程: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def _effective_external_scheduler_auto_start(self, key: str, fallback: bool = False) -> bool:
+        path = _EXTERNAL_SCHEDULER_AUTOSTART_PATHS.get(str(key or "").strip())
+        if not path:
+            return bool(fallback)
+        cfg = self._dict_path(self.runtime_config, path)
+        if isinstance(cfg, dict) and "auto_start_in_gui" in cfg:
+            return bool(cfg.get("auto_start_in_gui", False))
+        return bool(fallback)
+
+    def external_scheduler_runtime_memory_fields(self, key: str) -> Dict[str, Any]:
+        resolved = self.resolve_external_scheduler_autostart_state()
+        states = self._normalize_external_scheduler_states(resolved.get("states"))
+        remembered = bool(states.get(str(key or "").strip(), False))
+        return {
+            "remembered_enabled": remembered,
+            "effective_auto_start_in_gui": self._effective_external_scheduler_auto_start(
+                str(key or "").strip(),
+                remembered,
+            ),
+            "memory_source": str(resolved.get("memory_source", "") or "config_fallback"),
+        }
+
+    def _apply_scheduler_memory_to_runtime_object(self, key: str, desired: bool) -> bool:
+        attr_name = _EXTERNAL_SCHEDULER_OBJECT_ATTRS.get(str(key or "").strip())
+        if not attr_name:
+            return False
+        scheduler_obj = getattr(self, attr_name, None)
+        if scheduler_obj is None:
+            return False
+        changed = False
+        if getattr(scheduler_obj, "auto_start_in_gui", None) is not desired:
+            setattr(scheduler_obj, "auto_start_in_gui", desired)
+            changed = True
+        if isinstance(getattr(scheduler_obj, "cfg", None), dict) and scheduler_obj.cfg.get("auto_start_in_gui") is not desired:
+            scheduler_obj.cfg["auto_start_in_gui"] = desired
+            changed = True
+        if isinstance(getattr(scheduler_obj, "_cfg", None), dict) and scheduler_obj._cfg.get("auto_start_in_gui") is not desired:
+            scheduler_obj._cfg["auto_start_in_gui"] = desired
+            changed = True
+        if desired and getattr(scheduler_obj, "enabled", None) is not True:
+            try:
+                setattr(scheduler_obj, "enabled", True)
+                changed = True
+            except Exception:  # noqa: BLE001
+                pass
+        if desired and isinstance(getattr(scheduler_obj, "cfg", None), dict) and scheduler_obj.cfg.get("enabled") is not True:
+            scheduler_obj.cfg["enabled"] = True
+            changed = True
+        if desired and isinstance(getattr(scheduler_obj, "_cfg", None), dict) and scheduler_obj._cfg.get("enabled") is not True:
+            scheduler_obj._cfg["enabled"] = True
+            changed = True
+        child_schedulers = getattr(scheduler_obj, "schedulers", None)
+        if isinstance(child_schedulers, dict):
+            for child in child_schedulers.values():
+                if child is None:
+                    continue
+                if getattr(child, "auto_start_in_gui", None) is not desired:
+                    setattr(child, "auto_start_in_gui", desired)
+                    changed = True
+                if isinstance(getattr(child, "cfg", None), dict) and child.cfg.get("auto_start_in_gui") is not desired:
+                    child.cfg["auto_start_in_gui"] = desired
+                    changed = True
+                if desired and getattr(child, "enabled", None) is not True:
+                    try:
+                        setattr(child, "enabled", True)
+                        changed = True
+                    except Exception:  # noqa: BLE001
+                        pass
+                if desired and isinstance(getattr(child, "cfg", None), dict) and child.cfg.get("enabled") is not True:
+                    child.cfg["enabled"] = True
+                    changed = True
+        return changed
+
+    def _apply_single_external_scheduler_memory(self, key: str, desired: bool) -> bool:
+        path = _EXTERNAL_SCHEDULER_AUTOSTART_PATHS.get(str(key or "").strip())
+        changed = False
+        if path:
+            scheduler_cfg = self._ensure_config_dict_path(self.runtime_config, path)
+            if scheduler_cfg.get("auto_start_in_gui") is not desired:
+                scheduler_cfg["auto_start_in_gui"] = desired
+                changed = True
+            if desired and scheduler_cfg.get("enabled") is not True:
+                scheduler_cfg["enabled"] = True
+                changed = True
+        if self._apply_scheduler_memory_to_runtime_object(str(key or "").strip(), desired):
+            changed = True
+        return changed
+
+    def apply_external_scheduler_autostart_state(self, source: str = "进入外网端") -> Dict[str, Any]:
+        try:
+            resolved = self.resolve_external_scheduler_autostart_state(force_refresh=True)
+            states = self._normalize_external_scheduler_states(resolved.get("states"))
+            changed_labels: list[str] = []
+            for key, label, _path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS:
+                if self._apply_single_external_scheduler_memory(key, bool(states.get(key, False))):
+                    changed_labels.append(label)
+            result = {
+                "ok": True,
+                "changed": bool(changed_labels),
+                "states": states,
+                "changed_labels": changed_labels,
+                "memory_source": str(resolved.get("memory_source", "") or "config_fallback"),
+                "source": source,
+            }
+            self.external_scheduler_autostart_runtime_state = copy.deepcopy(result)
+            if changed_labels:
+                self.add_system_log(f"[调度] {source}: 已应用外网端调度记忆: {','.join(changed_labels)}")
+            return result
+        except Exception as exc:  # noqa: BLE001
+            self.add_system_log(f"[调度] {source}: 应用外网端调度记忆失败，继续按当前运行态: {exc}")
+            return {"ok": False, "error": str(exc)}
+
     @staticmethod
     def _inactive_startup_role_handoff() -> Dict[str, Any]:
         return {
@@ -740,8 +1049,18 @@ class AppContainer:
         return result
 
     def start_role_runtime_services(self, source: str = "启动确认") -> Dict[str, Any]:
-        self._ensure_runtime_dependencies_initialized()
         role_mode = str(self.deployment_snapshot().get("role_mode", "") or "").strip().lower()
+        self._ensure_runtime_dependencies_initialized()
+        external_scheduler_autostart_state: Dict[str, Any] = {}
+        if role_mode == "external":
+            external_scheduler_autostart_state = self.apply_external_scheduler_autostart_state(source=source)
+        else:
+            self.external_scheduler_autostart_runtime_state = {
+                "ok": True,
+                "states": self._normalize_external_scheduler_states({}),
+                "memory_source": "internal_role_ignored",
+                "changed": False,
+            }
         self.runtime_services_armed = True
 
         self.add_system_log(
@@ -895,7 +1214,195 @@ class AppContainer:
         if role_mode != "internal" and self.alert_log_uploader:
             self.start_alert_log_uploader(source=source)
         self.start_shared_bridge(source=source)
-        return {"ok": True, "armed": True, "role_mode": role_mode}
+        return {
+            "ok": True,
+            "armed": True,
+            "role_mode": role_mode,
+            "external_scheduler_autostart_state": external_scheduler_autostart_state,
+        }
+
+    @staticmethod
+    def _ensure_config_dict_path(root: Dict[str, Any], path: tuple[str, ...]) -> Dict[str, Any]:
+        current = root
+        for key in path:
+            next_value = current.get(key)
+            if not isinstance(next_value, dict):
+                next_value = {}
+                current[key] = next_value
+            current = next_value
+        return current
+
+    def _persist_running_scheduler_autostart_flags(self, source: str = "退出当前系统") -> Dict[str, Any]:
+        """Persist currently running schedulers as auto-start for the next role entry."""
+        entries: list[tuple[str, tuple[str, ...], bool, Any]] = [
+            (
+                "自动流程调度",
+                ("common", "scheduler"),
+                bool(self.scheduler.is_running()) if self.scheduler else False,
+                self.scheduler,
+            ),
+            (
+                "交接班调度",
+                ("features", "handover_log", "scheduler"),
+                bool(self.handover_scheduler_manager.is_running()) if self.handover_scheduler_manager else False,
+                self.handover_scheduler_manager,
+            ),
+            (
+                "湿球温度定时采集调度",
+                ("features", "wet_bulb_collection", "scheduler"),
+                bool(self.wet_bulb_collection_scheduler.is_running()) if self.wet_bulb_collection_scheduler else False,
+                self.wet_bulb_collection_scheduler,
+            ),
+            (
+                "12项独立上传调度",
+                ("features", "day_metric_upload", "scheduler"),
+                bool(self.day_metric_upload_scheduler.is_running()) if self.day_metric_upload_scheduler else False,
+                self.day_metric_upload_scheduler,
+            ),
+            (
+                "告警信息上传调度",
+                ("features", "alarm_export", "scheduler"),
+                bool(self.alarm_event_upload_scheduler.is_running()) if self.alarm_event_upload_scheduler else False,
+                self.alarm_event_upload_scheduler,
+            ),
+            (
+                "月度变更统计表调度",
+                ("features", "handover_log", "monthly_change_report", "scheduler"),
+                bool(self.monthly_change_report_scheduler.is_running()) if self.monthly_change_report_scheduler else False,
+                self.monthly_change_report_scheduler,
+            ),
+            (
+                "月度事件统计表调度",
+                ("features", "handover_log", "monthly_event_report", "scheduler"),
+                bool(self.monthly_event_report_scheduler.is_running()) if self.monthly_event_report_scheduler else False,
+                self.monthly_event_report_scheduler,
+            ),
+        ]
+        running_entries = [entry for entry in entries if entry[2]]
+        if not running_entries:
+            return {"ok": True, "changed": False, "saved": []}
+
+        try:
+            merged = copy.deepcopy(self.config if isinstance(self.config, dict) else {})
+            saved_labels: list[str] = []
+            for label, path, _running, scheduler_obj in running_entries:
+                scheduler_cfg = self._ensure_config_dict_path(merged, path)
+                changed = False
+                if scheduler_cfg.get("auto_start_in_gui") is not True:
+                    scheduler_cfg["auto_start_in_gui"] = True
+                    changed = True
+                if scheduler_cfg.get("enabled") is not True:
+                    scheduler_cfg["enabled"] = True
+                    changed = True
+                if changed:
+                    saved_labels.append(label)
+                if scheduler_obj is not None:
+                    try:
+                        setattr(scheduler_obj, "auto_start_in_gui", True)
+                        setattr(scheduler_obj, "enabled", True)
+                        if isinstance(getattr(scheduler_obj, "cfg", None), dict):
+                            scheduler_obj.cfg["auto_start_in_gui"] = True
+                            scheduler_obj.cfg["enabled"] = True
+                        if isinstance(getattr(scheduler_obj, "_cfg", None), dict):
+                            scheduler_obj._cfg["auto_start_in_gui"] = True
+                            scheduler_obj._cfg["enabled"] = True
+                        child_schedulers = getattr(scheduler_obj, "schedulers", None)
+                        if isinstance(child_schedulers, dict):
+                            for child in child_schedulers.values():
+                                try:
+                                    setattr(child, "auto_start_in_gui", True)
+                                    setattr(child, "enabled", True)
+                                    if isinstance(getattr(child, "cfg", None), dict):
+                                        child.cfg["auto_start_in_gui"] = True
+                                        child.cfg["enabled"] = True
+                                except Exception:  # noqa: BLE001
+                                    pass
+                    except Exception:  # noqa: BLE001
+                        pass
+            if not saved_labels:
+                return {"ok": True, "changed": False, "saved": []}
+            saved_config = save_settings(merged, self.config_path)
+            self.config = copy.deepcopy(saved_config)
+            self.runtime_config = adapt_runtime_config(self.config)
+            self.add_system_log(
+                f"[调度] {source}: 已保存当前运行调度为下次自动启动: {','.join(saved_labels)}"
+            )
+            return {"ok": True, "changed": True, "saved": saved_labels}
+        except Exception as exc:  # noqa: BLE001
+            self.add_system_log(f"[调度] {source}: 保存当前运行调度状态失败，不阻断退出: {exc}")
+            return {"ok": False, "changed": False, "saved": [], "error": str(exc)}
+
+    def stop_role_runtime_services(self, source: str = "退出当前系统") -> Dict[str, Any]:
+        role_mode = str(self.deployment_snapshot().get("role_mode", "") or "").strip().lower()
+        results: Dict[str, Any] = {}
+        cancelled_jobs: list[str] = []
+        failed_cancellations: list[Dict[str, str]] = []
+        scheduler_autostart_persist = {
+            "ok": True,
+            "skipped": True,
+            "reason": "exit_does_not_override_memory",
+        }
+        external_scheduler_autostart_state = self.persist_external_scheduler_autostart_state_on_exit(
+            source=f"{source}:退出不覆盖记忆"
+        )
+
+        active_job_ids: list[str] = []
+        try:
+            active_job_ids = list(self.job_service.active_job_ids(include_waiting=True))
+        except Exception as exc:  # noqa: BLE001
+            failed_cancellations.append({"job_id": "*", "error": str(exc)})
+        cancel_job = getattr(self.job_service, "cancel_job", None)
+        if callable(cancel_job):
+            for job_id in active_job_ids:
+                job_text = str(job_id or "").strip()
+                if not job_text:
+                    continue
+                try:
+                    cancel_job(job_text)
+                    cancelled_jobs.append(job_text)
+                except Exception as exc:  # noqa: BLE001
+                    failed_cancellations.append({"job_id": job_text, "error": str(exc)})
+
+        stop_actions = (
+            ("scheduler", self.stop_scheduler),
+            ("handover_scheduler", self.stop_handover_scheduler),
+            ("wet_bulb_collection_scheduler", self.stop_wet_bulb_collection_scheduler),
+            ("day_metric_upload_scheduler", self.stop_day_metric_upload_scheduler),
+            ("alarm_event_upload_scheduler", self.stop_alarm_event_upload_scheduler),
+            ("monthly_change_report_scheduler", self.stop_monthly_change_report_scheduler),
+            ("monthly_event_report_scheduler", self.stop_monthly_event_report_scheduler),
+            ("updater", self.stop_updater),
+            ("alert_log_uploader", self.stop_alert_log_uploader),
+            ("shared_bridge", self.stop_shared_bridge),
+        )
+        for key, action in stop_actions:
+            try:
+                results[key] = action(source=source)
+            except Exception as exc:  # noqa: BLE001
+                results[key] = {"ok": False, "error": str(exc)}
+
+        try:
+            self.job_service.shutdown_task_engine()
+            results["task_engine"] = {"ok": True, "stopped": True}
+        except Exception as exc:  # noqa: BLE001
+            results["task_engine"] = {"ok": False, "error": str(exc)}
+
+        self.runtime_services_armed = False
+        role_label = "内网端" if role_mode == "internal" else "外网端" if role_mode == "external" else "当前角色"
+        self.add_system_log(
+            f"[启动] {source}: 已退出{role_label}运行时, "
+            f"cancelled_jobs={len(cancelled_jobs)}, failed_cancellations={len(failed_cancellations)}"
+        )
+        return {
+            "ok": True,
+            "armed": False,
+            "role_mode": role_mode,
+            "cancelled_jobs": cancelled_jobs,
+            "failed_cancellations": failed_cancellations,
+            "scheduler_autostart_persist": scheduler_autostart_persist,
+            "external_scheduler_autostart_state": external_scheduler_autostart_state,
+            "results": results,
+        }
 
     def stop_scheduler(self, source: str = "手动") -> Dict[str, Any]:
         if self.scheduler:
@@ -1388,10 +1895,47 @@ class AppContainer:
         )
         return result
 
+    def scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("auto_flow")
+        if not self.scheduler:
+            return {
+                "enabled": False,
+                "running": False,
+                "status": "未初始化",
+                "next_run_time": "",
+                "last_check_at": "",
+                "last_decision": "",
+                "last_trigger_at": "",
+                "last_trigger_result": "",
+                "state_path": "",
+                "state_exists": False,
+                **memory_fields,
+            }
+        runtime = self.scheduler.get_runtime_snapshot()
+        return {
+            "enabled": bool(self.scheduler.enabled),
+            "status": self.scheduler.status_text(),
+            "next_run_time": self.scheduler.next_run_text(),
+            **runtime,
+            **memory_fields,
+        }
+
     def handover_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("handover")
         if not self.handover_scheduler_manager:
-            return {"enabled": False, "running": False, "status": "未初始化", "slots": {}, "state_paths": {}}
-        return self.handover_scheduler_manager.get_runtime_snapshot()
+            return {
+                "enabled": False,
+                "running": False,
+                "status": "未初始化",
+                "slots": {},
+                "state_paths": {},
+                **memory_fields,
+            }
+        snapshot = self.handover_scheduler_manager.get_runtime_snapshot()
+        return {
+            **snapshot,
+            **memory_fields,
+        }
 
     def handover_scheduler_diagnostics(self, limit: int = 50) -> Dict[str, Any]:
         if not self.handover_scheduler_manager:
@@ -1411,6 +1955,7 @@ class AppContainer:
         return data
 
     def wet_bulb_collection_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("wet_bulb_collection")
         if not self.wet_bulb_collection_scheduler:
             return {
                 "enabled": False,
@@ -1423,14 +1968,17 @@ class AppContainer:
                 "last_trigger_result": "",
                 "state_path": "",
                 "state_exists": False,
+                **memory_fields,
             }
         runtime = self.wet_bulb_collection_scheduler.get_runtime_snapshot()
         return {
             "enabled": bool(self.wet_bulb_collection_scheduler.enabled),
             **runtime,
+            **memory_fields,
         }
 
     def day_metric_upload_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("day_metric_upload")
         if not self.day_metric_upload_scheduler:
             return {
                 "enabled": False,
@@ -1443,6 +1991,7 @@ class AppContainer:
                 "last_trigger_result": "",
                 "state_path": "",
                 "state_exists": False,
+                **memory_fields,
             }
         runtime = self.day_metric_upload_scheduler.get_runtime_snapshot()
         return {
@@ -1450,9 +1999,11 @@ class AppContainer:
             "status": self.day_metric_upload_scheduler.status_text(),
             "next_run_time": self.day_metric_upload_scheduler.next_run_text(),
             **runtime,
+            **memory_fields,
         }
 
     def alarm_event_upload_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("alarm_event_upload")
         if not self.alarm_event_upload_scheduler:
             return {
                 "enabled": False,
@@ -1465,6 +2016,7 @@ class AppContainer:
                 "last_trigger_result": "",
                 "state_path": "",
                 "state_exists": False,
+                **memory_fields,
             }
         runtime = self.alarm_event_upload_scheduler.get_runtime_snapshot()
         return {
@@ -1472,9 +2024,11 @@ class AppContainer:
             "status": self.alarm_event_upload_scheduler.status_text(),
             "next_run_time": self.alarm_event_upload_scheduler.next_run_text(),
             **runtime,
+            **memory_fields,
         }
 
     def monthly_event_report_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("monthly_event_report")
         if not self.monthly_event_report_scheduler:
             return {
                 "enabled": False,
@@ -1487,14 +2041,17 @@ class AppContainer:
                 "last_trigger_result": "",
                 "state_path": "",
                 "state_exists": False,
+                **memory_fields,
             }
         runtime = self.monthly_event_report_scheduler.get_runtime_snapshot()
         return {
             "enabled": bool(self.monthly_event_report_scheduler.enabled),
             **runtime,
+            **memory_fields,
         }
 
     def monthly_change_report_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("monthly_change_report")
         if not self.monthly_change_report_scheduler:
             return {
                 "enabled": False,
@@ -1507,11 +2064,13 @@ class AppContainer:
                 "last_trigger_result": "",
                 "state_path": "",
                 "state_exists": False,
+                **memory_fields,
             }
         runtime = self.monthly_change_report_scheduler.get_runtime_snapshot()
         return {
             "enabled": bool(self.monthly_change_report_scheduler.enabled),
             **runtime,
+            **memory_fields,
         }
 
     def record_wet_bulb_collection_external_run(
@@ -1684,19 +2243,19 @@ class AppContainer:
         if not isinstance(monthly_event_scheduler_cfg, dict):
             monthly_event_scheduler_cfg = {}
         monthly_event_auto_start = bool(monthly_event_scheduler_cfg.get("auto_start_in_gui", False))
-        if was_running or auto_start:
+        if was_running or (self.runtime_services_armed and auto_start):
             self.scheduler.start()
-        if was_handover_running or handover_auto_start:
+        if was_handover_running or (self.runtime_services_armed and handover_auto_start):
             self.handover_scheduler_manager.start()
-        if was_wet_bulb_running or wet_bulb_auto_start:
+        if was_wet_bulb_running or (self.runtime_services_armed and wet_bulb_auto_start):
             self.wet_bulb_collection_scheduler.start()
-        if was_day_metric_upload_running or day_metric_auto_start:
+        if was_day_metric_upload_running or (self.runtime_services_armed and day_metric_auto_start):
             self.day_metric_upload_scheduler.start()
-        if was_alarm_event_upload_running or alarm_event_auto_start:
+        if was_alarm_event_upload_running or (self.runtime_services_armed and alarm_event_auto_start):
             self.alarm_event_upload_scheduler.start()
-        if was_monthly_change_report_running or monthly_change_auto_start:
+        if was_monthly_change_report_running or (self.runtime_services_armed and monthly_change_auto_start):
             self.monthly_change_report_scheduler.start()
-        if was_monthly_event_report_running or monthly_event_auto_start:
+        if was_monthly_event_report_running or (self.runtime_services_armed and monthly_event_auto_start):
             self.monthly_event_report_scheduler.start()
         updater_cfg = self.runtime_config.get("updater", {})
         if not isinstance(updater_cfg, dict):

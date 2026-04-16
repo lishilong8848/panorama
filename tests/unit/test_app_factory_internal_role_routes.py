@@ -12,6 +12,9 @@ from app.bootstrap import app_factory
 
 
 class _FakeJobService:
+    def __init__(self):
+        self.shutdown_calls = 0
+
     def active_job_id(self):
         return ""
 
@@ -22,17 +25,25 @@ class _FakeJobService:
         return {"queued": 0, "running": 0, "finished": 0, "failed": 0}
 
     def shutdown_task_engine(self):
+        self.shutdown_calls += 1
         return None
 
 
 class _FakeContainer:
     def __init__(self, *, frontend_root: Path, role_mode: str = "internal"):
+        shared_bridge_root = str((frontend_root / "shared").as_posix())
         self.config = {
             "common": {
                 "console": {},
                 "deployment": {
                     "role_mode": role_mode,
                     "last_started_role_mode": "",
+                },
+                "shared_bridge": {
+                    "enabled": True,
+                    "root_dir": shared_bridge_root,
+                    "internal_root_dir": shared_bridge_root,
+                    "external_root_dir": shared_bridge_root,
                 },
             }
         }
@@ -55,6 +66,7 @@ class _FakeContainer:
         self.version = "web-3.0.0"
         self.runtime_services_armed = False
         self.runtime_service_start_calls = []
+        self.runtime_service_stop_calls = []
         self.role_mode = role_mode
         self.startup_handoff = {
             "active": False,
@@ -127,7 +139,19 @@ class _FakeContainer:
         return False
 
     def deployment_snapshot(self):
-        return {"role_mode": self.role_mode, "node_id": "internal-node", "node_label": "内网端"}
+        deployment = self.config.get("common", {}).get("deployment", {})
+        role_mode = str(deployment.get("role_mode") or self.role_mode or "").strip().lower()
+        return {
+            "role_mode": role_mode,
+            "last_started_role_mode": str(deployment.get("last_started_role_mode") or "").strip().lower(),
+            "node_id": "internal-node",
+            "node_label": str(deployment.get("node_label") or ("内网端" if role_mode == "internal" else "外网端")),
+        }
+
+    def reload_config(self, saved):
+        self.config = saved
+        self.runtime_config = saved.get("common", {})
+        self.role_mode = str(saved.get("common", {}).get("deployment", {}).get("role_mode") or "").strip().lower()
 
     def get_startup_role_handoff(self):
         return dict(self.startup_handoff)
@@ -157,12 +181,34 @@ class _FakeContainer:
         return dict(self.startup_handoff)
 
     def shared_bridge_snapshot(self):
-        return {"enabled": True, "root_dir": "D:/QJPT_Shared", "db_status": "ok"}
+        bridge = self.config.get("common", {}).get("shared_bridge", {})
+        return {
+            "enabled": True,
+            "root_dir": str(bridge.get("root_dir", "") or "").strip(),
+            "db_status": "ok",
+        }
 
     def start_role_runtime_services(self, source="启动确认"):
         self.runtime_services_armed = True
         self.runtime_service_start_calls.append(str(source or ""))
         return {"ok": True, "armed": True, "role_mode": self.role_mode}
+
+    def stop_role_runtime_services(self, source="退出当前系统"):
+        self.runtime_services_armed = False
+        self.runtime_service_stop_calls.append(str(source or ""))
+        return {"ok": True, "armed": False, "role_mode": self.role_mode, "cancelled_jobs": []}
+
+    def handover_scheduler_status(self):
+        return {
+            "enabled": True,
+            "running": False,
+            "status": "未启动",
+            "slots": {},
+            "state_paths": {},
+        }
+
+    def start_handover_scheduler(self, source="手动"):
+        return {"ok": True, "running": True, "source": source}
 
     def stop_day_metric_upload_scheduler(self, source="关闭自动"):
         return {"ok": True, "source": source}
@@ -208,7 +254,10 @@ def _build_app_with_lifespan(monkeypatch, tmp_path: Path, *, role_mode: str = "i
 
 
 def test_internal_role_blocks_business_job_routes(monkeypatch, tmp_path):
-    client = TestClient(_build_app(monkeypatch, tmp_path))
+    app = _build_app(monkeypatch, tmp_path)
+    app.state.runtime_services_activated = True
+    app.state.startup_role_confirmed = True
+    client = TestClient(app)
 
     response = client.post("/api/jobs/auto-once", json={})
 
@@ -216,19 +265,53 @@ def test_internal_role_blocks_business_job_routes(monkeypatch, tmp_path):
     assert response.json()["detail"] == "当前为内网端，本地管理页不提供该业务入口，请在外网端发起。"
 
 
+def test_role_selection_mode_blocks_business_api_until_activation(monkeypatch, tmp_path):
+    client = TestClient(_build_app(monkeypatch, tmp_path, role_mode="external"))
+
+    response = client.post("/api/jobs/auto-once", json={})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "当前未进入内网端或外网端，请先在角色选择页进入系统。"
+    bootstrap = client.get("/api/health/bootstrap")
+    assert bootstrap.status_code == 200
+
+
+def test_lan_console_client_can_call_scheduler_api_after_activation(monkeypatch, tmp_path):
+    app = _build_app(monkeypatch, tmp_path, role_mode="external")
+    app.state.runtime_services_activated = True
+    app.state.startup_role_confirmed = True
+    monkeypatch.setattr(app_factory, "_is_loopback_client", lambda _host: False)
+    monkeypatch.setattr(app_factory, "_is_lan_console_client", lambda _request: True)
+    monkeypatch.setattr("app.modules.scheduler.api._config_persistence.save_settings", lambda settings, _path: settings)
+    client = TestClient(app)
+
+    response = client.post("/api/scheduler/handover/start", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+
+
 def test_internal_role_still_allows_bridge_health(monkeypatch, tmp_path):
-    client = TestClient(_build_app(monkeypatch, tmp_path))
+    app = _build_app(monkeypatch, tmp_path)
+    app.state.runtime_services_activated = True
+    app.state.startup_role_confirmed = True
+    expected_root = app.state.container.config["common"]["shared_bridge"]["root_dir"]
+    client = TestClient(app)
 
     response = client.get("/api/bridge/health")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["deployment"]["role_mode"] == "internal"
-    assert payload["shared_bridge"]["root_dir"] == "D:/QJPT_Shared"
+    assert payload["shared_bridge"]["root_dir"] == expected_root
 
 
 def test_internal_role_does_not_mount_network_routes(monkeypatch, tmp_path):
-    client = TestClient(_build_app(monkeypatch, tmp_path))
+    app = _build_app(monkeypatch, tmp_path)
+    app.state.runtime_services_activated = True
+    app.state.startup_role_confirmed = True
+    client = TestClient(app)
 
     response = client.get("/api/network/status")
 
@@ -343,7 +426,7 @@ def test_updater_restart_callback_writes_role_handoff_for_external(monkeypatch, 
     assert exit_calls == [194]
 
 
-def test_lifespan_keeps_saved_role_unactivated_until_user_confirms(monkeypatch, tmp_path):
+def test_lifespan_exposes_saved_role_as_restorable_without_reconfiguration(monkeypatch, tmp_path):
     app = _build_app_with_lifespan(monkeypatch, tmp_path, role_mode="external")
     container = app.state.container
 
@@ -356,7 +439,102 @@ def test_lifespan_keeps_saved_role_unactivated_until_user_confirms(monkeypatch, 
         assert container.runtime_service_start_calls == []
         assert app.state.startup_role_confirmed is False
         assert payload["runtime_activated"] is False
-        assert payload["role_selection_required"] is True
+        assert payload["startup_role_confirmed"] is True
+        assert payload["role_selection_required"] is False
+
+
+def test_activate_startup_with_role_saves_role_and_last_started(monkeypatch, tmp_path):
+    app = _build_app_with_lifespan(monkeypatch, tmp_path, role_mode="")
+    container = app.state.container
+    external_root = str((tmp_path / "external-share").as_posix())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/runtime/activate-startup",
+            json={
+                "source": "test_role_select",
+                "role_mode": "external",
+                "shared_bridge": {
+                    "root_dir": external_root,
+                    "external_root_dir": external_root,
+                    "poll_interval_sec": 3,
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["activated"] is True
+        assert payload["role_mode"] == "external"
+        assert payload["saved_role"]["role_mode"] == "external"
+        deployment = container.config["common"]["deployment"]
+        assert deployment["role_mode"] == "external"
+        assert deployment["last_started_role_mode"] == "external"
+        assert deployment["node_label"] == "外网端"
+        bridge = container.config["common"]["shared_bridge"]
+        assert bridge["root_dir"] == external_root
+        assert bridge["external_root_dir"] == external_root
+        assert bridge["poll_interval_sec"] == 3
+        assert container.runtime_service_start_calls == ["test_role_select"]
+        assert app.state.startup_role_confirmed is True
+
+
+def test_activate_startup_switches_role_without_process_restart(monkeypatch, tmp_path):
+    app = _build_app_with_lifespan(monkeypatch, tmp_path, role_mode="internal")
+    container = app.state.container
+    external_root = str((tmp_path / "external-share").as_posix())
+
+    with TestClient(app) as client:
+        first = client.post("/api/runtime/activate-startup", json={"source": "initial"})
+        assert first.status_code == 200
+        assert app.state.runtime_services_activated is True
+
+        response = client.post(
+            "/api/runtime/activate-startup",
+            json={
+                "source": "switch_to_external",
+                "role_mode": "external",
+                "shared_bridge": {
+                    "root_dir": external_root,
+                    "external_root_dir": external_root,
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["role_mode"] == "external"
+        assert container.runtime_service_stop_calls == ["switch_to_external-切换角色前停止当前系统"]
+        assert container.runtime_service_start_calls == ["initial", "switch_to_external"]
+        assert container.config["common"]["deployment"]["role_mode"] == "external"
+        assert container.config["common"]["deployment"]["last_started_role_mode"] == "external"
+
+
+def test_exit_current_runtime_stops_role_services_and_returns_to_selector(monkeypatch, tmp_path):
+    app = _build_app_with_lifespan(monkeypatch, tmp_path, role_mode="external")
+    container = app.state.container
+
+    with TestClient(app) as client:
+        activate = client.post("/api/runtime/activate-startup", json={"source": "test_activate"})
+        assert activate.status_code == 200
+        assert app.state.runtime_services_activated is True
+        response = client.post("/api/runtime/exit-current", json={"source": "test_exit"})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["deactivated"] is True
+        assert container.runtime_services_armed is False
+        assert container.runtime_service_stop_calls == ["test_exit"]
+        assert app.state.runtime_services_activated is False
+        assert app.state.startup_role_confirmed is False
+        assert app.state.startup_role_user_exited is True
+
+        bootstrap = client.get("/api/health/bootstrap").json()
+        assert bootstrap["role_selection_required"] is True
+        assert bootstrap["startup_role_user_exited"] is True
 
 
 def test_app_factory_routes_do_not_leave_mock_val_ser_fields(monkeypatch, tmp_path):

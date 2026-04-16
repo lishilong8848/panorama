@@ -6,7 +6,10 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config.settings_loader import save_settings
-from app.modules.scheduler.api._config_persistence import persist_scheduler_toggle
+from app.modules.scheduler.api._config_persistence import (
+    persist_scheduler_toggle,
+    record_scheduler_config_autostart,
+)
 
 
 router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
@@ -19,19 +22,24 @@ def _scheduler_cfg_from_v3(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_scheduler_payload(container, action_result: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    snapshot = container.scheduler_status() if hasattr(container, "scheduler_status") else {}
     scheduler = container.scheduler
     runtime = scheduler.get_runtime_snapshot() if scheduler else {}
+    effective_runtime = snapshot if isinstance(snapshot, dict) and snapshot else runtime
     return {
         "ok": True,
         "action": action_result or {},
-        "status": scheduler.status_text() if scheduler else "未初始化",
-        "next_run_time": scheduler.next_run_text() if scheduler else "",
+        "status": str(effective_runtime.get("status", scheduler.status_text() if scheduler else "未初始化")),
+        "next_run_time": str(effective_runtime.get("next_run_time", scheduler.next_run_text() if scheduler else "")),
         "executor_bound": bool(container.is_scheduler_executor_bound()),
         "callback_name": container.scheduler_executor_name(),
-        "running": bool(runtime.get("running", False)),
-        "last_decision": str(runtime.get("last_decision", "")),
-        "state_path": str(runtime.get("state_path", "")),
-        "state_exists": bool(runtime.get("state_exists", False)),
+        "running": bool(effective_runtime.get("running", False)),
+        "last_decision": str(effective_runtime.get("last_decision", "")),
+        "state_path": str(effective_runtime.get("state_path", "")),
+        "state_exists": bool(effective_runtime.get("state_exists", False)),
+        "remembered_enabled": bool(effective_runtime.get("remembered_enabled", False)),
+        "effective_auto_start_in_gui": bool(effective_runtime.get("effective_auto_start_in_gui", False)),
+        "memory_source": str(effective_runtime.get("memory_source", "") or ""),
     }
 
 
@@ -103,6 +111,11 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     new_scheduler_cfg = _scheduler_cfg_from_v3(container.config)
+    record_scheduler_config_autostart(
+        container,
+        path=("common", "scheduler"),
+        scheduler_cfg=new_scheduler_cfg,
+    )
     runtime = container.scheduler.get_runtime_snapshot() if container.scheduler else {}
     executor_bound = bool(container.is_scheduler_executor_bound())
     message = "调度配置已更新并热重载"

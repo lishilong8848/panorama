@@ -80,9 +80,9 @@ export function createDashboardWetBulbCollectionActions(ctx) {
     }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
   }
 
-  function markSchedulerToggle(mode, runningOverride) {
+  function markSchedulerToggle(mode, rememberedOverride) {
     if (typeof setSchedulerToggleState !== "function") return;
-    setSchedulerToggleState("wet_bulb", { mode, runningOverride });
+    setSchedulerToggleState("wet_bulb", { mode, rememberedOverride });
   }
 
   function isInternalRole() {
@@ -110,6 +110,15 @@ export function createDashboardWetBulbCollectionActions(ctx) {
       state_exists: Boolean(data.state_exists),
       executor_bound: Boolean(data.executor_bound),
       callback_name: String(data.callback_name || "-"),
+      remembered_enabled: Object.prototype.hasOwnProperty.call(data, "remembered_enabled")
+        ? Boolean(data.remembered_enabled)
+        : Boolean(health.wet_bulb_collection.scheduler.remembered_enabled),
+      effective_auto_start_in_gui: Object.prototype.hasOwnProperty.call(data, "effective_auto_start_in_gui")
+        ? Boolean(data.effective_auto_start_in_gui)
+        : Boolean(health.wet_bulb_collection.scheduler.effective_auto_start_in_gui),
+      memory_source: Object.prototype.hasOwnProperty.call(data, "memory_source")
+        ? String(data.memory_source || "")
+        : String(health.wet_bulb_collection.scheduler.memory_source || ""),
     });
   }
 

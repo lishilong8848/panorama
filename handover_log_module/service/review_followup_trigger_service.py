@@ -13,6 +13,10 @@ from handover_log_module.service.handover_daily_report_screenshot_service import
 )
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
+from handover_log_module.service.review_document_state_service import (
+    ReviewDocumentStateError,
+    ReviewDocumentStateService,
+)
 from handover_log_module.service.review_session_service import ReviewSessionNotFoundError, ReviewSessionService
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
@@ -139,6 +143,7 @@ class ReviewFollowupTriggerService:
         self._daily_report_asset_service = HandoverDailyReportAssetService(self.config)
         self._daily_report_screenshot_service = HandoverDailyReportScreenshotService(self.config)
         self._daily_report_bitable_export_service = HandoverDailyReportBitableExportService(self.config)
+        self._review_document_state_service = ReviewDocumentStateService(self.config)
 
     def evaluate(self, batch_status: Dict[str, Any] | None) -> Dict[str, Any]:
         payload = batch_status if isinstance(batch_status, dict) else {}
@@ -725,7 +730,13 @@ class ReviewFollowupTriggerService:
                 continue
         return normalized
 
-    def _build_cloud_items(self, sessions: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, str]], List[Dict[str, str]]]:
+    def _build_cloud_items(
+        self,
+        sessions: List[Dict[str, Any]],
+        *,
+        emit_log: Callable[[str], None] = print,
+        force_excel_sync: bool = False,
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, str]], List[Dict[str, str]]]:
         upload_items: List[Dict[str, Any]] = []
         skipped_buildings: List[Dict[str, str]] = []
         failed_buildings: List[Dict[str, str]] = []
@@ -743,6 +754,19 @@ class ReviewFollowupTriggerService:
             if not output_file:
                 failed_buildings.append({"building": building, "error": "missing_output_file"})
                 continue
+            if force_excel_sync:
+                try:
+                    self._review_document_state_service.force_sync_session_dict(
+                        session,
+                        reason="cloud_upload",
+                    )
+                except ReviewDocumentStateError as exc:
+                    emit_log(
+                        "[交接班][云表最终上传] 同步最新审核内容失败 "
+                        f"building={building}, session_id={session.get('session_id', '-')}, error={exc}"
+                    )
+                    failed_buildings.append({"building": building, "error": f"交接班 Excel 未同步到最新审核内容: {exc}"})
+                    continue
             upload_items.append(
                 {
                     "building": building,
@@ -867,7 +891,11 @@ class ReviewFollowupTriggerService:
         batch_status = str(batch_meta.get("status", "")).strip().lower()
         batch_token = str(batch_meta.get("spreadsheet_token", "")).strip()
         if batch_status not in {"prepared", "success"} or not batch_token:
-            upload_items, skipped_buildings, failed_buildings = self._build_cloud_items(sessions)
+            upload_items, skipped_buildings, failed_buildings = self._build_cloud_items(
+                sessions,
+                emit_log=emit_log,
+                force_excel_sync=False,
+            )
             batch_error = str(batch_meta.get("error", "")).strip() or "cloud_batch_unavailable"
             emit_log(
                 "[交接班][云表最终上传] 无法执行: "
@@ -895,7 +923,11 @@ class ReviewFollowupTriggerService:
             )
             return result
 
-        upload_items, skipped_buildings, failed_buildings = self._build_cloud_items(sessions)
+        upload_items, skipped_buildings, failed_buildings = self._build_cloud_items(
+            sessions,
+            emit_log=emit_log,
+            force_excel_sync=True,
+        )
         if not upload_items:
             status = "failed" if failed_buildings else "skipped"
             emit_log(

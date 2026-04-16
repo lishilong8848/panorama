@@ -95,6 +95,8 @@ class CabinetPowerDefaultsService:
         building_name = str(building or "").strip()
         if not building_name:
             return None
+        if building_name not in defaults_by_building:
+            return None
         payload = defaults_by_building.get(building_name, {})
         if not isinstance(payload, dict):
             return None

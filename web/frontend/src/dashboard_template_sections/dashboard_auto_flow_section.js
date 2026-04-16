@@ -1,4 +1,4 @@
-﻿export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'auto_flow'">
+export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'auto_flow'">
           <div class="dashboard-module-shell">
             <article class="task-block task-block-compact dashboard-module-scheduler-card">
               <div class="task-block-head">
@@ -29,10 +29,10 @@
                 <input style="width:120px" type="number" min="1" step="1" v-model.number="config.scheduler.interval_minutes" @change="saveSchedulerQuickConfig" />
               </div>
               <div class="btn-line">
-                <button class="btn btn-success" :disabled="getSchedulerEffectiveRunning('scheduler', health.scheduler.running) || isActionLocked(actionKeySchedulerStart) || isActionLocked(actionKeySchedulerStop) || isSchedulerTogglePending('scheduler')" @click="startScheduler">
-                  {{ getSchedulerToggleMode('scheduler') === 'starting' ? '启动中...' : (getSchedulerToggleMode('scheduler') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('scheduler', health.scheduler.running) ? '已启动调度' : '启动调度')) }}
+                <button class="btn btn-success" :disabled="getSchedulerEffectiveRunning('scheduler', health.scheduler.remembered_enabled) || isActionLocked(actionKeySchedulerStart) || isActionLocked(actionKeySchedulerStop) || isSchedulerTogglePending('scheduler')" @click="startScheduler">
+                  {{ getSchedulerToggleMode('scheduler') === 'starting' ? '启动中...' : (getSchedulerToggleMode('scheduler') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('scheduler', health.scheduler.remembered_enabled) ? '已记住开启' : '启动调度')) }}
                 </button>
-                <button class="btn btn-danger" :disabled="!getSchedulerEffectiveRunning('scheduler', health.scheduler.running) || isActionLocked(actionKeySchedulerStop) || isActionLocked(actionKeySchedulerStart) || isSchedulerTogglePending('scheduler')" @click="stopScheduler">
+                <button class="btn btn-danger" :disabled="!getSchedulerEffectiveRunning('scheduler', health.scheduler.remembered_enabled) || isActionLocked(actionKeySchedulerStop) || isActionLocked(actionKeySchedulerStart) || isSchedulerTogglePending('scheduler')" @click="stopScheduler">
                   {{ getSchedulerToggleMode('scheduler') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('scheduler') === 'starting' ? '处理中...' : '停止调度') }}
                 </button>
               </div>
@@ -147,3 +147,4 @@
         </section>
 
 `;
+

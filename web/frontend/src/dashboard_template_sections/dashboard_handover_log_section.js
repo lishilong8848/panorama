@@ -1,4 +1,4 @@
-﻿export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'handover_log'">
+export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'handover_log'">
           <div class="dashboard-module-shell">
           <article class="task-block dashboard-module-scheduler-card">
             <div class="task-block-head">
@@ -41,18 +41,18 @@
             <div class="btn-line" style="margin-top:10px;">
               <button
                 class="btn btn-success"
-                :disabled="isInternalDeploymentRole || getSchedulerEffectiveRunning('handover', health.handover_scheduler.running) || isActionLocked(actionKeyHandoverSchedulerStart) || isActionLocked(actionKeyHandoverSchedulerStop) || isSchedulerTogglePending('handover')"
+                :disabled="isInternalDeploymentRole || getSchedulerEffectiveRunning('handover', health.handover_scheduler.remembered_enabled) || isActionLocked(actionKeyHandoverSchedulerStart) || isActionLocked(actionKeyHandoverSchedulerStop) || isSchedulerTogglePending('handover')"
                 @click="startHandoverScheduler"
               >
                 {{
                   getSchedulerToggleMode('handover') === 'starting'
                     ? '启动中...'
-                    : (getSchedulerToggleMode('handover') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('handover', health.handover_scheduler.running) ? '已启动调度' : '启动调度'))
+                    : (getSchedulerToggleMode('handover') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('handover', health.handover_scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
                 }}
               </button>
               <button
                 class="btn btn-danger"
-                :disabled="isInternalDeploymentRole || !getSchedulerEffectiveRunning('handover', health.handover_scheduler.running) || isActionLocked(actionKeyHandoverSchedulerStop) || isActionLocked(actionKeyHandoverSchedulerStart) || isSchedulerTogglePending('handover')"
+                :disabled="isInternalDeploymentRole || !getSchedulerEffectiveRunning('handover', health.handover_scheduler.remembered_enabled) || isActionLocked(actionKeyHandoverSchedulerStop) || isActionLocked(actionKeyHandoverSchedulerStart) || isSchedulerTogglePending('handover')"
                 @click="stopHandoverScheduler"
               >
                 {{ getSchedulerToggleMode('handover') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('handover') === 'starting' ? '处理中...' : '停止调度') }}
@@ -552,3 +552,4 @@
         </section>
 
 `;
+

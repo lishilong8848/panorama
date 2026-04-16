@@ -1,4 +1,4 @@
-﻿export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'day_metric_upload'">
+export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'day_metric_upload'">
           <div class="dashboard-module-shell">
           <article class="task-block dashboard-module-scheduler-card">
             <div class="task-block-head">
@@ -38,18 +38,18 @@
             <div class="btn-line">
               <button
                 class="btn btn-success"
-                :disabled="isInternalDeploymentRole || getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.running) || isActionLocked(actionKeyDayMetricUploadSchedulerStart) || isActionLocked(actionKeyDayMetricUploadSchedulerStop) || isSchedulerTogglePending('day_metric_upload')"
+                :disabled="isInternalDeploymentRole || getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.remembered_enabled) || isActionLocked(actionKeyDayMetricUploadSchedulerStart) || isActionLocked(actionKeyDayMetricUploadSchedulerStop) || isSchedulerTogglePending('day_metric_upload')"
                 @click="startDayMetricUploadScheduler"
               >
                 {{
                   getSchedulerToggleMode('day_metric_upload') === 'starting'
                     ? '启动中...'
-                    : (getSchedulerToggleMode('day_metric_upload') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.running) ? '已启动调度' : '启动调度'))
+                    : (getSchedulerToggleMode('day_metric_upload') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
                 }}
               </button>
               <button
                 class="btn btn-danger"
-                :disabled="isInternalDeploymentRole || !getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.running) || isActionLocked(actionKeyDayMetricUploadSchedulerStop) || isActionLocked(actionKeyDayMetricUploadSchedulerStart) || isSchedulerTogglePending('day_metric_upload')"
+                :disabled="isInternalDeploymentRole || !getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.remembered_enabled) || isActionLocked(actionKeyDayMetricUploadSchedulerStop) || isActionLocked(actionKeyDayMetricUploadSchedulerStart) || isSchedulerTogglePending('day_metric_upload')"
                 @click="stopDayMetricUploadScheduler"
               >
                 {{ getSchedulerToggleMode('day_metric_upload') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('day_metric_upload') === 'starting' ? '处理中...' : '停止调度') }}
@@ -361,3 +361,4 @@
           </div>
         </section>
 `;
+

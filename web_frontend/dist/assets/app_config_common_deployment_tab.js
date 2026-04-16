@@ -50,11 +50,11 @@
       </div>
       <div class="form-row">
         <label class="label">内网共享目录</label>
-        <input type="text" v-model.trim="config.shared_bridge.internal_root_dir" placeholder="例如 D:\\share" />
+        <input type="text" v-model.trim="config.shared_bridge.internal_root_dir" placeholder="请输入内网端可访问的共享目录路径" />
       </div>
       <div class="form-row">
         <label class="label">外网共享目录</label>
-        <input type="text" v-model.trim="config.shared_bridge.external_root_dir" placeholder="例如 \\\\172.16.1.2\\share" />
+        <input type="text" v-model.trim="config.shared_bridge.external_root_dir" placeholder="请输入外网端可访问的共享目录路径" />
       </div>
       <div class="hint">内网端使用本地目录，外网端使用 UNC 路径。</div>
     </div>

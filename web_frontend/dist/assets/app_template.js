@@ -119,14 +119,14 @@ const APP_TEMPLATE_PREFIX = `
                   <span
                     class="field-help-badge"
                     :title="startupRoleSelectorSelection === 'internal'
-                      ? '填写内网端本机实际使用的共享目录本地路径，例如 D:\\\\share。'
-                      : '填写外网端本机实际访问的 UNC 共享路径，例如 \\\\\\\\172.16.1.2\\\\share。'"
+                      ? '填写内网端本机实际使用的共享目录路径。'
+                      : '填写外网端本机实际访问的共享目录路径。'"
                   >?</span>
                 </label>
                 <input
                   type="text"
                   v-model.trim="startupRoleBridgeDraft.root_dir"
-                  :placeholder="startupRoleSelectorSelection === 'internal' ? '例如 D:\\\\share' : '例如 \\\\\\\\172.16.1.2\\\\share'"
+                  placeholder="请输入当前角色可访问的共享目录路径"
                   :disabled="startupRoleSelectorBusy"
                 />
               </div>
@@ -313,6 +313,13 @@ const APP_TEMPLATE_PREFIX = `
                   {{ configNavLabel }}
                 </button>
               </div>
+              <button
+                class="btn btn-warning"
+                :disabled="startupRoleSelectorBusy || startupRoleLoadingVisible || updaterUiOverlayVisible"
+                @click="exitCurrentSystemToRoleSelector"
+              >
+                退出系统
+              </button>
             </div>
           </div>
         </section>

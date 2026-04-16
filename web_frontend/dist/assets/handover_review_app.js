@@ -24,9 +24,6 @@ const DEFAULT_FOOTER_INVENTORY_COLUMNS = [
   { key: "H", label: "清点确认人（接班）", source_cols: ["H"], span: 1 },
 ];
 const REVIEW_PATH_RE = /^\/handover\/review\/([a-e])\/?$/i;
-const REVIEW_IDLE_AUTOSAVE_DELAY_MS = 8000;
-const REVIEW_SAVE_FAILURE_RETRY_DELAY_MS = 30000;
-const REVIEW_SAVE_MAX_IDLE_RETRY_AFTER_FAILURE = 1;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 const REVIEW_LOCK_HEARTBEAT_MS = 15000;
 const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
@@ -58,6 +55,58 @@ function basenameFromPath(input) {
   if (!text) return "";
   const parts = text.split(/[\\/]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : text;
+}
+
+function parseDownloadFilename(contentDisposition = "", fallbackName = "") {
+  const header = String(contentDisposition || "").trim();
+  if (header) {
+    const utf8Match = header.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+    if (utf8Match && utf8Match[1]) {
+      try {
+        return decodeURIComponent(String(utf8Match[1] || "").trim());
+      } catch (_error) {
+        // ignore malformed utf8 filename and fall through
+      }
+    }
+    const plainMatch = header.match(/filename\s*=\s*"?([^\";]+)"?/i);
+    if (plainMatch && plainMatch[1]) {
+      return String(plainMatch[1] || "").trim();
+    }
+  }
+  return basenameFromPath(fallbackName) || "download.xlsx";
+}
+
+async function downloadBlobFile(url, fallbackName = "") {
+  const response = await window.fetch(String(url || ""), {
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    let detail = "";
+    const contentType = String(response.headers.get("content-type") || "").trim().toLowerCase();
+    try {
+      if (contentType.includes("application/json")) {
+        const payload = await response.json();
+        detail = String(payload?.detail || payload?.message || "").trim();
+      } else {
+        detail = String(await response.text()).trim();
+      }
+    } catch (_error) {
+      detail = "";
+    }
+    throw new Error(detail || `下载失败（${response.status}）`);
+  }
+  const blob = await response.blob();
+  const blobUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = blobUrl;
+  anchor.download = parseDownloadFilename(response.headers.get("content-disposition"), fallbackName);
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => {
+    window.URL.revokeObjectURL(blobUrl);
+  }, 5000);
 }
 
 function badgeVm(text, tone = "neutral", emphasis = "soft", icon = "dot") {
@@ -564,9 +613,6 @@ export function mountHandoverReviewApp(Vue) {
         buildings: [],
       });
       const suspendAutoSave = ref(true);
-      const autosaveTimer = ref(null);
-      const saveFailureRetryTimer = ref(null);
-      const pendingFailureRetryCount = ref(0);
       const pollTimer = ref(null);
       const heartbeatTimer = ref(null);
       const lastSavedSnapshot = ref("");
@@ -612,8 +658,8 @@ export function mountHandoverReviewApp(Vue) {
 
       const saveStatusText = computed(() => {
         if (saving.value) return statusText.value || "正在保存...";
-        if (dirty.value) return "待自动保存（空闲后保存）";
-        return statusText.value || "已同步";
+        if (dirty.value) return "未保存修改";
+        return statusText.value || "已保存";
       });
       const reviewFileSummary = computed(() => basenameFromPath(session.value?.output_file || ""));
       const currentDutyDateText = computed(() => String(session.value?.duty_date || "").trim() || "-");
@@ -638,7 +684,7 @@ export function mountHandoverReviewApp(Vue) {
         if (needsRefresh.value) return badgeVm("等待同步", "warning", "soft", "warn");
         if (saving.value) return badgeVm(statusText.value || "正在保存...", "info", "soft", "clock");
         if (dirty.value) return badgeVm("待保存", "warning", "soft", "warn");
-        return badgeVm(statusText.value || "已自动保存", "success", "soft", "check");
+        return badgeVm(statusText.value || "已保存", "success", "soft", "check");
       });
       const reviewConfirmBadge = computed(() =>
         session.value?.confirmed
@@ -648,6 +694,17 @@ export function mountHandoverReviewApp(Vue) {
 
       const reviewCloudSheetVm = computed(() => mapReviewCloudSheetSync(session.value?.cloud_sheet_sync || {}));
       const reviewCloudSheetUrl = computed(() => String(reviewCloudSheetVm.value.url || "").trim());
+      const excelSyncState = computed(() => {
+        const payload = session.value?.excel_sync && typeof session.value.excel_sync === "object"
+          ? session.value.excel_sync
+          : {};
+        return {
+          status: String(payload.status || "").trim().toLowerCase(),
+          error: String(payload.error || "").trim(),
+          syncedRevision: Number.parseInt(String(payload.synced_revision || 0), 10) || 0,
+          pendingRevision: Number.parseInt(String(payload.pending_revision || 0), 10) || 0,
+        };
+      });
       const canRetryCloudSync = computed(() => {
         const status = String(session.value?.cloud_sheet_sync?.status || "").trim().toLowerCase();
         return Boolean(
@@ -690,7 +747,6 @@ export function mountHandoverReviewApp(Vue) {
         || !session.value.session_id
         || !String(session.value.capacity_output_file || "").trim()
         || String(capacitySync.value.status || "").trim().toLowerCase() !== "ready"
-        || capacityLinkedDirty.value
       ));
 
       const reviewStatusBanners = computed(() => {
@@ -734,11 +790,22 @@ export function mountHandoverReviewApp(Vue) {
         if (reviewCloudSheetVm.value.error) {
           rows.push({ text: `云表同步失败: ${reviewCloudSheetVm.value.error}`, tone: "danger" });
         }
+        if (excelSyncState.value.status === "failed") {
+          rows.push({
+            text: `后台Excel同步失败：${excelSyncState.value.error || "下载前会自动重试同步"}`,
+            tone: "danger",
+          });
+        } else if (excelSyncState.value.status === "pending" || excelSyncState.value.status === "syncing") {
+          rows.push({
+            text: "后台正在同步交接班Excel，页面内容已保存到本楼SQLite；下载时会强制写入最新内容。",
+            tone: "info",
+          });
+        }
         return rows;
       });
 
       const confirmActionVm = computed(() => {
-        const disabled = !session.value || saving.value || dirty.value || confirming.value || cloudSyncBusy.value || needsRefresh.value || staleRevisionConflict.value || syncingRemoteRevision.value;
+        const disabled = !session.value || saving.value || confirming.value || cloudSyncBusy.value || needsRefresh.value || staleRevisionConflict.value || syncingRemoteRevision.value;
         if (!session.value) {
           return { text: "暂无记录", variant: "secondary", disabled: true };
         }
@@ -755,27 +822,23 @@ export function mountHandoverReviewApp(Vue) {
         return { text: "确认当前楼栋", variant: "warning", disabled };
       });
 
+      const saveActionVm = computed(() => {
+        const disabled = !session.value || loading.value || saving.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || needsRefresh.value || staleRevisionConflict.value || !dirty.value;
+        if (saving.value) {
+          return { text: "保存中...", disabled: true };
+        }
+        if (!dirty.value) {
+          return { text: "已保存", disabled: true };
+        }
+        return { text: "保存", disabled };
+      });
+
       function serializeDocument(document) {
         return JSON.stringify(document || {});
       }
 
-      function clearAutosaveTimer() {
-        if (autosaveTimer.value) {
-          window.clearTimeout(autosaveTimer.value);
-          autosaveTimer.value = null;
-        }
-      }
-
-      function clearSaveFailureRetryTimer() {
-        if (saveFailureRetryTimer.value) {
-          window.clearTimeout(saveFailureRetryTimer.value);
-          saveFailureRetryTimer.value = null;
-        }
-      }
-
       function clearSaveTimers() {
-        clearAutosaveTimer();
-        clearSaveFailureRetryTimer();
+        // 审核页已改为手动保存，这里保留空实现，兼容现有调用点。
       }
 
       function clearHeartbeatTimer() {
@@ -904,8 +967,18 @@ export function mountHandoverReviewApp(Vue) {
         void ensureEditingLock();
       }
 
-      function handleWindowBeforeUnload() {
+      function handleWindowBeforeUnload(event) {
+        if (dirty.value || saving.value) {
+          if (event && typeof event.preventDefault === "function") {
+            event.preventDefault();
+          }
+          if (event) {
+            event.returnValue = "";
+          }
+          return "";
+        }
         void releaseCurrentLock({ keepalive: true });
+        return undefined;
       }
 
       function buildLoadParams() {
@@ -1113,30 +1186,8 @@ export function mountHandoverReviewApp(Vue) {
         }
       }
 
-      function scheduleSaveRetryAfterFailure() {
-        if (pendingFailureRetryCount.value >= REVIEW_SAVE_MAX_IDLE_RETRY_AFTER_FAILURE) {
-          statusText.value = "保存失败，请稍后重试。";
-          return;
-        }
-        clearSaveFailureRetryTimer();
-        pendingFailureRetryCount.value += 1;
-        statusText.value = "保存失败，30 秒后自动重试。";
-        saveFailureRetryTimer.value = window.setTimeout(() => {
-          saveFailureRetryTimer.value = null;
-          saveDocument({ reason: "retry" });
-        }, REVIEW_SAVE_FAILURE_RETRY_DELAY_MS);
-      }
-
-      function scheduleAutosave() {
-        clearSaveTimers();
-        autosaveTimer.value = window.setTimeout(() => {
-          autosaveTimer.value = null;
-          saveDocument({ reason: "autosave" });
-        }, REVIEW_IDLE_AUTOSAVE_DELAY_MS);
-      }
-
       async function saveDocument(options = {}) {
-        const { reason = "autosave" } = options || {};
+        const { reason = "manual" } = options || {};
         if (saving.value || confirming.value || cloudSyncBusy.value || suspendAutoSave.value || syncingRemoteRevision.value || !session.value) return false;
         if (staleRevisionConflict.value) {
           beginRemoteSaveRefresh();
@@ -1145,8 +1196,8 @@ export function mountHandoverReviewApp(Vue) {
         const payloadSnapshot = serializeDocument(documentRef.value);
         if (payloadSnapshot === lastSavedSnapshot.value) {
           clearSaveTimers();
-          pendingFailureRetryCount.value = 0;
           dirty.value = false;
+          statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已保存";
           return true;
         }
         clearSaveTimers();
@@ -1155,15 +1206,17 @@ export function mountHandoverReviewApp(Vue) {
         await ensureEditingLock();
         const payloadDirtyRegions = cloneDirtyRegions(dirtyRegions.value);
         if (reason === "confirm") {
-          statusText.value = "正在保存...";
-        } else if (reason === "retry") {
-          statusText.value = "正在重新保存...";
+          statusText.value = "正在保存并确认...";
         } else if (reason === "switch") {
           statusText.value = "正在保存并切换...";
         } else if (reason === "cloud_update") {
           statusText.value = "正在保存并更新云文档...";
+        } else if (reason === "download") {
+          statusText.value = "正在保存并准备下载...";
+        } else if (reason === "capacity_download") {
+          statusText.value = "正在保存并准备下载容量报表...";
         } else {
-          statusText.value = "正在自动保存...";
+          statusText.value = "正在保存...";
         }
         try {
           const response = await saveHandoverReviewApi(buildingCode, {
@@ -1181,14 +1234,9 @@ export function mountHandoverReviewApp(Vue) {
             capacityLinkedDirty.value = false;
           }
           dirty.value = serializeDocument(documentRef.value) !== lastSavedSnapshot.value;
-          pendingFailureRetryCount.value = 0;
-          clearSaveFailureRetryTimer();
           staleRevisionConflict.value = false;
           needsRefresh.value = false;
-          statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已自动保存";
-          if (dirty.value) {
-            scheduleAutosave();
-          }
+          statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已保存";
           return true;
         } catch (error) {
           if (isRevisionConflictError(error)) {
@@ -1198,11 +1246,7 @@ export function mountHandoverReviewApp(Vue) {
             return false;
           }
           errorText.value = String(error?.message || error || "保存失败");
-          if (reason === "autosave") {
-            scheduleSaveRetryAfterFailure();
-          } else {
-            statusText.value = "保存失败，请处理后重试。";
-          }
+          statusText.value = "保存失败，请处理后重试。";
           return false;
         } finally {
           saving.value = false;
@@ -1258,8 +1302,8 @@ export function mountHandoverReviewApp(Vue) {
           staleRevisionConflict.value
         ) return;
         if (dirty.value) {
-          statusText.value = "请先等待当前修改保存成功后再确认。";
-          return;
+          const saved = await saveDocument({ reason: "confirm" });
+          if (!saved) return;
         }
         confirming.value = true;
         errorText.value = "";
@@ -1370,8 +1414,8 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       async function downloadCurrentReviewFile() {
-        if (saving.value || dirty.value || syncingRemoteRevision.value) {
-          statusText.value = "请先等待当前修改保存成功后再下载。";
+        if (saving.value || syncingRemoteRevision.value) {
+          statusText.value = "请先等待当前保存或同步完成后再下载。";
           return;
         }
         const sessionId = String(session.value?.session_id || "").trim();
@@ -1379,16 +1423,15 @@ export function mountHandoverReviewApp(Vue) {
           statusText.value = "当前没有可下载的交接班文件";
           return;
         }
+        if (dirty.value) {
+          const saved = await saveDocument({ reason: "download" });
+          if (!saved) return;
+        }
         downloading.value = true;
         errorText.value = "";
         try {
           const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId);
-          const anchor = document.createElement("a");
-          anchor.href = `${url}&ts=${Date.now()}`;
-          anchor.style.display = "none";
-          document.body.appendChild(anchor);
-          anchor.click();
-          anchor.remove();
+          await downloadBlobFile(`${url}&ts=${Date.now()}`, session.value?.output_file || "交接班日志.xlsx");
           statusText.value = "交接班日志下载已开始";
         } catch (error) {
           errorText.value = String(error?.message || error || "下载失败");
@@ -1400,16 +1443,24 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       async function downloadCurrentCapacityReviewFile() {
-        if (capacityDownloadDisabled.value) {
-          const syncStatus = String(capacitySync.value?.status || "").trim().toLowerCase();
-          if (syncingRemoteRevision.value) {
-            statusText.value = "请先等待远端修订同步完成后再下载。";
-          } else if (capacityLinkedDirty.value) {
+        if (saving.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value) {
+          statusText.value = "请先等待当前保存或同步完成后再下载。";
+          return;
+        }
+        if (dirty.value) {
+          const saved = await saveDocument({ reason: "capacity_download" });
+          if (!saved) return;
+        }
+        if (!session.value || !session.value.session_id || !String(session.value.capacity_output_file || "").trim()) {
+          statusText.value = "当前没有可下载的交接班容量报表";
+          return;
+        }
+        const syncStatus = String(capacitySync.value?.status || "").trim().toLowerCase();
+        if (syncStatus !== "ready") {
+          if (capacityLinkedDirty.value) {
             statusText.value = "容量关联字段已修改，请先保存并等待容量报表补写完成。";
-          } else if (syncStatus && syncStatus !== "ready") {
-            statusText.value = capacitySync.value?.error || "容量报表待补写完成后才能下载。";
           } else {
-            statusText.value = "当前没有可下载的交接班容量报表";
+            statusText.value = capacitySync.value?.error || "容量报表待补写完成后才能下载。";
           }
           return;
         }
@@ -1423,12 +1474,7 @@ export function mountHandoverReviewApp(Vue) {
         errorText.value = "";
         try {
           const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId);
-          const anchor = document.createElement("a");
-          anchor.href = `${url}&ts=${Date.now()}`;
-          anchor.style.display = "none";
-          document.body.appendChild(anchor);
-          anchor.click();
-          anchor.remove();
+          await downloadBlobFile(`${url}&ts=${Date.now()}`, capacityOutputFile || "交接班容量报表.xlsx");
           statusText.value = "交接班容量报表下载已开始";
         } catch (error) {
           errorText.value = String(error?.message || error || "下载失败");
@@ -1517,11 +1563,19 @@ export function mountHandoverReviewApp(Vue) {
       async function refreshData() {
         clearSaveTimers();
         if (dirty.value) {
-          const saved = await saveDocument({ reason: "switch" });
+          const saved = await saveDocument({ reason: "manual" });
           if (!saved) return;
         }
         needsRefresh.value = false;
         await loadReviewData({ background: false });
+      }
+
+      async function saveCurrentReview() {
+        if (!dirty.value) {
+          statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已保存";
+          return;
+        }
+        await saveDocument({ reason: "manual" });
       }
 
       watch(
@@ -1531,8 +1585,6 @@ export function mountHandoverReviewApp(Vue) {
           const nextSnapshot = serializeDocument(documentRef.value);
           if (nextSnapshot === lastSavedSnapshot.value) return;
           dirty.value = true;
-          pendingFailureRetryCount.value = 0;
-          clearSaveFailureRetryTimer();
           if (staleRevisionConflict.value) {
             clearSaveTimers();
             beginRemoteSaveRefresh();
@@ -1545,7 +1597,6 @@ export function mountHandoverReviewApp(Vue) {
           } else {
             statusText.value = "待保存";
           }
-          scheduleAutosave();
         },
         { deep: true },
       );
@@ -1612,6 +1663,7 @@ export function mountHandoverReviewApp(Vue) {
         reviewFileSummary,
         reviewSaveBadge,
         reviewConfirmBadge,
+        saveActionVm,
         reviewCloudSheetVm,
         reviewCloudSheetUrl,
         capacitySync,
@@ -1631,6 +1683,7 @@ export function mountHandoverReviewApp(Vue) {
         updateFooterCell,
         addFooterRow,
         removeFooterRow,
+        saveCurrentReview,
         toggleConfirm,
         retryCloudSheetSync,
         downloadCurrentReviewFile,

@@ -1,4 +1,4 @@
-﻿export const DASHBOARD_WET_BULB_COLLECTION_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'wet_bulb_collection'">
+export const DASHBOARD_WET_BULB_COLLECTION_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'wet_bulb_collection'">
           <div class="dashboard-module-shell">
           <article class="task-block dashboard-module-scheduler-card">
             <div class="task-block-head">
@@ -37,21 +37,21 @@
             <div class="btn-line">
               <button
                 class="btn btn-success"
-                :disabled="health.wet_bulb_collection.scheduler.running || isActionLocked(actionKeyWetBulbSchedulerStart)"
+                :disabled="getSchedulerEffectiveRunning('wet_bulb', health.wet_bulb_collection.scheduler.remembered_enabled) || isActionLocked(actionKeyWetBulbSchedulerStart) || isActionLocked(actionKeyWetBulbSchedulerStop) || isSchedulerTogglePending('wet_bulb')"
                 @click="startWetBulbCollectionScheduler"
               >
                 {{
-                  isActionLocked(actionKeyWetBulbSchedulerStart)
+                  getSchedulerToggleMode('wet_bulb') === 'starting'
                     ? '启动中...'
-                    : (health.wet_bulb_collection.scheduler.running ? '已启动调度' : '启动调度')
+                    : (getSchedulerToggleMode('wet_bulb') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('wet_bulb', health.wet_bulb_collection.scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
                 }}
               </button>
               <button
                 class="btn btn-danger"
-                :disabled="!health.wet_bulb_collection.scheduler.running || isActionLocked(actionKeyWetBulbSchedulerStop)"
+                :disabled="!getSchedulerEffectiveRunning('wet_bulb', health.wet_bulb_collection.scheduler.remembered_enabled) || isActionLocked(actionKeyWetBulbSchedulerStop) || isActionLocked(actionKeyWetBulbSchedulerStart) || isSchedulerTogglePending('wet_bulb')"
                 @click="stopWetBulbCollectionScheduler"
               >
-                {{ isActionLocked(actionKeyWetBulbSchedulerStop) ? '停止中...' : '停止调度' }}
+                {{ getSchedulerToggleMode('wet_bulb') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('wet_bulb') === 'starting' ? '处理中...' : '停止调度') }}
               </button>
             </div>
             <div class="hint">{{ wetBulbSchedulerQuickSaving ? '湿球温度定时采集调度配置保存中...' : '修改执行间隔后自动保存。' }}</div>
@@ -167,3 +167,4 @@
         </section>
 
 `;
+

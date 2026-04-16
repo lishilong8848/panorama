@@ -7,7 +7,10 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config.settings_loader import save_settings
-from app.modules.scheduler.api._config_persistence import persist_scheduler_toggle
+from app.modules.scheduler.api._config_persistence import (
+    persist_scheduler_toggle,
+    record_scheduler_config_autostart,
+)
 
 
 router = APIRouter(prefix="/api/scheduler/handover", tags=["scheduler-handover"])
@@ -58,6 +61,9 @@ def _build_handover_scheduler_payload(container, action_result: Dict[str, Any] |
         "status": str(snapshot.get("status", "未初始化")),
         "executor_bound": bool(container.is_handover_scheduler_executor_bound()),
         "callback_name": container.handover_scheduler_executor_name(),
+        "remembered_enabled": bool(snapshot.get("remembered_enabled", False)),
+        "effective_auto_start_in_gui": bool(snapshot.get("effective_auto_start_in_gui", False)),
+        "memory_source": str(snapshot.get("memory_source", "") or ""),
         "morning": morning,
         "afternoon": afternoon,
         "state_paths": snapshot.get("state_paths", {}),
@@ -153,6 +159,11 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     new_cfg = _handover_scheduler_cfg_from_v3(container.config)
+    record_scheduler_config_autostart(
+        container,
+        path=("features", "handover_log", "scheduler"),
+        scheduler_cfg=new_cfg,
+    )
     new_morning = str(new_cfg.get("morning_time", "")).strip()
     new_afternoon = str(new_cfg.get("afternoon_time", "")).strip()
     morning_changed = old_morning != new_morning

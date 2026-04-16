@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from app.modules.report_pipeline.service.job_service import JobService
+from app.modules.report_pipeline.service.task_engine_database import TaskEngineDatabase
 
 
 def _wait_until(predicate, timeout_sec: float = 3.0) -> None:
@@ -143,3 +144,30 @@ def test_job_service_task_engine_runtime_snapshot_and_shutdown(tmp_path: Path) -
 
     closed_snapshot = service.task_engine_runtime_snapshot()
     assert closed_snapshot["closed"] is True
+
+
+def test_task_engine_database_restarts_dead_writer(tmp_path: Path) -> None:
+    db = TaskEngineDatabase(runtime_config={"paths": {}}, app_dir=tmp_path)
+    writer = db._writer
+    assert writer is not None
+
+    db._writes.put(db._close_sentinel, timeout=1.0)
+    writer.join(timeout=3.0)
+    assert not writer.is_alive()
+
+    db.upsert_job(
+        {
+            "job_id": "job-restarted",
+            "name": "demo",
+            "feature": "demo",
+            "status": "queued",
+            "created_at": "2026-04-15 10:00:00",
+        }
+    )
+
+    row = db.get_job("job-restarted")
+    assert row is not None
+    assert row["job_id"] == "job-restarted"
+    assert db.runtime_snapshot()["writer_alive"] is True
+
+    db.close()

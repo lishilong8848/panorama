@@ -26,6 +26,11 @@ from handover_log_module.service.handover_daily_report_screenshot_service import
 )
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
+from handover_log_module.service.review_document_state_service import (
+    ReviewDocumentStateConflictError,
+    ReviewDocumentStateError,
+    ReviewDocumentStateService,
+)
 from handover_log_module.service.review_document_writer import ReviewDocumentWriter
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
 from handover_log_module.service.review_session_service import (
@@ -87,7 +92,12 @@ def _get_session_concurrency_safe(
 
 
 def _handover_cfg(container) -> Dict[str, Any]:
-    return load_handover_config(container.runtime_config)
+    runtime_config = getattr(container, "runtime_config", None)
+    if isinstance(runtime_config, dict):
+        return load_handover_config(runtime_config)
+    config_path = Path(str(getattr(container, "config_path", "") or "")).resolve()
+    runtime_root = config_path.parent / ".runtime" if str(config_path) else Path(".runtime").resolve()
+    return {"_global_paths": {"runtime_state_root": str(runtime_root)}}
 
 
 def _build_review_services(container) -> tuple[ReviewSessionService, ReviewDocumentParser, ReviewDocumentWriter, ReviewFollowupTriggerService]:
@@ -97,6 +107,20 @@ def _build_review_services(container) -> tuple[ReviewSessionService, ReviewDocum
         ReviewDocumentParser(handover_cfg),
         ReviewDocumentWriter(handover_cfg),
         ReviewFollowupTriggerService(handover_cfg),
+    )
+
+
+def _build_review_document_state_service(
+    container,
+    *,
+    parser: ReviewDocumentParser | None = None,
+    writer: ReviewDocumentWriter | None = None,
+) -> ReviewDocumentStateService:
+    return ReviewDocumentStateService(
+        _handover_cfg(container),
+        parser=parser,
+        writer=writer,
+        emit_log=getattr(container, "add_system_log", print),
     )
 
 
@@ -535,15 +559,12 @@ def _sync_capacity_overlay_after_review_save(
 
     handover_cfg = _handover_cfg(container)
     capacity_service = HandoverCapacityReportService(handover_cfg)
-    template_cfg = handover_cfg.get("template", {}) if isinstance(handover_cfg.get("template", {}), dict) else {}
-    handover_sheet_name = str(template_cfg.get("sheet_name", "") or "").strip()
-    sync_payload = capacity_service.sync_overlay_for_existing_report(
+    sync_payload = capacity_service.sync_overlay_for_existing_report_from_cells(
         building=building,
         duty_date=duty_date,
         duty_shift=duty_shift,
-        handover_output_file=str(saved_session.get("output_file", "")).strip(),
+        handover_cells=tracked_cells,
         capacity_output_file=str(saved_session.get("capacity_output_file", "")).strip(),
-        handover_sheet_name=handover_sheet_name,
         emit_log=container.add_system_log,
     )
     sync_status = str(sync_payload.get("status", "")).strip().lower()
@@ -597,59 +618,12 @@ def _persist_review_defaults(
     document: Dict[str, Any],
     dirty_regions: Dict[str, bool] | None = None,
 ) -> Dict[str, int | bool]:
-    footer_defaults_service = FooterInventoryDefaultsService()
-    cabinet_defaults_service = CabinetPowerDefaultsService()
-    normalized_dirty = _normalize_review_dirty_regions(dirty_regions)
-    footer_dirty = bool(normalized_dirty.get("footer_inventory"))
-    cabinet_dirty = bool(normalized_dirty.get("fixed_blocks"))
-    if not footer_dirty and not cabinet_dirty:
-        return {
-            "footer_inventory_rows": 0,
-            "cabinet_power_fields": 0,
-            "config_updated": False,
-        }
-
-    footer_rows = footer_defaults_service.extract_rows_from_document(document) if footer_dirty else []
-    cabinet_cells = cabinet_defaults_service.extract_cells_from_document(document) if cabinet_dirty else {}
-    building_code = building_code_from_name(building)
-    building_segment_path = handover_building_segment_path(container.config_path, building_code)
-    current_doc = get_handover_building_segment(building_code, container.config_path)
-    current_data = current_doc.get("data", {}) if isinstance(current_doc.get("data", {}), dict) else {}
-    current_footer_rows, current_cabinet_cells = _normalized_review_defaults_snapshot(
-        footer_service=footer_defaults_service,
-        cabinet_service=cabinet_defaults_service,
-        config=current_data,
+    state_service = _build_review_document_state_service(container)
+    return state_service.persist_defaults_from_document(
         building=building,
+        document=document,
+        dirty_regions=_normalize_review_dirty_regions(dirty_regions),
     )
-    footer_changed = footer_dirty and (not building_segment_path.exists() or current_footer_rows != footer_rows)
-    cabinet_changed = cabinet_dirty and (not building_segment_path.exists() or current_cabinet_cells != cabinet_cells)
-    if not footer_changed and not cabinet_changed:
-        return {
-            "footer_inventory_rows": len(footer_rows),
-            "cabinet_power_fields": len(cabinet_cells),
-            "config_updated": False,
-        }
-    updated_config = current_data
-    if footer_changed:
-        updated_config = footer_defaults_service.set_building_defaults(updated_config, building, footer_rows)
-    if cabinet_changed:
-        updated_config = cabinet_defaults_service.set_building_defaults(updated_config, building, cabinet_cells)
-    saved_config, _document, aggregate_refresh_error = save_handover_building_segment(
-        building_code,
-        updated_config,
-        base_revision=int(current_doc.get("revision", 0) or 0),
-        config_path=container.config_path,
-    )
-    container.reload_config(saved_config)
-    if aggregate_refresh_error:
-        container.add_system_log(
-            f"[交接班][审核模板默认] 楼栋分段已保存，但聚合配置刷新失败: building={building}, error={aggregate_refresh_error}"
-        )
-    return {
-        "footer_inventory_rows": len(footer_rows),
-        "cabinet_power_fields": len(cabinet_cells),
-        "config_updated": True,
-    }
 
 
 def _resolve_building_or_404(service: ReviewSessionService, building_code: str) -> str:
@@ -666,9 +640,6 @@ def _load_latest_session_or_404(service: ReviewSessionService, building: str) ->
         _raise_review_store_http_error(exc)
     if not isinstance(session, dict):
         raise HTTPException(status_code=404, detail="暂无可审核交接班文件")
-    output_file = Path(str(session.get("output_file", "")).strip())
-    if not output_file.exists():
-        raise HTTPException(status_code=404, detail="最新交接班文件不存在，请重新生成")
     return session
 
 
@@ -704,9 +675,6 @@ def _load_target_session_or_404(
         raise HTTPException(status_code=404, detail="暂无可审核交接班文件")
     if str(session.get("building", "")).strip() != str(building or "").strip():
         raise HTTPException(status_code=404, detail="review session building mismatch")
-    output_file = Path(str(session.get("output_file", "")).strip())
-    if not output_file.exists():
-        raise HTTPException(status_code=404, detail="交接班文件不存在，请重新生成")
     return session
 
 
@@ -1389,7 +1357,8 @@ def handover_review_data(
     client_id: str = "",
 ) -> Dict[str, Any]:
     container = request.app.state.container
-    service, parser, _, _ = _build_review_services(container)
+    service, parser, writer, _ = _build_review_services(container)
+    document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
     building = _resolve_building_or_404(service, building_code)
     session = _load_target_session_or_404(
         service,
@@ -1398,7 +1367,10 @@ def handover_review_data(
         duty_shift=duty_shift,
         session_id=session_id,
     )
-    document = parser.parse(session["output_file"])
+    try:
+        document, session = document_state.load_document(session)
+    except ReviewDocumentStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         batch_status = service.get_batch_status(session["batch_key"])
     except ReviewSessionStoreUnavailableError as exc:
@@ -1431,20 +1403,29 @@ def handover_review_data(
 @router.get("/api/handover/review/{building_code}/download")
 def handover_review_download(building_code: str, request: Request, session_id: str = "") -> FileResponse:
     container = request.app.state.container
-    service, _, _, _ = _build_review_services(container)
+    service, parser, writer, _ = _build_review_services(container)
+    document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
     building = _resolve_building_or_404(service, building_code)
 
     session_id_text = str(session_id or "").strip()
     if not session_id_text:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    try:
+        document_state.ensure_document_for_session(target)
+    except ReviewDocumentStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     output_file_text = str(target.get("output_file", "")).strip()
     if not output_file_text:
-        raise HTTPException(status_code=404, detail="最新交接班文件不存在，请重新生成")
+        raise HTTPException(status_code=409, detail="交接班文件不存在，无法同步最新审核内容")
     output_file = Path(output_file_text)
     if not output_file.exists() or not output_file.is_file():
-        raise HTTPException(status_code=404, detail="最新交接班文件不存在，请重新生成")
+        raise HTTPException(status_code=409, detail="交接班文件不存在，无法同步最新审核内容")
+    try:
+        document_state.force_sync_session_dict(target, reason="download")
+    except ReviewDocumentStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     container.add_system_log(
         f"[交接班][下载成品] building={building}, session_id={session_id_text}, file={output_file}"
@@ -1496,7 +1477,8 @@ def handover_review_save(
     payload: Dict[str, Any] = Body(...),
 ) -> Dict[str, Any]:
     container = request.app.state.container
-    service, _, writer, _ = _build_review_services(container)
+    service, parser, writer, _ = _build_review_services(container)
+    document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
     building = _resolve_building_or_404(service, building_code)
 
     session_id = str(payload.get("session_id", "")).strip()
@@ -1507,40 +1489,63 @@ def handover_review_save(
     if not isinstance(document, dict):
         raise HTTPException(status_code=400, detail="document 格式错误")
     target = _load_target_session_or_404(service, building=building, session_id=session_id)
-    latest_revision = int(target.get("revision", 0) or 0)
-    if base_revision != latest_revision:
-        raise HTTPException(status_code=409, detail="审核内容已被其他人修改，请刷新后重试")
+    try:
+        document_state.ensure_document_for_session(target)
+    except ReviewDocumentStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     batch_key = str(target.get("batch_key", "")).strip()
     dirty_regions = _normalize_review_dirty_regions(payload.get("dirty_regions"))
     save_started = time.perf_counter()
     write_elapsed_ms = 0
     defaults_elapsed_ms = 0
+    capacity_elapsed_ms = 0
     session_elapsed_ms = 0
+    queued_excel_sync = False
     with container.job_service.resource_guard(
         name=f"handover_save:{batch_key or building}:{session_id}",
         resource_keys=_handover_resource_keys(batch_key=batch_key),
     ):
         write_started = time.perf_counter()
-        writer.write(
-            output_file=target["output_file"],
-            document=document,
-            dirty_regions=dirty_regions,
-        )
+        previous_document_state: Dict[str, Any] | None = None
+        try:
+            _saved_document_state, previous_document_state = document_state.save_document(
+                session=target,
+                document=document,
+                base_revision=base_revision,
+                dirty_regions=dirty_regions,
+            )
+        except ReviewDocumentStateConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ReviewDocumentStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         write_elapsed_ms = int((time.perf_counter() - write_started) * 1000)
         try:
             latest_session_id = service.get_latest_session_id(building)
         except ReviewSessionStoreUnavailableError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
             _raise_review_store_http_error(exc, saved_document=True)
         is_latest_session = bool(latest_session_id and latest_session_id == session_id)
         persisted_defaults = {"footer_inventory_rows": 0, "cabinet_power_fields": 0, "config_updated": False}
         if is_latest_session:
             defaults_started = time.perf_counter()
-            persisted_defaults = _persist_review_defaults(
-                container,
-                building=building,
-                document=document,
-                dirty_regions=dirty_regions,
-            )
+            try:
+                persisted_defaults = _persist_review_defaults(
+                    container,
+                    building=building,
+                    document=document,
+                    dirty_regions=dirty_regions,
+                )
+            except Exception as exc:  # noqa: BLE001
+                persisted_defaults = {
+                    "footer_inventory_rows": 0,
+                    "cabinet_power_fields": 0,
+                    "config_updated": False,
+                    "defaults_updated": False,
+                    "error": str(exc),
+                }
+                container.add_system_log(
+                    f"[交接班][审核模板默认] SQLite默认值写入失败，已保留审核文档保存结果: building={building}, error={exc}"
+                )
             defaults_elapsed_ms = int((time.perf_counter() - defaults_started) * 1000)
         try:
             session_started = time.perf_counter()
@@ -1558,12 +1563,16 @@ def handover_review_save(
                 )
             session_elapsed_ms = int((time.perf_counter() - session_started) * 1000)
         except ReviewSessionConflictError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ReviewSessionStoreUnavailableError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
             _raise_review_store_http_error(exc, saved_document=True)
         try:
+            capacity_started = time.perf_counter()
             session = _sync_capacity_overlay_after_review_save(
                 container=container,
                 review_service=service,
@@ -1572,35 +1581,56 @@ def handover_review_save(
                 document=document,
                 dirty_regions=dirty_regions,
             )
+            capacity_elapsed_ms = int((time.perf_counter() - capacity_started) * 1000)
         except ReviewSessionStoreUnavailableError as exc:
             _raise_review_store_http_error(exc, saved_document=True)
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        try:
+            excel_sync = document_state.enqueue_excel_sync(
+                session=session,
+                target_revision=int(session.get("revision", 0) or 0),
+            )
+            queued_excel_sync = str(excel_sync.get("status", "")).strip().lower() not in {"", "failed", "unknown"}
+        except Exception as exc:  # noqa: BLE001
+            excel_sync = {
+                "status": "failed",
+                "synced_revision": int(session.get("revision", 0) or 0) - 1 if int(session.get("revision", 0) or 0) > 0 else 0,
+                "pending_revision": int(session.get("revision", 0) or 0),
+                "error": f"后台Excel同步排队失败: {exc}",
+                "updated_at": "",
+            }
+            container.add_system_log(
+                f"[交接班][审核SQLite] 后台Excel同步排队失败，已保留审核文档保存结果: "
+                f"building={building}, session_id={session_id}, error={exc}"
+            )
+        session = dict(session)
+        session["excel_sync"] = excel_sync if isinstance(excel_sync, dict) else document_state.attach_excel_sync(session).get("excel_sync", {})
 
     total_elapsed_ms = int((time.perf_counter() - save_started) * 1000)
     if is_latest_session:
         container.add_system_log(
             f"[交接班][审核保存] building={building}, session_id={session_id}, revision={session.get('revision', '-')}, "
-            f"写文件耗时={write_elapsed_ms}ms, 默认值耗时={defaults_elapsed_ms}ms, 状态更新耗时={session_elapsed_ms}ms, 总耗时={total_elapsed_ms}ms"
+            f"SQLite保存耗时={write_elapsed_ms}ms, 默认值耗时={defaults_elapsed_ms}ms, "
+            f"容量补写耗时={capacity_elapsed_ms}ms, 状态更新耗时={session_elapsed_ms}ms, 总耗时={total_elapsed_ms}ms"
         )
-        if isinstance(persisted_defaults, dict) and persisted_defaults.get("config_updated"):
+        if isinstance(persisted_defaults, dict) and persisted_defaults.get("defaults_updated"):
             container.add_system_log(
-                f"[交接班][审核模板默认] 已写回楼栋默认值: building={building}, "
+                f"[交接班][审核模板默认] 已写入楼栋SQLite默认值: building={building}, "
                 f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0)}, "
-                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0)}, "
-                f"config={container.config_path}"
+                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0)}"
             )
         else:
             container.add_system_log(
-                f"[交接班][审核模板默认] 楼栋默认值无变化，已跳过配置写回: building={building}, "
+                f"[交接班][审核模板默认] 楼栋SQLite默认值无变化，已跳过写入: building={building}, "
                 f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0) if isinstance(persisted_defaults, dict) else 0}, "
-                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}, "
-                f"config={container.config_path}"
+                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}"
             )
     else:
         container.add_system_log(
             f"[交接班][历史模式保存] building={building}, session_id={session_id}, revision={session.get('revision', '-')}, "
-            f"写文件耗时={write_elapsed_ms}ms, 状态更新耗时={session_elapsed_ms}ms, 总耗时={total_elapsed_ms}ms"
+            f"SQLite保存耗时={write_elapsed_ms}ms, 容量补写耗时={capacity_elapsed_ms}ms, "
+            f"状态更新耗时={session_elapsed_ms}ms, 总耗时={total_elapsed_ms}ms"
         )
         container.add_system_log(
             f"[交接班][审核模板默认] 已跳过历史模式默认值更新: building={building}, session_id={session_id}"
@@ -1622,8 +1652,12 @@ def handover_review_save(
         "batch_status": batch_status,
         "save_profile": {
             "write_ms": int(write_elapsed_ms or 0),
+            "sqlite_save_ms": int(write_elapsed_ms or 0),
             "defaults_ms": int(defaults_elapsed_ms or 0),
+            "capacity_sync_ms": int(capacity_elapsed_ms or 0),
             "session_ms": int(session_elapsed_ms or 0),
+            "queued_excel_sync": bool(queued_excel_sync),
+            "excel_sync_status": str(session.get("excel_sync", {}).get("status", "") if isinstance(session.get("excel_sync", {}), dict) else ""),
             "total_ms": int(total_elapsed_ms or 0),
         },
         "history": _build_history_payload_safe(

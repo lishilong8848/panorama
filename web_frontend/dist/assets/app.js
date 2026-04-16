@@ -892,7 +892,7 @@ createApp({
         const entry = schedulerToggleState?.[key];
         if (!entry || typeof entry !== "object") return;
         entry.mode = "idle";
-        entry.runningOverride = null;
+        entry.rememberedOverride = null;
       }, SCHEDULER_TOGGLE_SETTLE_MS);
       schedulerToggleTimers.set(key, timer);
     }
@@ -904,28 +904,30 @@ createApp({
       if (Object.prototype.hasOwnProperty.call(patch, "mode")) {
         entry.mode = String(patch.mode || "idle").trim() || "idle";
       }
-      if (Object.prototype.hasOwnProperty.call(patch, "runningOverride")) {
-        entry.runningOverride = typeof patch.runningOverride === "boolean" ? patch.runningOverride : null;
+      if (Object.prototype.hasOwnProperty.call(patch, "rememberedOverride")) {
+        entry.rememberedOverride = typeof patch.rememberedOverride === "boolean" ? patch.rememberedOverride : null;
+      } else if (Object.prototype.hasOwnProperty.call(patch, "runningOverride")) {
+        entry.rememberedOverride = typeof patch.runningOverride === "boolean" ? patch.runningOverride : null;
       }
-      if (entry.mode === "idle" && entry.runningOverride === null) {
+      if (entry.mode === "idle" && entry.rememberedOverride === null) {
         clearSchedulerToggleTimer(name);
         return;
       }
       scheduleSchedulerToggleAutoClear(name);
     }
 
-    function syncSchedulerToggleStateWithHealth(key, actualRunning) {
+    function syncSchedulerToggleStateWithHealth(key, actualRememberedEnabled) {
       const name = String(key || "").trim();
       const entry = schedulerToggleState?.[name];
       if (!entry || typeof entry !== "object") return;
-      const actual = Boolean(actualRunning);
-      if (typeof entry.runningOverride === "boolean" && entry.runningOverride === actual) {
-        entry.runningOverride = null;
+      const actual = Boolean(actualRememberedEnabled);
+      if (typeof entry.rememberedOverride === "boolean" && entry.rememberedOverride === actual) {
+        entry.rememberedOverride = null;
       }
-      if (entry.mode !== "idle" && entry.runningOverride === null) {
+      if (entry.mode !== "idle" && entry.rememberedOverride === null) {
         entry.mode = "idle";
       }
-      if (entry.mode === "idle" && entry.runningOverride === null) {
+      if (entry.mode === "idle" && entry.rememberedOverride === null) {
         clearSchedulerToggleTimer(name);
       }
     }
@@ -935,17 +937,73 @@ createApp({
       return String(entry?.mode || "idle").trim() || "idle";
     }
 
-    function getSchedulerEffectiveRunning(key, actualRunning) {
+    function getSchedulerEffectiveRunning(key, actualRememberedEnabled) {
       const entry = schedulerToggleState?.[String(key || "").trim()];
-      if (typeof entry?.runningOverride === "boolean") {
-        return entry.runningOverride;
+      if (typeof entry?.rememberedOverride === "boolean") {
+        return entry.rememberedOverride;
       }
-      return Boolean(actualRunning);
+      return Boolean(actualRememberedEnabled);
     }
 
     function isSchedulerTogglePending(key) {
       const mode = getSchedulerToggleMode(key);
       return mode === "starting" || mode === "stopping";
+    }
+
+    function syncSchedulerDraftAutoStartFromRemembered(key, rememberedEnabled) {
+      const remembered = Boolean(rememberedEnabled);
+      const normalized = String(key || "").trim();
+      if (normalized === "scheduler" && config?.value?.scheduler && typeof config.value.scheduler === "object") {
+        config.value.scheduler.auto_start_in_gui = remembered;
+        return;
+      }
+      if (
+        normalized === "handover"
+        && config?.value?.handover_log?.scheduler
+        && typeof config.value.handover_log.scheduler === "object"
+      ) {
+        config.value.handover_log.scheduler.auto_start_in_gui = remembered;
+        return;
+      }
+      if (
+        normalized === "wet_bulb"
+        && config?.value?.wet_bulb_collection?.scheduler
+        && typeof config.value.wet_bulb_collection.scheduler === "object"
+      ) {
+        config.value.wet_bulb_collection.scheduler.auto_start_in_gui = remembered;
+        return;
+      }
+      if (
+        normalized === "day_metric_upload"
+        && config?.value?.day_metric_upload?.scheduler
+        && typeof config.value.day_metric_upload.scheduler === "object"
+      ) {
+        config.value.day_metric_upload.scheduler.auto_start_in_gui = remembered;
+        return;
+      }
+      if (
+        normalized === "alarm_event_upload"
+        && config?.value?.alarm_export?.scheduler
+        && typeof config.value.alarm_export.scheduler === "object"
+      ) {
+        config.value.alarm_export.scheduler.auto_start_in_gui = remembered;
+        return;
+      }
+      if (
+        normalized === "monthly_event_report"
+        && config?.value?.handover_log?.monthly_event_report?.scheduler
+        && typeof config.value.handover_log.monthly_event_report.scheduler === "object"
+      ) {
+        config.value.handover_log.monthly_event_report.scheduler.auto_start_in_gui = remembered;
+        return;
+      }
+      if (
+        normalized === "monthly_change_report"
+        && config?.value?.handover_log?.monthly_change_report?.scheduler
+        && typeof config.value.handover_log.monthly_change_report.scheduler === "object"
+      ) {
+        config.value.handover_log.monthly_change_report.scheduler.auto_start_in_gui = remembered;
+      }
     }
     const isAlarmSourceCacheUploadRunning = computed(() => Boolean(externalAlarmReadinessFamily.value?.uploadRunning));
     const isSourceCacheUploadAlarmFullLocked = computed(() =>
@@ -1445,7 +1503,7 @@ createApp({
     });
     const effectiveRoleMode = computed(() =>
       normalizeDeploymentRoleMode(
-        config.value?.deployment?.role_mode || health.deployment?.role_mode || "",
+        health.deployment?.role_mode || config.value?.deployment?.role_mode || "",
       ),
     );
     const deploymentRoleMode = computed(() => effectiveRoleMode.value);
@@ -1898,7 +1956,7 @@ createApp({
       validateStartupBridgeDraft(startupRoleSelectorSelection.value, startupRoleBridgeDraft.value),
     );
     const startupRoleCurrentHasBridgeConfig = computed(() =>
-      Boolean(resolveSharedBridgeRoleRoot(config.value || {}, startupRoleSelectorSelection.value)),
+      Boolean(resolveSharedBridgeRoleRoot(startupRoleDraftSourceConfig(), startupRoleSelectorSelection.value)),
     );
     const startupRoleBridgeNoticeText = computed(() => {
       if (!startupRoleRequiresBridgeConfig.value) return "";
@@ -1914,7 +1972,7 @@ createApp({
       return "请先填写共享目录。节点名称会自动使用角色中文名，节点 ID 也会自动生成并长期固定。";
     });
     const startupRoleHasDraftChanges = computed(() =>
-      isStartupBridgeDraftChanged(config.value || {}, startupRoleBridgeDraft.value, startupRoleSelectorSelection.value),
+      isStartupBridgeDraftChanged(startupRoleDraftSourceConfig(), startupRoleBridgeDraft.value, startupRoleSelectorSelection.value),
     );
     const startupRoleHasRelevantDraftChanges = computed(() =>
       startupRoleRequiresBridgeConfig.value && startupRoleHasDraftChanges.value,
@@ -1940,7 +1998,7 @@ createApp({
       Boolean(startupRoleSelectorVisible.value || !startupRoleDecisionReady.value),
     );
     const shouldRenderAppShell = computed(() =>
-      Boolean(config.value) && startupRoleDecisionReady.value && !startupRoleSelectorVisible.value,
+      Boolean(startupRoleDecisionReady.value && !startupRoleSelectorVisible.value),
     );
     const deploymentNodeIdDisplayText = computed(() =>
       buildRoleNodeIdPreview(
@@ -2307,6 +2365,7 @@ createApp({
       saveHandoverBuildingConfig,
       autoSaveConfig,
       activateStartupRuntime,
+      exitCurrentRuntime,
       restartApplication,
       checkUpdaterNow,
       applyUpdaterPatch,
@@ -2551,6 +2610,16 @@ createApp({
       };
     }
 
+    function startupRoleDraftSourceConfig() {
+      if (configLoaded.value && config.value && typeof config.value === "object") {
+        return config.value;
+      }
+      return {
+        deployment: health.deployment || {},
+        shared_bridge: health.startup_shared_bridge || {},
+      };
+    }
+
     function suppressCurrentStartupHandoff() {
       const nonce = String(health.startup_handoff?.nonce || "").trim();
       if (nonce) {
@@ -2570,7 +2639,7 @@ createApp({
 
     function syncStartupRoleBridgeDraft() {
       const role = normalizeDeploymentRoleMode(startupRoleSelectorSelection.value || startupRoleCurrentMode.value || "internal") || "internal";
-      startupRoleBridgeDraft.value = buildStartupBridgeDraft(config.value || {}, role);
+      startupRoleBridgeDraft.value = buildStartupBridgeDraft(startupRoleDraftSourceConfig(), role);
       startupRoleAdvancedVisible.value = false;
     }
 
@@ -2585,6 +2654,39 @@ createApp({
       const targetRole = normalizeDeploymentRoleMode(
         options?.targetRoleMode || startupRoleSelectorSelection.value || config.value?.deployment?.role_mode || startupRoleCurrentMode.value,
       );
+      const bridgeRoot = String(startupRoleBridgeDraft.value?.root_dir || "").trim();
+      const roleRootKey = targetRole === "internal" ? "internal_root_dir" : "external_root_dir";
+      const sharedBridgePayload = {
+        enabled: true,
+        poll_interval_sec: normalizePositiveInteger(
+          startupRoleBridgeDraft.value?.poll_interval_sec,
+          STARTUP_BRIDGE_DEFAULTS.poll_interval_sec,
+        ),
+        heartbeat_interval_sec: normalizePositiveInteger(
+          startupRoleBridgeDraft.value?.heartbeat_interval_sec,
+          STARTUP_BRIDGE_DEFAULTS.heartbeat_interval_sec,
+        ),
+        claim_lease_sec: normalizePositiveInteger(
+          startupRoleBridgeDraft.value?.claim_lease_sec,
+          STARTUP_BRIDGE_DEFAULTS.claim_lease_sec,
+        ),
+        stale_task_timeout_sec: normalizePositiveInteger(
+          startupRoleBridgeDraft.value?.stale_task_timeout_sec,
+          STARTUP_BRIDGE_DEFAULTS.stale_task_timeout_sec,
+        ),
+        artifact_retention_days: normalizePositiveInteger(
+          startupRoleBridgeDraft.value?.artifact_retention_days,
+          STARTUP_BRIDGE_DEFAULTS.artifact_retention_days,
+        ),
+        sqlite_busy_timeout_ms: normalizePositiveInteger(
+          startupRoleBridgeDraft.value?.sqlite_busy_timeout_ms,
+          STARTUP_BRIDGE_DEFAULTS.sqlite_busy_timeout_ms,
+        ),
+      };
+      if (bridgeRoot && roleRootKey) {
+        sharedBridgePayload.root_dir = bridgeRoot;
+        sharedBridgePayload[roleRootKey] = bridgeRoot;
+      }
       showStartupRoleLoading({
         title: `正在加载${formatDeploymentRoleLabel(targetRole || "internal")}`,
         subtitle: "正在连接后台运行时，请稍候。",
@@ -2592,6 +2694,8 @@ createApp({
       });
       const activationResult = await activateStartupRuntime({
         source,
+        roleMode: targetRole,
+        sharedBridge: sharedBridgePayload,
         startupHandoffNonce: String(options?.startupHandoffNonce || "").trim(),
       });
       if (activationResult?.ok === false) {
@@ -2604,6 +2708,21 @@ createApp({
       health.runtime_activated = true;
       health.startup_role_confirmed = true;
       health.role_selection_required = false;
+      health.startup_role_user_exited = false;
+      if (targetRole) {
+        Object.assign(health.deployment, {
+          ...(health.deployment || {}),
+          role_mode: targetRole,
+          last_started_role_mode: targetRole,
+          node_label: formatDeploymentRoleLabel(targetRole),
+        });
+      }
+      if (activationResult?.savedRole && typeof activationResult.savedRole === "object") {
+        Object.assign(health.deployment, {
+          role_mode: String(activationResult.savedRole.role_mode || targetRole || "").trim(),
+          node_label: String(activationResult.savedRole.node_label || formatDeploymentRoleLabel(targetRole)).trim(),
+        });
+      }
       if (health.startup_handoff && typeof health.startup_handoff === "object") {
         Object.assign(health.startup_handoff, {
           active: false,
@@ -2617,16 +2736,51 @@ createApp({
       startupRoleSuppressedHandoffNonce.value = "";
       await fetchBootstrapHealth({ silentMessage: true });
       await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+      void fetchConfig({ silentMessage: true });
       persistStartupRoleSession(targetRole);
       hideStartupRoleLoading();
       startupRoleFlowState.value = "activated";
       return true;
     }
 
+    async function exitCurrentSystemToRoleSelector() {
+      if (startupRoleSelectorBusy.value || startupRoleLoadingVisible.value) return;
+      startupRoleSelectorBusy.value = true;
+      showStartupRoleLoading({
+        title: "正在退出当前系统",
+        subtitle: "正在停止当前角色的调度、共享桥接和后台运行组件。",
+        stage: "activating",
+      });
+      const result = await exitCurrentRuntime({ source: "用户退出当前系统" });
+      startupRoleSelectorBusy.value = false;
+      if (!result?.ok) {
+        hideStartupRoleLoading();
+        message.value = String(result?.error || "").trim() || "退出当前系统失败。";
+        return;
+      }
+      clearStartupRoleSession();
+      clearStartupRuntimeRecovery();
+      clearLegacyStartupRoleRestartState();
+      startupRoleAutoActivationKey.value = "";
+      health.runtime_activated = false;
+      health.startup_role_confirmed = false;
+      health.role_selection_required = true;
+      health.startup_role_user_exited = true;
+      selectStartupRole(
+        startupRoleCurrentMode.value
+        || deploymentRoleMode.value
+        || startupRoleSelectorSelection.value
+        || "internal",
+      );
+      syncStartupRoleBridgeDraft();
+      showStartupRoleSelector("已退出当前系统，请重新选择角色。");
+      message.value = "已退出当前系统，请重新选择角色。";
+      await fetchBootstrapHealth({ silentMessage: true });
+    }
+
     async function confirmStartupRoleSelection() {
       if (startupRoleSelectorBusy.value) return;
       const targetRole = normalizeDeploymentRoleMode(startupRoleSelectorSelection.value);
-      const currentRole = startupRoleCurrentMode.value;
       startupRoleSelectorBusy.value = true;
       startupRoleSelectorMessage.value = "";
       showStartupRoleLoading({
@@ -2644,179 +2798,18 @@ createApp({
         return;
       }
 
-      if (targetRole === currentRole && !startupRoleHasRelevantDraftChanges.value) {
-        showStartupRoleLoading({
-          title: `正在启动${formatDeploymentRoleLabel(targetRole)}`,
-          subtitle: "角色配置无需变更，正在进入对应页面。",
-          stage: "activating",
-        });
-        const activated = await activateStartupRuntimeAfterSelection("startup_role_confirm", {
-          targetRoleMode: targetRole,
-        });
-        if (!activated) {
-          startupRoleSelectorBusy.value = false;
-          showStartupRoleSelector("后台运行时激活失败。");
-          return;
-        }
-        closeStartupRoleSelector({ handled: true });
-        message.value = `本次启动已按${formatDeploymentRoleLabel(targetRole)}运行。`;
+      const activated = await activateStartupRuntimeAfterSelection("startup_role_confirm", {
+        targetRoleMode: targetRole,
+      });
+      startupRoleSelectorBusy.value = false;
+      if (!activated) {
+        showStartupRoleSelector("后台运行时激活失败。");
         return;
       }
-
-      const previousConfig = clone(config.value || {});
-      showStartupRoleLoading({
-        title: "正在保存角色配置",
-        subtitle: `正在应用${formatDeploymentRoleLabel(targetRole)}配置，请稍候。`,
-        stage: "saving",
-      });
-      try {
-        if (!config.value?.deployment || typeof config.value.deployment !== "object") {
-          config.value.deployment = {};
-        }
-        if (!config.value?.shared_bridge || typeof config.value.shared_bridge !== "object") {
-          config.value.shared_bridge = {};
-        }
-        config.value.deployment.role_mode = targetRole;
-        if (targetRole === "internal" || targetRole === "external") {
-          config.value.deployment.node_label = formatDeploymentRoleLabel(targetRole);
-          const nextRootDir = String(startupRoleBridgeDraft.value.root_dir || "").trim();
-          const roleRootKey = targetRole === "internal" ? "internal_root_dir" : "external_root_dir";
-          Object.assign(config.value.shared_bridge, {
-            enabled: true,
-            [roleRootKey]: nextRootDir,
-            root_dir: nextRootDir,
-            poll_interval_sec: normalizePositiveInteger(
-              startupRoleBridgeDraft.value.poll_interval_sec,
-              STARTUP_BRIDGE_DEFAULTS.poll_interval_sec,
-            ),
-            heartbeat_interval_sec: normalizePositiveInteger(
-              startupRoleBridgeDraft.value.heartbeat_interval_sec,
-              STARTUP_BRIDGE_DEFAULTS.heartbeat_interval_sec,
-            ),
-            claim_lease_sec: normalizePositiveInteger(
-              startupRoleBridgeDraft.value.claim_lease_sec,
-              STARTUP_BRIDGE_DEFAULTS.claim_lease_sec,
-            ),
-            stale_task_timeout_sec: normalizePositiveInteger(
-              startupRoleBridgeDraft.value.stale_task_timeout_sec,
-              STARTUP_BRIDGE_DEFAULTS.stale_task_timeout_sec,
-            ),
-            artifact_retention_days: normalizePositiveInteger(
-              startupRoleBridgeDraft.value.artifact_retention_days,
-              STARTUP_BRIDGE_DEFAULTS.artifact_retention_days,
-            ),
-            sqlite_busy_timeout_ms: normalizePositiveInteger(
-              startupRoleBridgeDraft.value.sqlite_busy_timeout_ms,
-              STARTUP_BRIDGE_DEFAULTS.sqlite_busy_timeout_ms,
-            ),
-          });
-        }
-        const isRoleSwitch = targetRole !== currentRole;
-        const startupRoleConfigPatch = {
-          common: {
-            deployment: {
-              role_mode: targetRole,
-              node_label: formatDeploymentRoleLabel(targetRole),
-            },
-            shared_bridge: {
-              enabled: true,
-              ...(targetRole === "internal"
-                ? { internal_root_dir: String(startupRoleBridgeDraft.value.root_dir || "").trim() }
-                : { external_root_dir: String(startupRoleBridgeDraft.value.root_dir || "").trim() }),
-              root_dir: String(startupRoleBridgeDraft.value.root_dir || "").trim(),
-              poll_interval_sec: normalizePositiveInteger(
-                startupRoleBridgeDraft.value.poll_interval_sec,
-                STARTUP_BRIDGE_DEFAULTS.poll_interval_sec,
-              ),
-              heartbeat_interval_sec: normalizePositiveInteger(
-                startupRoleBridgeDraft.value.heartbeat_interval_sec,
-                STARTUP_BRIDGE_DEFAULTS.heartbeat_interval_sec,
-              ),
-              claim_lease_sec: normalizePositiveInteger(
-                startupRoleBridgeDraft.value.claim_lease_sec,
-                STARTUP_BRIDGE_DEFAULTS.claim_lease_sec,
-              ),
-              stale_task_timeout_sec: normalizePositiveInteger(
-                startupRoleBridgeDraft.value.stale_task_timeout_sec,
-                STARTUP_BRIDGE_DEFAULTS.stale_task_timeout_sec,
-              ),
-              artifact_retention_days: normalizePositiveInteger(
-                startupRoleBridgeDraft.value.artifact_retention_days,
-                STARTUP_BRIDGE_DEFAULTS.artifact_retention_days,
-              ),
-              sqlite_busy_timeout_ms: normalizePositiveInteger(
-                startupRoleBridgeDraft.value.sqlite_busy_timeout_ms,
-                STARTUP_BRIDGE_DEFAULTS.sqlite_busy_timeout_ms,
-              ),
-            },
-          },
-        };
-        const saveResult = await savePartialConfig(startupRoleConfigPatch, {
-          skipPostSaveHealthRefresh: isRoleSwitch || Boolean(health.runtime_activated),
-        });
-        if (!saveResult?.saved) {
-          config.value = previousConfig;
-          showStartupRoleSelector(
-            saveResult?.reason === "invalid"
-              ? String(saveResult?.error || "").trim() || "当前配置校验失败，请检查启动角色参数或其余配置。"
-              : String(saveResult?.error || "").trim() || "保存角色配置失败。",
-          );
-          return;
-        }
-        const shouldRestartForStartupConfirm =
-          Boolean(saveResult?.restartRequired) && (isRoleSwitch || Boolean(health.runtime_activated));
-        if (shouldRestartForStartupConfirm) {
-          hideStartupRoleLoading();
-          const restartResult = await restartApplication({
-            source: "startup_role_picker",
-            targetRoleMode: targetRole,
-            reason: isRoleSwitch ? "role_mode_switch" : "startup_bridge_config_confirm",
-            kicker: isRoleSwitch ? "角色切换中" : "桥接配置生效中",
-            title: isRoleSwitch
-              ? `正在切换到${formatDeploymentRoleLabel(targetRole)}`
-              : `正在应用${formatDeploymentRoleLabel(targetRole)}桥接配置`,
-            subtitle: isRoleSwitch
-              ? "角色配置已保存，程序正在当前窗口内重启并切换监听地址。"
-              : "桥接配置已保存，程序正在当前窗口内重启并应用新的运行参数。",
-            reloadSubtitle: isRoleSwitch
-              ? "服务已恢复，正在刷新当前页面并继续启动新的运行角色。"
-              : "服务已恢复，正在刷新当前页面并接入新的桥接配置。",
-            message: isRoleSwitch
-              ? `已提交切换到${formatDeploymentRoleLabel(targetRole)}，正在当前窗口内重启并等待服务恢复。`
-              : `已提交${formatDeploymentRoleLabel(targetRole)}桥接配置更新，正在等待服务恢复。`,
-          });
-          if (restartResult?.ok === false) {
-            clearLegacyStartupRoleRestartState();
-            showStartupRoleSelector(
-              String(restartResult?.error || "").trim() || "角色配置已保存，但触发程序重启失败。",
-            );
-          }
-          return;
-        }
-        showStartupRoleLoading({
-          title: `正在加载${formatDeploymentRoleLabel(targetRole)}`,
-          subtitle: "配置已保存，正在连接后台运行时。",
-          stage: "activating",
-        });
-        const activated = await activateStartupRuntimeAfterSelection("startup_role_confirm_after_save", {
-          targetRoleMode: targetRole,
-        });
-        if (!activated) {
-          showStartupRoleSelector("后台运行时激活失败。");
-          return;
-        }
-        closeStartupRoleSelector({ handled: true });
-        clearLegacyStartupRoleRestartState();
-        syncStartupRoleBridgeDraft();
-        message.value =
-          targetRole === currentRole
-            ? `已确认${formatDeploymentRoleLabel(targetRole)}启动配置。`
-            : `已切换到${formatDeploymentRoleLabel(targetRole)}。`;
-      } catch (err) {
-        config.value = previousConfig;
-        clearLegacyStartupRoleRestartState();
-        showStartupRoleSelector(`角色切换失败: ${err}`);
-      }
+      closeStartupRoleSelector({ handled: true });
+      clearLegacyStartupRoleRestartState();
+      syncStartupRoleBridgeDraft();
+      message.value = `已进入${formatDeploymentRoleLabel(targetRole)}。`;
     }
 
     function formatJobWaitReason(job) {
@@ -4304,6 +4297,40 @@ createApp({
           })();
           return;
         }
+        if (
+          !routeRole
+          && savedRole
+          && state.startupRoleConfirmed
+          && !state.roleSelectionRequired
+        ) {
+          const activationKey = `${state.currentStartupToken || ""}|${savedRole}|saved_config_resume`;
+          if (startupRoleSelectorBusy.value || (startupRoleLoadingVisible.value && startupRoleFlowState.value !== "recovering")) return;
+          if (startupRoleAutoActivationKey.value === activationKey) return;
+          selectStartupRole(savedRole);
+          syncStartupRoleBridgeDraft();
+          startupRoleDecisionReady.value = true;
+          startupRoleSelectorHandled.value = true;
+          startupRoleSelectorVisible.value = false;
+          startupRoleAutoActivationKey.value = activationKey;
+          startupRoleSelectorBusy.value = true;
+          showStartupRoleLoading({
+            title: `正在恢复${formatDeploymentRoleLabel(savedRole)}`,
+            subtitle: "检测到已保存的启动角色和共享目录，正在自动恢复对应页面。",
+            stage: "recovering",
+          });
+          void (async () => {
+            const activated = await activateStartupRuntimeAfterSelection("startup_role_saved_config_resume", {
+              targetRoleMode: savedRole,
+            });
+            startupRoleSelectorBusy.value = false;
+            if (!activated) {
+              showStartupRoleSelector("后台运行时激活失败，请重新确认启动角色。");
+              return;
+            }
+            closeStartupRoleSelector({ handled: true });
+          })();
+          return;
+        }
         if (state.selectorVisible || state.selectorBusy) return;
         clearLegacyStartupRoleRestartState();
         startupRoleAutoActivationKey.value = "";
@@ -4384,6 +4411,17 @@ createApp({
       }
       return false;
     });
+
+    watch(
+      () => bootstrapReady.value,
+      (ready) => {
+        if (!ready) return;
+        if (configLoaded.value) return;
+        if (!health.runtime_activated || !health.startup_role_confirmed || startupRoleSelectorVisible.value) return;
+        void fetchConfig({ silentMessage: true });
+      },
+      { immediate: true },
+    );
 
     watch(
       () => ({
@@ -4631,13 +4669,62 @@ createApp({
       { immediate: true },
     );
 
-    watch(() => health.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("scheduler", value), { immediate: true });
-    watch(() => health.handover_scheduler.running, (value) => syncSchedulerToggleStateWithHealth("handover", value), { immediate: true });
-    watch(() => health.wet_bulb_collection.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("wet_bulb", value), { immediate: true });
-    watch(() => health.day_metric_upload.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("day_metric_upload", value), { immediate: true });
-    watch(() => health.alarm_event_upload.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("alarm_event_upload", value), { immediate: true });
-    watch(() => health.monthly_event_report.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("monthly_event_report", value), { immediate: true });
-    watch(() => health.monthly_change_report.scheduler.running, (value) => syncSchedulerToggleStateWithHealth("monthly_change_report", value), { immediate: true });
+    watch(
+      () => health.scheduler.remembered_enabled,
+      (value) => {
+        syncSchedulerToggleStateWithHealth("scheduler", value);
+        syncSchedulerDraftAutoStartFromRemembered("scheduler", value);
+      },
+      { immediate: true },
+    );
+    watch(
+      () => health.handover_scheduler.remembered_enabled,
+      (value) => {
+        syncSchedulerToggleStateWithHealth("handover", value);
+        syncSchedulerDraftAutoStartFromRemembered("handover", value);
+      },
+      { immediate: true },
+    );
+    watch(
+      () => health.wet_bulb_collection.scheduler.remembered_enabled,
+      (value) => {
+        syncSchedulerToggleStateWithHealth("wet_bulb", value);
+        syncSchedulerDraftAutoStartFromRemembered("wet_bulb", value);
+      },
+      { immediate: true },
+    );
+    watch(
+      () => health.day_metric_upload.scheduler.remembered_enabled,
+      (value) => {
+        syncSchedulerToggleStateWithHealth("day_metric_upload", value);
+        syncSchedulerDraftAutoStartFromRemembered("day_metric_upload", value);
+      },
+      { immediate: true },
+    );
+    watch(
+      () => health.alarm_event_upload.scheduler.remembered_enabled,
+      (value) => {
+        syncSchedulerToggleStateWithHealth("alarm_event_upload", value);
+        syncSchedulerDraftAutoStartFromRemembered("alarm_event_upload", value);
+      },
+      { immediate: true },
+    );
+    watch(
+      () => health.monthly_event_report.scheduler.remembered_enabled,
+      (value) => {
+        syncSchedulerToggleStateWithHealth("monthly_event_report", value);
+        syncSchedulerDraftAutoStartFromRemembered("monthly_event_report", value);
+      },
+      { immediate: true },
+    );
+    watch(
+      () => health.monthly_change_report.scheduler.remembered_enabled,
+      (value) => {
+        syncSchedulerToggleStateWithHealth("monthly_change_report", value);
+        syncSchedulerDraftAutoStartFromRemembered("monthly_change_report", value);
+      },
+      { immediate: true },
+    );
 
     watch(
       () => shouldPollBridgeTasks.value,
@@ -4705,6 +4792,7 @@ createApp({
       sharedBridgeSelfCheckResult,
       streamController,
       fetchHealth,
+      fetchConfig,
       fetchJobs,
       fetchBridgeTasks,
       fetchBridgeTaskDetail,
@@ -5014,6 +5102,7 @@ createApp({
       updaterBadgeToneClass,
       updaterButtonClass,
       isUpdaterActionLocked,
+      exitCurrentSystemToRoleSelector,
       isUpdaterInternalPeerCheckLocked,
       isUpdaterInternalPeerApplyLocked,
       updaterInternalPeerCheckButtonText,

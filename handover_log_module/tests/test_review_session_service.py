@@ -300,6 +300,54 @@ def test_get_latest_session_recovery_degrades_gracefully_when_state_save_fails(
     assert latest["source_mode"] == "recovered_from_output"
 
 
+def test_get_latest_session_repairs_latest_map_without_full_state_rewrite(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    service = _build_service(tmp_path)
+    output_dir = tmp_path / "outputs"
+    night_file = output_dir / "C楼_20260322_交接班日志.xlsx"
+    day_file = output_dir / "C楼_20260322_交接班日志_2.xlsx"
+    _create_output_file(night_file, shift_text="夜班")
+    _create_output_file(day_file, shift_text="白班")
+
+    service.register_generated_output(
+        building="C楼",
+        duty_date="2026-03-22",
+        duty_shift="night",
+        data_file="",
+        output_file=str(night_file),
+        source_mode="from_download",
+    )
+    service.register_generated_output(
+        building="C楼",
+        duty_date="2026-03-22",
+        duty_shift="day",
+        data_file="",
+        output_file=str(day_file),
+        source_mode="from_download",
+    )
+
+    state = service._review_state_store.load_state()
+    state["review_latest_by_building"] = {"C楼": "C楼|2026-03-22|night"}
+    state["review_latest_batch_key"] = "2026-03-22|night"
+    service._review_state_store.save_state(state)
+
+    def _boom(_payload):  # noqa: ANN001
+        raise AssertionError("save_state should not be used in latest-session repair")
+
+    monkeypatch.setattr(service._review_state_store, "save_state", _boom)
+
+    latest = service.get_latest_session("C楼")
+
+    assert latest is not None
+    assert latest["session_id"] == "C楼|2026-03-22|day"
+
+    reloaded = service._review_state_store.load_state()
+    assert reloaded["review_latest_by_building"]["C楼"] == "C楼|2026-03-22|day"
+    assert reloaded["review_latest_batch_key"] == "2026-03-22|day"
+
+
 def test_get_batch_status_and_session_follow_requested_duty_context(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     output_dir = tmp_path / "outputs"

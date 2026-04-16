@@ -60,11 +60,13 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     monthlyReportTestReceiveIdType,
     streamController,
     fetchHealth,
+    fetchConfig,
     fetchJobs,
     runSingleFlight,
     setSchedulerToggleState,
   } = ctx;
   let healthRefreshTimer = null;
+  let configRefreshTimer = null;
 
   function scheduleHealthRefresh(delayMs = 800) {
     if (healthRefreshTimer) {
@@ -76,9 +78,24 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
   }
 
-  function markSchedulerToggle(key, mode, runningOverride) {
+  function scheduleConfigBaselineRefresh(delayMs = 300) {
+    if (typeof fetchConfig !== "function") return;
+    if (configRefreshTimer) {
+      window.clearTimeout(configRefreshTimer);
+    }
+    configRefreshTimer = window.setTimeout(() => {
+      configRefreshTimer = null;
+      void fetchConfig({
+        silentMessage: true,
+        applyToDraft: false,
+        loadHandoverSegments: false,
+      });
+    }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
+  }
+
+  function markSchedulerToggle(key, mode, rememberedOverride) {
     if (typeof setSchedulerToggleState !== "function") return;
-    setSchedulerToggleState(key, { mode, runningOverride });
+    setSchedulerToggleState(key, { mode, rememberedOverride });
   }
 
   function isInternalRole() {
@@ -106,6 +123,15 @@ export function createDashboardMonthlyEventReportActions(ctx) {
       state_exists: Boolean(data.state_exists),
       executor_bound: Boolean(data.executor_bound),
       callback_name: String(data.callback_name || "-"),
+      remembered_enabled: Object.prototype.hasOwnProperty.call(data, "remembered_enabled")
+        ? Boolean(data.remembered_enabled)
+        : Boolean(targetScheduler.remembered_enabled),
+      effective_auto_start_in_gui: Object.prototype.hasOwnProperty.call(data, "effective_auto_start_in_gui")
+        ? Boolean(data.effective_auto_start_in_gui)
+        : Boolean(targetScheduler.effective_auto_start_in_gui),
+      memory_source: Object.prototype.hasOwnProperty.call(data, "memory_source")
+        ? String(data.memory_source || "")
+        : String(targetScheduler.memory_source || ""),
     });
   }
 
@@ -301,6 +327,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           applySchedulerSnapshot(health?.monthly_event_report?.scheduler, data);
           markSchedulerToggle("monthly_event_report", "idle", true);
           scheduleHealthRefresh();
+          scheduleConfigBaselineRefresh();
           message.value = `月度事件统计表调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("monthly_event_report", "idle", null);
@@ -326,6 +353,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           applySchedulerSnapshot(health?.monthly_event_report?.scheduler, data);
           markSchedulerToggle("monthly_event_report", "idle", false);
           scheduleHealthRefresh();
+          scheduleConfigBaselineRefresh();
           message.value = `月度事件统计表调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("monthly_event_report", "idle", null);
@@ -377,6 +405,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           if (config.value?.handover_log?.monthly_event_report?.scheduler && data?.scheduler_config) {
             Object.assign(config.value.handover_log.monthly_event_report.scheduler, data.scheduler_config);
           }
+          scheduleConfigBaselineRefresh();
           await fetchHealth();
           message.value = data?.message || "月度事件统计表调度配置已更新";
         } catch (err) {
@@ -404,6 +433,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           applySchedulerSnapshot(health?.monthly_change_report?.scheduler, data);
           markSchedulerToggle("monthly_change_report", "idle", true);
           scheduleHealthRefresh();
+          scheduleConfigBaselineRefresh();
           message.value = `月度变更统计表调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("monthly_change_report", "idle", null);
@@ -429,6 +459,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           applySchedulerSnapshot(health?.monthly_change_report?.scheduler, data);
           markSchedulerToggle("monthly_change_report", "idle", false);
           scheduleHealthRefresh();
+          scheduleConfigBaselineRefresh();
           message.value = `月度变更统计表调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("monthly_change_report", "idle", null);
@@ -480,6 +511,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           if (config.value?.handover_log?.monthly_change_report?.scheduler && data?.scheduler_config) {
             Object.assign(config.value.handover_log.monthly_change_report.scheduler, data.scheduler_config);
           }
+          scheduleConfigBaselineRefresh();
           await fetchHealth();
           message.value = data?.message || "月度变更统计表调度配置已更新";
         } catch (err) {
