@@ -2457,7 +2457,10 @@ class JobService:
 
     def cancel_job(self, job_id: str) -> Dict[str, Any]:
         with self._lock:
-            job = self._jobs.get(job_id)
+            normalized_job_id = str(job_id or "").strip()
+            job = self._jobs.get(normalized_job_id)
+            if job is None:
+                job = self._restore_job_from_db_locked(normalized_job_id)
             if job is None:
                 raise KeyError(f"任务不存在: {job_id}")
             if job.status in {"success", "failed", "cancelled", "partial_failed"}:

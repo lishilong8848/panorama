@@ -127,6 +127,62 @@ def test_job_service_reuses_active_job_by_dedupe_key_from_sqlite(tmp_path: Path)
     service.wait_job(first.job_id, timeout_sec=3)
 
 
+def test_job_service_can_cancel_waiting_resource_job_restored_from_sqlite(tmp_path: Path) -> None:
+    restored_service = JobService()
+    restored_service.configure_task_engine(
+        runtime_config={"paths": {}},
+        app_dir=tmp_path,
+        config_snapshot_getter=lambda: {"paths": {}},
+    )
+    db = restored_service._task_engine_db  # noqa: SLF001
+    assert db is not None
+    db.upsert_job(
+        {
+            "job_id": "job-waiting-restored",
+            "name": "second",
+            "feature": "demo_feature",
+            "status": "waiting_resource",
+            "created_at": "2026-04-19 22:00:00",
+            "started_at": "",
+            "finished_at": "",
+            "summary": "waiting",
+            "error": "",
+            "result": None,
+            "priority": "manual",
+            "resource_keys": ["browser:controlled"],
+            "wait_reason": "waiting:browser_controlled",
+            "bridge_task_id": "",
+            "cancel_requested": False,
+            "last_event_id": 0,
+        },
+        config_snapshot={"paths": {}},
+    )
+    db.upsert_stage(
+        "job-waiting-restored",
+        {
+            "stage_id": "main",
+            "name": "demo_feature",
+            "status": "waiting_resource",
+            "resource_keys": ["browser:controlled"],
+            "resume_policy": "manual_resume",
+            "worker_handler": "",
+            "worker_pid": 0,
+            "started_at": "",
+            "finished_at": "",
+            "summary": "waiting",
+            "error": "",
+            "result": None,
+            "cancel_requested": False,
+        },
+    )
+
+    payload = restored_service.cancel_job("job-waiting-restored")
+
+    assert payload["job_id"] == "job-waiting-restored"
+    assert payload["status"] == "cancelled"
+    assert restored_service.get_job("job-waiting-restored")["status"] == "cancelled"
+
+
 def test_job_service_task_engine_runtime_snapshot_and_shutdown(tmp_path: Path) -> None:
     service = JobService()
     service.configure_task_engine(

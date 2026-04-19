@@ -326,8 +326,16 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         deployment["node_label"] = _role_label(normalized)
         _apply_shared_bridge_role_patch(shared_bridge_cfg, normalized, payload)
 
-        saved = save_settings(merged, container.config_path)
-        container.reload_config(saved)
+        if merged == (container.config if isinstance(container.config, dict) else {}):
+            saved = copy.deepcopy(container.config if isinstance(container.config, dict) else merged)
+        else:
+            saved = save_settings(merged, container.config_path)
+        apply_snapshot = getattr(container, "apply_config_snapshot", None)
+        if callable(apply_snapshot):
+            apply_snapshot(saved, mode="light")
+        else:
+            container.config = copy.deepcopy(saved)
+            container.runtime_config = adapt_runtime_config(container.config)
         return {
             "role_mode": normalized,
             "node_label": deployment["node_label"],

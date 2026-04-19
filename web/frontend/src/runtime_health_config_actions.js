@@ -370,14 +370,14 @@ export function createRuntimeHealthConfigActions(ctx) {
       const roleReady = roleMode === "internal" || roleMode === "external";
       const restorable = Boolean(
         health?.runtime_activated
-        || health?.startup_role_confirmed
-        || !health?.role_selection_required,
+        && health?.startup_role_confirmed
+        && !health?.role_selection_required
+        && !health?.startup_role_user_exited,
       );
       if (
         !bootstrapReady?.value
         || !roleReady
         || !restorable
-        || Boolean(health?.startup_role_user_exited)
       ) {
         return false;
       }
