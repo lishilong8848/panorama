@@ -11,7 +11,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-
 from pipeline_utils import get_app_dir
 
 from app.shared.runtime_dependency_spec import normalized_runtime_dependency_specs
