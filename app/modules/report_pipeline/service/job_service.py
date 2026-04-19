@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from app.modules.network.service.network_stability import get_network_reachability_state
 from app.modules.report_pipeline.service.task_engine_database import TaskEngineDatabase
 from app.modules.report_pipeline.service.task_engine_store import TaskEngineStore
+from app.modules.updater.service.runtime_dependency_sync_service import RuntimeDependencySyncService
 
 
 class JobBusyError(RuntimeError):
@@ -62,6 +63,15 @@ _RESOURCE_CAPACITY_OVERRIDES = {
     "browser:controlled": 1,
     "updater:global": 1,
 }
+_WORKER_PYTHON_PROBE_CODE = "import encodings, json, sys; print(sys.executable)"
+_WORKER_IMPORT_PROBE_CODE = "import encodings, json, sys; import app.worker.entry; print('ok')"
+_WORKER_RUNTIME_REPAIR_TOKENS = (
+    "no module named 'encodings'",
+    "failed to import encodings module",
+    "could not find platform independent libraries",
+    "modulenotfounderror",
+    "no module named",
+)
 
 
 @dataclass
@@ -208,6 +218,7 @@ class JobService:
         self._resource_holders: Dict[str, List[str]] = {}
         self._task_engine_store: TaskEngineStore | None = None
         self._task_engine_db: TaskEngineDatabase | None = None
+        self._runtime_config: Dict[str, Any] = {}
         self._config_snapshot_getter: Callable[[], Dict[str, Any]] | None = None
         self._current_ssid_getter: Callable[[], str | None] | None = None
         self._worker_app_dir: Path = Path.cwd()
@@ -241,6 +252,9 @@ class JobService:
         self._worker_force_killed: set[tuple[str, str]] = set()
         self._worker_cancel_timeout_sec = 10.0
         self._worker_heartbeat_interval_sec = 5.0
+        self._worker_dependency_sync_lock = threading.Lock()
+        self._worker_python_probe_cache: Dict[str, tuple[bool, str]] = {}
+        self._worker_python_fallback_logged: set[str] = set()
         self._task_engine_recovery_completed = False
         self._task_engine_last_cleanup_monotonic = 0.0
 
@@ -262,6 +276,7 @@ class JobService:
         previous_db = self._task_engine_db
         if previous_db is not None:
             previous_db.close()
+        self._runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
         self._task_engine_store = TaskEngineStore(runtime_config=runtime_config, app_dir=app_dir)
         self._task_engine_db = TaskEngineDatabase(runtime_config=runtime_config, app_dir=app_dir)
         self._config_snapshot_getter = config_snapshot_getter
@@ -623,6 +638,59 @@ class JobService:
         snapshot["updated_at"] = self._now_text()
         self._task_engine_db.persist_resource_snapshot(snapshot)
 
+    @staticmethod
+    def _build_clean_python_env(base_env: Dict[str, str] | None = None) -> Dict[str, str]:
+        env = dict(base_env or os.environ)
+        env.pop("PYTHONHOME", None)
+        env.pop("PYTHONPATH", None)
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        return env
+
+    def _emit_service_log(self, text: str) -> None:
+        line = str(text or "").strip()
+        if not line:
+            return
+        sink = self._global_log_sink
+        if callable(sink):
+            try:
+                sink(line)
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        self._write_console_line(line)
+
+    def _probe_worker_python(self, executable: Path | str) -> tuple[bool, str]:
+        exe_text = str(executable or "").strip()
+        if not exe_text:
+            return False, "empty_python_executable"
+        cached = self._worker_python_probe_cache.get(exe_text)
+        if cached is not None:
+            return cached
+        try:
+            result = subprocess.run(
+                [exe_text, "-c", _WORKER_PYTHON_PROBE_CODE],
+                cwd=str(self._worker_app_dir),
+                env=self._build_clean_python_env(),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode == 0:
+                payload = (True, "")
+            else:
+                payload = (
+                    False,
+                    " ".join(str(result.stderr or result.stdout or f"exit={result.returncode}").split()),
+                )
+        except Exception as exc:  # noqa: BLE001
+            payload = (False, str(exc))
+        self._worker_python_probe_cache[exe_text] = payload
+        return payload
+
     def _resolve_worker_python_executable(self) -> str:
         runtime_root = self._worker_app_dir / "runtime" / "python"
         candidates = [
@@ -630,14 +698,27 @@ class JobService:
             runtime_root / "python",
             runtime_root / "bin" / "python",
             runtime_root / "bin" / "python3",
+            Path(sys.executable),
         ]
+        runtime_failures: List[str] = []
         for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
-        return str(sys.executable)
+            if not candidate.exists():
+                continue
+            ok, detail = self._probe_worker_python(candidate)
+            if ok:
+                candidate_text = str(candidate)
+                if candidate_text == str(sys.executable) and runtime_failures:
+                    signature = "|".join(runtime_failures)
+                    if signature not in self._worker_python_fallback_logged:
+                        self._worker_python_fallback_logged.add(signature)
+                        self._emit_service_log("[依赖同步] 检测到 runtime/python 不完整，已切换到当前 Python 运行 worker")
+                return candidate_text
+            if runtime_root in candidate.parents or candidate == runtime_root:
+                runtime_failures.append(f"{candidate}: {detail}")
+        raise RuntimeError("未找到可用 Python 运行时")
 
     def _build_worker_env(self) -> Dict[str, str]:
-        env = dict(os.environ)
+        env = self._build_clean_python_env()
         env["QJPT_WORKER_MODE"] = "1"
         env["QJPT_DISABLE_BROWSER_AUTO_OPEN"] = "1"
         env["QJPT_DISABLE_UPDATER_AUTOSTART"] = "1"
@@ -652,10 +733,11 @@ class JobService:
         worker_handler: str,
         payload_path: Path,
         control_port: int,
+        python_executable: str | None = None,
     ) -> List[str]:
         bootstrap_script = self._worker_app_dir / "worker_bootstrap.py"
         return [
-            self._resolve_worker_python_executable(),
+            str(python_executable or self._resolve_worker_python_executable()),
             str(bootstrap_script),
             "--job-dir",
             str(job_dir),
@@ -670,6 +752,102 @@ class JobService:
             "--heartbeat-interval",
             str(self._worker_heartbeat_interval_sec),
         ]
+
+    @staticmethod
+    def _is_worker_runtime_repairable_detail(detail: str) -> bool:
+        lowered = str(detail or "").strip().lower()
+        return bool(lowered and any(token in lowered for token in _WORKER_RUNTIME_REPAIR_TOKENS))
+
+    def _mark_worker_dependency_state(self, job: JobState, stage: StageState, *, worker_status: str, summary: str) -> None:
+        now_text = self._now_text()
+        with self._lock:
+            if job.status in {"success", "failed", "cancelled", "partial_failed"} or job.cancel_requested or stage.cancel_requested:
+                return
+            job.status = "waiting_resource"
+            job.wait_reason = "waiting:dependency_sync"
+            job.summary = summary
+            job.wait_started_monotonic = time.monotonic()
+            stage.status = "waiting_resource"
+            stage.summary = summary
+            stage.worker_status = worker_status
+            self._persist_job_snapshot(job)
+            self._record_job_event(
+                job,
+                stage_id=stage.stage_id,
+                stream="job",
+                event_type="dependency_sync",
+                level="info",
+                payload={"status": worker_status, "summary": summary, "timestamp": now_text},
+            )
+        self._persist_worker_snapshot(
+            job,
+            stage,
+            {
+                "pid": 0,
+                "status": worker_status,
+                "exit_code": 0,
+                "last_heartbeat_at": stage.last_heartbeat_at,
+                "updated_at": now_text,
+            },
+        )
+        self._persist_resource_snapshot()
+
+    def _sync_worker_dependencies(self, job: JobState, stage: StageState, *, python_executable: str, reason: str) -> Dict[str, Any]:
+        summary = "正在自动补齐运行依赖"
+        self._mark_worker_dependency_state(job, stage, worker_status="dependency_syncing", summary=summary)
+        self._append_log(job, f"[依赖同步] {summary}: reason={reason or '-'}")
+        runtime_paths = self._runtime_config.get("paths", {}) if isinstance(self._runtime_config, dict) else {}
+        service = RuntimeDependencySyncService(
+            app_dir=self._worker_app_dir,
+            runtime_state_root=str(runtime_paths.get("runtime_state_root", "") or "") if isinstance(runtime_paths, dict) else "",
+            emit_log=lambda text: self._append_log(job, text),
+            python_executable=python_executable,
+        )
+        with self._worker_dependency_sync_lock:
+            result = service.ensure_startup_dependencies(self._worker_app_dir / "runtime_dependency_lock.json")
+        self._append_log(
+            job,
+            f"[依赖同步] 运行依赖自动补齐完成: checked={result.get('checked', 0)}, installed={result.get('installed', 0)}",
+        )
+        return result
+
+    def _probe_worker_imports(self, python_executable: str) -> tuple[bool, str]:
+        try:
+            result = subprocess.run(
+                [python_executable, "-c", _WORKER_IMPORT_PROBE_CODE],
+                cwd=str(self._worker_app_dir),
+                env=self._build_worker_env(),
+                text=True,
+                capture_output=True,
+                timeout=20,
+                check=False,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        if result.returncode == 0:
+            return True, ""
+        return False, " ".join(str(result.stderr or result.stdout or f"exit={result.returncode}").split())
+
+    def _ensure_worker_runtime_ready(self, job: JobState, stage: StageState) -> str:
+        python_executable = self._resolve_worker_python_executable()
+        ok, detail = self._probe_worker_imports(python_executable)
+        if ok:
+            return python_executable
+        if not self._is_worker_runtime_repairable_detail(detail):
+            raise RuntimeError(f"worker 启动预检失败: {detail}")
+        self._mark_worker_dependency_state(
+            job,
+            stage,
+            worker_status="dependency_repairing",
+            summary="正在自动修复 worker 运行依赖",
+        )
+        self._sync_worker_dependencies(job, stage, python_executable=python_executable, reason=detail)
+        ok, detail_after = self._probe_worker_imports(python_executable)
+        if ok:
+            return python_executable
+        raise RuntimeError(f"worker 运行依赖自动修复后仍无法启动: {detail_after or detail}")
 
     def _persist_worker_snapshot(self, job: JobState, stage: StageState, payload: Dict[str, Any]) -> None:
         if not self._task_engine_db:
@@ -878,175 +1056,234 @@ class JobService:
 
         def _run() -> None:
             stage = self._get_primary_stage(job)
-            process: subprocess.Popen[str] | None = None
-            unhandled_error_detail = ""
-            worker_result: Dict[str, Any] = {}
-            control_port = 0
-            try:
-                self._acquire_job_resources(job)
-                control_port = self._allocate_worker_control_port()
-                command = self._build_worker_command(
-                    job_dir=self._task_engine_store.resolve_job_dir(job.job_id),
-                    stage=stage,
-                    worker_handler=normalized_handler,
-                    payload_path=payload_path,
-                    control_port=control_port,
-                )
-                popen_kwargs: Dict[str, Any] = {
-                    "cwd": str(self._worker_app_dir),
-                    "env": self._build_worker_env(),
-                    "stdout": subprocess.PIPE,
-                    "stderr": subprocess.PIPE,
-                    "text": True,
-                    "encoding": "utf-8",
-                    "errors": "replace",
-                    "bufsize": 1,
-                }
-                if os.name == "nt":
-                    popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                process = subprocess.Popen(command, **popen_kwargs)
-                with self._lock:
-                    stage.worker_pid = int(process.pid or 0)
-                    stage.worker_status = "running"
-                    self._worker_processes[(job.job_id, stage.stage_id)] = process
-                    self._worker_control_ports[(job.job_id, stage.stage_id)] = control_port
-                    self._persist_job_snapshot(job)
-                self._persist_worker_snapshot(
-                    job,
-                    stage,
-                    {
-                        "pid": int(process.pid or 0),
-                        "status": "running",
-                        "command": command,
-                        "started_at": self._now_text(),
-                        "updated_at": self._now_text(),
-                    },
-                )
-
-                def _consume_stdout() -> None:
-                    if process is None or process.stdout is None:
-                        return
-                    for raw_line in process.stdout:
-                        parsed = self._parse_worker_event(raw_line)
-                        if parsed:
-                            self._handle_worker_event(job, stage, parsed, worker_result)
-                        else:
-                            self._record_worker_text_line(job, stage, raw_line, stream="stdout")
-
-                def _consume_stderr() -> None:
-                    if process is None or process.stderr is None:
-                        return
-                    for raw_line in process.stderr:
-                        self._record_worker_text_line(job, stage, raw_line, stream="stderr")
-
-                stdout_thread = threading.Thread(target=_consume_stdout, daemon=True, name=f"worker-stdout-{job.job_id[:8]}")
-                stderr_thread = threading.Thread(target=_consume_stderr, daemon=True, name=f"worker-stderr-{job.job_id[:8]}")
-                stdout_thread.start()
-                stderr_thread.start()
-                return_code = int(process.wait())
-                stdout_thread.join(timeout=2)
-                stderr_thread.join(timeout=2)
-                with self._lock:
-                    stage.worker_pid = 0
-                    self._worker_processes.pop((job.job_id, stage.stage_id), None)
-                    self._worker_control_ports.pop((job.job_id, stage.stage_id), None)
-                    force_killed = (job.job_id, stage.stage_id) in self._worker_force_killed
-                    if force_killed:
-                        self._worker_force_killed.discard((job.job_id, stage.stage_id))
-                    stage.worker_status = (
-                        "cancelled"
-                        if (bool(worker_result.get("cancelled", False)) or force_killed)
-                        else ("success" if return_code == 0 else "failed")
+            repair_retry_used = False
+            while True:
+                process: subprocess.Popen[str] | None = None
+                unhandled_error_detail = ""
+                worker_result: Dict[str, Any] = {}
+                worker_stderr_lines: List[str] = []
+                control_port = 0
+                retry_after_repair = False
+                try:
+                    python_executable = self._ensure_worker_runtime_ready(job, stage)
+                    with self._lock:
+                        if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+                            return
+                    self._acquire_job_resources(job)
+                    control_port = self._allocate_worker_control_port()
+                    command = self._build_worker_command(
+                        job_dir=self._task_engine_store.resolve_job_dir(job.job_id),
+                        stage=stage,
+                        worker_handler=normalized_handler,
+                        payload_path=payload_path,
+                        control_port=control_port,
+                        python_executable=python_executable,
                     )
-                    if bool(worker_result.get("cancelled", False)) or force_killed:
-                        summary = "interrupted_force_killed" if force_killed else "cancelled"
-                        job.status = "cancelled"
-                        job.summary = summary
-                        job.finished_at = self._now_text()
-                        stage.status = "cancelled"
-                        stage.summary = summary
-                        stage.finished_at = job.finished_at
-                    elif return_code != 0 or not worker_result:
-                        detail = (
-                            str(worker_result.get("error", "") or "").strip()
-                            or str(worker_result.get("message", "") or "").strip()
-                            or f"worker exited with code {return_code}"
+                    popen_kwargs: Dict[str, Any] = {
+                        "cwd": str(self._worker_app_dir),
+                        "env": self._build_worker_env(),
+                        "stdout": subprocess.PIPE,
+                        "stderr": subprocess.PIPE,
+                        "text": True,
+                        "encoding": "utf-8",
+                        "errors": "replace",
+                        "bufsize": 1,
+                    }
+                    if os.name == "nt":
+                        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    process = subprocess.Popen(command, **popen_kwargs)
+                    with self._lock:
+                        stage.worker_pid = int(process.pid or 0)
+                        stage.worker_status = "running"
+                        self._worker_processes[(job.job_id, stage.stage_id)] = process
+                        self._worker_control_ports[(job.job_id, stage.stage_id)] = control_port
+                        self._persist_job_snapshot(job)
+                    self._persist_worker_snapshot(
+                        job,
+                        stage,
+                        {
+                            "pid": int(process.pid or 0),
+                            "status": "running",
+                            "command": command,
+                            "started_at": self._now_text(),
+                            "updated_at": self._now_text(),
+                        },
+                    )
+
+                    def _consume_stdout() -> None:
+                        if process is None or process.stdout is None:
+                            return
+                        for raw_line in process.stdout:
+                            parsed = self._parse_worker_event(raw_line)
+                            if parsed:
+                                self._handle_worker_event(job, stage, parsed, worker_result)
+                            else:
+                                self._record_worker_text_line(job, stage, raw_line, stream="stdout")
+
+                    def _consume_stderr() -> None:
+                        if process is None or process.stderr is None:
+                            return
+                        for raw_line in process.stderr:
+                            worker_stderr_lines.append(str(raw_line or "").strip())
+                            self._record_worker_text_line(job, stage, raw_line, stream="stderr")
+
+                    stdout_thread = threading.Thread(target=_consume_stdout, daemon=True, name=f"worker-stdout-{job.job_id[:8]}")
+                    stderr_thread = threading.Thread(target=_consume_stderr, daemon=True, name=f"worker-stderr-{job.job_id[:8]}")
+                    stdout_thread.start()
+                    stderr_thread.start()
+                    return_code = int(process.wait())
+                    stdout_thread.join(timeout=2)
+                    stderr_thread.join(timeout=2)
+                    stderr_detail = " ".join(line for line in worker_stderr_lines if line).strip()
+                    repairable_crash = (
+                        (return_code != 0 or not worker_result)
+                        and not repair_retry_used
+                        and self._is_worker_runtime_repairable_detail(stderr_detail)
+                    )
+                    if repairable_crash:
+                        repair_retry_used = True
+                        retry_after_repair = True
+                        unhandled_error_detail = stderr_detail
+                        self._mark_worker_dependency_state(
+                            job,
+                            stage,
+                            worker_status="dependency_repairing",
+                            summary="worker 运行依赖异常，正在自动修复后重试",
                         )
-                        unhandled_error_detail = detail
-                        job.status = "failed"
-                        job.error = detail
-                        job.summary = detail
-                        job.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        stage.status = "failed"
-                        stage.error = detail
-                        stage.summary = detail
-                        stage.finished_at = job.finished_at
+                        self._sync_worker_dependencies(
+                            job,
+                            stage,
+                            python_executable=python_executable,
+                            reason=stderr_detail,
+                        )
                     else:
-                        result_payload = worker_result.get("payload", worker_result.get("result"))
-                        job.status = "success"
-                        job.summary = "ok"
-                        job.result = result_payload
-                        job.finished_at = self._now_text()
-                        stage.status = "success"
-                        stage.summary = "ok"
-                        stage.result = result_payload
-                        stage.finished_at = job.finished_at
-                    self._persist_job_snapshot(job)
-                self._persist_worker_snapshot(
-                    job,
-                    stage,
-                    {
-                        "pid": 0,
-                        "status": stage.worker_status or ("success" if (return_code == 0 and worker_result) else "failed"),
-                        "exit_code": return_code,
-                        "last_heartbeat_at": stage.last_heartbeat_at,
-                        "updated_at": self._now_text(),
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                detail = str(exc)
-                unhandled_error_detail = detail
-                with self._lock:
-                    stage.worker_pid = 0
-                    stage.worker_status = "failed"
-                    job.status = "failed"
-                    job.error = detail
-                    job.summary = detail
-                    job.finished_at = self._now_text()
-                    stage.status = "failed"
-                    stage.error = detail
-                    stage.summary = detail
-                    stage.finished_at = job.finished_at
-                    self._persist_job_snapshot(job)
-                self._persist_worker_snapshot(
-                    job,
-                    stage,
-                    {
-                        "pid": 0,
-                        "status": "failed",
-                        "exit_code": int(getattr(process, "returncode", 0) or 0),
-                        "last_heartbeat_at": stage.last_heartbeat_at,
-                        "updated_at": self._now_text(),
-                    },
-                )
-            finally:
-                with self._lock:
-                    self._worker_processes.pop((job.job_id, stage.stage_id), None)
-                    self._worker_control_ports.pop((job.job_id, stage.stage_id), None)
-                with self._lock:
-                    if job.status == "failed":
-                        has_failure_line = any("[文件流程失败]" in line for line in job.logs)
-                        if not has_failure_line:
-                            detail = unhandled_error_detail or job.error or "未提供错误详情"
-                            detail = " ".join(str(detail).split())
-                            self._append_log(
-                                job,
-                                f"[文件流程失败] 功能=任务执行 阶段=worker 楼栋=- 文件=- 日期=- 错误={detail}",
+                        with self._lock:
+                            stage.worker_pid = 0
+                            self._worker_processes.pop((job.job_id, stage.stage_id), None)
+                            self._worker_control_ports.pop((job.job_id, stage.stage_id), None)
+                            force_killed = (job.job_id, stage.stage_id) in self._worker_force_killed
+                            if force_killed:
+                                self._worker_force_killed.discard((job.job_id, stage.stage_id))
+                            stage.worker_status = (
+                                "cancelled"
+                                if (bool(worker_result.get("cancelled", False)) or force_killed)
+                                else ("success" if return_code == 0 else "failed")
                             )
-                    self._persist_job_snapshot(job)
-                self._release_resources(job.job_id, list(job.acquired_resources))
-                job.acquired_resources = []
-                job.done_event.set()
+                            if bool(worker_result.get("cancelled", False)) or force_killed:
+                                summary = "interrupted_force_killed" if force_killed else "cancelled"
+                                job.status = "cancelled"
+                                job.summary = summary
+                                job.finished_at = self._now_text()
+                                stage.status = "cancelled"
+                                stage.summary = summary
+                                stage.finished_at = job.finished_at
+                            elif return_code != 0 or not worker_result:
+                                detail = (
+                                    str(worker_result.get("error", "") or "").strip()
+                                    or str(worker_result.get("message", "") or "").strip()
+                                    or stderr_detail
+                                    or f"worker exited with code {return_code}"
+                                )
+                                unhandled_error_detail = detail
+                                job.status = "failed"
+                                job.error = detail
+                                job.summary = detail
+                                job.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                stage.status = "failed"
+                                stage.error = detail
+                                stage.summary = detail
+                                stage.finished_at = job.finished_at
+                            else:
+                                result_payload = worker_result.get("payload", worker_result.get("result"))
+                                job.status = "success"
+                                job.summary = "ok"
+                                job.result = result_payload
+                                job.finished_at = self._now_text()
+                                stage.status = "success"
+                                stage.summary = "ok"
+                                stage.result = result_payload
+                                stage.finished_at = job.finished_at
+                            self._persist_job_snapshot(job)
+                        self._persist_worker_snapshot(
+                            job,
+                            stage,
+                            {
+                                "pid": 0,
+                                "status": stage.worker_status or ("success" if (return_code == 0 and worker_result) else "failed"),
+                                "exit_code": return_code,
+                                "last_heartbeat_at": stage.last_heartbeat_at,
+                                "updated_at": self._now_text(),
+                            },
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    detail = str(exc)
+                    unhandled_error_detail = detail
+                    if self._is_worker_runtime_repairable_detail(detail) and not repair_retry_used:
+                        repair_retry_used = True
+                        try:
+                            python_executable = self._resolve_worker_python_executable()
+                            self._mark_worker_dependency_state(
+                                job,
+                                stage,
+                                worker_status="dependency_repairing",
+                                summary="worker 启动异常，正在自动修复后重试",
+                            )
+                            self._sync_worker_dependencies(
+                                job,
+                                stage,
+                                python_executable=python_executable,
+                                reason=detail,
+                            )
+                            retry_after_repair = True
+                        except Exception as repair_exc:  # noqa: BLE001
+                            detail = f"{detail}; 自动修复失败: {repair_exc}"
+                            unhandled_error_detail = detail
+                    if not retry_after_repair:
+                        with self._lock:
+                            stage.worker_pid = 0
+                            stage.worker_status = "failed"
+                            job.status = "failed"
+                            job.error = detail
+                            job.summary = detail
+                            job.finished_at = self._now_text()
+                            stage.status = "failed"
+                            stage.error = detail
+                            stage.summary = detail
+                            stage.finished_at = job.finished_at
+                            self._persist_job_snapshot(job)
+                        self._persist_worker_snapshot(
+                            job,
+                            stage,
+                            {
+                                "pid": 0,
+                                "status": "failed",
+                                "exit_code": int(getattr(process, "returncode", 0) or 0),
+                                "last_heartbeat_at": stage.last_heartbeat_at,
+                                "updated_at": self._now_text(),
+                            },
+                        )
+                finally:
+                    with self._lock:
+                        self._worker_processes.pop((job.job_id, stage.stage_id), None)
+                        self._worker_control_ports.pop((job.job_id, stage.stage_id), None)
+                    with self._lock:
+                        if job.status == "failed":
+                            has_failure_line = any("[文件流程失败]" in line for line in job.logs)
+                            if not has_failure_line:
+                                detail = unhandled_error_detail or job.error or "未提供错误详情"
+                                detail = " ".join(str(detail).split())
+                                self._append_log(
+                                    job,
+                                    f"[文件流程失败] 功能=任务执行 阶段=worker 楼栋=- 文件=- 日期=- 错误={detail}",
+                                )
+                        self._persist_job_snapshot(job)
+                    self._release_resources(job.job_id, list(job.acquired_resources))
+                    job.acquired_resources = []
+                    if not retry_after_repair:
+                        job.done_event.set()
+                if retry_after_repair:
+                    continue
+                break
 
         thread = threading.Thread(target=_run, daemon=True, name=f"worker-job-{job.job_id[:8]}")
         job.thread = thread

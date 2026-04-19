@@ -7,6 +7,7 @@ from app.modules.report_pipeline.service.job_service import TaskEngineUnavailabl
 _JOB_RUNNING_STATUSES = {"running"}
 _JOB_WAITING_STATUSES = {"queued", "waiting_resource"}
 _JOB_INCOMPLETE_STATUSES = _JOB_RUNNING_STATUSES | _JOB_WAITING_STATUSES
+_JOB_DEPENDENCY_STATUSES = {"dependency_checking", "dependency_syncing", "dependency_repairing"}
 _JOB_FINISHED_STATUSES = {
     "success",
     "failed",
@@ -31,6 +32,12 @@ _BRIDGE_WAITING_TEXTS = (
 
 def _format_job_status(status: Any) -> str:
     normalized = str(status or "").strip().lower()
+    if normalized == "dependency_checking":
+        return "检查依赖中"
+    if normalized == "dependency_syncing":
+        return "同步依赖中"
+    if normalized == "dependency_repairing":
+        return "修复依赖中"
     if normalized == "queued":
         return "排队中"
     if normalized == "waiting_resource":
@@ -54,6 +61,10 @@ def _format_job_status(status: Any) -> str:
 
 def _format_job_tone(status: Any) -> str:
     normalized = str(status or "").strip().lower()
+    if normalized in {"dependency_checking", "dependency_syncing"}:
+        return "info"
+    if normalized == "dependency_repairing":
+        return "warning"
     if normalized == "success":
         return "success"
     if normalized == "running":
@@ -96,9 +107,22 @@ def _format_job_wait_reason(job: Dict[str, Any]) -> str:
             mapped.append("等待共享源文件")
         elif item == "waiting:app_update":
             mapped.append("等待更新独占")
+        elif item == "waiting:dependency_sync":
+            mapped.append("正在自动补齐运行依赖")
         else:
             mapped.append(item)
     return " / ".join(mapped) if mapped else raw
+
+
+def _job_dependency_display_status(job: Dict[str, Any]) -> str:
+    stages = job.get("stages", []) if isinstance(job.get("stages", []), list) else []
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        worker_status = str(stage.get("worker_status", "") or "").strip().lower()
+        if worker_status in _JOB_DEPENDENCY_STATUSES:
+            return worker_status
+    return ""
 
 
 def _is_handover_generation_job(job: Dict[str, Any]) -> bool:
@@ -111,6 +135,8 @@ def _is_handover_generation_job(job: Dict[str, Any]) -> bool:
 
 def _present_job(job: Dict[str, Any]) -> Dict[str, Any]:
     status = str(job.get("status", "") or "").strip().lower()
+    dependency_status = _job_dependency_display_status(job)
+    display_status = dependency_status or status
     job_id = str(job.get("job_id", "") or "").strip()
     time_text = (
         str(job.get("started_at", "") or "").strip()
@@ -126,7 +152,9 @@ def _present_job(job: Dict[str, Any]) -> Dict[str, Any]:
         detail_text = f"说明：{summary_text}"
     elif wait_reason:
         detail_text = f"说明：{_format_job_wait_reason(job)}"
-    meta_parts = [f"状态：{_format_job_status(status)}"]
+    elif dependency_status:
+        detail_text = "说明：正在自动补齐运行依赖"
+    meta_parts = [f"状态：{_format_job_status(display_status)}"]
     if time_text:
         meta_parts.append(f"时间：{time_text}")
     cancel_allowed = (
@@ -147,8 +175,8 @@ def _present_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "item_kind": "job",
         "__waiting_kind": "job",
         "__waiting_id": f"job:{job_id}",
-        "status_text": _format_job_status(status),
-        "tone": _format_job_tone(status),
+        "status_text": _format_job_status(display_status),
+        "tone": _format_job_tone(display_status),
         "display_title": str(job.get("name", "") or "").strip()
         or str(job.get("feature", "") or "").strip()
         or job_id

@@ -46,7 +46,10 @@ __pycache__/
 *.tmp_keep
 .npm-cache
 .playwright-cli
-
+*.json
+表格计算配置.json
+D:\桌面\ShiJian_Code\pythonProject\全景平台月报自动定时上传\表格计算配置.json
+表格计算配置.pre_handover_segments.20260410-201706.json
 # Project-specific backup and recovery files
 /表格计算部分代码.cpython-*.py
 /表格计算部分代码.py.corrupted_*.bak
@@ -66,3 +69,5 @@ tests/
 !tests/unit/
 !tests/unit/test_handover_shift_interval_filters.py
 !tests/unit/test_settings_loader_handover_shift_fields.py
+表格计算配置.json
+表格计算配置.json

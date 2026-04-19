@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
 import time
+import sys
 from pathlib import Path
 
+import app.modules.report_pipeline.service.job_service as job_service_module
 from app.modules.report_pipeline.service.task_engine_database import TaskEngineDatabase
-from app.modules.report_pipeline.service.job_service import JobService
+from app.modules.report_pipeline.service.job_service import JobService, JobState, StageState
 from app.modules.report_pipeline.service.task_engine_store import TaskEngineStore
 
 
@@ -138,6 +140,63 @@ def test_job_service_worker_command_bootstraps_app_root(tmp_path: Path) -> None:
     assert "-m" not in command
     assert "-c" not in command
     assert command[1] == str(project_root / "worker_bootstrap.py")
+
+
+def test_job_service_skips_broken_runtime_python_for_worker(monkeypatch, tmp_path: Path) -> None:
+    runtime_python = tmp_path / "runtime" / "python" / "python.exe"
+    runtime_python.parent.mkdir(parents=True, exist_ok=True)
+    runtime_python.write_text("", encoding="utf-8")
+    service = JobService()
+    service.configure_task_engine(
+        runtime_config={"paths": {}},
+        app_dir=tmp_path / "runtime_app",
+        worker_app_dir=tmp_path,
+        config_snapshot_getter=lambda: {"paths": {"business_root_dir": "D:/QLDownload"}},
+    )
+
+    def fake_probe(candidate):  # noqa: ANN001
+        if Path(candidate) == runtime_python:
+            return False, "Failed to import encodings module"
+        return True, ""
+
+    monkeypatch.setattr(service, "_probe_worker_python", fake_probe)
+
+    assert service._resolve_worker_python_executable() == str(Path(sys.executable))
+
+
+def test_job_service_repairs_missing_worker_dependency_before_launch(monkeypatch, tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    runtime_app_dir = tmp_path / "sandbox_app"
+    service = JobService()
+    service.configure_task_engine(
+        runtime_config={"paths": {}},
+        app_dir=runtime_app_dir,
+        worker_app_dir=project_root,
+        config_snapshot_getter=lambda: {"paths": {"business_root_dir": "D:/QLDownload"}},
+    )
+    job = JobState(job_id="dependency-repair", name="dependency-repair", status="queued")
+    stage = StageState(stage_id="main", name="main", worker_handler="test_echo_payload")
+    job.stages = [stage]
+    probe_results = [(False, "ModuleNotFoundError: No module named 'sniffio'"), (True, "")]
+    sync_calls: list[Path] = []
+
+    class FakeRuntimeDependencySyncService:
+        def __init__(self, **_kwargs):  # noqa: ANN003
+            pass
+
+        def ensure_startup_dependencies(self, lock_path):  # noqa: ANN001
+            sync_calls.append(Path(lock_path))
+            return {"status": "success", "checked": 1, "installed": 1, "packages": ["sniffio"]}
+
+    monkeypatch.setattr(service, "_resolve_worker_python_executable", lambda: sys.executable)
+    monkeypatch.setattr(service, "_probe_worker_imports", lambda _python: probe_results.pop(0))
+    monkeypatch.setattr(job_service_module, "RuntimeDependencySyncService", FakeRuntimeDependencySyncService)
+
+    assert service._ensure_worker_runtime_ready(job, stage) == sys.executable
+    assert sync_calls == [project_root / "runtime_dependency_lock.json"]
+    assert job.status == "waiting_resource"
+    assert job.wait_reason == "waiting:dependency_sync"
+    assert stage.worker_status == "dependency_syncing"
 
 
 def test_job_service_can_cancel_worker_stage(tmp_path: Path) -> None:

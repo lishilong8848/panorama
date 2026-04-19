@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from app.modules.report_pipeline.service.job_panel_presenter import (
     build_bridge_tasks_summary,
     build_job_panel_summary,
+    present_job_item,
     present_bridge_task,
 )
 
@@ -139,6 +140,34 @@ def test_present_bridge_task_returns_backend_ready_display_fields() -> None:
     assert payload["actions"]["cancel"]["target_id"] == "bridge-running"
     assert payload["actions"]["retry"]["target_kind"] == "bridge"
     assert payload["actions"]["retry"]["target_id"] == "bridge-running"
+
+
+def test_present_job_item_shows_dependency_repair_state() -> None:
+    payload = present_job_item(
+        {
+            "job_id": "job-dependency",
+            "name": "日报截图重截",
+            "feature": "daily_report_recapture",
+            "status": "waiting_resource",
+            "created_at": "2026-04-19 21:51:33",
+            "wait_reason": "waiting:dependency_sync",
+            "summary": "",
+            "error": "",
+            "cancel_requested": False,
+            "stages": [
+                {
+                    "stage_id": "main",
+                    "worker_status": "dependency_repairing",
+                }
+            ],
+        }
+    )
+
+    assert payload["status_text"] == "修复依赖中"
+    assert payload["tone"] == "warning"
+    assert payload["display_meta"] == "状态：修复依赖中 | 时间：2026-04-19 21:51:33"
+    assert payload["display_detail"] == "说明：正在自动补齐运行依赖"
+    assert payload["actions"]["cancel"]["allowed"] is True
 
 
 def test_build_bridge_tasks_summary_returns_backend_display_groups() -> None:

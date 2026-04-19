@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -41,6 +42,20 @@ def test_sync_required_packages_installs_missing_and_mismatched_versions(monkeyp
     assert install_calls == [("fastapi", "0.116.0"), ("uvicorn", "0.35.0")]
     assert result["installed"] == 2
     assert result["status"] == "success"
+
+
+def test_dependency_sync_python_env_strips_broken_pythonhome(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("PYTHONHOME", "D:/broken/runtime/python")
+    monkeypatch.setenv("PYTHONPATH", "D:/broken/runtime/python/Lib")
+    service = RuntimeDependencySyncService(app_dir=tmp_path)
+
+    env = service._build_python_env()  # noqa: SLF001
+
+    assert "PYTHONHOME" not in env
+    assert "PYTHONPATH" not in env
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+    assert os.environ["PYTHONHOME"] == "D:/broken/runtime/python"
 
 
 def test_sync_from_lock_file_uses_exact_versions(monkeypatch, tmp_path: Path) -> None:

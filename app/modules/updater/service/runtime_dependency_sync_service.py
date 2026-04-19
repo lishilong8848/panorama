@@ -53,6 +53,30 @@ class RuntimeDependencySyncService:
             return None
         return {"paths": {"runtime_state_root": self.runtime_state_root}}
 
+    def _build_python_env(self, *, strip_proxy: bool = False) -> dict[str, str]:
+        env = os.environ.copy()
+        # A broken embedded runtime often leaves PYTHONHOME/PYTHONPATH pointing
+        # at an incomplete stdlib. Every dependency probe/install must avoid it.
+        env.pop("PYTHONHOME", None)
+        env.pop("PYTHONPATH", None)
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        if not str(env.get("PIP_INDEX_URL", "")).strip():
+            env["PIP_INDEX_URL"] = self.pip_index_url
+        if not str(env.get("PIP_TRUSTED_HOST", "")).strip():
+            env["PIP_TRUSTED_HOST"] = self.pip_trusted_host
+        if strip_proxy:
+            for key in (
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ):
+                env.pop(key, None)
+        return env
+
     def default_lock_path(self) -> Path:
         return self.app_dir / "runtime_dependency_lock.json"
 
@@ -106,6 +130,9 @@ class RuntimeDependencySyncService:
             text=True,
             capture_output=True,
             check=False,
+            env=self._build_python_env(),
+            encoding="utf-8",
+            errors="replace",
         )
 
     def _find_import(self, import_name: str) -> bool:
@@ -147,31 +174,15 @@ class RuntimeDependencySyncService:
         return str(probe.stdout or "").strip()
 
     def _run_pip(self, args: List[str]) -> tuple[bool, str]:
-        def _build_env(*, strip_proxy: bool) -> dict[str, str]:
-            env = os.environ.copy()
-            if not str(env.get("PIP_INDEX_URL", "")).strip():
-                env["PIP_INDEX_URL"] = self.pip_index_url
-            if not str(env.get("PIP_TRUSTED_HOST", "")).strip():
-                env["PIP_TRUSTED_HOST"] = self.pip_trusted_host
-            if strip_proxy:
-                for key in (
-                    "HTTP_PROXY",
-                    "HTTPS_PROXY",
-                    "ALL_PROXY",
-                    "http_proxy",
-                    "https_proxy",
-                    "all_proxy",
-                ):
-                    env.pop(key, None)
-            return env
-
         command = [self.python_executable, "-m", "pip", *args]
         result = subprocess.run(
             command,
             text=True,
             capture_output=True,
             check=False,
-            env=_build_env(strip_proxy=False),
+            env=self._build_python_env(strip_proxy=False),
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode == 0:
             return True, ""
@@ -186,7 +197,9 @@ class RuntimeDependencySyncService:
                 text=True,
                 capture_output=True,
                 check=False,
-                env=_build_env(strip_proxy=True),
+                env=self._build_python_env(strip_proxy=True),
+                encoding="utf-8",
+                errors="replace",
             )
             if retry_result.returncode == 0:
                 return True, ""
@@ -223,6 +236,9 @@ class RuntimeDependencySyncService:
             text=True,
             capture_output=True,
             check=False,
+            env=self._build_python_env(),
+            encoding="utf-8",
+            errors="replace",
         )
         return result.returncode == 0
 
@@ -235,6 +251,9 @@ class RuntimeDependencySyncService:
             text=True,
             capture_output=True,
             check=False,
+            env=self._build_python_env(),
+            encoding="utf-8",
+            errors="replace",
         )
         if ensurepip_result.returncode == 0 and self._is_pip_available():
             self._log("已通过 ensurepip 初始化 pip。")
@@ -257,6 +276,9 @@ class RuntimeDependencySyncService:
                     text=True,
                     capture_output=True,
                     check=False,
+                    env=self._build_python_env(),
+                    encoding="utf-8",
+                    errors="replace",
                 )
                 if result.returncode == 0 and self._is_pip_available():
                     self._log(f"已通过 get-pip 恢复 pip: {url}")
