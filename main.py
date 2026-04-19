@@ -53,7 +53,7 @@ def _configure_console_utf8() -> None:
 
 def _ensure_runtime_dependencies(runtime_config: dict | None = None) -> None:
     print(
-        "[启动] 正在检查运行依赖，首次启动或版本更新后可能需要几分钟，请勿关闭此窗口。",
+        "[启动] 正在检查全部运行依赖，首次启动或版本更新后可能需要几分钟，请勿关闭此窗口。",
         flush=True,
     )
     service = RuntimeDependencySyncService(
@@ -65,13 +65,14 @@ def _ensure_runtime_dependencies(runtime_config: dict | None = None) -> None:
         python_executable=sys.executable,
     )
     result = service.ensure_startup_dependencies()
+    checked = int(result.get("checked", 0) or 0)
     if int(result.get("installed", 0) or 0) > 0:
         print(
-            f"[依赖检查] 已完成运行依赖同步: installed={result.get('installed', 0)}",
+            f"[依赖检查] 已完成运行依赖同步: checked={checked}, installed={result.get('installed', 0)}",
             flush=True,
         )
     else:
-        print("[依赖检查] 运行依赖已就绪。", flush=True)
+        print(f"[依赖检查] 运行依赖已就绪: checked={checked}", flush=True)
 
 
 def _stdio_is_available() -> bool:

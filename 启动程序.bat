@@ -21,22 +21,36 @@ if not exist "portable_launcher.py" goto missing_launcher
 set "PYTHON_EXE="
 set "PYTHON_DESC="
 set "USE_PY_LAUNCHER="
+set "PYTHON_HEALTH_PROBE=import encodings, ensurepip, json, sqlite3, ssl, sys"
+set "EMBEDDED_RUNTIME_PRESENT="
+set "EMBEDDED_RUNTIME_BROKEN="
 
 if exist ".venv\Scripts\python.exe" (
-    set "PYTHON_EXE=%CD%\.venv\Scripts\python.exe"
-    set "PYTHON_DESC=project .venv"
-    goto run_main
+    "%CD%\.venv\Scripts\python.exe" -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_EXE=%CD%\.venv\Scripts\python.exe"
+        set "PYTHON_DESC=project .venv"
+        goto run_main
+    )
+    echo [WARN] Ignoring broken project .venv Python: %CD%\.venv\Scripts\python.exe
 )
 
 if exist "runtime\python\python.exe" (
-    set "PYTHON_EXE=%CD%\runtime\python\python.exe"
-    set "PYTHON_DESC=embedded runtime"
-    goto run_main
+    set "EMBEDDED_RUNTIME_PRESENT=1"
+    "%CD%\runtime\python\python.exe" -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_EXE=%CD%\runtime\python\python.exe"
+        set "PYTHON_DESC=embedded runtime"
+        goto run_main
+    )
+    set "EMBEDDED_RUNTIME_BROKEN=1"
+    echo [WARN] Detected incomplete embedded runtime: %CD%\runtime\python\python.exe
+    echo [WARN] Startup will skip runtime\python and continue searching for a healthy Python runtime.
 )
 
 where python >nul 2>nul
 if errorlevel 1 goto try_registry_python
-python -c "import sys" >nul 2>nul
+python -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
 if errorlevel 1 goto try_registry_python
 set "PYTHON_EXE=python"
 set "PYTHON_DESC=python on PATH"
@@ -48,7 +62,7 @@ if defined PYTHON_EXE goto verify_registry_python
 goto try_common_python
 
 :verify_registry_python
-"%PYTHON_EXE%" -c "import sys" >nul 2>nul
+"%PYTHON_EXE%" -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
 if errorlevel 1 (
     set "PYTHON_EXE="
     goto try_common_python
@@ -62,7 +76,7 @@ if defined PYTHON_EXE goto verify_common_python
 goto try_py_launcher
 
 :verify_common_python
-"%PYTHON_EXE%" -c "import sys" >nul 2>nul
+"%PYTHON_EXE%" -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
 if errorlevel 1 (
     set "PYTHON_EXE="
     goto try_py_launcher
@@ -73,7 +87,7 @@ goto run_main
 :try_py_launcher
 where py >nul 2>nul
 if errorlevel 1 goto no_python
-py -3 -c "import sys" >nul 2>nul
+py -3 -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
 if errorlevel 1 goto no_python
 set "USE_PY_LAUNCHER=1"
 set "PYTHON_DESC=py launcher"
@@ -92,17 +106,26 @@ echo [ERROR] Python runtime not found.
 echo [ERROR] This source-run version requires a local Python runtime or bundled runtime\python.
 echo [ERROR] If you are preparing a delivery folder, run the runtime-prepare BAT on the developer machine first.
 echo [ERROR] Otherwise install Python 3.11+ on this computer, or create .venv in the project directory.
+if defined EMBEDDED_RUNTIME_BROKEN echo [ERROR] Detected runtime\python, but it is incomplete and cannot import standard library modules.
 echo [ERROR] Current fallback order: .venv ^> runtime\python ^> python(PATH) ^> registered Python ^> common install paths ^> py -3
 goto fail_exit
 
 :run_main
 if defined USE_PY_LAUNCHER goto run_with_py_launcher
 echo [INFO] Using Python executable (%PYTHON_DESC%): %PYTHON_EXE%
+if defined EMBEDDED_RUNTIME_BROKEN (
+    echo [INFO] Startup skipped a broken runtime\python and will use the healthy Python above.
+    echo [INFO] Missing startup dependencies will be checked and installed automatically before the web console starts.
+)
 "%PYTHON_EXE%" -u "portable_launcher.py" %*
 goto finish
 
 :run_with_py_launcher
 echo [INFO] Using Python launcher: py -3
+if defined EMBEDDED_RUNTIME_BROKEN (
+    echo [INFO] Startup skipped a broken runtime\python and will use the healthy Python resolved by py -3.
+    echo [INFO] Missing startup dependencies will be checked and installed automatically before the web console starts.
+)
 py -3 -u "portable_launcher.py" %*
 goto finish
 

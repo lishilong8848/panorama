@@ -24,6 +24,24 @@ def test_main_uses_shared_runtime_dependency_service(monkeypatch) -> None:
     assert captured["init"]["python_executable"] == main_module.sys.executable
 
 
+def test_main_reports_checked_startup_dependencies(monkeypatch, capsys) -> None:
+    class FakeService:
+        def __init__(self, **_kwargs):
+            pass
+
+        def ensure_startup_dependencies(self):
+            return {"installed": 2, "checked": 9}
+
+    monkeypatch.setattr(main_module, "RuntimeDependencySyncService", FakeService)
+
+    main_module._ensure_runtime_dependencies({"paths": {"runtime_state_root": ".runtime"}})  # noqa: SLF001
+
+    captured = capsys.readouterr()
+    assert "正在检查全部运行依赖" in captured.out
+    assert "checked=9" in captured.out
+    assert "installed=2" in captured.out
+
+
 def test_main_exits_cleanly_when_dependency_bootstrap_fails(monkeypatch, capsys) -> None:
     monkeypatch.setattr(main_module, "_ensure_runtime_dependencies", lambda _cfg=None: (_ for _ in ()).throw(RuntimeError("代理连接失败")))
 
