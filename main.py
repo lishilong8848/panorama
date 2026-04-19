@@ -10,8 +10,6 @@ import warnings
 import webbrowser
 from pathlib import Path
 
-from pipeline_utils import is_release_code_dir
-
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -196,10 +194,6 @@ def _is_loopback_host(value: object) -> bool:
 def _should_disable_updater_for_source_run() -> bool:
     if getattr(sys, "frozen", False):
         return False
-    if str(os.environ.get(_PORTABLE_LAUNCHER_ENV, "") or "").strip():
-        return False
-    if is_release_code_dir(PROJECT_ROOT):
-        return False
     return True
 
 
@@ -239,7 +233,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(1) from exc
     source_run_updater_disabled = _apply_source_run_runtime_flags()
     if source_run_updater_disabled:
-        print("[启动] 当前为 Python 本地源码运行，已跳过自动更新。", flush=True)
+        print("[启动] 当前为源码直跑模式，应用内自动更新已禁用；如需更新请先执行 git pull。", flush=True)
 
     import uvicorn
     from app.bootstrap.app_factory import create_app

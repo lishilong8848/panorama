@@ -515,9 +515,10 @@ def test_present_updater_mirror_overview_marks_python_source_run_as_debug_mode()
     )
 
     assert payload["tone"] == "info"
-    assert payload["status_text"] == "本地调试模式"
-    assert payload["badge_text"] == "本地源码运行不更新"
-    assert payload["items"][0]["value"] == "Python 本地源码运行"
+    assert payload["status_text"] == "请先 git pull"
+    assert payload["badge_text"] == "源码直跑不走应用内更新"
+    assert payload["items"][0]["value"] == "源码直跑"
+    assert payload["items"][2]["value"] == "先 git pull 再重启"
     assert payload["actions"]["main"]["reason_code"] == "source_python_run"
     assert payload["actions"]["internal_peer_check"]["reason_code"] == "source_python_run"
     assert payload["actions"]["internal_peer_apply"]["reason_code"] == "source_python_run"

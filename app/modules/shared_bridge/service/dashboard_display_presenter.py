@@ -1068,14 +1068,14 @@ def _updater_source_label(payload: Dict[str, Any]) -> str:
 def _updater_disabled_reason_text(raw: Any) -> str:
     key = _string(raw).lower()
     if key == "source_python_run":
-        return "当前为 Python 本地源码运行，已跳过更新。"
+        return "当前为源码直跑模式，请先执行 git pull 后重启程序。"
     if key == "git_not_installed":
         return "当前电脑未安装 Git，无法执行代码拉取更新。"
     if key == "git_repo_missing":
         return "当前代码目录不是 Git 工作区，无法执行代码拉取更新。"
     if key == "git_remote_missing":
         return "当前未配置 Git 更新仓库地址。"
-    return "当前运行模式已跳过更新。"
+    return "当前运行模式不支持应用内更新。"
 
 
 def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
@@ -1283,22 +1283,22 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     if not updater_enabled and disabled_reason == "source_python_run":
         return {
             "tone": "info",
-            "kicker": "调试模式",
-            "title": "本地运行模式",
-            "status_text": "本地调试模式",
-            "badge_text": "本地源码运行不更新",
-            "summary_text": "当前为 Python 本地源码运行，已跳过自动更新与共享目录镜像检查。",
+            "kicker": "源码模式",
+            "title": "源码直跑模式",
+            "status_text": "请先 git pull",
+            "badge_text": "源码直跑不走应用内更新",
+            "summary_text": "当前程序通过源码直接运行。应用内更新与共享目录镜像检查已停用；如需更新请先执行 git pull 再重启程序。",
             "manifest_path": "",
             "error_text": "",
             "items": [
-                {"label": "运行方式", "value": "Python 本地源码运行", "tone": "info"},
+                {"label": "运行方式", "value": "源码直跑", "tone": "info"},
                 {
                     "label": "当前版本",
                     "value": f"{local_version} / r{local_revision}" if local_revision > 0 else local_version,
                     "tone": "neutral",
                 },
-                {"label": "更新行为", "value": "不自动更新", "tone": "neutral"},
-                {"label": "共享镜像", "value": "不检查", "tone": "neutral"},
+                {"label": "更新方式", "value": "先 git pull 再重启", "tone": "neutral"},
+                {"label": "共享镜像", "value": "源码模式不检查", "tone": "neutral"},
                 {
                     "label": "内网端状态",
                     "value": internal_peer_status_text,

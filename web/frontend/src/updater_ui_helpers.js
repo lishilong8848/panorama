@@ -12,11 +12,11 @@ export function createUpdaterUiHelpers(options = {}) {
 
   function getUpdaterDisabledText(action) {
     const reasonCode = String(action?.reasonCode || "").trim().toLowerCase();
-    if (reasonCode === "source_python_run") return "当前为 Python 本地源码运行，已跳过更新。";
+    if (reasonCode === "source_python_run") return "当前为源码直跑模式，请先执行 git pull 后重启程序。";
     if (reasonCode === "git_not_installed") return "当前电脑未安装 Git，无法执行代码拉取更新。";
     if (reasonCode === "git_repo_missing") return "当前代码目录不是 Git 工作区，无法执行代码拉取更新。";
     if (reasonCode === "git_remote_missing") return "当前未配置 Git 更新仓库地址。";
-    return String(action?.disabledReason || "").trim() || "当前运行模式已跳过更新。";
+    return String(action?.disabledReason || "").trim() || "当前运行模式不支持应用内更新。";
   }
 
   const updaterMainAction = computed(() => updaterMirrorOverview.value?.actions?.main || {

@@ -55,7 +55,7 @@ from handover_log_module.service.handover_daily_report_screenshot_service import
 )
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
-from pipeline_utils import get_app_dir, get_app_root_dir
+from pipeline_utils import get_app_dir
 
 
 _EXTERNAL_REVIEW_ALLOWED_PREFIXES = (
@@ -1479,13 +1479,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 return True, "same_console_restart_scheduled"
 
             app_dir = get_app_dir()
-            app_root_dir = get_app_root_dir(app_dir)
-            launcher_bat = app_root_dir / "启动程序.bat"
+            launcher_bat = app_dir / "启动程序.bat"
             portable_launcher = app_dir / "portable_launcher.py"
-            if sys.platform.startswith("win") and launcher_bat.exists() and app_root_dir != app_dir:
-                cmd = ["cmd.exe", "/c", str(launcher_bat)]
-                popen_kwargs = {"cwd": str(app_root_dir)}
-            elif (
+            if (
                 not getattr(sys, "frozen", False)
                 and not str(os.environ.get("QJPT_PORTABLE_LAUNCHER", "") or "").strip()
                 and portable_launcher.exists()
@@ -1494,7 +1490,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 popen_kwargs = {"cwd": str(app_dir)}
             elif sys.platform.startswith("win") and launcher_bat.exists():
                 cmd = ["cmd.exe", "/c", str(launcher_bat)]
-                popen_kwargs = {"cwd": str(app_root_dir)}
+                popen_kwargs = {"cwd": str(app_dir)}
             elif getattr(sys, "frozen", False):
                 cmd = [sys.executable]
                 popen_kwargs = {"cwd": str(app_dir)}
