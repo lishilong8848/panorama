@@ -29,6 +29,7 @@ _UPDATER_RESULT_TEXT = {
     "git_fetching": "Git 远端检查中",
     "git_pulling": "Git 拉取中",
     "dirty_worktree": "检测到本地改动，已阻止更新",
+    "source_publishing": "源码批准版本发布中",
     "failed": "更新失败",
 }
 
@@ -96,6 +97,10 @@ def _runtime_payload(container) -> Dict[str, Any]:
         "mirror_manifest_path": str(runtime.get("mirror_manifest_path", "")),
         "last_publish_at": str(runtime.get("last_publish_at", "")),
         "last_publish_error": str(runtime.get("last_publish_error", "")),
+        "approved_commit": str(runtime.get("approved_commit", "")),
+        "approved_manifest": dict(runtime.get("approved_manifest", {}))
+        if isinstance(runtime.get("approved_manifest", {}), dict)
+        else {},
         "internal_peer": dict(runtime.get("internal_peer", {}))
         if isinstance(runtime.get("internal_peer", {}), dict)
         else {},
@@ -156,6 +161,23 @@ def updater_restart(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"触发重启失败: {exc}") from exc
 
 
+@router.post("/publish-approved")
+def updater_publish_approved(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    try:
+        with container.job_service.resource_guard(name="updater_publish_approved", resource_keys=["updater:global"]):
+            service = container.ensure_updater_service()
+            result = service.publish_approved_source_snapshot()
+        container.add_system_log(
+            "[更新] 已发布内网批准源码版本: "
+            f"commit={str(result.get('source_commit', '') or '')[:7] or '-'}, "
+            f"files={int(result.get('included_files', 0) or 0)}"
+        )
+        return {"ok": True, "result": result, "runtime": _runtime_payload(container)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"发布内网批准源码版本失败: {exc}") from exc
+
+
 def _resolve_container_role_mode(container) -> str:
     deployment_snapshot = getattr(container, "deployment_snapshot", None)
     if callable(deployment_snapshot):
@@ -213,3 +235,8 @@ def updater_internal_peer_check(request: Request) -> Dict[str, Any]:
 @router.post("/internal-peer/apply")
 def updater_internal_peer_apply(request: Request) -> Dict[str, Any]:
     return _submit_internal_peer_command(request, action="apply")
+
+
+@router.post("/internal-peer/restart")
+def updater_internal_peer_restart(request: Request) -> Dict[str, Any]:
+    return _submit_internal_peer_command(request, action="restart")

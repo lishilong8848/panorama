@@ -1060,8 +1060,12 @@ def _normalize_task_overview(payload: Any) -> Dict[str, Any]:
 
 def _updater_source_label(payload: Dict[str, Any]) -> str:
     kind = _string(payload.get("source_kind", "")).lower()
+    if kind == "shared_approved_source":
+        return "共享目录批准源码（不访问互联网）"
     if kind == "shared_mirror":
         return "共享目录更新源（不访问互联网）"
+    if kind == "git_remote":
+        return "Git 仓库更新源"
     return _string(payload.get("source_label", "")) or "远端正式更新源"
 
 
@@ -1075,6 +1079,8 @@ def _updater_disabled_reason_text(raw: Any) -> str:
         return "当前代码目录不是 Git 工作区，无法执行代码拉取更新。"
     if key == "git_remote_missing":
         return "当前未配置 Git 更新仓库地址。"
+    if key == "shared_root_missing":
+        return "共享目录未配置，无法检查批准版本。"
     return "当前运行模式已跳过更新。"
 
 
@@ -1104,6 +1110,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     internal_peer_heartbeat_at = _string(internal_peer.get("heartbeat_at", ""))
     internal_peer_check_at = _string(internal_peer.get("last_check_at", ""))
     internal_peer_update_available = bool(internal_peer.get("update_available", False))
+    internal_peer_restart_required = bool(internal_peer.get("restart_required", False))
     internal_peer_last_result = _string(internal_peer.get("last_result", "")).lower()
     internal_peer_command = (
         internal_peer.get("command", {})
@@ -1124,7 +1131,11 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         action_text = (
             "开始更新"
             if internal_peer_command_action == "apply"
-            else ("检查更新" if internal_peer_command_action == "check" else "更新命令")
+            else (
+                "检查更新"
+                if internal_peer_command_action == "check"
+                else ("重启生效" if internal_peer_command_action == "restart" else "更新命令")
+            )
         )
         status_text = (
             "待执行"
@@ -1161,6 +1172,8 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             internal_peer_status_text = "在线，正在处理开始更新"
         elif internal_peer_command_action == "check":
             internal_peer_status_text = "在线，正在处理检查更新"
+        elif internal_peer_command_action == "restart":
+            internal_peer_status_text = "在线，正在处理重启生效"
         else:
             internal_peer_status_text = "在线，正在处理远程命令"
     else:
@@ -1216,6 +1229,13 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         elif update_mode == "git_pull":
             main_action_id = "apply"
             main_action_label = "拉取代码"
+        elif update_mode == "shared_approved_source":
+            if bool(updater.get("update_available", False)):
+                main_action_id = "apply"
+                main_action_label = "应用共享更新"
+            else:
+                main_action_id = "check"
+                main_action_label = "检查共享更新"
         elif queued_apply:
             main_action_id = "apply"
             main_action_label = "任务结束后自动更新"
@@ -1226,6 +1246,30 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         main_action_allowed = False
         main_action_disabled_reason = "检测到本地已修改文件，已阻止自动拉取代码。"
         main_action_reason_code = "dirty_worktree"
+    publish_allowed = bool(updater_enabled and update_mode == "git_pull" and source_kind == "git_remote" and not worktree_dirty)
+    publish_label = "发布内网批准版本"
+    publish_disabled_reason = ""
+    publish_reason_code = ""
+    if not updater_enabled:
+        publish_allowed = False
+        publish_disabled_reason = main_action_disabled_reason or "当前运行模式已跳过更新。"
+        publish_reason_code = main_action_reason_code or "updater_disabled"
+    elif update_mode != "git_pull":
+        publish_allowed = False
+        publish_disabled_reason = "当前不是 Git 源码更新模式，无法发布源码批准版本。"
+        publish_reason_code = "not_git_pull"
+    elif source_kind != "git_remote":
+        publish_allowed = False
+        publish_disabled_reason = "当前更新源不是 Git 仓库。"
+        publish_reason_code = "not_git_remote"
+    elif not manifest_path:
+        publish_allowed = False
+        publish_disabled_reason = "共享目录未配置，无法发布内网批准版本。"
+        publish_reason_code = "shared_root_missing"
+    elif worktree_dirty:
+        publish_allowed = False
+        publish_disabled_reason = "存在本地代码改动，无法发布内网批准版本。"
+        publish_reason_code = "dirty_worktree"
     internal_peer_check_allowed = bool(updater_enabled and internal_peer_available and not internal_peer_command_active)
     internal_peer_check_label = "内网端检查更新"
     internal_peer_check_disabled_reason = ""
@@ -1287,6 +1331,29 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             if not internal_peer_check_at and not internal_peer_last_result
             else "未发现更新"
         )
+    internal_peer_restart_allowed = bool(
+        updater_enabled
+        and internal_peer_available
+        and not internal_peer_command_active
+        and internal_peer_restart_required
+    )
+    internal_peer_restart_label = "内网端重启生效"
+    internal_peer_restart_disabled_reason = ""
+    internal_peer_restart_reason_code = ""
+    if not updater_enabled:
+        internal_peer_restart_disabled_reason = main_action_disabled_reason or "当前运行模式已跳过更新。"
+        internal_peer_restart_reason_code = main_action_reason_code or "updater_disabled"
+    elif not internal_peer_available:
+        internal_peer_restart_disabled_reason = "当前未接入内网端远程更新能力"
+        internal_peer_restart_reason_code = "internal_peer_unavailable"
+    elif internal_peer_command_active:
+        internal_peer_restart_disabled_reason = "当前已有待执行远程命令"
+        internal_peer_restart_reason_code = "command_active"
+        internal_peer_restart_label = "已有待执行命令"
+    elif not internal_peer_restart_required:
+        internal_peer_restart_disabled_reason = "内网端当前没有待重启更新。"
+        internal_peer_restart_reason_code = "restart_not_required"
+        internal_peer_restart_label = "无需重启"
     if not updater_enabled and disabled_reason == "source_python_run":
         return {
             "tone": "info",
@@ -1316,6 +1383,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                 "available": internal_peer_available,
                 "online": internal_peer_online,
                 "update_available": internal_peer_update_available,
+                "restart_required": internal_peer_restart_required,
                 "status_text": internal_peer_status_text,
                 "command": {
                     "active": internal_peer_command_active,
@@ -1339,6 +1407,14 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                     disabled_reason=main_action_disabled_reason,
                     reason_code=main_action_reason_code,
                 ),
+                "publish_approved": _action(
+                    "publish_approved",
+                    label=publish_label,
+                    allowed=publish_allowed,
+                    pending=False,
+                    disabled_reason=publish_disabled_reason,
+                    reason_code=publish_reason_code,
+                ),
                 "internal_peer_check": _action(
                     "internal_peer_check",
                     label=internal_peer_check_label,
@@ -1354,6 +1430,14 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                     pending=False,
                     disabled_reason=internal_peer_apply_disabled_reason,
                     reason_code=internal_peer_apply_reason_code,
+                ),
+                "internal_peer_restart": _action(
+                    "internal_peer_restart",
+                    label=internal_peer_restart_label,
+                    allowed=internal_peer_restart_allowed,
+                    pending=False,
+                    disabled_reason=internal_peer_restart_disabled_reason,
+                    reason_code=internal_peer_restart_reason_code,
                 ),
             },
         }
@@ -1432,6 +1516,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                 "available": internal_peer_available,
                 "online": internal_peer_online,
                 "update_available": internal_peer_update_available,
+                "restart_required": internal_peer_restart_required,
                 "status_text": internal_peer_status_text,
                 "command": {
                     "active": internal_peer_command_active,
@@ -1455,6 +1540,14 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                     disabled_reason=main_action_disabled_reason,
                     reason_code=main_action_reason_code,
                 ),
+                "publish_approved": _action(
+                    "publish_approved",
+                    label=publish_label,
+                    allowed=publish_allowed,
+                    pending=False,
+                    disabled_reason=publish_disabled_reason,
+                    reason_code=publish_reason_code,
+                ),
                 "internal_peer_check": _action(
                     "internal_peer_check",
                     label=internal_peer_check_label,
@@ -1470,6 +1563,14 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                     pending=False,
                     disabled_reason=internal_peer_apply_disabled_reason,
                     reason_code=internal_peer_apply_reason_code,
+                ),
+                "internal_peer_restart": _action(
+                    "internal_peer_restart",
+                    label=internal_peer_restart_label,
+                    allowed=internal_peer_restart_allowed,
+                    pending=False,
+                    disabled_reason=internal_peer_restart_disabled_reason,
+                    reason_code=internal_peer_restart_reason_code,
                 ),
             },
         }
@@ -1489,11 +1590,15 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     tone = "neutral"
     status_text = "尚未发布到共享目录"
     summary_text = "当前更新链路尚未生成可供内网跟随的批准版本。"
-    if source_kind == "shared_mirror":
+    if source_kind in {"shared_mirror", "shared_approved_source"}:
         if mirror_ready:
             tone = "success"
             status_text = "已检测到共享目录批准版本"
-            summary_text = "当前使用共享目录更新源，不访问互联网；检测到新批准版本后会自动跟随。"
+            summary_text = (
+                "当前使用共享目录批准源码更新源，不访问互联网；点击“应用共享更新”后才会应用。"
+                if source_kind == "shared_approved_source"
+                else "当前使用共享目录更新源，不访问互联网；检测到新批准版本后会自动跟随。"
+            )
         elif error_text:
             tone = "danger"
             status_text = "共享目录更新源异常"
@@ -1583,6 +1688,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             "available": internal_peer_available,
             "online": internal_peer_online,
             "update_available": internal_peer_update_available,
+            "restart_required": internal_peer_restart_required,
             "status_text": internal_peer_status_text,
             "command": {
                 "active": internal_peer_command_active,
@@ -1606,6 +1712,14 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                 disabled_reason=main_action_disabled_reason,
                 reason_code=main_action_reason_code,
             ),
+            "publish_approved": _action(
+                "publish_approved",
+                label=publish_label,
+                allowed=publish_allowed,
+                pending=False,
+                disabled_reason=publish_disabled_reason,
+                reason_code=publish_reason_code,
+            ),
             "internal_peer_check": _action(
                 "internal_peer_check",
                 label=internal_peer_check_label,
@@ -1621,6 +1735,14 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                 pending=False,
                 disabled_reason=internal_peer_apply_disabled_reason,
                 reason_code=internal_peer_apply_reason_code,
+            ),
+            "internal_peer_restart": _action(
+                "internal_peer_restart",
+                label=internal_peer_restart_label,
+                allowed=internal_peer_restart_allowed,
+                pending=False,
+                disabled_reason=internal_peer_restart_disabled_reason,
+                reason_code=internal_peer_restart_reason_code,
             ),
         },
     }

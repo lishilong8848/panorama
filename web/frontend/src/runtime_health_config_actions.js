@@ -15,11 +15,13 @@ import {
   activateStartupRuntimeApi,
   exitCurrentRuntimeApi,
   checkUpdaterApi,
+  publishUpdaterApprovedApi,
   getUpdaterStatusApi,
   restartUpdaterApi,
   restartAppApi,
   triggerInternalPeerUpdaterApplyApi,
   triggerInternalPeerUpdaterCheckApi,
+  triggerInternalPeerUpdaterRestartApi,
   getBridgeTaskApi,
   getBridgeTasksApi,
   getInternalRuntimeBuildingStatusApi,
@@ -65,8 +67,10 @@ const ACTION_KEY_APP_RESTART = "app:restart";
 const ACTION_KEY_UPDATER_CHECK = "updater:check";
 const ACTION_KEY_UPDATER_APPLY = "updater:apply";
 const ACTION_KEY_UPDATER_RESTART = "updater:restart";
+const ACTION_KEY_UPDATER_PUBLISH_APPROVED = "updater:publish_approved";
 const ACTION_KEY_UPDATER_INTERNAL_PEER_CHECK = "updater:internal_peer_check";
 const ACTION_KEY_UPDATER_INTERNAL_PEER_APPLY = "updater:internal_peer_apply";
+const ACTION_KEY_UPDATER_INTERNAL_PEER_RESTART = "updater:internal_peer_restart";
 const ACTION_KEY_HANDOVER_CONFIRM_ALL = "handover_review:confirm_all";
 const ACTION_KEY_HANDOVER_CLOUD_RETRY_ALL = "handover_review:cloud_retry_all";
 const ACTION_KEY_HANDOVER_DAILY_REPORT_AUTH_OPEN = "handover_daily_report:auth_open";
@@ -4087,6 +4091,33 @@ export function createRuntimeHealthConfigActions(ctx) {
     return runner();
   }
 
+  async function publishUpdaterApproved() {
+    const runner = async () => {
+      try {
+        const data = await publishUpdaterApprovedApi();
+        if (data?.runtime && typeof data.runtime === "object") {
+          Object.assign(health.updater, data.runtime);
+        }
+        const result = data?.result || {};
+        const commit = String(result?.source_commit || "").trim().slice(0, 7);
+        message.value = `已发布内网批准版本${commit ? `: ${commit}` : ""}`;
+        try {
+          await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        } catch (_err) {
+          // publish succeeded; status refresh is best-effort
+        }
+        return data;
+      } catch (err) {
+        message.value = `发布内网批准版本失败: ${err}`;
+        return { ok: false, reason: "error", error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_UPDATER_PUBLISH_APPROVED, runner, { cooldownMs: 500 });
+    }
+    return runner();
+  }
+
   async function triggerInternalPeerUpdaterCheck() {
     const runner = async () => {
       try {
@@ -4135,6 +4166,32 @@ export function createRuntimeHealthConfigActions(ctx) {
     };
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_UPDATER_INTERNAL_PEER_APPLY, runner, { cooldownMs: 500 });
+    }
+    return runner();
+  }
+
+  async function triggerInternalPeerUpdaterRestart() {
+    const runner = async () => {
+      try {
+        const data = await triggerInternalPeerUpdaterRestartApi();
+        if (data?.runtime && typeof data.runtime === "object") {
+          Object.assign(health.updater, data.runtime);
+        }
+        const result = data?.result || {};
+        message.value = String(result?.message || "").trim() || "已下发内网端重启生效命令。";
+        try {
+          await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        } catch (_err) {
+          // ignore transient fetch failures; command submission already succeeded
+        }
+        return data;
+      } catch (err) {
+        message.value = `下发内网端重启生效失败: ${err}`;
+        return { ok: false, reason: "error", error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_UPDATER_INTERNAL_PEER_RESTART, runner, { cooldownMs: 500 });
     }
     return runner();
   }
@@ -4702,8 +4759,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     applyUpdaterPatch,
     restartUpdaterApp,
     resumeUpdaterRecoveryIfNeeded,
+    publishUpdaterApproved,
     triggerInternalPeerUpdaterCheck,
     triggerInternalPeerUpdaterApply,
+    triggerInternalPeerUpdaterRestart,
     confirmAllHandoverReview,
     retryAllFailedHandoverCloudSync,
     openHandoverDailyReportScreenshotAuth,
@@ -4737,8 +4796,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     ACTION_KEY_DAY_METRIC_CONFIG_REPAIR,
     ACTION_KEY_HANDOVER_REVIEW_BASE_URL_SAVE,
     ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX,
+    ACTION_KEY_UPDATER_PUBLISH_APPROVED,
     ACTION_KEY_UPDATER_INTERNAL_PEER_CHECK,
     ACTION_KEY_UPDATER_INTERNAL_PEER_APPLY,
+    ACTION_KEY_UPDATER_INTERNAL_PEER_RESTART,
     ACTION_KEY_HANDOVER_DAILY_REPORT_SCREENSHOT_TEST,
     ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE,
     ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,

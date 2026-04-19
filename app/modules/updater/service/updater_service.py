@@ -8,11 +8,13 @@ import sys
 import threading
 import time
 import uuid
+import hashlib
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple
 
-from pipeline_utils import DEFAULT_CONFIG_FILENAME, get_app_dir
+from pipeline_utils import DEFAULT_CONFIG_FILENAME, get_app_dir, get_app_root_dir, get_persistent_user_data_dir
 
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.modules.updater.core.versioning import (
@@ -37,9 +39,42 @@ from app.modules.updater.service.update_applier import UpdateApplier
 
 _SOURCE_RUN_DISABLE_UPDATER_ENV = "QJPT_DISABLE_UPDATER_IN_SOURCE_RUN"
 _SOURCE_RUN_GIT_PULL_ENV = "QJPT_ENABLE_GIT_PULL_IN_SOURCE_RUN"
+_SOURCE_APPROVED_UPDATE_MODE = "shared_approved_source"
+_SOURCE_APPROVED_SOURCE_KIND = "shared_approved_source"
 _INTERNAL_PEER_HEARTBEAT_INTERVAL_SEC = 5
 _INTERNAL_PEER_HEARTBEAT_TIMEOUT_SEC = 15
 _GIT_TRACKED_STATUS_TIMEOUT_SEC = 30
+_SOURCE_SNAPSHOT_ZIP_NAME = "source_snapshot.zip"
+_SOURCE_MANIFEST_NAME = "source_manifest.json"
+_SOURCE_PUBLISH_STATE_NAME = "source_publish_state.json"
+_SOURCE_SNAPSHOT_EXCLUDED_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".runtime",
+    ".venv",
+    "__pycache__",
+    "build_output",
+    "config_segments",
+    "dist",
+    "htmlcov",
+    "logs",
+    "node_modules",
+    "runtime_state",
+    "share",
+    "user_data",
+    "venv",
+}
+_SOURCE_SNAPSHOT_EXCLUDED_PREFIXES = (
+    "runtime/python/",
+)
+_SOURCE_SNAPSHOT_EXCLUDED_FILES = {
+    DEFAULT_CONFIG_FILENAME,
+    ".env",
+}
 _GIT_DIRTY_ALLOWLIST = {
     DEFAULT_CONFIG_FILENAME,
     "runtime_dependency_lock.json",
@@ -85,6 +120,36 @@ def _short_git_commit(raw: Any) -> str:
     if len(text) >= 7:
         return text[:7]
     return text
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest().lower()
+
+
+def _normalize_zip_relpath(raw_path: Path | str) -> str:
+    return str(raw_path).replace("\\", "/").lstrip("/")
+
+
+def _is_source_snapshot_excluded(rel_path: Path, *, is_dir: bool = False) -> bool:
+    rel_text = _normalize_zip_relpath(rel_path)
+    if not rel_text:
+        return True
+    parts = set(rel_path.parts)
+    if any(part in _SOURCE_SNAPSHOT_EXCLUDED_DIRS for part in parts):
+        return True
+    if rel_path.name in _SOURCE_SNAPSHOT_EXCLUDED_FILES:
+        return True
+    if rel_path.name.startswith(f"{DEFAULT_CONFIG_FILENAME}.backup"):
+        return True
+    if any(rel_text == prefix.rstrip("/") or rel_text.startswith(prefix) for prefix in _SOURCE_SNAPSHOT_EXCLUDED_PREFIXES):
+        return True
+    if is_dir and rel_path.name in _SOURCE_SNAPSHOT_EXCLUDED_DIRS:
+        return True
+    return False
 
 
 def _default_node_id(role_mode: Any) -> str:
@@ -149,10 +214,15 @@ class UpdaterService:
         self.shared_bridge_enabled = bool(resolved_shared_bridge.get("enabled", False))
         self.shared_bridge_root = str(resolved_shared_bridge.get("root_dir", "") or "").strip()
         self.app_dir = get_app_dir()
-        self.app_root_dir = self.app_dir
-        self.persistent_user_data_dir = self.app_dir
+        self.app_root_dir = get_app_root_dir(self.app_dir)
+        self.persistent_user_data_dir = get_persistent_user_data_dir(self.app_dir)
         self.source_run_git_pull_enabled = _source_run_git_pull_enabled_from_env()
-        self.update_mode = "git_pull" if self.source_run_git_pull_enabled else "patch_zip"
+        if self.source_run_git_pull_enabled and self.role_mode == "internal":
+            self.update_mode = _SOURCE_APPROVED_UPDATE_MODE
+        elif self.source_run_git_pull_enabled:
+            self.update_mode = "git_pull"
+        else:
+            self.update_mode = "patch_zip"
         self.git_available = bool(shutil.which("git")) if self.update_mode == "git_pull" else False
         self.git_repo_detected = bool((self.app_dir / ".git").exists()) if self.update_mode == "git_pull" else False
         self.git_repo_url = ""
@@ -161,6 +231,9 @@ class UpdaterService:
         if self.update_mode == "git_pull":
             self.source_kind = "git_remote"
             self.source_label = "Git 仓库更新源"
+        elif self.update_mode == _SOURCE_APPROVED_UPDATE_MODE:
+            self.source_kind = _SOURCE_APPROVED_SOURCE_KIND
+            self.source_label = "共享目录批准源码"
         else:
             self.source_kind = "shared_mirror" if self.role_mode == "internal" else "remote"
             self.source_label = "共享目录更新源" if self.source_kind == "shared_mirror" else "远端正式更新源"
@@ -180,6 +253,8 @@ class UpdaterService:
         self.shared_mirror_client = SharedMirrorManifestClient(self.shared_bridge_root) if self.shared_bridge_root else None
         self.remote_control_store = UpdaterRemoteControlStore(self.shared_bridge_root) if self.shared_bridge_root else None
         if self.update_mode == "git_pull":
+            self.client = None
+        elif self.update_mode == _SOURCE_APPROVED_UPDATE_MODE:
             self.client = None
         elif self.source_kind == "shared_mirror":
             self.client = self.shared_mirror_client
@@ -228,6 +303,8 @@ class UpdaterService:
         self.state.setdefault("mirror_manifest_path", mirror_runtime.get("mirror_manifest_path", ""))
         self.state.setdefault("last_publish_at", mirror_runtime.get("last_publish_at", ""))
         self.state.setdefault("last_publish_error", mirror_runtime.get("last_publish_error", ""))
+        self.state.setdefault("approved_commit", mirror_runtime.get("approved_commit", ""))
+        self.state.setdefault("approved_manifest", mirror_runtime.get("approved_manifest", {}))
         if not bool(self.cfg["enabled"]):
             self.state.update(
                 {
@@ -284,6 +361,10 @@ class UpdaterService:
             "last_publish_at": str(self.state.get("last_publish_at", mirror_runtime.get("last_publish_at", "")) or ""),
             "last_publish_error": str(
                 self.state.get("last_publish_error", mirror_runtime.get("last_publish_error", "")) or ""
+            ),
+            "approved_commit": str(self.state.get("approved_commit", mirror_runtime.get("approved_commit", "")) or ""),
+            "approved_manifest": dict(
+                self.state.get("approved_manifest", mirror_runtime.get("approved_manifest", {})) or {}
             ),
             "internal_peer": internal_peer_runtime,
         }
@@ -363,8 +444,8 @@ class UpdaterService:
         action_text = str(action or "").strip().lower()
         if self.role_mode != "external":
             raise RuntimeError("当前仅支持外网端下发内网更新命令。")
-        if action_text not in {"check", "apply"}:
-            raise RuntimeError("仅支持下发检查更新或开始更新命令。")
+        if action_text not in {"check", "apply", "restart"}:
+            raise RuntimeError("仅支持下发检查更新、开始更新或重启生效命令。")
         if not self.remote_control_store or not self.shared_bridge_root:
             raise RuntimeError("共享目录未配置，无法向内网端下发更新命令。")
         result = self.remote_control_store.submit_command(
@@ -379,6 +460,8 @@ class UpdaterService:
             message = "已下发内网端检查更新命令，等待内网端执行。"
             if action_text == "apply":
                 message = "已下发内网端开始更新命令，等待内网端执行。"
+            elif action_text == "restart":
+                message = "已下发内网端重启生效命令，等待内网端执行。"
             self._log(
                 "已下发内网远程更新命令: "
                 f"action={action_text}, command_id={str(command.get('command_id', '') or '-').strip() or '-'}"
@@ -390,6 +473,8 @@ class UpdaterService:
                 message = "已有待执行的内网端检查更新命令，请等待其完成。"
             elif pending_action == "apply":
                 message = "已有待执行的内网端开始更新命令，请等待其完成。"
+            elif pending_action == "restart":
+                message = "已有待执行的内网端重启生效命令，请等待其完成。"
         return {
             **result,
             "action": action_text,
@@ -669,7 +754,11 @@ class UpdaterService:
                 "mirror_manifest_path": "",
                 "last_publish_at": "",
                 "last_publish_error": "",
+                "approved_commit": "",
+                "approved_manifest": {},
             }
+        if self.update_mode in {"git_pull", _SOURCE_APPROVED_UPDATE_MODE}:
+            return self._source_approved_runtime_snapshot()
         snapshot = self.shared_mirror_client.get_runtime_snapshot()
         return {
             "mirror_ready": bool(snapshot.get("mirror_ready", False)),
@@ -677,6 +766,77 @@ class UpdaterService:
             "mirror_manifest_path": str(snapshot.get("mirror_manifest_path", "") or "").strip(),
             "last_publish_at": str(snapshot.get("last_publish_at", "") or "").strip(),
             "last_publish_error": str(snapshot.get("last_publish_error", "") or "").strip(),
+            "approved_commit": "",
+            "approved_manifest": {},
+        }
+
+    @property
+    def _source_approved_root(self) -> Path:
+        if self.shared_mirror_client:
+            return self.shared_mirror_client.approved_root
+        return Path(self.shared_bridge_root) / "updater" / "approved"
+
+    @property
+    def _source_manifest_path(self) -> Path:
+        return self._source_approved_root / _SOURCE_MANIFEST_NAME
+
+    @property
+    def _source_publish_state_path(self) -> Path:
+        return self._source_approved_root / _SOURCE_PUBLISH_STATE_NAME
+
+    def _default_source_publish_state(self) -> Dict[str, Any]:
+        return {
+            "mirror_ready": False,
+            "mirror_version": "",
+            "mirror_release_revision": 0,
+            "last_publish_at": "",
+            "last_publish_error": "",
+            "mirror_manifest_path": str(self._source_manifest_path),
+            "published_by_role": "",
+            "published_by_node_id": "",
+            "zip_relpath": "",
+            "approved_commit": "",
+        }
+
+    def _load_source_publish_state(self) -> Dict[str, Any]:
+        payload = self._default_source_publish_state()
+        try:
+            if self._source_publish_state_path.exists():
+                loaded = json.loads(self._source_publish_state_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    payload.update(loaded)
+        except Exception:  # noqa: BLE001
+            pass
+        payload["mirror_manifest_path"] = str(self._source_manifest_path)
+        return payload
+
+    def _source_approved_runtime_snapshot(self) -> Dict[str, Any]:
+        state = self._load_source_publish_state()
+        manifest: Dict[str, Any] = {}
+        if self._source_manifest_path.exists():
+            try:
+                loaded = json.loads(self._source_manifest_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    manifest = loaded
+            except Exception as exc:  # noqa: BLE001
+                state["last_publish_error"] = f"读取源码批准清单失败: {exc}"
+                state["mirror_ready"] = False
+        approved_commit = str(manifest.get("source_commit", state.get("approved_commit", "")) or "").strip()
+        version = str(
+            manifest.get("display_version")
+            or manifest.get("target_display_version")
+            or state.get("mirror_version", "")
+            or _short_git_commit(approved_commit)
+            or ""
+        ).strip()
+        return {
+            "mirror_ready": bool(state.get("mirror_ready", False)) and bool(manifest),
+            "mirror_version": version,
+            "mirror_manifest_path": str(self._source_manifest_path),
+            "last_publish_at": str(state.get("last_publish_at", "") or manifest.get("created_at", "") or "").strip(),
+            "last_publish_error": str(state.get("last_publish_error", "") or "").strip(),
+            "approved_commit": approved_commit,
+            "approved_manifest": manifest,
         }
 
     def _sync_mirror_runtime(self) -> Dict[str, Any]:
@@ -689,17 +849,24 @@ class UpdaterService:
             mirror_manifest_path=str(snapshot.get("mirror_manifest_path", "") or "").strip(),
             last_publish_at=str(snapshot.get("last_publish_at", "") or "").strip(),
             last_publish_error=str(snapshot.get("last_publish_error", "") or "").strip(),
+            approved_commit=str(snapshot.get("approved_commit", "") or "").strip(),
+            approved_manifest=dict(snapshot.get("approved_manifest", {}) or {}),
         )
         return snapshot
 
     def _shared_mirror_watch_signal(self) -> tuple[str, ...]:
-        if self.source_kind != "shared_mirror" or not self.shared_mirror_client:
+        if self.source_kind not in {"shared_mirror", _SOURCE_APPROVED_SOURCE_KIND} or not self.shared_mirror_client:
             return ()
         parts: list[str] = []
         # Only use the final publish-state file as the immediate trigger.
         # The manifest may appear slightly earlier during publishing, and
         # watching it would widen the window for reacting to a half-published mirror.
-        for path in (self.shared_mirror_client.publish_state_path,):
+        watch_path = (
+            self._source_publish_state_path
+            if self.source_kind == _SOURCE_APPROVED_SOURCE_KIND
+            else self.shared_mirror_client.publish_state_path
+        )
+        for path in (watch_path,):
             try:
                 if path.exists():
                     stat = path.stat()
@@ -753,7 +920,7 @@ class UpdaterService:
             )
             self._log(f"更新服务未启用: {self._disabled_reason_text(self.disabled_reason)}")
             return {"started": False, "running": False, "reason": "disabled"}
-        if self.source_kind == "shared_mirror" and not self.shared_mirror_client:
+        if self.source_kind in {"shared_mirror", _SOURCE_APPROVED_SOURCE_KIND} and not self.shared_mirror_client:
             self._set_runtime_and_state(
                 last_result="failed",
                 last_error="共享目录未配置，内网端无法检查离线更新。",
@@ -789,6 +956,25 @@ class UpdaterService:
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, daemon=True, name="qjpt-updater")
             self._thread.start()
+            return {"started": True, "running": True, "reason": "started"}
+
+        if self.update_mode == _SOURCE_APPROVED_UPDATE_MODE:
+            self._set_runtime_and_state(
+                enabled=True,
+                disabled_reason="",
+                last_error="",
+                source_kind=self.source_kind,
+                source_label=self.source_label,
+                update_mode=self.update_mode,
+                dependency_sync_status=str(self.state.get("dependency_sync_status", "idle") or "idle"),
+                dependency_sync_error=str(self.state.get("dependency_sync_error", "") or ""),
+                queued_apply=dict(self.state.get("queued_apply", self._empty_queue_payload()) or self._empty_queue_payload()),
+            )
+            self._sync_shared_mirror_watch_signal()
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, daemon=True, name="qjpt-updater")
+            self._thread.start()
+            self._log("内网端共享目录批准源码更新模式已启用；启动阶段不会自动应用更新。")
             return {"started": True, "running": True, "reason": "started"}
 
         try:
@@ -890,6 +1076,8 @@ class UpdaterService:
             )
         if not bool(self.state.get("restart_required", False)):
             return self._build_result_payload(last_result=str(self.state.get("last_result", "")), queue_status="none")
+        if self.is_busy():
+            raise RuntimeError("当前仍有任务在运行，暂不能重启生效。")
         if not callable(self.restart_callback):
             raise RuntimeError("当前运行模式不支持自动重启，请手动重启程序。")
         ok, detail = self.restart_callback(
@@ -968,6 +1156,8 @@ class UpdaterService:
             "mirror_manifest_path": str(self.state.get("mirror_manifest_path", "") or ""),
             "last_publish_at": str(self.state.get("last_publish_at", "") or ""),
             "last_publish_error": str(self.state.get("last_publish_error", "") or ""),
+            "approved_commit": str(self.state.get("approved_commit", "") or ""),
+            "approved_manifest": dict(self.state.get("approved_manifest", {}) or {}),
             "message": str(extra.pop("message", "") or "").strip(),
         }
         payload.update(extra)
@@ -1065,6 +1255,148 @@ class UpdaterService:
             self._sync_mirror_runtime()
             self._log(f"共享目录更新镜像发布失败: {exc}")
             return {"published": False, "reason": "publish_failed", "error": str(exc)}
+
+    def _build_source_snapshot_zip(self, *, manifest: Dict[str, Any], zip_path: Path) -> Dict[str, Any]:
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        if zip_path.exists():
+            zip_path.unlink()
+        included = 0
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+            embedded_manifest = dict(manifest if isinstance(manifest, dict) else {})
+            embedded_manifest.pop("sha256", None)
+            embedded_manifest.pop("zip_sha256", None)
+            embedded_manifest.pop("zip_size", None)
+            archive.writestr(_SOURCE_MANIFEST_NAME, json.dumps(embedded_manifest, ensure_ascii=False, indent=2))
+            for path in sorted(self.app_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+                try:
+                    rel = path.relative_to(self.app_dir)
+                except ValueError:
+                    continue
+                if _is_source_snapshot_excluded(rel):
+                    continue
+                rel_text = _normalize_zip_relpath(rel)
+                if rel_text == _SOURCE_MANIFEST_NAME:
+                    continue
+                archive.write(path, rel_text)
+                included += 1
+        return {"zip_path": str(zip_path), "included_files": included, "zip_size": int(zip_path.stat().st_size)}
+
+    def _write_source_publish_error(self, error_text: str) -> None:
+        if not self.shared_bridge_root:
+            return
+        payload = self._load_source_publish_state()
+        payload.update(
+            {
+                "mirror_ready": False,
+                "last_publish_error": str(error_text or "").strip(),
+                "last_publish_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "published_by_role": self.role_mode,
+                "published_by_node_id": self.node_id,
+                "mirror_manifest_path": str(self._source_manifest_path),
+            }
+        )
+        self._source_publish_state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._source_publish_state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def publish_approved_source_snapshot(self) -> Dict[str, Any]:
+        if self.role_mode != "external":
+            raise RuntimeError("仅外网端可发布内网批准源码版本。")
+        if self.update_mode != "git_pull":
+            raise RuntimeError("当前不是 Git 源码更新模式，无法发布源码快照。")
+        if not self.shared_bridge_root or not self.shared_mirror_client:
+            raise RuntimeError("共享目录未配置，无法发布内网批准源码版本。")
+
+        try:
+            git_snapshot = self._sync_git_runtime(fetch_remote=False)
+            local_commit = str(git_snapshot.get("local_commit", "") or self.state.get("local_commit", "") or "").strip()
+            branch = str(git_snapshot.get("branch", "") or self.state.get("branch", "") or "").strip()
+            if not local_commit:
+                raise RuntimeError("当前 Git 本地提交未知，请先检查代码更新。")
+            if bool(git_snapshot.get("worktree_dirty", False)):
+                dirty_files = list(git_snapshot.get("dirty_files", []) or [])
+                raise RuntimeError(
+                    "检测到本地代码改动，已阻止发布内网批准源码版本。"
+                    + (f" 脏文件={','.join(dirty_files[:5])}" if dirty_files else "")
+                )
+
+            local = normalize_local_version(load_local_build_meta(self.app_dir))
+            local_version_text = str(local.get("display_version") or local.get("build_id") or "").strip()
+            local_release_revision = int(local.get("release_revision", 0) or 0)
+            published_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            manifest = {
+                "format": "source_snapshot",
+                "source_commit": local_commit,
+                "branch": branch,
+                "created_at": published_at,
+                "zip_relpath": _SOURCE_SNAPSHOT_ZIP_NAME,
+                "display_version": local_version_text,
+                "release_revision": local_release_revision,
+                "target_display_version": local_version_text,
+                "target_release_revision": local_release_revision,
+                "published_by_role": self.role_mode,
+                "published_by_node_id": self.node_id,
+                "exclude_policy_version": 1,
+            }
+            staging_zip = self.download_dir / f"source_snapshot_{_short_git_commit(local_commit) or int(time.time())}.zip"
+            build_result = self._build_source_snapshot_zip(manifest=manifest, zip_path=staging_zip)
+            actual_sha = _sha256_file(staging_zip)
+            manifest["sha256"] = actual_sha
+            manifest["zip_sha256"] = actual_sha
+            manifest["zip_size"] = int(staging_zip.stat().st_size)
+
+            approved_root = self._source_approved_root
+            staging_root = approved_root.parent / "staging"
+            approved_root.mkdir(parents=True, exist_ok=True)
+            staging_root.mkdir(parents=True, exist_ok=True)
+            staging_approved_zip = staging_root / _SOURCE_SNAPSHOT_ZIP_NAME
+            approved_zip = approved_root / _SOURCE_SNAPSHOT_ZIP_NAME
+            approved_zip_tmp = approved_root / f".{_SOURCE_SNAPSHOT_ZIP_NAME}.tmp"
+            manifest_tmp = approved_root / f".{_SOURCE_MANIFEST_NAME}.tmp"
+            state_tmp = approved_root / f".{_SOURCE_PUBLISH_STATE_NAME}.tmp"
+            shutil.copy2(staging_zip, staging_approved_zip)
+            shutil.copy2(staging_approved_zip, approved_zip_tmp)
+            os.replace(approved_zip_tmp, approved_zip)
+            manifest_tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(manifest_tmp, self._source_manifest_path)
+            publish_state = {
+                "mirror_ready": True,
+                "mirror_version": local_version_text or _short_git_commit(local_commit),
+                "mirror_release_revision": local_release_revision,
+                "last_publish_at": published_at,
+                "last_publish_error": "",
+                "mirror_manifest_path": str(self._source_manifest_path),
+                "published_by_role": self.role_mode,
+                "published_by_node_id": self.node_id,
+                "zip_relpath": _SOURCE_SNAPSHOT_ZIP_NAME,
+                "approved_commit": local_commit,
+            }
+            state_tmp.write_text(json.dumps(publish_state, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(state_tmp, self._source_publish_state_path)
+            staging_approved_zip.unlink(missing_ok=True)
+            self._sync_mirror_runtime()
+            self._log(
+                "已发布内网批准源码版本到共享目录: "
+                f"commit={_short_git_commit(local_commit)}, files={build_result.get('included_files', 0)}, "
+                f"path={self._source_manifest_path}"
+            )
+            return {
+                "published": True,
+                "manifest_path": str(self._source_manifest_path),
+                "zip_path": str(approved_zip),
+                "sha256": actual_sha,
+                "source_commit": local_commit,
+                "branch": branch,
+                "display_version": local_version_text,
+                "release_revision": local_release_revision,
+                "included_files": int(build_result.get("included_files", 0) or 0),
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._write_source_publish_error(str(exc))
+            self._sync_mirror_runtime()
+            self._log(f"内网批准源码版本发布失败: {exc}")
+            raise
 
     def _persist_local_build_meta_from_remote(self, remote_manifest: Dict[str, Any]) -> None:
         if not isinstance(remote_manifest, dict):
@@ -1359,6 +1691,197 @@ class UpdaterService:
             dependency_result=dependency_result,
         )
 
+    def _fetch_source_manifest(self) -> Dict[str, Any]:
+        if not self.shared_bridge_root:
+            raise SharedMirrorPendingError("共享目录未配置，无法检查批准源码版本。")
+        state = self._load_source_publish_state()
+        if not self._source_publish_state_path.exists():
+            raise SharedMirrorPendingError("暂无外网端发布的批准源码版本。")
+        if not bool(state.get("mirror_ready", False)):
+            raise SharedMirrorPendingError("共享目录批准源码版本尚未发布完成。")
+        error_text = str(state.get("last_publish_error", "") or "").strip()
+        if error_text:
+            raise SharedMirrorPendingError(f"共享目录批准源码版本发布异常: {error_text}")
+        if not self._source_manifest_path.exists():
+            raise SharedMirrorPendingError("共享目录批准源码清单不存在。")
+        try:
+            payload = json.loads(self._source_manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"读取共享目录批准源码清单失败: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("共享目录批准源码清单格式错误。")
+        if str(payload.get("format", "") or "").strip() != "source_snapshot":
+            raise RuntimeError("共享目录批准源码清单不是 source_snapshot 格式。")
+        zip_relpath = str(payload.get("zip_relpath", "") or _SOURCE_SNAPSHOT_ZIP_NAME).strip()
+        zip_path = self._source_approved_root / Path(zip_relpath).name
+        if not zip_path.exists():
+            raise SharedMirrorPendingError("共享目录批准源码包尚未就绪。")
+        expected_sha = str(payload.get("sha256", payload.get("zip_sha256", "")) or "").strip().lower()
+        if expected_sha:
+            actual_sha = _sha256_file(zip_path)
+            if actual_sha != expected_sha:
+                raise RuntimeError("批准版本校验失败。")
+        payload["zip_relpath"] = Path(zip_relpath).name
+        payload["zip_path"] = str(zip_path)
+        return payload
+
+    def _local_source_commit(self) -> str:
+        if self.git_available and self.git_repo_detected:
+            try:
+                snapshot = self._git_tracked_status()
+                commit = str(snapshot.get("local_commit", "") or "").strip()
+                if commit:
+                    return commit
+            except Exception:  # noqa: BLE001
+                pass
+        return str(self.state.get("local_commit", "") or self.runtime.get("local_commit", "") or "").strip()
+
+    def _check_source_approved_once(self, *, apply_update: bool | None) -> Dict[str, Any]:
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        local = normalize_local_version(load_local_build_meta(self.app_dir))
+        local_version_text = local.get("display_version") or local.get("build_id") or "-"
+        local_release_revision = int(local.get("release_revision", 0) or 0)
+        self._sync_mirror_runtime()
+        local_commit = self._local_source_commit()
+        try:
+            manifest = self._fetch_source_manifest()
+        except SharedMirrorPendingError as exc:
+            self._set_runtime_and_state(
+                last_check_at=now_text,
+                last_result="mirror_pending_publish",
+                last_error="",
+                local_version=str(local_version_text),
+                remote_version="",
+                local_release_revision=local_release_revision,
+                remote_release_revision=0,
+                local_commit=local_commit,
+                update_available=False,
+                force_apply_available=False,
+                source_kind=self.source_kind,
+                source_label=self.source_label,
+                update_mode=self.update_mode,
+            )
+            return self._build_result_payload(last_result="mirror_pending_publish", message=str(exc))
+
+        approved_commit = str(manifest.get("source_commit", "") or "").strip()
+        approved_version = str(
+            manifest.get("display_version")
+            or manifest.get("target_display_version")
+            or _short_git_commit(approved_commit)
+            or ""
+        ).strip()
+        approved_revision = int(manifest.get("release_revision", manifest.get("target_release_revision", 0)) or 0)
+        update_available = bool(approved_commit and approved_commit != local_commit)
+        self._set_runtime_and_state(
+            last_check_at=now_text,
+            local_version=str(local_version_text),
+            remote_version=approved_version or _short_git_commit(approved_commit),
+            local_release_revision=local_release_revision,
+            remote_release_revision=approved_revision,
+            local_commit=local_commit,
+            remote_commit=approved_commit,
+            approved_commit=approved_commit,
+            approved_manifest=manifest,
+            update_available=update_available,
+            force_apply_available=False,
+            source_kind=self.source_kind,
+            source_label=self.source_label,
+            update_mode=self.update_mode,
+        )
+
+        if not apply_update:
+            result_key = "update_available" if update_available else "up_to_date"
+            if bool(self.state.get("restart_required", False)):
+                result_key = "restart_pending"
+            self._set_runtime_and_state(last_result=result_key, last_error="")
+            return self._build_result_payload(
+                last_result=result_key,
+                message="检测到共享目录批准源码版本。" if update_available else "当前已是共享目录批准源码版本。",
+            )
+
+        if not update_available:
+            result_key = "restart_pending" if bool(self.state.get("restart_required", False)) else "up_to_date"
+            self._set_runtime_and_state(last_result=result_key, last_error="")
+            return self._build_result_payload(last_result=result_key, message="当前已是共享目录批准源码版本。")
+
+        zip_path = Path(str(manifest.get("zip_path", "") or ""))
+        if not zip_path.exists():
+            raise RuntimeError("共享目录批准源码包不存在。")
+        expected_sha = str(manifest.get("sha256", manifest.get("zip_sha256", "")) or "").strip().lower()
+        local_zip = self.download_dir / _SOURCE_SNAPSHOT_ZIP_NAME
+        self._set_runtime_and_state(last_result="downloading_patch", last_error="")
+        shutil.copy2(zip_path, local_zip)
+        if expected_sha and _sha256_file(local_zip) != expected_sha:
+            local_zip.unlink(missing_ok=True)
+            raise RuntimeError("批准版本校验失败。")
+
+        self._set_runtime_and_state(last_result="applying_patch")
+        applied = self.applier.apply_source_snapshot_zip(
+            zip_path=local_zip,
+            backup_root=self.backup_dir,
+            max_backups=int(self.cfg["max_backups"]),
+        )
+        try:
+            dependency_result = self._sync_patch_dependencies(applied, {"dependency_manifest_path": "runtime_dependency_lock.json"})
+        except Exception as dependency_exc:  # noqa: BLE001
+            return self._rollback_after_dependency_failure(
+                applied=applied,
+                remote={
+                    "build_id": approved_version or approved_commit,
+                    "display_version": approved_version or _short_git_commit(approved_commit),
+                    "release_revision": approved_revision,
+                },
+                remote_version_text=approved_version or _short_git_commit(approved_commit),
+                remote_release_revision=approved_revision,
+                error_text=str(dependency_exc),
+            )
+
+        refreshed_local = normalize_local_version(load_local_build_meta(self.app_dir))
+        refreshed_local_text = (
+            str(manifest.get("display_version") or manifest.get("target_display_version") or "").strip()
+            or refreshed_local.get("display_version")
+            or refreshed_local.get("build_id")
+            or "-"
+        )
+        refreshed_revision = int(
+            manifest.get("release_revision", manifest.get("target_release_revision", 0))
+            or refreshed_local.get("release_revision", 0)
+            or 0
+        )
+        dependency_status = "success" if str(dependency_result.get("status", "")).strip() == "success" else "idle"
+        self._set_runtime_and_state(
+            last_result="restart_pending",
+            last_error="",
+            local_version=str(refreshed_local_text),
+            remote_version=approved_version or _short_git_commit(approved_commit),
+            local_release_revision=refreshed_revision,
+            remote_release_revision=approved_revision,
+            local_commit=approved_commit,
+            remote_commit=approved_commit,
+            approved_commit=approved_commit,
+            approved_manifest=manifest,
+            update_available=False,
+            force_apply_available=False,
+            last_updated_at=now_text,
+            restart_required=True,
+            last_applied_release_revision=refreshed_revision,
+            dependency_sync_status=dependency_status,
+            dependency_sync_error="",
+            dependency_sync_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        self._write_internal_peer_status(online=True, force=True)
+        self._log(
+            "共享目录批准源码应用完成: "
+            f"commit={_short_git_commit(approved_commit)}, replaced={applied.get('replaced', 0)}, "
+            f"deleted={applied.get('deleted', 0)}"
+        )
+        return self._build_result_payload(
+            last_result="restart_pending",
+            message="共享目录批准源码已应用并完成运行依赖同步，请重启程序使更新生效。",
+            applied=applied,
+            dependency_result=dependency_result,
+        )
+
     def _check_once(self, *, apply_update: bool | None, force_remote: bool) -> Dict[str, Any]:
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         local = normalize_local_version(load_local_build_meta(self.app_dir))
@@ -1562,6 +2085,8 @@ class UpdaterService:
         try:
             if self.update_mode == "git_pull":
                 return self._check_git_once(apply_update=apply_update)
+            if self.update_mode == _SOURCE_APPROVED_UPDATE_MODE:
+                return self._check_source_approved_once(apply_update=apply_update)
             return self._check_once(apply_update=apply_update, force_remote=force_remote)
         finally:
             self._sync_shared_mirror_watch_signal()
@@ -1619,6 +2144,8 @@ class UpdaterService:
                 result = self.check_now()
             elif action == "apply":
                 result = self.apply_now(mode="normal", queue_if_busy=True)
+            elif action == "restart":
+                result = self.restart_now()
             else:
                 raise RuntimeError(f"不支持的远程命令动作: {action or '-'}")
             result_key = str(result.get("last_result", "") or "").strip().lower()
@@ -1632,6 +2159,8 @@ class UpdaterService:
                 completion_message = "内网端更新命令已排队执行"
             elif action == "apply":
                 completion_message = "内网端开始更新命令执行完成"
+            elif action == "restart":
+                completion_message = "内网端重启生效命令执行完成"
             else:
                 completion_message = "内网端检查更新命令执行完成"
 

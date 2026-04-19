@@ -1815,6 +1815,9 @@ class AppContainer:
                 "mirror_manifest_path": "",
                 "last_publish_at": "",
                 "last_publish_error": "",
+                "approved_commit": "",
+                "approved_manifest": {},
+                "internal_peer": {},
             }
         return self.updater_service.get_runtime_snapshot()
 

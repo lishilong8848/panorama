@@ -1,5 +1,8 @@
 from __future__ import annotations
 from pathlib import Path
+import hashlib
+import json
+import zipfile
 
 import pytest
 
@@ -182,6 +185,28 @@ def test_git_dirty_worktree_ignores_user_mutable_tracked_files(tmp_path: Path, m
         ("fetch", "origin", "master"): type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
     }
 
+
+def _build_role_config(tmp_path: Path, *, role_mode: str, shared_root: Path) -> dict:
+    cfg = _build_config(tmp_path)
+    cfg.update(
+        {
+            "deployment": {"role_mode": role_mode},
+            "shared_bridge": {
+                "enabled": True,
+                "root_dir": str(shared_root),
+            },
+        }
+    )
+    return cfg
+
+
+def _sha256(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest().lower()
+
     def fake_run_git(self, *args):  # noqa: ANN001
         return responses[tuple(args)]
 
@@ -215,3 +240,125 @@ def test_remote_manifest_prefers_zip_url_over_zip_relpath(tmp_path: Path, monkey
     )
 
     assert patch_ref == "https://example.invalid/updates/patches/QJPT_patch_only_p224_r224.zip"
+
+
+def test_internal_source_run_uses_shared_approved_source_without_git(tmp_path: Path, monkeypatch) -> None:
+    shared_root = tmp_path / "share"
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: tmp_path / "app")
+    monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")
+    monkeypatch.setattr(updater_service_module.shutil, "which", lambda _name: None)
+    (tmp_path / "app").mkdir()
+
+    service = UpdaterService(
+        config=_build_role_config(tmp_path, role_mode="internal", shared_root=shared_root),
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+    result = service.check_now()
+
+    assert service.update_mode == updater_service_module._SOURCE_APPROVED_UPDATE_MODE
+    assert service.source_kind == updater_service_module._SOURCE_APPROVED_SOURCE_KIND
+    assert result["last_result"] == "mirror_pending_publish"
+    assert result["enabled"] is True
+
+
+def test_external_publish_approved_source_snapshot_excludes_user_config(tmp_path: Path, monkeypatch) -> None:
+    app_dir = tmp_path / "app"
+    shared_root = tmp_path / "share"
+    app_dir.mkdir()
+    (app_dir / ".git").mkdir()
+    (app_dir / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (app_dir / "表格计算配置.json").write_text('{"secret": "keep"}', encoding="utf-8")
+    (app_dir / "config_segments").mkdir()
+    (app_dir / "config_segments" / "handover.json").write_text('{"keep": true}', encoding="utf-8")
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: app_dir)
+    monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")
+    monkeypatch.setattr(updater_service_module.shutil, "which", lambda _name: "C:/Git/bin/git.exe")
+
+    responses = {
+        ("rev-parse", "--abbrev-ref", "HEAD"): type("R", (), {"returncode": 0, "stdout": "master\n", "stderr": ""})(),
+        ("config", "--get", "branch.master.remote"): type("R", (), {"returncode": 0, "stdout": "origin\n", "stderr": ""})(),
+        ("remote", "get-url", "origin"): type("R", (), {"returncode": 0, "stdout": "https://example.invalid/repo.git\n", "stderr": ""})(),
+        ("rev-parse", "HEAD"): type("R", (), {"returncode": 0, "stdout": "abcdef123456\n", "stderr": ""})(),
+        ("status", "--porcelain", "--untracked-files=no"): type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+        ("rev-parse", "origin/master"): type("R", (), {"returncode": 0, "stdout": "abcdef123456\n", "stderr": ""})(),
+    }
+
+    def fake_run_git(self, *args):  # noqa: ANN001
+        return responses[tuple(args)]
+
+    monkeypatch.setattr(UpdaterService, "_run_git", fake_run_git, raising=False)
+    service = UpdaterService(
+        config=_build_role_config(tmp_path, role_mode="external", shared_root=shared_root),
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+
+    result = service.publish_approved_source_snapshot()
+    zip_path = Path(result["zip_path"])
+
+    assert result["published"] is True
+    assert (shared_root / "updater" / "approved" / "source_manifest.json").exists()
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        names = set(archive.namelist())
+    assert "main.py" in names
+    assert "表格计算配置.json" not in names
+    assert "config_segments/handover.json" not in names
+
+
+def test_internal_apply_approved_source_snapshot_preserves_user_config(tmp_path: Path, monkeypatch) -> None:
+    app_dir = tmp_path / "app"
+    shared_root = tmp_path / "share"
+    approved_root = shared_root / "updater" / "approved"
+    approved_root.mkdir(parents=True)
+    app_dir.mkdir()
+    (app_dir / "old.py").write_text("old\n", encoding="utf-8")
+    (app_dir / "表格计算配置.json").write_text('{"secret": "keep"}', encoding="utf-8")
+    manifest = {
+        "format": "source_snapshot",
+        "source_commit": "fedcba987654",
+        "branch": "master",
+        "created_at": "2026-04-19 12:00:00",
+        "zip_relpath": "source_snapshot.zip",
+        "display_version": "V3.test",
+        "release_revision": 999,
+    }
+    zip_path = approved_root / "source_snapshot.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("source_manifest.json", json.dumps(manifest, ensure_ascii=False))
+        archive.writestr("new.py", "new\n")
+        archive.writestr("表格计算配置.json", '{"secret": "overwrite"}')
+    manifest["sha256"] = _sha256(zip_path)
+    manifest["zip_size"] = zip_path.stat().st_size
+    (approved_root / "source_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (approved_root / "source_publish_state.json").write_text(
+        json.dumps(
+            {
+                "mirror_ready": True,
+                "mirror_version": "V3.test",
+                "mirror_release_revision": 999,
+                "last_publish_at": "2026-04-19 12:00:00",
+                "last_publish_error": "",
+                "zip_relpath": "source_snapshot.zip",
+                "approved_commit": "fedcba987654",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: app_dir)
+    monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")
+    monkeypatch.setattr(updater_service_module.shutil, "which", lambda _name: None)
+    service = UpdaterService(
+        config=_build_role_config(tmp_path, role_mode="internal", shared_root=shared_root),
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+
+    result = service.apply_now(mode="normal", queue_if_busy=False)
+
+    assert result["last_result"] == "restart_pending"
+    assert (app_dir / "new.py").exists()
+    assert not (app_dir / "old.py").exists()
+    assert json.loads((app_dir / "表格计算配置.json").read_text(encoding="utf-8"))["secret"] == "keep"
+    assert service.get_runtime_snapshot()["restart_required"] is True

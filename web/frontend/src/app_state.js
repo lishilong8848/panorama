@@ -1972,6 +1972,7 @@ export function createAppState(vueApi) {
         available: false,
         online: false,
         updateAvailable: false,
+        restartRequired: false,
         statusText: "等待后端状态",
         command: {
           active: false,

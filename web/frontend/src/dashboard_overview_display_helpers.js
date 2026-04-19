@@ -551,6 +551,7 @@ export function mapBackendUpdaterMirrorOverview(raw) {
       available: Boolean(internalPeerRaw.available),
       online: Boolean(internalPeerRaw.online),
       updateAvailable: Boolean(internalPeerRaw.update_available ?? internalPeerRaw.updateAvailable),
+      restartRequired: Boolean(internalPeerRaw.restart_required ?? internalPeerRaw.restartRequired),
       statusText: String(internalPeerRaw.status_text || internalPeerRaw.statusText || "").trim(),
       command: {
         active: Boolean(internalPeerCommand.active),

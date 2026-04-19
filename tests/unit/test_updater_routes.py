@@ -26,6 +26,13 @@ class _FakeUpdaterService:
     def restart_now(self):
         return {"last_result": "updated_restart_scheduled"}
 
+    def publish_approved_source_snapshot(self):
+        return {
+            "published": True,
+            "source_commit": "abcdef123456",
+            "included_files": 12,
+        }
+
     def submit_internal_peer_command(self, *, action):  # noqa: ANN001
         return {
             "accepted": True,
@@ -196,3 +203,24 @@ def test_updater_internal_peer_check_allows_v3_common_deployment_role() -> None:
 
     assert payload["ok"] is True
     assert payload["result"]["accepted"] is True
+
+
+def test_updater_publish_approved_route_uses_global_guard() -> None:
+    request = _fake_request()
+
+    payload = routes.updater_publish_approved(request)
+
+    assert payload["ok"] is True
+    assert payload["result"]["published"] is True
+    guard = request.app.state.container.job_service.guards[0]
+    assert guard["resource_keys"] == ["updater:global"]
+
+
+def test_updater_internal_peer_restart_route_uses_global_guard() -> None:
+    request = _fake_request()
+
+    payload = routes.updater_internal_peer_restart(request)
+
+    assert payload["ok"] is True
+    assert payload["result"]["accepted"] is True
+    assert payload["result"]["action"] == "restart"

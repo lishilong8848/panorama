@@ -163,9 +163,13 @@ class UpdaterRemoteControlStore:
                     "consumed_at": "",
                     "finished_at": "",
                     "message": (
-                        "等待内网端执行开始更新"
-                        if str(action or "").strip().lower() == "apply"
-                        else "等待内网端执行检查更新"
+                        "等待内网端执行重启生效"
+                        if str(action or "").strip().lower() == "restart"
+                        else (
+                            "等待内网端执行开始更新"
+                            if str(action or "").strip().lower() == "apply"
+                            else "等待内网端执行检查更新"
+                        )
                     ),
                 }
             )

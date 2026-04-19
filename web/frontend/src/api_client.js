@@ -413,12 +413,20 @@ export async function restartUpdaterApi() {
   return apiJson("/api/updater/restart", { method: "POST", body: "{}" });
 }
 
+export async function publishUpdaterApprovedApi() {
+  return apiJson("/api/updater/publish-approved", { method: "POST", body: "{}" });
+}
+
 export async function triggerInternalPeerUpdaterCheckApi() {
   return apiJson("/api/updater/internal-peer/check", { method: "POST", body: "{}" });
 }
 
 export async function triggerInternalPeerUpdaterApplyApi() {
   return apiJson("/api/updater/internal-peer/apply", { method: "POST", body: "{}" });
+}
+
+export async function triggerInternalPeerUpdaterRestartApi() {
+  return apiJson("/api/updater/internal-peer/restart", { method: "POST", body: "{}" });
 }
 
 export async function restartAppApi(payload = {}) {

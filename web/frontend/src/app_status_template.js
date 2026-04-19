@@ -73,7 +73,7 @@
           </div>
         </article>
 
-        <article v-if="!isInternalDeploymentRole" class="status-card">
+        <article class="status-card">
           <div class="status-card-head">
             <div>
               <span class="status-panel-kicker">{{ dashboardSystemOverview.kicker || '系统与网络' }}</span>
@@ -121,7 +121,24 @@
           <div class="hint" v-if="updaterMirrorOverview.errorText">
             发布异常：{{ updaterMirrorOverview.errorText }}
           </div>
-          <div class="btn-line" style="margin-top:10px;">
+          <div class="btn-line" style="margin-top:10px;" v-if="isInternalDeploymentRole">
+            <button
+              class="btn"
+              :class="updaterButtonClass"
+              @click="runUpdaterMainAction"
+              :disabled="isUpdaterActionLocked"
+            >
+              {{ updaterMainButtonText }}
+            </button>
+          </div>
+          <div class="btn-line" style="margin-top:10px;" v-else>
+            <button
+              class="btn btn-secondary"
+              @click="publishUpdaterApprovedNow"
+              :disabled="isUpdaterPublishApprovedLocked"
+            >
+              {{ updaterPublishApprovedButtonText }}
+            </button>
             <button
               class="btn btn-secondary"
               @click="checkInternalPeerUpdaterNow"
@@ -135,6 +152,13 @@
               :disabled="isUpdaterInternalPeerApplyLocked"
             >
               {{ updaterInternalPeerApplyButtonText }}
+            </button>
+            <button
+              class="btn btn-secondary"
+              @click="restartInternalPeerUpdaterNow"
+              :disabled="isUpdaterInternalPeerRestartLocked"
+            >
+              {{ updaterInternalPeerRestartButtonText }}
             </button>
           </div>
           <div class="hint" v-if="updaterMirrorOverview.internalPeer && updaterMirrorOverview.internalPeer.command && updaterMirrorOverview.internalPeer.command.message">
