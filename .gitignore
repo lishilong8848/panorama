@@ -47,7 +47,7 @@ __pycache__/
 .npm-cache
 .playwright-cli
 *.json
-表格计算配置.json
+/表格计算配置.json
 D:\桌面\ShiJian_Code\pythonProject\全景平台月报自动定时上传\表格计算配置.json
 C:\Users\HP\Desktop\自建app\全景平台程序\QJPT_V3\表格计算配置.json
 表格计算配置.pre_handover_segments.20260410-201706.json
