@@ -151,10 +151,52 @@ def test_source_python_run_uses_manual_git_pull_mode(tmp_path: Path, monkeypatch
 
     assert service.enabled is True
     assert service.update_mode == "git_pull"
+    assert service.source_kind == "git_remote"
+    assert service.source_label == "Git 仓库更新源"
     assert result["enabled"] is True
     assert result["disabled_reason"] == ""
     assert result["last_result"] == "up_to_date"
     assert "最新提交" in result["message"]
+
+
+def test_git_dirty_worktree_ignores_user_mutable_tracked_files(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: tmp_path)
+    monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(updater_service_module.shutil, "which", lambda _name: "C:/Git/bin/git.exe")
+    responses = {
+        ("rev-parse", "--abbrev-ref", "HEAD"): type("R", (), {"returncode": 0, "stdout": "master\n", "stderr": ""})(),
+        ("config", "--get", "branch.master.remote"): type("R", (), {"returncode": 0, "stdout": "origin\n", "stderr": ""})(),
+        ("remote", "get-url", "origin"): type("R", (), {"returncode": 0, "stdout": "https://example.invalid/repo.git\n", "stderr": ""})(),
+        ("rev-parse", "HEAD"): type("R", (), {"returncode": 0, "stdout": "abcdef123456\n", "stderr": ""})(),
+        ("status", "--porcelain", "--untracked-files=no"): type(
+            "R",
+            (),
+            {
+                "returncode": 0,
+                "stdout": " M 表格计算配置.json\n M config_segments/handover/common.json\n",
+                "stderr": "",
+            },
+        )(),
+        ("rev-parse", "origin/master"): type("R", (), {"returncode": 0, "stdout": "9999999aaaaaaa\n", "stderr": ""})(),
+        ("fetch", "origin", "master"): type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    }
+
+    def fake_run_git(self, *args):  # noqa: ANN001
+        return responses[tuple(args)]
+
+    monkeypatch.setattr(UpdaterService, "_run_git", fake_run_git, raising=False)
+    service = UpdaterService(
+        config=_build_config(tmp_path),
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+
+    snapshot = service.check_now()
+
+    assert snapshot["last_result"] == "update_available"
+    assert snapshot["worktree_dirty"] is False
+    assert snapshot["dirty_files"] == []
 
 
 def test_remote_manifest_prefers_zip_url_over_zip_relpath(tmp_path: Path, monkeypatch) -> None:

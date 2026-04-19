@@ -72,8 +72,8 @@ class _FakeContainer:
             "remote_commit": "9999999aaaaaaa",
             "worktree_dirty": False,
             "dirty_files": [],
-            "source_kind": "shared_mirror",
-            "source_label": "共享目录更新源",
+            "source_kind": "git_remote",
+            "source_label": "Git 仓库更新源",
             "local_release_revision": 0,
             "remote_release_revision": 0,
             "update_available": False,
@@ -138,8 +138,8 @@ def test_updater_status_exposes_source_and_mirror_fields() -> None:
 
     assert payload["ok"] is True
     runtime = payload["runtime"]
-    assert runtime["source_kind"] == "shared_mirror"
-    assert runtime["source_label"] == "共享目录更新源"
+    assert runtime["source_kind"] == "git_remote"
+    assert runtime["source_label"] == "Git 仓库更新源"
     assert runtime["update_mode"] == "git_pull"
     assert runtime["branch"] == "master"
     assert runtime["git_available"] is True

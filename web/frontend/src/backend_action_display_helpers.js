@@ -1,7 +1,10 @@
-export function buildSourceCachePlaceholderBuilding(building, bucketKey) {
+export function buildSourceCachePlaceholderBuilding(building, bucketKey, sourceFamily = "") {
+  const normalizedSourceFamily = String(sourceFamily || "").trim();
   return {
     building: String(building || "").trim() || "-",
     bucketKey: String(bucketKey || "").trim() || "-",
+    sourceFamily: normalizedSourceFamily,
+    source_family: normalizedSourceFamily,
     statusKey: "pending_backend",
     ready: false,
     downloadedAt: "",

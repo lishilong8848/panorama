@@ -376,7 +376,7 @@
                     <button
                       class="btn btn-ghost source-cache-building-btn"
                       type="button"
-                      @click="refreshBuildingLatestSourceCache(family.key, building.building)"
+                      @click="refreshBuildingLatestSourceCache(family.key || building.sourceFamily || building.source_family, building.building)"
                       :disabled="isInternalSourceCacheRefreshLocked(family, building)"
                       :title="getInternalSourceCacheRefreshDisabledReason(family, building) || ''"
                     >

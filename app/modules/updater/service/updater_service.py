@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple
 
-from pipeline_utils import get_app_dir
+from pipeline_utils import DEFAULT_CONFIG_FILENAME, get_app_dir
 
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.modules.updater.core.versioning import (
@@ -40,6 +40,34 @@ _SOURCE_RUN_GIT_PULL_ENV = "QJPT_ENABLE_GIT_PULL_IN_SOURCE_RUN"
 _INTERNAL_PEER_HEARTBEAT_INTERVAL_SEC = 5
 _INTERNAL_PEER_HEARTBEAT_TIMEOUT_SEC = 15
 _GIT_TRACKED_STATUS_TIMEOUT_SEC = 30
+_GIT_DIRTY_ALLOWLIST = {
+    DEFAULT_CONFIG_FILENAME,
+    "runtime_dependency_lock.json",
+}
+_GIT_DIRTY_ALLOWLIST_PREFIXES = (
+    "config_segments/",
+    "user_data/",
+)
+
+
+def _normalize_git_status_path(raw_path: Any) -> str:
+    text = str(raw_path or "").strip().replace("\\", "/")
+    if " -> " in text:
+        text = text.split(" -> ", 1)[1].strip()
+    while text.startswith("./"):
+        text = text[2:]
+    return text.lstrip("/")
+
+
+def _is_ignorable_git_dirty_path(raw_path: Any) -> bool:
+    normalized = _normalize_git_status_path(raw_path)
+    if not normalized:
+        return False
+    if normalized in _GIT_DIRTY_ALLOWLIST:
+        return True
+    return any(normalized.startswith(prefix) for prefix in _GIT_DIRTY_ALLOWLIST_PREFIXES)
+
+
 def _updater_disabled_reason_from_env() -> str:
     raw = str(os.environ.get(_SOURCE_RUN_DISABLE_UPDATER_ENV, "") or "").strip().lower()
     if raw in {"1", "true", "yes", "on"}:
@@ -130,11 +158,15 @@ class UpdaterService:
         self.git_repo_url = ""
         self.git_branch = ""
         self.git_remote_name = ""
+        if self.update_mode == "git_pull":
+            self.source_kind = "git_remote"
+            self.source_label = "Git 仓库更新源"
+        else:
+            self.source_kind = "shared_mirror" if self.role_mode == "internal" else "remote"
+            self.source_label = "共享目录更新源" if self.source_kind == "shared_mirror" else "远端正式更新源"
         self.disabled_reason = self._resolve_disabled_reason()
         if self.disabled_reason:
             self.cfg["enabled"] = False
-        self.source_kind = "shared_mirror" if self.role_mode == "internal" else "remote"
-        self.source_label = "共享目录更新源" if self.source_kind == "shared_mirror" else "远端正式更新源"
 
         self.state_path = self._resolve_state_path(self.cfg["state_file"])
         self.download_dir = self._resolve_any_path(self.cfg["download_dir"])
@@ -147,15 +179,18 @@ class UpdaterService:
 
         self.shared_mirror_client = SharedMirrorManifestClient(self.shared_bridge_root) if self.shared_bridge_root else None
         self.remote_control_store = UpdaterRemoteControlStore(self.shared_bridge_root) if self.shared_bridge_root else None
-        if self.source_kind == "shared_mirror":
+        if self.update_mode == "git_pull":
+            self.client = None
+        elif self.source_kind == "shared_mirror":
             self.client = self.shared_mirror_client
-        self.client = ManifestClient(
-            repo_url=self.cfg["gitee_repo"],
-            branch=self.cfg["gitee_branch"],
-            manifest_path=self.cfg["gitee_manifest_path"],
-            timeout_sec=self.cfg["request_timeout_sec"],
-            retry_count=self.cfg["download_retry_count"],
-        )
+        else:
+            self.client = ManifestClient(
+                repo_url=self.cfg["gitee_repo"],
+                branch=self.cfg["gitee_branch"],
+                manifest_path=self.cfg["gitee_manifest_path"],
+                timeout_sec=self.cfg["request_timeout_sec"],
+                retry_count=self.cfg["download_retry_count"],
+            )
         self.applier = UpdateApplier(
             app_dir=self.app_dir,
             emit_log=self.emit_log,
@@ -458,12 +493,13 @@ class UpdaterService:
         dirty_ret = self._run_git("status", "--porcelain", "--untracked-files=no")
         if dirty_ret.returncode == 0:
             dirty_lines = [
-                line[3:].strip()
+                _normalize_git_status_path(line[3:].strip())
                 for line in (dirty_ret.stdout or "").splitlines()
                 if str(line or "").strip()
             ]
-            snapshot["dirty_files"] = dirty_lines
-            snapshot["worktree_dirty"] = bool(dirty_lines)
+            blocking_dirty_lines = [line for line in dirty_lines if line and not _is_ignorable_git_dirty_path(line)]
+            snapshot["dirty_files"] = blocking_dirty_lines
+            snapshot["worktree_dirty"] = bool(blocking_dirty_lines)
         remote_name = str(snapshot.get("remote_name", "") or self.git_remote_name or "").strip()
         branch = str(snapshot.get("branch", "") or self.git_branch or "").strip()
         remote_commit_ret = self._run_git("rev-parse", f"{remote_name}/{branch}") if remote_name and branch else None
