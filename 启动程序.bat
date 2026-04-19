@@ -21,9 +21,10 @@ if not exist "portable_launcher.py" goto missing_launcher
 set "PYTHON_EXE="
 set "PYTHON_DESC="
 set "USE_PY_LAUNCHER="
-set "PYTHON_HEALTH_PROBE=import encodings, ensurepip, json, sqlite3, ssl, sys"
+set "PYTHON_HEALTH_PROBE=import encodings, json, sqlite3, ssl, sys"
 set "EMBEDDED_RUNTIME_PRESENT="
 set "EMBEDDED_RUNTIME_BROKEN="
+set "RUNTIME_REPAIR_ATTEMPTED="
 
 if exist ".venv\Scripts\python.exe" (
     "%CD%\.venv\Scripts\python.exe" -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
@@ -86,12 +87,34 @@ goto run_main
 
 :try_py_launcher
 where py >nul 2>nul
-if errorlevel 1 goto no_python
+if errorlevel 1 goto try_repair_embedded_runtime
 py -3 -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
-if errorlevel 1 goto no_python
+if errorlevel 1 goto try_repair_embedded_runtime
 set "USE_PY_LAUNCHER=1"
 set "PYTHON_DESC=py launcher"
 goto run_main
+
+:try_repair_embedded_runtime
+if defined RUNTIME_REPAIR_ATTEMPTED goto no_python
+set "RUNTIME_REPAIR_ATTEMPTED=1"
+if not exist "scripts\repair_embedded_runtime.ps1" goto no_python
+echo [INFO] No healthy Python runtime found. Attempting to repair runtime\python automatically...
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\repair_embedded_runtime.ps1" -ProjectRoot "%CD%" -TargetRoot "%CD%\runtime\python" -PythonVersion "3.11.9"
+if errorlevel 1 (
+    echo [ERROR] Automatic runtime repair failed.
+    goto no_python
+)
+if exist "runtime\python\python.exe" (
+    "runtime\python\python.exe" -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_EXE=%CD%\runtime\python\python.exe"
+        set "PYTHON_DESC=repaired embedded runtime"
+        set "EMBEDDED_RUNTIME_PRESENT=1"
+        set "EMBEDDED_RUNTIME_BROKEN="
+        goto run_main
+    )
+)
+goto no_python
 
 :missing_main
 echo [ERROR] main.py not found in project root: %CD%
