@@ -3,6 +3,8 @@ export const UPDATER_RESULT_TEXT_MAP = {
   disabled: "已禁用",
   up_to_date: "已经是最新版本",
   update_available: "发现可用更新",
+  git_fetching: "Git 远端检查中",
+  git_pulling: "Git 拉取中",
   downloading_patch: "补丁下载中",
   applying_patch: "补丁应用中",
   dependency_checking: "运行依赖检查中",
@@ -15,6 +17,7 @@ export const UPDATER_RESULT_TEXT_MAP = {
   ahead_of_remote: "本地版本高于远端正式版本",
   ahead_of_mirror: "本地版本高于共享目录批准版本",
   mirror_pending_publish: "等待外网端发布批准版本",
+  dirty_worktree: "检测到本地改动，已阻止拉取代码",
   failed: "更新失败",
 };
 
@@ -29,17 +32,34 @@ export function buildUpdaterApplyMessage(raw) {
   if (explicitMessage) return explicitMessage;
 
   const key = String((payload && payload.last_result) || raw || "").trim();
+  const updateMode = String(payload?.update_mode || "").trim().toLowerCase();
+  const isGitPull = updateMode === "git_pull";
+  if (key === "up_to_date" && isGitPull) {
+    return "当前代码已经是最新提交。";
+  }
+  if (key === "update_available" && isGitPull) {
+    return "检测到远端仓库有可拉取更新。";
+  }
   if (key === "updated_restart_scheduled") {
-    return "补丁已应用并完成运行依赖同步，程序将自动重启。";
+    return isGitPull
+      ? "代码已拉取完成并完成运行依赖同步，程序将自动重启。"
+      : "补丁已应用并完成运行依赖同步，程序将自动重启。";
   }
   if (key === "queued_busy") {
-    return "当前仍有任务在运行，更新已排队，任务结束后会自动执行。";
+    return isGitPull
+      ? "当前仍有任务在运行，拉取代码请求已排队，任务结束后会自动执行。"
+      : "当前仍有任务在运行，更新已排队，任务结束后会自动执行。";
   }
   if (key === "restart_pending") {
-    return "补丁已应用并完成运行依赖同步，重启程序后即可生效。";
+    return isGitPull
+      ? "代码已拉取完成并完成运行依赖同步，重启程序后即可生效。"
+      : "补丁已应用并完成运行依赖同步，重启程序后即可生效。";
   }
   if (key === "updated") {
-    return "补丁已应用完成。";
+    return isGitPull ? "代码已拉取完成。" : "补丁已应用完成。";
+  }
+  if (key === "dirty_worktree") {
+    return "检测到本地已修改文件，已阻止拉取代码。";
   }
   if (key === "ahead_of_remote") {
     return "检测到本地版本高于远端正式版本，如需覆盖回远端正式版本，可继续执行更新。";

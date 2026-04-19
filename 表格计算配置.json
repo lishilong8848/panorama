@@ -129,47 +129,47 @@
       "enable_sse": true
     },
     "network_switch": {
-      "post_switch_probe_external_host": "open.feishu.cn",
-      "post_switch_stabilize_sec": 3,
+      "hard_recovery_cooldown_sec": 20,
+      "role_mode": "external",
+      "internal_probe_parallelism": 5,
       "post_switch_probe_retries": 3,
-      "require_admin_for_hard_recovery": true,
+      "hard_recovery_after_scan_failures": 2,
+      "auto_disconnect_before_connect": true,
+      "post_switch_probe_interval_sec": 1,
       "post_switch_probe_internal_port": 80,
+      "connect_poll_interval_sec": 1,
+      "external_profile_name": "",
+      "scan_before_connect": true,
+      "hard_recovery_enabled": true,
+      "internal_probe_timeout_ms": 1200,
+      "post_switch_probe_external_port": 443,
+      "retry_count": 3,
+      "switch_back_to_original": false,
+      "scan_wait_sec": 2,
+      "connect_with_ssid_param": true,
+      "post_switch_probe_external_host": "open.feishu.cn",
+      "retry_interval_sec": 2,
+      "strict_target_visible_before_connect": true,
+      "post_switch_stabilize_sec": 3,
+      "internal_probe_count": 1,
+      "external_ssid": "ALBB-EA118-2F",
+      "fail_fast_on_netsh_error": true,
+      "post_switch_probe_timeout_sec": 2,
+      "external_probe_cache_ttl_sec": 2,
+      "scan_attempts": 3,
+      "internal_probe_cache_ttl_sec": 2,
+      "switch_timeout_sec": 30,
+      "internal_profile_name": "",
+      "post_switch_probe_enabled": false,
+      "preferred_interface": "",
+      "require_saved_profiles": true,
+      "internal_ssid": "H-DH",
+      "require_admin_for_hard_recovery": true,
       "hard_recovery_steps": [
         "toggle_adapter",
         "restart_wlansvc"
       ],
-      "strict_target_visible_before_connect": true,
-      "post_switch_probe_internal_host": "",
-      "internal_profile_name": "",
-      "internal_probe_timeout_ms": 1200,
-      "switch_timeout_sec": 30,
-      "fail_fast_on_netsh_error": true,
-      "scan_before_connect": true,
-      "internal_ssid": "H-DH",
-      "require_saved_profiles": true,
-      "auto_disconnect_before_connect": true,
-      "post_switch_probe_external_port": 443,
-      "role_mode": "external",
-      "switch_back_to_original": false,
-      "hard_recovery_after_scan_failures": 2,
-      "internal_probe_cache_ttl_sec": 2,
-      "external_probe_cache_ttl_sec": 2,
-      "external_profile_name": "",
-      "post_switch_probe_enabled": false,
-      "hard_recovery_enabled": true,
-      "post_switch_probe_interval_sec": 1,
-      "connect_poll_interval_sec": 1,
-      "retry_count": 3,
-      "preferred_interface": "",
-      "external_ssid": "ALBB-EA118-2F",
-      "internal_probe_count": 1,
-      "internal_probe_parallelism": 5,
-      "connect_with_ssid_param": true,
-      "retry_interval_sec": 2,
-      "scan_attempts": 3,
-      "scan_wait_sec": 2,
-      "post_switch_probe_timeout_sec": 2,
-      "hard_recovery_cooldown_sec": 20
+      "post_switch_probe_internal_host": ""
     }
   },
   "features": {
@@ -202,44 +202,44 @@
       "playwright_browsers_path": "",
       "sites": [
         {
-          "password": "BMS@123456",
-          "enabled": true,
-          "url": null,
-          "building": "A楼",
+          "host": "192.168.210.50",
           "username": "admin",
-          "host": "192.168.210.50"
+          "password": "BMS@123456",
+          "url": null,
+          "enabled": true,
+          "building": "A楼"
         },
         {
+          "host": "192.168.220.50",
+          "username": "admin",
           "password": "BMS123456",
-          "enabled": true,
           "url": null,
-          "building": "B楼",
-          "username": "admin",
-          "host": "192.168.220.50"
+          "enabled": true,
+          "building": "B楼"
         },
         {
+          "host": "192.168.231.53",
+          "username": "admin",
           "password": "BMS@123456",
-          "enabled": true,
           "url": null,
-          "building": "C楼",
-          "username": "admin",
-          "host": "192.168.231.53"
+          "enabled": true,
+          "building": "C楼"
         },
         {
+          "host": "192.168.232.53",
+          "username": "admin",
           "password": "123456",
-          "enabled": true,
           "url": null,
-          "building": "D楼",
-          "username": "admin",
-          "host": "192.168.232.53"
+          "enabled": true,
+          "building": "D楼"
         },
         {
-          "password": "BMS@123456",
-          "enabled": true,
-          "url": null,
-          "building": "E楼",
+          "host": "192.168.233.57",
           "username": "admin",
-          "host": "192.168.233.57"
+          "password": "BMS@123456",
+          "url": null,
+          "enabled": true,
+          "building": "E楼"
         }
       ],
       "multi_date": {
@@ -379,44 +379,44 @@
         "export_button_text": "原样导出",
         "sites": [
           {
-            "password": "BMS@123456",
-            "enabled": true,
-            "url": null,
-            "building": "A楼",
+            "host": "192.168.210.50",
             "username": "admin",
-            "host": "192.168.210.50"
+            "password": "BMS@123456",
+            "url": null,
+            "enabled": true,
+            "building": "A楼"
           },
           {
+            "host": "192.168.220.50",
+            "username": "admin",
             "password": "BMS123456",
-            "enabled": true,
             "url": null,
-            "building": "B楼",
-            "username": "admin",
-            "host": "192.168.220.50"
+            "enabled": true,
+            "building": "B楼"
           },
           {
+            "host": "192.168.231.53",
+            "username": "admin",
             "password": "BMS@123456",
-            "enabled": true,
             "url": null,
-            "building": "C楼",
-            "username": "admin",
-            "host": "192.168.231.53"
+            "enabled": true,
+            "building": "C楼"
           },
           {
+            "host": "192.168.232.53",
+            "username": "admin",
             "password": "123456",
-            "enabled": true,
             "url": null,
-            "building": "D楼",
-            "username": "admin",
-            "host": "192.168.232.53"
+            "enabled": true,
+            "building": "D楼"
           },
           {
-            "password": "BMS@123456",
-            "enabled": true,
-            "url": null,
-            "building": "E楼",
+            "host": "192.168.233.57",
             "username": "admin",
-            "host": "192.168.233.57"
+            "password": "BMS@123456",
+            "url": null,
+            "enabled": true,
+            "building": "E楼"
           }
         ]
       },
@@ -1456,86 +1456,86 @@
           "A楼": [
             {
               "enabled": true,
-              "note": "李世龙A",
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "李世龙A"
             },
             {
               "enabled": false,
-              "note": "A",
-              "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a"
+              "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a",
+              "note": "A"
             },
             {
               "enabled": false,
-              "note": "M",
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "M"
             }
           ],
           "B楼": [
             {
               "enabled": true,
-              "note": "李世龙B",
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "李世龙B"
             },
             {
               "enabled": false,
-              "note": "B",
-              "open_id": "ou_160e991b0fd811cda7260de056d8a363"
+              "open_id": "ou_160e991b0fd811cda7260de056d8a363",
+              "note": "B"
             },
             {
               "enabled": false,
-              "note": "m",
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "m"
             }
           ],
           "C楼": [
             {
               "enabled": true,
-              "note": "李世龙C",
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "李世龙C"
             },
             {
               "enabled": false,
-              "note": "C",
-              "open_id": "ou_99391b00c1406917930483d8500af400"
+              "open_id": "ou_99391b00c1406917930483d8500af400",
+              "note": "C"
             },
             {
               "enabled": false,
-              "note": "m",
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "m"
             }
           ],
           "D楼": [
             {
               "enabled": true,
-              "note": "李世龙D",
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "李世龙D"
             },
             {
               "enabled": false,
-              "note": "D",
-              "open_id": "ou_b9c26b4da3721c2de11ee175c707e756"
+              "open_id": "ou_b9c26b4da3721c2de11ee175c707e756",
+              "note": "D"
             },
             {
               "enabled": false,
-              "note": "m",
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "m"
             }
           ],
           "E楼": [
             {
               "enabled": true,
-              "note": "李世龙E",
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "李世龙E"
             },
             {
               "enabled": false,
-              "note": "E",
-              "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3"
+              "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3",
+              "note": "E"
             },
             {
               "enabled": false,
-              "note": "m",
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "m"
             }
           ]
         }
@@ -4548,44 +4548,44 @@
       },
       "sites": [
         {
-          "password": "BMS@123456",
-          "enabled": true,
-          "url": null,
-          "building": "A楼",
+          "host": "192.168.210.50",
           "username": "admin",
-          "host": "192.168.210.50"
+          "password": "BMS@123456",
+          "url": null,
+          "enabled": true,
+          "building": "A楼"
         },
         {
+          "host": "192.168.220.50",
+          "username": "admin",
           "password": "BMS123456",
-          "enabled": true,
           "url": null,
-          "building": "B楼",
-          "username": "admin",
-          "host": "192.168.220.50"
+          "enabled": true,
+          "building": "B楼"
         },
         {
+          "host": "192.168.231.53",
+          "username": "admin",
           "password": "BMS@123456",
-          "enabled": true,
           "url": null,
-          "building": "C楼",
-          "username": "admin",
-          "host": "192.168.231.53"
+          "enabled": true,
+          "building": "C楼"
         },
         {
+          "host": "192.168.232.53",
+          "username": "admin",
           "password": "123456",
-          "enabled": true,
           "url": null,
-          "building": "D楼",
-          "username": "admin",
-          "host": "192.168.232.53"
+          "enabled": true,
+          "building": "D楼"
         },
         {
-          "password": "BMS@123456",
-          "enabled": true,
-          "url": null,
-          "building": "E楼",
+          "host": "192.168.233.57",
           "username": "admin",
-          "host": "192.168.233.57"
+          "password": "BMS@123456",
+          "url": null,
+          "enabled": true,
+          "building": "E楼"
         }
       ]
     },
@@ -4641,65 +4641,65 @@
         "delete_batch_size": 500,
         "create_batch_size": 200,
         "timeout": 30,
-        "clear_before_upload": true,
-        "list_page_size": 500
+        "list_page_size": 500,
+        "clear_before_upload": true
       },
       "shared_source_upload": {
         "replace_existing_on_full": true
       },
-      "alarm_category_default": "真实告警",
-      "test_db": {
-        "fixed_table": "event_2026_02",
-        "time_field_mode": "auto",
-        "user": "root",
-        "enabled": true,
-        "host": "127.0.0.1",
-        "port": 3306,
-        "password": "123456",
-        "building_label": "测试楼栋",
-        "database": "e_event",
-        "table_mode": "fixed"
-      },
+      "snapshot_mode": "clear_and_rebuild",
+      "run_with_scheduler": true,
       "skip_levels": [
         5
       ],
+      "level_mapping": {
+        "2": "严重",
+        "3": "重要",
+        "4": "次要",
+        "1": "紧急"
+      },
       "enabled": true,
+      "resume": {
+        "root_dir": "alarm_export_resume",
+        "reuse_extracted_rows": true,
+        "enabled": true,
+        "state_file": "alarm_export_resume_state.json",
+        "max_retry": 3,
+        "retry_interval_sec": 2
+      },
+      "window_end_time": "00:00:00",
+      "test_db": {
+        "time_field_mode": "auto",
+        "host": "127.0.0.1",
+        "building_label": "测试楼栋",
+        "table_mode": "fixed",
+        "port": 3306,
+        "enabled": true,
+        "fixed_table": "event_2026_02",
+        "user": "root",
+        "password": "123456",
+        "database": "e_event"
+      },
       "fields": {
         "accept_description": "accept_description",
-        "process_suggestion": "process_suggestion",
-        "event_time": "event_time",
-        "event_source": "event_source",
+        "recover_time": "recover_time",
         "process_status": "process_status",
-        "confirm_time": "confirm_time",
-        "content": "content",
         "accept_user": "accept_user",
-        "alarm_type": "alarm_type",
-        "confirm_user": "confirm_user",
-        "recover_status": "recover_status",
-        "trigger_value": "trigger_value",
         "confirm_description": "confirm_description",
+        "event_time": "event_time",
+        "trigger_value": "trigger_value",
+        "content": "content",
+        "alarm_type": "alarm_type",
         "event_level": "event_level",
+        "event_source": "event_source",
+        "confirm_user": "confirm_user",
+        "confirm_time": "confirm_time",
         "accept_time": "accept_time",
-        "recover_time": "recover_time"
+        "recover_status": "recover_status",
+        "process_suggestion": "process_suggestion"
       },
-      "resume": {
-        "reuse_extracted_rows": true,
-        "root_dir": "alarm_export_resume",
-        "max_retry": 3,
-        "enabled": true,
-        "retry_interval_sec": 2,
-        "state_file": "alarm_export_resume_state.json"
-      },
-      "window_days": 35,
-      "snapshot_mode": "clear_and_rebuild",
-      "window_end_time": "00:00:00",
-      "run_with_scheduler": true,
-      "level_mapping": {
-        "1": "紧急",
-        "4": "次要",
-        "2": "严重",
-        "3": "重要"
-      }
+      "alarm_category_default": "真实告警",
+      "window_days": 35
     },
     "manual_upload_gui": {
       "enabled": true

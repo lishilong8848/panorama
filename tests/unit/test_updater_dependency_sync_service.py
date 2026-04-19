@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from app.modules.updater.service.runtime_dependency_sync_service import RuntimeDependencySyncService
@@ -84,3 +85,32 @@ def test_format_install_failure_includes_user_friendly_advice(tmp_path: Path) ->
 
     assert "安装依赖失败 fastapi==0.116.1" in message
     assert "代理连接失败" in message
+
+
+def test_find_import_uses_real_import_not_only_spec(monkeypatch, tmp_path: Path) -> None:
+    service = RuntimeDependencySyncService(app_dir=tmp_path)
+
+    def fake_probe(_code: str, *args: str):  # noqa: ANN001
+        import_name = args[0]
+        if import_name == "fastapi":
+            return subprocess.CompletedProcess(["python"], 1, stdout="", stderr="ModuleNotFoundError: sniffio")
+        return subprocess.CompletedProcess(["python"], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(service, "_run_python_probe", fake_probe)
+
+    assert service._find_import("fastapi") is False  # noqa: SLF001
+
+
+def test_installed_version_uses_target_python_probe(monkeypatch, tmp_path: Path) -> None:
+    service = RuntimeDependencySyncService(app_dir=tmp_path)
+
+    def fake_probe(_code: str, *args: str):  # noqa: ANN001
+        package = args[0]
+        if package == "fastapi":
+            return subprocess.CompletedProcess(["python"], 0, stdout="0.128.5\n", stderr="")
+        return subprocess.CompletedProcess(["python"], 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(service, "_run_python_probe", fake_probe)
+
+    assert service._installed_version("fastapi") == "0.128.5"  # noqa: SLF001
+    assert service._installed_version("unknown") == ""  # noqa: SLF001

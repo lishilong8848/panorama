@@ -515,14 +515,38 @@ def test_present_updater_mirror_overview_marks_python_source_run_as_debug_mode()
     )
 
     assert payload["tone"] == "info"
-    assert payload["status_text"] == "请先 git pull"
-    assert payload["badge_text"] == "源码直跑不走应用内更新"
-    assert payload["items"][0]["value"] == "源码直跑"
-    assert payload["items"][2]["value"] == "先 git pull 再重启"
+    assert payload["status_text"] == "本地调试模式"
+    assert payload["badge_text"] == "本地源码运行不更新"
+    assert payload["items"][0]["value"] == "Python 本地源码运行"
     assert payload["actions"]["main"]["reason_code"] == "source_python_run"
     assert payload["actions"]["internal_peer_check"]["reason_code"] == "source_python_run"
     assert payload["actions"]["internal_peer_apply"]["reason_code"] == "source_python_run"
     assert payload["business_actions"]["allowed"] is True
+
+
+def test_present_updater_mirror_overview_for_git_pull_source_mode():
+    payload = present_updater_mirror_overview(
+        {
+            "enabled": True,
+            "update_mode": "git_pull",
+            "local_version": "web-3.0.0",
+            "local_release_revision": 216,
+            "branch": "master",
+            "local_commit": "abcdef123456",
+            "remote_commit": "fedcba654321",
+            "worktree_dirty": False,
+            "last_result": "update_available",
+        }
+    )
+
+    assert payload["title"] == "Git 代码拉取"
+    assert payload["status_text"] == "检测到可拉取更新"
+    assert payload["summary_text"] == "检测到远端仓库有新代码。点击“拉取代码”即可开始更新。"
+    assert payload["items"][0]["value"] == "源码直跑"
+    assert payload["items"][2]["value"] == "手动点击“拉取代码”"
+    assert payload["actions"]["main"]["id"] == "apply"
+    assert payload["actions"]["main"]["label"] == "拉取代码"
+    assert payload["actions"]["main"]["allowed"] is True
 
 
 def test_present_updater_mirror_overview_prefers_shared_mirror_waiting_text():
@@ -582,10 +606,11 @@ def test_present_updater_mirror_overview_shows_git_mode_items():
         }
     )
 
-    assert payload["items"][0]["value"] == "Git 拉取代码"
-    assert payload["items"][1]["value"] == "master"
-    assert payload["items"][2]["value"] == "1111111"
-    assert payload["items"][4]["value"] == "存在本地修改"
+    assert payload["items"][0]["value"] == "源码直跑"
+    assert payload["items"][2]["value"] == "手动点击“拉取代码”"
+    assert payload["items"][3]["value"] == "master"
+    assert payload["items"][4]["value"] == "1111111"
+    assert payload["items"][6]["value"] == "存在本地修改"
 
 
 def test_present_external_module_hero_overviews_prefers_scheduler_summary_items() -> None:

@@ -15,6 +15,8 @@ DEFAULT_CONFIG_TEMPLATE_FILENAME = "表格计算配置.template.json"
 DEFAULT_CALC_FILENAME = "表格计算部分代码.py"
 DEFAULT_DOWNLOAD_FILENAME = "下载动环表格.py"
 DEFAULT_WEBHOOK_KEYWORD = "事件"
+RELEASE_CODE_DIR_NAME = "QJPT_V3_code"
+PERSISTENT_USER_DATA_DIR_NAME = "user_data"
 
 
 def get_app_dir() -> Path:
@@ -28,6 +30,22 @@ def get_bundle_dir() -> Path:
     if meipass:
         return Path(str(meipass)).resolve()
     return Path(__file__).resolve().parent
+
+
+def is_release_code_dir(app_dir: Path | None = None) -> bool:
+    candidate = Path(app_dir).resolve() if app_dir is not None else get_app_dir()
+    return candidate.name == RELEASE_CODE_DIR_NAME
+
+
+def get_app_root_dir(app_dir: Path | None = None) -> Path:
+    candidate = Path(app_dir).resolve() if app_dir is not None else get_app_dir()
+    if is_release_code_dir(candidate):
+        return candidate.parent
+    return candidate
+
+
+def get_persistent_user_data_dir(app_dir: Path | None = None) -> Path:
+    return get_app_root_dir(app_dir) / PERSISTENT_USER_DATA_DIR_NAME
 
 
 def _expand_candidate_path(raw_path: str | Path) -> List[Path]:
@@ -54,7 +72,10 @@ def _pick_first_existing(candidates: Iterable[Path]) -> Path | None:
 
 
 def _resolve_single_config_target() -> Path:
-    return get_app_dir() / DEFAULT_CONFIG_FILENAME
+    app_dir = get_app_dir()
+    if is_release_code_dir(app_dir):
+        return get_persistent_user_data_dir(app_dir) / DEFAULT_CONFIG_FILENAME
+    return app_dir / DEFAULT_CONFIG_FILENAME
 
 
 def _legacy_root_config_candidates(target: Path) -> List[tuple[Path, str]]:

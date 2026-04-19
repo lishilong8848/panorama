@@ -1068,14 +1068,14 @@ def _updater_source_label(payload: Dict[str, Any]) -> str:
 def _updater_disabled_reason_text(raw: Any) -> str:
     key = _string(raw).lower()
     if key == "source_python_run":
-        return "当前为源码直跑模式，请先执行 git pull 后重启程序。"
+        return "当前为 Python 本地源码运行，已跳过更新。"
     if key == "git_not_installed":
         return "当前电脑未安装 Git，无法执行代码拉取更新。"
     if key == "git_repo_missing":
         return "当前代码目录不是 Git 工作区，无法执行代码拉取更新。"
     if key == "git_remote_missing":
         return "当前未配置 Git 更新仓库地址。"
-    return "当前运行模式不支持应用内更新。"
+    return "当前运行模式已跳过更新。"
 
 
 def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
@@ -1213,12 +1213,19 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         if bool(updater.get("restart_required", False)):
             main_action_id = "restart"
             main_action_label = "立即重启生效"
+        elif update_mode == "git_pull":
+            main_action_id = "apply"
+            main_action_label = "拉取代码"
         elif queued_apply:
             main_action_id = "apply"
             main_action_label = "任务结束后自动更新"
         elif bool(updater.get("update_available", False) or updater.get("force_apply_available", False)):
             main_action_id = "apply"
             main_action_label = "开始更新"
+    if updater_enabled and update_mode == "git_pull" and worktree_dirty:
+        main_action_allowed = False
+        main_action_disabled_reason = "检测到本地已修改文件，已阻止自动拉取代码。"
+        main_action_reason_code = "dirty_worktree"
     internal_peer_check_allowed = bool(updater_enabled and internal_peer_available and not internal_peer_command_active)
     internal_peer_check_label = "内网端检查更新"
     internal_peer_check_disabled_reason = ""
@@ -1283,28 +1290,144 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     if not updater_enabled and disabled_reason == "source_python_run":
         return {
             "tone": "info",
-            "kicker": "源码模式",
-            "title": "源码直跑模式",
-            "status_text": "请先 git pull",
-            "badge_text": "源码直跑不走应用内更新",
-            "summary_text": "当前程序通过源码直接运行。应用内更新与共享目录镜像检查已停用；如需更新请先执行 git pull 再重启程序。",
+            "kicker": "调试模式",
+            "title": "本地运行模式",
+            "status_text": "本地调试模式",
+            "badge_text": "本地源码运行不更新",
+            "summary_text": "当前为 Python 本地源码运行，已跳过自动更新与共享目录镜像检查。",
             "manifest_path": "",
             "error_text": "",
             "items": [
-                {"label": "运行方式", "value": "源码直跑", "tone": "info"},
+                {"label": "运行方式", "value": "Python 本地源码运行", "tone": "info"},
                 {
                     "label": "当前版本",
                     "value": f"{local_version} / r{local_revision}" if local_revision > 0 else local_version,
                     "tone": "neutral",
                 },
-                {"label": "更新方式", "value": "先 git pull 再重启", "tone": "neutral"},
-                {"label": "共享镜像", "value": "源码模式不检查", "tone": "neutral"},
+                {"label": "更新行为", "value": "不自动更新", "tone": "neutral"},
+                {"label": "共享镜像", "value": "不检查", "tone": "neutral"},
                 {
                     "label": "内网端状态",
                     "value": internal_peer_status_text,
                     "tone": "warning" if internal_peer_command_active else ("success" if internal_peer_online else "neutral"),
                 },
             ],
+            "internal_peer": {
+                "available": internal_peer_available,
+                "online": internal_peer_online,
+                "update_available": internal_peer_update_available,
+                "status_text": internal_peer_status_text,
+                "command": {
+                    "active": internal_peer_command_active,
+                    "action": internal_peer_command_action,
+                    "status": internal_peer_command_status,
+                    "message": _string(internal_peer_command.get("message", "")),
+                },
+            },
+            "business_actions": {
+                "allowed": business_actions_allowed,
+                "reason_code": business_actions_reason_code,
+                "disabled_reason": business_actions_disabled_reason,
+                "status_text": business_actions_status_text,
+            },
+            "actions": {
+                "main": _action(
+                    main_action_id,
+                    label=main_action_label,
+                    allowed=main_action_allowed,
+                    pending=False,
+                    disabled_reason=main_action_disabled_reason,
+                    reason_code=main_action_reason_code,
+                ),
+                "internal_peer_check": _action(
+                    "internal_peer_check",
+                    label=internal_peer_check_label,
+                    allowed=internal_peer_check_allowed,
+                    pending=False,
+                    disabled_reason=internal_peer_check_disabled_reason,
+                    reason_code=internal_peer_check_reason_code,
+                ),
+                "internal_peer_apply": _action(
+                    "internal_peer_apply",
+                    label=internal_peer_apply_label,
+                    allowed=internal_peer_apply_allowed,
+                    pending=False,
+                    disabled_reason=internal_peer_apply_disabled_reason,
+                    reason_code=internal_peer_apply_reason_code,
+                ),
+            },
+        }
+    if update_mode == "git_pull":
+        tone = "info"
+        status_text = "可手动拉取代码"
+        summary_text = "当前程序通过源码直接运行。启动阶段不会自动拉取代码；如需更新，请点击“拉取代码”，完成后再重启程序。"
+        badge_text = "源码直跑 / Git"
+        if not updater_enabled:
+            tone = "warning"
+            if disabled_reason == "git_not_installed":
+                status_text = "未安装 Git"
+                summary_text = "当前电脑未安装 Git，无法通过页面按钮拉取代码。"
+            elif disabled_reason == "git_repo_missing":
+                status_text = "当前目录不是 Git 仓库"
+                summary_text = "当前代码目录缺少 .git，无法通过页面按钮拉取代码。"
+            elif disabled_reason == "git_remote_missing":
+                status_text = "未配置 Git 远端"
+                summary_text = "当前 Git 工作区没有可用远端，无法通过页面按钮拉取代码。"
+            else:
+                status_text = "当前运行模式不支持拉取代码"
+                summary_text = _updater_disabled_reason_text(disabled_reason)
+        elif restart_required:
+            tone = "warning"
+            status_text = "代码已拉取，等待重启生效"
+            summary_text = "最新代码已经拉取完成，请点击“立即重启生效”使新代码生效。"
+        elif last_result == "git_pulling" or dependency_sync_status == "running":
+            tone = "info"
+            status_text = "拉取代码中"
+            summary_text = "正在从 Git 仓库拉取代码并同步运行依赖，请保持当前页面打开。"
+        elif last_result == "update_available":
+            tone = "success"
+            status_text = "检测到可拉取更新"
+            summary_text = "检测到远端仓库有新代码。点击“拉取代码”即可开始更新。"
+        elif last_result == "up_to_date":
+            tone = "success"
+            status_text = "当前代码已是最新"
+            summary_text = "当前 Git 工作区已经与远端保持一致。"
+        elif worktree_dirty:
+            tone = "warning"
+            status_text = "检测到本地修改"
+            summary_text = "当前 Git 工作区存在本地已修改文件，已阻止自动拉取代码。"
+        items = [
+            {"label": "运行方式", "value": "源码直跑", "tone": "info"},
+            {
+                "label": "当前版本",
+                "value": f"{local_version} / r{local_revision}" if local_revision > 0 else local_version,
+                "tone": "neutral",
+            },
+            {"label": "更新方式", "value": "手动点击“拉取代码”", "tone": "neutral"},
+            {"label": "当前分支", "value": branch or "-", "tone": "neutral"},
+            {"label": "本地提交", "value": local_commit[:7] if local_commit else "-", "tone": "neutral"},
+            {"label": "远端提交", "value": remote_commit[:7] if remote_commit else "-", "tone": "neutral"},
+            {
+                "label": "工作区状态",
+                "value": "存在本地修改" if worktree_dirty else "干净",
+                "tone": "warning" if worktree_dirty else "success",
+            },
+            {
+                "label": "内网端状态",
+                "value": internal_peer_status_text,
+                "tone": "warning" if internal_peer_command_active else ("success" if internal_peer_online else "neutral"),
+            },
+        ]
+        return {
+            "tone": tone,
+            "kicker": "源码更新",
+            "title": "Git 代码拉取",
+            "status_text": status_text,
+            "badge_text": badge_text,
+            "summary_text": summary_text,
+            "manifest_path": "",
+            "error_text": error_text,
+            "items": items,
             "internal_peer": {
                 "available": internal_peer_available,
                 "online": internal_peer_online,

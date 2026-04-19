@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -35,6 +36,7 @@ from app.modules.updater.service.update_applier import UpdateApplier
 
 
 _SOURCE_RUN_DISABLE_UPDATER_ENV = "QJPT_DISABLE_UPDATER_IN_SOURCE_RUN"
+_SOURCE_RUN_GIT_PULL_ENV = "QJPT_ENABLE_GIT_PULL_IN_SOURCE_RUN"
 _INTERNAL_PEER_HEARTBEAT_INTERVAL_SEC = 5
 _INTERNAL_PEER_HEARTBEAT_TIMEOUT_SEC = 15
 _GIT_TRACKED_STATUS_TIMEOUT_SEC = 30
@@ -43,6 +45,11 @@ def _updater_disabled_reason_from_env() -> str:
     if raw in {"1", "true", "yes", "on"}:
         return "source_python_run"
     return ""
+
+
+def _source_run_git_pull_enabled_from_env() -> bool:
+    raw = str(os.environ.get(_SOURCE_RUN_GIT_PULL_ENV, "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _short_git_commit(raw: Any) -> str:
@@ -116,9 +123,10 @@ class UpdaterService:
         self.app_dir = get_app_dir()
         self.app_root_dir = self.app_dir
         self.persistent_user_data_dir = self.app_dir
-        self.update_mode = "patch_zip"
-        self.git_available = False
-        self.git_repo_detected = False
+        self.source_run_git_pull_enabled = _source_run_git_pull_enabled_from_env()
+        self.update_mode = "git_pull" if self.source_run_git_pull_enabled else "patch_zip"
+        self.git_available = bool(shutil.which("git")) if self.update_mode == "git_pull" else False
+        self.git_repo_detected = bool((self.app_dir / ".git").exists()) if self.update_mode == "git_pull" else False
         self.git_repo_url = ""
         self.git_branch = ""
         self.git_remote_name = ""
@@ -355,7 +363,22 @@ class UpdaterService:
         }
 
     def _resolve_disabled_reason(self) -> str:
-        return _updater_disabled_reason_from_env()
+        env_reason = _updater_disabled_reason_from_env()
+        if env_reason:
+            return env_reason
+        if self.update_mode != "git_pull":
+            return ""
+        if not self.git_available:
+            return "git_not_installed"
+        if not self.git_repo_detected:
+            return "git_repo_missing"
+        identity = self._detect_git_identity(self.git_branch)
+        self.git_branch = str(identity.get("branch", "") or self.git_branch).strip()
+        self.git_remote_name = str(identity.get("remote_name", "") or self.git_remote_name).strip()
+        self.git_repo_url = str(identity.get("remote_url", "") or self.git_repo_url).strip()
+        if not self.git_remote_name or not self.git_repo_url:
+            return "git_remote_missing"
+        return ""
 
     def _run_git(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -454,11 +477,16 @@ class UpdaterService:
             return snapshot
         remote_name = str(snapshot.get("remote_name", "") or self.git_remote_name or "").strip()
         branch = str(snapshot.get("branch", "") or self.git_branch or "").strip()
+        local = normalize_local_version(load_local_build_meta(self.app_dir))
+        local_version_text = local.get("display_version") or local.get("build_id") or "-"
+        local_release_revision = int(local.get("release_revision", 0) or 0)
         if fetch_remote and self.git_available and self.git_repo_detected and remote_name and branch:
             fetch_ret = self._run_git("fetch", remote_name, branch)
             if fetch_ret.returncode != 0:
                 raise RuntimeError((fetch_ret.stderr or fetch_ret.stdout or "git fetch 失败").strip())
             snapshot = self._git_tracked_status()
+        elif fetch_remote and self.git_available and self.git_repo_detected:
+            raise RuntimeError("当前未配置 Git 更新仓库地址。")
         self.git_repo_detected = bool((self.app_dir / ".git").exists())
         self.git_branch = str(snapshot.get("branch", "") or self.git_branch).strip() or self.git_branch
         self.git_remote_name = str(snapshot.get("remote_name", "") or self.git_remote_name).strip() or self.git_remote_name
@@ -469,6 +497,12 @@ class UpdaterService:
             persistent_user_data_dir=str(self.persistent_user_data_dir),
             git_available=self.git_available,
             git_repo_detected=self.git_repo_detected,
+            source_kind=self.source_kind,
+            source_label=self.source_label,
+            local_version=str(local_version_text),
+            remote_version=_short_git_commit(str(snapshot.get("remote_commit", "") or "")),
+            local_release_revision=local_release_revision,
+            remote_release_revision=local_release_revision,
             branch=str(snapshot.get("branch", "") or self.git_branch or ""),
             local_commit=str(snapshot.get("local_commit", "") or ""),
             remote_commit=str(snapshot.get("remote_commit", "") or ""),
@@ -482,6 +516,12 @@ class UpdaterService:
                 "persistent_user_data_dir": str(self.persistent_user_data_dir),
                 "git_available": self.git_available,
                 "git_repo_detected": self.git_repo_detected,
+                "source_kind": self.source_kind,
+                "source_label": self.source_label,
+                "local_version": str(local_version_text),
+                "remote_version": _short_git_commit(str(snapshot.get("remote_commit", "") or "")),
+                "local_release_revision": local_release_revision,
+                "remote_release_revision": local_release_revision,
                 "branch": str(snapshot.get("branch", "") or self.git_branch or ""),
                 "local_commit": str(snapshot.get("local_commit", "") or ""),
                 "remote_commit": str(snapshot.get("remote_commit", "") or ""),
@@ -691,6 +731,29 @@ class UpdaterService:
             return {"started": False, "running": True, "reason": "already_running"}
 
         self._sync_mirror_runtime()
+
+        if self.update_mode == "git_pull":
+            try:
+                self._sync_git_runtime(fetch_remote=False)
+                self._set_runtime_and_state(
+                    enabled=True,
+                    disabled_reason="",
+                    last_error="",
+                    source_kind=self.source_kind,
+                    source_label=self.source_label,
+                    update_mode=self.update_mode,
+                    dependency_sync_status=str(self.state.get("dependency_sync_status", "idle") or "idle"),
+                    dependency_sync_error=str(self.state.get("dependency_sync_error", "") or ""),
+                    queued_apply=dict(self.state.get("queued_apply", self._empty_queue_payload()) or self._empty_queue_payload()),
+                )
+                self._log("源码直跑模式已启用手动代码拉取；启动阶段不会自动检查或拉取 Git 代码。")
+            except Exception as exc:  # noqa: BLE001
+                self._record_failure("初始化 Git 更新状态失败", exc)
+            self._sync_shared_mirror_watch_signal()
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, daemon=True, name="qjpt-updater")
+            self._thread.start()
+            return {"started": True, "running": True, "reason": "started"}
 
         try:
             startup_result = self._run_check(apply_update=None, force_remote=False)
@@ -1229,19 +1292,10 @@ class UpdaterService:
         refreshed_local_release_revision = int(refreshed_local.get("release_revision", 0) or 0)
         refreshed_git_snapshot = self._sync_git_runtime(fetch_remote=False)
         refreshed_remote_commit = str(refreshed_git_snapshot.get("remote_commit", "") or "").strip()
-        final_result = "updated"
-        restart_required = False
-        if bool(self.cfg.get("auto_restart", False)):
-            final_result, restart_required = self._apply_restart_strategy(
-                local_version=str(refreshed_local_text),
-                local_release_revision=refreshed_local_release_revision,
-            )
+        final_result = "restart_pending"
+        restart_required = True
         dependency_status = "success" if str(dependency_result.get("status", "")).strip() == "success" else "idle"
-        final_message = "Git 更新已应用完成。"
-        if final_result == "updated_restart_scheduled":
-            final_message = "Git 更新已应用并完成运行依赖同步，程序将自动重启。"
-        elif final_result == "restart_pending":
-            final_message = "Git 更新已应用并完成运行依赖同步，请重启程序使更新生效。"
+        final_message = "代码已拉取完成并完成运行依赖同步，请重启程序使新代码生效。"
         self._set_runtime_and_state(
             last_result=final_result,
             last_error="",
@@ -1470,6 +1524,8 @@ class UpdaterService:
         if not locked:
             raise RuntimeError("更新检查正在进行，请稍后重试。")
         try:
+            if self.update_mode == "git_pull":
+                return self._check_git_once(apply_update=apply_update)
             return self._check_once(apply_update=apply_update, force_remote=force_remote)
         finally:
             self._sync_shared_mirror_watch_signal()
@@ -1579,7 +1635,10 @@ class UpdaterService:
             self._write_internal_peer_status(online=True, force=True)
         elif self.role_mode == "external":
             self._sync_internal_peer_runtime()
-        self._log(f"更新线程已启动: interval={self.cfg['check_interval_sec']}s")
+        if self.update_mode == "git_pull":
+            self._log("更新线程已启动: 源码直跑模式仅处理手动拉取、排队请求和远程命令，不会自动拉取代码。")
+        else:
+            self._log(f"更新线程已启动: interval={self.cfg['check_interval_sec']}s")
         next_check_monotonic = time.monotonic() + int(self.cfg["check_interval_sec"])
         while not self._stop.wait(1):
             if self.role_mode == "internal":
@@ -1588,6 +1647,8 @@ class UpdaterService:
             elif self.role_mode == "external":
                 self._sync_internal_peer_runtime()
             self._try_process_queued_apply()
+            if self.update_mode == "git_pull":
+                continue
             if self._consume_shared_mirror_watch_trigger():
                 self._log("检测到共享目录批准版本变化，立即检查更新")
                 next_check_monotonic = time.monotonic() + int(self.cfg["check_interval_sec"])

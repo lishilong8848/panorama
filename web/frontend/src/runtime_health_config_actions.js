@@ -3960,6 +3960,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function applyUpdaterPatch() {
+    const isGitPullMode = String(health.updater?.update_mode || "").trim().toLowerCase() === "git_pull";
     const requestedMode = String(
       health.updater?.queued_apply?.queued && String(health.updater?.queued_apply?.mode || "").trim()
         ? health.updater.queued_apply.mode
@@ -3973,21 +3974,26 @@ export function createRuntimeHealthConfigActions(ctx) {
       let requestPending = true;
       pauseRuntimeTraffic();
       setUpdaterOverlay(true, {
-        title: "正在更新程序",
-        subtitle: "请保持当前页面打开，更新完成后会自动恢复。",
+        title: isGitPullMode ? "正在拉取代码" : "正在更新程序",
+        subtitle: isGitPullMode
+          ? "正在从 Git 仓库拉取最新代码，请保持当前页面打开。"
+          : "请保持当前页面打开，更新完成后会自动恢复。",
         stage: "applying",
+        kicker: isGitPullMode ? "Git 拉取中" : "",
       });
-      persistUpdaterRecoveryIntent("applying", "updater_apply");
       await flushUpdaterOverlayPaint();
-      startUpdaterBootstrapRecoveryWatch({
-        source: "updater_apply",
-        startupToken: String(health?.startup_time || "").trim(),
-      });
-      startUpdaterRuntimeMonitor({
-        queued: false,
-        initialGraceMs: 15000,
-        isRequestPending: () => requestPending,
-      });
+      if (!isGitPullMode) {
+        persistUpdaterRecoveryIntent("applying", "updater_apply");
+        startUpdaterBootstrapRecoveryWatch({
+          source: "updater_apply",
+          startupToken: String(health?.startup_time || "").trim(),
+        });
+        startUpdaterRuntimeMonitor({
+          queued: false,
+          initialGraceMs: 15000,
+          isRequestPending: () => requestPending,
+        });
+      }
       try {
         const data = await applyUpdaterApi({
           mode: requestedMode,
@@ -4001,11 +4007,15 @@ export function createRuntimeHealthConfigActions(ctx) {
         message.value = buildUpdaterApplyMessage(result);
         const finalResult = String(result?.last_result || "").trim();
         if (finalResult === "queued_busy") {
-          startQueuedUpdaterMonitor();
+          if (!isGitPullMode) {
+            startQueuedUpdaterMonitor();
+          }
           return data;
         }
         if (finalResult === "updated_restart_scheduled") {
-          beginUpdaterRestartRecovery({ source: "updater_apply" });
+          if (!isGitPullMode) {
+            beginUpdaterRestartRecovery({ source: "updater_apply" });
+          }
           return data;
         }
         await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
@@ -4013,13 +4023,13 @@ export function createRuntimeHealthConfigActions(ctx) {
         return data;
       } catch (err) {
         requestPending = false;
-        if (isTransientNetworkError(err)) {
+        if (!isGitPullMode && isTransientNetworkError(err)) {
           return handoffUpdaterToRestartRecovery("更新已开始，服务正在重启，正在等待恢复。", {
             source: "updater_apply",
           });
         }
         hideUpdaterOverlay();
-        message.value = `应用更新失败: ${err}`;
+        message.value = `${isGitPullMode ? "拉取代码失败" : "应用更新失败"}: ${err}`;
       }
     };
     if (typeof runSingleFlight === "function") {

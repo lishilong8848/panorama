@@ -26,6 +26,7 @@ def _build_config(tmp_path: Path) -> dict:
 @pytest.fixture(autouse=True)
 def _clear_source_run_disable_env(monkeypatch) -> None:
     monkeypatch.delenv(updater_service_module._SOURCE_RUN_DISABLE_UPDATER_ENV, raising=False)
+    monkeypatch.delenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, raising=False)
 
 
 def test_apply_now_queues_when_job_is_busy(tmp_path: Path, monkeypatch) -> None:
@@ -121,9 +122,25 @@ def test_check_now_does_not_expose_force_apply_when_already_up_to_date(tmp_path:
     assert result["force_apply_available"] is False
 
 
-def test_source_python_run_disables_updater_service(tmp_path: Path, monkeypatch) -> None:
+def test_source_python_run_uses_manual_git_pull_mode(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: tmp_path)
-    monkeypatch.setenv(updater_service_module._SOURCE_RUN_DISABLE_UPDATER_ENV, "1")
+    monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(updater_service_module.shutil, "which", lambda _name: "C:/Git/bin/git.exe")
+    responses = {
+        ("rev-parse", "--abbrev-ref", "HEAD"): type("R", (), {"returncode": 0, "stdout": "master\n", "stderr": ""})(),
+        ("config", "--get", "branch.master.remote"): type("R", (), {"returncode": 0, "stdout": "origin\n", "stderr": ""})(),
+        ("remote", "get-url", "origin"): type("R", (), {"returncode": 0, "stdout": "https://example.invalid/repo.git\n", "stderr": ""})(),
+        ("rev-parse", "HEAD"): type("R", (), {"returncode": 0, "stdout": "abcdef123456\n", "stderr": ""})(),
+        ("status", "--porcelain", "--untracked-files=no"): type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+        ("rev-parse", "origin/master"): type("R", (), {"returncode": 0, "stdout": "abcdef123456\n", "stderr": ""})(),
+        ("fetch", "origin", "master"): type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    }
+
+    def fake_run_git(self, *args):  # noqa: ANN001
+        return responses[tuple(args)]
+
+    monkeypatch.setattr(UpdaterService, "_run_git", fake_run_git, raising=False)
     service = UpdaterService(
         config=_build_config(tmp_path),
         emit_log=lambda _text: None,
@@ -132,11 +149,12 @@ def test_source_python_run_disables_updater_service(tmp_path: Path, monkeypatch)
 
     result = service.check_now()
 
-    assert service.enabled is False
-    assert result["enabled"] is False
-    assert result["disabled_reason"] == "source_python_run"
-    assert result["last_result"] == "disabled"
-    assert "git pull" in result["message"]
+    assert service.enabled is True
+    assert service.update_mode == "git_pull"
+    assert result["enabled"] is True
+    assert result["disabled_reason"] == ""
+    assert result["last_result"] == "up_to_date"
+    assert "最新提交" in result["message"]
 
 
 def test_remote_manifest_prefers_zip_url_over_zip_relpath(tmp_path: Path, monkeypatch) -> None:

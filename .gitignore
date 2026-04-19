@@ -3,6 +3,10 @@
 /build/
 /build_output/
 /node_modules/
+/runtime/python/
+*.zip
+*.exe
+*.exe.manifest
 
 # Environment and caches
 /.env

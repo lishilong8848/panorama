@@ -442,11 +442,15 @@ def test_updater_restart_callback_writes_role_handoff_for_external(monkeypatch, 
     assert exit_calls == [194]
 
 
-def test_updater_restart_callback_prefers_portable_launcher_in_source_mode(monkeypatch, tmp_path):
+def test_updater_restart_callback_prefers_top_level_launcher_for_release_code_dir(monkeypatch, tmp_path):
     app = _build_app(monkeypatch, tmp_path, role_mode="external")
     container = app.state.container
-    app_dir = tmp_path
-    (app_dir / "portable_launcher.py").write_text("print('ok')", encoding="utf-8")
+    code_dir = tmp_path / "QJPT_V3_code"
+    root_dir = tmp_path
+    code_dir.mkdir(parents=True, exist_ok=True)
+    (code_dir / "portable_launcher.py").write_text("print('ok')", encoding="utf-8")
+    launcher_bat = root_dir / "启动程序.bat"
+    launcher_bat.write_text("@echo off\r\n", encoding="utf-8")
     popen_calls = []
     exit_calls = []
 
@@ -464,7 +468,8 @@ def test_updater_restart_callback_prefers_portable_launcher_in_source_mode(monke
 
     monkeypatch.delenv("QJPT_RESTART_EXIT_CODE", raising=False)
     monkeypatch.delenv("QJPT_PORTABLE_LAUNCHER", raising=False)
-    monkeypatch.setattr(app_factory, "get_app_dir", lambda: app_dir)
+    monkeypatch.setattr(app_factory, "get_app_dir", lambda: code_dir)
+    monkeypatch.setattr(app_factory, "get_app_root_dir", lambda _app_dir=None: root_dir)
     monkeypatch.setattr(app_factory.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr(app_factory.os, "_exit", lambda code: exit_calls.append(code))
     monkeypatch.setattr(app_factory.time, "sleep", lambda _secs: None)
@@ -475,8 +480,8 @@ def test_updater_restart_callback_prefers_portable_launcher_in_source_mode(monke
 
     assert ok is True
     assert detail == "restart_scheduled"
-    assert popen_calls[0]["cmd"] == [app_factory.sys.executable, str(app_dir / "portable_launcher.py")]
-    assert popen_calls[0]["kwargs"]["cwd"] == str(app_dir)
+    assert popen_calls[0]["cmd"] == ["cmd.exe", "/c", str(launcher_bat)]
+    assert popen_calls[0]["kwargs"]["cwd"] == str(root_dir)
     assert exit_calls == [0]
 
 

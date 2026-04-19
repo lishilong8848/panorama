@@ -2,7 +2,6 @@
 
 import importlib
 import importlib.metadata
-import importlib.util
 import json
 import os
 import subprocess
@@ -11,6 +10,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List
+
 
 from pipeline_utils import get_app_dir
 
@@ -101,16 +101,51 @@ class RuntimeDependencySyncService:
             for spec in normalized_runtime_dependency_specs()
         ]
 
+    def _run_python_probe(self, code: str, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [self.python_executable, "-c", code, *args],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def _find_import(self, import_name: str) -> bool:
-        return importlib.util.find_spec(str(import_name or "").strip()) is not None
+        target = str(import_name or "").strip()
+        if not target:
+            return False
+        probe = self._run_python_probe(
+            (
+                "import importlib, sys\n"
+                "target = sys.argv[1]\n"
+                "try:\n"
+                "    importlib.import_module(target)\n"
+                "except Exception:\n"
+                "    raise SystemExit(1)\n"
+                "raise SystemExit(0)\n"
+            ),
+            target,
+        )
+        return probe.returncode == 0
 
     def _installed_version(self, package: str) -> str:
-        try:
-            return str(importlib.metadata.version(str(package or "").strip()) or "").strip()
-        except importlib.metadata.PackageNotFoundError:
+        target = str(package or "").strip()
+        if not target:
             return ""
-        except Exception:
+        probe = self._run_python_probe(
+            (
+                "import importlib.metadata, sys\n"
+                "target = sys.argv[1]\n"
+                "try:\n"
+                "    version = importlib.metadata.version(target)\n"
+                "except Exception:\n"
+                "    version = ''\n"
+                "print(version)\n"
+            ),
+            target,
+        )
+        if probe.returncode != 0:
             return ""
+        return str(probe.stdout or "").strip()
 
     def _run_pip(self, args: List[str]) -> tuple[bool, str]:
         def _build_env(*, strip_proxy: bool) -> dict[str, str]:

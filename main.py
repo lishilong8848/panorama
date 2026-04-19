@@ -27,6 +27,7 @@ from app.modules.updater.service.runtime_dependency_sync_service import (  # noq
 
 
 _SOURCE_RUN_DISABLE_UPDATER_ENV = "QJPT_DISABLE_UPDATER_IN_SOURCE_RUN"
+_SOURCE_RUN_GIT_PULL_ENV = "QJPT_ENABLE_GIT_PULL_IN_SOURCE_RUN"
 _PORTABLE_LAUNCHER_ENV = "QJPT_PORTABLE_LAUNCHER"
 
 
@@ -200,7 +201,8 @@ def _should_disable_updater_for_source_run() -> bool:
 def _apply_source_run_runtime_flags() -> bool:
     if not _should_disable_updater_for_source_run():
         return False
-    os.environ[_SOURCE_RUN_DISABLE_UPDATER_ENV] = "1"
+    os.environ.pop(_SOURCE_RUN_DISABLE_UPDATER_ENV, None)
+    os.environ[_SOURCE_RUN_GIT_PULL_ENV] = "1"
     return True
 
 
@@ -231,9 +233,9 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[启动] 运行依赖准备失败: {exc}", flush=True)
         print("[启动] 请检查当前网络、系统代理或 VPN 配置，以及 PIP 镜像连通性后重试。", flush=True)
         raise SystemExit(1) from exc
-    source_run_updater_disabled = _apply_source_run_runtime_flags()
-    if source_run_updater_disabled:
-        print("[启动] 当前为源码直跑模式，应用内自动更新已禁用；如需更新请先执行 git pull。", flush=True)
+    source_run_git_pull_enabled = _apply_source_run_runtime_flags()
+    if source_run_git_pull_enabled:
+        print("[启动] 当前为源码直跑模式。启动阶段不会自动拉取代码；如需更新请点击页面中的“拉取代码”按钮或手动执行 git pull。", flush=True)
 
     import uvicorn
     from app.bootstrap.app_factory import create_app
