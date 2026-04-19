@@ -5,6 +5,7 @@
   setSystemOffset,
   onJobDone,
   onJobReconnect,
+  canAttachSystemStream,
   systemReconnectDelayMs = 1200,
   jobReconnectDelayMs = 1200,
 }) {
@@ -16,6 +17,14 @@
   let paused = false;
   let systemLastEventId = Number.isInteger(getSystemOffset?.()) ? getSystemOffset() : 0;
   const jobLastEventIds = new Map();
+  let systemReconnectAttempt = 0;
+  let jobReconnectAttempt = 0;
+
+  function resolveReconnectDelay(baseDelayMs, attempt) {
+    const base = Math.max(250, Number.parseInt(String(baseDelayMs || 0), 10) || 1200);
+    const exponent = Math.max(0, Number.parseInt(String(attempt || 0), 10) || 0);
+    return Math.min(10000, base * (2 ** exponent));
+  }
 
   function closeJobStream() {
     if (jobReconnectTimer) {
@@ -29,14 +38,19 @@
 
   function scheduleSystemReconnect() {
     if (paused || systemReconnectTimer) return;
+    if (typeof canAttachSystemStream === "function" && !canAttachSystemStream()) return;
+    const delayMs = resolveReconnectDelay(systemReconnectDelayMs, systemReconnectAttempt);
+    systemReconnectAttempt += 1;
     systemReconnectTimer = setTimeout(() => {
       systemReconnectTimer = null;
       attachSystemStream();
-    }, systemReconnectDelayMs);
+    }, delayMs);
   }
 
   function scheduleJobReconnect(jobId) {
     if (paused || !jobId || jobReconnectTimer) return;
+    const delayMs = resolveReconnectDelay(jobReconnectDelayMs, jobReconnectAttempt);
+    jobReconnectAttempt += 1;
     jobReconnectTimer = setTimeout(async () => {
       jobReconnectTimer = null;
       attachJobStream(jobId);
@@ -45,7 +59,7 @@
       } catch (_) {
         // ignore reconnect refresh errors
       }
-    }, jobReconnectDelayMs);
+    }, delayMs);
   }
 
   function closeSystemStream() {
@@ -60,10 +74,14 @@
 
   function attachSystemStream() {
     if (paused) return;
+    if (typeof canAttachSystemStream === "function" && !canAttachSystemStream()) return;
     closeSystemStream();
     const offset = Number.isInteger(getSystemOffset?.()) ? getSystemOffset() : systemLastEventId;
     systemLastEventId = Math.max(0, Number.parseInt(String(offset || 0), 10) || 0);
     const es = new EventSource(`/api/logs/system?last_event_id=${Math.max(0, systemLastEventId)}`);
+    es.onopen = () => {
+      systemReconnectAttempt = 0;
+    };
     const handleSystemEvent = (e) => {
       try {
         const payload = JSON.parse(e.data);
@@ -94,6 +112,9 @@
     closeJobStream();
     const lastEventId = Number.parseInt(String(jobLastEventIds.get(normalizedJobId) || 0), 10);
     const es = new EventSource(`/api/jobs/${normalizedJobId}/logs?last_event_id=${Math.max(0, lastEventId || 0)}`);
+    es.onopen = () => {
+      jobReconnectAttempt = 0;
+    };
     const handleJobEvent = (e) => {
       const nextId = Number.parseInt(String(e.lastEventId || 0), 10);
       if (Number.isInteger(nextId) && nextId > 0) {
@@ -138,6 +159,8 @@
 
   function pauseAll() {
     paused = true;
+    systemReconnectAttempt = 0;
+    jobReconnectAttempt = 0;
     closeJobStream();
     closeSystemStream();
   }
@@ -145,7 +168,9 @@
   function resumeAll() {
     if (!paused) return;
     paused = false;
-    attachSystemStream();
+    if (typeof canAttachSystemStream !== "function" || canAttachSystemStream()) {
+      attachSystemStream();
+    }
     if (activeJobId) {
       attachJobStream(activeJobId);
     }

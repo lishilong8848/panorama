@@ -50,6 +50,7 @@ from app.shared.utils.atomic_file import (
     validate_excel_workbook_file,
     validate_json_file,
 )
+from app.shared.utils.file_utils import normalize_windows_path_text
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.excel_reader import load_rows
@@ -111,11 +112,13 @@ class SharedBridgeRuntimeService:
         app_version: str,
         job_service: JobService | None = None,
         emit_log: Callable[[str], None] | None = None,
+        request_runtime_status_refresh: Callable[[str], None] | None = None,
     ) -> None:
         self.runtime_config = copy.deepcopy(runtime_config if isinstance(runtime_config, dict) else {})
         self.app_version = str(app_version or "").strip()
         self.emit_log = emit_log
         self._job_service = job_service
+        self._request_runtime_status_refresh_callback = request_runtime_status_refresh
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -546,6 +549,9 @@ class SharedBridgeRuntimeService:
         if not isinstance(bridge_cfg, dict):
             bridge_cfg = {}
         resolved_bridge_cfg = resolve_shared_bridge_paths(bridge_cfg, deployment.get("role_mode"))
+        resolved_bridge_cfg["root_dir"] = normalize_windows_path_text(
+            str(resolved_bridge_cfg.get("root_dir", "") or "").strip()
+        )
         if isinstance(self.runtime_config, dict):
             self.runtime_config["shared_bridge"] = copy.deepcopy(resolved_bridge_cfg)
         self.role_mode = normalize_role_mode(deployment.get("role_mode"))
@@ -926,6 +932,7 @@ class SharedBridgeRuntimeService:
                     self._internal_download_pool = InternalDownloadBrowserPool(
                         self.runtime_config,
                         emit_log=self._emit_system_log,
+                        request_runtime_status_refresh=lambda reason: self._request_runtime_status_refresh(reason=reason),
                     )
                 pool_result = self._internal_download_pool.start()
                 if not bool(pool_result.get("running", False)):
@@ -1458,9 +1465,13 @@ class SharedBridgeRuntimeService:
                 "last_success_at": "",
                 "last_error": "",
                 "failed_buildings": [],
+                "blocked_buildings": [],
+                "running_buildings": [],
+                "completed_buildings": [],
                 "scope_text": "当前小时",
             },
             "handover_log_family": {},
+            "handover_capacity_report_family": {},
             "monthly_report_family": {},
             "alarm_event_family": {},
         }
@@ -2318,6 +2329,23 @@ class SharedBridgeRuntimeService:
             buildings=buildings,
         )
 
+    def fill_day_metric_history(
+        self,
+        *,
+        selected_dates: List[str],
+        building_scope: str,
+        building: str | None,
+        emit_log: Callable[[str], None],
+    ) -> List[Dict[str, Any]]:
+        if self._source_cache_service is None:
+            return []
+        return self._source_cache_service.fill_day_metric_history(
+            selected_dates=selected_dates,
+            building_scope=building_scope,
+            building=building,
+            emit_log=emit_log,
+        )
+
     def get_monthly_by_date_cache_entries(self, *, selected_dates: List[str], buildings: List[str] | None = None) -> List[Dict[str, Any]]:
         if self._source_cache_service is None:
             return []
@@ -2402,6 +2430,15 @@ class SharedBridgeRuntimeService:
         line = str(text or "").strip()
         if line and callable(self.emit_log):
             self.emit_log(line)
+
+    def _request_runtime_status_refresh(self, *, reason: str) -> None:
+        callback = self._request_runtime_status_refresh_callback
+        if not callable(callback):
+            return
+        try:
+            callback(str(reason or "").strip() or "shared_bridge_runtime")
+        except Exception:
+            pass
 
     def _touch_node(self) -> None:
         if not self._store:
@@ -3281,6 +3318,7 @@ class SharedBridgeRuntimeService:
                     sync_mailbox=False,
                 )
                 self._store.append_event(task_id=task_id, stage_id=stage_id, side="internal", level="info", event_type="await_external", payload={"message": "内网下载完成，等待外网继续处理"})
+                self._request_runtime_status_refresh(reason=f"handover_internal_download_completed:{task_id}")
             else:
                 error_text = (
                     str(handover_result.get("error", "") or "").strip()
@@ -3300,6 +3338,7 @@ class SharedBridgeRuntimeService:
                     stage_status="failed",
                     task_result={"internal": stage_result, "status": "failed"},
                 )
+                self._request_runtime_status_refresh(reason=f"handover_internal_download_failed:{task_id}")
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
             self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
@@ -3316,6 +3355,7 @@ class SharedBridgeRuntimeService:
                 task_result={"status": "failed", "error": error_text},
             )
             self._emit_system_log(f"[共享桥接][内网端] 任务={task_id} 交接班共享文件准备失败: {error_text}")
+            self._request_runtime_status_refresh(reason=f"handover_internal_download_exception:{task_id}")
 
     def _run_handover_external_continue(self, task: Dict[str, Any]) -> None:
         if not self._store:
@@ -3565,6 +3605,7 @@ class SharedBridgeRuntimeService:
                     sync_mailbox=False,
                 )
                 self._store.append_event(task_id=task_id, stage_id=stage_id, side="internal", level="info", event_type="await_external", payload={"message": "内网下载完成，等待外网继续上传"})
+                self._request_runtime_status_refresh(reason=f"day_metric_internal_download_completed:{task_id}")
             else:
                 result_rows: List[Dict[str, Any]] = []
                 for date_row in internal_result.get("results", []) if isinstance(internal_result.get("results", []), list) else []:
@@ -3584,6 +3625,7 @@ class SharedBridgeRuntimeService:
                     stage_status="failed",
                     task_result={"internal": stage_result, "status": "failed"},
                 )
+                self._request_runtime_status_refresh(reason=f"day_metric_internal_download_failed:{task_id}")
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
             self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
@@ -3600,6 +3642,7 @@ class SharedBridgeRuntimeService:
                 task_result={"status": "failed", "error": error_text},
             )
             self._emit_system_log(f"[共享桥接][内网端] 任务={task_id} 12项共享文件准备失败: {error_text}")
+            self._request_runtime_status_refresh(reason=f"day_metric_internal_download_exception:{task_id}")
 
     def _run_day_metric_external_continue(self, task: Dict[str, Any]) -> None:
         if not self._store:
@@ -3829,6 +3872,7 @@ class SharedBridgeRuntimeService:
                     event_type="await_external",
                     payload={"message": "内网下载完成，等待外网继续处理"},
                 )
+                self._request_runtime_status_refresh(reason=f"wet_bulb_internal_download_completed:{task_id}")
             else:
                 failed_buildings = internal_result.get("failed_buildings", []) if isinstance(internal_result.get("failed_buildings", []), list) else []
                 error_text = "内网下载未产生任何共享源文件"
@@ -3851,6 +3895,7 @@ class SharedBridgeRuntimeService:
                     stage_status="failed",
                     task_result={"internal": stage_result, "status": "failed"},
                 )
+                self._request_runtime_status_refresh(reason=f"wet_bulb_internal_download_failed:{task_id}")
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
             self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
@@ -3867,6 +3912,7 @@ class SharedBridgeRuntimeService:
                 task_result={"status": "failed", "error": error_text},
             )
             self._emit_system_log(f"[共享桥接][内网端] 任务={task_id} 湿球温度共享文件准备失败: {error_text}")
+            self._request_runtime_status_refresh(reason=f"wet_bulb_internal_download_exception:{task_id}")
 
     def _run_wet_bulb_external_continue(self, task: Dict[str, Any]) -> None:
         if not self._store:

@@ -84,24 +84,25 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
               <div class="task-block-kicker">执行引擎</div>
               <h3 class="card-title">任务与资源</h3>
             </div>
-            <span class="status-badge status-badge-soft" :class="runningJobs.length ? 'tone-info' : 'tone-neutral'">
-              运行中 {{ runningJobs.length }} / 等待 {{ waitingResourceJobs.length }}
+            <span class="status-badge status-badge-soft" :class="'tone-' + (taskPanelOverview.tone || 'neutral')">
+              {{ taskPanelOverview.statusText || '当前空闲' }}
             </span>
           </div>
-          <div class="status-metric-grid status-metric-grid-compact">
-            <div class="status-metric">
-              <div class="status-metric-label">运行中任务</div>
-              <strong class="status-metric-value">{{ runningJobs.length }}</strong>
-            </div>
-            <div class="status-metric">
-              <div class="status-metric-label">等待资源</div>
-              <strong class="status-metric-value">{{ waitingResourceJobs.length }}</strong>
-            </div>
-            <div class="status-metric">
-              <div class="status-metric-label">补采同步</div>
-              <strong class="status-metric-value">{{ activeBridgeTasks.length }}</strong>
+          <div class="hint">{{ taskPanelOverview.summaryText }}</div>
+          <div
+            class="status-metric-grid status-metric-grid-compact"
+            v-if="taskPanelOverview.items && taskPanelOverview.items.length"
+          >
+            <div
+              class="status-metric"
+              v-for="item in taskPanelOverview.items.slice(0, 3)"
+              :key="'task-panel-overview-' + item.label"
+            >
+              <div class="status-metric-label">{{ item.label }}</div>
+              <strong class="status-metric-value">{{ item.value }}</strong>
             </div>
           </div>
+          <div class="hint" v-else>等待后端任务摘要。</div>
           <div class="ops-job-grid">
             <article class="task-block task-block-compact">
               <div class="task-block-head">
@@ -109,8 +110,8 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                   <div class="task-block-kicker">运行中</div>
                   <h4 class="card-title">运行中任务</h4>
                 </div>
-                <span class="status-badge status-badge-soft" :class="runningJobs.length ? 'tone-info' : 'tone-neutral'">
-                  {{ runningJobs.length ? (runningJobs.length + ' 项') : '无' }}
+                <span class="status-badge status-badge-soft" :class="taskPanelOverview.runningCount ? 'tone-info' : 'tone-neutral'">
+                  {{ taskPanelOverview.runningCount ? (taskPanelOverview.runningCount + ' 项') : '无' }}
                 </span>
               </div>
               <div class="ops-job-list" v-if="runningJobs.length">
@@ -125,19 +126,20 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                     type="button"
                     @click="focusJobInRuntimeLogs(job)"
                   >
-                    <span class="ops-job-list-title">{{ job.name || job.feature || job.job_id }}</span>
-                    <span class="ops-job-list-meta">{{ formatJobCompactMeta(job) }}</span>
-                    <span class="ops-job-list-meta" v-if="formatJobCompactDetail(job)">{{ formatJobCompactDetail(job) }}</span>
+                    <span class="ops-job-list-title">{{ getRuntimeTaskTitle(job) }}</span>
+                    <span class="ops-job-list-meta">{{ getRuntimeTaskMeta(job) }}</span>
+                    <span class="ops-job-list-meta" v-if="getRuntimeTaskDetail(job)">{{ getRuntimeTaskDetail(job) }}</span>
                   </button>
                   <div class="ops-job-inline-action-slot">
                     <button
-                      v-if="canCancelJob(job)"
+                      v-if="isRuntimeTaskActionVisible(job, 'cancel')"
                       class="btn btn-secondary btn-mini ops-job-inline-action"
                       type="button"
-                      :disabled="isActionLocked(getJobCancelActionKey(job.job_id))"
-                      @click="cancelJobItem(job)"
+                      :title="getRuntimeTaskActionDisabledReason(job, 'cancel')"
+                      :disabled="isRuntimeTaskActionLocked(job, 'cancel')"
+                      @click="cancelRuntimeTask(job)"
                     >
-                      {{ isActionLocked(getJobCancelActionKey(job.job_id)) ? '取消中...' : '取消任务' }}
+                      {{ getRuntimeTaskActionLabel(job, 'cancel') }}
                     </button>
                   </div>
                 </div>
@@ -151,8 +153,8 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                   <div class="task-block-kicker">等待资源</div>
                   <h4 class="card-title">等待资源任务</h4>
                 </div>
-                <span class="status-badge status-badge-soft" :class="waitingResourceJobs.length ? 'tone-warning' : 'tone-neutral'">
-                  {{ waitingResourceJobs.length ? (waitingResourceJobs.length + ' 项') : '无' }}
+                <span class="status-badge status-badge-soft" :class="taskPanelOverview.waitingCount ? 'tone-warning' : 'tone-neutral'">
+                  {{ taskPanelOverview.waitingCount ? (taskPanelOverview.waitingCount + ' 项') : '无' }}
                 </span>
               </div>
               <div class="ops-job-list" v-if="waitingResourceJobs.length">
@@ -167,28 +169,20 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                     type="button"
                     @click="focusWaitingResourceItemInRuntimeLogs(job)"
                   >
-                    <span class="ops-job-list-title">{{ formatWaitingResourceItemTitle(job) }}</span>
-                    <span class="ops-job-list-meta">{{ formatWaitingResourceItemMeta(job) }}</span>
-                    <span class="ops-job-list-meta" v-if="formatWaitingResourceItemDetail(job)">{{ formatWaitingResourceItemDetail(job) }}</span>
+                    <span class="ops-job-list-title">{{ getRuntimeTaskTitle(job) }}</span>
+                    <span class="ops-job-list-meta">{{ getRuntimeTaskMeta(job) }}</span>
+                    <span class="ops-job-list-meta" v-if="getRuntimeTaskDetail(job)">{{ getRuntimeTaskDetail(job) }}</span>
                   </button>
                   <div class="ops-job-inline-action-slot">
                     <button
-                      v-if="job.__waiting_kind === 'bridge' && canCancelBridgeTask(job)"
+                      v-if="isRuntimeTaskActionVisible(job, 'cancel')"
                       class="btn btn-secondary btn-mini ops-job-inline-action"
                       type="button"
-                      :disabled="isActionLocked(getBridgeTaskCancelActionKey(job.task_id))"
-                      @click="cancelBridgeTask(job.task_id)"
+                      :title="getRuntimeTaskActionDisabledReason(job, 'cancel')"
+                      :disabled="isRuntimeTaskActionLocked(job, 'cancel')"
+                      @click="cancelRuntimeTask(job)"
                     >
-                      {{ isActionLocked(getBridgeTaskCancelActionKey(job.task_id)) ? '取消中...' : '取消任务' }}
-                    </button>
-                    <button
-                      v-else-if="job.__waiting_kind !== 'bridge' && canCancelJob(job)"
-                      class="btn btn-secondary btn-mini ops-job-inline-action"
-                      type="button"
-                      :disabled="isActionLocked(getJobCancelActionKey(job.job_id))"
-                      @click="cancelJobItem(job)"
-                    >
-                      {{ isActionLocked(getJobCancelActionKey(job.job_id)) ? '取消中...' : '取消任务' }}
+                      {{ getRuntimeTaskActionLabel(job, 'cancel') }}
                     </button>
                   </div>
                 </div>
@@ -243,10 +237,11 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                 <div class="task-block-kicker">内外网同步</div>
                 <h4 class="card-title">补采同步任务</h4>
               </div>
-              <span class="status-badge status-badge-soft" :class="activeBridgeTasks.length ? 'tone-warning' : 'tone-neutral'">
-                {{ activeBridgeTasks.length ? ('处理中 ' + activeBridgeTasks.length + ' 项') : '当前空闲' }}
+              <span class="status-badge status-badge-soft" :class="'tone-' + (bridgeTaskPanelOverview?.tone || 'neutral')">
+                {{ bridgeTaskPanelOverview?.statusText || '等待后端摘要' }}
               </span>
             </div>
+            <div class="hint">{{ bridgeTaskPanelOverview?.summaryText || '暂无共享桥接任务。' }}</div>
             <div class="hint">缺文件任务会先由内网补采，再由原任务自动继续处理。</div>
             <div class="hint">这里只保留任务摘要和操作入口，详细排障信息不再占用首页区域。</div>
             <div class="ops-job-list" v-if="displayedBridgeTasks.length">
@@ -261,19 +256,20 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                   type="button"
                   @click="focusBridgeTaskInRuntimeLogs(task)"
                 >
-                  <span class="ops-job-list-title">{{ task.feature_label || formatBridgeFeature(task.feature) }}</span>
-                  <span class="ops-job-list-meta">{{ formatBridgeTaskCompactMeta(task) }}</span>
-                  <span class="ops-job-list-meta" v-if="formatBridgeTaskCompactDetail(task)">{{ formatBridgeTaskCompactDetail(task) }}</span>
+                  <span class="ops-job-list-title">{{ getRuntimeTaskTitle(task) }}</span>
+                  <span class="ops-job-list-meta">{{ getRuntimeTaskMeta(task) }}</span>
+                  <span class="ops-job-list-meta" v-if="getRuntimeTaskDetail(task)">{{ getRuntimeTaskDetail(task) }}</span>
                 </button>
                 <div v-if="isExternalDeploymentRole" class="ops-job-inline-action-slot">
                   <button
-                    v-if="canCancelBridgeTask(task)"
+                    v-if="isRuntimeTaskActionVisible(task, 'cancel')"
                     class="btn btn-secondary btn-mini ops-job-inline-action"
                     type="button"
-                    :disabled="isActionLocked(getBridgeTaskCancelActionKey(task.task_id))"
-                    @click="cancelBridgeTask(task.task_id)"
+                    :title="getRuntimeTaskActionDisabledReason(task, 'cancel')"
+                    :disabled="isRuntimeTaskActionLocked(task, 'cancel')"
+                    @click="cancelRuntimeTask(task)"
                   >
-                    {{ isActionLocked(getBridgeTaskCancelActionKey(task.task_id)) ? '取消提交中...' : '取消任务' }}
+                    {{ getRuntimeTaskActionLabel(task, 'cancel') }}
                   </button>
                 </div>
               </div>

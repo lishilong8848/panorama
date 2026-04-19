@@ -58,6 +58,21 @@ def test_handover_review_data_loads_requested_duty_context(monkeypatch):
 
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), _Parser(), None, None))
 
+    class _DocumentState:
+        def load_document(self, session):
+            hydrated = dict(session)
+            hydrated["excel_sync"] = {"status": "synced"}
+            return (
+                {"fixed_blocks": [], "sections": [], "footer_blocks": []},
+                hydrated,
+            )
+
+    monkeypatch.setattr(
+        routes,
+        "_build_review_document_state_service",
+        lambda _container, **_kwargs: _DocumentState(),
+    )
+
     payload = routes.handover_review_data(
         "a",
         _fake_request(),
@@ -72,3 +87,8 @@ def test_handover_review_data_loads_requested_duty_context(monkeypatch):
     assert payload["history"]["selected_in_history_list"] is True
     assert payload["history"]["history_limit"] == 10
     assert payload["history"]["history_rule"] == "cloud_success_only"
+    assert payload["display_state"]["actions"]["download"]["allowed"] is True
+    assert payload["display_state"]["actions"]["confirm"]["allowed"] is True
+    assert payload["display_state"]["history_hint"].startswith("仅显示最近 10 条已成功上云")
+    assert payload["display_state"]["download_state"]["status"] == "ready"
+    assert payload["display_state"]["confirm_state"]["status"] == "pending_confirm"

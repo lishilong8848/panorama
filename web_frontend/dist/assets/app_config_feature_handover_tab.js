@@ -126,11 +126,11 @@
           <div class="form-row"><label class="label">事件模板文件</label><input type="text" v-model="config.handover_log.monthly_event_report.template.source_path" /></div>
           <div class="form-row"><label class="label">输出目录</label><input type="text" v-model="config.handover_log.monthly_event_report.template.output_dir" /></div>
           <div class="form-row"><label class="label">文件命名规则</label><input type="text" v-model="config.handover_log.monthly_event_report.template.file_name_pattern" /></div>
-          <div class="form-row"><label class="label">每月几号</label><input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_event_report.scheduler.day_of_month" @change="saveMonthlyEventReportSchedulerQuickConfig" /></div>
-          <div class="form-row"><label class="label">调度时间</label><input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" @change="saveMonthlyEventReportSchedulerQuickConfig" /></div>
-          <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.handover_log.monthly_event_report.scheduler.check_interval_sec" @change="saveMonthlyEventReportSchedulerQuickConfig" /></div>
-          <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_event_report.scheduler.state_file" @change="saveMonthlyEventReportSchedulerQuickConfig" /></div>
-          <div class="hint">{{ monthlyEventReportSchedulerQuickSaving ? '事件月报调度配置保存中...' : '修改后自动保存。' }}</div>
+          <div class="form-row"><label class="label">每月几号</label><input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_event_report.scheduler.day_of_month" /></div>
+          <div class="form-row"><label class="label">调度时间</label><input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" /></div>
+          <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.handover_log.monthly_event_report.scheduler.check_interval_sec" /></div>
+          <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_event_report.scheduler.state_file" /></div>
+          <div class="hint">修改后请点击上方“保存配置”。</div>
           <div class="hint">数据源固定复用“新事件处理”同一张多维表。</div>
       </section>
 
@@ -140,11 +140,11 @@
           <div class="form-row"><label class="label">变更模板文件</label><input type="text" v-model="config.handover_log.monthly_change_report.template.source_path" /></div>
           <div class="form-row"><label class="label">输出目录</label><input type="text" v-model="config.handover_log.monthly_change_report.template.output_dir" /></div>
           <div class="form-row"><label class="label">文件命名规则</label><input type="text" v-model="config.handover_log.monthly_change_report.template.file_name_pattern" /></div>
-          <div class="form-row"><label class="label">每月几号</label><input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_change_report.scheduler.day_of_month" @change="saveMonthlyChangeReportSchedulerQuickConfig" /></div>
-          <div class="form-row"><label class="label">调度时间</label><input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" @change="saveMonthlyChangeReportSchedulerQuickConfig" /></div>
-          <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.handover_log.monthly_change_report.scheduler.check_interval_sec" @change="saveMonthlyChangeReportSchedulerQuickConfig" /></div>
-          <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_change_report.scheduler.state_file" @change="saveMonthlyChangeReportSchedulerQuickConfig" /></div>
-          <div class="hint">{{ monthlyChangeReportSchedulerQuickSaving ? '变更月报调度配置保存中...' : '修改后自动保存。' }}</div>
+          <div class="form-row"><label class="label">每月几号</label><input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_change_report.scheduler.day_of_month" /></div>
+          <div class="form-row"><label class="label">调度时间</label><input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" /></div>
+          <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.handover_log.monthly_change_report.scheduler.check_interval_sec" /></div>
+          <div class="form-row"><label class="label">调度状态文件</label><input type="text" v-model="config.handover_log.monthly_change_report.scheduler.state_file" /></div>
+          <div class="hint">修改后请点击上方“保存配置”。</div>
           <div class="hint">变更月报按“变更开始时间”归属到上一个自然月，输出只写本地文件，不上传飞书。</div>
       </section>
 
@@ -442,6 +442,31 @@
           <div class="hint" style="margin-bottom:8px;">当前楼栋 Sheet 名按楼独立保存；不同楼可以并行修改，互不覆盖。</div>
           <div class="hint" style="margin-bottom:8px;">下载完内网源表并切回外网后，系统只会为当前日期班次预创建一份云电子表格，并确保存在 A-E 楼 5 个固定 Sheet。五楼全部确认后，系统会把每个楼本地交接班成品 Excel 的“交接班日志”页覆盖写入同名 Sheet。审核保存本身不会立即同步云表；若最终上传失败，可按楼重试，也可一键重试全部失败楼栋。</div>
       </section>
+
+      <section
+        class="content-card config-panel-card config-subgroup-card"
+        v-if="config.handover_log && config.handover_log.capacity_report && config.handover_log.capacity_report.weather"
+      >
+        <div class="section-title">容量报表天气</div>
+          <div class="form-row"><label class="label">天气来源</label><input type="text" v-model="config.handover_log.capacity_report.weather.provider" /></div>
+          <div class="form-row"><label class="label">地点</label><input type="text" v-model="config.handover_log.capacity_report.weather.location" /></div>
+          <div class="form-row">
+            <label class="label">备用地点</label>
+            <input
+              type="text"
+              :value="(config.handover_log.capacity_report.weather.fallback_locations || []).join(', ')"
+              @input="config.handover_log.capacity_report.weather.fallback_locations = String($event.target.value || '').split(/[，,]/).map((item) => item.trim()).filter(Boolean)"
+            />
+          </div>
+          <div class="form-row"><label class="label">语言</label><input type="text" v-model="config.handover_log.capacity_report.weather.language" /></div>
+          <div class="form-row"><label class="label">单位</label><input type="text" v-model="config.handover_log.capacity_report.weather.unit" /></div>
+          <div class="form-row"><label class="label">鉴权模式</label><input type="text" v-model="config.handover_log.capacity_report.weather.auth_mode" /></div>
+          <div class="form-row"><label class="label">请求超时（秒）</label><input type="number" min="1" v-model.number="config.handover_log.capacity_report.weather.timeout_sec" /></div>
+          <div class="form-row"><label class="label">心知公钥</label><input type="text" v-model="config.handover_log.capacity_report.weather.seniverse_public_key" autocomplete="off" /></div>
+          <div class="form-row"><label class="label">心知私钥</label><input type="password" v-model="config.handover_log.capacity_report.weather.seniverse_private_key" autocomplete="new-password" /></div>
+          <div class="hint" style="margin-bottom:8px;">当天及未来日期使用心知天气，历史日期继续沿用旧网页抓取逻辑。默认先查崇川区，权限不足时回退到南通。</div>
+          <div class="hint">天气现象写入容量报表 L2，湿度写入 X2；天气失败只影响这两个单元格，不阻断整份容量报表。</div>
+      </section>
       </div>
     </div>
   </details>
@@ -471,15 +496,14 @@
             {{ health.handover.review_base_url_error }}
           </div>
           <div class="form-row">
-            <label class="label">审核页访问基地址（失焦后自动保存并立即生效）</label>
+            <label class="label">审核页访问基地址</label>
             <input
               type="text"
               v-model="config.handover_log.review_ui.public_base_url"
-              @blur="saveHandoverReviewBaseUrlQuickConfig({ silentSuccess: true, silentNoChange: true })"
               placeholder="例如 http://192.168.220.160:18765"
             />
           </div>
-          <div class="hint">审核访问地址仅使用手工配置值，不再自动探测。</div>
+          <div class="hint">修改后请点击上方“保存配置”；审核访问地址仅使用手工配置值，不再自动探测。</div>
       </section>
 
       <section class="content-card config-panel-card config-subgroup-card config-panel-card-wide config-editor-card">
@@ -494,7 +518,7 @@
           <div class="btn-line" style="margin-bottom:8px;">
             <button
               class="btn btn-secondary"
-              @click="(config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] || (config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] = [])).push({ note: '', open_id: '' })"
+              @click="(config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] || (config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] = [])).push({ note: '', open_id: '', enabled: true })"
             >新增接收人</button>
           </div>
           <div class="config-editor-scroll">
@@ -504,6 +528,7 @@
                   <th style="width:160px;">备注</th>
                   <th>Open ID</th>
                   <th style="width:100px;">操作</th>
+                  <th style="width:100px;">是否启用</th>
                 </tr>
               </thead>
               <tbody>
@@ -519,12 +544,22 @@
                       @click="config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding].splice(idx, 1)"
                     >删除</button>
                   </td>
+                  <td>
+                    <label class="checkbox-inline">
+                      <input
+                        type="checkbox"
+                        :checked="row.enabled !== false"
+                        @change="row.enabled = $event.target.checked"
+                      />
+                      <span>启用</span>
+                    </label>
+                  </td>
                 </tr>
                 <tr
                   v-if="!(config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] || []).length"
                   class="config-editor-empty-row"
                 >
-                  <td colspan="3" class="hint">当前楼还没有审核链接接收人；自动发送会跳过并显示“未配置收件人”。</td>
+                  <td colspan="4" class="hint">当前楼还没有审核链接接收人；没有启用且有效的接收人时，自动发送会跳过。</td>
                 </tr>
               </tbody>
             </table>

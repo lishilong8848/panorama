@@ -642,7 +642,7 @@ class ReviewSessionService:
         elif capacity_status in {"ok", "success"}:
             status = "ready"
             error = ""
-        elif capacity_status in {"pending_input", "missing_file", "failed"}:
+        elif capacity_status in {"pending", "pending_input", "missing_file", "failed"}:
             status = capacity_status
             error = capacity_error
         elif capacity_status == "skipped":
@@ -667,9 +667,9 @@ class ReviewSessionService:
         merged.update(backup)
         merged.update(source)
         status = str(merged.get("status", "") or "").strip().lower()
-        if status not in {"ready", "pending_input", "missing_file", "failed"}:
+        if status not in {"ready", "pending", "pending_input", "missing_file", "failed"}:
             status = str(backup.get("status", "") or "failed").strip().lower()
-            if status not in {"ready", "pending_input", "missing_file", "failed"}:
+            if status not in {"ready", "pending", "pending_input", "missing_file", "failed"}:
                 status = "failed"
         return {
             "status": status,
@@ -1122,22 +1122,98 @@ class ReviewSessionService:
         return output
 
     def get_latest_session(self, building: str) -> Dict[str, Any] | None:
+        return self._get_latest_session(building, allow_recover=True)
+
+    def get_latest_session_fast(self, building: str) -> Dict[str, Any] | None:
+        return self._get_latest_session(building, allow_recover=False)
+
+    def _get_latest_session(self, building: str, *, allow_recover: bool) -> Dict[str, Any] | None:
         building_name = str(building or "").strip()
         if not building_name:
+            return None
+        state = self._load_state()
+        return self._get_latest_session_from_state(
+            state,
+            building_name,
+            allow_recover=allow_recover,
+        )
+
+    def _get_latest_session_from_state(
+        self,
+        state: Dict[str, Any],
+        building: str,
+        *,
+        allow_recover: bool,
+    ) -> Dict[str, Any] | None:
+        building_name = str(building or "").strip()
+        if not building_name:
+            return None
+        latest_map = state.get("review_latest_by_building", {})
+        sessions = state.get("review_sessions", {})
+        if isinstance(latest_map, dict) and isinstance(sessions, dict):
+            session_id = str(latest_map.get(building_name, "")).strip()
+            raw_session = sessions.get(session_id, {})
+            if session_id and isinstance(raw_session, dict):
+                return self._normalize_session(raw_session)
+        if not allow_recover:
             return None
         recovered = self._recover_latest_session_from_output_file(building_name)
         if isinstance(recovered, dict):
             return recovered
-        state = self._load_state()
+        return None
+
+    def _latest_session_id_from_state(self, state: Dict[str, Any], building: str) -> str:
+        building_name = str(building or "").strip()
+        if not building_name:
+            return ""
         latest_map = state.get("review_latest_by_building", {})
         sessions = state.get("review_sessions", {})
         if not isinstance(latest_map, dict) or not isinstance(sessions, dict):
-            return None
+            return ""
         session_id = str(latest_map.get(building_name, "")).strip()
         raw_session = sessions.get(session_id, {})
         if not session_id or not isinstance(raw_session, dict):
-            return None
-        return self._normalize_session(raw_session)
+            return ""
+        if str(raw_session.get("building", "")).strip() != building_name:
+            return ""
+        return session_id
+
+    def _list_building_sessions_from_state(
+        self,
+        state: Dict[str, Any],
+        building: str,
+    ) -> List[Dict[str, Any]]:
+        building_name = str(building or "").strip()
+        if not building_name:
+            return []
+        latest_session_id = self._latest_session_id_from_state(state, building_name)
+        sessions = state.get("review_sessions", {})
+        if not isinstance(sessions, dict):
+            return []
+
+        output: List[Dict[str, Any]] = []
+        for raw in list(sessions.values()):
+            if not isinstance(raw, dict):
+                continue
+            session = self._normalize_session(raw)
+            if str(session.get("building", "")).strip() != building_name:
+                continue
+            output.append(session)
+
+        output.sort(
+            key=lambda item: (
+                str(item.get("duty_date", "")),
+                2 if str(item.get("duty_shift", "")).strip().lower() == "night" else 1,
+                self._parse_updated_at(str(item.get("updated_at", ""))),
+                int(item.get("revision", 0) or 0),
+            ),
+            reverse=True,
+        )
+        if latest_session_id:
+            output.sort(
+                key=lambda item: 0 if str(item.get("session_id", "")).strip() == latest_session_id else 1
+            )
+        return output
 
     def get_latest_session_for_context(
         self,
@@ -1146,33 +1222,52 @@ class ReviewSessionService:
         duty_date: str,
         duty_shift: str,
     ) -> Dict[str, Any] | None:
+        return self._get_latest_session_for_context(
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            allow_recover=True,
+        )
+
+    def get_latest_session_for_context_fast(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+    ) -> Dict[str, Any] | None:
+        return self._get_latest_session_for_context(
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            allow_recover=False,
+        )
+
+    def _get_latest_session_for_context(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        allow_recover: bool,
+    ) -> Dict[str, Any] | None:
         building_name = str(building or "").strip()
         duty_date_text = str(duty_date or "").strip()
         duty_shift_text = str(duty_shift or "").strip().lower()
         if not building_name or not duty_date_text or duty_shift_text not in {"day", "night"}:
             return None
-        candidates: List[Dict[str, Any]] = []
-        for session in self.list_sessions():
-            if not isinstance(session, dict):
-                continue
-            if str(session.get("building", "")).strip() != building_name:
-                continue
-            if str(session.get("duty_date", "")).strip() != duty_date_text:
-                continue
-            if str(session.get("duty_shift", "")).strip().lower() != duty_shift_text:
-                continue
-            candidates.append(session)
-        if not candidates:
+        state = self._load_state()
+        sessions = state.get("review_sessions", {})
+        if isinstance(sessions, dict):
+            session_id = self.build_session_id(building_name, duty_date_text, duty_shift_text)
+            raw_session = sessions.get(session_id, {})
+            if isinstance(raw_session, dict):
+                session = self._normalize_session(raw_session)
+                if str(session.get("building", "")).strip() == building_name:
+                    return session
+        if not allow_recover:
             return None
-        candidates.sort(
-            key=lambda item: (
-                int(item.get("revision", 0) or 0),
-                self._parse_updated_at(str(item.get("updated_at", ""))),
-                str(item.get("session_id", "")),
-            ),
-            reverse=True,
-        )
-        return candidates[0]
+        return self._recover_session_from_output_file(building_name, duty_date_text, duty_shift_text)
 
     def get_session_by_id(self, session_id: str) -> Dict[str, Any] | None:
         target_session_id = str(session_id or "").strip()
@@ -1188,6 +1283,26 @@ class ReviewSessionService:
         if not isinstance(raw_session, dict):
             return None
         return self._normalize_session(raw_session)
+
+    def get_or_recover_session_by_id(self, session_id: str) -> Dict[str, Any] | None:
+        target_session_id = str(session_id or "").strip()
+        if not target_session_id:
+            return None
+        session = self.get_session_by_id(target_session_id)
+        if isinstance(session, dict):
+            return session
+        try:
+            building, duty_date, duty_shift = target_session_id.split("|", 2)
+        except ValueError:
+            return None
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        if duty_shift_text not in {"day", "night"}:
+            return None
+        return self._recover_session_from_output_file(
+            str(building or "").strip(),
+            str(duty_date or "").strip(),
+            duty_shift_text,
+        )
 
     def get_session_concurrency(
         self,
@@ -1287,24 +1402,63 @@ class ReviewSessionService:
             _reraise_review_store_error(exc)
 
     def get_session_for_building_duty(self, building: str, duty_date: str, duty_shift: str) -> Dict[str, Any] | None:
+        return self._get_session_for_building_duty(
+            building,
+            duty_date,
+            duty_shift,
+            allow_recover=True,
+        )
+
+    def get_session_for_building_duty_fast(self, building: str, duty_date: str, duty_shift: str) -> Dict[str, Any] | None:
+        return self._get_session_for_building_duty(
+            building,
+            duty_date,
+            duty_shift,
+            allow_recover=False,
+        )
+
+    def _get_session_for_building_duty(
+        self,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        *,
+        allow_recover: bool,
+    ) -> Dict[str, Any] | None:
         building_name = str(building or "").strip()
         duty_date_text = str(duty_date or "").strip()
         duty_shift_text = str(duty_shift or "").strip().lower()
         if not building_name:
             return None
         if not duty_date_text or not duty_shift_text:
-            return self.get_latest_session(building_name)
+            return self._get_latest_session(building_name, allow_recover=allow_recover)
         target_session_id = self.build_session_id(building_name, duty_date_text, duty_shift_text)
         session = self.get_session_by_id(target_session_id)
         if isinstance(session, dict):
             return session
+        if not allow_recover:
+            return None
         return self._recover_session_from_output_file(building_name, duty_date_text, duty_shift_text)
 
     def get_latest_session_id(self, building: str) -> str:
-        latest = self.get_latest_session(building)
+        building_name = str(building or "").strip()
+        if not building_name:
+            return ""
+        state = self._load_state()
+        session_id = self._latest_session_id_from_state(state, building_name)
+        if session_id:
+            return session_id
+        latest = self._get_latest_session_from_state(state, building_name, allow_recover=True)
         if not isinstance(latest, dict):
             return ""
         return str(latest.get("session_id", "")).strip()
+
+    def get_latest_session_id_fast(self, building: str) -> str:
+        building_name = str(building or "").strip()
+        if not building_name:
+            return ""
+        state = self._load_state()
+        return self._latest_session_id_from_state(state, building_name)
 
     def _session_has_successful_cloud_history(self, session: Dict[str, Any]) -> bool:
         cloud_sync = self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
@@ -1316,39 +1470,8 @@ class ReviewSessionService:
         building_name = str(building or "").strip()
         if not building_name:
             return []
-        self._recover_all_sessions_from_output_files(building_name)
-        latest_session_id = self.get_latest_session_id(building_name)
         state = self._load_state()
-        sessions = state.get("review_sessions", {})
-        if not isinstance(sessions, dict):
-            return []
-
-        output: List[Dict[str, Any]] = []
-        for raw in list(sessions.values()):
-            if not isinstance(raw, dict):
-                continue
-            session = self._normalize_session(raw)
-            if str(session.get("building", "")).strip() != building_name:
-                continue
-            output_file = Path(str(session.get("output_file", "")).strip())
-            if not output_file.exists():
-                continue
-            output.append(session)
-
-        output.sort(
-            key=lambda item: (
-                str(item.get("duty_date", "")),
-                2 if str(item.get("duty_shift", "")).strip().lower() == "night" else 1,
-                self._parse_updated_at(str(item.get("updated_at", ""))),
-                int(item.get("revision", 0) or 0),
-            ),
-            reverse=True,
-        )
-        if latest_session_id:
-            output.sort(
-                key=lambda item: 0 if str(item.get("session_id", "")).strip() == latest_session_id else 1
-            )
-        return output
+        return self._list_building_sessions_from_state(state, building_name)
 
     def list_building_cloud_history_sessions(
         self,

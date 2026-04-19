@@ -1,4 +1,4 @@
-﻿import {
+import {
   clone,
   convertLegacyConfigToV3,
   convertV3ConfigToLegacy,
@@ -27,6 +27,7 @@ import {
   buildHandoverDailyReportCaptureAssetUrl,
   getBootstrapHealthApi,
   getConfigApi,
+  getExternalDashboardSummaryApi,
   getHandoverBuildingConfigSegmentApi,
   getHandoverCommonConfigSegmentApi,
   getHandoverDailyReportContextApi,
@@ -107,6 +108,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     jobsList,
     selectedJobId,
     bridgeTasks,
+    bridgeTasksDisplay,
     selectedBridgeTaskId,
     bridgeTaskDetail,
     resourceSnapshot,
@@ -134,8 +136,9 @@ export function createRuntimeHealthConfigActions(ctx) {
     handoverConfigBuildingUpdatedAt,
     handoverDutyDate,
     handoverDutyShift,
-    configAutoSaveSuspendDepth,
-    configAutoSaveStatus,
+    currentView,
+    configSaveSuspendDepth,
+    configSaveStatus,
     timers,
     streamController,
     runSingleFlight,
@@ -160,13 +163,16 @@ export function createRuntimeHealthConfigActions(ctx) {
     writeUpdaterRecoveryIntent,
     clearUpdaterRecoveryIntent,
     nextTick,
+    scheduleExternalDashboardRefresh,
     shouldIncludeHandoverHealthContext,
+    shouldFetchHandoverDailyReportContext,
     shouldLoadEngineerDirectory,
   } = ctx;
   let lastSavedConfigSignature = "";
   let serverConfigSnapshot = null;
   let engineerDirectoryPrefetchTimer = null;
   let configRequestInFlight = null;
+  let externalDashboardSummaryRequestInFlight = null;
   const healthRequestInFlight = {
     lite: null,
     full: null,
@@ -183,14 +189,20 @@ export function createRuntimeHealthConfigActions(ctx) {
   let updaterHealthHydratedOnce = false;
   let handoverReviewStatusBroadcastBound = false;
   let internalRuntimeSummaryRequestInFlight = null;
+  let internalRuntimeSummaryRefetchQueued = false;
   let runtimeRoleConflictRecoveryInFlight = null;
   let runtimeRoleConflictReloadAt = 0;
   const internalRuntimeBuildingRequestsInFlight = new Map();
+  const internalRuntimeBuildingRefetchQueued = new Map();
   let internalRuntimeRefreshDebounceTimer = null;
   let internalRuntimeRefreshAllPending = false;
   const internalRuntimeRefreshBuildingsPending = new Set();
   const BRIDGE_TASKS_FETCH_COOLDOWN_MS = 1200;
   const INTERNAL_RUNTIME_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"];
+
+  function shouldLoadConfigNow() {
+    return String(currentView?.value || "").trim().toLowerCase() === "config";
+  }
 
   function resolveCurrentRoleMode() {
     return String(health?.deployment?.role_mode || config?.value?.deployment?.role_mode || "").trim().toLowerCase();
@@ -272,6 +284,8 @@ export function createRuntimeHealthConfigActions(ctx) {
       && !normalized.includes("[共享缓存]")
       && !normalized.includes("浏览器池")
       && !normalized.includes("楼栋浏览器")
+      && !normalized.includes("共享文件")
+      && !normalized.includes("源文件")
       && !normalized.includes("内网下载")
       && !normalized.includes("补采")
       && !normalized.includes("页池")
@@ -289,12 +303,40 @@ export function createRuntimeHealthConfigActions(ctx) {
     return Boolean(updaterUiOverlayVisible?.value || updaterAwaitingRestartRecovery?.value);
   }
 
+  function isLocallyExitedToRoleSelection() {
+    return Boolean(
+      health?.startup_role_user_exited
+      && health?.role_selection_required
+      && !health?.runtime_activated,
+    );
+  }
+
   function isRuntimeApiReady() {
     return Boolean(
       bootstrapReady?.value
       && health?.runtime_activated
       && health?.startup_role_confirmed,
     );
+  }
+
+  function refreshRoleScopedRuntimeStatus(reason = "runtime_action", options = {}) {
+    const buildingText = String(options?.building || "").trim();
+    if (resolveCurrentRoleMode() === "internal") {
+      scheduleInternalRuntimeStatusRefresh({
+        building: buildingText,
+        delayMs: Math.max(0, Number.parseInt(String(options?.delayMs || 120), 10) || 120),
+      });
+      return;
+    }
+    if (typeof scheduleExternalDashboardRefresh === "function") {
+      scheduleExternalDashboardRefresh(reason, {
+        includePendingResume: Boolean(options?.includePendingResume),
+      });
+      return;
+    }
+    if (typeof fetchExternalDashboardSummary === "function") {
+      void fetchExternalDashboardSummary({ silentMessage: true });
+    }
   }
 
   function isRoleSelectionConflictError(err) {
@@ -310,6 +352,7 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   async function tryRecoverFromRoleSelectionConflict() {
     if (typeof window === "undefined") return false;
+    if (isLocallyExitedToRoleSelection()) return false;
     const now = Date.now();
     if (runtimeRoleConflictRecoveryInFlight) {
       return runtimeRoleConflictRecoveryInFlight;
@@ -326,7 +369,12 @@ export function createRuntimeHealthConfigActions(ctx) {
         || health?.startup_role_confirmed
         || !health?.role_selection_required,
       );
-      if (!bootstrapReady?.value || !roleReady || !restorable) {
+      if (
+        !bootstrapReady?.value
+        || !roleReady
+        || !restorable
+        || Boolean(health?.startup_role_user_exited)
+      ) {
         return false;
       }
       runtimeRoleConflictReloadAt = Date.now();
@@ -362,9 +410,11 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   function scheduleConfigRetry() {
     if (configLoaded?.value) return;
+    if (!shouldLoadConfigNow()) return;
     clearConfigRetryTimer();
     timers.configRetryTimer = window.setTimeout(() => {
       timers.configRetryTimer = null;
+      if (!shouldLoadConfigNow()) return;
       void fetchConfig({ silentMessage: true });
     }, 1000);
   }
@@ -874,8 +924,12 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (streamController?.attachJobStream) {
       streamController.attachJobStream(jobId);
     }
-    await fetchJobs({ silentMessage: true });
-    await fetchRuntimeResources({ silentMessage: true });
+    if (data?.job_panel_summary && typeof data.job_panel_summary === "object") {
+      applyJobPanelSummary(data.job_panel_summary);
+    } else {
+      void fetchJobs({ silentMessage: true });
+    }
+    refreshRoleScopedRuntimeStatus("accepted_job", { includePendingResume: true });
     if (submitMessage) {
       message.value = submitMessage;
     }
@@ -1005,37 +1059,35 @@ export function createRuntimeHealthConfigActions(ctx) {
     return { ok: true, v3Payload, signature };
   }
 
-  function syncConfigAutoSaveSignature(signature = "", { pending = true } = {}) {
-    if (!configAutoSaveStatus || typeof configAutoSaveStatus !== "object") return;
+  function syncConfigSaveSignature(signature = "", { pending = true } = {}) {
+    if (!configSaveStatus || typeof configSaveStatus !== "object") return;
     const normalizedSignature = String(signature || "");
-    configAutoSaveStatus.saved_signature = normalizedSignature;
-    if (pending) {
-      configAutoSaveStatus.pending_signature = normalizedSignature;
-    }
+    configSaveStatus.saved_signature = normalizedSignature;
+    if (pending) configSaveStatus.draft_dirty = false;
   }
 
   function setLastSavedSignatureFromPreparedPayload() {
     const payloadState = buildPreparedSavePayload();
     if (!payloadState.ok) {
       lastSavedConfigSignature = "";
-      syncConfigAutoSaveSignature("", { pending: true });
+      syncConfigSaveSignature("", { pending: true });
       return;
     }
     lastSavedConfigSignature = payloadState.signature || "";
-    syncConfigAutoSaveSignature(lastSavedConfigSignature, { pending: true });
+    syncConfigSaveSignature(lastSavedConfigSignature, { pending: true });
   }
 
-  function withAutoSaveSuspended(applyFn) {
-    if (!configAutoSaveSuspendDepth) {
+  function withConfigSaveSuspended(applyFn) {
+    if (!configSaveSuspendDepth) {
       applyFn();
       return;
     }
-    configAutoSaveSuspendDepth.value += 1;
+    configSaveSuspendDepth.value += 1;
     try {
       applyFn();
     } finally {
       window.setTimeout(() => {
-        configAutoSaveSuspendDepth.value = Math.max(0, configAutoSaveSuspendDepth.value - 1);
+        configSaveSuspendDepth.value = Math.max(0, configSaveSuspendDepth.value - 1);
       }, 0);
     }
   }
@@ -1089,8 +1141,100 @@ export function createRuntimeHealthConfigActions(ctx) {
       : [];
   }
 
+  function mergeLiteSharedBridgeFamily(currentFamily, nextFamily) {
+    const current = currentFamily && typeof currentFamily === "object" ? currentFamily : {};
+    const next = nextFamily && typeof nextFamily === "object" ? nextFamily : {};
+    if (!Object.keys(next).length) {
+      return current;
+    }
+    const merged = { ...current, ...next };
+    const currentBuildings = Array.isArray(current.buildings) ? current.buildings : [];
+    const nextBuildings = Array.isArray(next.buildings) ? next.buildings : [];
+    if (!nextBuildings.length && currentBuildings.length) {
+      merged.buildings = currentBuildings;
+    }
+    const objectKeys = ["display_overview", "latest_selection", "upload_status", "external_upload"];
+    objectKeys.forEach((key) => {
+      const nextValue = next[key];
+      const currentValue = current[key];
+      if (
+        (!nextValue || typeof nextValue !== "object" || !Object.keys(nextValue).length)
+        && currentValue
+        && typeof currentValue === "object"
+        && Object.keys(currentValue).length
+      ) {
+        merged[key] = currentValue;
+      }
+    });
+    return merged;
+  }
+
+  function mergeLiteInternalSourceCache(currentPayload, nextPayload) {
+    const current = currentPayload && typeof currentPayload === "object" ? currentPayload : {};
+    const next = nextPayload && typeof nextPayload === "object" ? nextPayload : {};
+    if (!Object.keys(next).length) {
+      return current;
+    }
+    const merged = { ...current, ...next };
+    if (
+      (!next.display_overview || typeof next.display_overview !== "object" || !Object.keys(next.display_overview).length)
+      && current.display_overview
+      && typeof current.display_overview === "object"
+      && Object.keys(current.display_overview).length
+    ) {
+      merged.display_overview = current.display_overview;
+    }
+    if (
+      (!next.current_hour_refresh_overview
+        || typeof next.current_hour_refresh_overview !== "object"
+        || !Object.keys(next.current_hour_refresh_overview).length)
+      && current.current_hour_refresh_overview
+      && typeof current.current_hour_refresh_overview === "object"
+      && Object.keys(current.current_hour_refresh_overview).length
+    ) {
+      merged.current_hour_refresh_overview = current.current_hour_refresh_overview;
+    }
+    ["handover_log_family", "handover_capacity_report_family", "monthly_report_family", "alarm_event_family"].forEach((key) => {
+      merged[key] = mergeLiteSharedBridgeFamily(current[key], next[key]);
+    });
+    return merged;
+  }
+
+  function mergePresentedPayload(currentPayload, nextPayload, objectKeys = []) {
+    const current = currentPayload && typeof currentPayload === "object" ? currentPayload : {};
+    const next = nextPayload && typeof nextPayload === "object" ? nextPayload : {};
+    if (!Object.keys(next).length) {
+      return current;
+    }
+    const merged = { ...current, ...next };
+    objectKeys.forEach((key) => {
+      const nextValue = next[key];
+      const currentValue = current[key];
+      if (
+        (!nextValue || typeof nextValue !== "object" || !Object.keys(nextValue).length)
+        && currentValue
+        && typeof currentValue === "object"
+        && Object.keys(currentValue).length
+      ) {
+        merged[key] = currentValue;
+      }
+    });
+    return merged;
+  }
+
   function applyHealthSnapshot(data) {
     if (!data || typeof data !== "object") return;
+    const healthMode = String(data?.health_mode || "").trim().toLowerCase();
+    const isLiteHealth = healthMode === "lite";
+    const shouldPreserveExitedSelectorState = Boolean(
+      isLocallyExitedToRoleSelection()
+      && !Boolean(data?.startup_role_user_exited)
+      && !Boolean(data?.role_selection_required)
+      && (data?.runtime_activated === true || data?.startup_role_confirmed === true),
+    );
+    if (shouldPreserveExitedSelectorState) {
+      return;
+    }
     health.version = String(data.version || "");
     health.startup_time = String(data.startup_time || health.startup_time || "");
     health.startup_role_confirmed = Boolean(
@@ -1501,7 +1645,66 @@ export function createRuntimeHealthConfigActions(ctx) {
       Object.assign(health.deployment, data.deployment);
     }
     if (data.shared_bridge && typeof data.shared_bridge === "object") {
-      Object.assign(health.shared_bridge, data.shared_bridge);
+      const nextSharedBridge = { ...data.shared_bridge };
+      if (
+        nextSharedBridge.internal_source_cache
+        && typeof nextSharedBridge.internal_source_cache === "object"
+        && health.shared_bridge?.internal_source_cache
+        && typeof health.shared_bridge.internal_source_cache === "object"
+      ) {
+        nextSharedBridge.internal_source_cache = mergeLiteInternalSourceCache(
+          health.shared_bridge.internal_source_cache,
+          nextSharedBridge.internal_source_cache,
+        );
+      }
+      if (
+        nextSharedBridge.internal_download_pool
+        && typeof nextSharedBridge.internal_download_pool === "object"
+        && health.shared_bridge?.internal_download_pool
+        && typeof health.shared_bridge.internal_download_pool === "object"
+      ) {
+        nextSharedBridge.internal_download_pool = mergePresentedPayload(
+          health.shared_bridge.internal_download_pool,
+          nextSharedBridge.internal_download_pool,
+          ["overview"],
+        );
+      }
+      if (
+        nextSharedBridge.internal_alert_status
+        && typeof nextSharedBridge.internal_alert_status === "object"
+        && health.shared_bridge?.internal_alert_status
+        && typeof health.shared_bridge.internal_alert_status === "object"
+      ) {
+        nextSharedBridge.internal_alert_status = mergePresentedPayload(
+          health.shared_bridge.internal_alert_status,
+          nextSharedBridge.internal_alert_status,
+          ["display_overview"],
+        );
+      }
+      if (isLiteHealth) {
+        if (
+          (!nextSharedBridge.internal_source_cache || typeof nextSharedBridge.internal_source_cache !== "object")
+          && health.shared_bridge?.internal_source_cache
+          && typeof health.shared_bridge.internal_source_cache === "object"
+        ) {
+          nextSharedBridge.internal_source_cache = health.shared_bridge.internal_source_cache;
+        }
+        if (
+          (!nextSharedBridge.internal_download_pool || typeof nextSharedBridge.internal_download_pool !== "object")
+          && health.shared_bridge?.internal_download_pool
+          && typeof health.shared_bridge.internal_download_pool === "object"
+        ) {
+          nextSharedBridge.internal_download_pool = health.shared_bridge.internal_download_pool;
+        }
+        if (
+          (!nextSharedBridge.internal_alert_status || typeof nextSharedBridge.internal_alert_status !== "object")
+          && health.shared_bridge?.internal_alert_status
+          && typeof health.shared_bridge.internal_alert_status === "object"
+        ) {
+          nextSharedBridge.internal_alert_status = health.shared_bridge.internal_alert_status;
+        }
+      }
+      Object.assign(health.shared_bridge, nextSharedBridge);
     }
     if (data.network && typeof data.network === "object") {
       Object.assign(health.network, data.network);
@@ -1640,7 +1843,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     const silentMessage = Boolean(options?.silentMessage);
     try {
       const data = await getJobsApi({ limit: 60 });
-      jobsList.value = Array.isArray(data?.jobs) ? data.jobs : [];
+      applyJobPanelSummary(data || {});
       let detailJobId = "";
       const currentSelectedJobId = String(selectedJobId?.value || currentJob?.value?.job_id || "").trim();
       if (currentSelectedJobId) {
@@ -1663,14 +1866,17 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
       }
       if (detailJobId && currentJob) {
-        try {
-          const detail = await getJobApi(detailJobId);
-          if (detail && typeof detail === "object") {
-            currentJob.value = { ...(currentJob.value || {}), ...detail };
+        void (async () => {
+          try {
+            const detail = await getJobApi(detailJobId);
+            const latestSelectedJobId = String(selectedJobId?.value || currentJob?.value?.job_id || "").trim();
+            if (detail && typeof detail === "object" && (!latestSelectedJobId || latestSelectedJobId === detailJobId)) {
+              currentJob.value = { ...(currentJob.value || {}), ...detail };
+            }
+          } catch (_) {
+            // keep list summary when detail refresh fails
           }
-        } catch (_) {
-          // keep list summary when detail refresh fails
-        }
+        })();
       }
       return true;
     } catch (err) {
@@ -1707,17 +1913,398 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
   }
 
+  function applyExternalSchedulerSummary(summary) {
+    if (!summary || typeof summary !== "object") return;
+    if (summary.scheduler && typeof summary.scheduler === "object") {
+      Object.assign(health.scheduler, summary.scheduler);
+    }
+    if (summary.handover_scheduler && typeof summary.handover_scheduler === "object") {
+      Object.assign(health.handover_scheduler, summary.handover_scheduler);
+    }
+    const wet = summary.wet_bulb_collection_scheduler;
+    if (wet && typeof wet === "object" && health?.wet_bulb_collection?.scheduler) {
+      Object.assign(health.wet_bulb_collection.scheduler, wet);
+    }
+    const dayMetric = summary.day_metric_upload_scheduler;
+    if (dayMetric && typeof dayMetric === "object" && health?.day_metric_upload?.scheduler) {
+      Object.assign(health.day_metric_upload.scheduler, dayMetric);
+    }
+    const alarm = summary.alarm_event_upload_scheduler;
+    if (alarm && typeof alarm === "object" && health?.alarm_event_upload?.scheduler) {
+      Object.assign(health.alarm_event_upload.scheduler, alarm);
+    }
+    const monthlyEvent = summary.monthly_event_report_scheduler;
+    if (monthlyEvent && typeof monthlyEvent === "object" && health?.monthly_event_report?.scheduler) {
+      Object.assign(health.monthly_event_report.scheduler, monthlyEvent);
+    }
+    const monthlyChange = summary.monthly_change_report_scheduler;
+    if (monthlyChange && typeof monthlyChange === "object" && health?.monthly_change_report?.scheduler) {
+      Object.assign(health.monthly_change_report.scheduler, monthlyChange);
+    }
+  }
+
+  function applyJobPanelSummary(summary) {
+    const jobPanel = summary && typeof summary === "object" ? summary : {};
+    const nextJobs = Array.isArray(jobPanel.jobs) ? jobPanel.jobs : [];
+    jobsList.value = nextJobs;
+    health.job_panel_summary = {
+      jobs: nextJobs,
+      count: Number(jobPanel.count || nextJobs.length || 0),
+      active_job_ids: Array.isArray(jobPanel.active_job_ids) ? [...jobPanel.active_job_ids] : [],
+      job_counts: jobPanel.job_counts && typeof jobPanel.job_counts === "object" ? { ...jobPanel.job_counts } : {},
+      display: jobPanel.display && typeof jobPanel.display === "object" ? { ...jobPanel.display } : {},
+    };
+    const selectedId = String(selectedJobId?.value || currentJob?.value?.job_id || "").trim();
+    if (selectedId) {
+      const matched = nextJobs.find((item) => String(item?.job_id || "").trim() === selectedId);
+      if (matched && currentJob) {
+        currentJob.value = { ...(currentJob.value || {}), ...matched };
+      } else if (selectedJobId) {
+        selectedJobId.value = "";
+      }
+    }
+    if ((!selectedId || !String(selectedJobId?.value || "").trim()) && nextJobs.length && currentJob) {
+      const fallback =
+        nextJobs.find((item) => String(item?.status || "").trim().toLowerCase() === "running")
+        || nextJobs.find((item) => String(item?.status || "").trim().toLowerCase() === "waiting_resource")
+        || nextJobs[0];
+      if (fallback) {
+        currentJob.value = { ...(currentJob.value || {}), ...fallback };
+        if (selectedJobId) {
+          selectedJobId.value = String(fallback?.job_id || "").trim();
+        }
+      }
+    }
+    if (Array.isArray(jobPanel.active_job_ids)) {
+      health.active_job_ids = [...jobPanel.active_job_ids];
+    }
+    if (jobPanel.job_counts && typeof jobPanel.job_counts === "object") {
+      health.job_counts = { ...jobPanel.job_counts };
+    }
+  }
+
+  function buildPendingActionState(action, patch = {}) {
+    const base = action && typeof action === "object" ? action : {};
+    const normalizedPatch = patch && typeof patch === "object" ? patch : {};
+    const disabledReason = String(
+      normalizedPatch.disabled_reason
+      || normalizedPatch.disabledReason
+      || base.disabled_reason
+      || base.disabledReason
+      || "",
+    ).trim();
+    return {
+      ...base,
+      ...normalizedPatch,
+      pending: normalizedPatch.pending !== undefined ? Boolean(normalizedPatch.pending) : Boolean(base.pending),
+      disabled_reason: disabledReason,
+      disabledReason,
+    };
+  }
+
+  function patchJobPanelActionState(jobId, actionName, patch = {}) {
+    const jobIdText = String(jobId || "").trim();
+    const actionKey = String(actionName || "").trim();
+    if (!jobIdText || !actionKey) return false;
+    let changed = false;
+    const updateRow = (item) => {
+      if (!item || typeof item !== "object") return item;
+      if (String(item?.job_id || "").trim() !== jobIdText) return item;
+      changed = true;
+      const actions = item.actions && typeof item.actions === "object" ? item.actions : {};
+      return {
+        ...item,
+        actions: {
+          ...actions,
+          [actionKey]: buildPendingActionState(actions[actionKey], patch),
+        },
+      };
+    };
+    if (Array.isArray(jobsList.value)) {
+      jobsList.value = jobsList.value.map(updateRow);
+    }
+    if (currentJob?.value && String(currentJob.value?.job_id || "").trim() === jobIdText) {
+      currentJob.value = updateRow(currentJob.value);
+    }
+    const summary = health.job_panel_summary && typeof health.job_panel_summary === "object"
+      ? health.job_panel_summary
+      : null;
+    if (summary) {
+      const display = summary.display && typeof summary.display === "object" ? summary.display : {};
+      health.job_panel_summary = {
+        ...summary,
+        jobs: Array.isArray(summary.jobs) ? summary.jobs.map(updateRow) : summary.jobs,
+        display: {
+          ...display,
+          running_jobs: Array.isArray(display.running_jobs) ? display.running_jobs.map(updateRow) : display.running_jobs,
+          waiting_resource_items: Array.isArray(display.waiting_resource_items)
+            ? display.waiting_resource_items.map(updateRow)
+            : display.waiting_resource_items,
+          recent_finished_jobs: Array.isArray(display.recent_finished_jobs)
+            ? display.recent_finished_jobs.map(updateRow)
+            : display.recent_finished_jobs,
+        },
+      };
+    }
+    return changed;
+  }
+
+  function applyBridgeTasksSummary(summary, options = {}) {
+    const bridgeSummary = summary && typeof summary === "object" ? summary : {};
+    if (bridgeTasksDisplay) {
+      const previousDisplay = bridgeTasksDisplay.value && typeof bridgeTasksDisplay.value === "object"
+        ? bridgeTasksDisplay.value
+        : {};
+      const display = bridgeSummary.display && typeof bridgeSummary.display === "object"
+        ? bridgeSummary.display
+        : {};
+      bridgeTasksDisplay.value = {
+        active_tasks: Array.isArray(display.active_tasks)
+          ? display.active_tasks
+          : (Array.isArray(previousDisplay.active_tasks) ? previousDisplay.active_tasks : []),
+        waiting_resource_items: Array.isArray(display.waiting_resource_items)
+          ? display.waiting_resource_items
+          : (Array.isArray(previousDisplay.waiting_resource_items) ? previousDisplay.waiting_resource_items : []),
+        recent_finished_tasks: Array.isArray(display.recent_finished_tasks)
+          ? display.recent_finished_tasks
+          : (Array.isArray(previousDisplay.recent_finished_tasks) ? previousDisplay.recent_finished_tasks : []),
+        active_count: Number.parseInt(String(display.active_count ?? previousDisplay.active_count ?? 0), 10) || 0,
+        waiting_count: Number.parseInt(String(display.waiting_count ?? previousDisplay.waiting_count ?? 0), 10) || 0,
+        finished_count: Number.parseInt(String(display.finished_count ?? previousDisplay.finished_count ?? 0), 10) || 0,
+        overview: display.overview && typeof display.overview === "object"
+          ? display.overview
+          : (previousDisplay.overview && typeof previousDisplay.overview === "object"
+            ? previousDisplay.overview
+            : {
+            reason_code: "idle",
+            tone: "neutral",
+            status_text: "当前空闲",
+            summary_text: "暂无共享桥接任务。",
+            detail_text: "当前没有共享桥接任务。",
+            focus_title: "当前没有选中共享桥接任务",
+            focus_meta: "暂无共享桥接任务",
+            active_count: 0,
+            waiting_count: 0,
+            finished_count: 0,
+            items: [],
+            actions: [],
+          }),
+      };
+    }
+    const tasks = (Array.isArray(bridgeSummary.tasks) ? bridgeSummary.tasks : []).filter((item) => {
+      const requestPayload = item?.request && typeof item.request === "object" ? item.request : {};
+      return !String(requestPayload.resume_job_id || "").trim();
+    });
+    bridgeTasks.value = tasks;
+    const preferredTaskId = String(options?.preferredTaskId || "").trim();
+    const selectedTaskId = String(preferredTaskId || selectedBridgeTaskId?.value || "").trim();
+    let nextTaskId = selectedTaskId;
+    if (selectedTaskId && !tasks.some((item) => String(item?.task_id || "").trim() === selectedTaskId)) {
+      nextTaskId = "";
+    }
+    if (!nextTaskId && tasks.length) {
+      const preferred =
+        tasks.find((item) => {
+          const status = String(item?.status || "").trim().toLowerCase();
+          return !["success", "failed", "partial_failed", "cancelled", "stale"].includes(status);
+        }) || tasks[0];
+      nextTaskId = String(preferred?.task_id || "").trim();
+    }
+    if (selectedBridgeTaskId) {
+      selectedBridgeTaskId.value = nextTaskId;
+    }
+    if (bridgeTaskDetail) {
+      const matchedDetail = nextTaskId
+        ? tasks.find((item) => String(item?.task_id || "").trim() === nextTaskId) || null
+        : null;
+      bridgeTaskDetail.value = matchedDetail;
+    }
+    return nextTaskId;
+  }
+
+  function applyBridgeTaskMutationResult(data, taskId) {
+    const taskIdText = String(taskId || "").trim();
+    let applied = false;
+    const summary = data?.bridge_tasks_summary && typeof data.bridge_tasks_summary === "object"
+      ? data.bridge_tasks_summary
+      : null;
+    if (summary) {
+      applyBridgeTasksSummary(summary, { preferredTaskId: taskIdText });
+      applied = true;
+    }
+    const task = data?.task && typeof data.task === "object" ? data.task : null;
+    if (task) {
+      const currentTaskId = String(task?.task_id || "").trim();
+      if (currentTaskId) {
+        if (Array.isArray(bridgeTasks.value) && bridgeTasks.value.length) {
+          let matched = false;
+          bridgeTasks.value = bridgeTasks.value.map((item) => {
+            if (String(item?.task_id || "").trim() !== currentTaskId) return item;
+            matched = true;
+            return { ...item, ...task };
+          });
+          if (!matched) {
+            bridgeTasks.value = [task, ...bridgeTasks.value];
+          }
+        } else {
+          bridgeTasks.value = [task];
+        }
+        const selectedTaskId = String(selectedBridgeTaskId?.value || "").trim();
+        if (!selectedTaskId || selectedTaskId === currentTaskId || currentTaskId === taskIdText) {
+          if (selectedBridgeTaskId) {
+            selectedBridgeTaskId.value = currentTaskId;
+          }
+          if (bridgeTaskDetail) {
+            bridgeTaskDetail.value = task;
+          }
+        }
+      }
+      applied = true;
+    }
+    return applied;
+  }
+
+  function patchBridgeTaskActionState(taskId, actionName, patch = {}) {
+    const taskIdText = String(taskId || "").trim();
+    const actionKey = String(actionName || "").trim();
+    if (!taskIdText || !actionKey) return false;
+    let changed = false;
+    const updateRow = (item) => {
+      if (!item || typeof item !== "object") return item;
+      if (String(item?.task_id || "").trim() !== taskIdText) return item;
+      changed = true;
+      const actions = item.actions && typeof item.actions === "object" ? item.actions : {};
+      return {
+        ...item,
+        actions: {
+          ...actions,
+          [actionKey]: buildPendingActionState(actions[actionKey], patch),
+        },
+      };
+    };
+    if (Array.isArray(bridgeTasks.value)) {
+      bridgeTasks.value = bridgeTasks.value.map(updateRow);
+    }
+    if (bridgeTaskDetail?.value && String(bridgeTaskDetail.value?.task_id || "").trim() === taskIdText) {
+      bridgeTaskDetail.value = updateRow(bridgeTaskDetail.value);
+    }
+    if (bridgeTasksDisplay?.value && typeof bridgeTasksDisplay.value === "object") {
+      bridgeTasksDisplay.value = {
+        ...bridgeTasksDisplay.value,
+        active_tasks: Array.isArray(bridgeTasksDisplay.value.active_tasks)
+          ? bridgeTasksDisplay.value.active_tasks.map(updateRow)
+          : bridgeTasksDisplay.value.active_tasks,
+        waiting_resource_items: Array.isArray(bridgeTasksDisplay.value.waiting_resource_items)
+          ? bridgeTasksDisplay.value.waiting_resource_items.map(updateRow)
+          : bridgeTasksDisplay.value.waiting_resource_items,
+        recent_finished_tasks: Array.isArray(bridgeTasksDisplay.value.recent_finished_tasks)
+          ? bridgeTasksDisplay.value.recent_finished_tasks.map(updateRow)
+          : bridgeTasksDisplay.value.recent_finished_tasks,
+      };
+    }
+    return changed;
+  }
+
+  function applyExternalDashboardSummary(data) {
+    if (!data || typeof data !== "object") return;
+    if (isLocallyExitedToRoleSelection()) return;
+    const healthLite = data.health_lite && typeof data.health_lite === "object" ? data.health_lite : null;
+    if (healthLite) {
+      applyHealthSnapshot(healthLite);
+    }
+    const nextDisplay = data.display && typeof data.display === "object" ? data.display : null;
+    if (nextDisplay) {
+      const previousDisplay = health.dashboard_display && typeof health.dashboard_display === "object"
+        ? health.dashboard_display
+        : {};
+      health.dashboard_display = {
+        ...previousDisplay,
+        ...nextDisplay,
+      };
+    } else if (!health.dashboard_display || typeof health.dashboard_display !== "object") {
+      health.dashboard_display = {};
+    }
+    applyExternalSchedulerSummary(
+      data.scheduler_status_summary && typeof data.scheduler_status_summary === "object"
+        ? data.scheduler_status_summary
+        : null,
+    );
+    const updater = data.updater_summary && typeof data.updater_summary === "object" ? data.updater_summary : null;
+    if (updater && health?.updater && typeof health.updater === "object") {
+      Object.assign(health.updater, updater);
+    }
+    const jobPanel = data.job_panel_summary && typeof data.job_panel_summary === "object" ? data.job_panel_summary : null;
+    if (jobPanel) {
+      applyJobPanelSummary(jobPanel);
+    }
+    const bridgeSummary = data.bridge_tasks_summary && typeof data.bridge_tasks_summary === "object"
+      ? data.bridge_tasks_summary
+      : null;
+    if (bridgeSummary) {
+      applyBridgeTasksSummary(bridgeSummary);
+    }
+    const runtimeResources = data.runtime_resources_summary && typeof data.runtime_resources_summary === "object"
+      ? data.runtime_resources_summary
+      : null;
+    if (runtimeResources) {
+      resourceSnapshot.value = runtimeResources;
+    }
+  }
+
+  async function fetchExternalDashboardSummary(options = {}) {
+    if (isUpdaterTrafficPaused() || isLocallyExitedToRoleSelection() || !isRuntimeApiReady()) return false;
+    if (resolveCurrentRoleMode() === "internal") return false;
+    const silentMessage = Boolean(options?.silentMessage);
+    if (externalDashboardSummaryRequestInFlight) {
+      return externalDashboardSummaryRequestInFlight;
+    }
+    externalDashboardSummaryRequestInFlight = (async () => {
+      try {
+        const data = await getExternalDashboardSummaryApi();
+        applyExternalDashboardSummary(data || {});
+        if (fullHealthLoaded) {
+          fullHealthLoaded.value = true;
+        }
+        if (healthLoadError) {
+          healthLoadError.value = "";
+        }
+        return true;
+      } catch (err) {
+        if (isAbortError(err)) return false;
+        if (isRoleSelectionConflictError(err)) {
+          await tryRecoverFromRoleSelectionConflict();
+          return false;
+        }
+        if (!silentMessage) {
+          message.value = `读取外网首页状态失败: ${err}`;
+        }
+        return false;
+      } finally {
+        externalDashboardSummaryRequestInFlight = null;
+      }
+    })();
+    return externalDashboardSummaryRequestInFlight;
+  }
+
   async function fetchInternalRuntimeSummary(options = {}) {
     if (isUpdaterTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
     const silentMessage = Boolean(options?.silentMessage);
+    const force = Boolean(options?.force);
     if (internalRuntimeSummaryRequestInFlight) {
+      if (force) {
+        internalRuntimeSummaryRefetchQueued = true;
+      }
       return internalRuntimeSummaryRequestInFlight;
     }
     internalRuntimeSummaryRequestInFlight = (async () => {
       try {
         const data = await getInternalRuntimeStatusApi();
         const summary = data?.summary && typeof data.summary === "object" ? data.summary : null;
-        internalRuntimeSummary.value = summary;
+        if (summary) {
+          internalRuntimeSummary.value = summary;
+        } else if (!internalRuntimeSummary.value || typeof internalRuntimeSummary.value !== "object") {
+          internalRuntimeSummary.value = {};
+        }
         return true;
       } catch (err) {
         if (isRoleSelectionConflictError(err)) {
@@ -1730,6 +2317,12 @@ export function createRuntimeHealthConfigActions(ctx) {
         return false;
       } finally {
         internalRuntimeSummaryRequestInFlight = null;
+        if (internalRuntimeSummaryRefetchQueued) {
+          internalRuntimeSummaryRefetchQueued = false;
+          if (!isUpdaterTrafficPaused() && isRuntimeApiReady() && canUseInternalRuntimeStatus()) {
+            void fetchInternalRuntimeSummary({ silentMessage: true });
+          }
+        }
       }
     })();
     return internalRuntimeSummaryRequestInFlight;
@@ -1740,8 +2333,12 @@ export function createRuntimeHealthConfigActions(ctx) {
     const buildingText = normalizeInternalRuntimeBuildingName(building);
     const buildingCode = normalizeInternalRuntimeBuildingCode(buildingText);
     const silentMessage = Boolean(options?.silentMessage);
+    const force = Boolean(options?.force);
     const currentInFlight = internalRuntimeBuildingRequestsInFlight.get(buildingCode);
     if (currentInFlight) {
+      if (force) {
+        internalRuntimeBuildingRefetchQueued.set(buildingCode, true);
+      }
       return currentInFlight;
     }
     const request = (async () => {
@@ -1772,6 +2369,12 @@ export function createRuntimeHealthConfigActions(ctx) {
         return false;
       } finally {
         internalRuntimeBuildingRequestsInFlight.delete(buildingCode);
+        if (internalRuntimeBuildingRefetchQueued.get(buildingCode)) {
+          internalRuntimeBuildingRefetchQueued.delete(buildingCode);
+          if (!isUpdaterTrafficPaused() && isRuntimeApiReady() && canUseInternalRuntimeStatus()) {
+            void fetchInternalRuntimeBuildingRuntimeStatus(buildingText, { silentMessage: true });
+          }
+        }
       }
     })();
     internalRuntimeBuildingRequestsInFlight.set(buildingCode, request);
@@ -1795,7 +2398,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     window.addEventListener("storage", (event) => {
       if (String(event?.key || "").trim() !== HANDOVER_REVIEW_STATUS_BROADCAST_KEY) return;
       if (!String(event?.newValue || "").trim()) return;
-      void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+      refreshRoleScopedRuntimeStatus("handover_review_status_broadcast", { includePendingResume: true });
     });
   }
 
@@ -1861,27 +2464,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     bridgeTasksRequestInFlight = (async () => {
       try {
         const data = await getBridgeTasksApi({ limit: 60 });
-        const tasks = (Array.isArray(data?.tasks) ? data.tasks : []).filter((item) => {
-          const requestPayload = item?.request && typeof item.request === "object" ? item.request : {};
-          return !String(requestPayload.resume_job_id || "").trim();
-        });
-        bridgeTasks.value = tasks;
-        const selectedTaskId = String(selectedBridgeTaskId?.value || "").trim();
-        let nextTaskId = selectedTaskId;
-        if (selectedTaskId && !tasks.some((item) => String(item?.task_id || "").trim() === selectedTaskId)) {
-          nextTaskId = "";
-        }
-        if (!nextTaskId && tasks.length) {
-          const preferred =
-            tasks.find((item) => {
-              const status = String(item?.status || "").trim().toLowerCase();
-              return !["success", "failed", "partial_failed", "cancelled", "stale"].includes(status);
-            }) || tasks[0];
-          nextTaskId = String(preferred?.task_id || "").trim();
-        }
-        if (selectedBridgeTaskId) {
-          selectedBridgeTaskId.value = nextTaskId;
-        }
+        const nextTaskId = applyBridgeTasksSummary(data || {});
         if (nextTaskId) {
           await fetchBridgeTaskDetail(nextTaskId, { silentMessage: true });
         } else if (bridgeTaskDetail) {
@@ -1920,12 +2503,22 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
     const runner = async () => {
       try {
-        await cancelBridgeTaskApi(taskIdText);
-        await fetchBridgeTasks({ silentMessage: true, force: true });
-        await fetchBridgeTaskDetail(taskIdText, { silentMessage: true });
+        patchBridgeTaskActionState(taskIdText, "cancel", {
+          allowed: false,
+          pending: true,
+          label: "取消中...",
+          disabled_reason: "取消请求已提交",
+        });
+        const data = await cancelBridgeTaskApi(taskIdText);
+        const applied = applyBridgeTaskMutationResult(data, taskIdText);
+        if (!applied) {
+          await fetchBridgeTasks({ silentMessage: true, force: true });
+          await fetchBridgeTaskDetail(taskIdText, { silentMessage: true });
+        }
         message.value = "共享任务取消请求已提交";
         return true;
       } catch (err) {
+        await fetchBridgeTasks({ silentMessage: true, force: true });
         message.value = `共享任务取消失败: ${err}`;
         return false;
       }
@@ -1944,12 +2537,22 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
     const runner = async () => {
       try {
-        await retryBridgeTaskApi(taskIdText);
-        await fetchBridgeTasks({ silentMessage: true, force: true });
-        await fetchBridgeTaskDetail(taskIdText, { silentMessage: true });
+        patchBridgeTaskActionState(taskIdText, "retry", {
+          allowed: false,
+          pending: true,
+          label: "重试中...",
+          disabled_reason: "重试请求已提交",
+        });
+        const data = await retryBridgeTaskApi(taskIdText);
+        const applied = applyBridgeTaskMutationResult(data, taskIdText);
+        if (!applied) {
+          await fetchBridgeTasks({ silentMessage: true, force: true });
+          await fetchBridgeTaskDetail(taskIdText, { silentMessage: true });
+        }
         message.value = "共享任务已重新排队";
         return true;
       } catch (err) {
+        await fetchBridgeTasks({ silentMessage: true, force: true });
         message.value = `共享任务重试失败: ${err}`;
         return false;
       }
@@ -1964,7 +2567,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => {
       try {
         const data = await refreshCurrentHourSourceCacheApi();
-        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        refreshRoleScopedRuntimeStatus("source_cache_refresh_current_hour");
         message.value = String(data?.message || "").trim() || "已开始下载当前小时全部文件";
         return data;
       } catch (err) {
@@ -1992,7 +2595,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => {
       try {
         const data = await refreshBuildingLatestSourceCacheApi(sourceFamilyText, buildingText);
-        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        refreshRoleScopedRuntimeStatus("source_cache_refresh_building_latest", { building: buildingText });
         const familyLabel = SOURCE_CACHE_FAMILY_LABELS[sourceFamilyText] || sourceFamilyText;
         message.value = String(data?.message || "").trim() || `已开始重新拉取 ${buildingText} ${familyLabel}`;
         return data;
@@ -2012,7 +2615,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => {
       try {
         const data = await refreshManualAlarmSourceCacheApi();
-        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        refreshRoleScopedRuntimeStatus("source_cache_refresh_alarm_manual");
         message.value = String(data?.message || "").trim() || "已开始手动拉取告警信息文件";
         return data;
       } catch (err) {
@@ -2030,7 +2633,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => {
       try {
         const data = await deleteManualAlarmSourceCacheFilesApi();
-        await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        refreshRoleScopedRuntimeStatus("source_cache_delete_alarm_manual");
         message.value = String(data?.message || "").trim() || "已删除手动拉取的告警信息文件";
         return data;
       } catch (err) {
@@ -2211,6 +2814,15 @@ export function createRuntimeHealthConfigActions(ctx) {
                 },
               },
             },
+      display:
+        data?.display && typeof data.display === "object"
+          ? { ...data.display }
+          : {
+              auth: null,
+              export: null,
+              actions: {},
+              capture_assets: null,
+            },
     };
     if (handoverDailyReportLastScreenshotTest) {
       const currentBatchKey = String(handoverDailyReportLastScreenshotTest.value?.batch_key || "").trim();
@@ -2239,6 +2851,33 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
       return true;
     }
+    if (!Boolean(bootstrapReady?.value)) {
+      if (handoverDailyReportContext) {
+        applyHandoverDailyReportContext({
+          duty_date: dutyDate,
+          duty_shift: dutyShift,
+        });
+      }
+      return true;
+    }
+    if (resolveCurrentRoleMode() !== "external" || !Boolean(health?.runtime_activated) || !Boolean(health?.startup_role_confirmed)) {
+      if (handoverDailyReportContext) {
+        applyHandoverDailyReportContext({
+          duty_date: dutyDate,
+          duty_shift: dutyShift,
+        });
+      }
+      return true;
+    }
+    if (typeof shouldFetchHandoverDailyReportContext === "function" && !Boolean(shouldFetchHandoverDailyReportContext())) {
+      if (handoverDailyReportContext) {
+        applyHandoverDailyReportContext({
+          duty_date: dutyDate,
+          duty_shift: dutyShift,
+        });
+      }
+      return true;
+    }
     dailyReportContextRequestInFlight = (async () => {
       try {
         const data = await getHandoverDailyReportContextApi({
@@ -2250,6 +2889,16 @@ export function createRuntimeHealthConfigActions(ctx) {
       } catch (err) {
         if (isAbortError(err)) return false;
         if (silentTransientNetworkError && isTransientNetworkError(err)) return false;
+        const httpStatus = Number.parseInt(String(err?.httpStatus || 0), 10) || 0;
+        if (silentMessage && (httpStatus === 404 || httpStatus === 409)) {
+          if (handoverDailyReportContext) {
+            applyHandoverDailyReportContext({
+              duty_date: dutyDate,
+              duty_shift: dutyShift,
+            });
+          }
+          return false;
+        }
         if (handoverDailyReportContext) {
           applyHandoverDailyReportContext({
             duty_date: dutyDate,
@@ -2449,6 +3098,12 @@ export function createRuntimeHealthConfigActions(ctx) {
       ? config.value.handover_log
       : {};
     const handover = config.value.handover_log;
+    handover.capacity_report = handover.capacity_report && typeof handover.capacity_report === "object"
+      ? handover.capacity_report
+      : {};
+    handover.capacity_report.weather = handover.capacity_report.weather && typeof handover.capacity_report.weather === "object"
+      ? handover.capacity_report.weather
+      : {};
     handover.cell_rules = handover.cell_rules && typeof handover.cell_rules === "object"
       ? handover.cell_rules
       : {};
@@ -2479,6 +3134,50 @@ export function createRuntimeHealthConfigActions(ctx) {
       && typeof handover.review_ui.review_link_recipients_by_building === "object"
       ? handover.review_ui.review_link_recipients_by_building
       : {};
+    if (!String(handover.capacity_report.weather.provider || "").trim()) {
+      handover.capacity_report.weather.provider = "seniverse";
+    }
+    if (!String(handover.capacity_report.weather.location || "").trim()) {
+      handover.capacity_report.weather.location = "崇川区";
+    }
+    handover.capacity_report.weather.fallback_locations = Array.isArray(handover.capacity_report.weather.fallback_locations)
+      ? handover.capacity_report.weather.fallback_locations
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+      : ["南通"];
+    if (!handover.capacity_report.weather.fallback_locations.length) {
+      handover.capacity_report.weather.fallback_locations = ["南通"];
+    }
+    if (!String(handover.capacity_report.weather.language || "").trim()) {
+      handover.capacity_report.weather.language = "zh-Hans";
+    }
+    if (!String(handover.capacity_report.weather.unit || "").trim()) {
+      handover.capacity_report.weather.unit = "c";
+    }
+    if (!String(handover.capacity_report.weather.auth_mode || "").trim()) {
+      handover.capacity_report.weather.auth_mode = "signed";
+    }
+    if (!Number.isInteger(Number.parseInt(String(handover.capacity_report.weather.timeout_sec ?? ""), 10))
+      || Number.parseInt(String(handover.capacity_report.weather.timeout_sec ?? ""), 10) <= 0) {
+      handover.capacity_report.weather.timeout_sec = 8;
+    }
+    if (typeof handover.capacity_report.weather.seniverse_public_key !== "string") {
+      handover.capacity_report.weather.seniverse_public_key = "";
+    }
+    if (typeof handover.capacity_report.weather.seniverse_private_key !== "string") {
+      handover.capacity_report.weather.seniverse_private_key = "";
+    }
+    Object.keys(handover.review_ui.review_link_recipients_by_building).forEach((building) => {
+      const rows = Array.isArray(handover.review_ui.review_link_recipients_by_building[building])
+        ? handover.review_ui.review_link_recipients_by_building[building]
+        : [];
+      handover.review_ui.review_link_recipients_by_building[building] = rows
+        .filter((row) => row && typeof row === "object")
+        .map((row) => ({
+          ...row,
+          enabled: row.enabled === false ? false : true,
+        }));
+    });
     return handover;
   }
 
@@ -2490,7 +3189,14 @@ export function createRuntimeHealthConfigActions(ctx) {
     const preservedCabinetDefaults = clone(handover.review_ui?.cabinet_power_defaults_by_building || {});
     const preservedFooterDefaults = clone(handover.review_ui?.footer_inventory_defaults_by_building || {});
     const preservedReviewLinkRecipients = clone(handover.review_ui?.review_link_recipients_by_building || {});
+    const preservedCapacityReport = clone(handover.capacity_report || {});
     const next = segmentData && typeof segmentData === "object" ? clone(segmentData) : {};
+    next.capacity_report = next.capacity_report && typeof next.capacity_report === "object"
+      ? { ...preservedCapacityReport, ...next.capacity_report }
+      : preservedCapacityReport;
+    next.capacity_report.weather = next.capacity_report.weather && typeof next.capacity_report.weather === "object"
+      ? { ...(preservedCapacityReport.weather || {}), ...next.capacity_report.weather }
+      : clone(preservedCapacityReport.weather || {});
     next.cell_rules = next.cell_rules && typeof next.cell_rules === "object" ? next.cell_rules : {};
     next.cloud_sheet_sync = next.cloud_sheet_sync && typeof next.cloud_sheet_sync === "object" ? next.cloud_sheet_sync : {};
     next.review_ui = next.review_ui && typeof next.review_ui === "object" ? next.review_ui : {};
@@ -2538,14 +3244,39 @@ export function createRuntimeHealthConfigActions(ctx) {
       delete handover.review_ui.footer_inventory_defaults_by_building[buildingText];
     }
     handover.review_ui.review_link_recipients_by_building[buildingText] = Array.isArray(reviewLinkRecipients[buildingText])
-      ? clone(reviewLinkRecipients[buildingText])
+      ? clone(reviewLinkRecipients[buildingText]).map((row) => ({
+        ...row,
+        enabled: row?.enabled === false ? false : true,
+      }))
       : [];
+  }
+
+  function syncServerConfigSnapshotHandoverSegment() {
+    if (!config.value || typeof config.value !== "object") return;
+    const legacyHandover = config.value.handover_log && typeof config.value.handover_log === "object"
+      ? clone(config.value.handover_log)
+      : {};
+    const partialV3 = convertLegacyConfigToV3({ handover_log: legacyHandover });
+    const nextHandover = partialV3?.features?.handover_log && typeof partialV3.features.handover_log === "object"
+      ? partialV3.features.handover_log
+      : {};
+    serverConfigSnapshot = mergeConfigWithServerSnapshot(serverConfigSnapshot, {
+      features: {
+        handover_log: nextHandover,
+      },
+    });
   }
 
   function buildHandoverCommonSegmentPayload() {
     const handover = ensureHandoverSegmentConfigShape();
     if (!handover) return {};
     const payload = clone(handover);
+    payload.capacity_report = payload.capacity_report && typeof payload.capacity_report === "object"
+      ? payload.capacity_report
+      : {};
+    payload.capacity_report.weather = payload.capacity_report.weather && typeof payload.capacity_report.weather === "object"
+      ? payload.capacity_report.weather
+      : {};
     payload.cell_rules = payload.cell_rules && typeof payload.cell_rules === "object" ? payload.cell_rules : {};
     payload.cloud_sheet_sync = payload.cloud_sheet_sync && typeof payload.cloud_sheet_sync === "object" ? payload.cloud_sheet_sync : {};
     payload.review_ui = payload.review_ui && typeof payload.review_ui === "object" ? payload.review_ui : {};
@@ -2664,7 +3395,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           building: buildingText,
         });
         message.value = `${buildingText}审核链接测试发送任务已提交`;
-        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        refreshRoleScopedRuntimeStatus("handover_review_link_send", { includePendingResume: true });
         return data;
       } catch (err) {
         message.value = `发送${buildingText}审核链接测试消息失败: ${err}`;
@@ -2706,7 +3437,7 @@ export function createRuntimeHealthConfigActions(ctx) {
       if (requestSeq !== handoverBuildingSegmentRequestSeq) {
         return null;
       }
-      withAutoSaveSuspended(() => {
+      withConfigSaveSuspended(() => {
         if (handoverConfigBuilding) {
           handoverConfigBuilding.value = buildingText;
         }
@@ -2734,14 +3465,14 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (configRequestInFlight) return configRequestInFlight;
     const silentMessage = Boolean(options?.silentMessage);
     const applyToDraft = options?.applyToDraft !== false;
-    const loadHandoverSegments = options?.loadHandoverSegments !== false;
+    const loadHandoverSegments = Boolean(options?.loadHandoverSegments);
     configRequestInFlight = (async () => {
       try {
         const data = await getConfigApi();
         serverConfigSnapshot = clone(data || {});
         if (applyToDraft) {
           const normalized = ensureConfigShape(convertV3ConfigToLegacy(data || {}));
-          withAutoSaveSuspended(() => {
+          withConfigSaveSuspended(() => {
             hydrateConfigView(normalized);
             setLastSavedSignatureFromPreparedPayload();
           });
@@ -2753,9 +3484,9 @@ export function createRuntimeHealthConfigActions(ctx) {
         if (configLoadError) {
           configLoadError.value = "";
         }
-        if (applyToDraft && configAutoSaveStatus && typeof configAutoSaveStatus === "object") {
-          configAutoSaveStatus.mode = "idle";
-          configAutoSaveStatus.last_error = "";
+        if (applyToDraft && configSaveStatus && typeof configSaveStatus === "object") {
+          configSaveStatus.mode = "idle";
+          configSaveStatus.last_error = "";
         }
         if (applyToDraft && loadHandoverSegments) {
           void fetchHandoverCommonConfigSegment({ silentMessage: true });
@@ -2788,7 +3519,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           base_revision: Number.parseInt(String(handoverConfigCommonRevision?.value || 0), 10) || 0,
           data: buildHandoverCommonSegmentPayload(),
         });
-        withAutoSaveSuspended(() => {
+        withConfigSaveSuspended(() => {
           if (handoverConfigCommonRevision) {
             handoverConfigCommonRevision.value = Number.parseInt(String(data?.revision || 0), 10) || 0;
           }
@@ -2797,18 +3528,14 @@ export function createRuntimeHealthConfigActions(ctx) {
           }
           applyHandoverCommonSegmentData(data?.data || {});
         });
-        if (!options?.skipConfigRefresh) {
-          await fetchConfig({ silentMessage: true });
-        }
+        syncServerConfigSnapshotHandoverSegment();
         if (!options?.silentSuccess) {
           message.value = "交接班公共配置已保存";
         }
         return { saved: true, reason: "saved", data };
       } catch (err) {
         if (Number.parseInt(String(err?.httpStatus || 0), 10) === 409) {
-          await fetchConfig({ silentMessage: true });
           await fetchHandoverCommonConfigSegment({ silentMessage: true });
-          await fetchHandoverBuildingConfigSegment(handoverConfigBuilding?.value, { silentMessage: true });
           if (!options?.silentConflictMessage) {
             message.value = "交接班公共配置已被其他人修改，请刷新后重试";
           }
@@ -2868,7 +3595,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         const savedBaseUrl = String(data?.data?.review_ui?.public_base_url || normalizedBaseUrl).trim();
         handover.review_ui.public_base_url = savedBaseUrl;
         health.handover.review_base_url = savedBaseUrl;
-        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        syncServerConfigSnapshotHandoverSegment();
         if (!options?.silentSuccess) {
           message.value = savedBaseUrl
             ? `审核访问地址已保存：${savedBaseUrl}`
@@ -2877,9 +3604,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         return { saved: true, reason: "saved", value: savedBaseUrl, data };
       } catch (err) {
         if (Number.parseInt(String(err?.httpStatus || 0), 10) === 409) {
-          await fetchConfig({ silentMessage: true });
           await fetchHandoverCommonConfigSegment({ silentMessage: true });
-          await fetchHandoverBuildingConfigSegment(handoverConfigBuilding?.value, { silentMessage: true });
           if (!options?.silentMessage) {
             message.value = "审核访问地址已被其他人修改，请刷新后重试";
           }
@@ -2914,7 +3639,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           base_revision: Number.parseInt(String(handoverConfigBuildingRevision?.value || 0), 10) || 0,
           data: buildHandoverBuildingSegmentPayload(buildingText),
         });
-        withAutoSaveSuspended(() => {
+        withConfigSaveSuspended(() => {
           if (handoverConfigBuilding) {
             handoverConfigBuilding.value = buildingText;
           }
@@ -2926,17 +3651,13 @@ export function createRuntimeHealthConfigActions(ctx) {
           }
           applyHandoverBuildingSegmentData(buildingText, data?.data || {});
         });
-        if (!options?.skipConfigRefresh) {
-          await fetchConfig({ silentMessage: true });
-        }
+        syncServerConfigSnapshotHandoverSegment();
         if (!options?.silentSuccess) {
           message.value = `${buildingText}交接班配置已保存`;
         }
         return { saved: true, reason: "saved", data };
       } catch (err) {
         if (Number.parseInt(String(err?.httpStatus || 0), 10) === 409) {
-          await fetchConfig({ silentMessage: true });
-          await fetchHandoverCommonConfigSegment({ silentMessage: true });
           await fetchHandoverBuildingConfigSegment(buildingText, { silentMessage: true });
           if (!options?.silentConflictMessage) {
             message.value = "当前楼配置已被其他人修改，请刷新后重试";
@@ -2977,7 +3698,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     const { v3Payload, signature } = payloadState;
     const requestPayload = mergeConfigWithServerSnapshot(serverConfigSnapshot, v3Payload);
     if (auto && signature && signature === lastSavedConfigSignature) {
-      syncConfigAutoSaveSignature(signature, { pending: true });
+      syncConfigSaveSignature(signature, { pending: true });
       return { saved: false, reason: "unchanged", restartRequired: false, signature };
     }
 
@@ -2996,10 +3717,10 @@ export function createRuntimeHealthConfigActions(ctx) {
       const returnedConfig = data?.config && typeof data.config === "object" ? data.config : requestPayload;
       serverConfigSnapshot = clone(returnedConfig);
       lastSavedConfigSignature = signature || "";
-      syncConfigAutoSaveSignature(lastSavedConfigSignature, { pending: true });
+      syncConfigSaveSignature(lastSavedConfigSignature, { pending: true });
       if (!skipHydrateOnSuccess) {
         const normalized = ensureConfigShape(convertV3ConfigToLegacy(returnedConfig));
-        withAutoSaveSuspended(() => {
+        withConfigSaveSuspended(() => {
           hydrateConfigView(normalized);
           setLastSavedSignatureFromPreparedPayload();
         });
@@ -3013,7 +3734,7 @@ export function createRuntimeHealthConfigActions(ctx) {
       clearEngineerDirectoryCache();
       applyHandoverReviewAccessSnapshot(data?.handover_review_access);
       if (!skipPostSaveHealthRefresh) {
-        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        refreshRoleScopedRuntimeStatus("config_saved");
         scheduleEngineerDirectoryPrefetch(0);
       }
       if (!auto) {
@@ -3063,7 +3784,7 @@ export function createRuntimeHealthConfigActions(ctx) {
       const data = await putConfigApi(mergedRequestPayload);
       serverConfigSnapshot = clone(data?.config || mergedRequestPayload);
       const normalized = ensureConfigShape(convertV3ConfigToLegacy(data?.config || mergedRequestPayload));
-      withAutoSaveSuspended(() => {
+      withConfigSaveSuspended(() => {
         hydrateConfigView(normalized);
         setLastSavedSignatureFromPreparedPayload();
       });
@@ -3076,7 +3797,7 @@ export function createRuntimeHealthConfigActions(ctx) {
       clearEngineerDirectoryCache();
       applyHandoverReviewAccessSnapshot(data?.handover_review_access);
       if (!options?.skipPostSaveHealthRefresh) {
-        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        refreshRoleScopedRuntimeStatus("config_saved");
         scheduleEngineerDirectoryPrefetch(0);
       }
       if (!options?.silentSuccessMessage) {
@@ -3125,30 +3846,13 @@ export function createRuntimeHealthConfigActions(ctx) {
     return runner();
   }
 
-  async function autoSaveConfig(options = {}) {
-    const runner = async () => saveConfigInternal({
-      auto: true,
-      skipPostSaveHealthRefresh: Boolean(options?.skipPostSaveHealthRefresh),
-      responseMode: String(options?.responseMode || ""),
-      skipHydrateOnSuccess: Boolean(options?.skipHydrateOnSuccess),
-      silentErrorMessage: Boolean(options?.silentErrorMessage),
-    });
-    if (options?.bypassSingleFlight) {
-      return runner();
-    }
-    if (typeof runSingleFlight === "function") {
-      return runSingleFlight(ACTION_KEY_SAVE_CONFIG, runner, { cooldownMs: 500 });
-    }
-    return runner();
-  }
-
   async function repairDayMetricUploadConfig() {
     const runner = async () => {
       try {
         const data = await repairDayMetricUploadConfigApi();
         serverConfigSnapshot = clone(data?.config || serverConfigSnapshot || config.value || {});
         const normalized = ensureConfigShape(convertV3ConfigToLegacy(data?.config || serverConfigSnapshot || {}));
-        withAutoSaveSuspended(() => {
+        withConfigSaveSuspended(() => {
           hydrateConfigView(normalized);
           setLastSavedSignatureFromPreparedPayload();
         });
@@ -3160,7 +3864,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         clearEngineerDirectoryCache();
         applyHandoverReviewAccessSnapshot(data?.handover_review_access);
-        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        refreshRoleScopedRuntimeStatus("day_metric_config_repaired");
         scheduleEngineerDirectoryPrefetch(0);
         const notes = Array.isArray(data?.notes) ? data.notes.filter(Boolean) : [];
         if (data?.repaired) {
@@ -3561,7 +4265,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           void (async () => {
             const job = await waitForAcceptedJobCompletion(jobId, { timeoutMs: 15 * 60 * 1000 });
             if (!job) return;
-            await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+            refreshRoleScopedRuntimeStatus("handover_confirm_all_completed", { includePendingResume: true });
             if (job.status === "success" && shouldPublishAcceptedJobResult(jobId)) {
               message.value = summarizeConfirmAllResult(job?.result || {});
             }
@@ -3596,7 +4300,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           void (async () => {
             const job = await waitForAcceptedJobCompletion(jobId, { timeoutMs: 10 * 60 * 1000 });
             if (!job) return;
-            await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+            refreshRoleScopedRuntimeStatus("handover_cloud_retry_completed", { includePendingResume: true });
             if (job.status === "success" && shouldPublishAcceptedJobResult(jobId)) {
               message.value = summarizeBatchCloudRetryResult(job?.result || {});
             }
@@ -3922,7 +4626,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         const data = await reprobeHandoverReviewAccessApi();
         const snapshot = data?.handover_review_access || {};
         applyHandoverReviewAccessSnapshot(snapshot);
-        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        refreshRoleScopedRuntimeStatus("handover_review_access_reprobe");
         const effectiveBaseUrl = String(snapshot?.review_base_url_effective || "").trim();
         if (effectiveBaseUrl) {
           message.value = `审核访问地址已刷新，当前生效地址：${effectiveBaseUrl}`;
@@ -3945,7 +4649,10 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   return {
     appendLog,
+    applyJobPanelSummary,
+    patchJobPanelActionState,
     fetchBootstrapHealth,
+    fetchExternalDashboardSummary,
     fetchHealth,
     fetchJobs,
     fetchBridgeTasks,
@@ -3978,7 +4685,6 @@ export function createRuntimeHealthConfigActions(ctx) {
     saveHandoverCommonConfig,
     saveHandoverReviewBaseUrlQuickConfig,
     saveHandoverBuildingConfig,
-    autoSaveConfig,
     activateStartupRuntime,
     exitCurrentRuntime,
     restartApplication,

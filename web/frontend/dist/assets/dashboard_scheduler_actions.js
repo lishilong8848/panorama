@@ -63,37 +63,20 @@ export function createDashboardSchedulerActions(ctx) {
     handoverSchedulerQuickSaving,
     dayMetricUploadSchedulerQuickSaving,
     alarmEventUploadSchedulerQuickSaving,
-    fetchHealth,
-    fetchConfig,
+    fetchExternalDashboardSummary,
+    scheduleExternalDashboardRefresh,
     runSingleFlight,
     setSchedulerToggleState,
   } = ctx;
-  let healthRefreshTimer = null;
-  let configRefreshTimer = null;
 
-  function scheduleHealthRefresh(delayMs = 800) {
-    if (healthRefreshTimer) {
-      window.clearTimeout(healthRefreshTimer);
+  function triggerDashboardRefresh(reason = "scheduler_action") {
+    if (typeof scheduleExternalDashboardRefresh === "function") {
+      scheduleExternalDashboardRefresh(reason);
+      return;
     }
-    healthRefreshTimer = window.setTimeout(() => {
-      healthRefreshTimer = null;
-      void fetchHealth({ silentMessage: true });
-    }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
-  }
-
-  function scheduleConfigBaselineRefresh(delayMs = 300) {
-    if (typeof fetchConfig !== "function") return;
-    if (configRefreshTimer) {
-      window.clearTimeout(configRefreshTimer);
+    if (typeof fetchExternalDashboardSummary === "function") {
+      void fetchExternalDashboardSummary({ silentMessage: true });
     }
-    configRefreshTimer = window.setTimeout(() => {
-      configRefreshTimer = null;
-      void fetchConfig({
-        silentMessage: true,
-        applyToDraft: false,
-        loadHandoverSegments: false,
-      });
-    }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
   }
 
   function markSchedulerToggle(key, mode, rememberedOverride) {
@@ -103,7 +86,12 @@ export function createDashboardSchedulerActions(ctx) {
 
   async function guardedRun(actionKey, taskFn, options = {}) {
     if (typeof runSingleFlight === "function") {
-      return runSingleFlight(actionKey, taskFn, options);
+      return runSingleFlight(actionKey, taskFn, {
+        ...options,
+        onCooldown: () => {
+          message.value = "请求处理中，请稍候";
+        },
+      });
     }
     return taskFn();
   }
@@ -118,8 +106,7 @@ export function createDashboardSchedulerActions(ctx) {
           syncLocalSchedulerAutoStart(config.value?.scheduler, true, { enableOnStart: true });
           applySchedulerSnapshot(health?.scheduler, { ...data, enabled: true, running: true });
           markSchedulerToggle("scheduler", "idle", true);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("scheduler_start");
           message.value = `调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("scheduler", "idle", null);
@@ -154,8 +141,8 @@ export function createDashboardSchedulerActions(ctx) {
           if (data?.scheduler_config && config.value?.scheduler) {
             Object.assign(config.value.scheduler, data.scheduler_config);
           }
-          scheduleConfigBaselineRefresh();
-          await fetchHealth();
+          applySchedulerSnapshot(health?.scheduler, data?.scheduler_status || data);
+          triggerDashboardRefresh("scheduler_save");
           const executorBound = data?.executor_bound_after_reload !== false;
           if (!executorBound) {
             message.value = "调度配置已更新，但执行器未绑定，自动调度暂不可用";
@@ -182,8 +169,7 @@ export function createDashboardSchedulerActions(ctx) {
           syncLocalSchedulerAutoStart(config.value?.scheduler, false);
           applySchedulerSnapshot(health?.scheduler, { ...data, running: false });
           markSchedulerToggle("scheduler", "idle", false);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("scheduler_stop");
           message.value = `调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("scheduler", "idle", null);
@@ -204,8 +190,7 @@ export function createDashboardSchedulerActions(ctx) {
           syncLocalSchedulerAutoStart(config.value?.handover_log?.scheduler, true, { enableOnStart: true });
           applyHandoverSchedulerSnapshot(health?.handover_scheduler, { ...data, enabled: true, running: true });
           markSchedulerToggle("handover", "idle", true);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("handover_scheduler_start");
           message.value = `交接班调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("handover", "idle", null);
@@ -226,8 +211,7 @@ export function createDashboardSchedulerActions(ctx) {
           syncLocalSchedulerAutoStart(config.value?.handover_log?.scheduler, false);
           applyHandoverSchedulerSnapshot(health?.handover_scheduler, { ...data, running: false });
           markSchedulerToggle("handover", "idle", false);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("handover_scheduler_stop");
           message.value = `交接班调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("handover", "idle", null);
@@ -275,8 +259,8 @@ export function createDashboardSchedulerActions(ctx) {
           if (data?.scheduler_config && config.value?.handover_log?.scheduler) {
             Object.assign(config.value.handover_log.scheduler, data.scheduler_config);
           }
-          scheduleConfigBaselineRefresh();
-          await fetchHealth();
+          applyHandoverSchedulerSnapshot(health?.handover_scheduler, data?.scheduler_status || data);
+          triggerDashboardRefresh("handover_scheduler_save");
           const changed = Boolean(data?.morning_time_changed || data?.afternoon_time_changed);
           message.value = changed
             ? "交接班调度配置已更新，已重置对应时段今日状态"
@@ -377,8 +361,7 @@ export function createDashboardSchedulerActions(ctx) {
           syncLocalSchedulerAutoStart(config.value?.day_metric_upload?.scheduler, true, { enableOnStart: true });
           applySchedulerSnapshot(health?.day_metric_upload?.scheduler, { ...data, enabled: true, running: true });
           markSchedulerToggle("day_metric_upload", "idle", true);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("day_metric_scheduler_start");
           message.value = `12项独立上传调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("day_metric_upload", "idle", null);
@@ -399,8 +382,7 @@ export function createDashboardSchedulerActions(ctx) {
           syncLocalSchedulerAutoStart(config.value?.day_metric_upload?.scheduler, false);
           applySchedulerSnapshot(health?.day_metric_upload?.scheduler, { ...data, running: false });
           markSchedulerToggle("day_metric_upload", "idle", false);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("day_metric_scheduler_stop");
           message.value = `12项独立上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("day_metric_upload", "idle", null);
@@ -435,9 +417,8 @@ export function createDashboardSchedulerActions(ctx) {
           if (data?.scheduler_config && config.value?.day_metric_upload?.scheduler) {
             Object.assign(config.value.day_metric_upload.scheduler, data.scheduler_config);
           }
-          applySchedulerSnapshot(health?.day_metric_upload?.scheduler, data);
-          scheduleConfigBaselineRefresh();
-          await fetchHealth();
+          applySchedulerSnapshot(health?.day_metric_upload?.scheduler, data?.scheduler_status || data);
+          triggerDashboardRefresh("day_metric_scheduler_save");
           message.value = data?.message || "12项独立上传调度配置已更新";
         } catch (err) {
           message.value = `12项独立上传调度自动更新失败: ${err}`;
@@ -459,8 +440,7 @@ export function createDashboardSchedulerActions(ctx) {
           syncLocalSchedulerAutoStart(config.value?.alarm_export?.scheduler, true, { enableOnStart: true });
           applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, { ...data, enabled: true, running: true });
           markSchedulerToggle("alarm_event_upload", "idle", true);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("alarm_scheduler_start");
           message.value = `告警信息上传调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("alarm_event_upload", "idle", null);
@@ -481,8 +461,7 @@ export function createDashboardSchedulerActions(ctx) {
           syncLocalSchedulerAutoStart(config.value?.alarm_export?.scheduler, false);
           applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, { ...data, running: false });
           markSchedulerToggle("alarm_event_upload", "idle", false);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("alarm_scheduler_stop");
           message.value = `告警信息上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("alarm_event_upload", "idle", null);
@@ -520,9 +499,8 @@ export function createDashboardSchedulerActions(ctx) {
           if (data?.scheduler_config && config.value?.alarm_export?.scheduler) {
             Object.assign(config.value.alarm_export.scheduler, data.scheduler_config);
           }
-          applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, data);
-          scheduleConfigBaselineRefresh();
-          await fetchHealth();
+          applySchedulerSnapshot(health?.alarm_event_upload?.scheduler, data?.scheduler_status || data);
+          triggerDashboardRefresh("alarm_scheduler_save");
           message.value = data?.message || "告警信息上传调度配置已更新";
         } catch (err) {
           message.value = `告警信息上传调度自动更新失败: ${err}`;

@@ -170,8 +170,10 @@ class ReviewDocumentStateService:
         document: Dict[str, Any],
         base_revision: int,
         dirty_regions: Dict[str, Any],
+        ensure_ready: bool = True,
     ) -> tuple[Dict[str, Any], Dict[str, Any] | None]:
-        self.ensure_document_for_session(session)
+        if ensure_ready:
+            self.ensure_document_for_session(session)
         try:
             return self._store(self._building(session)).save_document(
                 session=session,

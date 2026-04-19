@@ -6,8 +6,8 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
                   <div class="task-block-kicker">定时执行</div>
                   <h3 class="card-title">调度设置</h3>
                 </div>
-                <span class="status-badge status-badge-soft" :class="health.scheduler.running ? 'tone-success' : 'tone-neutral'">
-                  {{ health.scheduler.status || '未启动' }}
+                <span class="status-badge status-badge-soft" :class="'tone-' + getSchedulerStatusTone('scheduler')">
+                  {{ getSchedulerStatusText('scheduler') || '未启动' }}
                 </span>
               </div>
               <div class="status-metric-grid status-metric-grid-compact">
@@ -21,7 +21,7 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
                 </div>
                 <div class="status-metric">
                   <div class="status-metric-label">当前状态</div>
-                  <strong class="status-metric-value">{{ health.scheduler.status || '-' }}</strong>
+                  <strong class="status-metric-value">{{ getSchedulerStatusText('scheduler') || '-' }}</strong>
                 </div>
               </div>
               <div class="btn-line">
@@ -29,14 +29,14 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
                 <input style="width:120px" type="number" min="1" step="1" v-model.number="config.scheduler.interval_minutes" @change="saveSchedulerQuickConfig" />
               </div>
               <div class="btn-line">
-                <button class="btn btn-success" :disabled="getSchedulerEffectiveRunning('scheduler', health.scheduler.remembered_enabled) || isActionLocked(actionKeySchedulerStart) || isActionLocked(actionKeySchedulerStop) || isSchedulerTogglePending('scheduler')" @click="startScheduler">
-                  {{ getSchedulerToggleMode('scheduler') === 'starting' ? '启动中...' : (getSchedulerToggleMode('scheduler') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('scheduler', health.scheduler.remembered_enabled) ? '已记住开启' : '启动调度')) }}
+                <button class="btn btn-success" :disabled="isSchedulerStartDisabled('scheduler', actionKeySchedulerStart, actionKeySchedulerStop)" @click="startScheduler">
+                  {{ getSchedulerStartButtonText('scheduler') }}
                 </button>
-                <button class="btn btn-danger" :disabled="!getSchedulerEffectiveRunning('scheduler', health.scheduler.remembered_enabled) || isActionLocked(actionKeySchedulerStop) || isActionLocked(actionKeySchedulerStart) || isSchedulerTogglePending('scheduler')" @click="stopScheduler">
-                  {{ getSchedulerToggleMode('scheduler') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('scheduler') === 'starting' ? '处理中...' : '停止调度') }}
+                <button class="btn btn-danger" :disabled="isSchedulerStopDisabled('scheduler', actionKeySchedulerStart, actionKeySchedulerStop)" @click="stopScheduler">
+                  {{ getSchedulerStopButtonText('scheduler') }}
                 </button>
               </div>
-              <div class="hint">{{ schedulerQuickSaving ? '调度配置保存中...' : '修改执行间隔后自动保存。' }}</div>
+              <div class="hint">{{ schedulerQuickSaving ? '调度配置同步中...' : '修改执行间隔后立即生效。' }}</div>
             </article>
 
             <div class="dashboard-module-primary-grid">
@@ -57,7 +57,7 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
                 </div>
                 <div class="status-metric">
                   <div class="status-metric-label">调度状态</div>
-                  <strong class="status-metric-value">{{ health.scheduler.status || '-' }}</strong>
+                  <strong class="status-metric-value">{{ getSchedulerStatusText('scheduler') || '-' }}</strong>
                 </div>
                 <div class="status-metric">
                   <div class="status-metric-label">待续传任务</div>

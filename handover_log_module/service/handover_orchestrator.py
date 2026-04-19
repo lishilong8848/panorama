@@ -1,9 +1,11 @@
 ﻿from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
 from handover_log_module.core.models import BuildingResult, RunSummary
@@ -64,6 +66,8 @@ class HandoverQueryContext:
     duty_shift: str
     target_buildings: List[str]
     roster_assignments: Dict[str, ShiftRosterAssignment] = field(default_factory=dict)
+    long_day_values_by_building: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    engineer_directory_records: List[Dict[str, str]] = field(default_factory=list)
     event_query_by_building: EventQueryByBuilding | None = None
     change_rows_by_building: ChangeRowsByBuilding | None = None
     exercise_rows_by_building: ExerciseRowsByBuilding | None = None
@@ -270,75 +274,112 @@ class HandoverOrchestrator:
         if not context.duty_date or not context.duty_shift or not target_buildings:
             return context
 
-        if prefetch_roster and not context.roster_assignments:
+        def _load_shift_roster_bundle() -> Dict[str, Any]:
+            bundle: Dict[str, Any] = {}
+            if prefetch_roster and not context.roster_assignments:
+                try:
+                    bundle["roster_assignments"] = self._shift_roster_repo.query_assignments(
+                        buildings=target_buildings,
+                        duty_date=context.duty_date,
+                        duty_shift=context.duty_shift,
+                        emit_log=emit_log,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    emit_log(f"[交接班][排班查询] 预取失败，后续按单楼兜底查询: {exc}")
+                    bundle["roster_assignments"] = {}
             try:
-                context.roster_assignments = self._shift_roster_repo.query_assignments(
+                bundle["long_day_values_by_building"] = self._shift_roster_repo.query_long_day_cell_values_grouped(
                     buildings=target_buildings,
                     duty_date=context.duty_date,
                     duty_shift=context.duty_shift,
                     emit_log=emit_log,
                 )
             except Exception as exc:  # noqa: BLE001
-                emit_log(f"[交接班][排班查询] 预取失败，后续按单楼兜底查询: {exc}")
-                context.roster_assignments = {}
+                emit_log(f"[交接班][长白岗查询] 批量预取失败，后续按单楼兜底查询: {exc}")
+                bundle["long_day_values_by_building"] = {}
+            try:
+                bundle["engineer_directory_records"] = self._shift_roster_repo.list_engineer_directory(
+                    duty_date=context.duty_date,
+                    duty_shift=context.duty_shift,
+                    emit_log=emit_log,
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][工程师目录] 批量预取失败，后续按单楼兜底读取: {exc}")
+                bundle["engineer_directory_records"] = []
+            return bundle
 
-        if len(target_buildings) <= 1:
-            return context
-
-        try:
-            context.event_query_by_building = self._event_category_builder.repo.load_current_shift_events_grouped(
-                buildings=target_buildings,
-                duty_date=context.duty_date,
-                duty_shift=context.duty_shift,
-                emit_log=emit_log,
-            )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][事件分类] 批量预取失败，后续按单楼兜底读取: {exc}")
-            context.event_query_by_building = None
-
-        try:
-            context.change_rows_by_building, _ = self._change_management_builder.repo.list_current_shift_rows_grouped(
-                buildings=target_buildings,
-                duty_date=context.duty_date,
-                duty_shift=context.duty_shift,
-                emit_log=emit_log,
-            )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][变更管理] 批量预取失败，后续按单楼兜底读取: {exc}")
-            context.change_rows_by_building = None
-
-        try:
-            context.exercise_rows_by_building, _ = self._exercise_management_builder.repo.list_current_shift_rows_grouped(
-                buildings=target_buildings,
-                duty_date=context.duty_date,
-                duty_shift=context.duty_shift,
-                emit_log=emit_log,
-            )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][演练管理] 批量预取失败，后续按单楼兜底读取: {exc}")
-            context.exercise_rows_by_building = None
-
-        try:
-            context.maintenance_rows_by_building, _ = self._maintenance_management_builder.repo.list_current_shift_rows_grouped(
-                buildings=target_buildings,
-                duty_date=context.duty_date,
-                duty_shift=context.duty_shift,
-                emit_log=emit_log,
-            )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][维护管理] 批量预取失败，后续按单楼兜底读取: {exc}")
-            context.maintenance_rows_by_building = None
-
-        try:
-            context.other_important_work_rows_by_building, _ = self._other_important_work_builder.repo.list_current_shift_rows_grouped(
-                buildings=target_buildings,
-                duty_date=context.duty_date,
-                duty_shift=context.duty_shift,
-                emit_log=emit_log,
-            )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][其他重要工作] 批量预取失败，后续按单楼兜底读取: {exc}")
-            context.other_important_work_rows_by_building = None
+        task_specs = {
+            "shift_roster_bundle": (
+                _load_shift_roster_bundle,
+                "[交接班][排班查询] 批量预取失败，后续按单楼兜底查询",
+            ),
+            "event_query_by_building": (
+                lambda: self._event_category_builder.repo.load_current_shift_events_grouped(
+                    buildings=target_buildings,
+                    duty_date=context.duty_date,
+                    duty_shift=context.duty_shift,
+                    emit_log=emit_log,
+                ),
+                "[交接班][事件分类] 批量预取失败，后续按单楼兜底读取",
+            ),
+            "change_rows_by_building": (
+                lambda: self._change_management_builder.repo.list_current_shift_rows_grouped(
+                    buildings=target_buildings,
+                    duty_date=context.duty_date,
+                    duty_shift=context.duty_shift,
+                    emit_log=emit_log,
+                )[0],
+                "[交接班][变更管理] 批量预取失败，后续按单楼兜底读取",
+            ),
+            "exercise_rows_by_building": (
+                lambda: self._exercise_management_builder.repo.list_current_shift_rows_grouped(
+                    buildings=target_buildings,
+                    duty_date=context.duty_date,
+                    duty_shift=context.duty_shift,
+                    emit_log=emit_log,
+                )[0],
+                "[交接班][演练管理] 批量预取失败，后续按单楼兜底读取",
+            ),
+            "maintenance_rows_by_building": (
+                lambda: self._maintenance_management_builder.repo.list_current_shift_rows_grouped(
+                    buildings=target_buildings,
+                    duty_date=context.duty_date,
+                    duty_shift=context.duty_shift,
+                    emit_log=emit_log,
+                )[0],
+                "[交接班][维护管理] 批量预取失败，后续按单楼兜底读取",
+            ),
+            "other_important_work_rows_by_building": (
+                lambda: self._other_important_work_builder.repo.list_current_shift_rows_grouped(
+                    buildings=target_buildings,
+                    duty_date=context.duty_date,
+                    duty_shift=context.duty_shift,
+                    emit_log=emit_log,
+                )[0],
+                "[交接班][其他重要工作] 批量预取失败，后续按单楼兜底读取",
+            ),
+        }
+        max_workers = min(4, max(1, len(task_specs)))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="handover-prefetch") as executor:
+            future_to_name = {
+                executor.submit(loader): (name, failure_message)
+                for name, (loader, failure_message) in task_specs.items()
+            }
+            for future in as_completed(future_to_name):
+                name, failure_message = future_to_name[future]
+                try:
+                    payload = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    emit_log(f"{failure_message}: {exc}")
+                    continue
+                if name == "shift_roster_bundle":
+                    bundle = payload if isinstance(payload, dict) else {}
+                    if "roster_assignments" in bundle and not context.roster_assignments:
+                        context.roster_assignments = dict(bundle.get("roster_assignments", {}) or {})
+                    context.long_day_values_by_building = dict(bundle.get("long_day_values_by_building", {}) or {})
+                    context.engineer_directory_records = list(bundle.get("engineer_directory_records", []) or [])
+                    continue
+                setattr(context, name, payload)
         return context
 
     def _build_shift_roster_fixed_values(
@@ -349,6 +390,7 @@ class HandoverOrchestrator:
         duty_shift: str,
         emit_log: Callable[[str], None],
         assignment: ShiftRosterAssignment | None = None,
+        preloaded_long_day_values: Dict[str, str] | None = None,
     ) -> Dict[str, str]:
         roster_cfg = self.config.get("shift_roster", {})
         if not isinstance(roster_cfg, dict) or not bool(roster_cfg.get("enabled", True)):
@@ -393,17 +435,26 @@ class HandoverOrchestrator:
             f"当前班组={'有' if fixed.get(current_cell) else '空'}, 下个班组={'有' if fixed.get(next_cell) else '空'}, "
             f"下班首人={'有' if first_name else '空'}"
         )
-        try:
+        if isinstance(preloaded_long_day_values, dict) and preloaded_long_day_values:
             fixed.update(
-                self._shift_roster_repo.query_long_day_cell_values(
-                    building=building,
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
-                    emit_log=emit_log,
-                )
+                {
+                    str(cell).strip().upper(): str(value or "").strip()
+                    for cell, value in preloaded_long_day_values.items()
+                    if self._valid_cell(cell)
+                }
             )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][长白岗查询] building={building} 查询失败，按留空继续: {exc}")
+        else:
+            try:
+                fixed.update(
+                    self._shift_roster_repo.query_long_day_cell_values(
+                        building=building,
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        emit_log=emit_log,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][长白岗查询] building={building} 查询失败，按留空继续: {exc}")
         return fixed
 
     @staticmethod
@@ -480,6 +531,7 @@ class HandoverOrchestrator:
         emit_log: Callable[[str], None],
         roster_assignment: ShiftRosterAssignment | None = None,
         include_roster: bool = True,
+        preloaded_long_day_values: Dict[str, str] | None = None,
         alarm_selection_snapshot: Dict[str, Any] | None = None,
         alarm_document_cache: Dict[str, Dict[str, Any]] | None = None,
     ) -> tuple[Dict[str, str], datetime, Dict[str, Any]]:
@@ -545,6 +597,7 @@ class HandoverOrchestrator:
                     duty_shift=duty_shift,
                     emit_log=emit_log,
                     assignment=roster_assignment,
+                    preloaded_long_day_values=preloaded_long_day_values,
                 )
             )
         duty_day = parse_duty_date(duty_date)
@@ -655,6 +708,8 @@ class HandoverOrchestrator:
         exercise_rows_by_building: ExerciseRowsByBuilding | None = None,
         maintenance_rows_by_building: MaintenanceRowsByBuilding | None = None,
         other_important_work_rows_by_building: OtherImportantWorkRowsByBuilding | None = None,
+        long_day_values: Dict[str, str] | None = None,
+        engineer_directory_records: List[Dict[str, str]] | None = None,
         alarm_selection_snapshot: Dict[str, Any] | None = None,
         alarm_document_cache: Dict[str, Dict[str, Any]] | None = None,
         alarm_summary_payload: Dict[str, Any] | None = None,
@@ -703,6 +758,7 @@ class HandoverOrchestrator:
                 end_time=end_time_text,
                 emit_log=emit_log,
                 roster_assignment=roster_assignment,
+                preloaded_long_day_values=long_day_values,
                 alarm_selection_snapshot=alarm_selection_snapshot,
                 alarm_document_cache=alarm_document_cache,
             )
@@ -725,6 +781,7 @@ class HandoverOrchestrator:
                 duty_shift=duty_shift_text,
                 emit_log=emit_log,
                 assignment=roster_assignment,
+                preloaded_long_day_values=long_day_values,
             )
             fixed_cell_values = dict(fixed_cell_values or {})
             fixed_cell_values.update(roster_fixed)
@@ -762,6 +819,7 @@ class HandoverOrchestrator:
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     preloaded_rows_by_building=change_rows_by_building,
+                    preloaded_engineers=engineer_directory_records,
                     emit_log=emit_log,
                 )
                 if isinstance(change_payloads, dict):
@@ -787,6 +845,7 @@ class HandoverOrchestrator:
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     preloaded_rows_by_building=maintenance_rows_by_building,
+                    preloaded_engineers=engineer_directory_records,
                     emit_log=emit_log,
                 )
                 if isinstance(maintenance_payloads, dict):
@@ -799,6 +858,7 @@ class HandoverOrchestrator:
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     preloaded_rows_by_building=other_important_work_rows_by_building,
+                    preloaded_engineers=engineer_directory_records,
                     emit_log=emit_log,
                 )
                 if isinstance(other_important_work_payloads, dict):
@@ -986,6 +1046,20 @@ class HandoverOrchestrator:
                     )
                     try:
                         ReviewDocumentStateService(self.config, emit_log=emit_log).ensure_document_for_session(review_session)
+                        try:
+                            from app.modules.handover_review.api.routes import schedule_latest_review_documents_warmup
+
+                            schedule_latest_review_documents_warmup(
+                                SimpleNamespace(runtime_config=self.config, add_system_log=emit_log),
+                                preferred_building=building,
+                                reason="review_session_registered",
+                                target_only=True,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            emit_log(
+                                "[交接班][审核预热] 会话登记后首屏快照预热失败 "
+                                f"building={building}, session_id={review_session.get('session_id', '-')}, error={exc}"
+                            )
                     except Exception as exc:  # noqa: BLE001
                         emit_log(
                             "[交接班][审核SQLite] 初始化失败 "
@@ -1123,6 +1197,8 @@ class HandoverOrchestrator:
                     exercise_rows_by_building=query_context.exercise_rows_by_building,
                     maintenance_rows_by_building=query_context.maintenance_rows_by_building,
                     other_important_work_rows_by_building=query_context.other_important_work_rows_by_building,
+                    long_day_values=query_context.long_day_values_by_building.get(building),
+                    engineer_directory_records=query_context.engineer_directory_records,
                     alarm_selection_snapshot=alarm_selection_snapshot,
                     alarm_document_cache=alarm_document_cache,
                     capacity_source_file=capacity_file_map.get(building),
@@ -1251,6 +1327,21 @@ class HandoverOrchestrator:
                 for item in success_items
                 if str(item.get("building", "")).strip()
             ]
+            query_context = HandoverQueryContext(
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                target_buildings=success_buildings,
+                roster_assignments=dict(roster_prefetch),
+            )
+            if duty_date_text and duty_shift_text and success_buildings:
+                query_context = self._build_query_context(
+                    buildings=success_buildings,
+                    duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
+                    emit_log=emit_log,
+                    preloaded_roster_assignments=roster_prefetch,
+                    prefetch_roster=False,
+                )
             alarm_selection_snapshot: Dict[str, Any] | None = None
             alarm_document_cache: Dict[str, Dict[str, Any]] | None = None
             if self._deployment_role_mode() == "external" and duty_date_text and duty_shift_text and success_buildings:
@@ -1288,6 +1379,7 @@ class HandoverOrchestrator:
                         emit_log=emit_log,
                         roster_assignment=assignment,
                         include_roster=False,
+                        preloaded_long_day_values=query_context.long_day_values_by_building.get(building),
                         alarm_selection_snapshot=alarm_selection_snapshot,
                         alarm_document_cache=alarm_document_cache,
                     )
@@ -1330,22 +1422,6 @@ class HandoverOrchestrator:
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班][云表预建] 批次状态登记失败: {exc}")
 
-            query_context = HandoverQueryContext(
-                duty_date=duty_date_text,
-                duty_shift=duty_shift_text,
-                target_buildings=success_buildings,
-                roster_assignments=dict(roster_prefetch),
-            )
-            if duty_date_text and duty_shift_text and success_buildings:
-                query_context = self._build_query_context(
-                    buildings=success_buildings,
-                    duty_date=duty_date_text,
-                    duty_shift=duty_shift_text,
-                    emit_log=emit_log,
-                    preloaded_roster_assignments=roster_prefetch,
-                    prefetch_roster=False,
-                )
-
             for item in success_items:
                 building = str(item.get("building", "")).strip()
                 data_file = str(item.get("file_path", "")).strip()
@@ -1370,6 +1446,7 @@ class HandoverOrchestrator:
                             emit_log=emit_log,
                             roster_assignment=assignment,
                             include_roster=False,
+                            preloaded_long_day_values=query_context.long_day_values_by_building.get(building),
                             alarm_selection_snapshot=alarm_selection_snapshot,
                             alarm_document_cache=alarm_document_cache,
                         )
@@ -1390,6 +1467,8 @@ class HandoverOrchestrator:
                     exercise_rows_by_building=query_context.exercise_rows_by_building,
                     maintenance_rows_by_building=query_context.maintenance_rows_by_building,
                     other_important_work_rows_by_building=query_context.other_important_work_rows_by_building,
+                    long_day_values=query_context.long_day_values_by_building.get(building),
+                    engineer_directory_records=query_context.engineer_directory_records,
                     alarm_selection_snapshot=alarm_selection_snapshot,
                     alarm_document_cache=alarm_document_cache,
                     alarm_summary_payload=alarm_summary_payload,

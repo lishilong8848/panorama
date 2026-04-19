@@ -113,6 +113,9 @@ _CAPACITY_SOURCE_DIRECT_ALIASES = {
     "storage_total": ["蓄水池总储水量"],
     "oil_amount": ["油量"],
 }
+_CAPACITY_SOURCE_DIRECT_EXACT_ALIASES = {
+    "oil_amount": ["燃油吨数", "燃油总吨数", "油量总吨数"],
+}
 _CAPACITY_SOURCE_DIRECT_EXCLUDES = {
     "oil_amount": ["油量后备时间", "燃油后备时间"],
 }
@@ -604,6 +607,20 @@ def _first_text_by_d_contains(
     return ""
 
 
+def _first_text_by_d_exact(query: CapacitySourceQuery, needles: Sequence[str]) -> str:
+    normalized_needles = {_casefold(item) for item in needles if _text(item)}
+    if not normalized_needles:
+        return ""
+    for row in query.rows:
+        d_name = _casefold(getattr(row, "d_name", ""))
+        if not d_name or d_name not in normalized_needles:
+            continue
+        value_text = _text(getattr(row, "e_raw", None))
+        if value_text:
+            return value_text
+    return ""
+
+
 def _resolve_public_flow_values(query: CapacitySourceQuery, *, zone: str, context: Dict[str, Any]) -> Dict[str, str]:
     building = _text(context.get("building"))
     cells = _WEST_PUBLIC_CELLS if zone == "west" else _EAST_PUBLIC_CELLS
@@ -695,18 +712,16 @@ def _build_capacity_source_direct_values(query: CapacitySourceQuery, *, context:
     running_units = context.get("running_units", {}) if isinstance(context.get("running_units", {}), dict) else {}
     values: Dict[str, str] = {}
 
-    storage_total = _first_text_by_d_contains(
+    oil_amount = _first_text_by_d_exact(
         query,
-        _CAPACITY_SOURCE_DIRECT_ALIASES["storage_total"],
+        _CAPACITY_SOURCE_DIRECT_EXACT_ALIASES["oil_amount"],
     )
-    if storage_total:
-        values["AC29"] = storage_total
-
-    oil_amount = _first_text_by_d_contains(
-        query,
-        _CAPACITY_SOURCE_DIRECT_ALIASES["oil_amount"],
-        excludes=_CAPACITY_SOURCE_DIRECT_EXCLUDES["oil_amount"],
-    )
+    if not oil_amount:
+        oil_amount = _first_text_by_d_contains(
+            query,
+            _CAPACITY_SOURCE_DIRECT_ALIASES["oil_amount"],
+            excludes=_CAPACITY_SOURCE_DIRECT_EXCLUDES["oil_amount"],
+        )
     if oil_amount:
         values["U16"] = oil_amount
 
@@ -821,7 +836,9 @@ def _build_tr_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> Di
         if row_idx > 0 and matched_row is not None:
             values[f"D{row_idx}"] = _text(getattr(matched_row, "e_raw", None))
         replacement_tokens = _tr_replacement_search_tokens(identifier)
-        replacement_row = query.first_row_by_identifier(identifier_tokens=replacement_tokens, search_column="b")
+        replacement_row = query.first_row_by_identifier(identifier_tokens=replacement_tokens, search_column="c")
+        if replacement_row is None:
+            replacement_row = query.first_row_by_identifier(identifier_tokens=replacement_tokens, search_column="b")
         if row_idx > 0 and replacement_row is not None:
             values[f"E{row_idx}"] = _text(getattr(replacement_row, "e_raw", None))
     return {cell: value for cell, value in values.items() if value != ""}

@@ -1,3 +1,9 @@
+import json
+from datetime import date
+from io import BytesIO
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlparse
+
 import openpyxl
 
 from handover_log_module.core.models import RawRow
@@ -61,7 +67,7 @@ def test_build_capacity_cells_include_direct_source_values_and_zone_capacity_for
 
     values = build_capacity_cells_with_config(context)
 
-    assert values["AC29"] == "88.6"
+    assert "AC29" not in values
     assert values["U16"] == "55.2"
     assert values["D22"] == "466.67"
     assert values["Q22"] == "840"
@@ -99,6 +105,177 @@ def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
     assert values["AC24"] == "9.8"
     assert values["X2"] == "96%"
     assert "D8" in service.tracked_cells()
+
+
+def test_weather_payload_uses_seniverse_for_today_and_caches(monkeypatch) -> None:
+    service = HandoverCapacityReportService(
+        {
+            "capacity_report": {
+                "weather": {
+                    "seniverse_public_key": "test-public",
+                    "seniverse_private_key": "test-private",
+                    "location": "崇川区",
+                    "language": "zh-Hans",
+                    "unit": "c",
+                    "timeout_sec": 8,
+                }
+            }
+        }
+    )
+    monkeypatch.setattr(service, "_today_local_date", lambda: date(2026, 4, 17))
+    calls = {"count": 0}
+
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "results": [
+                        {
+                            "daily": [
+                                {
+                                    "date": "2026-04-17",
+                                    "text_day": "多云",
+                                    "text_night": "阴",
+                                    "humidity": "96",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def _fake_urlopen(request, timeout=0):  # noqa: ANN001
+        calls["count"] += 1
+        parsed = urlparse(request.full_url)
+        query = parse_qs(parsed.query)
+        assert query["uid"] == ["test-public"]
+        assert query["location"] == ["31.98:120.89"]
+        assert query["language"] == ["zh-Hans"]
+        assert query["unit"] == ["c"]
+        assert "sig" in query and query["sig"][0]
+        assert timeout == 8
+        return _FakeResponse()
+
+    monkeypatch.setattr("handover_log_module.service.handover_capacity_report_service.urlopen", _fake_urlopen)
+
+    first = service._fetch_weather_payload_for_duty_date(
+        duty_date="2026-04-17",
+        emit_log=lambda _msg: None,
+    )
+    second = service._fetch_weather_payload_for_duty_date(
+        duty_date="2026-04-17",
+        emit_log=lambda _msg: None,
+    )
+
+    assert first == {"text": "多云", "humidity": "96%"}
+    assert second == first
+    assert calls["count"] == 1
+
+
+def test_weather_payload_falls_back_to_nantong_when_chongchuan_is_forbidden(monkeypatch) -> None:
+    service = HandoverCapacityReportService(
+        {
+            "capacity_report": {
+                "weather": {
+                    "seniverse_public_key": "test-public",
+                    "seniverse_private_key": "test-private",
+                    "location": "崇川区",
+                    "fallback_locations": ["南通"],
+                    "language": "zh-Hans",
+                    "unit": "c",
+                    "timeout_sec": 8,
+                }
+            }
+        }
+    )
+    monkeypatch.setattr(service, "_today_local_date", lambda: date(2026, 4, 17))
+    attempted_locations = []
+
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "results": [
+                        {
+                            "daily": [
+                                {
+                                    "date": "2026-04-17",
+                                    "text_day": "阴",
+                                    "text_night": "阴",
+                                    "humidity": "72",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def _fake_urlopen(request, timeout=0):  # noqa: ANN001
+        parsed = urlparse(request.full_url)
+        query = parse_qs(parsed.query)
+        location = query["location"][0]
+        attempted_locations.append(location)
+        assert timeout == 8
+        if location == "31.98:120.89":
+            raise HTTPError(
+                request.full_url,
+                403,
+                "Forbidden",
+                hdrs=None,
+                fp=BytesIO(b"{\"status\":\"You don't have access to data of this city.\",\"status_code\":\"AP010006\"}"),
+            )
+        return _FakeResponse()
+
+    monkeypatch.setattr("handover_log_module.service.handover_capacity_report_service.urlopen", _fake_urlopen)
+
+    payload = service._fetch_weather_payload_for_duty_date(
+        duty_date="2026-04-17",
+        emit_log=lambda _msg: None,
+    )
+
+    assert attempted_locations == ["31.98:120.89", "南通"]
+    assert payload == {"text": "阴", "humidity": "72%"}
+
+
+def test_weather_payload_uses_legacy_html_for_historical_dates(monkeypatch) -> None:
+    service = HandoverCapacityReportService({})
+    monkeypatch.setattr(service, "_today_local_date", lambda: date(2026, 4, 17))
+    legacy_calls = {"count": 0}
+
+    def _fake_legacy_fetch(**kwargs):  # noqa: ANN003
+        legacy_calls["count"] += 1
+        assert kwargs["duty_date"] == "2026-04-16"
+        return {"text": "小雨", "humidity": "88%"}
+
+    def _unexpected_seniverse_fetch(**kwargs):  # noqa: ANN003
+        raise AssertionError("historical duty_date should not call Seniverse")
+
+    monkeypatch.setattr(service, "_legacy_fetch_weather_payload_for_duty_date", _fake_legacy_fetch)
+    monkeypatch.setattr(service, "_fetch_seniverse_weather_payload_for_duty_date", _unexpected_seniverse_fetch)
+
+    payload = service._fetch_weather_payload_for_duty_date(
+        duty_date="2026-04-16",
+        emit_log=lambda _msg: None,
+    )
+
+    assert payload == {"text": "小雨", "humidity": "88%"}
+    assert legacy_calls["count"] == 1
 
 
 def test_ab_building_current_oil_values_are_scaled() -> None:
@@ -334,6 +511,78 @@ def test_build_capacity_cells_fill_e_column_from_trb_201_source_row() -> None:
     values = build_capacity_cells_with_config(context)
 
     assert values["E67"] == "45.6"
+
+
+def test_build_capacity_cells_fill_e_column_from_trb_source_c_column_for_d_building() -> None:
+    context = {
+        "capacity_rows": [
+            RawRow(1, "", "D-218-TRB-101", "", "101.1", 101.1),
+            RawRow(2, "", "D-218-TRB-201", "", "201.2", 201.2),
+        ],
+        "running_units": {},
+        "template_snapshot": {
+            "tr_entries": [
+                {"row": 77, "identifier": "D-218-TR201", "search_tokens": ["D-218-TR201"]},
+                {"row": 82, "identifier": "D-218-TR202", "search_tokens": ["D-218-TR202"]},
+            ],
+            "ups_entries": [],
+            "hvdc_entries": [],
+            "rpp_entries": [],
+        },
+    }
+
+    values = build_capacity_cells_with_config(context)
+
+    assert values["E77"] == "101.1"
+    assert values["E82"] == "201.2"
+
+
+def test_build_capacity_cells_prioritize_exact_oil_tonnage_alias_for_u16() -> None:
+    context = {
+        "building": "D楼",
+        "capacity_rows": [
+            RawRow(1, "", "燃油自控系统", "油量", "legacy", None),
+            RawRow(2, "", "燃油自控系统", "燃油总吨数", "66.6", 66.6),
+        ],
+        "running_units": {},
+    }
+
+    values = build_capacity_cells_with_config(context)
+
+    assert values["U16"] == "66.6"
+
+
+def test_d_building_capacity_cells_keep_formula_cells_and_fill_required_oil_and_tr_values() -> None:
+    context = {
+        "building": "D楼",
+        "duty_shift": "day",
+        "oil_current": {"first": "31", "second": "41"},
+        "capacity_rows": [
+            RawRow(1, "", "", "蓄水池总储水量", "88.6", 88.6),
+            RawRow(2, "", "燃油自控系统", "燃油总吨数", "66.6", 66.6),
+            RawRow(3, "", "D-218-TRB-101", "", "101.1", 101.1),
+            RawRow(4, "", "D-218-TRB-201", "", "201.2", 201.2),
+        ],
+        "running_units": {},
+        "template_snapshot": {
+            "tr_entries": [
+                {"row": 77, "identifier": "D-218-TR201", "search_tokens": ["D-218-TR201"]},
+                {"row": 82, "identifier": "D-218-TR202", "search_tokens": ["D-218-TR202"]},
+            ],
+            "ups_entries": [],
+            "hvdc_entries": [],
+            "rpp_entries": [],
+        },
+    }
+
+    values = build_capacity_cells_with_config(context)
+
+    assert values["U13"] == "31"
+    assert values["X13"] == "41"
+    assert values["U16"] == "66.6"
+    assert values["E77"] == "101.1"
+    assert values["E82"] == "201.2"
+    assert "AC29" not in values
 
 
 def test_build_capacity_cells_hvdc_for_other_buildings_prefers_last_digit_two_source_row() -> None:

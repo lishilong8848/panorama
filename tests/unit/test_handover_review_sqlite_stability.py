@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import BackgroundTasks
@@ -68,7 +69,7 @@ def test_handover_review_save_returns_ok_when_enqueue_excel_sync_fails(monkeypat
         def ensure_document_for_session(self, _session):
             return None
 
-        def save_document(self, *, session, document, base_revision, dirty_regions):
+        def save_document(self, *, session, document, base_revision, dirty_regions, ensure_ready=True):
             return (
                 {"session_id": session["session_id"], "revision": base_revision + 1, "document": document},
                 {"session_id": session["session_id"], "revision": base_revision},
@@ -102,8 +103,8 @@ def test_handover_review_save_returns_ok_when_enqueue_excel_sync_fails(monkeypat
     )
     monkeypatch.setattr(
         routes,
-        "_sync_capacity_overlay_after_review_save",
-        lambda *, saved_session, **_kwargs: saved_session,
+        "_queue_capacity_overlay_after_review_save",
+        lambda *, saved_session, **_kwargs: (saved_session, False),
     )
     monkeypatch.setattr(routes, "_build_history_payload_safe", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(routes, "_get_session_concurrency_safe", lambda *_args, **_kwargs: {})
@@ -124,3 +125,41 @@ def test_handover_review_save_returns_ok_when_enqueue_excel_sync_fails(monkeypat
     assert payload["session"]["excel_sync"]["status"] == "failed"
     assert "后台Excel同步排队失败" in payload["session"]["excel_sync"]["error"]
     assert payload["save_profile"]["queued_excel_sync"] is False
+
+
+def test_load_review_document_cached_reuses_latest_snapshot(tmp_path: Path):
+    output_file = tmp_path / "latest.xlsx"
+    output_file.write_text("ok", encoding="utf-8")
+    session = {
+        "session_id": "A楼|2026-04-17|day",
+        "building": "A楼",
+        "revision": 2,
+        "output_file": str(output_file),
+    }
+
+    class _DocumentState(routes.ReviewDocumentStateService):
+        def __init__(self):
+            self.calls = 0
+
+        def load_document(self, session):
+            self.calls += 1
+            return (
+                {"fixed_blocks": [{"cell": "A1", "value": "cached"}], "sections": [], "footer_blocks": []},
+                dict(session),
+            )
+
+        def attach_excel_sync(self, session):
+            payload = dict(session)
+            payload["excel_sync"] = {"status": "synced"}
+            return payload
+
+    document_state = _DocumentState()
+    with routes._REVIEW_DOCUMENT_CACHE_GUARD:
+        routes._REVIEW_DOCUMENT_CACHE.clear()
+
+    first_document, _first_session = routes._load_review_document_cached(document_state, session)
+    second_document, second_session = routes._load_review_document_cached(document_state, session)
+
+    assert document_state.calls == 1
+    assert first_document == second_document
+    assert second_session["excel_sync"]["status"] == "synced"

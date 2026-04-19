@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from requests import HTTPError
 
 from app.modules.updater.service.manifest_client import (
     ManifestClient,
@@ -14,6 +15,8 @@ from app.modules.updater.service import manifest_client as manifest_client_modul
 class _FakeResponse:
     def __init__(self, body: bytes) -> None:
         self._body = body
+        self.status_code = 200
+        self.text = body.decode("utf-8", errors="ignore")
 
     def __enter__(self):
         return self
@@ -62,6 +65,42 @@ def test_download_patch_retries_with_cache_bust_after_sha_mismatch(tmp_path, mon
     assert len(requested_urls) == 2
     assert requested_urls[0] == "https://gitee.com/example/repo/raw/master/updates/patches/QJPT_patch_only.zip"
     assert "_cb=" in requested_urls[1]
+
+
+def test_download_patch_reports_gitee_large_file_forbidden_clearly(tmp_path, monkeypatch) -> None:
+    class _ForbiddenResponse(_FakeResponse):
+        def __init__(self) -> None:
+            super().__init__(b"[session-1] large file require login for access.")
+            self.status_code = 403
+
+        def raise_for_status(self) -> None:
+            raise HTTPError("403 Client Error: Forbidden for url", response=self)
+
+    def fake_get(url: str, timeout: int, stream: bool = False, headers=None):  # noqa: ANN001
+        return _ForbiddenResponse()
+
+    monkeypatch.setattr(manifest_client_module.requests, "get", fake_get)
+    monkeypatch.setattr(manifest_client_module.time, "sleep", lambda _sec: None)
+
+    client = ManifestClient(
+        repo_url="https://gitee.com/example/repo",
+        branch="master",
+        manifest_path="updates/latest_patch.json",
+        retry_count=1,
+    )
+
+    try:
+        client.download_patch(
+            "https://gitee.com/example/repo/raw/master/updates/patches/QJPT_patch_only_p223_r223.zip",
+            tmp_path / "patch.zip",
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+    assert "Gitee 标记为大文件" in message
+    assert "匿名 raw 下载被拒绝" in message
 
 
 def test_shared_mirror_pending_before_publish(tmp_path) -> None:

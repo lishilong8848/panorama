@@ -36,6 +36,8 @@ export function createDashboardJobActions(ctx) {
     selectedJobId,
     selectedBridgeTaskId,
     bridgeTaskDetail,
+    applyJobPanelSummary,
+    patchJobPanelActionState,
     config,
     selectedDates,
     manualBuilding,
@@ -59,6 +61,8 @@ export function createDashboardJobActions(ctx) {
     fetchJobs,
     fetchBridgeTasks,
     fetchBridgeTaskDetail,
+    scheduleExternalDashboardRefresh,
+    fetchExternalDashboardSummary,
     syncHandoverDutyFromNow,
     runSingleFlight,
   } = ctx;
@@ -69,9 +73,24 @@ export function createDashboardJobActions(ctx) {
 
   async function guardedRun(actionKey, taskFn, options = {}) {
     if (typeof runSingleFlight === "function") {
-      return runSingleFlight(actionKey, taskFn, options);
+      return runSingleFlight(actionKey, taskFn, {
+        ...options,
+        onCooldown: () => {
+          message.value = "请求处理中，请稍候";
+        },
+      });
     }
     return taskFn();
+  }
+
+  function triggerDashboardRefresh(reason = "job_action") {
+    if (typeof scheduleExternalDashboardRefresh === "function") {
+      scheduleExternalDashboardRefresh(reason);
+      return;
+    }
+    if (typeof fetchExternalDashboardSummary === "function") {
+      void fetchExternalDashboardSummary({ silentMessage: true });
+    }
   }
 
   async function startJobByJson(url, body, title, actionKey) {
@@ -219,26 +238,45 @@ export function createDashboardJobActions(ctx) {
     return `job:retry:${String(jobId || "").trim()}`;
   }
 
-  async function cancelCurrentJob() {
-    const jobId = String(currentJob.value?.job_id || selectedJobId?.value || "").trim();
+  async function cancelCurrentJob(targetJobId = "") {
+    const jobId = String(targetJobId || currentJob.value?.job_id || selectedJobId?.value || "").trim();
     if (!jobId) {
-      message.value = "当前没有可取消的任务";
+      message.value = "等待后端返回任务动作能力";
       return;
     }
     return guardedRun(
       getJobCancelActionKey(jobId),
       async () => {
         try {
-          await cancelJobApi(jobId);
-          await fetchJob(jobId);
-          if (typeof fetchJobs === "function") {
-            await fetchJobs({ silentMessage: true });
+          if (typeof patchJobPanelActionState === "function") {
+            patchJobPanelActionState(jobId, "cancel", {
+              allowed: false,
+              pending: true,
+              label: "取消中...",
+              disabled_reason: "取消请求已提交",
+            });
           }
-          if (typeof fetchHealth === "function") {
-            await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+          const data = await cancelJobApi(jobId);
+          if (data?.job && typeof data.job === "object" && currentJob?.value) {
+            const currentSelectedJobId = String(selectedJobId?.value || currentJob.value?.job_id || "").trim();
+            if (!currentSelectedJobId || currentSelectedJobId === jobId) {
+              currentJob.value = { ...(currentJob.value || {}), ...data.job };
+            }
+          }
+          let summaryApplied = false;
+          if (typeof applyJobPanelSummary === "function" && data?.job_panel_summary && typeof data.job_panel_summary === "object") {
+            applyJobPanelSummary(data.job_panel_summary);
+            summaryApplied = true;
+          }
+          triggerDashboardRefresh("job_cancel");
+          if (!summaryApplied && typeof fetchJobs === "function") {
+            void fetchJobs({ silentMessage: true });
           }
           message.value = "任务取消请求已提交";
         } catch (err) {
+          if (typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
           message.value = `任务取消失败: ${err}`;
         }
       },
@@ -291,6 +329,7 @@ export function createDashboardJobActions(ctx) {
     if (typeof fetchJobs === "function") {
       await fetchJobs({ silentMessage: true });
     }
+    triggerDashboardRefresh("job_accepted");
     if (isWaitingSharedBridge) {
       message.value = `${title} 已进入等待内网补采同步，共享文件到位后会自动继续`;
     }
@@ -299,24 +338,42 @@ export function createDashboardJobActions(ctx) {
   async function retryCurrentJob() {
     const jobId = String(currentJob.value?.job_id || selectedJobId?.value || "").trim();
     if (!jobId) {
-      message.value = "当前没有可重试的任务";
+      message.value = "等待后端返回任务动作能力";
       return;
     }
     return guardedRun(
       getJobRetryActionKey(jobId),
       async () => {
         try {
+          if (typeof patchJobPanelActionState === "function") {
+            patchJobPanelActionState(jobId, "retry", {
+              allowed: false,
+              pending: true,
+              label: "重试中...",
+              disabled_reason: "重试请求已提交",
+            });
+          }
           message.value = "任务重试已提交";
-          const job = await retryJobApi(jobId);
+          const response = await retryJobApi(jobId);
+          const job = response?.job && typeof response.job === "object" ? response.job : response;
           currentJob.value = job;
           if (selectedJobId) {
             selectedJobId.value = String(job?.job_id || "").trim();
           }
           streamController.attachJobStream(job.job_id);
+          let summaryApplied = false;
+          if (typeof applyJobPanelSummary === "function" && response?.job_panel_summary && typeof response.job_panel_summary === "object") {
+            applyJobPanelSummary(response.job_panel_summary);
+            summaryApplied = true;
+          }
+          if (!summaryApplied && typeof fetchJobs === "function") {
+            await fetchJobs({ silentMessage: true });
+          }
+          triggerDashboardRefresh("job_retry");
+        } catch (err) {
           if (typeof fetchJobs === "function") {
             await fetchJobs({ silentMessage: true });
           }
-        } catch (err) {
           message.value = `任务重试失败: ${err}`;
         }
       },

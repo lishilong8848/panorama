@@ -53,9 +53,11 @@ class InternalDownloadBrowserPool:
         runtime_config: Dict[str, Any],
         *,
         emit_log: Callable[[str], None] | None = None,
+        request_runtime_status_refresh: Callable[[str], None] | None = None,
     ) -> None:
         self.runtime_config = copy.deepcopy(runtime_config if isinstance(runtime_config, dict) else {})
         self.emit_log = emit_log
+        self._request_runtime_status_refresh = request_runtime_status_refresh
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready_event = threading.Event()
@@ -64,7 +66,9 @@ class InternalDownloadBrowserPool:
         self._browser_slots: Dict[str, Dict[str, Any]] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
         self._recovery_probe_task: asyncio.Task[Any] | None = None
+        self._prelogin_tasks: set[asyncio.Task[Any]] = set()
         self._state_lock = threading.Lock()
+        self._stopping = False
         self._last_error = ""
         self._slot_state: Dict[str, Dict[str, Any]] = {
             building: {
@@ -125,9 +129,35 @@ class InternalDownloadBrowserPool:
         return launch_kwargs
 
     def _update_slot(self, building: str, **changes: Any) -> None:
+        watched_keys = {
+            "browser_ready",
+            "page_ready",
+            "login_state",
+            "last_login_at",
+            "login_error",
+            "in_use",
+            "last_used_at",
+            "last_result",
+            "last_error",
+            "suspended",
+            "suspend_reason",
+            "failure_kind",
+            "recovery_attempts",
+            "next_probe_at",
+            "pending_issue_summary",
+        }
+        changed = False
         with self._state_lock:
             slot = self._slot_state.setdefault(building, {"building": building})
+            before = {key: slot.get(key) for key in watched_keys}
             slot.update(changes)
+            after = {key: slot.get(key) for key in watched_keys}
+            changed = before != after
+        if changed and callable(self._request_runtime_status_refresh):
+            try:
+                self._request_runtime_status_refresh(f"internal_download_pool_slot:{building}")
+            except Exception:
+                pass
 
     def _slot_login_state(self, building: str) -> str:
         with self._state_lock:
@@ -336,6 +366,7 @@ class InternalDownloadBrowserPool:
                 login_error="",
                 last_error="",
                 last_login_at=_now_text(),
+                last_result="ready",
             )
             return
         reason = self._format_login_error(slot.get("login_error") or slot.get("last_error"))
@@ -487,10 +518,13 @@ class InternalDownloadBrowserPool:
 
         self._update_slot(
             building,
+            browser_ready=True,
+            page_ready=True,
             login_state="ready",
             login_error="",
             last_error="",
             last_login_at=_now_text(),
+            last_result="ready",
         )
         self._clear_issue_state(building)
         if login_visible:
@@ -654,23 +688,43 @@ class InternalDownloadBrowserPool:
             return
 
     async def _async_prelogin_building(self, building: str) -> None:
+        if self._stopping:
+            return
         lock = self._locks.get(building)
         if lock is None:
             return
-        async with lock:
-            page = await self._ensure_page(building)
-            try:
-                await self._ensure_logged_in(building, page)
-            except Exception as exc:  # noqa: BLE001
-                failure_kind = self._classify_failure_kind(exc, login_state=self._slot_login_state(building))
-                if failure_kind != "unknown":
-                    await self._attempt_building_recovery(
-                        building,
-                        base_reason=str(exc),
-                        failure_kind=failure_kind or "browser_issue",
-                        from_probe=False,
-                    )
-                return
+        try:
+            async with lock:
+                if self._stopping:
+                    return
+                page = await self._ensure_page(building)
+                try:
+                    await self._ensure_logged_in(building, page)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    if self._stopping:
+                        return
+                    failure_kind = self._classify_failure_kind(exc, login_state=self._slot_login_state(building))
+                    if failure_kind != "unknown":
+                        await self._attempt_building_recovery(
+                            building,
+                            base_reason=str(exc),
+                            failure_kind=failure_kind or "browser_issue",
+                            from_probe=False,
+                        )
+                    return
+        except asyncio.CancelledError:
+            return
+
+    def _track_async_task(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+        self._prelogin_tasks.add(task)
+
+        def _discard(done_task: asyncio.Task[Any]) -> None:
+            self._prelogin_tasks.discard(done_task)
+
+        task.add_done_callback(_discard)
+        return task
 
     async def _close_slot(self, building: str) -> None:
         slot = self._browser_slots.pop(building, None)
@@ -809,6 +863,7 @@ class InternalDownloadBrowserPool:
         return request_context, base_url
 
     async def _async_start(self) -> None:
+        self._stopping = False
         configure_playwright_environment(self.runtime_config)
         self._playwright = await async_playwright().start()
         self._locks = {building: asyncio.Lock() for building in self.BUILDINGS}
@@ -817,6 +872,7 @@ class InternalDownloadBrowserPool:
         self._recovery_probe_task = asyncio.create_task(self._async_recovery_probe_loop())
 
     async def _async_stop(self) -> None:
+        self._stopping = True
         if self._recovery_probe_task is not None:
             self._recovery_probe_task.cancel()
             try:
@@ -824,6 +880,15 @@ class InternalDownloadBrowserPool:
             except Exception:
                 pass
             self._recovery_probe_task = None
+        pending_prelogin_tasks = list(self._prelogin_tasks)
+        for task in pending_prelogin_tasks:
+            task.cancel()
+        if pending_prelogin_tasks:
+            try:
+                await asyncio.gather(*pending_prelogin_tasks, return_exceptions=True)
+            except Exception:
+                pass
+        self._prelogin_tasks.clear()
         for building in list(self.BUILDINGS):
             await self._close_slot(building)
         self._browser_slots.clear()
@@ -854,7 +919,7 @@ class InternalDownloadBrowserPool:
             return
         self._ready_event.set()
         for building in self.BUILDINGS:
-            loop.create_task(self._async_prelogin_building(building))
+            self._track_async_task(loop.create_task(self._async_prelogin_building(building)))
         try:
             loop.run_forever()
         finally:
@@ -891,6 +956,7 @@ class InternalDownloadBrowserPool:
         thread = self._thread
         if loop is None or thread is None:
             return {"stopped": False, "running": False, "reason": "not_running"}
+        self._stopping = True
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=10)
         self._thread = None

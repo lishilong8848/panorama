@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -85,6 +86,33 @@ class _FakeReviewFollowupTriggerService:
 
     def get_followup_progress(self, _batch_key: str):
         return routes._empty_followup_progress()
+
+
+class _ExplodingWetBulbCollectionService:
+    def __init__(self, _runtime_cfg):
+        pass
+
+    def build_target_descriptor(self, force_refresh=False):
+        _ = force_refresh
+        raise AssertionError("external health cold path should not block on wet bulb target preview")
+
+
+class _ExplodingDayMetricBitableExportService:
+    def __init__(self, _cfg):
+        pass
+
+    def build_target_descriptor(self, force_refresh=False):
+        _ = force_refresh
+        raise AssertionError("external health cold path should not block on day metric target preview")
+
+
+class _ExplodingSharedSourceCacheService:
+    def __init__(self, *, runtime_config, store, download_browser_pool=None, emit_log=None):
+        _ = runtime_config, store, download_browser_pool, emit_log
+
+    def get_alarm_event_upload_target_preview(self, force_refresh=False):
+        _ = force_refresh
+        raise AssertionError("external health cold path should not block on alarm target preview")
 
 
 def test_external_health_hides_internal_download_pool_but_keeps_shared_file_readiness_and_alert_projection(monkeypatch, tmp_path):
@@ -198,7 +226,50 @@ def test_external_health_hides_internal_download_pool_but_keeps_shared_file_read
         system_log_next_offset=lambda: 0,
     )
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(container=container)),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                container=container,
+                _health_component_cache={
+                    "target_preview:day_metric": {
+                        "ts": 0.0,
+                        "value": _FakeDayMetricBitableExportService({}).build_target_descriptor(),
+                        "ready": True,
+                        "refreshing": False,
+                    },
+                    "target_preview:alarm_event": {
+                        "ts": 0.0,
+                        "value": _FakeSharedSourceCacheService(runtime_config={}, store=None).get_alarm_event_upload_target_preview(),
+                        "ready": True,
+                        "refreshing": False,
+                    },
+                    "target_preview:engineer_directory": {
+                        "ts": 0.0,
+                        "value": {},
+                        "ready": True,
+                        "refreshing": False,
+                    },
+                    "target_preview:wet_bulb": {
+                        "ts": 0.0,
+                        "value": {},
+                        "ready": True,
+                        "refreshing": False,
+                    },
+                    "handover_review_access::": {
+                        "ts": 0.0,
+                        "value": routes._empty_handover_review_access(),
+                        "ready": True,
+                        "refreshing": False,
+                    },
+                    "shared_root_diagnostic:external": {
+                        "ts": 0.0,
+                        "value": container.shared_root_diagnostic_snapshot(),
+                        "ready": True,
+                        "refreshing": False,
+                    },
+                },
+                _health_component_cache_lock=threading.Lock(),
+            )
+        ),
         url=SimpleNamespace(hostname='127.0.0.1', port=18765),
     )
 
@@ -224,3 +295,97 @@ def test_external_health_hides_internal_download_pool_but_keeps_shared_file_read
     assert payload['day_metric_upload']['target_preview']['display_url'].startswith('https://vnet.feishu.cn/wiki/')
     assert payload['alarm_event_upload']['target_preview']['target_kind'] == 'wiki_token_pair'
     assert payload['alarm_event_upload']['target_preview']['display_url'].startswith('https://vnet.feishu.cn/wiki/')
+
+
+def test_external_health_cold_path_returns_ok_with_empty_optional_previews(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes, 'get_app_dir', lambda: tmp_path)
+    monkeypatch.setattr(routes, 'WetBulbCollectionService', _ExplodingWetBulbCollectionService)
+    monkeypatch.setattr(routes, 'DayMetricBitableExportService', _ExplodingDayMetricBitableExportService)
+    monkeypatch.setattr(routes, 'SharedSourceCacheService', _ExplodingSharedSourceCacheService)
+    monkeypatch.setattr(routes, 'EventFollowupCacheStore', _FakeEventFollowupCacheStore)
+    monkeypatch.setattr(routes, 'load_handover_config', lambda _cfg: {})
+    monkeypatch.setattr(routes, 'ReviewSessionService', _FakeReviewSessionService)
+    monkeypatch.setattr(routes, 'ReviewFollowupTriggerService', _FakeReviewFollowupTriggerService)
+    monkeypatch.setattr(routes, '_build_handover_review_access', lambda *_args, **_kwargs: routes._empty_handover_review_access())
+
+    container = SimpleNamespace(
+        version='web-3.0.0',
+        config={'version': 3},
+        config_path=tmp_path / 'config.json',
+        runtime_config={
+            'paths': {'runtime_state_root': str(tmp_path / '.runtime')},
+            'scheduler': {},
+            'download': {'resume': {}},
+            'handover_log': {'template': {}, 'event_sections': {'cache': {'state_file': 'handover_cache.json'}}},
+            'network': {},
+            'wet_bulb_collection': {},
+            'shared_bridge': {},
+        },
+        scheduler=None,
+        frontend_mode='source',
+        frontend_root=str(tmp_path / 'frontend'),
+        frontend_assets_dir=str(tmp_path / 'frontend'),
+        wifi_service=None,
+        job_service=SimpleNamespace(
+            active_job_id=lambda: '',
+            active_job_ids=lambda include_waiting=True: [],
+            job_counts=lambda: {'queued': 0, 'running': 0, 'finished': 0, 'failed': 0},
+        ),
+        updater_snapshot=lambda: {},
+        handover_scheduler_status=lambda: {'enabled': False, 'running': False, 'status': '未初始化', 'slots': {}, 'state_paths': {}},
+        wet_bulb_collection_scheduler_status=lambda: {
+            'enabled': False,
+            'running': False,
+            'status': '未初始化',
+            'next_run_time': '',
+            'last_check_at': '',
+            'last_decision': '',
+            'last_trigger_at': '',
+            'last_trigger_result': '',
+            'state_path': '',
+            'state_exists': False,
+        },
+        scheduler_executor_name=lambda: '-',
+        is_scheduler_executor_bound=lambda: False,
+        handover_scheduler_executor_name=lambda: '-',
+        is_handover_scheduler_executor_bound=lambda: False,
+        wet_bulb_collection_scheduler_executor_name=lambda: '-',
+        is_wet_bulb_collection_scheduler_executor_bound=lambda: False,
+        deployment_snapshot=lambda: {'role_mode': 'external', 'node_id': 'external-node', 'node_label': '外网端'},
+        shared_root_diagnostic_snapshot=lambda **_kwargs: {},
+        shared_bridge_snapshot=lambda mode='external_full': {
+            'enabled': True,
+            'role_mode': 'external',
+            'root_dir': 'Z:/share',
+            'internal_download_pool': {
+                'enabled': True,
+                'browser_ready': True,
+                'page_slots': [{'building': 'A楼', 'login_state': 'ready'}],
+                'active_buildings': ['A楼'],
+                'last_error': '',
+            },
+            'internal_source_cache': {},
+            'internal_alert_status': {},
+        },
+        system_logs=[],
+        get_system_log_entries=lambda **_kwargs: [],
+        system_log_next_offset=lambda: 0,
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                container=container,
+                _health_component_cache={},
+                _health_component_cache_lock=threading.Lock(),
+            )
+        ),
+        url=SimpleNamespace(hostname='127.0.0.1', port=18765),
+    )
+
+    payload = routes.health(request)
+
+    assert payload['ok'] is True
+    assert payload['wet_bulb_collection']['target_preview'] == {}
+    assert payload['day_metric_upload']['target_preview'] == {}
+    assert payload['alarm_event_upload']['target_preview'] == {}
+    assert payload['handover']['review_links'] == []

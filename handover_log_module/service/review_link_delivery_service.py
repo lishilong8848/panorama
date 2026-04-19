@@ -116,6 +116,8 @@ class ReviewLinkDeliveryService:
         recipients: List[Dict[str, str]] = []
         seen_open_ids: set[str] = set()
         invalid_count = 0
+        enabled_count = 0
+        disabled_count = 0
         normalized_items = raw_items if isinstance(raw_items, list) else []
         for raw in normalized_items:
             if not isinstance(raw, dict):
@@ -127,10 +129,18 @@ class ReviewLinkDeliveryService:
                 invalid_count += 1
                 continue
             seen_open_ids.add(open_id)
-            recipients.append({"open_id": open_id, "note": note})
+            enabled = raw.get("enabled", True)
+            enabled_bool = enabled if isinstance(enabled, bool) else True
+            if enabled_bool:
+                enabled_count += 1
+                recipients.append({"open_id": open_id, "note": note, "enabled": True})
+            else:
+                disabled_count += 1
         return {
             "raw_count": len(normalized_items),
             "invalid_count": invalid_count,
+            "enabled_count": enabled_count,
+            "disabled_count": disabled_count,
             "recipients": recipients,
             "open_ids": [item["open_id"] for item in recipients],
         }
@@ -144,6 +154,8 @@ class ReviewLinkDeliveryService:
                 "updated_at": "",
                 "raw_count": 0,
                 "invalid_count": 0,
+                "enabled_count": 0,
+                "disabled_count": 0,
                 "recipients": [],
                 "open_ids": [],
                 "source": "empty",
@@ -200,12 +212,20 @@ class ReviewLinkDeliveryService:
             recipient_count = len(snapshot.get("recipients", []))
             raw_count = int(snapshot.get("raw_count", 0) or 0)
             invalid_count = int(snapshot.get("invalid_count", 0) or 0)
+            enabled_count = int(snapshot.get("enabled_count", 0) or 0)
+            disabled_count = int(snapshot.get("disabled_count", 0) or 0)
             if recipient_count > 0:
                 status_text = "已保存，可发送"
                 reason = ""
+            elif raw_count > 0 and disabled_count > 0 and invalid_count == 0:
+                status_text = "已配置但全部停用"
+                reason = "当前楼审核链接接收人均未启用"
             elif raw_count > 0 and invalid_count >= raw_count:
                 status_text = "当前楼未配置接收人"
                 reason = "当前楼审核链接接收人无有效 open_id"
+            elif raw_count > 0 and disabled_count > 0:
+                status_text = "已配置但无启用接收人"
+                reason = "当前楼无启用接收人，且存在无效接收人配置"
             else:
                 status_text = "当前楼未配置接收人"
                 reason = "当前楼未配置审核链接接收人"
@@ -217,6 +237,8 @@ class ReviewLinkDeliveryService:
                     "recipient_count": recipient_count,
                     "raw_count": raw_count,
                     "invalid_count": invalid_count,
+                    "enabled_count": enabled_count,
+                    "disabled_count": disabled_count,
                     "open_ids": [
                         str(item or "").strip()
                         for item in snapshot.get("open_ids", [])
@@ -428,6 +450,8 @@ class ReviewLinkDeliveryService:
             "[交接班][审核链接发送] 开始发送 "
             f"building={building}, session_id={session_id}, revision={int(recipient_snapshot.get('revision', 0) or 0)}, "
             f"recipients={len(recipients)}, raw={int(recipient_snapshot.get('raw_count', 0) or 0)}, "
+            f"enabled={int(recipient_snapshot.get('enabled_count', 0) or 0)}, "
+            f"disabled={int(recipient_snapshot.get('disabled_count', 0) or 0)}, "
             f"invalid={int(recipient_snapshot.get('invalid_count', 0) or 0)}, "
             f"open_ids={recipient_snapshot.get('open_ids', [])}, access_ready={bool(url)}, source={source_text}, "
             f"recipient_source={str(recipient_snapshot.get('source', '') or '').strip() or 'unknown'}"
@@ -435,14 +459,19 @@ class ReviewLinkDeliveryService:
         if not recipients:
             raw_count = int(recipient_snapshot.get("raw_count", 0) or 0)
             invalid_count = int(recipient_snapshot.get("invalid_count", 0) or 0)
+            disabled_count = int(recipient_snapshot.get("disabled_count", 0) or 0)
             reason = (
-                "当前楼审核链接接收人无有效 open_id"
-                if raw_count > 0 and invalid_count >= raw_count
-                else "当前楼未配置审核链接接收人"
+                "当前楼审核链接接收人均未启用"
+                if raw_count > 0 and disabled_count > 0 and invalid_count == 0
+                else (
+                    "当前楼审核链接接收人无有效 open_id"
+                    if raw_count > 0 and invalid_count >= raw_count
+                    else "当前楼未配置审核链接接收人"
+                )
             )
             next_state = {
                 **delivery_state,
-                "status": "unconfigured",
+                "status": "disabled" if "未启用" in reason else "unconfigured",
                 "error": reason,
                 "source": source_text,
             }
@@ -657,6 +686,9 @@ class ReviewLinkDeliveryService:
         if not recipients:
             raw_count = int(recipient_snapshot.get("raw_count", 0) or 0)
             invalid_count = int(recipient_snapshot.get("invalid_count", 0) or 0)
+            disabled_count = int(recipient_snapshot.get("disabled_count", 0) or 0)
+            if raw_count > 0 and disabled_count > 0 and invalid_count == 0:
+                raise ValueError("当前楼审核链接接收人均未启用")
             if raw_count > 0 and invalid_count >= raw_count:
                 raise ValueError("当前楼审核链接接收人无有效 open_id")
             raise ValueError("当前楼未配置审核链接接收人")
@@ -677,6 +709,8 @@ class ReviewLinkDeliveryService:
             "[交接班][审核链接发送测试] 开始发送 "
             f"building={building_text}, batch={batch_key_text or '-'}, revision={int(recipient_snapshot.get('revision', 0) or 0)}, "
             f"recipients={len(recipients)}, raw={int(recipient_snapshot.get('raw_count', 0) or 0)}, "
+            f"enabled={int(recipient_snapshot.get('enabled_count', 0) or 0)}, "
+            f"disabled={int(recipient_snapshot.get('disabled_count', 0) or 0)}, "
             f"invalid={int(recipient_snapshot.get('invalid_count', 0) or 0)}, "
             f"open_ids={recipient_snapshot.get('open_ids', [])}, access_ready={bool(url)}, "
             f"recipient_source={str(recipient_snapshot.get('source', '') or '').strip() or 'unknown'}"
@@ -760,6 +794,9 @@ class ReviewLinkDeliveryService:
             if not recipients:
                 raw_count = int(recipient_snapshot.get("raw_count", 0) or 0)
                 invalid_count = int(recipient_snapshot.get("invalid_count", 0) or 0)
+                disabled_count = int(recipient_snapshot.get("disabled_count", 0) or 0)
+                if raw_count > 0 and disabled_count > 0 and invalid_count == 0:
+                    raise ValueError("当前楼审核链接接收人均未启用")
                 if raw_count > 0 and invalid_count >= raw_count:
                     raise ValueError("当前楼审核链接接收人无有效 open_id")
                 raise ValueError("当前楼未配置审核链接接收人")

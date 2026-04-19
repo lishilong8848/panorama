@@ -10,6 +10,8 @@ import warnings
 import webbrowser
 from pathlib import Path
 
+from pipeline_utils import is_release_code_dir
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -195,6 +197,8 @@ def _should_disable_updater_for_source_run() -> bool:
     if getattr(sys, "frozen", False):
         return False
     if str(os.environ.get(_PORTABLE_LAUNCHER_ENV, "") or "").strip():
+        return False
+    if is_release_code_dir(PROJECT_ROOT):
         return False
     return True
 

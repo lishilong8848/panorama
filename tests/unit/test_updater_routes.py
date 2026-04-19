@@ -62,6 +62,16 @@ class _FakeContainer:
             "last_error": "",
             "local_version": "",
             "remote_version": "",
+            "update_mode": "git_pull",
+            "app_root_dir": r"D:\QJPT_V3",
+            "persistent_user_data_dir": r"D:\QJPT_V3\user_data",
+            "git_available": True,
+            "git_repo_detected": True,
+            "branch": "master",
+            "local_commit": "1111111222222333333",
+            "remote_commit": "9999999aaaaaaa",
+            "worktree_dirty": False,
+            "dirty_files": [],
             "source_kind": "shared_mirror",
             "source_label": "共享目录更新源",
             "local_release_revision": 0,
@@ -130,6 +140,9 @@ def test_updater_status_exposes_source_and_mirror_fields() -> None:
     runtime = payload["runtime"]
     assert runtime["source_kind"] == "shared_mirror"
     assert runtime["source_label"] == "共享目录更新源"
+    assert runtime["update_mode"] == "git_pull"
+    assert runtime["branch"] == "master"
+    assert runtime["git_available"] is True
     assert runtime["mirror_ready"] is True
     assert runtime["mirror_version"] == "V3.61.20260328"
     assert runtime["internal_peer"]["available"] is True

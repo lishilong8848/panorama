@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 from pathlib import Path
 
 import pytest
 
+from app.config import settings_loader
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3
 from app.config.handover_segment_store import (
     handover_building_segment_path,
@@ -145,6 +147,56 @@ def test_save_settings_preserves_segment_backed_handover_values(tmp_path: Path) 
     assert saved["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-段配置真值"
 
 
+def test_save_settings_does_not_rewrite_existing_user_filled_values(tmp_path: Path) -> None:
+    config_path = tmp_path / "表格计算配置.json"
+    payload = copy.deepcopy(DEFAULT_CONFIG_V3)
+    payload["common"]["paths"]["business_root_dir"] = r"D:\用户业务目录"
+    template = payload["features"]["handover_log"]["template"]
+    template["apply_building_title"] = False
+    template["title_cell"] = "C3"
+    template["building_title_pattern"] = "用户自定义标题"
+    template["building_title_map"] = {
+        "A楼": "A楼自定义标题",
+        "B楼": "B楼自定义标题",
+    }
+    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8-sig")
+
+    saved = save_settings(copy.deepcopy(payload), config_path)
+
+    assert saved["common"]["paths"]["business_root_dir"] == r"D:\用户业务目录"
+    assert saved["features"]["handover_log"]["template"]["title_cell"] == "C3"
+    assert saved["features"]["handover_log"]["template"]["building_title_pattern"] == "用户自定义标题"
+    assert saved["features"]["handover_log"]["template"]["building_title_map"]["A楼"] == "A楼自定义标题"
+
+
+def test_save_handover_segment_refresh_does_not_rewrite_unrelated_config_values(tmp_path: Path) -> None:
+    config_path = tmp_path / "表格计算配置.json"
+    payload = copy.deepcopy(DEFAULT_CONFIG_V3)
+    payload["common"]["paths"]["business_root_dir"] = r"D:\用户业务目录"
+    payload["features"]["handover_log"]["template"]["title_cell"] = "C3"
+    payload["features"]["handover_log"]["template"]["building_title_pattern"] = "用户自定义标题"
+    payload["features"]["handover_log"]["template"]["building_title_map"] = {"A楼": "A楼自定义标题"}
+    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8-sig")
+
+    load_settings(config_path)
+    a_doc = get_handover_building_segment("A", config_path)
+    a_payload = copy.deepcopy(a_doc["data"])
+    a_payload["cloud_sheet_sync"]["sheet_names"]["A楼"] = "A楼-分段保存后新值"
+
+    save_handover_building_segment(
+        "A",
+        a_payload,
+        base_revision=a_doc["revision"],
+        config_path=config_path,
+    )
+
+    saved = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    assert saved["common"]["paths"]["business_root_dir"] == r"D:\用户业务目录"
+    assert saved["features"]["handover_log"]["template"]["title_cell"] == "C3"
+    assert saved["features"]["handover_log"]["template"]["building_title_pattern"] == "用户自定义标题"
+    assert saved["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-分段保存后新值"
+
+
 def test_load_settings_prefers_segment_truth_after_root_config_is_stale(tmp_path: Path) -> None:
     config_path = tmp_path / "表格计算配置.json"
     _write_default_config(config_path)
@@ -167,3 +219,113 @@ def test_load_settings_prefers_segment_truth_after_root_config_is_stale(tmp_path
     reloaded = load_settings(config_path)
 
     assert reloaded["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-分段真值"
+
+
+def test_save_handover_building_segments_can_commit_concurrently(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "表格计算配置.json"
+    _write_default_config(config_path)
+    load_settings(config_path)
+
+    a_doc = get_handover_building_segment("A", config_path)
+    b_doc = get_handover_building_segment("B", config_path)
+    a_payload = copy.deepcopy(a_doc["data"])
+    b_payload = copy.deepcopy(b_doc["data"])
+    a_payload["cloud_sheet_sync"]["sheet_names"]["A楼"] = "A楼-并发保存"
+    b_payload["cloud_sheet_sync"]["sheet_names"]["B楼"] = "B楼-并发保存"
+
+    barrier = threading.Barrier(2, timeout=5)
+    original_refresh = settings_loader._refresh_handover_aggregate_view
+
+    def _refresh_with_barrier(config_path_arg=None):
+        barrier.wait()
+        return original_refresh(config_path_arg)
+
+    monkeypatch.setattr(settings_loader, "_refresh_handover_aggregate_view", _refresh_with_barrier)
+
+    errors: list[BaseException] = []
+
+    def _run_save(building_code: str, payload: dict[str, object], revision: int) -> None:
+        try:
+            save_handover_building_segment(
+                building_code,
+                payload,
+                base_revision=revision,
+                config_path=config_path,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread_a = threading.Thread(target=_run_save, args=("A", a_payload, a_doc["revision"]), daemon=True)
+    thread_b = threading.Thread(target=_run_save, args=("B", b_payload, b_doc["revision"]), daemon=True)
+    thread_a.start()
+    thread_b.start()
+    thread_a.join(timeout=10)
+    thread_b.join(timeout=10)
+
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+    assert not errors
+
+    reloaded = load_settings(config_path)
+    assert reloaded["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-并发保存"
+    assert reloaded["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["B楼"] == "B楼-并发保存"
+
+
+def test_save_handover_common_and_building_segments_can_commit_concurrently(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "表格计算配置.json"
+    _write_default_config(config_path)
+    load_settings(config_path)
+
+    common_doc = get_handover_common_segment(config_path)
+    b_doc = get_handover_building_segment("B", config_path)
+    common_payload = copy.deepcopy(common_doc["data"])
+    b_payload = copy.deepcopy(b_doc["data"])
+    common_payload["cloud_sheet_sync"]["root_wiki_url"] = "https://example.com/wiki/concurrent-common"
+    b_payload["cloud_sheet_sync"]["sheet_names"]["B楼"] = "B楼-并发保存-common"
+
+    barrier = threading.Barrier(2, timeout=5)
+    original_refresh = settings_loader._refresh_handover_aggregate_view
+
+    def _refresh_with_barrier(config_path_arg=None):
+        barrier.wait()
+        return original_refresh(config_path_arg)
+
+    monkeypatch.setattr(settings_loader, "_refresh_handover_aggregate_view", _refresh_with_barrier)
+
+    errors: list[BaseException] = []
+
+    def _run_common() -> None:
+        try:
+            save_handover_common_segment(
+                common_payload,
+                base_revision=common_doc["revision"],
+                config_path=config_path,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def _run_building() -> None:
+        try:
+            save_handover_building_segment(
+                "B",
+                b_payload,
+                base_revision=b_doc["revision"],
+                config_path=config_path,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread_common = threading.Thread(target=_run_common, daemon=True)
+    thread_b = threading.Thread(target=_run_building, daemon=True)
+    thread_common.start()
+    thread_b.start()
+    thread_common.join(timeout=10)
+    thread_b.join(timeout=10)
+
+    assert not thread_common.is_alive()
+    assert not thread_b.is_alive()
+    assert not errors
+
+    reloaded = load_settings(config_path)
+    assert reloaded["features"]["handover_log"]["cloud_sheet_sync"]["root_wiki_url"] == "https://example.com/wiki/concurrent-common"
+    assert reloaded["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["B楼"] == "B楼-并发保存-common"

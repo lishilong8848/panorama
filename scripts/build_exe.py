@@ -83,6 +83,7 @@ EXCLUDE_TOP_LEVEL = {
     ".git",
     ".idea",
     ".vscode",
+    ".npm-cache",
     "__pycache__",
     ".pytest_cache",
     ".pytest_tmp",
@@ -378,6 +379,22 @@ def _to_raw_url(repo_url: str, branch: str, repo_path: str) -> str:
     return f"{base}/raw/{branch}/{rel}"
 
 
+def _is_config_template_rel(rel: Path) -> bool:
+    rel_text = str(rel).replace("\\", "/")
+    return rel_text == "config/表格计算配置.template.json" or rel.name == "表格计算配置.template.json"
+
+
+def _is_user_config_rel(rel: Path) -> bool:
+    rel_text = str(rel).replace("\\", "/")
+    if rel.name == USER_CONFIG_FILE_NAME:
+        return True
+    if rel.parts and rel.parts[0] == "config_segments":
+        return True
+    if rel.suffix.lower() == ".json" and rel.parts and rel.parts[0] == "config" and not _is_config_template_rel(rel):
+        return True
+    return False
+
+
 def _should_exclude(rel: Path, include_venv: bool, include_runtime: bool = True) -> bool:
     parts = {p for p in rel.parts}
     if parts & EXCLUDE_CONTAINS:
@@ -399,7 +416,7 @@ def _should_exclude(rel: Path, include_venv: bool, include_runtime: bool = True)
         return True
     if rel.suffix.lower() in EXCLUDE_SUFFIX:
         return True
-    if rel.name == USER_CONFIG_FILE_NAME:
+    if _is_user_config_rel(rel):
         return True
     return False
 
@@ -440,6 +457,51 @@ def _copy_project_tree(
     return copied, skipped
 
 
+def _detect_local_repo_branch(repo_dir: Path) -> str:
+    ret = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir)
+    if ret.returncode != 0:
+        return DEFAULT_GITEE_BRANCH
+    branch = str(ret.stdout or "").strip()
+    if not branch or branch == "HEAD":
+        return DEFAULT_GITEE_BRANCH
+    return branch
+
+
+def _detect_local_repo_tracked_dirty(repo_dir: Path) -> bool:
+    ret = _run_cmd(["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo_dir)
+    if ret.returncode != 0:
+        return False
+    return bool(str(ret.stdout or "").strip())
+
+
+def _materialize_git_release_tree(
+    dst_dir: Path,
+    *,
+    repo_url: str,
+    preferred_branch: str,
+) -> tuple[str, str]:
+    source_branch = _detect_local_repo_branch(PROJECT_ROOT)
+    if _detect_local_repo_tracked_dirty(PROJECT_ROOT):
+        log("检测到当前仓库存在已跟踪未提交修改；Git 代码目录将按当前 HEAD 提交构建，不会带入未提交改动。")
+    if dst_dir.exists():
+        shutil.rmtree(dst_dir, ignore_errors=True)
+    clone_ret = _run_cmd(["git", "clone", "--branch", source_branch, str(PROJECT_ROOT), str(dst_dir)])
+    if clone_ret.returncode != 0:
+        raise RuntimeError(f"构建 Git 代码目录失败: {clone_ret.stderr or clone_ret.stdout}")
+    target_branch = str(preferred_branch or "").strip() or source_branch or DEFAULT_GITEE_BRANCH
+    if target_branch != source_branch:
+        checkout_ret = _run_cmd(["git", "checkout", "-B", target_branch], cwd=dst_dir)
+        if checkout_ret.returncode != 0:
+            raise RuntimeError(f"切换发布分支失败: {checkout_ret.stderr or checkout_ret.stdout}")
+    if str(repo_url or "").strip():
+        remote_ret = _run_cmd(["git", "remote", "set-url", "origin", repo_url], cwd=dst_dir)
+        if remote_ret.returncode != 0:
+            raise RuntimeError(f"设置发布仓库地址失败: {remote_ret.stderr or remote_ret.stdout}")
+        _run_cmd(["git", "config", f"branch.{target_branch}.remote", "origin"], cwd=dst_dir)
+        _run_cmd(["git", "config", f"branch.{target_branch}.merge", f"refs/heads/{target_branch}"], cwd=dst_dir)
+    return source_branch, target_branch
+
+
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -471,17 +533,27 @@ def _remove_packaged_runtime_config_artifacts(code_dir: Path) -> list[str]:
     if handover_segments_dir.exists():
         shutil.rmtree(handover_segments_dir, ignore_errors=True)
         removed.append("config_segments/")
+    config_dir = code_dir / "config"
+    if config_dir.exists() and config_dir.is_dir():
+        for path in config_dir.rglob("*.json"):
+            rel = path.relative_to(code_dir)
+            if _is_config_template_rel(rel):
+                continue
+            path.unlink(missing_ok=True)
+            removed.append(str(rel).replace("\\", "/"))
     return removed
 
 
 def _should_exclude_from_patch(rel: Path) -> bool:
     rel_text = str(rel).replace("\\", "/")
-    is_config_template = rel_text == "config/表格计算配置.template.json" or rel.name == "表格计算配置.template.json"
+    is_config_template = _is_config_template_rel(rel)
     if rel_text.startswith(f"{RUNTIME_DIR_NAME}/"):
         return True
-    if rel.parts and rel.parts[0] == "config_segments":
+    if _is_user_config_rel(rel):
         return True
     if rel.parts and str(rel.parts[0]).startswith(".tmp_"):
+        return True
+    if rel.parts and str(rel.parts[0]).strip().lower() in {".npm-cache", "node_modules"}:
         return True
     rel_name = str(rel.name or "").strip().lower()
     if rel_name.startswith(".tmp_"):
@@ -671,6 +743,7 @@ def _write_latest_manifest(
         "target_patch_version": patch_meta.get("target_patch_version", 0),
         "target_release_revision": int(build_meta.get("release_revision", 0) or 0),
         "target_display_version": build_meta.get("display_version", ""),
+        "zip_relpath": patch_repo_rel,
         "zip_url": _to_raw_url(repo_url, branch, patch_repo_rel),
         "zip_sha256": _sha256_file(patch_zip),
         "zip_size": int(patch_zip.stat().st_size),
@@ -893,6 +966,15 @@ def _capture_existing_user_config(source_dir: Path) -> dict[str, bytes]:
                 continue
             rel = path.relative_to(source_dir)
             payload[str(rel).replace("\\", "/")] = path.read_bytes()
+    config_dir = source_dir / "config"
+    if config_dir.exists() and config_dir.is_dir():
+        for path in config_dir.rglob("*.json"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(source_dir)
+            if not _is_user_config_rel(rel):
+                continue
+            payload[str(rel).replace("\\", "/")] = path.read_bytes()
     return payload
 
 
@@ -1009,18 +1091,15 @@ def main() -> None:
     release_root = BUILD_DIR / RELEASE_ROOT_NAME
     release_code_dir = release_root / RELEASE_CODE_DIR_NAME
     patch_dir = BUILD_DIR / PATCH_DIR_NAME
-    removed_runtime_artifacts = _remove_packaged_runtime_config_artifacts(release_code_dir)
-    if removed_runtime_artifacts:
-        log(f"已清理全量目录中的历史运行配置产物: {', '.join(removed_runtime_artifacts)}")
 
     persisted_major, persisted_patch, persisted_release_revision = _pick_persisted_version()
     first_full_build = bool(args.force_full) or not (release_code_dir / "build_meta.json").exists()
 
     if first_full_build:
-        copied_count, skipped_count = _copy_project_tree(
+        source_branch, target_branch = _materialize_git_release_tree(
             release_code_dir,
-            include_venv=include_venv_in_full,
-            clean_before_copy=True,
+            repo_url=args.gitee_repo,
+            preferred_branch=args.gitee_branch,
         )
         _prepare_embedded_runtime(release_code_dir, embed_python_version)
         _ensure_release_tree_imports(release_code_dir)
@@ -1058,9 +1137,10 @@ def main() -> None:
         code_launcher = _write_code_launcher(release_code_dir)
         log(
             "首次构建完成（全量便携目录）: "
-            f"root={release_root}, code={release_code_dir}, launcher={launcher.name}, code_launcher={code_launcher.name}, files={copied_count}, "
-            f"skipped={skipped_count}, version={build_meta.get('display_version')}, mode={package_mode}, "
-            "packaged_config=excluded"
+            f"root={release_root}, code={release_code_dir}, launcher={launcher.name}, code_launcher={code_launcher.name}, "
+            f"git_source_branch={source_branch}, git_target_branch={target_branch}, "
+            f"version={build_meta.get('display_version')}, mode={package_mode}, "
+            "packaged_code_dir=git_worktree"
         )
         log("当前未生成补丁；后续再次执行 build_exe.py 将只生成 patch_only 并上传。")
         return
@@ -1091,14 +1171,16 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="qjpt_stage_") as td:
         stage_root = Path(td)
         stage_code_dir = stage_root / RELEASE_CODE_DIR_NAME
-        copied_count, skipped_count = _copy_project_tree(
+        source_branch, target_branch = _materialize_git_release_tree(
             stage_code_dir,
-            include_venv=bool(args.patch_include_venv),
-            clean_before_copy=True,
+            repo_url=args.gitee_repo,
+            preferred_branch=args.gitee_branch,
         )
-        _remove_packaged_runtime_config_artifacts(stage_code_dir)
         _write_code_launcher(stage_code_dir)
-        log(f"代码快照完成: {stage_code_dir} (files={copied_count}, skipped={skipped_count})")
+        log(
+            f"代码快照完成: {stage_code_dir} "
+            f"(git_source_branch={source_branch}, git_target_branch={target_branch})"
+        )
 
         dependency_lock = _write_runtime_dependency_lock(
             stage_code_dir,

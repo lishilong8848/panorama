@@ -105,6 +105,8 @@ def test_run_from_existing_files_prefetches_context_once_and_passes_grouped_resu
             duty_shift=duty_shift,
             target_buildings=list(buildings),
             roster_assignments={"A楼": {"leader": "张三"}, "B楼": {"leader": "李四"}},  # type: ignore[arg-type]
+            long_day_values_by_building={"A楼": {"B4": "长白岗：张三"}, "B楼": {"B4": "长白岗：李四"}},
+            engineer_directory_records=[{"building": "A楼", "specialty": "电气", "supervisor": "汪根尚"}],
             event_query_by_building={"A楼": {"current_rows": []}, "B楼": {"current_rows": []}},  # type: ignore[arg-type]
             change_rows_by_building={"A楼": ["change-a"], "B楼": ["change-b"]},  # type: ignore[arg-type]
             exercise_rows_by_building={"A楼": ["exercise-a"], "B楼": ["exercise-b"]},  # type: ignore[arg-type]
@@ -123,6 +125,8 @@ def test_run_from_existing_files_prefetches_context_once_and_passes_grouped_resu
                 "exercise_rows_by_building": kwargs.get("exercise_rows_by_building"),
                 "maintenance_rows_by_building": kwargs.get("maintenance_rows_by_building"),
                 "other_important_work_rows_by_building": kwargs.get("other_important_work_rows_by_building"),
+                "long_day_values": kwargs.get("long_day_values"),
+                "engineer_directory_records": kwargs.get("engineer_directory_records"),
             }
         )
         return _single_result(building, data_file, success=True, output_file=f"{building}.xlsx")
@@ -148,5 +152,7 @@ def test_run_from_existing_files_prefetches_context_once_and_passes_grouped_resu
     assert run_calls[1]["exercise_rows_by_building"]["A楼"] == ["exercise-a"]
     assert run_calls[1]["maintenance_rows_by_building"]["B楼"] == ["maintenance-b"]
     assert run_calls[1]["other_important_work_rows_by_building"]["A楼"] == ["other-a"]
+    assert run_calls[0]["long_day_values"] == {"B4": "长白岗：张三"}
+    assert run_calls[1]["engineer_directory_records"] == [{"building": "A楼", "specialty": "电气", "supervisor": "汪根尚"}]
     assert result["selected_buildings"] == ["A楼", "B楼"]
     assert result["skipped_buildings"] == ["C楼"]

@@ -107,6 +107,25 @@ def _write_alarm_json(
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
+def _write_minimal_handover_workbook(
+    path: Path,
+    *,
+    b_text: str = 'A-245-TEST-001',
+    c_text: str = '测试系统',
+    d_name: str = '测试点位',
+    e_value: object = 1,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = '交接班日志'
+    worksheet['B4'] = b_text
+    worksheet['C4'] = c_text
+    worksheet['D4'] = d_name
+    worksheet['E4'] = e_value
+    workbook.save(path)
+
+
 def _add_alarm_cache_entry(
     *,
     store: SharedBridgeStore,
@@ -166,8 +185,7 @@ def test_health_snapshot_contains_building_level_current_hour_statuses(work_dir:
     service._current_hour_bucket = bucket_key
 
     ready_file = shared_root / '交接班日志源文件' / '202603' / '20260329--10' / '20260329--10--交接班日志源文件--A楼.xlsx'
-    ready_file.parent.mkdir(parents=True, exist_ok=True)
-    ready_file.write_bytes(b'ready-a')
+    _write_minimal_handover_workbook(ready_file)
     store.upsert_source_cache_entry(
         source_family=FAMILY_HANDOVER_LOG,
         building='A楼',
@@ -853,8 +871,7 @@ def test_get_handover_by_date_entries_reuses_latest_matching_date_shift_entry(wo
     )
 
     latest_file = shared_root / '交接班日志源文件' / '202603' / '20260331--21' / '20260331--21--交接班日志源文件--A楼.xlsx'
-    latest_file.parent.mkdir(parents=True, exist_ok=True)
-    latest_file.write_bytes(b'handover-a')
+    _write_minimal_handover_workbook(latest_file)
     store.upsert_source_cache_entry(
         source_family=FAMILY_HANDOVER_LOG,
         building='A楼',
@@ -888,8 +905,7 @@ def test_get_handover_by_date_entries_reuses_latest_entry_with_legacy_none_duty_
     )
 
     latest_file = shared_root / '交接班日志源文件' / '202604' / '20260401--09' / '20260401--09--交接班日志源文件--A楼.xlsx'
-    latest_file.parent.mkdir(parents=True, exist_ok=True)
-    latest_file.write_bytes(b'handover-legacy-none')
+    _write_minimal_handover_workbook(latest_file)
     store.upsert_source_cache_entry(
         source_family=FAMILY_HANDOVER_LOG,
         building='A楼',
@@ -927,10 +943,7 @@ def test_fill_handover_latest_infers_duty_context_when_downloader_returns_none(
         emit_log=lambda *_args, **_kwargs: None,
     )
     downloaded_file = work_dir / 'downloaded' / 'A楼.xlsx'
-    downloaded_file.parent.mkdir(parents=True, exist_ok=True)
-    workbook = openpyxl.Workbook()
-    workbook.active['A1'] = 'handover-latest'
-    workbook.save(downloaded_file)
+    _write_minimal_handover_workbook(downloaded_file)
 
     class _FakeDownloadService:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -1173,10 +1186,8 @@ def test_get_latest_ready_selection_blocks_stale_building_over_three_buckets(wor
 
     latest_a = shared_root / '交接班日志源文件' / '202603' / '20260330--08' / '20260330--08--交接班日志源文件--A楼.xlsx'
     stale_b = shared_root / '交接班日志源文件' / '202603' / '20260330--04' / '20260330--04--交接班日志源文件--B楼.xlsx'
-    latest_a.parent.mkdir(parents=True, exist_ok=True)
-    stale_b.parent.mkdir(parents=True, exist_ok=True)
-    latest_a.write_bytes(b'a')
-    stale_b.write_bytes(b'b')
+    _write_minimal_handover_workbook(latest_a)
+    _write_minimal_handover_workbook(stale_b)
     store.upsert_source_cache_entry(
         source_family=FAMILY_HANDOVER_LOG,
         building='A楼',

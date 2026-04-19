@@ -8,19 +8,19 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
               </div>
               <span
                 class="status-badge status-badge-soft"
-                :class="health.handover_scheduler.running ? 'tone-success' : 'tone-neutral'"
+                :class="'tone-' + getSchedulerStatusTone('handover')"
               >
-                {{ health.handover_scheduler.status || '-' }}
+                {{ getSchedulerStatusText('handover') || '-' }}
               </span>
             </div>
             <div class="status-metric-grid status-metric-grid-compact">
               <div class="status-metric">
                 <div class="status-metric-label">上午下次执行</div>
-                <strong class="status-metric-value">{{ (health.handover_scheduler.morning && health.handover_scheduler.morning.next_run_time) || '-' }}</strong>
+                <strong class="status-metric-value">{{ getSchedulerDisplayText(health.handover_scheduler.morning, 'next_run_text', '-') }}</strong>
               </div>
               <div class="status-metric">
                 <div class="status-metric-label">下午下次执行</div>
-                <strong class="status-metric-value">{{ (health.handover_scheduler.afternoon && health.handover_scheduler.afternoon.next_run_time) || '-' }}</strong>
+                <strong class="status-metric-value">{{ getSchedulerDisplayText(health.handover_scheduler.afternoon, 'next_run_text', '-') }}</strong>
               </div>
               <div class="status-metric">
                 <div class="status-metric-label">最近决策</div>
@@ -41,24 +41,20 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
             <div class="btn-line" style="margin-top:10px;">
               <button
                 class="btn btn-success"
-                :disabled="isInternalDeploymentRole || getSchedulerEffectiveRunning('handover', health.handover_scheduler.remembered_enabled) || isActionLocked(actionKeyHandoverSchedulerStart) || isActionLocked(actionKeyHandoverSchedulerStop) || isSchedulerTogglePending('handover')"
+                :disabled="isSchedulerStartDisabled('handover', actionKeyHandoverSchedulerStart, actionKeyHandoverSchedulerStop)"
                 @click="startHandoverScheduler"
               >
-                {{
-                  getSchedulerToggleMode('handover') === 'starting'
-                    ? '启动中...'
-                    : (getSchedulerToggleMode('handover') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('handover', health.handover_scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
-                }}
+                {{ getSchedulerStartButtonText('handover') }}
               </button>
               <button
                 class="btn btn-danger"
-                :disabled="isInternalDeploymentRole || !getSchedulerEffectiveRunning('handover', health.handover_scheduler.remembered_enabled) || isActionLocked(actionKeyHandoverSchedulerStop) || isActionLocked(actionKeyHandoverSchedulerStart) || isSchedulerTogglePending('handover')"
+                :disabled="isSchedulerStopDisabled('handover', actionKeyHandoverSchedulerStart, actionKeyHandoverSchedulerStop)"
                 @click="stopHandoverScheduler"
               >
-                {{ getSchedulerToggleMode('handover') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('handover') === 'starting' ? '处理中...' : '停止调度') }}
+                {{ getSchedulerStopButtonText('handover') }}
               </button>
             </div>
-            <div class="hint">{{ handoverSchedulerQuickSaving ? '交接班调度配置保存中...' : '修改上午或下午时间后自动保存。' }}</div>
+            <div class="hint">{{ handoverSchedulerQuickSaving ? '交接班调度配置同步中...' : '修改上午或下午时间后立即生效。' }}</div>
           </article>
           <div class="handover-task-shell-redesign">
             <div class="handover-top-grid dashboard-module-primary-grid">
@@ -167,7 +163,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                   当前为内网端，该模块请在外网端发起；内网端只消费共享桥接任务。
                 </div>
                 <div class="action-reason action-reason-warning" v-if="handoverGenerationBusy">
-                  当前已有交接班日志生成任务在执行或排队，请等待任务完成后再发起新的交接班生成。
+                  {{ handoverGenerationStatusText || '当前已有交接班日志生成任务在执行或排队，请等待任务完成后再发起新的交接班生成。' }}
                 </div>
                 <div class="action-reason action-reason-warning" v-else-if="!hasSelectedHandoverFiles">
                   请先为至少一个楼选择已有数据表文件，再执行“从已有数据表生成”。
@@ -306,18 +302,24 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                 <div class="btn-line" style="margin-top:10px;">
                   <button
                     class="btn btn-secondary"
-                    :disabled="isActionLocked(actionKeyHandoverDailyReportAuthOpen)"
+                    :disabled="isActionLocked(actionKeyHandoverDailyReportAuthOpen) || isHandoverDailyReportActionDisabled('open_auth')"
                     @click="openHandoverDailyReportScreenshotAuth"
                   >
-                    {{ isActionLocked(actionKeyHandoverDailyReportAuthOpen) ? '打开中...' : '初始化飞书截图登录态' }}
+                    {{ isActionLocked(actionKeyHandoverDailyReportAuthOpen) ? '打开中...' : getHandoverDailyReportActionButtonText('open_auth', '初始化飞书截图登录态') }}
                   </button>
                   <button
                     class="btn btn-secondary"
-                    :disabled="isActionLocked(actionKeyHandoverDailyReportScreenshotTest)"
+                    :disabled="isActionLocked(actionKeyHandoverDailyReportScreenshotTest) || isHandoverDailyReportActionDisabled('screenshot_test')"
                     @click="runHandoverDailyReportScreenshotTest"
                   >
-                    {{ isActionLocked(actionKeyHandoverDailyReportScreenshotTest) ? '测试中...' : '截图测试' }}
+                    {{ isActionLocked(actionKeyHandoverDailyReportScreenshotTest) ? '测试中...' : getHandoverDailyReportActionButtonText('screenshot_test', '截图测试') }}
                   </button>
+                </div>
+                <div class="hint" v-if="!isActionLocked(actionKeyHandoverDailyReportAuthOpen) && getHandoverDailyReportActionDisabledReason('open_auth')">
+                  {{ getHandoverDailyReportActionDisabledReason('open_auth') }}
+                </div>
+                <div class="hint" v-if="!isActionLocked(actionKeyHandoverDailyReportScreenshotTest) && getHandoverDailyReportActionDisabledReason('screenshot_test')">
+                  {{ getHandoverDailyReportActionDisabledReason('screenshot_test') }}
                 </div>
                 <div class="form-row" style="margin-top:10px;">
                   <label class="label">云文档链接</label>
@@ -369,21 +371,28 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                     <div class="btn-line" style="margin-top:10px; flex-wrap:wrap;">
                       <button
                         class="btn btn-secondary"
-                        :disabled="!handoverDailyReportCaptureAssets.summarySheetImage.exists"
+                        :disabled="isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.summarySheetImage, 'preview')"
                         @click="openHandoverDailyReportPreview('summary_sheet')"
-                      >放大查看</button>
+                      >{{ getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.summarySheetImage, 'preview', '放大查看') }}</button>
                       <button
                         class="btn btn-secondary"
-                        :disabled="isActionLocked(getHandoverDailyReportRecaptureActionKey('summary_sheet'))"
+                        :disabled="isActionLocked(getHandoverDailyReportRecaptureActionKey('summary_sheet')) || isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.summarySheetImage, 'recapture')"
                         @click="recaptureHandoverDailyReportAsset('summary_sheet')"
-                      >{{ isActionLocked(getHandoverDailyReportRecaptureActionKey('summary_sheet')) ? '重截中...' : '重新截图' }}</button>
-                      <button class="btn btn-secondary" @click="openHandoverDailyReportUploadDialog('summary_sheet')">上传/粘贴替换</button>
+                      >{{ isActionLocked(getHandoverDailyReportRecaptureActionKey('summary_sheet')) ? '重截中...' : getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.summarySheetImage, 'recapture', '重新截图') }}</button>
+                      <button
+                        class="btn btn-secondary"
+                        :disabled="isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.summarySheetImage, 'upload')"
+                        @click="openHandoverDailyReportUploadDialog('summary_sheet')"
+                      >{{ getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.summarySheetImage, 'upload', '上传/粘贴替换') }}</button>
                       <button
                         v-if="handoverDailyReportCaptureAssets.summarySheetImage.hasManual"
                         class="btn btn-ghost"
-                        :disabled="isActionLocked(getHandoverDailyReportRestoreActionKey('summary_sheet'))"
+                        :disabled="isActionLocked(getHandoverDailyReportRestoreActionKey('summary_sheet')) || isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.summarySheetImage, 'restore_auto')"
                         @click="restoreHandoverDailyReportAutoAsset('summary_sheet')"
-                      >{{ isActionLocked(getHandoverDailyReportRestoreActionKey('summary_sheet')) ? '恢复中...' : '恢复自动图' }}</button>
+                      >{{ isActionLocked(getHandoverDailyReportRestoreActionKey('summary_sheet')) ? '恢复中...' : getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.summarySheetImage, 'restore_auto', '恢复自动图') }}</button>
+                    </div>
+                    <div class="hint" v-if="getHandoverDailyReportAssetActionDisabledReason(handoverDailyReportCaptureAssets.summarySheetImage, 'preview') && !handoverDailyReportCaptureAssets.summarySheetImage.exists">
+                      {{ getHandoverDailyReportAssetActionDisabledReason(handoverDailyReportCaptureAssets.summarySheetImage, 'preview') }}
                     </div>
                   </div>
 
@@ -425,21 +434,28 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                     <div class="btn-line" style="margin-top:10px; flex-wrap:wrap;">
                       <button
                         class="btn btn-secondary"
-                        :disabled="!handoverDailyReportCaptureAssets.externalPageImage.exists"
+                        :disabled="isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.externalPageImage, 'preview')"
                         @click="openHandoverDailyReportPreview('external_page')"
-                      >放大查看</button>
+                      >{{ getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.externalPageImage, 'preview', '放大查看') }}</button>
                       <button
                         class="btn btn-secondary"
-                        :disabled="isActionLocked(getHandoverDailyReportRecaptureActionKey('external_page'))"
+                        :disabled="isActionLocked(getHandoverDailyReportRecaptureActionKey('external_page')) || isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.externalPageImage, 'recapture')"
                         @click="recaptureHandoverDailyReportAsset('external_page')"
-                      >{{ isActionLocked(getHandoverDailyReportRecaptureActionKey('external_page')) ? '重截中...' : '重新截图' }}</button>
-                      <button class="btn btn-secondary" @click="openHandoverDailyReportUploadDialog('external_page')">上传/粘贴替换</button>
+                      >{{ isActionLocked(getHandoverDailyReportRecaptureActionKey('external_page')) ? '重截中...' : getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.externalPageImage, 'recapture', '重新截图') }}</button>
+                      <button
+                        class="btn btn-secondary"
+                        :disabled="isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.externalPageImage, 'upload')"
+                        @click="openHandoverDailyReportUploadDialog('external_page')"
+                      >{{ getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.externalPageImage, 'upload', '上传/粘贴替换') }}</button>
                       <button
                         v-if="handoverDailyReportCaptureAssets.externalPageImage.hasManual"
                         class="btn btn-ghost"
-                        :disabled="isActionLocked(getHandoverDailyReportRestoreActionKey('external_page'))"
+                        :disabled="isActionLocked(getHandoverDailyReportRestoreActionKey('external_page')) || isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.externalPageImage, 'restore_auto')"
                         @click="restoreHandoverDailyReportAutoAsset('external_page')"
-                      >{{ isActionLocked(getHandoverDailyReportRestoreActionKey('external_page')) ? '恢复中...' : '恢复自动图' }}</button>
+                      >{{ isActionLocked(getHandoverDailyReportRestoreActionKey('external_page')) ? '恢复中...' : getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.externalPageImage, 'restore_auto', '恢复自动图') }}</button>
+                    </div>
+                    <div class="hint" v-if="getHandoverDailyReportAssetActionDisabledReason(handoverDailyReportCaptureAssets.externalPageImage, 'preview') && !handoverDailyReportCaptureAssets.externalPageImage.exists">
+                      {{ getHandoverDailyReportAssetActionDisabledReason(handoverDailyReportCaptureAssets.externalPageImage, 'preview') }}
                     </div>
                   </div>
                 </div>
@@ -449,14 +465,14 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                 <div class="btn-line" style="margin-top:12px;">
                   <button
                     class="btn btn-primary"
-                    :disabled="!canRewriteHandoverDailyReportRecord || isActionLocked(actionKeyHandoverDailyReportRecordRewrite)"
+                    :disabled="isActionLocked(actionKeyHandoverDailyReportRecordRewrite) || isHandoverDailyReportActionDisabled('rewrite_record')"
                     @click="rewriteHandoverDailyReportRecord"
                   >
-                    {{ isActionLocked(actionKeyHandoverDailyReportRecordRewrite) ? '重写中...' : '重新写入日报多维表' }}
+                    {{ isActionLocked(actionKeyHandoverDailyReportRecordRewrite) ? '重写中...' : getHandoverDailyReportActionButtonText('rewrite_record', '重新写入日报多维表') }}
                   </button>
                 </div>
-                <div class="hint" v-if="!canRewriteHandoverDailyReportRecord">
-                  需要当前批次已有云文档链接，且两张截图都存在，才能重写日报多维表记录。
+                <div class="hint" v-if="!isActionLocked(actionKeyHandoverDailyReportRecordRewrite) && getHandoverDailyReportActionDisabledReason('rewrite_record')">
+                  {{ getHandoverDailyReportActionDisabledReason('rewrite_record') }}
                 </div>
                   </article>
                 </div>
@@ -512,6 +528,12 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                       审核链接发送：
                       <span class="status-badge status-badge-soft" :class="'tone-' + row.reviewLinkDeliveryTone">{{ row.reviewLinkDeliveryText }}</span>
                     </div>
+                    <div class="hint" style="margin-top:4px;">
+                      接收人状态：
+                      <span class="status-badge status-badge-soft" :class="'tone-' + (row.actions.reviewLinkSend.allowed ? 'success' : 'neutral')">
+                        {{ row.reviewLinkRecipientStatus.text || '等待后端接收人状态' }}
+                      </span>
+                    </div>
                     <a
                       v-if="row.hasUrl"
                       class="handover-access-url"
@@ -530,12 +552,13 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                     <div class="btn-line" style="margin-top:8px;">
                       <button
                         class="btn btn-secondary"
-                        :disabled="isActionLocked(getHandoverReviewLinkSendActionKey(row.building, handoverReviewOverview.batchKey))"
+                        :disabled="isHandoverReviewLinkSendDisabled(row)"
                         @click="sendHandoverReviewLink(row.building, { batchKey: handoverReviewOverview.batchKey, force: true })"
                       >
-                        {{ isActionLocked(getHandoverReviewLinkSendActionKey(row.building, handoverReviewOverview.batchKey)) ? '发送中...' : '手动发送审核链接' }}
+                        {{ getHandoverReviewLinkSendButtonText(row) }}
                       </button>
                     </div>
+                    <div class="hint" v-if="getHandoverReviewLinkSendDisabledReason(row)">{{ getHandoverReviewLinkSendDisabledReason(row) }}</div>
                     <div class="hint" v-if="row.reviewLinkDeliveryLastSentAt">最近发送：{{ row.reviewLinkDeliveryLastSentAt }}</div>
                     <div class="hint" v-else-if="row.reviewLinkDeliveryLastAttemptAt">最近尝试：{{ row.reviewLinkDeliveryLastAttemptAt }}</div>
                     <div class="hint" v-if="row.reviewLinkDeliveryError">{{ row.reviewLinkDeliveryError }}</div>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from scripts import build_exe as module
@@ -46,3 +47,40 @@ def test_write_latest_manifest_includes_target_release_revision(tmp_path: Path, 
     )
 
     assert manifest["target_release_revision"] == 77
+    assert manifest["zip_relpath"] == "updates/patches/QJPT_patch_only.zip"
+
+
+def test_should_exclude_npm_cache_from_patch() -> None:
+    assert module._should_exclude_from_patch(Path(".npm-cache/_cacache/demo")) is True  # noqa: SLF001
+    assert module._should_exclude_from_patch(Path("node_modules/demo/index.js")) is True  # noqa: SLF001
+
+
+def test_materialize_git_release_tree_rewrites_origin(tmp_path, monkeypatch) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "master"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "tester"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    (repo_dir / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    target_dir = tmp_path / "release" / "QJPT_V3_code"
+    monkeypatch.setattr(module, "PROJECT_ROOT", repo_dir)
+
+    source_branch, target_branch = module._materialize_git_release_tree(  # noqa: SLF001
+        target_dir,
+        repo_url="https://example.invalid/repo.git",
+        preferred_branch="master",
+    )
+
+    origin_url = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=target_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert source_branch == "master"
+    assert target_branch == "master"
+    assert (target_dir / ".git").exists()
+    assert origin_url == "https://example.invalid/repo.git"

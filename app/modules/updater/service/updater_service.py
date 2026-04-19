@@ -2,6 +2,8 @@
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -10,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple
 
-from pipeline_utils import get_app_dir
+from pipeline_utils import get_app_dir, get_app_root_dir, get_persistent_user_data_dir, is_release_code_dir
 
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.modules.updater.core.versioning import (
@@ -36,6 +38,7 @@ from app.modules.updater.service.update_applier import UpdateApplier
 _SOURCE_RUN_DISABLE_UPDATER_ENV = "QJPT_DISABLE_UPDATER_IN_SOURCE_RUN"
 _INTERNAL_PEER_HEARTBEAT_INTERVAL_SEC = 5
 _INTERNAL_PEER_HEARTBEAT_TIMEOUT_SEC = 15
+_GIT_TRACKED_STATUS_TIMEOUT_SEC = 30
 
 
 def _updater_disabled_reason_from_env() -> str:
@@ -43,6 +46,13 @@ def _updater_disabled_reason_from_env() -> str:
     if raw in {"1", "true", "yes", "on"}:
         return "source_python_run"
     return ""
+
+
+def _short_git_commit(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if len(text) >= 7:
+        return text[:7]
+    return text
 
 
 def _default_node_id(role_mode: Any) -> str:
@@ -97,9 +107,6 @@ class UpdaterService:
             ).strip(),
             "max_backups": max(1, int(updater_cfg.get("max_backups", 3))),
         }
-        self.disabled_reason = _updater_disabled_reason_from_env()
-        if self.disabled_reason:
-            self.cfg["enabled"] = False
         self.runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
         self.emit_log = emit_log
         self.restart_callback = restart_callback
@@ -109,10 +116,24 @@ class UpdaterService:
         resolved_shared_bridge = resolve_shared_bridge_paths(shared_bridge_cfg, deployment_cfg.get("role_mode"))
         self.shared_bridge_enabled = bool(resolved_shared_bridge.get("enabled", False))
         self.shared_bridge_root = str(resolved_shared_bridge.get("root_dir", "") or "").strip()
-        self.source_kind = "shared_mirror" if self.role_mode == "internal" else "remote"
-        self.source_label = "共享目录更新源" if self.source_kind == "shared_mirror" else "远端正式更新源"
-
         self.app_dir = get_app_dir()
+        self.app_root_dir = get_app_root_dir(self.app_dir)
+        self.persistent_user_data_dir = get_persistent_user_data_dir(self.app_dir)
+        self.update_mode = "git_pull" if (not getattr(sys, "frozen", False) and is_release_code_dir(self.app_dir)) else "patch_zip"
+        self.git_repo_url = str(self.cfg.get("gitee_repo", "") or "").strip()
+        self.git_branch = str(self.cfg.get("gitee_branch", "master") or "master").strip() or "master"
+        self.git_available = bool(shutil.which("git")) if self.update_mode == "git_pull" else False
+        self.git_repo_detected = bool((self.app_dir / ".git").exists()) if self.update_mode == "git_pull" else False
+        self.disabled_reason = self._resolve_disabled_reason()
+        if self.disabled_reason:
+            self.cfg["enabled"] = False
+        if self.update_mode == "git_pull":
+            self.source_kind = "git_remote"
+            self.source_label = "Git 仓库更新源"
+        else:
+            self.source_kind = "shared_mirror" if self.role_mode == "internal" else "remote"
+            self.source_label = "共享目录更新源" if self.source_kind == "shared_mirror" else "远端正式更新源"
+
         self.state_path = self._resolve_state_path(self.cfg["state_file"])
         self.download_dir = self._resolve_any_path(self.cfg["download_dir"])
         self.backup_dir = self._resolve_any_path(self.cfg["backup_dir"])
@@ -126,7 +147,7 @@ class UpdaterService:
         self.remote_control_store = UpdaterRemoteControlStore(self.shared_bridge_root) if self.shared_bridge_root else None
         if self.source_kind == "shared_mirror":
             self.client = self.shared_mirror_client
-        else:
+        elif self.update_mode == "patch_zip":
             self.client = ManifestClient(
                 repo_url=self.cfg["gitee_repo"],
                 branch=self.cfg["gitee_branch"],
@@ -134,6 +155,8 @@ class UpdaterService:
                 timeout_sec=self.cfg["request_timeout_sec"],
                 retry_count=self.cfg["download_retry_count"],
             )
+        else:
+            self.client = None
         self.applier = UpdateApplier(
             app_dir=self.app_dir,
             emit_log=self.emit_log,
@@ -156,6 +179,16 @@ class UpdaterService:
         internal_peer_runtime = self._internal_peer_runtime_snapshot()
         self.state.setdefault("source_kind", self.source_kind)
         self.state.setdefault("source_label", self.source_label)
+        self.state.setdefault("update_mode", self.update_mode)
+        self.state.setdefault("app_root_dir", str(self.app_root_dir))
+        self.state.setdefault("persistent_user_data_dir", str(self.persistent_user_data_dir))
+        self.state.setdefault("git_available", self.git_available)
+        self.state.setdefault("git_repo_detected", self.git_repo_detected)
+        self.state.setdefault("branch", "")
+        self.state.setdefault("local_commit", "")
+        self.state.setdefault("remote_commit", "")
+        self.state.setdefault("worktree_dirty", False)
+        self.state.setdefault("dirty_files", [])
         self.state.setdefault("enabled", bool(self.cfg["enabled"]))
         self.state.setdefault("disabled_reason", self.disabled_reason)
         self.state.setdefault("mirror_ready", mirror_runtime.get("mirror_ready", False))
@@ -188,6 +221,19 @@ class UpdaterService:
             "remote_version": str(self.state.get("remote_version", "")),
             "source_kind": str(self.state.get("source_kind", self.source_kind) or self.source_kind),
             "source_label": str(self.state.get("source_label", self.source_label) or self.source_label),
+            "update_mode": str(self.state.get("update_mode", self.update_mode) or self.update_mode),
+            "app_root_dir": str(self.state.get("app_root_dir", str(self.app_root_dir)) or str(self.app_root_dir)),
+            "persistent_user_data_dir": str(
+                self.state.get("persistent_user_data_dir", str(self.persistent_user_data_dir))
+                or str(self.persistent_user_data_dir)
+            ),
+            "git_available": bool(self.state.get("git_available", self.git_available)),
+            "git_repo_detected": bool(self.state.get("git_repo_detected", self.git_repo_detected)),
+            "branch": str(self.state.get("branch", "") or ""),
+            "local_commit": str(self.state.get("local_commit", "") or ""),
+            "remote_commit": str(self.state.get("remote_commit", "") or ""),
+            "worktree_dirty": bool(self.state.get("worktree_dirty", False)),
+            "dirty_files": list(self.state.get("dirty_files", []) or []),
             "local_release_revision": int(self.state.get("local_release_revision", 0) or 0),
             "remote_release_revision": int(self.state.get("remote_release_revision", 0) or 0),
             "update_available": bool(self.state.get("update_available", False)),
@@ -209,6 +255,8 @@ class UpdaterService:
             ),
             "internal_peer": internal_peer_runtime,
         }
+        if self.update_mode == "git_pull":
+            self._sync_git_runtime(fetch_remote=False)
 
     def _log(self, text: str) -> None:
         self.emit_log(f"[Updater] {text}")
@@ -320,11 +368,122 @@ class UpdaterService:
             "internal_peer": internal_peer,
         }
 
+    def _resolve_disabled_reason(self) -> str:
+        disabled_reason = _updater_disabled_reason_from_env()
+        if self.update_mode == "git_pull" and disabled_reason == "source_python_run":
+            disabled_reason = ""
+        if disabled_reason:
+            return disabled_reason
+        if self.update_mode != "git_pull":
+            return ""
+        if not self.git_available:
+            return "git_not_installed"
+        if not self.git_repo_detected:
+            return "git_repo_missing"
+        if not self.git_repo_url:
+            return "git_remote_missing"
+        return ""
+
+    def _run_git(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(self.app_dir),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_GIT_TRACKED_STATUS_TIMEOUT_SEC,
+        )
+
+    def _git_tracked_status(self) -> Dict[str, Any]:
+        if self.update_mode != "git_pull":
+            return {
+                "update_mode": self.update_mode,
+                "branch": "",
+                "local_commit": "",
+                "remote_commit": "",
+                "worktree_dirty": False,
+                "dirty_files": [],
+            }
+        snapshot = {
+            "update_mode": "git_pull",
+            "branch": "",
+            "local_commit": "",
+            "remote_commit": "",
+            "worktree_dirty": False,
+            "dirty_files": [],
+        }
+        if not self.git_available or not self.git_repo_detected:
+            return snapshot
+        branch_ret = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
+        if branch_ret.returncode == 0:
+            snapshot["branch"] = str(branch_ret.stdout or "").strip()
+        local_commit_ret = self._run_git("rev-parse", "HEAD")
+        if local_commit_ret.returncode == 0:
+            snapshot["local_commit"] = str(local_commit_ret.stdout or "").strip()
+        dirty_ret = self._run_git("status", "--porcelain", "--untracked-files=no")
+        if dirty_ret.returncode == 0:
+            dirty_lines = [
+                line[3:].strip()
+                for line in (dirty_ret.stdout or "").splitlines()
+                if str(line or "").strip()
+            ]
+            snapshot["dirty_files"] = dirty_lines
+            snapshot["worktree_dirty"] = bool(dirty_lines)
+        remote_commit_ret = self._run_git("rev-parse", f"origin/{self.git_branch}")
+        if remote_commit_ret.returncode == 0:
+            snapshot["remote_commit"] = str(remote_commit_ret.stdout or "").strip()
+        return snapshot
+
+    def _sync_git_runtime(self, *, fetch_remote: bool = False) -> Dict[str, Any]:
+        snapshot = self._git_tracked_status()
+        if self.update_mode != "git_pull":
+            return snapshot
+        if fetch_remote and self.git_available and self.git_repo_detected:
+            fetch_ret = self._run_git("fetch", "origin", self.git_branch)
+            if fetch_ret.returncode != 0:
+                raise RuntimeError((fetch_ret.stderr or fetch_ret.stdout or "git fetch 失败").strip())
+            snapshot = self._git_tracked_status()
+        self.git_repo_detected = bool((self.app_dir / ".git").exists())
+        self._set_runtime(
+            update_mode="git_pull",
+            app_root_dir=str(self.app_root_dir),
+            persistent_user_data_dir=str(self.persistent_user_data_dir),
+            git_available=self.git_available,
+            git_repo_detected=self.git_repo_detected,
+            branch=str(snapshot.get("branch", "") or ""),
+            local_commit=str(snapshot.get("local_commit", "") or ""),
+            remote_commit=str(snapshot.get("remote_commit", "") or ""),
+            worktree_dirty=bool(snapshot.get("worktree_dirty", False)),
+            dirty_files=list(snapshot.get("dirty_files", [])),
+        )
+        self.state.update(
+            {
+                "update_mode": "git_pull",
+                "app_root_dir": str(self.app_root_dir),
+                "persistent_user_data_dir": str(self.persistent_user_data_dir),
+                "git_available": self.git_available,
+                "git_repo_detected": self.git_repo_detected,
+                "branch": str(snapshot.get("branch", "") or ""),
+                "local_commit": str(snapshot.get("local_commit", "") or ""),
+                "remote_commit": str(snapshot.get("remote_commit", "") or ""),
+                "worktree_dirty": bool(snapshot.get("worktree_dirty", False)),
+                "dirty_files": list(snapshot.get("dirty_files", [])),
+            }
+        )
+        self._persist_state()
+        return snapshot
+
     @staticmethod
     def _disabled_reason_text(raw: Any) -> str:
         key = str(raw or "").strip().lower()
         if key == "source_python_run":
             return "当前为 Python 本地源码运行，已跳过更新。"
+        if key == "git_not_installed":
+            return "当前电脑未安装 Git，无法执行代码拉取更新。"
+        if key == "git_repo_missing":
+            return "当前代码目录不是 Git 工作区，无法执行代码拉取更新。"
+        if key == "git_remote_missing":
+            return "当前未配置 Git 更新仓库地址。"
         return "当前运行模式已禁用更新。"
 
     @staticmethod
@@ -347,6 +506,9 @@ class UpdaterService:
             "ahead_of_remote": "本地版本高于远端正式版本",
             "ahead_of_mirror": "本地版本高于共享目录批准版本",
             "mirror_pending_publish": "等待外网端发布批准版本",
+            "git_fetching": "Git 远端检查中",
+            "git_pulling": "Git 拉取中",
+            "dirty_worktree": "检测到本地改动，已阻止更新",
             "failed": "更新失败",
         }
         return mapping.get(key, key or "-")
@@ -543,6 +705,8 @@ class UpdaterService:
     def get_runtime_snapshot(self) -> Dict[str, Any]:
         if self.role_mode == "external":
             self._sync_internal_peer_runtime()
+        if self.update_mode == "git_pull":
+            self._sync_git_runtime(fetch_remote=False)
         with self._lock:
             return dict(self.runtime)
 
@@ -663,6 +827,19 @@ class UpdaterService:
             "remote_version": str(self.state.get("remote_version", "")),
             "source_kind": str(self.state.get("source_kind", self.source_kind) or self.source_kind),
             "source_label": str(self.state.get("source_label", self.source_label) or self.source_label),
+            "update_mode": str(self.state.get("update_mode", self.update_mode) or self.update_mode),
+            "app_root_dir": str(self.state.get("app_root_dir", str(self.app_root_dir)) or str(self.app_root_dir)),
+            "persistent_user_data_dir": str(
+                self.state.get("persistent_user_data_dir", str(self.persistent_user_data_dir))
+                or str(self.persistent_user_data_dir)
+            ),
+            "git_available": bool(self.state.get("git_available", self.git_available)),
+            "git_repo_detected": bool(self.state.get("git_repo_detected", self.git_repo_detected)),
+            "branch": str(self.state.get("branch", "") or ""),
+            "local_commit": str(self.state.get("local_commit", "") or ""),
+            "remote_commit": str(self.state.get("remote_commit", "") or ""),
+            "worktree_dirty": bool(self.state.get("worktree_dirty", False)),
+            "dirty_files": list(self.state.get("dirty_files", []) or []),
             "local_release_revision": int(self.state.get("local_release_revision", 0) or 0),
             "remote_release_revision": int(self.state.get("remote_release_revision", 0) or 0),
             "dependency_sync_status": str(self.state.get("dependency_sync_status", "idle") or "idle"),
@@ -702,10 +879,11 @@ class UpdaterService:
         self._set_runtime_and_state(queued_apply=self._empty_queue_payload())
 
     def _resolve_manifest_patch_ref(self, remote_manifest: Dict[str, Any]) -> str:
-        return (
-            str(remote_manifest.get("zip_relpath", "") or "").strip()
-            or str(remote_manifest.get("zip_url", "") or "").strip()
-        )
+        zip_relpath = str(remote_manifest.get("zip_relpath", "") or "").strip()
+        zip_url = str(remote_manifest.get("zip_url", "") or "").strip()
+        if isinstance(self.client, SharedMirrorManifestClient):
+            return zip_relpath or zip_url
+        return zip_url or zip_relpath
 
     def _ensure_publishable_patch_zip(self, remote_manifest: Dict[str, Any]) -> Path:
         patch_ref = self._resolve_manifest_patch_ref(remote_manifest)
@@ -934,7 +1112,147 @@ class UpdaterService:
             rollback_detail=rollback_detail,
         )
 
+    def _check_git_once(self, *, apply_update: bool | None) -> Dict[str, Any]:
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        local = normalize_local_version(load_local_build_meta(self.app_dir))
+        local_version_text = local.get("display_version") or local.get("build_id") or "-"
+        local_release_revision = int(local.get("release_revision", 0) or 0)
+        self._set_runtime_and_state(
+            last_result="git_fetching",
+            last_error="",
+            source_kind=self.source_kind,
+            source_label=self.source_label,
+            update_mode=self.update_mode,
+        )
+        git_snapshot = self._sync_git_runtime(fetch_remote=True)
+        branch = str(git_snapshot.get("branch", "") or self.git_branch or "").strip()
+        local_commit = str(git_snapshot.get("local_commit", "") or "").strip()
+        remote_commit = str(git_snapshot.get("remote_commit", "") or "").strip()
+        worktree_dirty = bool(git_snapshot.get("worktree_dirty", False))
+        dirty_files = list(git_snapshot.get("dirty_files", []) or [])
+        update_available = bool(local_commit and remote_commit and local_commit != remote_commit)
+
+        self._set_runtime_and_state(
+            last_check_at=now_text,
+            local_version=str(local_version_text),
+            remote_version=_short_git_commit(remote_commit),
+            source_kind=self.source_kind,
+            source_label=self.source_label,
+            local_release_revision=local_release_revision,
+            remote_release_revision=local_release_revision,
+            update_available=update_available,
+            force_apply_available=False,
+            branch=branch,
+            local_commit=local_commit,
+            remote_commit=remote_commit,
+            worktree_dirty=worktree_dirty,
+            dirty_files=dirty_files,
+        )
+
+        if not apply_update:
+            result_key = "up_to_date"
+            message = "当前 Git 工作区已经是最新提交。"
+            if update_available:
+                result_key = "update_available"
+                message = "检测到 Git 仓库有可拉取更新。"
+            self._set_runtime_and_state(last_result=result_key, last_error="")
+            return self._build_result_payload(last_result=result_key, message=message)
+
+        if worktree_dirty:
+            self._set_runtime_and_state(last_result="dirty_worktree", last_error="", update_available=update_available)
+            dirty_preview = "，".join(dirty_files[:5])
+            if len(dirty_files) > 5:
+                dirty_preview = f"{dirty_preview} 等 {len(dirty_files)} 项"
+            return self._build_result_payload(
+                last_result="dirty_worktree",
+                message=(
+                    f"检测到本地已修改文件，已阻止自动更新：{dirty_preview}"
+                    if dirty_preview
+                    else "检测到本地已修改文件，已阻止自动更新。"
+                ),
+            )
+
+        if not update_available:
+            result_key = "restart_pending" if bool(self.state.get("restart_required", False)) else "up_to_date"
+            self._set_runtime_and_state(last_result=result_key, last_error="")
+            return self._build_result_payload(
+                last_result=result_key,
+                message="代码已拉取完成，等待重启生效。" if result_key == "restart_pending" else "当前 Git 工作区已经是最新提交。",
+            )
+
+        self._set_runtime_and_state(last_result="git_pulling", last_error="")
+        self._log(
+            "开始执行 Git 拉取更新: "
+            f"branch={branch or self.git_branch}, local={_short_git_commit(local_commit) or '-'}, "
+            f"remote={_short_git_commit(remote_commit) or '-'}"
+        )
+        pull_ret = self._run_git("pull", "--ff-only", "origin", branch or self.git_branch)
+        if pull_ret.returncode != 0:
+            raise RuntimeError((pull_ret.stderr or pull_ret.stdout or "git pull 失败").strip())
+
+        try:
+            dependency_result = self._sync_patch_dependencies({}, {"dependency_manifest_path": "runtime_dependency_lock.json"})
+        except Exception as dependency_exc:  # noqa: BLE001
+            self._set_runtime_and_state(
+                last_result="failed",
+                last_error=str(dependency_exc),
+                dependency_sync_status="failed",
+                dependency_sync_error=str(dependency_exc),
+                dependency_sync_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            return self._build_result_payload(
+                last_result="failed",
+                message=f"Git 拉取成功，但运行依赖同步失败: {dependency_exc}",
+            )
+
+        refreshed_local = normalize_local_version(load_local_build_meta(self.app_dir))
+        refreshed_local_text = refreshed_local.get("display_version") or refreshed_local.get("build_id") or "-"
+        refreshed_local_release_revision = int(refreshed_local.get("release_revision", 0) or 0)
+        refreshed_git_snapshot = self._sync_git_runtime(fetch_remote=False)
+        refreshed_remote_commit = str(refreshed_git_snapshot.get("remote_commit", "") or "").strip()
+        final_result = "updated"
+        restart_required = False
+        if bool(self.cfg.get("auto_restart", False)):
+            final_result, restart_required = self._apply_restart_strategy(
+                local_version=str(refreshed_local_text),
+                local_release_revision=refreshed_local_release_revision,
+            )
+        dependency_status = "success" if str(dependency_result.get("status", "")).strip() == "success" else "idle"
+        final_message = "Git 更新已应用完成。"
+        if final_result == "updated_restart_scheduled":
+            final_message = "Git 更新已应用并完成运行依赖同步，程序将自动重启。"
+        elif final_result == "restart_pending":
+            final_message = "Git 更新已应用并完成运行依赖同步，请重启程序使更新生效。"
+        self._set_runtime_and_state(
+            last_result=final_result,
+            last_error="",
+            local_version=str(refreshed_local_text),
+            remote_version=_short_git_commit(refreshed_remote_commit),
+            local_release_revision=refreshed_local_release_revision,
+            remote_release_revision=refreshed_local_release_revision,
+            update_available=False,
+            force_apply_available=False,
+            last_updated_at=now_text,
+            restart_required=restart_required,
+            last_applied_release_revision=refreshed_local_release_revision,
+            dependency_sync_status=dependency_status,
+            dependency_sync_error="",
+            dependency_sync_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        self._log(
+            "Git 更新完成: "
+            f"结果={self._result_text(final_result)}, branch={branch or self.git_branch}, "
+            f"commit={_short_git_commit(str(refreshed_git_snapshot.get('local_commit', '') or '')) or '-'}"
+        )
+        return self._build_result_payload(
+            last_result=final_result,
+            message=final_message,
+            dependency_result=dependency_result,
+        )
+
     def _check_once(self, *, apply_update: bool | None, force_remote: bool) -> Dict[str, Any]:
+        if self.update_mode == "git_pull":
+            return self._check_git_once(apply_update=apply_update)
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         local = normalize_local_version(load_local_build_meta(self.app_dir))
         local_version_text = local.get("display_version") or local.get("build_id") or "-"

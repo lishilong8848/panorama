@@ -6,18 +6,18 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
                 <div class="task-block-kicker">调度卡</div>
                 <h3 class="card-title">12项独立上传调度</h3>
               </div>
-              <span class="status-badge status-badge-soft" :class="health.day_metric_upload.scheduler.running ? 'tone-success' : 'tone-neutral'">
-                {{ health.day_metric_upload.scheduler.status || '-' }}
+              <span class="status-badge status-badge-soft" :class="'tone-' + getSchedulerStatusTone('day_metric_upload')">
+                {{ getSchedulerStatusText('day_metric_upload') || '-' }}
               </span>
             </div>
             <div class="status-metric-grid status-metric-grid-compact">
               <div class="status-metric">
                 <div class="status-metric-label">下次执行</div>
-                <strong class="status-metric-value">{{ health.day_metric_upload.scheduler.next_run_time || '-' }}</strong>
+                <strong class="status-metric-value">{{ getSchedulerDisplayText('day_metric_upload', 'next_run_text', '-') }}</strong>
               </div>
               <div class="status-metric">
                 <div class="status-metric-label">最近触发</div>
-                <strong class="status-metric-value">{{ health.day_metric_upload.scheduler.last_trigger_at || '-' }}</strong>
+                <strong class="status-metric-value">{{ getSchedulerDisplayText('day_metric_upload', 'last_trigger_text', '-') }}</strong>
               </div>
               <div class="status-metric">
                 <div class="status-metric-label">最近决策</div>
@@ -38,24 +38,20 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
             <div class="btn-line">
               <button
                 class="btn btn-success"
-                :disabled="isInternalDeploymentRole || getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.remembered_enabled) || isActionLocked(actionKeyDayMetricUploadSchedulerStart) || isActionLocked(actionKeyDayMetricUploadSchedulerStop) || isSchedulerTogglePending('day_metric_upload')"
+                :disabled="isSchedulerStartDisabled('day_metric_upload', actionKeyDayMetricUploadSchedulerStart, actionKeyDayMetricUploadSchedulerStop)"
                 @click="startDayMetricUploadScheduler"
               >
-                {{
-                  getSchedulerToggleMode('day_metric_upload') === 'starting'
-                    ? '启动中...'
-                    : (getSchedulerToggleMode('day_metric_upload') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
-                }}
+                {{ getSchedulerStartButtonText('day_metric_upload') }}
               </button>
               <button
                 class="btn btn-danger"
-                :disabled="isInternalDeploymentRole || !getSchedulerEffectiveRunning('day_metric_upload', health.day_metric_upload.scheduler.remembered_enabled) || isActionLocked(actionKeyDayMetricUploadSchedulerStop) || isActionLocked(actionKeyDayMetricUploadSchedulerStart) || isSchedulerTogglePending('day_metric_upload')"
+                :disabled="isSchedulerStopDisabled('day_metric_upload', actionKeyDayMetricUploadSchedulerStart, actionKeyDayMetricUploadSchedulerStop)"
                 @click="stopDayMetricUploadScheduler"
               >
-                {{ getSchedulerToggleMode('day_metric_upload') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('day_metric_upload') === 'starting' ? '处理中...' : '停止调度') }}
+                {{ getSchedulerStopButtonText('day_metric_upload') }}
               </button>
             </div>
-            <div class="hint">{{ dayMetricUploadSchedulerQuickSaving ? '12项独立上传调度配置保存中...' : '修改执行间隔后自动保存。' }}</div>
+            <div class="hint">{{ dayMetricUploadSchedulerQuickSaving ? '12项独立上传调度配置同步中...' : '修改执行间隔后立即生效。' }}</div>
           </article>
           <div class="day-metric-shell">
             <div class="day-metric-top-grid dashboard-module-primary-grid">
@@ -292,8 +288,8 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
                   >
                     重试全部失败单元（{{ dayMetricRetryableFailedCount }}）
                   </button>
-                  <span class="status-badge status-badge-soft" :class="currentJob && currentJob.status === 'failed' ? 'tone-danger' : currentJob && currentJob.status === 'success' ? 'tone-success' : 'tone-warning'">
-                    {{ currentJob ? (currentJob.status || 'running') : '-' }}
+                  <span class="status-badge status-badge-soft" :class="'tone-' + (currentJob?.tone || 'warning')">
+                    {{ currentJob ? (currentJob.status_text || currentJob.statusText || currentJob.status || 'running') : '-' }}
                   </span>
                 </div>
               </div>

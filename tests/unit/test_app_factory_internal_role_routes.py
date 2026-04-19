@@ -276,6 +276,18 @@ def test_role_selection_mode_blocks_business_api_until_activation(monkeypatch, t
     assert bootstrap.status_code == 200
 
 
+def test_role_selection_mode_allows_system_log_stream_before_activation(monkeypatch, tmp_path):
+    _build_app(monkeypatch, tmp_path, role_mode="external")
+
+    assert app_factory._is_role_selection_allowed_path("/api/logs/system") is True
+
+
+def test_role_selection_mode_allows_handover_daily_report_context_before_activation(monkeypatch, tmp_path):
+    _build_app(monkeypatch, tmp_path, role_mode="external")
+
+    assert app_factory._is_role_selection_allowed_path("/api/handover/daily-report/context") is True
+
+
 def test_lan_console_client_can_call_scheduler_api_after_activation(monkeypatch, tmp_path):
     app = _build_app(monkeypatch, tmp_path, role_mode="external")
     app.state.runtime_services_activated = True
@@ -305,6 +317,10 @@ def test_internal_role_still_allows_bridge_health(monkeypatch, tmp_path):
     payload = response.json()
     assert payload["deployment"]["role_mode"] == "internal"
     assert payload["shared_bridge"]["root_dir"] == expected_root
+
+
+def test_internal_role_allows_daily_report_context_route_shape(monkeypatch, tmp_path):
+    assert app_factory._is_role_selection_allowed_path("/api/handover/daily-report/context") is True
 
 
 def test_internal_role_does_not_mount_network_routes(monkeypatch, tmp_path):
@@ -424,6 +440,49 @@ def test_updater_restart_callback_writes_role_handoff_for_external(monkeypatch, 
     assert container.startup_handoff["target_role_mode"] == "external"
     assert container.startup_handoff["source"] == "updater_restart"
     assert exit_calls == [194]
+
+
+def test_updater_restart_callback_prefers_top_level_launcher_for_release_code_dir(monkeypatch, tmp_path):
+    app = _build_app(monkeypatch, tmp_path, role_mode="external")
+    container = app.state.container
+    code_dir = tmp_path / "QJPT_V3_code"
+    root_dir = tmp_path
+    code_dir.mkdir(parents=True, exist_ok=True)
+    (code_dir / "portable_launcher.py").write_text("print('ok')", encoding="utf-8")
+    launcher_bat = root_dir / "启动程序.bat"
+    launcher_bat.write_text("@echo off\r\n", encoding="utf-8")
+    popen_calls = []
+    exit_calls = []
+
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            popen_calls.append({"cmd": cmd, "kwargs": kwargs})
+
+    class _ImmediateThread:
+        def __init__(self, target=None, **_kwargs):
+            self._target = target
+
+        def start(self):
+            if callable(self._target):
+                self._target()
+
+    monkeypatch.delenv("QJPT_RESTART_EXIT_CODE", raising=False)
+    monkeypatch.delenv("QJPT_PORTABLE_LAUNCHER", raising=False)
+    monkeypatch.setattr(app_factory, "get_app_dir", lambda: code_dir)
+    monkeypatch.setattr(app_factory, "get_app_root_dir", lambda _app_dir=None: root_dir)
+    monkeypatch.setattr(app_factory.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(app_factory.os, "_exit", lambda code: exit_calls.append(code))
+    monkeypatch.setattr(app_factory.time, "sleep", lambda _secs: None)
+    monkeypatch.setattr(app_factory.threading, "Thread", _ImmediateThread)
+
+    callback = container.updater_restart_callback
+    ok, detail = callback({"reason": "updated_restart_scheduled"})
+
+    assert ok is True
+    assert detail == "restart_scheduled"
+    assert popen_calls[0]["cmd"] == ["cmd.exe", "/c", str(launcher_bat)]
+    assert popen_calls[0]["kwargs"]["cwd"] == str(root_dir)
+    assert exit_calls == [0]
 
 
 def test_lifespan_exposes_saved_role_as_restorable_without_reconfiguration(monkeypatch, tmp_path):

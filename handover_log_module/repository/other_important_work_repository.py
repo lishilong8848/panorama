@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import RLock
 from typing import Any, Callable, Dict, List, Tuple
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
@@ -161,6 +163,7 @@ class OtherImportantWorkRepository:
     def __init__(self, handover_cfg: Dict[str, Any]) -> None:
         self.handover_cfg = handover_cfg
         self._field_option_maps_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
+        self._field_option_maps_cache_lock = RLock()
 
     @staticmethod
     def _defaults() -> Dict[str, Any]:
@@ -337,7 +340,8 @@ class OtherImportantWorkRepository:
         if not table_key or not field_names:
             return {}
 
-        cached = self._field_option_maps_cache.get(table_key)
+        with self._field_option_maps_cache_lock:
+            cached = self._field_option_maps_cache.get(table_key)
         if cached is not None:
             return {field_name: dict(cached.get(field_name, {})) for field_name in field_names}
 
@@ -361,7 +365,8 @@ class OtherImportantWorkRepository:
                 continue
             output[field_name] = self._extract_option_map_from_field(field_def)
 
-        self._field_option_maps_cache[table_key] = {key: dict(value) for key, value in output.items()}
+        with self._field_option_maps_cache_lock:
+            self._field_option_maps_cache[table_key] = {key: dict(value) for key, value in output.items()}
         counts = ", ".join(f"{field_name}={len(output.get(field_name, {}))}" for field_name in field_names)
         emit_log(f"[交接班][其他重要工作] 字段选项映射已加载: table_id={table_key}, {counts}")
         return {field_name: dict(output.get(field_name, {})) for field_name in field_names}
@@ -562,6 +567,37 @@ class OtherImportantWorkRepository:
         sources_cfg = cfg.get("sources", {}) if isinstance(cfg.get("sources", {}), dict) else {}
         order = cfg.get("order", []) if isinstance(cfg.get("order", []), list) else []
 
+        source_results: Dict[str, Tuple[List[OtherImportantWorkRow], Dict[str, int]]] = {}
+        runnable_sources: List[Tuple[str, Dict[str, Any]]] = []
+        for source_key in order:
+            current_cfg = sources_cfg.get(source_key, {})
+            if isinstance(current_cfg, dict):
+                runnable_sources.append((source_key, current_cfg))
+
+        max_workers = min(4, max(1, len(runnable_sources)))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="other-work") as executor:
+            future_to_source = {
+                executor.submit(
+                    self._load_source_rows_for_shift,
+                    source_key=source_key,
+                    source_cfg=current_cfg,
+                    shared_source_cfg=shared_source_cfg,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    emit_log=emit_log,
+                ): source_key
+                for source_key, current_cfg in runnable_sources
+            }
+            for future in as_completed(future_to_source):
+                source_key = future_to_source[future]
+                try:
+                    source_results[source_key] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    emit_log(
+                        "[交接班][其他重要工作] 读取失败，跳过该来源继续: "
+                        f"source={source_key}, error={exc}"
+                    )
+
         all_rows: List[OtherImportantWorkRow] = []
         total = 0
         in_scope = 0
@@ -571,24 +607,9 @@ class OtherImportantWorkRepository:
         end_time_before_filter_start_skipped = 0
         end_time_before_start_skipped = 0
         for source_key in order:
-            current_cfg = sources_cfg.get(source_key, {})
-            if not isinstance(current_cfg, dict):
+            if source_key not in source_results:
                 continue
-            try:
-                source_rows, counters = self._load_source_rows_for_shift(
-                    source_key=source_key,
-                    source_cfg=current_cfg,
-                    shared_source_cfg=shared_source_cfg,
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
-                    emit_log=emit_log,
-                )
-            except Exception as exc:  # noqa: BLE001
-                emit_log(
-                    "[交接班][其他重要工作] 读取失败，跳过该来源继续: "
-                    f"source={source_key}, error={exc}"
-                )
-                continue
+            source_rows, counters = source_results[source_key]
             all_rows.extend(source_rows)
             total += int(counters.get("total", 0) or 0)
             in_scope += int(counters.get("in_scope", 0) or 0)
@@ -597,6 +618,8 @@ class OtherImportantWorkRepository:
             start_time_after_filter_end_skipped += int(counters.get("start_time_after_filter_end_skipped", 0) or 0)
             end_time_before_filter_start_skipped += int(counters.get("end_time_before_filter_start_skipped", 0) or 0)
             end_time_before_start_skipped += int(counters.get("end_time_before_start_skipped", 0) or 0)
+
+        all_rows.sort(key=self._sort_key)
 
         return all_rows, cfg, {
             "total": total,

@@ -93,6 +93,8 @@ def test_list_jobs_route_returns_job_list_and_counts() -> None:
     assert payload["active_job_ids"] == ["job-running", "job-waiting"]
     assert payload["job_counts"]["running"] == 1
     assert payload["jobs"][0]["job_id"] == "job-running"
+    assert payload["jobs"][0]["display_title"] == "告警多维上传"
+    assert payload["jobs"][0]["actions"]["cancel"]["allowed"] is True
 
 
 def test_runtime_resources_route_returns_resource_snapshot() -> None:
@@ -171,6 +173,15 @@ def test_get_job_route_returns_stage_details() -> None:
     assert payload["feature"] == "handover_from_download"
     assert payload["stages"][0]["stage_id"] == "main"
     assert payload["stages"][0]["resource_keys"] == ["network:internal"]
+    assert payload["display_title"] == "交接班下载"
+    assert payload["actions"]["cancel"]["allowed"] is True
+
+
+def test_list_jobs_route_with_status_filter_returns_presented_jobs() -> None:
+    payload = routes.list_jobs(_fake_request(), limit=10, statuses="running")
+    assert payload["count"] == 2
+    assert payload["jobs"][0]["display_title"] == "告警多维上传"
+    assert payload["jobs"][1]["display_detail"] == "说明：等待受控浏览器"
 
 
 def test_get_job_route_returns_503_when_task_engine_temporarily_unavailable() -> None:

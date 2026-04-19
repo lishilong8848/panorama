@@ -4,6 +4,8 @@ import json
 import sqlite3
 from datetime import datetime
 
+import openpyxl
+
 from app.modules.shared_bridge.service.shared_bridge_mailbox_store import SharedBridgeMailboxStore
 from app.modules.shared_bridge.service.shared_source_cache_index_store import SharedSourceCacheIndexStore
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
@@ -261,7 +263,11 @@ def test_runtime_service_alias_root_reads_latest_source_cache_selection(tmp_path
 
     source_file = canonical_root / "交接班日志源文件" / "202604" / f"{current_bucket.replace(' ', '--')}" / "latest--交接班日志源文件--A楼.xlsx"
     source_file.parent.mkdir(parents=True, exist_ok=True)
-    source_file.write_bytes(b"ok")
+    workbook = openpyxl.Workbook()
+    workbook.active["D4"] = "市电总功率"
+    workbook.active["E4"] = 123.4
+    workbook.save(source_file)
+    workbook.close()
 
     store.upsert_source_cache_entry(
         source_family="handover_log_family",

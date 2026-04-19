@@ -35,6 +35,7 @@ class _FakeBridgeService:
         self.buildings = ["A楼", "B楼"]
         self.cache_ready = False
         self.base_dir = base_dir
+        self.fill_history_ready = False
 
     def get_source_cache_buildings(self):
         self.calls.append(("get_source_cache_buildings", {}))
@@ -56,6 +57,24 @@ class _FakeBridgeService:
                     }
                 )
         return output
+
+    def fill_day_metric_history(self, *, selected_dates, building_scope, building, emit_log):  # noqa: ANN001
+        self.calls.append(
+            (
+                "fill_day_metric_history",
+                {
+                    "selected_dates": list(selected_dates),
+                    "building_scope": building_scope,
+                    "building": building,
+                },
+            )
+        )
+        if self.fill_history_ready:
+            self.cache_ready = True
+        return self.get_day_metric_by_date_cache_entries(
+            selected_dates=selected_dates,
+            buildings=[building] if building_scope == "single" and building else self.buildings,
+        )
 
     def create_day_metric_from_download_task(self, **kwargs):  # noqa: ANN003
         self.calls.append(("create_day_metric_from_download_task", dict(kwargs)))
@@ -166,6 +185,27 @@ def test_day_metric_from_download_route_starts_from_shared_cache_when_ready() ->
     assert request.app.state.container.job_service.worker_calls == []
 
 
+def test_day_metric_from_download_route_fills_day_cache_from_existing_handover_files_before_waiting() -> None:
+    request = _fake_request(ready=False)
+    request.app.state.container.shared_bridge_service.fill_history_ready = True
+    payload = {
+        "dates": ["2026-03-20"],
+        "building_scope": "single",
+        "building": "A楼",
+    }
+
+    response = routes.job_day_metric_from_download(payload, request)
+
+    assert response["job_id"] == "job-1"
+    assert ("fill_day_metric_history", {
+        "selected_dates": ["2026-03-20"],
+        "building_scope": "single",
+        "building": "A楼",
+    }) in request.app.state.container.shared_bridge_service.calls
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "day_metric_cache_by_date"
+    assert request.app.state.container.job_service.waiting_calls == []
+
+
 def test_day_metric_from_download_route_creates_cache_fill_when_indexed_file_is_missing() -> None:
     request = _fake_request(ready=True)
     payload = {
@@ -267,3 +307,86 @@ def test_day_metric_from_download_route_uses_cached_file_path_verbatim(monkeypat
             "source_file": str(actual_file),
         }
     ]
+
+
+def test_day_metric_from_download_route_runs_ready_dates_and_waits_missing_dates(monkeypatch) -> None:
+    request = _fake_request(ready=False)
+    payload = {
+        "dates": ["2026-03-19", "2026-03-20"],
+        "building_scope": "all_enabled",
+        "building": "",
+    }
+
+    captured = {}
+
+    class _FakeService:
+        def __init__(self, _config):  # noqa: D401, ANN001
+            pass
+
+        def continue_from_source_files(
+            self,
+            *,
+            selected_dates,
+            buildings,
+            source_units,
+            building_scope,
+            building,
+            emit_log,
+        ):  # noqa: ANN001
+            captured["selected_dates"] = list(selected_dates)
+            captured["buildings"] = list(buildings)
+            captured["source_units"] = list(source_units)
+            captured["building_scope"] = building_scope
+            captured["building"] = building
+            captured["emit_log"] = emit_log
+            return {"ok": True}
+
+    monkeypatch.setattr(routes, "DayMetricStandaloneUploadService", _FakeService)
+    ready_dir = Path.cwd() / ".tmp_day_metric_bridge_routes" / "partial-ready"
+    request.app.state.container.shared_bridge_service.get_day_metric_by_date_cache_entries = lambda **_kwargs: [  # noqa: E731
+        {
+            "building": "A楼",
+            "duty_date": "2026-03-19",
+            "file_path": str(_touch_file(ready_dir / "2026-03-19" / "A楼.xlsx")),
+        },
+        {
+            "building": "B楼",
+            "duty_date": "2026-03-19",
+            "file_path": str(_touch_file(ready_dir / "2026-03-19" / "B楼.xlsx")),
+        },
+    ]
+
+    response = routes.job_day_metric_from_download(payload, request)
+    run_func = request.app.state.container.job_service.start_job_calls[0]["run_func"]
+    result = run_func(lambda *_args, **_kwargs: None)
+
+    assert response["job_id"] == "job-1"
+    assert response["partial_waiting"] is True
+    assert response["partial_waiting_dates"] == ["2026-03-20"]
+    assert response["partial_bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
+    assert response["partial_waiting_job"]["status"] == "waiting_resource"
+    assert result == {"ok": True}
+    assert captured["selected_dates"] == ["2026-03-19"]
+    assert captured["buildings"] == ["A楼", "B楼"]
+    assert captured["building_scope"] == "all_enabled"
+    assert captured["building"] is None
+    assert captured["source_units"] == [
+        {
+            "duty_date": "2026-03-19",
+            "building": "A楼",
+            "source_file": str(ready_dir / "2026-03-19" / "A楼.xlsx"),
+        },
+        {
+            "duty_date": "2026-03-19",
+            "building": "B楼",
+            "source_file": str(ready_dir / "2026-03-19" / "B楼.xlsx"),
+        },
+    ]
+    assert request.app.state.container.job_service.waiting_calls[0]["worker_payload"]["selected_dates"] == ["2026-03-20"]
+    assert ("create_day_metric_from_download_task", {
+        "selected_dates": ["2026-03-20"],
+        "building_scope": "all_enabled",
+        "building": None,
+        "resume_job_id": "job-waiting-1",
+        "requested_by": "manual",
+    }) in request.app.state.container.shared_bridge_service.calls

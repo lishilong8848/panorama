@@ -793,9 +793,29 @@ class ShiftRosterRepository:
         duty_shift: str,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, str]:
+        grouped = self.query_long_day_cell_values_grouped(
+            buildings=[building],
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=emit_log,
+        )
+        return dict(grouped.get(str(building or "").strip(), {}) or {})
+
+    def query_long_day_cell_values_grouped(
+        self,
+        *,
+        buildings: List[str],
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Dict[str, str]]:
         cfg = self._normalize_cfg()
         long_day_cfg = cfg.get("long_day", {})
         if not isinstance(long_day_cfg, dict) or not bool(long_day_cfg.get("enabled", True)):
+            return {}
+
+        target_buildings = [str(item or "").strip() for item in buildings if str(item or "").strip()]
+        if not target_buildings:
             return {}
 
         source_cfg = long_day_cfg.get("source", {})
@@ -834,43 +854,46 @@ class ShiftRosterRepository:
         target_day = duty_day if normalized_shift == "day" else duty_day + timedelta(days=1)
         target_date_text = target_day.strftime("%Y-%m-%d")
         target_shift_value = str(long_day_cfg.get("shift_value", "长白")).strip().casefold()
-
-        row_people = ""
-        for item in records:
-            if not isinstance(item, dict):
-                continue
-            fields = item.get("fields", {})
-            if not isinstance(fields, dict):
-                continue
-            row_date = _normalize_date_text(fields.get(str(fields_cfg.get("duty_date", "排班日期"))))
-            if row_date != target_date_text:
-                continue
-            row_building = _field_text(fields.get(str(fields_cfg.get("building", "机楼"))))
-            if not self._match_building(building, row_building, mode):
-                continue
-            shift_field_name = str(fields_cfg.get("shift", "")).strip()
-            row_shift = _field_text(fields.get(shift_field_name)).casefold() if shift_field_name else ""
-            if target_shift_value:
-                # 班次仅作为可选过滤：有班次值时才匹配“长白”，无班次值不拦截
-                if row_shift and target_shift_value not in row_shift:
-                    continue
-            row_people = self._people_text_from_fields(
-                fields=fields,
-                configured_field=fields_cfg.get("people_text", self.PREFERRED_PEOPLE_TEXT_FIELD),
-            )
-            if row_people:
-                break
-
-        result = dict(default_values)
+        shift_field_name = str(fields_cfg.get("shift", "")).strip()
+        configured_people_field = fields_cfg.get("people_text", self.PREFERRED_PEOPLE_TEXT_FIELD)
         target_cell = day_cell if normalized_shift == "day" else night_cell
-        if target_cell in result:
-            result[target_cell] = f"{prefix}{row_people or rest_text}"
+        grouped: Dict[str, Dict[str, str]] = {}
 
-        emit_log(
-            f"[交接班][长白岗查询] building={building}, duty={duty_date}/{normalized_shift}, "
-            f"query_date={target_date_text}, result={'命中' if row_people else '休息'}"
-        )
-        return result
+        for building in target_buildings:
+            row_people = ""
+            for item in records:
+                if not isinstance(item, dict):
+                    continue
+                fields = item.get("fields", {})
+                if not isinstance(fields, dict):
+                    continue
+                row_date = _normalize_date_text(fields.get(str(fields_cfg.get("duty_date", "排班日期"))))
+                if row_date != target_date_text:
+                    continue
+                row_building = _field_text(fields.get(str(fields_cfg.get("building", "机楼"))))
+                if not self._match_building(building, row_building, mode):
+                    continue
+                row_shift = _field_text(fields.get(shift_field_name)).casefold() if shift_field_name else ""
+                if target_shift_value and row_shift and target_shift_value not in row_shift:
+                    continue
+                row_people = self._people_text_from_fields(
+                    fields=fields,
+                    configured_field=configured_people_field,
+                )
+                if row_people:
+                    break
+
+            result = dict(default_values)
+            if target_cell in result:
+                result[target_cell] = f"{prefix}{row_people or rest_text}"
+            grouped[building] = result
+            emit_log(
+                f"[交接班][长白岗查询] building={building}, duty={duty_date}/{normalized_shift}, "
+                f"query_date={target_date_text}, result={'命中' if row_people else '休息'}"
+            )
+
+        emit_log(f"[交接班][长白岗查询] 批量预取完成: buildings={len(grouped)}, records={len(records)}")
+        return grouped
 
     def list_engineer_directory(
         self,

@@ -44,40 +44,23 @@ export function createDashboardWetBulbCollectionActions(ctx) {
     config,
     wetBulbSchedulerQuickSaving,
     streamController,
-    fetchHealth,
-    fetchConfig,
+    fetchExternalDashboardSummary,
+    scheduleExternalDashboardRefresh,
     fetchJobs,
     fetchBridgeTasks,
     fetchBridgeTaskDetail,
     runSingleFlight,
     setSchedulerToggleState,
   } = ctx;
-  let healthRefreshTimer = null;
-  let configRefreshTimer = null;
 
-  function scheduleHealthRefresh(delayMs = 800) {
-    if (healthRefreshTimer) {
-      window.clearTimeout(healthRefreshTimer);
+  function triggerDashboardRefresh(reason = "wet_bulb_action") {
+    if (typeof scheduleExternalDashboardRefresh === "function") {
+      scheduleExternalDashboardRefresh(reason);
+      return;
     }
-    healthRefreshTimer = window.setTimeout(() => {
-      healthRefreshTimer = null;
-      void fetchHealth({ silentMessage: true });
-    }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
-  }
-
-  function scheduleConfigBaselineRefresh(delayMs = 300) {
-    if (typeof fetchConfig !== "function") return;
-    if (configRefreshTimer) {
-      window.clearTimeout(configRefreshTimer);
+    if (typeof fetchExternalDashboardSummary === "function") {
+      void fetchExternalDashboardSummary({ silentMessage: true });
     }
-    configRefreshTimer = window.setTimeout(() => {
-      configRefreshTimer = null;
-      void fetchConfig({
-        silentMessage: true,
-        applyToDraft: false,
-        loadHandoverSegments: false,
-      });
-    }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
   }
 
   function markSchedulerToggle(mode, rememberedOverride) {
@@ -91,7 +74,12 @@ export function createDashboardWetBulbCollectionActions(ctx) {
 
   async function guardedRun(actionKey, taskFn, options = {}) {
     if (typeof runSingleFlight === "function") {
-      return runSingleFlight(actionKey, taskFn, options);
+      return runSingleFlight(actionKey, taskFn, {
+        ...options,
+        onCooldown: () => {
+          message.value = "请求处理中，请稍候";
+        },
+      });
     }
     return taskFn();
   }
@@ -216,8 +204,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
           syncLocalWetBulbSchedulerAutoStart(config.value?.wet_bulb_collection?.scheduler, true, { enableOnStart: true });
           applyWetBulbSchedulerSnapshotFromAction(data);
           markSchedulerToggle("idle", true);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("wet_bulb_scheduler_start");
           message.value = `湿球温度定时采集调度启动结果: ${formatWetBulbSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("idle", null);
@@ -242,8 +229,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
           syncLocalWetBulbSchedulerAutoStart(config.value?.wet_bulb_collection?.scheduler, false);
           applyWetBulbSchedulerSnapshotFromAction(data);
           markSchedulerToggle("idle", false);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("wet_bulb_scheduler_stop");
           message.value = `湿球温度定时采集调度停止结果: ${formatWetBulbSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("idle", null);
@@ -292,8 +278,8 @@ export function createDashboardWetBulbCollectionActions(ctx) {
             const next = cleanupWetBulbCollectionCompat({ scheduler: data.scheduler_config }).scheduler;
             Object.assign(config.value.wet_bulb_collection.scheduler, next || {});
           }
-          scheduleConfigBaselineRefresh();
-          await fetchHealth();
+          applyWetBulbSchedulerSnapshotFromAction(data?.scheduler_status || data);
+          triggerDashboardRefresh("wet_bulb_scheduler_save");
           message.value = data?.message || "湿球温度定时采集调度配置已更新";
         } catch (err) {
           message.value = formatWetBulbCollectionError(err, "湿球温度定时采集调度自动更新");

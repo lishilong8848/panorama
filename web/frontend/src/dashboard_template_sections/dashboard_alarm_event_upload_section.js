@@ -6,18 +6,18 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
                             <div class="task-block-kicker">调度卡</div>
                             <h3 class="card-title">告警信息上传调度</h3>
                           </div>
-                          <span class="status-badge status-badge-soft" :class="health.alarm_event_upload.scheduler.running ? 'tone-success' : 'tone-neutral'">
-                            {{ health.alarm_event_upload.scheduler.status || '-' }}
+                          <span class="status-badge status-badge-soft" :class="'tone-' + getSchedulerStatusTone('alarm_event_upload')">
+                            {{ getSchedulerStatusText('alarm_event_upload') || '-' }}
                           </span>
                         </div>
                         <div class="status-metric-grid status-metric-grid-compact">
-                          <div class="status-metric">
+                        <div class="status-metric">
                             <div class="status-metric-label">下次执行</div>
-                            <strong class="status-metric-value">{{ health.alarm_event_upload.scheduler.next_run_time || '-' }}</strong>
-                          </div>
+                            <strong class="status-metric-value">{{ getSchedulerDisplayText('alarm_event_upload', 'next_run_text', '-') }}</strong>
+                        </div>
                           <div class="status-metric">
                             <div class="status-metric-label">最近触发</div>
-                            <strong class="status-metric-value">{{ health.alarm_event_upload.scheduler.last_trigger_at || '-' }}</strong>
+                            <strong class="status-metric-value">{{ getSchedulerDisplayText('alarm_event_upload', 'last_trigger_text', '-') }}</strong>
                           </div>
                           <div class="status-metric">
                             <div class="status-metric-label">最近结果</div>
@@ -38,24 +38,20 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
                         <div class="btn-line">
                           <button
                             class="btn btn-success"
-                            :disabled="getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.remembered_enabled) || isActionLocked(actionKeyAlarmEventUploadSchedulerStart) || isActionLocked(actionKeyAlarmEventUploadSchedulerStop) || isSchedulerTogglePending('alarm_event_upload')"
+                            :disabled="isSchedulerStartDisabled('alarm_event_upload', actionKeyAlarmEventUploadSchedulerStart, actionKeyAlarmEventUploadSchedulerStop)"
                             @click="startAlarmEventUploadScheduler"
                           >
-                            {{
-                              getSchedulerToggleMode('alarm_event_upload') === 'starting'
-                                ? '启动中...'
-                                : (getSchedulerToggleMode('alarm_event_upload') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
-                            }}
+                            {{ getSchedulerStartButtonText('alarm_event_upload') }}
                           </button>
                           <button
                             class="btn btn-danger"
-                            :disabled="!getSchedulerEffectiveRunning('alarm_event_upload', health.alarm_event_upload.scheduler.remembered_enabled) || isActionLocked(actionKeyAlarmEventUploadSchedulerStop) || isActionLocked(actionKeyAlarmEventUploadSchedulerStart) || isSchedulerTogglePending('alarm_event_upload')"
+                            :disabled="isSchedulerStopDisabled('alarm_event_upload', actionKeyAlarmEventUploadSchedulerStart, actionKeyAlarmEventUploadSchedulerStop)"
                             @click="stopAlarmEventUploadScheduler"
                           >
-                            {{ getSchedulerToggleMode('alarm_event_upload') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('alarm_event_upload') === 'starting' ? '处理中...' : '停止调度') }}
+                            {{ getSchedulerStopButtonText('alarm_event_upload') }}
                           </button>
                         </div>
-                        <div class="hint">{{ alarmEventUploadSchedulerQuickSaving ? '告警信息上传调度配置保存中...' : '修改每日执行时间后自动保存。' }}</div>
+                        <div class="hint">{{ alarmEventUploadSchedulerQuickSaving ? '告警信息上传调度配置同步中...' : '修改每日执行时间后立即生效。' }}</div>
                       </article>
 
             <div class="dashboard-module-intro">
@@ -132,8 +128,8 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
                     <div class="task-block-kicker">状态概览</div>
                     <h3 class="card-title">当前上传状态</h3>
                   </div>
-                  <span class="status-badge status-badge-soft" :class="'tone-' + externalAlarmReadinessFamily.tone">
-                    {{ externalAlarmReadinessFamily.statusText }}
+                  <span class="status-badge status-badge-soft" :class="'tone-' + externalAlarmUploadStatus.tone">
+                    {{ externalAlarmUploadStatus.statusText }}
                   </span>
                 </div>
                 <div class="status-metric-grid status-metric-grid-compact">
@@ -150,9 +146,16 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
                     <strong class="status-metric-value">{{ externalAlarmReadinessFamily.uploadFileCount || 0 }} 份</strong>
                   </div>
                 </div>
-                <div class="hint">共享文件状态：{{ externalAlarmReadinessFamily.summaryText }}</div>
-                <div class="hint" v-if="externalAlarmReadinessFamily.selectionReferenceDate">参考日期：{{ externalAlarmReadinessFamily.selectionReferenceDate }}</div>
-                <div class="hint" v-if="externalAlarmReadinessFamily.uploadLastError">最近异常：{{ externalAlarmReadinessFamily.uploadLastError }}</div>
+                <div class="hint">{{ externalAlarmUploadStatus.summaryText }}</div>
+                <template v-if="externalAlarmReadinessFamily.metaLines && externalAlarmReadinessFamily.metaLines.length">
+                  <div
+                    class="hint"
+                    v-for="(line, idx) in externalAlarmReadinessFamily.metaLines"
+                    :key="'alarm-upload-status-meta-' + idx"
+                  >
+                    {{ line }}
+                  </div>
+                </template>
               </article>
             </div>
 
@@ -168,9 +171,25 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
                             </span>
                           </div>
                           <div class="hint">{{ externalAlarmReadinessFamily.summaryText }}</div>
-                          <div class="hint" v-if="externalAlarmReadinessFamily.selectionReferenceDate">
-                            选择策略：当天最新一份，缺失则回退昨天最新。参考日期：{{ externalAlarmReadinessFamily.selectionReferenceDate }}
+                          <div class="status-list" v-if="externalAlarmReadinessFamily.items && externalAlarmReadinessFamily.items.length">
+                            <div
+                              v-for="(item, idx) in externalAlarmReadinessFamily.items"
+                              :key="'alarm-upload-family-item-' + idx"
+                              class="status-list-row"
+                            >
+                              <span class="status-list-label">{{ item.label }}</span>
+                              <span class="status-list-value" :class="'tone-' + (item.tone || 'neutral')">{{ item.value }}</span>
+                            </div>
                           </div>
+                          <template v-if="externalAlarmReadinessFamily.metaLines && externalAlarmReadinessFamily.metaLines.length">
+                            <div
+                              class="hint"
+                              v-for="(line, idx) in externalAlarmReadinessFamily.metaLines"
+                              :key="'alarm-upload-family-meta-' + idx"
+                            >
+                              {{ line }}
+                            </div>
+                          </template>
                           <div class="source-cache-building-grid" v-if="externalAlarmReadinessFamily.buildings && externalAlarmReadinessFamily.buildings.length" style="margin-top:12px;">
                             <div
                               class="source-cache-building-card"
@@ -181,11 +200,18 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
                                 <span class="source-cache-building-card-title">{{ building.building }}</span>
                                 <span class="status-badge status-badge-soft" :class="'tone-' + building.tone">{{ building.stateText }}</span>
                               </div>
-                              <div class="hint">同步日期：{{ building.selectionReferenceDate || externalAlarmReadinessFamily.selectionReferenceDate || '-' }}</div>
-                              <div class="hint">选择文件时间：{{ building.selectedDownloadedAt || '-' }}</div>
-                              <div class="hint">{{ building.detailText || building.selectionScopeText || building.sourceKindText || '-' }}</div>
-                              <div class="hint" v-if="building.resolvedFilePath">共享路径：{{ building.resolvedFilePath }}</div>
-                              <div class="hint" v-else-if="building.relativePath">缓存文件：{{ building.relativePath }}</div>
+                              <template v-if="building.metaLines && building.metaLines.length">
+                                <div
+                                  class="hint"
+                                  v-for="(line, idx) in building.metaLines"
+                                  :key="'alarm-upload-family-building-meta-' + building.building + '-' + idx"
+                                >
+                                  {{ line }}
+                                </div>
+                              </template>
+                              <template v-else>
+                                <div class="hint">等待后端明细</div>
+                              </template>
                             </div>
                           </div>
                           <div class="hint" v-else style="margin-top:10px;">当前没有可展示的楼栋告警文件状态。</div>
@@ -243,15 +269,15 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
                             </button>
                           </div>
                           <div class="hint" style="margin-top:10px;">{{ alarmEventUploadTarget.hintText }}</div>
-                          <div class="hint" v-if="externalAlarmReadinessFamily.selectionReferenceDate">
-                            选择参考日期：{{ externalAlarmReadinessFamily.selectionReferenceDate }}
-                          </div>
-                          <div class="hint" v-if="externalAlarmReadinessFamily.uploadRunning">
-                            {{ externalAlarmReadinessFamily.uploadRunningText }}
-                          </div>
-                          <div class="hint" v-if="externalAlarmReadinessFamily.uploadLastError">
-                            最近上传异常：{{ externalAlarmReadinessFamily.uploadLastError }}
-                          </div>
+                          <template v-if="externalAlarmReadinessFamily.metaLines && externalAlarmReadinessFamily.metaLines.length">
+                            <div
+                              class="hint"
+                              v-for="(line, idx) in externalAlarmReadinessFamily.metaLines"
+                              :key="'alarm-upload-advanced-meta-' + idx"
+                            >
+                              {{ line }}
+                            </div>
+                          </template>
                         </article>
                           </div>
                         </details>

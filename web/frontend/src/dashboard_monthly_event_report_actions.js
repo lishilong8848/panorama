@@ -59,38 +59,20 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     monthlyReportTestReceiveIds,
     monthlyReportTestReceiveIdType,
     streamController,
-    fetchHealth,
-    fetchConfig,
+    fetchExternalDashboardSummary,
+    scheduleExternalDashboardRefresh,
     fetchJobs,
     runSingleFlight,
     setSchedulerToggleState,
   } = ctx;
-  let healthRefreshTimer = null;
-  let configRefreshTimer = null;
-
-  function scheduleHealthRefresh(delayMs = 800) {
-    if (healthRefreshTimer) {
-      window.clearTimeout(healthRefreshTimer);
+  function triggerDashboardRefresh(reason = "monthly_report_action") {
+    if (typeof scheduleExternalDashboardRefresh === "function") {
+      scheduleExternalDashboardRefresh(reason);
+      return;
     }
-    healthRefreshTimer = window.setTimeout(() => {
-      healthRefreshTimer = null;
-      void fetchHealth({ silentMessage: true });
-    }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
-  }
-
-  function scheduleConfigBaselineRefresh(delayMs = 300) {
-    if (typeof fetchConfig !== "function") return;
-    if (configRefreshTimer) {
-      window.clearTimeout(configRefreshTimer);
+    if (typeof fetchExternalDashboardSummary === "function") {
+      void fetchExternalDashboardSummary({ silentMessage: true });
     }
-    configRefreshTimer = window.setTimeout(() => {
-      configRefreshTimer = null;
-      void fetchConfig({
-        silentMessage: true,
-        applyToDraft: false,
-        loadHandoverSegments: false,
-      });
-    }, Math.max(0, Number.parseInt(String(delayMs || 0), 10) || 0));
   }
 
   function markSchedulerToggle(key, mode, rememberedOverride) {
@@ -104,7 +86,12 @@ export function createDashboardMonthlyEventReportActions(ctx) {
 
   function guardedRun(actionKey, taskFn, options = {}) {
     if (typeof runSingleFlight === "function") {
-      return runSingleFlight(actionKey, taskFn, options);
+      return runSingleFlight(actionKey, taskFn, {
+        ...options,
+        onCooldown: () => {
+          message.value = "请求处理中，请稍候";
+        },
+      });
     }
     return taskFn();
   }
@@ -326,8 +313,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           syncLocalMonthlySchedulerAutoStart(config.value?.handover_log?.monthly_event_report?.scheduler, true, { enableOnStart: true });
           applySchedulerSnapshot(health?.monthly_event_report?.scheduler, data);
           markSchedulerToggle("monthly_event_report", "idle", true);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("monthly_event_scheduler_start");
           message.value = `月度事件统计表调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("monthly_event_report", "idle", null);
@@ -352,8 +338,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           syncLocalMonthlySchedulerAutoStart(config.value?.handover_log?.monthly_event_report?.scheduler, false);
           applySchedulerSnapshot(health?.monthly_event_report?.scheduler, data);
           markSchedulerToggle("monthly_event_report", "idle", false);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("monthly_event_scheduler_stop");
           message.value = `月度事件统计表调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("monthly_event_report", "idle", null);
@@ -405,8 +390,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           if (config.value?.handover_log?.monthly_event_report?.scheduler && data?.scheduler_config) {
             Object.assign(config.value.handover_log.monthly_event_report.scheduler, data.scheduler_config);
           }
-          scheduleConfigBaselineRefresh();
-          await fetchHealth();
+          triggerDashboardRefresh("monthly_event_scheduler_save");
           message.value = data?.message || "月度事件统计表调度配置已更新";
         } catch (err) {
           message.value = formatError(err, "月度事件统计表调度自动更新");
@@ -432,8 +416,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           syncLocalMonthlySchedulerAutoStart(config.value?.handover_log?.monthly_change_report?.scheduler, true, { enableOnStart: true });
           applySchedulerSnapshot(health?.monthly_change_report?.scheduler, data);
           markSchedulerToggle("monthly_change_report", "idle", true);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("monthly_change_scheduler_start");
           message.value = `月度变更统计表调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("monthly_change_report", "idle", null);
@@ -458,8 +441,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           syncLocalMonthlySchedulerAutoStart(config.value?.handover_log?.monthly_change_report?.scheduler, false);
           applySchedulerSnapshot(health?.monthly_change_report?.scheduler, data);
           markSchedulerToggle("monthly_change_report", "idle", false);
-          scheduleHealthRefresh();
-          scheduleConfigBaselineRefresh();
+          triggerDashboardRefresh("monthly_change_scheduler_stop");
           message.value = `月度变更统计表调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("monthly_change_report", "idle", null);
@@ -511,8 +493,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           if (config.value?.handover_log?.monthly_change_report?.scheduler && data?.scheduler_config) {
             Object.assign(config.value.handover_log.monthly_change_report.scheduler, data.scheduler_config);
           }
-          scheduleConfigBaselineRefresh();
-          await fetchHealth();
+          triggerDashboardRefresh("monthly_change_scheduler_save");
           message.value = data?.message || "月度变更统计表调度配置已更新";
         } catch (err) {
           message.value = formatError(err, "月度变更统计表调度自动更新");

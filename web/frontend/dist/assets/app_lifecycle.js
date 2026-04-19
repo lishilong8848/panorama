@@ -2,6 +2,7 @@
   const { onMounted, onBeforeUnmount } = vueHooks;
   const {
     fetchBootstrapHealth,
+    fetchExternalDashboardSummary,
     fetchHealth,
     fetchJobs,
     fetchBridgeTasks,
@@ -20,6 +21,7 @@
     shouldPollJobPanel,
     shouldLoadEngineerDirectory,
     shouldPauseRuntimeRequests,
+    shouldPollExternalDashboardSummary,
     scheduleEngineerDirectoryPrefetch,
     tryAutoResume,
     fetchJob,
@@ -40,6 +42,10 @@
       typeof shouldFetchHealth === "function"
         ? Boolean(shouldFetchHealth())
         : true;
+    const canPollExternalDashboardSummary = () =>
+      typeof shouldPollExternalDashboardSummary === "function"
+        ? Boolean(shouldPollExternalDashboardSummary())
+        : false;
     const canPollJobPanel = () =>
       typeof shouldPollJobPanel === "function"
         ? Boolean(shouldPollJobPanel())
@@ -70,6 +76,25 @@
       typeof getHealthPollIntervalMs === "function"
         ? Math.max(1000, Number.parseInt(String(getHealthPollIntervalMs() || 5000), 10) || 5000)
         : 5000;
+    const dashboardSummaryPollIntervalMs = 10000;
+
+    const scheduleDashboardSummaryPoll = (delayMs = dashboardSummaryPollIntervalMs) => {
+      if (timers.externalDashboardSummaryTimer) clearTimeout(timers.externalDashboardSummaryTimer);
+      timers.externalDashboardSummaryTimer = window.setTimeout(async () => {
+        if (!isBootstrapReady()) {
+          scheduleDashboardSummaryPoll(dashboardSummaryPollIntervalMs);
+          return;
+        }
+        if (isRuntimeTrafficPaused()) {
+          scheduleDashboardSummaryPoll(dashboardSummaryPollIntervalMs);
+          return;
+        }
+        if (canPollExternalDashboardSummary()) {
+          await fetchExternalDashboardSummary({ silentMessage: true });
+        }
+        scheduleDashboardSummaryPoll(dashboardSummaryPollIntervalMs);
+      }, delayMs);
+    };
 
     const scheduleHealthPoll = (delayMs = 5000) => {
       if (timers.healthTimer) clearTimeout(timers.healthTimer);
@@ -177,6 +202,7 @@
       scheduleEngineerDirectoryPrefetch(3000);
     }
     scheduleHealthPoll(resolveHealthPollIntervalMs());
+    scheduleDashboardSummaryPoll(dashboardSummaryPollIntervalMs);
     scheduleJobPanelPoll(jobPanelPollIntervalMs);
     scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
     scheduleInternalRuntimePoll(internalRuntimePollIntervalMs);
@@ -208,6 +234,7 @@
     streamController.dispose();
     if (timers.pollTimer) clearInterval(timers.pollTimer);
     if (timers.healthTimer) clearTimeout(timers.healthTimer);
+    if (timers.externalDashboardSummaryTimer) clearTimeout(timers.externalDashboardSummaryTimer);
     if (timers.healthWarmupTimer) clearTimeout(timers.healthWarmupTimer);
     if (timers.configRetryTimer) clearTimeout(timers.configRetryTimer);
     if (timers.internalRuntimeTimer) clearTimeout(timers.internalRuntimeTimer);

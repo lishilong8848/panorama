@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 4,
-  "updated_at": "2026-04-16T15:34:32+08:00",
+  "revision": 9,
+  "updated_at": "2026-04-19T00:17:27+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -176,7 +176,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "1号冷机模式"
+              "1号冷机模式",
+              "1号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -196,7 +197,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "2号冷机模式"
+              "2号冷机模式",
+              "2号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -216,7 +218,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "3号冷机模式"
+              "3号冷机模式",
+              "3号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -236,7 +239,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "4号冷机模式"
+              "4号冷机模式",
+              "4号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -256,7 +260,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "5号冷机模式"
+              "5号冷机模式",
+              "5号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -276,7 +281,8 @@
             "target_cell": "",
             "rule_type": "direct",
             "d_keywords": [
-              "6号冷机模式"
+              "6号冷机模式",
+              "6号冷机运行模式"
             ],
             "match_mode": "contains_casefold",
             "agg": "first",
@@ -623,8 +629,8 @@
       "cabinet_power_defaults_by_building": {
         "A楼": {
           "cells": {
-            "B13": "1272345",
-            "D13": "234",
+            "B13": "988000",
+            "D13": "970000",
             "F13": "0",
             "H13": "0"
           }
@@ -636,7 +642,7 @@
             {
               "cells": {
                 "B": "值班手机",
-                "C": "A11244值班室",
+                "C": "值班桌面",
                 "E": "1",
                 "F": "否",
                 "G": "无"
@@ -645,16 +651,7 @@
             {
               "cells": {
                 "B": "对讲机",
-                "C": "D112值班室",
-                "E": "5",
-                "F": "否",
-                "G": "无"
-              }
-            },
-            {
-              "cells": {
-                "B": "钥匙",
-                "C": "DDD112值班室钥匙箱",
+                "C": "值班桌面",
                 "E": "4",
                 "F": "否",
                 "G": "无"
@@ -662,9 +659,27 @@
             },
             {
               "cells": {
-                "B": "应急工具",
-                "C": "E-112值班室",
-                "E": "1",
+                "B": "钥匙",
+                "C": "钥匙箱",
+                "E": "3",
+                "F": "否",
+                "G": "无"
+              }
+            },
+            {
+              "cells": {
+                "B": "工具包",
+                "C": "值班室后面办公柜",
+                "E": "2",
+                "F": "否",
+                "G": "无"
+              }
+            },
+            {
+              "cells": {
+                "B": "手电筒",
+                "C": "值班桌面",
+                "E": "3",
                 "F": "否",
                 "G": "无"
               }
@@ -676,7 +691,18 @@
         "A楼": [
           {
             "note": "李世龙A",
-            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+            "enabled": true
+          },
+          {
+            "note": "A",
+            "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a",
+            "enabled": false
+          },
+          {
+            "note": "M",
+            "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+            "enabled": false
           }
         ]
       }

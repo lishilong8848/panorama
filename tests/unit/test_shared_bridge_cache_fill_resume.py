@@ -12,7 +12,8 @@ def _touch_file(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() == ".xlsx":
         workbook = openpyxl.Workbook()
-        workbook.active["A1"] = "ok"
+        workbook.active["D4"] = "市电总功率"
+        workbook.active["E4"] = 123.4
         workbook.save(path)
     else:
         path.write_bytes(b"ok")

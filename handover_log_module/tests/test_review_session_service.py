@@ -384,6 +384,19 @@ def test_get_batch_status_and_session_follow_requested_duty_context(tmp_path: Pa
     assert batch_status["duty_shift"] == "day"
 
 
+def test_get_session_for_building_duty_fast_skips_output_recover(tmp_path: Path, monkeypatch) -> None:
+    service = _build_service(tmp_path)
+
+    def _unexpected_recover(*_args, **_kwargs):
+        raise AssertionError("fast duty path should not recover from output files")
+
+    monkeypatch.setattr(service, "_recover_session_from_output_file", _unexpected_recover)
+
+    requested = service.get_session_for_building_duty_fast("A楼", "2026-03-24", "day")
+
+    assert requested is None
+
+
 def test_list_building_sessions_returns_existing_outputs_latest_first(tmp_path: Path, monkeypatch) -> None:
     service = _build_service(tmp_path)
     monkeypatch.setattr(service, "_is_legacy_test_output_file", lambda _output: False)
@@ -424,6 +437,7 @@ def test_list_building_sessions_returns_existing_outputs_latest_first(tmp_path: 
     assert [item["session_id"] for item in items] == [
         "A楼|2026-03-23|night",
         "A楼|2026-03-22|day",
+        "A楼|2026-03-21|night",
     ]
     assert service.get_latest_session_id("A楼") == "A楼|2026-03-23|night"
 
@@ -594,3 +608,131 @@ def test_register_generated_output_discards_old_sqlite_review_document_for_same_
     assert second["output_file"] == str(new_output)
     assert second["revision"] == int(first["revision"]) + 1
     assert store.get_document(first["session_id"]) is None
+
+
+def test_get_latest_session_prefers_state_without_output_recovery(tmp_path: Path, monkeypatch) -> None:
+    service = _build_service(tmp_path)
+    monkeypatch.setattr(service, "_is_legacy_test_output_file", lambda _output: False)
+    output_dir = tmp_path / "outputs"
+    day_file = output_dir / "A楼_20260322_交接班日志.xlsx"
+    _create_output_file(day_file, shift_text="白班")
+
+    service.register_generated_output(
+        building="A楼",
+        duty_date="2026-03-22",
+        duty_shift="day",
+        data_file="",
+        output_file=str(day_file),
+        source_mode="from_download",
+    )
+
+    monkeypatch.setattr(
+        service,
+        "_recover_latest_session_from_output_file",
+        lambda _building: (_ for _ in ()).throw(AssertionError("should not recover latest session from outputs")),
+    )
+
+    latest = service.get_latest_session("A楼")
+
+    assert latest is not None
+    assert latest["session_id"] == "A楼|2026-03-22|day"
+    assert latest["output_file"] == str(day_file)
+
+
+def test_list_building_sessions_does_not_scan_output_directory_on_hot_path(tmp_path: Path, monkeypatch) -> None:
+    service = _build_service(tmp_path)
+    monkeypatch.setattr(service, "_is_legacy_test_output_file", lambda _output: False)
+    output_dir = tmp_path / "outputs"
+    day_file = output_dir / "A楼_20260322_交接班日志.xlsx"
+    night_file = output_dir / "A楼_20260322_交接班日志_2.xlsx"
+    _create_output_file(day_file, shift_text="白班")
+    _create_output_file(night_file, shift_text="夜班")
+
+    service.register_generated_output(
+        building="A楼",
+        duty_date="2026-03-22",
+        duty_shift="day",
+        data_file="",
+        output_file=str(day_file),
+        source_mode="from_download",
+    )
+    service.register_generated_output(
+        building="A楼",
+        duty_date="2026-03-22",
+        duty_shift="night",
+        data_file="",
+        output_file=str(night_file),
+        source_mode="from_download",
+    )
+
+    monkeypatch.setattr(
+        service,
+        "_recover_all_sessions_from_output_files",
+        lambda _building: (_ for _ in ()).throw(AssertionError("should not rescan outputs in history hot path")),
+    )
+
+    sessions = service.list_building_sessions("A楼")
+
+    assert [item["session_id"] for item in sessions] == [
+        "A楼|2026-03-22|night",
+        "A楼|2026-03-22|day",
+    ]
+
+
+def test_get_latest_session_id_fast_reads_latest_map_without_recovery(tmp_path: Path, monkeypatch) -> None:
+    service = _build_service(tmp_path)
+    monkeypatch.setattr(service, "_is_legacy_test_output_file", lambda _output: False)
+    output_dir = tmp_path / "outputs"
+    output_file = output_dir / "A楼_20260322_交接班日志.xlsx"
+    _create_output_file(output_file, shift_text="白班")
+
+    service.register_generated_output(
+        building="A楼",
+        duty_date="2026-03-22",
+        duty_shift="day",
+        data_file="",
+        output_file=str(output_file),
+        source_mode="from_download",
+    )
+
+    monkeypatch.setattr(
+        service,
+        "_recover_latest_session_from_output_file",
+        lambda _building: (_ for _ in ()).throw(AssertionError("fast latest id lookup should not recover from outputs")),
+    )
+
+    latest_session_id = service.get_latest_session_id_fast("A楼")
+
+    assert latest_session_id == "A楼|2026-03-22|day"
+
+
+def test_get_latest_session_for_context_does_not_scan_all_sessions_on_hot_path(tmp_path: Path, monkeypatch) -> None:
+    service = _build_service(tmp_path)
+    monkeypatch.setattr(service, "_is_legacy_test_output_file", lambda _output: False)
+    output_dir = tmp_path / "outputs"
+    day_file = output_dir / "A楼_20260322_交接班日志.xlsx"
+    _create_output_file(day_file, shift_text="白班")
+
+    service.register_generated_output(
+        building="A楼",
+        duty_date="2026-03-22",
+        duty_shift="day",
+        data_file="",
+        output_file=str(day_file),
+        source_mode="from_download",
+    )
+
+    monkeypatch.setattr(
+        service,
+        "list_sessions",
+        lambda: (_ for _ in ()).throw(AssertionError("context lookup hot path should not scan all sessions")),
+    )
+
+    session = service.get_latest_session_for_context(
+        building="A楼",
+        duty_date="2026-03-22",
+        duty_shift="day",
+    )
+
+    assert session is not None
+    assert session["session_id"] == "A楼|2026-03-22|day"

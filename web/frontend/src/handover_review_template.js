@@ -7,29 +7,35 @@
           <p class="review-subtitle">{{ sessionSummary }}</p>
         </div>
         <div class="review-header-actions">
-          <button class="btn btn-secondary btn-mini" @click="refreshData" :disabled="loading || saving || confirming || syncingRemoteRevision || cloudSyncBusy">
-            刷新
+          <button v-if="showRefreshAction" class="btn btn-secondary btn-mini" @click="refreshData" :disabled="refreshActionVm.disabled" :title="refreshActionVm.disabledReason || ''">
+            {{ refreshActionVm.text }}
           </button>
           <button
+            v-if="showSaveAction"
             class="btn btn-primary btn-mini"
             @click="saveCurrentReview"
             :disabled="saveActionVm.disabled"
+            :title="saveActionVm.disabledReason || ''"
           >
             {{ saveActionVm.text }}
           </button>
           <button
+            v-if="showDownloadAction"
             class="btn btn-secondary btn-mini"
             @click="downloadCurrentReviewFile"
-            :disabled="loading || saving || syncingRemoteRevision || downloading || cloudSyncBusy || !session || !session.session_id"
+            :disabled="downloadActionVm.disabled"
+            :title="downloadActionVm.disabledReason || ''"
           >
-            {{ downloading ? "下载中..." : "下载交接班日志" }}
+            {{ downloadActionVm.text }}
           </button>
           <button
+            v-if="showCapacityDownloadAction"
             class="btn btn-secondary btn-mini"
             @click="downloadCurrentCapacityReviewFile"
             :disabled="capacityDownloadDisabled"
+            :title="capacityDownloadActionVm.disabledReason || ''"
           >
-            {{ capacityDownloading ? "下载中..." : "下载交接班容量报表" }}
+            {{ capacityDownloadActionVm.text }}
           </button>
           <a
             v-if="reviewCloudSheetUrl"
@@ -41,27 +47,30 @@
             打开云文档
           </a>
           <button
-            v-if="canRetryCloudSync"
+            v-if="showRetryCloudSyncAction"
             class="btn btn-warning btn-mini"
             @click="retryCloudSheetSync"
-            :disabled="loading || saving || confirming || cloudSyncBusy"
+            :disabled="retryCloudSyncActionVm.disabled"
+            :title="retryCloudSyncActionVm.disabledReason || ''"
           >
-            {{ retryingCloudSync ? "重试上传中..." : "重试云表上传" }}
+            {{ retryCloudSyncActionVm.text }}
           </button>
           <button
-            v-if="isHistoryMode"
+            v-if="showUpdateHistoryCloudSyncAction"
             class="btn btn-warning btn-mini"
             @click="updateHistoryCloudSync"
-            :disabled="!canUpdateHistoryCloudSync"
+            :disabled="updateHistoryCloudSyncActionVm.disabled"
+            :title="updateHistoryCloudSyncActionVm.disabledReason || ''"
           >
-            {{ updatingHistoryCloudSync ? "更新中..." : "更新云文档" }}
+            {{ updateHistoryCloudSyncActionVm.text }}
           </button>
           <button
-            v-if="!isHistoryMode"
+            v-if="showConfirmAction"
             class="btn"
             :class="'btn-' + confirmActionVm.variant"
             @click="toggleConfirm"
             :disabled="confirmActionVm.disabled"
+            :title="confirmActionVm.disabledReason || ''"
           >
             {{ confirmActionVm.text }}
           </button>
@@ -114,9 +123,19 @@
           <label class="review-field review-field-wide">
             <span class="review-field-label">历史交接班日志</span>
             <div class="review-history-control">
-              <select class="review-input" :value="selectedSessionIdInListOrEmpty" @change="onHistorySelectionChange($event.target.value)" :disabled="loading || saving || confirming || cloudSyncBusy || !historySessions.length">
-                <option v-if="!historySessions.length" value="" disabled>
-                  暂无符合条件的历史交接班日志
+              <select
+                class="review-input"
+                :value="selectedSessionIdInListOrEmpty"
+                @focus="ensureHistoryLoaded()"
+                @mousedown="ensureHistoryLoaded()"
+                @change="onHistorySelectionChange($event.target.value)"
+                :disabled="loading || saving || confirming || cloudSyncBusy || historyLoading"
+              >
+                <option v-if="historyLoading" value="" disabled>
+                  正在加载历史交接班日志...
+                </option>
+                <option v-else-if="!historySessions.length" value="" disabled>
+                  {{ selectedSessionInHistoryList ? "暂无符合条件的历史交接班日志" : "展开后加载历史交接班日志" }}
                 </option>
                 <option v-else-if="!selectedSessionInHistoryList" value="" disabled>
                   当前记录未进入历史列表
@@ -126,12 +145,13 @@
                 </option>
               </select>
               <button
-                v-if="canReturnToLatest"
+                v-if="showReturnToLatestAction"
                 class="btn btn-secondary btn-mini review-history-return"
                 @click="returnToLatestSession"
-                :disabled="loading || saving || confirming || cloudSyncBusy"
+                :disabled="returnToLatestActionVm.disabled"
+                :title="returnToLatestActionVm.disabledReason || ''"
               >
-                返回最新
+                {{ returnToLatestActionVm.text }}
               </button>
             </div>
             <small class="review-field-hint">{{ historySelectorHint }}</small>

@@ -5,6 +5,8 @@ import {
   confirmHandoverReviewApi,
   getJobApi,
   getHandoverReviewApi,
+  getHandoverReviewBootstrapApi,
+  getHandoverReviewHistoryApi,
   getHandoverReviewStatusApi,
   heartbeatHandoverReviewLockApi,
   releaseHandoverReviewLockApi,
@@ -14,6 +16,9 @@ import {
   unconfirmHandoverReviewApi,
 } from "./api_client.js";
 import { HANDOVER_REVIEW_TEMPLATE } from "./handover_review_template.js";
+import { createHandoverReviewDisplayUiHelpers } from "./handover_review_display_ui_helpers.js";
+import { createHandoverReviewDocumentEditHelpers } from "./handover_review_document_edit_helpers.js";
+import { createHandoverReviewActionHelpers } from "./handover_review_action_helpers.js";
 
 const FALLBACK_COLUMN_LETTERS = ["B", "C", "D", "E", "F", "G", "H", "I"];
 const DEFAULT_FOOTER_INVENTORY_COLUMNS = [
@@ -158,22 +163,14 @@ function broadcastHandoverReviewStatusChange(payload = {}) {
   }
 }
 
-function mapReviewCloudSheetSync(raw) {
-  const status = String(raw?.status || "").trim().toLowerCase();
-  const attempted = Boolean(raw?.attempted);
-  const url = String(raw?.spreadsheet_url || "").trim();
-  const error = String(raw?.error || "").trim();
-  if (status === "success") return { text: "云表已同步", tone: "success", url, error };
-  if (status === "failed") return { text: "云表最终上传失败", tone: "danger", url, error };
-  if (status === "prepare_failed") return { text: "云表预建失败", tone: "danger", url, error };
-  if (status === "pending_upload") return { text: "云表待最终上传", tone: "warning", url, error };
-  if (status === "disabled") return { text: "云表未启用", tone: "neutral", url, error };
-  if (status === "skipped") return { text: "云表未执行", tone: "neutral", url, error };
-  if (attempted) return { text: "云表已尝试同步", tone: "info", url, error };
-  return { text: "云表未执行", tone: "neutral", url, error };
-}
-
 function cloneDeep(value) {
+  if (typeof structuredClone === "function") {
+    try {
+      return structuredClone(value ?? null);
+    } catch (_error) {
+      // Fall through to JSON clone for plain-document payloads.
+    }
+  }
   return JSON.parse(JSON.stringify(value ?? null));
 }
 
@@ -427,7 +424,7 @@ function cloneDirtyRegions(dirtyRegions) {
 
 function normalizeCapacitySync(raw) {
   const status = String(raw?.status || "").trim().toLowerCase();
-  const normalizedStatus = ["ready", "pending_input", "missing_file", "failed"].includes(status)
+  const normalizedStatus = ["ready", "pending", "pending_input", "missing_file", "failed"].includes(status)
     ? status
     : "failed";
   const trackedCells = Array.isArray(raw?.tracked_cells) && raw.tracked_cells.length
@@ -557,8 +554,232 @@ function normalizeConcurrencyPayload(raw, fallbackRevision = 0) {
   };
 }
 
+function normalizeDisplayBadge(raw, fallback = {}) {
+  return {
+    code: String(raw?.code || fallback.code || "").trim(),
+    text: String(raw?.text || fallback.text || "").trim(),
+    tone: String(raw?.tone || fallback.tone || "neutral").trim() || "neutral",
+    emphasis: String(raw?.emphasis || fallback.emphasis || "soft").trim() || "soft",
+    icon: String(raw?.icon || fallback.icon || "dot").trim() || "dot",
+  };
+}
+
+function normalizeDisplayAction(raw, fallback = {}) {
+  return {
+    allowed: Boolean(raw?.allowed ?? fallback.allowed),
+    visible: Boolean(raw?.visible ?? fallback.visible ?? true),
+    pending: Boolean(raw?.pending ?? fallback.pending),
+    label: String(raw?.label || fallback.label || "").trim(),
+    disabledReason: String(raw?.disabled_reason || fallback.disabledReason || "").trim(),
+    reasonCode: String(raw?.reason_code || fallback.reasonCode || "").trim(),
+    tone: String(raw?.tone || fallback.tone || "neutral").trim() || "neutral",
+    variant: String(raw?.variant || fallback.variant || "secondary").trim() || "secondary",
+  };
+}
+
+function normalizeDisplayItem(raw, fallback = {}) {
+  return {
+    status: String(raw?.status || fallback.status || "unknown").trim().toLowerCase() || "unknown",
+    text: String(raw?.text || fallback.text || "").trim(),
+    tone: String(raw?.tone || fallback.tone || "neutral").trim() || "neutral",
+    reason_code: String(raw?.reason_code || fallback.reason_code || "").trim(),
+    detail_text: String(raw?.detail_text || fallback.detail_text || "").trim(),
+  };
+}
+
+function normalizeReviewDisplayState(raw = {}) {
+  const actions = raw?.actions && typeof raw.actions === "object" ? raw.actions : {};
+  const headerBadges = Array.isArray(raw?.header_badges)
+    ? raw.header_badges
+        .filter((item) => item && typeof item === "object")
+        .map((item) => normalizeDisplayBadge(item))
+        .filter((item) => item.text)
+    : [];
+  const statusBanners = Array.isArray(raw?.status_banners)
+    ? raw.status_banners
+        .filter((item) => item && typeof item === "object")
+        .map((item) => ({
+          code: String(item.code || "").trim(),
+          text: String(item.text || "").trim(),
+          tone: String(item.tone || "neutral").trim() || "neutral",
+        }))
+        .filter((item) => item.text)
+    : [];
+  const trackedCells = Array.isArray(raw?.capacity_sync?.tracked_cells)
+    ? raw.capacity_sync.tracked_cells.map((item) => String(item || "").trim().toUpperCase()).filter(Boolean)
+    : CAPACITY_SYNC_TRACKED_CELLS;
+  return {
+    mode: normalizeDisplayBadge(raw?.mode, {
+      code: "unknown",
+      text: "",
+      tone: "neutral",
+      emphasis: "soft",
+      icon: "dot",
+    }),
+    header_badges: headerBadges,
+    confirm_badge: normalizeDisplayBadge(raw?.confirm_badge, {
+      code: "unknown",
+      text: "",
+      tone: "neutral",
+      emphasis: "soft",
+      icon: "dot",
+    }),
+    lock_state: {
+      status: String(raw?.lock_state?.status || "unknown").trim() || "unknown",
+      text: String(raw?.lock_state?.text || "").trim(),
+      tone: String(raw?.lock_state?.tone || "neutral").trim() || "neutral",
+      reason_code: String(raw?.lock_state?.reason_code || "").trim(),
+    },
+    history_hint: String(raw?.history_hint || "").trim(),
+    save_state: normalizeDisplayItem(raw?.save_state, {
+      status: "unknown",
+      text: "",
+      tone: "neutral",
+      reason_code: "",
+      detail_text: "",
+    }),
+    download_state: normalizeDisplayItem(raw?.download_state, {
+      status: "unknown",
+      text: "",
+      tone: "neutral",
+      reason_code: "",
+      detail_text: "",
+    }),
+    capacity_download_state: normalizeDisplayItem(raw?.capacity_download_state, {
+      status: "unknown",
+      text: "",
+      tone: "neutral",
+      reason_code: "",
+      detail_text: "",
+    }),
+    confirm_state: normalizeDisplayItem(raw?.confirm_state, {
+      status: "unknown",
+      text: "",
+      tone: "neutral",
+      reason_code: "",
+      detail_text: "",
+    }),
+    cloud_sheet: {
+      status: String(raw?.cloud_sheet?.status || "").trim().toLowerCase(),
+      text: String(raw?.cloud_sheet?.text || "").trim(),
+      tone: String(raw?.cloud_sheet?.tone || "neutral").trim() || "neutral",
+      reason_code: String(raw?.cloud_sheet?.reason_code || "").trim(),
+      url: String(raw?.cloud_sheet?.url || "").trim(),
+      error: String(raw?.cloud_sheet?.error || "").trim(),
+    },
+    excel_sync: {
+      status: String(raw?.excel_sync?.status || "unknown").trim().toLowerCase(),
+      text: String(raw?.excel_sync?.text || "").trim(),
+      tone: String(raw?.excel_sync?.tone || "neutral").trim() || "neutral",
+      reason_code: String(raw?.excel_sync?.reason_code || "").trim(),
+      error: String(raw?.excel_sync?.error || "").trim(),
+      synced_revision: Number.parseInt(String(raw?.excel_sync?.synced_revision || 0), 10) || 0,
+      pending_revision: Number.parseInt(String(raw?.excel_sync?.pending_revision || 0), 10) || 0,
+    },
+    capacity_sync: {
+      status: String(raw?.capacity_sync?.status || "unknown").trim().toLowerCase(),
+      text: String(raw?.capacity_sync?.text || "").trim(),
+      tone: String(raw?.capacity_sync?.tone || "neutral").trim() || "neutral",
+      reason_code: String(raw?.capacity_sync?.reason_code || "").trim(),
+      error: String(raw?.capacity_sync?.error || "").trim(),
+      tracked_cells: trackedCells,
+      updated_at: String(raw?.capacity_sync?.updated_at || "").trim(),
+    },
+    document_state: {
+      status: String(raw?.document_state?.status || "unknown").trim().toLowerCase(),
+      text: String(raw?.document_state?.text || "").trim(),
+      tone: String(raw?.document_state?.tone || "neutral").trim() || "neutral",
+      reason_code: String(raw?.document_state?.reason_code || "").trim(),
+      detail_text: String(raw?.document_state?.detail_text || "").trim(),
+      should_reload_document: Boolean(raw?.document_state?.should_reload_document),
+    },
+    defaults_sync: normalizeDisplayItem(raw?.defaults_sync, {
+      status: "unknown",
+      text: "",
+      tone: "neutral",
+      reason_code: "",
+      detail_text: "",
+    }),
+    status_banners: statusBanners,
+    actions: {
+      refresh: normalizeDisplayAction(actions.refresh, { allowed: false, visible: false, label: "刷新", tone: "neutral", variant: "secondary" }),
+      save: normalizeDisplayAction(actions.save, { allowed: false, visible: false, label: "保存", tone: "primary", variant: "primary" }),
+      download: normalizeDisplayAction(actions.download, { allowed: false, visible: false, label: "下载交接班日志", tone: "neutral", variant: "secondary" }),
+      capacity_download: normalizeDisplayAction(actions.capacity_download, { allowed: false, visible: false, label: "下载交接班容量报表", tone: "neutral", variant: "secondary" }),
+      confirm: normalizeDisplayAction(actions.confirm, { allowed: false, visible: false, label: "确认当前楼栋", tone: "warning", variant: "warning" }),
+      retry_cloud_sync: normalizeDisplayAction(actions.retry_cloud_sync, { allowed: false, visible: false, label: "重试云表上传", tone: "warning", variant: "warning" }),
+      update_history_cloud_sync: normalizeDisplayAction(actions.update_history_cloud_sync, { allowed: false, visible: false, label: "更新云文档", tone: "warning", variant: "warning" }),
+      return_to_latest: normalizeDisplayAction(actions.return_to_latest, { allowed: false, visible: false, label: "返回最新", tone: "neutral", variant: "secondary" }),
+    },
+  };
+}
+
+function resolveReviewActionDisabledReasonStrict(baseAction, pendingText = "请求处理中，请稍候") {
+  const action = baseAction && typeof baseAction === "object" ? baseAction : {};
+  if (action.allowed === false) {
+    return String(action.disabledReason || "").trim();
+  }
+  if (action.pending) {
+    return String(pendingText || "").trim() || "请求处理中，请稍候";
+  }
+  return "";
+}
+
+function resolveOperationFeedbackText(payload, fallback = "") {
+  const feedback = payload?.operation_feedback;
+  if (feedback && typeof feedback === "object") {
+    const text = String(feedback.text || feedback.detail_text || "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return String(fallback || "").trim();
+}
+
+function badgeVmFromDisplayItem(item, fallback = {}) {
+  const normalized = item && typeof item === "object" ? item : {};
+  const text = String(normalized.text || fallback.text || "").trim();
+  if (!text) {
+    return null;
+  }
+  return badgeVm(
+    text,
+    String(normalized.tone || fallback.tone || "neutral").trim() || "neutral",
+    String(fallback.emphasis || "soft").trim() || "soft",
+    String(fallback.icon || "dot").trim() || "dot",
+  );
+}
+
+function buildReviewActionVmBase({
+  baseAction,
+  fallbackLabel = "",
+  inFlight = false,
+  inFlightText = "",
+  disabled = false,
+}) {
+  const action = baseAction && typeof baseAction === "object" ? baseAction : {};
+  return {
+    text: (inFlight || action.pending)
+      ? (String(inFlightText || "").trim() || String(action.label || "").trim() || fallbackLabel)
+      : (String(action.label || "").trim() || fallbackLabel),
+    disabled: Boolean(disabled),
+    disabledReason: resolveReviewActionDisabledReasonStrict(action),
+  };
+}
+
+function emptyReviewCloudSheetVm() {
+  return {
+    status: "unknown",
+    text: "",
+    tone: "neutral",
+    reason_code: "",
+    url: "",
+    error: "",
+  };
+}
+
 export function mountHandoverReviewApp(Vue) {
-  const { createApp, ref, computed, onMounted, onBeforeUnmount, watch } = Vue;
+  const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;
 
   createApp({
     setup() {
@@ -584,6 +805,7 @@ export function mountHandoverReviewApp(Vue) {
       const statusText = ref("");
       const building = ref("");
       const session = ref(null);
+      const reviewDisplayState = ref(normalizeReviewDisplayState({}));
       const historyState = ref(normalizeHistoryPayload({}, null));
       const documentRef = ref(normalizeDocument({}));
       const batchStatus = ref({
@@ -594,233 +816,114 @@ export function mountHandoverReviewApp(Vue) {
         ready_for_followup_upload: false,
         buildings: [],
       });
-      const suspendAutoSave = ref(true);
+      const documentHydrating = ref(true);
       const pollTimer = ref(null);
       const heartbeatTimer = ref(null);
-      const lastSavedSnapshot = ref("");
+      const documentMutationVersion = ref(0);
       const pollIntervalMs = ref(DEFAULT_POLL_INTERVAL_MS);
       const reviewClientIdentity = ensureReviewClientIdentity();
       const reviewClientId = String(reviewClientIdentity.clientId || "").trim();
       const reviewHolderLabel = String(reviewClientIdentity.holderLabel || "").trim();
       const concurrency = ref(emptyConcurrencyState(0));
+      const historyLoading = ref(false);
+      const historyLoaded = ref(false);
+      const historyCacheKey = ref("");
       const staleRevisionConflict = ref(false);
       const syncingRemoteRevision = ref(false);
       const heldLockSessionId = ref("");
       let latestLoadRequestSeq = 0;
       let activeLoadController = null;
+      let activeMetaControllers = [];
 
       const cloudSyncBusy = computed(() => retryingCloudSync.value || updatingHistoryCloudSync.value);
-      const capacitySync = computed(() => normalizeCapacitySync(session.value?.capacity_sync || {}));
-      const capacityTrackedCellSet = computed(() => new Set(capacitySync.value.tracked_cells || CAPACITY_SYNC_TRACKED_CELLS));
-      const selectedSessionId = computed(() => String(historyState.value?.selected_session_id || session.value?.session_id || "").trim());
-      const latestSessionId = computed(() => String(historyState.value?.latest_session_id || "").trim());
-      const isHistoryMode = computed(() => Boolean(session.value) && !Boolean(historyState.value?.selected_is_latest));
-      const historySessions = computed(() => Array.isArray(historyState.value?.sessions) ? historyState.value.sessions : []);
-      const selectedSessionInHistoryList = computed(() => Boolean(historyState.value?.selected_in_history_list));
-      const selectedSessionIdInListOrEmpty = computed(() => (selectedSessionInHistoryList.value ? selectedSessionId.value : ""));
-      const historySelectorHint = computed(() => {
-        const limit = Math.max(1, Number.parseInt(historyState.value?.history_limit ?? 10, 10) || 10);
-        const rows = [`仅显示最近 ${limit} 条已成功上云的交接班日志。`];
-        if (session.value && !selectedSessionInHistoryList.value) {
-          const excludedReason = String(historyState.value?.selected_history_excluded_reason || "").trim();
-          if (excludedReason === "outside_limit") {
-            rows.push(`当前查看记录已成功上云，但不在最近 ${limit} 条历史范围内。`);
-          } else if (excludedReason === "not_cloud_success") {
-            rows.push("当前查看记录尚未成功上云，因此不在历史列表中。");
-          }
-        }
-        return rows.join(" ");
-      });
-
-      const sessionSummary = computed(() => {
-        if (!session.value) return "暂无会话";
-        const dutyDate = session.value.duty_date || "-";
-        return `${dutyDate} / ${shiftTextFromCode(session.value.duty_shift || "")}`;
-      });
-
-      const saveStatusText = computed(() => {
-        if (saving.value) return statusText.value || "正在保存...";
-        if (dirty.value) return "未保存修改";
-        return statusText.value || "已保存";
-      });
-      const reviewFileSummary = computed(() => basenameFromPath(session.value?.output_file || ""));
-      const currentDutyDateText = computed(() => String(session.value?.duty_date || "").trim() || "-");
-      const currentDutyShiftText = computed(() => shiftTextFromCode(session.value?.duty_shift || ""));
-      const currentModeText = computed(() => (isHistoryMode.value ? "历史" : "最新"));
-      const canReturnToLatest = computed(() => Boolean(session.value && latestSessionId.value && selectedSessionId.value && selectedSessionId.value !== latestSessionId.value));
-      const canUpdateHistoryCloudSync = computed(() => Boolean(
-        isHistoryMode.value
-        && session.value
-        && session.value.session_id
-        && !loading.value
-        && !saving.value
-        && !confirming.value
-        && !cloudSyncBusy.value
-        && !needsRefresh.value
-      ));
-      const activeEditorLabel = computed(() => String(concurrency.value?.active_editor?.holder_label || "").trim());
-      const remoteRevision = computed(() => Number.parseInt(String(concurrency.value?.current_revision || 0), 10) || 0);
-
-      const reviewSaveBadge = computed(() => {
-        if (errorText.value) return badgeVm("保存异常", "danger", "soft", "error");
-        if (needsRefresh.value) return badgeVm("等待同步", "warning", "soft", "warn");
-        if (saving.value) return badgeVm(statusText.value || "正在保存...", "info", "soft", "clock");
-        if (dirty.value) return badgeVm("待保存", "warning", "soft", "warn");
-        return badgeVm(statusText.value || "已保存", "success", "soft", "check");
-      });
-      const reviewConfirmBadge = computed(() =>
-        session.value?.confirmed
-          ? badgeVm("已确认", "success", "solid", "check")
-          : badgeVm("待确认", "warning", "soft", "warn"),
-      );
-
-      const reviewCloudSheetVm = computed(() => mapReviewCloudSheetSync(session.value?.cloud_sheet_sync || {}));
-      const reviewCloudSheetUrl = computed(() => String(reviewCloudSheetVm.value.url || "").trim());
-      const excelSyncState = computed(() => {
-        const payload = session.value?.excel_sync && typeof session.value.excel_sync === "object"
-          ? session.value.excel_sync
-          : {};
-        return {
-          status: String(payload.status || "").trim().toLowerCase(),
-          error: String(payload.error || "").trim(),
-          syncedRevision: Number.parseInt(String(payload.synced_revision || 0), 10) || 0,
-          pendingRevision: Number.parseInt(String(payload.pending_revision || 0), 10) || 0,
-        };
-      });
-      const canRetryCloudSync = computed(() => {
-        const status = String(session.value?.cloud_sheet_sync?.status || "").trim().toLowerCase();
-        return Boolean(
-          session.value
-          && !isHistoryMode.value
-          && session.value.confirmed
-          && batchStatus.value?.all_confirmed
-          && ["failed", "prepare_failed"].includes(status),
-        );
-      });
-
-      const reviewHeaderBadges = computed(() => {
-        const badges = [
-          badgeVm(
-            isHistoryMode.value ? "历史记录" : "当前记录",
-            isHistoryMode.value ? "warning" : "info",
-            "outline",
-            "clock",
-          ),
-          reviewSaveBadge.value,
-          isHistoryMode.value ? badgeVm("可编辑", "neutral", "outline", "file") : reviewConfirmBadge.value,
-        ];
-        if (concurrency.value?.client_holds_lock) {
-          badges.push(badgeVm("本端编辑中", "info", "outline", "warn"));
-        } else if (activeEditorLabel.value) {
-          badges.push(badgeVm("其他终端编辑中", "warning", "outline", "warn"));
-        } else if (["warning", "danger"].includes(String(reviewCloudSheetVm.value.tone || ""))) {
-          badges.push(badgeVm(reviewCloudSheetVm.value.text, reviewCloudSheetVm.value.tone, "outline", "link"));
-        }
-        return badges;
-      });
-      const capacityDownloadDisabled = computed(() => Boolean(
-        loading.value
-        || saving.value
-        || confirming.value
-        || cloudSyncBusy.value
-        || syncingRemoteRevision.value
-        || capacityDownloading.value
-        || !session.value
-        || !session.value.session_id
-        || !String(session.value.capacity_output_file || "").trim()
-        || String(capacitySync.value.status || "").trim().toLowerCase() !== "ready"
-      ));
-
-      const reviewStatusBanners = computed(() => {
-        const rows = [];
-        if (isHistoryMode.value) {
-          rows.push({
-            text: "当前为历史模式：只更新当前历史记录，不改模板默认值；如需同步云文档，请手动点击“更新云文档”。",
-            tone: "info",
-          });
-        }
-        if (syncingRemoteRevision.value) {
-          rows.push({
-            text: "其他用户正在保存，请稍等，系统将自动刷新最新内容。",
-            tone: "warning",
-          });
-        }
-        if (staleRevisionConflict.value) {
-          rows.push({
-            text: "内容已有更新，请稍等，系统将自动同步最新内容。",
-            tone: "warning",
-          });
-        }
-        if (concurrency.value?.is_editing_elsewhere && activeEditorLabel.value) {
-          rows.push({
-            text: `其他用户正在编辑：${activeEditorLabel.value}。如需保存或确认，请稍等。`,
-            tone: "warning",
-          });
-        }
-        if (statusText.value && !saving.value && !dirty.value && !errorText.value && !staleRevisionConflict.value) {
-          rows.push({ text: statusText.value, tone: "info" });
-        }
-        if (needsRefresh.value) {
-          rows.push({
-            text: "检测到新版本，请刷新后查看。",
-            tone: "warning",
-          });
-        }
-        if (errorText.value) {
-          rows.push({ text: errorText.value, tone: "danger" });
-        }
-        if (reviewCloudSheetVm.value.error) {
-          rows.push({ text: `云表同步失败: ${reviewCloudSheetVm.value.error}`, tone: "danger" });
-        }
-        if (excelSyncState.value.status === "failed") {
-          rows.push({
-            text: `后台Excel同步失败：${excelSyncState.value.error || "下载前会自动重试同步"}`,
-            tone: "danger",
-          });
-        } else if (excelSyncState.value.status === "pending" || excelSyncState.value.status === "syncing") {
-          rows.push({
-            text: "后台正在同步交接班Excel，页面内容已保存到本楼SQLite；下载时会强制写入最新内容。",
-            tone: "info",
-          });
-        }
-        return rows;
-      });
-
-      const confirmActionVm = computed(() => {
-        const disabled = !session.value || saving.value || confirming.value || cloudSyncBusy.value || needsRefresh.value || staleRevisionConflict.value || syncingRemoteRevision.value;
-        if (!session.value) {
-          return { text: "暂无记录", variant: "secondary", disabled: true };
-        }
-        if (confirming.value) {
+      const capacitySync = computed(() => {
+        const backendCapacity = reviewDisplayState.value?.capacity_sync;
+        if (backendCapacity && backendCapacity.status) {
           return {
-            text: "处理中...",
-            variant: session.value?.confirmed ? "success" : "warning",
-            disabled: true,
+            ...normalizeCapacitySync(session.value?.capacity_sync || {}),
+            status: String(backendCapacity.status || "").trim().toLowerCase() || "failed",
+            error: String(backendCapacity.error || "").trim(),
+            tracked_cells: Array.isArray(backendCapacity.tracked_cells) && backendCapacity.tracked_cells.length
+              ? backendCapacity.tracked_cells
+              : normalizeCapacitySync(session.value?.capacity_sync || {}).tracked_cells,
+            updated_at: String(backendCapacity.updated_at || "").trim(),
           };
         }
-        if (session.value?.confirmed) {
-          return { text: "已确认（可取消）", variant: "success", disabled };
-        }
-        return { text: "确认当前楼栋", variant: "warning", disabled };
+        return normalizeCapacitySync(session.value?.capacity_sync || {});
       });
-
-      const saveActionVm = computed(() => {
-        const disabled = !session.value || loading.value || saving.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || needsRefresh.value || staleRevisionConflict.value || !dirty.value;
-        if (saving.value) {
-          return { text: "保存中...", disabled: true };
-        }
-        if (!dirty.value) {
-          return { text: "已保存", disabled: true };
-        }
-        return { text: "保存", disabled };
+      const capacityTrackedCellSet = computed(() => new Set(capacitySync.value.tracked_cells || CAPACITY_SYNC_TRACKED_CELLS));
+      const {
+        selectedSessionId,
+        latestSessionId,
+        isHistoryMode,
+        historySessions,
+        selectedSessionInHistoryList,
+        selectedSessionIdInListOrEmpty,
+        historySelectorHint,
+        sessionSummary,
+        currentDutyDateText,
+        currentDutyShiftText,
+        currentModeText,
+        refreshActionBase,
+        saveActionBase,
+        downloadActionBase,
+        capacityDownloadActionBase,
+        confirmActionBase,
+        retryCloudSyncActionBase,
+        updateHistoryCloudSyncActionBase,
+        returnToLatestActionBase,
+        showRefreshAction,
+        showSaveAction,
+        showDownloadAction,
+        showCapacityDownloadAction,
+        showConfirmAction,
+        showReturnToLatestAction,
+        reviewSaveBadge,
+        reviewCloudSheetVm,
+        reviewCloudSheetUrl,
+        reviewHeaderBadges,
+        refreshActionVm,
+        downloadActionVm,
+        capacityDownloadActionVm,
+        capacityDownloadDisabled,
+        reviewStatusBanners,
+        confirmActionVm,
+        saveActionVm,
+        retryCloudSyncActionVm,
+        showRetryCloudSyncAction,
+        updateHistoryCloudSyncActionVm,
+        showUpdateHistoryCloudSyncAction,
+        returnToLatestActionVm,
+      } = createHandoverReviewDisplayUiHelpers({
+        computed,
+        session,
+        reviewDisplayState,
+        historyState,
+        historyLoading,
+        activeRouteSelection,
+        loading,
+        saving,
+        downloading,
+        capacityDownloading,
+        confirming,
+        retryingCloudSync,
+        updatingHistoryCloudSync,
+        dirty,
+        syncingRemoteRevision,
+        cloudSyncBusy,
+        errorText,
+        statusText,
+        badgeVm,
+        badgeVmFromDisplayItem,
+        normalizeDisplayBadge,
+        buildReviewActionVmBase,
+        emptyReviewCloudSheetVm,
+        resolveReviewActionDisabledReasonStrict,
+        shiftTextFromCode,
       });
-
-      function serializeDocument(document) {
-        return JSON.stringify(document || {});
-      }
 
       function clearSaveTimers() {
-        // 审核页已改为手动保存，这里保留空实现，兼容现有调用点。
+        // 审核页已改为显式保存，这里保留空实现，兼容现有调用点。
       }
 
       function clearHeartbeatTimer() {
@@ -978,6 +1081,34 @@ export function mountHandoverReviewApp(Vue) {
         return params;
       }
 
+      function buildStatusParams() {
+        const params = buildLoadParams();
+        const currentSessionId = String(session.value?.session_id || "").trim();
+        const currentRevision = Number.parseInt(String(session.value?.revision || 0), 10) || 0;
+        if (currentSessionId) {
+          params.client_session_id = currentSessionId;
+        }
+        if (currentRevision > 0) {
+          params.client_revision = currentRevision;
+        }
+        return params;
+      }
+
+      function shouldPreferBootstrapLoad({ forceLatest = false } = {}) {
+        if (forceLatest) {
+          return true;
+        }
+        const explicitSessionId = String(activeRouteSelection.value.sessionId || "").trim();
+        const hasExplicitDutyContext = Boolean(
+          activeRouteSelection.value.dutyDate && activeRouteSelection.value.dutyShift,
+        );
+        if (explicitSessionId || hasExplicitDutyContext) {
+          return false;
+        }
+        const backendMode = String(reviewDisplayState.value?.mode?.code || "").trim().toLowerCase();
+        return backendMode !== "history";
+      }
+
       function syncRouteToCurrentSelection(nextHistory = historyState.value) {
         const selectedId = String(nextHistory?.selected_session_id || session.value?.session_id || "").trim();
         syncReviewSelectionToUrl({
@@ -986,15 +1117,52 @@ export function mountHandoverReviewApp(Vue) {
         });
       }
 
+      function buildHistoryCacheKey(sessionPayload = session.value, historyPayload = historyState.value) {
+        const currentSessionId = String(sessionPayload?.session_id || "").trim();
+        const latestId = String(historyPayload?.latest_session_id || currentSessionId || "").trim();
+        return `${buildingCode || ""}|${latestId}|${currentSessionId}`;
+      }
+
       function applyPayloadMeta(payload = {}) {
         const nextSession = payload?.session && typeof payload.session === "object" ? cloneDeep(payload.session) : null;
         if (nextSession) {
           session.value = nextSession;
         }
+        reviewDisplayState.value = normalizeReviewDisplayState(payload?.display_state || reviewDisplayState.value);
         batchStatus.value = payload?.batch_status && typeof payload.batch_status === "object"
           ? cloneDeep(payload.batch_status)
           : batchStatus.value;
-        historyState.value = normalizeHistoryPayload(payload?.history || {}, nextSession || session.value);
+        const hasHistoryPayload = Object.prototype.hasOwnProperty.call(payload || {}, "history");
+        if (hasHistoryPayload) {
+          applyHistoryPayload(payload);
+        } else {
+          const currentHistory = historyState.value && typeof historyState.value === "object"
+            ? cloneDeep(historyState.value)
+            : {};
+          const selectedId = String(nextSession?.session_id || currentHistory.selected_session_id || session.value?.session_id || "").trim();
+          const latestId = String(
+            payload?.latest_session_id
+            || currentHistory.latest_session_id
+            || nextSession?.session_id
+            || "",
+          ).trim();
+          historyState.value = normalizeHistoryPayload(
+            {
+              ...currentHistory,
+              latest_session_id: latestId,
+              selected_session_id: selectedId,
+              selected_is_latest: selectedId
+                ? Boolean(latestId && selectedId === latestId)
+                : (!activeRouteSelection.value.sessionId
+                  && !(activeRouteSelection.value.dutyDate && activeRouteSelection.value.dutyShift)),
+              sessions: Array.isArray(currentHistory.sessions) ? currentHistory.sessions : [],
+            },
+            nextSession || session.value,
+          );
+          if (!historyLoaded.value) {
+            historyCacheKey.value = "";
+          }
+        }
         const selectedId = String(historyState.value?.selected_session_id || nextSession?.session_id || session.value?.session_id || "").trim();
         activeRouteSelection.value = {
           sessionId: historyState.value?.selected_is_latest ? "" : selectedId,
@@ -1009,27 +1177,156 @@ export function mountHandoverReviewApp(Vue) {
         );
       }
 
-      function isIncompleteJobStatus(status) {
-        const normalized = String(status || "").trim().toLowerCase();
-        return normalized === "queued" || normalized === "running" || normalized === "waiting_resource";
+      function clearMetaControllers() {
+        activeMetaControllers.forEach((controller) => {
+          if (controller && typeof controller.abort === "function") {
+            controller.abort();
+          }
+        });
+        activeMetaControllers = [];
       }
 
-      async function waitForBackgroundJob(jobId, { timeoutMs = 120000, intervalMs = 1500 } = {}) {
-        const targetJobId = String(jobId || "").trim();
-        if (!targetJobId) return null;
-        const startedAt = Date.now();
-        while (Date.now() - startedAt <= timeoutMs) {
-          try {
-            const job = await getJobApi(targetJobId);
-            if (!isIncompleteJobStatus(job?.status)) {
-              return job;
-            }
-          } catch (_error) {
-            // Ignore transient polling failures and keep waiting.
-          }
-          await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+      function createRequestController() {
+        return typeof AbortController === "function" ? new AbortController() : null;
+      }
+
+      function buildRequestOptions(controller = null) {
+        if (!controller) {
+          return {};
         }
-        return null;
+        return {
+          signal: controller.signal,
+          retryTransientNetworkErrors: false,
+        };
+      }
+
+      function resolvePollInterval(reviewUi = {}) {
+        return Math.max(
+          1000,
+          Number(reviewUi.poll_interval_sec || DEFAULT_POLL_INTERVAL_MS / 1000) * 1000,
+        );
+      }
+
+      function applyHistoryPayload(payload = {}) {
+        const normalizedHistory = normalizeHistoryPayload(payload?.history || {}, session.value);
+        historyState.value = normalizedHistory;
+        historyLoaded.value = true;
+        historyCacheKey.value = buildHistoryCacheKey(session.value, normalizedHistory);
+        const selectedId = String(normalizedHistory?.selected_session_id || session.value?.session_id || "").trim();
+        activeRouteSelection.value = {
+          sessionId: normalizedHistory?.selected_is_latest ? "" : selectedId,
+          dutyDate: "",
+          dutyShift: "",
+        };
+        syncRouteToCurrentSelection(normalizedHistory);
+      }
+
+      async function ensureHistoryLoaded({ force = false } = {}) {
+        if (!buildingCode || !session.value || !String(session.value?.session_id || "").trim()) {
+          return;
+        }
+        const targetKey = buildHistoryCacheKey();
+        if (!force && historyLoaded.value && historyCacheKey.value === targetKey) {
+          return;
+        }
+        if (historyLoading.value) {
+          return;
+        }
+        historyLoading.value = true;
+        try {
+          const payload = await getHandoverReviewHistoryApi(
+            buildingCode,
+            buildLoadParams(),
+          );
+          applyHistoryPayload(payload || {});
+        } catch (error) {
+          if (!errorText.value) {
+            statusText.value = String(error?.message || error || "历史交接班日志加载失败");
+          }
+        } finally {
+          historyLoading.value = false;
+        }
+      }
+
+      async function applyStatusPayload(payload = {}, { background = false } = {}) {
+        const reviewUi = payload?.review_ui && typeof payload.review_ui === "object" ? payload.review_ui : {};
+        pollIntervalMs.value = resolvePollInterval(reviewUi);
+        restartPollTimer();
+        const nextDisplayState = normalizeReviewDisplayState(payload?.display_state || reviewDisplayState.value);
+        reviewDisplayState.value = nextDisplayState;
+
+        const incomingSession = payload?.session && typeof payload.session === "object" ? cloneDeep(payload.session) : {};
+        const currentSessionId = String(session.value?.session_id || "").trim();
+        const incomingSessionId = String(incomingSession.session_id || "").trim();
+        const incomingRevision = Number(incomingSession.revision || 0);
+        const currentRevision = Number(session.value?.revision || 0);
+
+        batchStatus.value = payload?.batch_status && typeof payload.batch_status === "object"
+          ? cloneDeep(payload.batch_status)
+          : batchStatus.value;
+        const incomingLatestSessionId = String(payload?.latest_session_id || "").trim();
+        if (incomingLatestSessionId) {
+          const currentHistory = historyState.value && typeof historyState.value === "object"
+            ? cloneDeep(historyState.value)
+            : {};
+          historyState.value = normalizeHistoryPayload(
+            {
+              ...currentHistory,
+              latest_session_id: incomingLatestSessionId,
+              selected_session_id: String(currentHistory.selected_session_id || incomingSession.session_id || session.value?.session_id || "").trim(),
+              sessions: Array.isArray(currentHistory.sessions) ? currentHistory.sessions : [],
+            },
+            incomingSession && Object.keys(incomingSession).length ? incomingSession : session.value,
+          );
+        }
+        applyConcurrencyState(payload?.concurrency, incomingRevision || currentRevision, incomingSessionId || currentSessionId);
+
+        if (!session.value) {
+          if (incomingSession && Object.keys(incomingSession).length) {
+            session.value = incomingSession;
+          }
+          return;
+        }
+
+        if (nextDisplayState.document_state?.should_reload_document) {
+          const reloadMessage = String(
+            nextDisplayState.document_state.detail_text
+            || nextDisplayState.document_state.text
+            || "检测到审核内容更新，正在同步最新内容...",
+          ).trim();
+          if (saving.value) {
+            session.value = {
+              ...(session.value || {}),
+              ...(incomingSession || {}),
+            };
+            return;
+          }
+          if (dirty.value) {
+            clearSaveTimers();
+            beginRemoteSaveRefresh(reloadMessage);
+            session.value = {
+              ...(session.value || {}),
+              ...(incomingSession || {}),
+            };
+            return;
+          }
+          if (background) {
+            statusText.value = reloadMessage;
+            await loadReviewData({
+              background: false,
+              mode: shouldPreferBootstrapLoad() ? "bootstrap" : "full",
+            });
+            return;
+          }
+        }
+
+        if (!dirty.value && !saving.value) {
+          session.value = {
+            ...(session.value || {}),
+            ...(incomingSession || {}),
+          };
+          staleRevisionConflict.value = false;
+        }
       }
 
       function restartPollTimer() {
@@ -1047,7 +1344,7 @@ export function mountHandoverReviewApp(Vue) {
         const rawNextDocument = normalizeDocument(payload?.document || {});
         const nextDocument = fromBackground ? mergeInventoryFooterBlock(documentRef.value, rawNextDocument) : rawNextDocument;
 
-        suspendAutoSave.value = true;
+        documentHydrating.value = true;
         building.value = String(payload?.building || nextSession?.building || "");
         documentRef.value = nextDocument;
         applyPayloadMeta(payload);
@@ -1060,105 +1357,104 @@ export function mountHandoverReviewApp(Vue) {
           needsRefresh.value = false;
           statusText.value = "";
         }
-        lastSavedSnapshot.value = serializeDocument(nextDocument);
         syncingRemoteRevision.value = false;
         window.setTimeout(() => {
-          suspendAutoSave.value = false;
+          documentHydrating.value = false;
         }, 0);
       }
 
-      async function loadReviewData({ background = false } = {}) {
+      async function loadReviewData({ background = false, mode = "auto" } = {}) {
         if (!buildingCode) {
           loading.value = false;
           errorText.value = "无效的楼栋审核页面地址";
           return;
         }
-        if (background && (dirty.value || saving.value || loading.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || downloading.value || capacityDownloading.value)) {
+        if (background && (saving.value || loading.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || downloading.value || capacityDownloading.value)) {
           return;
         }
+        const resolvedMode = background ? "status" : (mode === "bootstrap" ? "bootstrap" : "full");
         const requestSeq = ++latestLoadRequestSeq;
         if (activeLoadController && typeof activeLoadController.abort === "function") {
           activeLoadController.abort();
         }
-        activeLoadController = typeof AbortController === "function" ? new AbortController() : null;
+        clearMetaControllers();
+        activeLoadController = createRequestController();
         try {
-          if (!background) loading.value = true;
-          const payload = await (background ? getHandoverReviewStatusApi : getHandoverReviewApi)(
+          if (!background) {
+            loading.value = true;
+          }
+          if (resolvedMode === "bootstrap") {
+            statusText.value = "正在加载最新交接班内容...";
+            errorText.value = "";
+            let payload;
+            try {
+              payload = await getHandoverReviewBootstrapApi(
+                buildingCode,
+                buildLoadParams(),
+                buildRequestOptions(activeLoadController),
+              );
+            } catch (error) {
+              if (error?.name === "AbortError") {
+                return;
+              }
+              payload = await getHandoverReviewApi(
+                buildingCode,
+                buildLoadParams(),
+                buildRequestOptions(activeLoadController),
+              );
+            }
+            if (requestSeq !== latestLoadRequestSeq) {
+              return;
+            }
+            pollIntervalMs.value = resolvePollInterval(payload?.review_ui && typeof payload.review_ui === "object" ? payload.review_ui : {});
+            restartPollTimer();
+            hydrateFromPayload(payload, { fromBackground: false });
+            statusText.value = "正在补充审核状态信息...";
+
+            const statusController = createRequestController();
+            if (statusController) {
+              activeMetaControllers.push(statusController);
+            }
+            await Promise.allSettled([
+              getHandoverReviewStatusApi(
+                buildingCode,
+                buildStatusParams(),
+                buildRequestOptions(statusController),
+              ).then(async (statusPayload) => {
+                if (requestSeq !== latestLoadRequestSeq) {
+                  return;
+                }
+                await applyStatusPayload(statusPayload, { background: false });
+              }),
+            ]);
+            activeMetaControllers = [];
+            if (
+              requestSeq === latestLoadRequestSeq
+              && !dirty.value
+              && !saving.value
+              && !syncingRemoteRevision.value
+              && !errorText.value
+              && statusText.value === "正在补充审核状态信息..."
+            ) {
+              statusText.value = "";
+            }
+            return;
+          }
+          const payload = await (resolvedMode === "status" ? getHandoverReviewStatusApi : getHandoverReviewApi)(
             buildingCode,
-            buildLoadParams(),
-            activeLoadController
-              ? { signal: activeLoadController.signal, retryTransientNetworkErrors: false }
-              : {},
+            resolvedMode === "status" ? buildStatusParams() : buildLoadParams(),
+            buildRequestOptions(activeLoadController),
           );
           if (requestSeq !== latestLoadRequestSeq) {
             return;
           }
-          const reviewUi = payload?.review_ui && typeof payload.review_ui === "object" ? payload.review_ui : {};
-
-          pollIntervalMs.value = Math.max(
-            1000,
-            Number(reviewUi.poll_interval_sec || DEFAULT_POLL_INTERVAL_MS / 1000) * 1000,
-          );
+          if (resolvedMode === "status") {
+            await applyStatusPayload(payload, { background: true });
+            return;
+          }
+          pollIntervalMs.value = resolvePollInterval(payload?.review_ui && typeof payload.review_ui === "object" ? payload.review_ui : {});
           restartPollTimer();
-          if (!background || !session.value) {
-            hydrateFromPayload(payload, { fromBackground: background });
-            return;
-          }
-
-          const incomingSession = payload?.session && typeof payload.session === "object" ? payload.session : {};
-          const currentSessionId = String(session.value?.session_id || "").trim();
-          const incomingSessionId = String(incomingSession.session_id || "").trim();
-          const incomingRevision = Number(incomingSession.revision || 0);
-          const currentRevision = Number(session.value?.revision || 0);
-
-          batchStatus.value = payload?.batch_status && typeof payload.batch_status === "object"
-            ? cloneDeep(payload.batch_status)
-            : batchStatus.value;
-          historyState.value = normalizeHistoryPayload(payload?.history || {}, incomingSession || session.value);
-          syncRouteToCurrentSelection(historyState.value);
-          applyConcurrencyState(payload?.concurrency, incomingRevision || currentRevision, incomingSessionId || currentSessionId);
-
-          if (incomingSessionId && currentSessionId && incomingSessionId !== currentSessionId) {
-            if (Boolean(historyState.value?.selected_is_latest)) {
-              hydrateFromPayload(payload, { fromBackground: true });
-              needsRefresh.value = false;
-              statusText.value = "已切换到最新交接班日志";
-              return;
-            }
-            applyPayloadMeta(payload);
-            needsRefresh.value = true;
-            statusText.value = "检测到新版本，请刷新后查看。";
-            return;
-          }
-
-          if (incomingRevision !== currentRevision) {
-            if (saving.value) {
-              applyPayloadMeta(payload);
-              return;
-            }
-            if (dirty.value) {
-              clearSaveTimers();
-              beginRemoteSaveRefresh();
-              applyPayloadMeta(payload);
-              return;
-            }
-            hydrateFromPayload(payload, { fromBackground: true });
-            statusText.value = "已同步最新审核内容";
-            return;
-          }
-
-          if (dirty.value) {
-            applyPayloadMeta(payload);
-            return;
-          }
-
-          if (!dirty.value && !saving.value) {
-            session.value = {
-              ...(session.value || {}),
-              ...(incomingSession || {}),
-            };
-            staleRevisionConflict.value = false;
-          }
+          hydrateFromPayload(payload, { fromBackground: false });
         } catch (error) {
           if (error?.name === "AbortError") {
             return;
@@ -1170,24 +1466,26 @@ export function mountHandoverReviewApp(Vue) {
           if (requestSeq === latestLoadRequestSeq) {
             activeLoadController = null;
           }
-          if (!background) loading.value = false;
+          if (!background) {
+            loading.value = false;
+          }
         }
       }
 
       async function saveDocument(options = {}) {
         const { reason = "manual" } = options || {};
-        if (saving.value || confirming.value || cloudSyncBusy.value || suspendAutoSave.value || syncingRemoteRevision.value || !session.value) return false;
+        if (saving.value || confirming.value || cloudSyncBusy.value || documentHydrating.value || syncingRemoteRevision.value || !session.value) return false;
         if (staleRevisionConflict.value) {
           beginRemoteSaveRefresh();
           return false;
         }
-        const payloadSnapshot = serializeDocument(documentRef.value);
-        if (payloadSnapshot === lastSavedSnapshot.value) {
+        if (!dirty.value) {
           clearSaveTimers();
           dirty.value = false;
           statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已保存";
           return true;
         }
+        const payloadVersion = documentMutationVersion.value;
         clearSaveTimers();
         saving.value = true;
         errorText.value = "";
@@ -1199,25 +1497,33 @@ export function mountHandoverReviewApp(Vue) {
             session_id: session.value.session_id,
             base_revision: session.value.revision,
             client_id: reviewClientId,
-            document: cloneDeep(documentRef.value),
+            document: documentRef.value,
             dirty_regions: payloadDirtyRegions,
           });
           applyPayloadMeta(response || {});
           broadcastHandoverReviewStatusChange(response || {});
-          lastSavedSnapshot.value = payloadSnapshot;
-          if (serializeDocument(documentRef.value) === payloadSnapshot) {
+          if (documentMutationVersion.value === payloadVersion) {
             dirtyRegions.value = emptyDirtyRegions();
             capacityLinkedDirty.value = false;
+            dirty.value = false;
+          } else {
+            dirty.value = true;
           }
-          dirty.value = serializeDocument(documentRef.value) !== lastSavedSnapshot.value;
           staleRevisionConflict.value = false;
           needsRefresh.value = false;
-          statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已保存";
+          const saveStatus = response?.save_status && typeof response.save_status === "object"
+            ? response.save_status
+            : null;
+          statusText.value = String(saveStatus?.state_text || "").trim()
+            || (isHistoryMode.value ? "历史交接班日志已保存" : "已保存");
           return true;
         } catch (error) {
           if (isRevisionConflictError(error)) {
             beginRemoteSaveRefresh();
-            await loadReviewData({ background: false });
+            await loadReviewData({
+              background: false,
+              mode: shouldPreferBootstrapLoad() ? "bootstrap" : "full",
+            });
             statusText.value = "已同步最新审核内容";
             return false;
           }
@@ -1229,367 +1535,102 @@ export function mountHandoverReviewApp(Vue) {
         }
       }
 
-      async function switchToSession(sessionId, { toLatest = false } = {}) {
-        const nextSessionId = String(sessionId || "").trim();
-        if (!toLatest && (!nextSessionId || nextSessionId === selectedSessionId.value)) return;
-        if (dirty.value) {
-          const saved = await saveDocument({ reason: "switch" });
-          if (!saved) return;
-        }
-        await releaseCurrentLock();
-        clearSaveTimers();
-        needsRefresh.value = false;
-        staleRevisionConflict.value = false;
-        errorText.value = "";
-        activeRouteSelection.value = {
-          sessionId: toLatest ? "" : nextSessionId,
-          dutyDate: "",
-          dutyShift: "",
-        };
-        syncReviewSelectionToUrl({ sessionId: toLatest ? "" : nextSessionId, isLatest: toLatest });
-        statusText.value = toLatest ? "正在切换到最新交接班日志..." : "正在切换历史交接班日志...";
-        await loadReviewData({ background: false });
-      }
-
-      async function onHistorySelectionChange(nextSessionId) {
-        const targetSessionId = String(nextSessionId || "").trim();
-        if (!targetSessionId || targetSessionId === selectedSessionId.value) return;
-        if (latestSessionId.value && targetSessionId === latestSessionId.value) {
-          await switchToSession(latestSessionId.value, { toLatest: true });
-          return;
-        }
-        await switchToSession(targetSessionId, { toLatest: false });
-      }
-
-      async function returnToLatestSession() {
-        if (!canReturnToLatest.value) return;
-        await switchToSession(latestSessionId.value, { toLatest: true });
-      }
-
-      async function toggleConfirm() {
-        if (
-          isHistoryMode.value ||
-          !session.value ||
-          saving.value ||
-          confirming.value ||
-          cloudSyncBusy.value ||
-          syncingRemoteRevision.value ||
-          needsRefresh.value ||
-          staleRevisionConflict.value
-        ) return;
-        if (dirty.value) {
-          const saved = await saveDocument({ reason: "confirm" });
-          if (!saved) return;
-        }
-        confirming.value = true;
-        errorText.value = "";
-        statusText.value = "正在同步交接班文件并执行确认上传...";
-        try {
-          const request = {
-            session_id: session.value.session_id,
-            base_revision: session.value.revision,
-            client_id: reviewClientId,
-          };
-          const response = session.value.confirmed
-            ? await unconfirmHandoverReviewApi(buildingCode, request)
-            : await confirmHandoverReviewApi(buildingCode, request);
-          applyPayloadMeta(response || {});
-          broadcastHandoverReviewStatusChange(response || {});
-          staleRevisionConflict.value = false;
-          needsRefresh.value = false;
-          const followupStatus = String(response?.followup_result?.status || "").trim().toLowerCase();
-          const cloudStatus = String(response?.followup_result?.cloud_sheet_sync?.status || "").trim().toLowerCase();
-          if (followupStatus === "await_all_confirmed") {
-            statusText.value = "等待五个楼栋全部确认";
-          } else if (followupStatus === "ok" || followupStatus === "success") {
-            statusText.value = "已触发首次全量上传";
-          } else if (cloudStatus === "ok" || cloudStatus === "success") {
-            statusText.value = "已进入单楼云表重传";
-          } else {
-            statusText.value = session.value?.confirmed ? "已确认当前楼栋" : "已撤销确认";
-          }
-        } catch (error) {
-          if (isRevisionConflictError(error)) {
-            beginRemoteSaveRefresh();
-            await loadReviewData({ background: false });
-            statusText.value = "已同步最新审核内容";
-          } else {
-            errorText.value = String(error?.message || error || "确认失败");
-          }
-        } finally {
-          confirming.value = false;
-        }
-      }
-
-      async function retryCloudSheetSync() {
-        if (!buildingCode || !session.value || retryingCloudSync.value || !canRetryCloudSync.value) return;
-        retryingCloudSync.value = true;
-        errorText.value = "";
-        statusText.value = "正在重试云表同步...";
-        try {
-          const response = await retryHandoverReviewCloudSyncApi(buildingCode, {
-            session_id: session.value.session_id,
-          });
-          const jobId = String(response?.job?.job_id || response?.job_id || "").trim();
-          if (!jobId) {
-            throw new Error("云表重试任务提交失败");
-          }
-          statusText.value = "已提交云表同步任务，正在处理中...";
-          void (async () => {
-            const job = await waitForBackgroundJob(jobId, { timeoutMs: 10 * 60 * 1000 });
-            if (!job) return;
-            await loadReviewData({ background: true });
-            if (job.status === "success") {
-              const result = job?.result && typeof job.result === "object" ? job.result : {};
-              applyPayloadMeta(result || {});
-              broadcastHandoverReviewStatusChange(result || {});
-              const retryStatus = String(result.status || "").trim().toLowerCase();
-              if (retryStatus === "ok" || retryStatus === "success") {
-                statusText.value = "云表上传成功";
-                errorText.value = "";
-              } else if (retryStatus === "blocked") {
-                errorText.value = String(result?.cloud_sheet_sync?.blocked_reason || "") || "当前批次尚未全部确认，不能重试云表上传。";
-              } else {
-                const failedRows = Array.isArray(result?.cloud_sheet_sync?.failed_buildings)
-                  ? result.cloud_sheet_sync.failed_buildings
-                  : [];
-                const failedItem = failedRows.find((item) => String(item?.building || "").trim() === String(building.value || "").trim());
-                errorText.value = String(failedItem?.error || "云表上传失败");
-                statusText.value = "云表上传失败";
-              }
-            } else {
-              errorText.value = String(job?.error || "云表重试失败");
-              statusText.value = "云表上传失败";
-            }
-          })();
-        } catch (error) {
-          errorText.value = String(error?.message || error || "云表重试失败");
-          statusText.value = "云表上传失败";
-        } finally {
-          retryingCloudSync.value = false;
-        }
-      }
-
-      async function updateHistoryCloudSync() {
-        if (!buildingCode || !session.value || !canUpdateHistoryCloudSync.value) return;
-        if (dirty.value) {
-          const saved = await saveDocument({ reason: "cloud_update" });
-          if (!saved) return;
-        }
-        updatingHistoryCloudSync.value = true;
-        errorText.value = "";
-        statusText.value = "正在更新历史云文档...";
-        try {
-          const response = await updateHandoverReviewCloudSyncApi(buildingCode, {
-            session_id: session.value.session_id,
-            client_id: reviewClientId,
-          });
-          applyPayloadMeta(response || {});
-          broadcastHandoverReviewStatusChange(response || {});
-          const updateStatus = String(response.status || "").trim().toLowerCase();
-          if (updateStatus === "ok" || updateStatus === "success") {
-            statusText.value = "历史云文档已更新";
-          } else {
-            errorText.value = String(response?.cloud_sheet_sync?.failed_buildings?.[0]?.error || response?.status || "历史云文档更新失败");
-            statusText.value = "历史云文档更新失败";
-          }
-        } catch (error) {
-          errorText.value = String(error?.message || error || "历史云文档更新失败");
-          statusText.value = "历史云文档更新失败";
-        } finally {
-          updatingHistoryCloudSync.value = false;
-        }
-      }
-
-      async function downloadCurrentReviewFile() {
-        if (saving.value || syncingRemoteRevision.value) {
-          statusText.value = "请先等待当前保存或同步完成后再下载。";
-          return;
-        }
-        const sessionId = String(session.value?.session_id || "").trim();
-        if (!buildingCode || !sessionId) {
-          statusText.value = "当前没有可下载的交接班文件";
-          return;
-        }
-        if (dirty.value) {
-          const saved = await saveDocument({ reason: "download" });
-          if (!saved) return;
-        }
-        downloading.value = true;
-        errorText.value = "";
-        statusText.value = "正在同步交接班文件...";
-        try {
-          const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId);
-          triggerBrowserDownload(`${url}&ts=${Date.now()}`, session.value?.output_file || "交接班日志.xlsx");
-          statusText.value = "交接班文件已同步，正在开始下载...";
-        } catch (error) {
-          errorText.value = String(error?.message || error || "下载失败");
-        } finally {
-          window.setTimeout(() => {
-            downloading.value = false;
-          }, 1500);
-        }
-      }
-
-      async function downloadCurrentCapacityReviewFile() {
-        if (saving.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value) {
-          statusText.value = "请先等待当前保存或同步完成后再下载。";
-          return;
-        }
-        if (dirty.value) {
-          const saved = await saveDocument({ reason: "capacity_download" });
-          if (!saved) return;
-        }
-        if (!session.value || !session.value.session_id || !String(session.value.capacity_output_file || "").trim()) {
-          statusText.value = "当前没有可下载的交接班容量报表";
-          return;
-        }
-        const syncStatus = String(capacitySync.value?.status || "").trim().toLowerCase();
-        if (syncStatus !== "ready") {
-          if (capacityLinkedDirty.value) {
-            statusText.value = "容量关联字段已修改，请先保存并等待容量报表补写完成。";
-          } else {
-            statusText.value = capacitySync.value?.error || "容量报表待补写完成后才能下载。";
-          }
-          return;
-        }
-        const sessionId = String(session.value?.session_id || "").trim();
-        const capacityOutputFile = String(session.value?.capacity_output_file || "").trim();
-        if (!buildingCode || !sessionId || !capacityOutputFile) {
-          statusText.value = "当前没有可下载的交接班容量报表";
-          return;
-        }
-        capacityDownloading.value = true;
-        errorText.value = "";
-        statusText.value = "容量报表已就绪，正在开始下载...";
-        try {
-          const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId);
-          triggerBrowserDownload(`${url}&ts=${Date.now()}`, capacityOutputFile || "交接班容量报表.xlsx");
-          statusText.value = "容量报表已就绪，正在开始下载...";
-        } catch (error) {
-          errorText.value = String(error?.message || error || "下载失败");
-        } finally {
-          window.setTimeout(() => {
-            capacityDownloading.value = false;
-          }, 1500);
-        }
-      }
-
-      function updateFixedField(blockIndex, fieldIndex, value) {
-        const block = documentRef.value.fixed_blocks?.[blockIndex];
-        const field = block?.fields?.[fieldIndex];
-        if (!field) return;
-        touchEditingIntent();
-        dirtyRegions.value.fixed_blocks = true;
-        const cellName = String(field.cell || "").trim().toUpperCase();
-        if (capacityTrackedCellSet.value.has(cellName)) {
-          capacityLinkedDirty.value = true;
-        }
-        field.value = String(value ?? "");
-      }
-
-      function updateSectionCell(sectionIndex, rowIndex, column, value) {
-        const section = documentRef.value.sections?.[sectionIndex];
-        const row = section?.rows?.[rowIndex];
-        if (!section || !row || !row.cells) return;
-        touchEditingIntent();
-        dirtyRegions.value.sections = true;
-        row.cells[column] = String(value ?? "");
-        row.is_placeholder_row = !hasSectionRowContent(row, section.columns);
-      }
-
-      function addSectionRow(sectionIndex) {
-        const section = documentRef.value.sections?.[sectionIndex];
-        if (!section || !Array.isArray(section.rows)) return;
-        touchEditingIntent();
-        dirtyRegions.value.sections = true;
-        section.rows.push(blankRow(section.columns));
-      }
-
-      function removeSectionRow(sectionIndex, rowIndex) {
-        const section = documentRef.value.sections?.[sectionIndex];
-        if (!section || !Array.isArray(section.rows)) return;
-        touchEditingIntent();
-        dirtyRegions.value.sections = true;
-        section.rows.splice(rowIndex, 1);
-        if (!section.rows.length) {
-          section.rows.push(blankRow(section.columns));
-        }
-      }
-
-      function updateFooterCell(blockIndex, rowIndex, column, value) {
-        const block = documentRef.value.footer_blocks?.[blockIndex];
-        if (!block || block.type !== "inventory_table") return;
-        const row = block.rows?.[rowIndex];
-        if (!row || !row.cells) return;
-        touchEditingIntent();
-        dirtyRegions.value.footer_inventory = true;
-        row.cells[column] = String(value ?? "");
-        row.is_placeholder_row = !footerRowHasContent(row, block.columns);
-      }
-
-      function addFooterRow(blockIndex) {
-        const block = documentRef.value.footer_blocks?.[blockIndex];
-        if (!block || block.type !== "inventory_table" || !Array.isArray(block.rows)) return;
-        touchEditingIntent();
-        dirtyRegions.value.footer_inventory = true;
-        block.rows.push(blankFooterInventoryRowWithDefaults(block.columns, resolveFooterAutoFillCells(block)));
-      }
-
-      function removeFooterRow(blockIndex, rowIndex) {
-        const block = documentRef.value.footer_blocks?.[blockIndex];
-        if (!block || block.type !== "inventory_table" || !Array.isArray(block.rows)) return;
-        touchEditingIntent();
-        dirtyRegions.value.footer_inventory = true;
-        if (block.rows.length <= 1) {
-          const placeholder = blankFooterInventoryRow(block.columns);
-          block.rows[0].cells = placeholder.cells;
-          block.rows[0].is_placeholder_row = true;
-          return;
-        }
-        block.rows.splice(rowIndex, 1);
-      }
-
-      async function refreshData() {
-        clearSaveTimers();
-        if (dirty.value) {
-          const saved = await saveDocument({ reason: "manual" });
-          if (!saved) return;
-        }
-        needsRefresh.value = false;
-        await loadReviewData({ background: false });
-      }
-
-      async function saveCurrentReview() {
-        if (!dirty.value) {
-          statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已保存";
-          return;
-        }
-        await saveDocument({ reason: "manual" });
-      }
-
-      watch(
+      const {
+        markDocumentDirty,
+        updateFixedField,
+        updateSectionCell,
+        addSectionRow,
+        removeSectionRow,
+        updateFooterCell,
+        addFooterRow,
+        removeFooterRow,
+      } = createHandoverReviewDocumentEditHelpers({
         documentRef,
-        () => {
-          if (suspendAutoSave.value || !session.value) return;
-          const nextSnapshot = serializeDocument(documentRef.value);
-          if (nextSnapshot === lastSavedSnapshot.value) return;
-          dirty.value = true;
-          if (staleRevisionConflict.value) {
-            clearSaveTimers();
-            beginRemoteSaveRefresh();
-            return;
-          }
-          if (!isHistoryMode.value && session.value?.confirmed) {
-            statusText.value = "内容已修改，保存后需重新确认";
-          } else if (isHistoryMode.value) {
-            statusText.value = "历史记录待保存";
-          } else {
-            statusText.value = "待保存";
-          }
-        },
-        { deep: true },
-      );
+        session,
+        dirtyRegions,
+        capacityTrackedCellSet,
+        capacityLinkedDirty,
+        documentMutationVersion,
+        dirty,
+        staleRevisionConflict,
+        clearSaveTimers,
+        beginRemoteSaveRefresh,
+        isHistoryMode,
+        statusText,
+        touchEditingIntent,
+        blankRow,
+        hasSectionRowContent,
+        footerRowHasContent,
+        blankFooterInventoryRowWithDefaults,
+        resolveFooterAutoFillCells,
+        blankFooterInventoryRow,
+      });
+
+      const {
+        switchToSession,
+        onHistorySelectionChange,
+        returnToLatestSession,
+        toggleConfirm,
+        retryCloudSheetSync,
+        updateHistoryCloudSync,
+        downloadCurrentReviewFile,
+        downloadCurrentCapacityReviewFile,
+        refreshData,
+        saveCurrentReview,
+      } = createHandoverReviewActionHelpers({
+        session,
+        building,
+        buildingCode,
+        dirty,
+        saving,
+        confirming,
+        cloudSyncBusy,
+        syncingRemoteRevision,
+        needsRefresh,
+        staleRevisionConflict,
+        downloading,
+        capacityDownloading,
+        retryingCloudSync,
+        updatingHistoryCloudSync,
+        activeRouteSelection,
+        selectedSessionId,
+        latestSessionId,
+        isHistoryMode,
+        statusText,
+        errorText,
+        reviewClientId,
+        returnToLatestActionBase,
+        confirmActionBase,
+        confirmActionVm,
+        retryCloudSyncActionBase,
+        retryCloudSyncActionVm,
+        updateHistoryCloudSyncActionBase,
+        updateHistoryCloudSyncActionVm,
+        downloadActionBase,
+        downloadActionVm,
+        capacityDownloadActionBase,
+        capacityDownloadActionVm,
+        refreshActionBase,
+        refreshActionVm,
+        clearSaveTimers,
+        saveDocument,
+        releaseCurrentLock,
+        loadReviewData,
+        shouldPreferBootstrapLoad,
+        beginRemoteSaveRefresh,
+        isRevisionConflictError,
+        applyPayloadMeta,
+        broadcastHandoverReviewStatusChange,
+        resolveOperationFeedbackText,
+        syncReviewSelectionToUrl,
+        confirmHandoverReviewApi,
+        unconfirmHandoverReviewApi,
+        retryHandoverReviewCloudSyncApi,
+        updateHandoverReviewCloudSyncApi,
+        buildHandoverReviewDownloadUrl,
+        buildHandoverReviewCapacityDownloadUrl,
+        triggerBrowserDownload,
+      });
 
       onMounted(async () => {
         if (typeof window !== "undefined") {
@@ -1599,12 +1640,14 @@ export function mountHandoverReviewApp(Vue) {
           sessionId: activeRouteSelection.value.sessionId,
           isLatest: !activeRouteSelection.value.sessionId,
         });
-        await loadReviewData({ background: false });
+        const useBootstrap = shouldPreferBootstrapLoad();
+        await loadReviewData({ background: false, mode: useBootstrap ? "bootstrap" : "full" });
       });
 
       onBeforeUnmount(() => {
         clearSaveTimers();
         clearHeartbeatTimer();
+        clearMetaControllers();
         if (activeLoadController && typeof activeLoadController.abort === "function") {
           activeLoadController.abort();
           activeLoadController = null;
@@ -1638,6 +1681,7 @@ export function mountHandoverReviewApp(Vue) {
         batchStatus,
         historyState,
         historySessions,
+        historyLoading,
         selectedSessionId,
         selectedSessionInHistoryList,
         selectedSessionIdInListOrEmpty,
@@ -1646,25 +1690,34 @@ export function mountHandoverReviewApp(Vue) {
         currentDutyDateText,
         currentDutyShiftText,
         currentModeText,
-        canReturnToLatest,
-        canUpdateHistoryCloudSync,
+        showReturnToLatestAction,
+        showRefreshAction,
+        showSaveAction,
+        showDownloadAction,
+        showCapacityDownloadAction,
+        showConfirmAction,
+        showRetryCloudSyncAction,
+        showUpdateHistoryCloudSyncAction,
         sessionSummary,
-        saveStatusText,
-        reviewFileSummary,
         reviewSaveBadge,
-        reviewConfirmBadge,
+        refreshActionVm,
         saveActionVm,
+        downloadActionVm,
+        capacityDownloadActionVm,
+        retryCloudSyncActionVm,
+        updateHistoryCloudSyncActionVm,
+        returnToLatestActionVm,
         reviewCloudSheetVm,
         reviewCloudSheetUrl,
         capacitySync,
         capacityDownloadDisabled,
-        canRetryCloudSync,
         reviewHeaderBadges,
         reviewStatusBanners,
         confirmActionVm,
         syncingRemoteRevision,
         onHistorySelectionChange,
         returnToLatestSession,
+        ensureHistoryLoaded,
         updateHistoryCloudSync,
         updateFixedField,
         updateSectionCell,
@@ -1675,7 +1728,7 @@ export function mountHandoverReviewApp(Vue) {
         removeFooterRow,
         saveCurrentReview,
         toggleConfirm,
-        retryCloudSheetSync,
+        retryCloudSheetSync: () => retryCloudSheetSync(getJobApi),
         downloadCurrentReviewFile,
         downloadCurrentCapacityReviewFile,
         refreshData,

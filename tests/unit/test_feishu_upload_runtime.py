@@ -30,8 +30,16 @@ class _FakeClient:
     def _to_feishu_date(self, date_text: str) -> str:
         return date_text
 
-    def list_records(self, table_id: str, page_size: int = 500, max_records: int = 0) -> List[Dict[str, Any]]:
-        self.calls.append(("list_records", table_id, page_size, max_records))
+    def list_records(
+        self,
+        table_id: str,
+        page_size: int = 500,
+        max_records: int = 0,
+        *,
+        view_id: str = "",
+        filter_formula: str = "",
+    ) -> List[Dict[str, Any]]:
+        self.calls.append(("list_records", table_id, page_size, max_records, view_id, filter_formula))
         if table_id == "calc_table":
             return list(self.calc_records)
         if table_id == "attach_table":
@@ -131,8 +139,8 @@ def test_upload_results_to_feishu_success_flow(tmp_path: Path) -> None:
     client_calls = [c[0] for c in clients[0].calls]
     assert client_calls == [
         "list_records",
-        "batch_delete_records",
         "list_records",
+        "batch_delete_records",
         "batch_delete_records",
         "upload_calc_records",
         "upload_attachment",
@@ -167,3 +175,59 @@ def test_upload_results_to_feishu_calc_stage_failure() -> None:
         )
 
     assert any("文件流程失败" in line and "计算记录上传" in line for line in logs)
+
+
+def test_upload_results_to_feishu_prefetches_old_records_once_for_multiple_buildings(tmp_path: Path) -> None:
+    logs: List[str] = []
+    clients: List[_FakeClient] = []
+
+    def _factory(**kwargs: Any) -> _FakeClient:
+        c = _FakeClient(**kwargs)
+        c.calc_records = [
+            {"record_id": "rec_calc_a", "fields": {"楼栋": "A楼", "日期": "2026-03-01"}},
+            {"record_id": "rec_calc_b", "fields": {"楼栋": "B楼", "日期": "2026-03-01"}},
+        ]
+        c.attachment_records = [
+            {"record_id": "rec_attach_a", "fields": {"类型": "全景平台月报", "楼栋": "A楼", "日期": "2026-03-01"}},
+            {"record_id": "rec_attach_b", "fields": {"类型": "全景平台月报", "楼栋": "B楼", "日期": "2026-03-01"}},
+        ]
+        clients.append(c)
+        return c
+
+    source_a = tmp_path / "A楼.xlsx"
+    source_b = tmp_path / "B楼.xlsx"
+    source_a.write_bytes(b"a")
+    source_b.write_bytes(b"b")
+    results = [
+        _FakeResult(
+            source_file=str(source_a),
+            building="A楼",
+            month="2026-03-01",
+            values={"PUE": 1.1},
+            records=[{"k": "a"}],
+        ),
+        _FakeResult(
+            source_file=str(source_b),
+            building="B楼",
+            month="2026-03-01",
+            values={"PUE": 1.2},
+            records=[{"k": "b"}],
+        ),
+    ]
+
+    upload_results_to_feishu(
+        results=results,
+        config=_build_config(enable_upload=True),
+        resolve_upload_date_from_runtime=lambda _cfg: "2026-03-01",
+        client_factory=_factory,
+        emit_log=logs.append,
+    )
+
+    assert len(clients) == 1
+    list_calls = [call for call in clients[0].calls if call[0] == "list_records"]
+    assert len(list_calls) == 2
+    assert [call[1] for call in list_calls] == ["calc_table", "attach_table"]
+    delete_calls = [call for call in clients[0].calls if call[0] == "batch_delete_records"]
+    assert len(delete_calls) == 4
+    assert any("楼栋=A楼" in line and "已读取旧计算记录" in line for line in logs)
+    assert any("楼栋=B楼" in line and "已读取旧附件记录" in line for line in logs)

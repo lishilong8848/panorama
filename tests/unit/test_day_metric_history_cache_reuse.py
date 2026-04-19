@@ -419,7 +419,7 @@ def test_sweep_invalid_ready_entries_only_scans_latest_and_recent_window(work_di
     assert len(old_ready) == 1
 
 
-def test_sweep_invalid_ready_entries_removes_missing_ready_entry(work_dir: Path) -> None:
+def test_sweep_invalid_ready_entries_downgrades_missing_ready_entry_to_failed(work_dir: Path) -> None:
     shared_root = work_dir / "shared"
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
@@ -456,13 +456,14 @@ def test_sweep_invalid_ready_entries_removes_missing_ready_entry(work_dir: Path)
         bucket_key="2026-04-11 16",
         status="ready",
     ) == []
-    assert store.list_source_cache_entries(
+    failed_rows = store.list_source_cache_entries(
         source_family=FAMILY_HANDOVER_LOG,
         building="A楼",
         bucket_kind="latest",
         bucket_key="2026-04-11 16",
         status="failed",
-    ) == []
+    )
+    assert len(failed_rows) == 1
 
 
 def test_fill_day_metric_history_falls_back_to_real_history_folder_when_store_missing_valid_entry(work_dir: Path) -> None:

@@ -148,6 +148,84 @@ def test_send_for_batch_manual_success_uses_open_id(monkeypatch):
     assert any("批次完成" in line for line in logs)
 
 
+def test_send_for_batch_old_recipients_without_enabled_still_send(monkeypatch):
+    service = _make_service(
+        monkeypatch,
+        recipients_by_building={"A楼": [{"open_id": "ou_legacy", "note": "旧配置"}]},
+        review_links=[{"building": "A楼", "url": "http://example.com/review/A"}],
+    )
+    calls = []
+
+    class _FakeClient:
+        def send_text_message(self, *, receive_id: str, receive_id_type: str, text: str):
+            calls.append(
+                {
+                    "receive_id": receive_id,
+                    "receive_id_type": receive_id_type,
+                    "text": text,
+                }
+            )
+            return {"message_id": "msg-legacy"}
+
+    service._build_feishu_client = lambda: _FakeClient()
+
+    result = service.send_for_batch(
+        batch_key="2026-04-10|night",
+        building="A楼",
+        source="manual",
+        emit_log=lambda _msg: None,
+    )
+
+    assert result["results"][0]["delivery"]["status"] == "success"
+    assert calls[0]["receive_id"] == "ou_legacy"
+
+
+def test_send_for_batch_skips_disabled_recipients(monkeypatch):
+    service = _make_service(
+        monkeypatch,
+        recipients_by_building={
+            "A楼": [
+                {"open_id": "ou_enabled", "note": "启用", "enabled": True},
+                {"open_id": "ou_disabled", "note": "停用", "enabled": False},
+            ]
+        },
+        review_links=[{"building": "A楼", "url": "http://example.com/review/A"}],
+    )
+    calls = []
+
+    class _FakeClient:
+        def send_text_message(self, *, receive_id: str, receive_id_type: str, text: str):
+            calls.append(receive_id)
+            return {"message_id": "msg-mixed"}
+
+    service._build_feishu_client = lambda: _FakeClient()
+
+    result = service.send_for_batch(
+        batch_key="2026-04-10|night",
+        building="A楼",
+        source="manual",
+        emit_log=lambda _msg: None,
+    )
+
+    assert result["results"][0]["delivery"]["status"] == "success"
+    assert calls == ["ou_enabled"]
+
+
+def test_send_manual_test_all_recipients_disabled_raises(monkeypatch):
+    service = _make_service(
+        monkeypatch,
+        recipients_by_building={"A楼": [{"open_id": "ou_disabled", "note": "停用", "enabled": False}]},
+        review_links=[{"building": "A楼", "url": "http://example.com/review/A"}],
+    )
+
+    with pytest.raises(ValueError, match="当前楼审核链接接收人均未启用"):
+        service.send_manual_test(
+            building="A楼",
+            batch_key="2026-04-10|night",
+            emit_log=lambda _msg: None,
+        )
+
+
 def test_send_for_batch_auto_uses_effective_base_url_fallback(monkeypatch):
     service = _make_service(
         monkeypatch,

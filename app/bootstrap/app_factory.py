@@ -55,7 +55,7 @@ from handover_log_module.service.handover_daily_report_screenshot_service import
 )
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
-from pipeline_utils import get_app_dir
+from pipeline_utils import get_app_dir, get_app_root_dir
 
 
 _EXTERNAL_REVIEW_ALLOWED_PREFIXES = (
@@ -73,6 +73,8 @@ _ROLE_SELECTION_ALLOWED_EXACT = {
     "/index.html",
     "/favicon.ico",
     "/api/health/bootstrap",
+    "/api/handover/daily-report/context",
+    "/api/logs/system",
     "/api/runtime/activate-startup",
     "/api/runtime/exit-current",
 }
@@ -454,6 +456,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     async def guard_internal_role_routes(request: Request, call_next):
         role_mode = _deployment_role_mode()
         path = str(request.url.path or "").strip() or "/"
+        if path == "/api/handover/daily-report/context":
+            return await call_next(request)
         if role_mode == "internal" and any(path.startswith(prefix) for prefix in _INTERNAL_BLOCKED_PREFIXES):
             return JSONResponse(
                 content={"detail": "当前为内网端，本地管理页不提供该业务入口，请在外网端发起。"},
@@ -546,6 +550,18 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     runtime_status_coordinator.request_refresh(reason="runtime_activated")
                 except Exception:  # noqa: BLE001
                     pass
+            if role_mode == "external":
+                try:
+                    from app.modules.handover_review.api.routes import (
+                        schedule_latest_review_documents_warmup,
+                    )
+
+                    schedule_latest_review_documents_warmup(
+                        container,
+                        reason="external_runtime_activated",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    container.add_system_log(f"[交接班][审核预热] 运行时启动后预热失败: {exc}")
             try:
                 _persist_last_started_role_mode(role_mode)
             except Exception as exc:  # noqa: BLE001
@@ -1226,6 +1242,26 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             ]
             expected_count = len(target_buildings)
             if len(cached_entries) < expected_count:
+                try:
+                    container.add_system_log("[12项独立上传调度] 按日缓存未齐全，先尝试直接复用现有交接班日志源文件")
+                    bridge_service.fill_day_metric_history(
+                        selected_dates=[target_date],
+                        building_scope="all_enabled",
+                        building=None,
+                        emit_log=container.add_system_log,
+                    )
+                    cached_entries = [
+                        item
+                        for item in bridge_service.get_day_metric_by_date_cache_entries(
+                            selected_dates=[target_date],
+                            buildings=target_buildings,
+                        )
+                        if str(item.get("file_path", "") or "").strip()
+                        and os.path.exists(str(item.get("file_path", "") or "").strip())
+                    ]
+                except Exception as exc:  # noqa: BLE001
+                    container.add_system_log(f"[12项独立上传调度] 直接复用交接班日志源文件失败，继续等待内网补采同步: {exc}")
+            if len(cached_entries) < expected_count:
                 dedupe_key = f"day_metric_upload:scheduler:{target_date}:{'|'.join(sorted(target_buildings))}"
                 job, bridge_task = start_waiting_bridge_job(
                     job_service=container.job_service,
@@ -1443,9 +1479,13 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 return True, "same_console_restart_scheduled"
 
             app_dir = get_app_dir()
-            launcher_bat = app_dir / "启动程序.bat"
+            app_root_dir = get_app_root_dir(app_dir)
+            launcher_bat = app_root_dir / "启动程序.bat"
             portable_launcher = app_dir / "portable_launcher.py"
-            if (
+            if sys.platform.startswith("win") and launcher_bat.exists() and app_root_dir != app_dir:
+                cmd = ["cmd.exe", "/c", str(launcher_bat)]
+                popen_kwargs = {"cwd": str(app_root_dir)}
+            elif (
                 not getattr(sys, "frozen", False)
                 and not str(os.environ.get("QJPT_PORTABLE_LAUNCHER", "") or "").strip()
                 and portable_launcher.exists()
@@ -1454,7 +1494,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 popen_kwargs = {"cwd": str(app_dir)}
             elif sys.platform.startswith("win") and launcher_bat.exists():
                 cmd = ["cmd.exe", "/c", str(launcher_bat)]
-                popen_kwargs = {"cwd": str(app_dir)}
+                popen_kwargs = {"cwd": str(app_root_dir)}
             elif getattr(sys, "frozen", False):
                 cmd = [sys.executable]
                 popen_kwargs = {"cwd": str(app_dir)}

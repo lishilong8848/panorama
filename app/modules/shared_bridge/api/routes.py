@@ -1,12 +1,20 @@
 ﻿from __future__ import annotations
 
 import copy
-from datetime import datetime
 from typing import Any, Callable, Dict
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.config.config_adapter import normalize_role_mode
+from app.modules.report_pipeline.service.job_panel_presenter import (
+    build_job_panel_summary,
+    build_bridge_tasks_summary,
+    present_bridge_task,
+)
+from app.modules.shared_bridge.service.dashboard_display_presenter import (
+    present_internal_runtime_display,
+    present_internal_runtime_building_display,
+)
 from app.modules.shared_bridge.service.internal_runtime_status_presenter import (
     build_empty_internal_runtime_building_status,
     build_empty_internal_runtime_summary,
@@ -70,9 +78,6 @@ _INTERNAL_RUNTIME_BUILDINGS = {
 }
 
 
-def _now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 
 def _deployment_role_mode(request: Request) -> str:
     container = request.app.state.container
@@ -104,161 +109,45 @@ def _normalize_internal_runtime_building(building_code: str) -> tuple[str, str]:
     raise HTTPException(status_code=404, detail="楼栋不存在，仅支持 A楼 到 E楼")
 
 
-def _normalize_internal_runtime_family_summary(payload: Any, *, fallback_bucket: str = "") -> Dict[str, Any]:
-    row = payload if isinstance(payload, dict) else {}
-    return {
-        "ready_count": int(row.get("ready_count", 0) or 0),
-        "failed_buildings": [str(item or "").strip() for item in (row.get("failed_buildings", []) or []) if str(item or "").strip()],
-        "blocked_buildings": [str(item or "").strip() for item in (row.get("blocked_buildings", []) or []) if str(item or "").strip()],
-        "last_success_at": str(row.get("last_success_at", "") or "").strip(),
-        "current_bucket": str(row.get("current_bucket", "") or "").strip() or str(fallback_bucket or "").strip(),
-    }
-
-
-def _normalize_internal_runtime_building_row(payload: Any, *, building: str, fallback_bucket: str = "") -> Dict[str, Any]:
-    row = payload if isinstance(payload, dict) else {}
-    return {
-        "building": str(row.get("building", "") or "").strip() or building,
-        "bucket_key": str(row.get("bucket_key", "") or "").strip() or str(fallback_bucket or "").strip(),
-        "status": str(row.get("status", "") or "").strip().lower() or "waiting",
-        "ready": bool(row.get("ready", False)),
-        "downloaded_at": str(row.get("downloaded_at", "") or "").strip(),
-        "last_error": _bridge_text(row.get("last_error", "")),
-        "relative_path": str(row.get("relative_path", "") or "").strip(),
-        "resolved_file_path": str(row.get("resolved_file_path", "") or "").strip(),
-        "started_at": str(row.get("started_at", "") or "").strip(),
-        "blocked": bool(row.get("blocked", False)),
-        "blocked_reason": _bridge_text(row.get("blocked_reason", "")),
-        "next_probe_at": str(row.get("next_probe_at", "") or "").strip(),
-    }
-
-
-def _select_internal_runtime_building_row(payload: Any, *, building: str, fallback_bucket: str = "") -> Dict[str, Any]:
-    family = payload if isinstance(payload, dict) else {}
-    rows = family.get("buildings", []) if isinstance(family.get("buildings", []), list) else []
-    matched = next(
-        (
-            item
-            for item in rows
-            if isinstance(item, dict) and str(item.get("building", "") or "").strip() == building
-        ),
-        {},
-    )
-    return _normalize_internal_runtime_building_row(
-        matched,
-        building=building,
-        fallback_bucket=str(family.get("current_bucket", "") or "").strip() or str(fallback_bucket or "").strip(),
-    )
-
-
-def _build_internal_runtime_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    raw_snapshot = snapshot if isinstance(snapshot, dict) else {}
-    raw_pool = raw_snapshot.get("internal_download_pool", {}) if isinstance(raw_snapshot.get("internal_download_pool", {}), dict) else {}
-    raw_cache = raw_snapshot.get("internal_source_cache", {}) if isinstance(raw_snapshot.get("internal_source_cache", {}), dict) else {}
-    current_bucket = str(raw_cache.get("current_hour_bucket", "") or "").strip()
-    return {
-        "updated_at": _now_text(),
-        "role_mode": normalize_role_mode(raw_snapshot.get("role_mode")),
-        "bridge_enabled": bool(raw_snapshot.get("enabled", False)),
-        "agent_status": str(raw_snapshot.get("agent_status", "") or "").strip(),
-        "db_status": str(raw_snapshot.get("db_status", "") or "").strip(),
-        "last_error": _bridge_text(raw_snapshot.get("last_error", "")),
-        "last_poll_at": str(raw_snapshot.get("last_poll_at", "") or "").strip(),
-        "queue": {
-            "pending_internal": int(raw_snapshot.get("pending_internal", 0) or 0),
-            "pending_external": int(raw_snapshot.get("pending_external", 0) or 0),
-            "problematic": int(raw_snapshot.get("problematic", 0) or 0),
-            "task_count": int(raw_snapshot.get("task_count", 0) or 0),
-        },
-        "pool": {
-            "enabled": bool(raw_pool.get("enabled", False)),
-            "browser_ready": bool(raw_pool.get("browser_ready", False)),
-            "active_buildings": [str(item or "").strip() for item in (raw_pool.get("active_buildings", []) or []) if str(item or "").strip()],
-            "last_error": _bridge_text(raw_pool.get("last_error", "")),
-        },
-        "source_cache": {
-            "enabled": bool(raw_cache.get("enabled", False)),
-            "scheduler_running": bool(raw_cache.get("scheduler_running", False)),
-            "current_hour_bucket": current_bucket,
-            "last_run_at": str(raw_cache.get("last_run_at", "") or "").strip(),
-            "last_success_at": str(raw_cache.get("last_success_at", "") or "").strip(),
-            "last_error": _bridge_text(raw_cache.get("last_error", "")),
-            "cache_root": str(raw_cache.get("cache_root", "") or "").strip(),
-            "current_hour_refresh": copy.deepcopy(raw_cache.get("current_hour_refresh", {}) if isinstance(raw_cache.get("current_hour_refresh", {}), dict) else {}),
-            "handover_log_family": _normalize_internal_runtime_family_summary(
-                raw_cache.get("handover_log_family", {}),
-                fallback_bucket=current_bucket,
-            ),
-            "handover_capacity_report_family": _normalize_internal_runtime_family_summary(
-                raw_cache.get("handover_capacity_report_family", {}),
-                fallback_bucket=current_bucket,
-            ),
-            "monthly_report_family": _normalize_internal_runtime_family_summary(
-                raw_cache.get("monthly_report_family", {}),
-                fallback_bucket=current_bucket,
-            ),
-            "alarm_event_family": _normalize_internal_runtime_family_summary(
-                raw_cache.get("alarm_event_family", {}),
-                fallback_bucket=str(raw_cache.get("alarm_event_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
-            ),
-        },
-    }
-
-
-def _build_internal_runtime_building_status(snapshot: Dict[str, Any], *, building: str, building_code: str) -> Dict[str, Any]:
-    raw_snapshot = snapshot if isinstance(snapshot, dict) else {}
-    raw_pool = raw_snapshot.get("internal_download_pool", {}) if isinstance(raw_snapshot.get("internal_download_pool", {}), dict) else {}
-    raw_cache = raw_snapshot.get("internal_source_cache", {}) if isinstance(raw_snapshot.get("internal_source_cache", {}), dict) else {}
-    slot_rows = raw_pool.get("page_slots", []) if isinstance(raw_pool.get("page_slots", []), list) else []
-    matched_slot = next(
-        (
-            item
-            for item in slot_rows
-            if isinstance(item, dict) and str(item.get("building", "") or "").strip() == building
-        ),
-        {"building": building},
-    )
-    current_bucket = str(raw_cache.get("current_hour_bucket", "") or "").strip()
-    return {
-        "updated_at": _now_text(),
-        "building": building,
-        "building_code": building_code,
-        "page_slot": copy.deepcopy(matched_slot if isinstance(matched_slot, dict) else {"building": building}),
-        "source_families": {
-            "handover_log_family": _select_internal_runtime_building_row(
-                raw_cache.get("handover_log_family", {}),
-                building=building,
-                fallback_bucket=current_bucket,
-            ),
-            "handover_capacity_report_family": _select_internal_runtime_building_row(
-                raw_cache.get("handover_capacity_report_family", {}),
-                building=building,
-                fallback_bucket=current_bucket,
-            ),
-            "monthly_report_family": _select_internal_runtime_building_row(
-                raw_cache.get("monthly_report_family", {}),
-                building=building,
-                fallback_bucket=current_bucket,
-            ),
-            "alarm_event_family": _select_internal_runtime_building_row(
-                raw_cache.get("alarm_event_family", {}),
-                building=building,
-                fallback_bucket=str(raw_cache.get("alarm_event_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
-            ),
-        },
-        "pool": {
-            "browser_ready": bool(raw_pool.get("browser_ready", False)),
-            "last_error": _bridge_text(raw_pool.get("last_error", "")),
-        },
-    }
-
-
 def _ensure_bridge_write_allowed(request: Request) -> None:
     if _deployment_role_mode(request) == "internal":
         raise HTTPException(
             status_code=409,
             detail="当前为内网端，本地管理页只提供共享任务只读查看，请在外网端执行重试或取消。",
         )
+
+
+def _list_visible_bridge_tasks(service, *, limit: int = 100) -> list[Dict[str, Any]]:
+    try:
+        tasks = service.list_tasks(limit=limit) if service else []
+    except Exception as exc:  # noqa: BLE001
+        if not service or not _bridge_store_read_is_recoverable(service, exc):
+            raise
+        cache_reader = getattr(service, "get_cached_tasks", None)
+        tasks = cache_reader(limit=limit) if callable(cache_reader) else []
+    rows = tasks if isinstance(tasks, list) else []
+    return [task for task in rows if str(task.get("feature", "") or "").strip().lower() != "alarm_export"]
+
+
+def _get_visible_bridge_task(service, task_id: str) -> Dict[str, Any] | None:
+    try:
+        payload = service.get_task(task_id) if service else None
+    except Exception as exc:  # noqa: BLE001
+        if not service or not _bridge_store_read_is_recoverable(service, exc):
+            raise
+        cache_reader = getattr(service, "get_cached_task", None)
+        payload = cache_reader(task_id) if callable(cache_reader) else None
+    if not payload or str(payload.get("feature", "") or "").strip().lower() == "alarm_export":
+        return None
+    return payload
+
+
+def _build_bridge_tasks_summary_payload(service, *, limit: int = 60) -> Dict[str, Any]:
+    visible_tasks = _list_visible_bridge_tasks(service, limit=limit)
+    return build_bridge_tasks_summary(
+        [_bridge_present_task(task) for task in visible_tasks],
+        count=len(visible_tasks),
+    )
 
 
 def _start_local_background_job(
@@ -528,25 +417,57 @@ def bridge_health(request: Request) -> Dict[str, Any]:
 def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
     _ensure_internal_bridge_runtime_allowed(request)
     container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
     coordinator = getattr(container, "runtime_status_coordinator", None)
+
+    def _attach_display(summary_payload: Dict[str, Any]) -> Dict[str, Any]:
+        summary = copy.deepcopy(summary_payload if isinstance(summary_payload, dict) else {})
+        task_summary = build_job_panel_summary(container, limit=20)
+        summary["display"] = present_internal_runtime_display(
+            summary,
+            task_overview=(
+                task_summary.get("display", {}).get("overview", {})
+                if isinstance(task_summary.get("display", {}), dict)
+                else {}
+            ),
+        )
+        return summary
+
     if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
         snapshot = coordinator.read_scope_snapshot("internal_runtime_summary")
         payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
         if isinstance(payload, dict):
-            return {"ok": True, "summary": payload}
+            return {"ok": True, "summary": _attach_display(payload)}
         try:
             coordinator.request_refresh(reason="internal_runtime_summary_route")
         except Exception:
             pass
-        return {"ok": True, "summary": build_empty_internal_runtime_summary(role_mode="internal")}
-    service = getattr(container, "shared_bridge_service", None)
-    if service is None or not hasattr(service, "get_health_snapshot"):
-        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
-    snapshot = service.get_health_snapshot(mode="internal_light")
-    return {
-        "ok": True,
-        "summary": presenter_build_internal_runtime_summary(snapshot if isinstance(snapshot, dict) else {}),
-    }
+        if service is None or not hasattr(service, "get_health_snapshot"):
+            return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
+
+    if service is not None and hasattr(service, "get_health_snapshot"):
+        try:
+            live_snapshot = service.get_health_snapshot(mode="internal_light")
+            try:
+                if coordinator is not None and callable(getattr(coordinator, "request_refresh", None)):
+                    coordinator.request_refresh(reason="internal_runtime_summary_route")
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "summary": _attach_display(
+                    presenter_build_internal_runtime_summary(
+                        live_snapshot if isinstance(live_snapshot, dict) else {},
+                    )
+                ),
+            }
+        except Exception:
+            pass
+
+    if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
+        return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
+
+    raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
 
 
 @router.get("/api/bridge/internal-runtime-status/buildings/{building_code}")
@@ -554,35 +475,67 @@ def bridge_internal_runtime_status_building(building_code: str, request: Request
     _ensure_internal_bridge_runtime_allowed(request)
     normalized_code, building = _normalize_internal_runtime_building(building_code)
     container = request.app.state.container
+    service = getattr(container, "shared_bridge_service", None)
     coordinator = getattr(container, "runtime_status_coordinator", None)
+
+    def _attach_display(status_payload: Dict[str, Any]) -> Dict[str, Any]:
+        status = copy.deepcopy(status_payload if isinstance(status_payload, dict) else {})
+        status["display"] = present_internal_runtime_building_display(status)
+        return status
+
     if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
         snapshot = coordinator.read_building_snapshot(building)
         payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
         if isinstance(payload, dict):
-            return {"ok": True, "status": payload}
+            return {"ok": True, "status": _attach_display(payload)}
         try:
             coordinator.request_refresh(reason=f"internal_runtime_building_route:{building}")
         except Exception:
             pass
+        if service is None or not hasattr(service, "get_health_snapshot"):
+            return {
+                "ok": True,
+                "status": _attach_display(
+                    build_empty_internal_runtime_building_status(
+                        building=building,
+                        building_code=normalized_code,
+                    )
+                ),
+            }
+
+    if service is not None and hasattr(service, "get_health_snapshot"):
+        try:
+            live_snapshot = service.get_health_snapshot(mode="internal_light")
+            try:
+                if coordinator is not None and callable(getattr(coordinator, "request_refresh", None)):
+                    coordinator.request_refresh(reason=f"internal_runtime_building_route:{building}")
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "status": _attach_display(
+                    presenter_build_internal_runtime_building_status(
+                        live_snapshot if isinstance(live_snapshot, dict) else {},
+                        building=building,
+                        building_code=normalized_code,
+                    )
+                ),
+            }
+        except Exception:
+            pass
+
+    if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
         return {
             "ok": True,
-            "status": build_empty_internal_runtime_building_status(
-                building=building,
-                building_code=normalized_code,
+            "status": _attach_display(
+                build_empty_internal_runtime_building_status(
+                    building=building,
+                    building_code=normalized_code,
+                )
             ),
         }
-    service = getattr(container, "shared_bridge_service", None)
-    if service is None or not hasattr(service, "get_health_snapshot"):
-        raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
-    snapshot = service.get_health_snapshot(mode="internal_light")
-    return {
-        "ok": True,
-        "status": presenter_build_internal_runtime_building_status(
-            snapshot if isinstance(snapshot, dict) else {},
-            building=building,
-            building_code=normalized_code,
-        ),
-    }
+
+    raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
 
 
 @router.post("/api/bridge/shared-root/self-check")
@@ -895,44 +848,36 @@ def bridge_source_cache_refresh_today(request: Request) -> Dict[str, Any]:
 def bridge_tasks(request: Request, limit: int = Query(100, ge=1, le=500)) -> Dict[str, Any]:
     container = request.app.state.container
     coordinator = getattr(container, "runtime_status_coordinator", None)
+    safe_limit = max(1, min(int(limit or 100), 500))
     if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
         snapshot = coordinator.read_scope_snapshot("bridge_tasks_summary")
         payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
         rows = payload.get("tasks", []) if isinstance(payload, dict) else []
         if isinstance(rows, list):
-            limited_tasks = rows[: max(1, min(int(limit or 100), 500))]
-            return {"ok": True, "tasks": [_bridge_present_task(task) for task in limited_tasks]}
-        try:
-            coordinator.request_refresh(reason="bridge_tasks_route")
-        except Exception:
-            pass
-        return {"ok": True, "tasks": []}
+            limited_tasks = rows[:safe_limit]
+            summary = build_bridge_tasks_summary(
+                [_bridge_present_task(task) for task in limited_tasks],
+                count=min(
+                    int(payload.get("count", 0) or len(rows)) if isinstance(payload, dict) else len(rows),
+                    safe_limit,
+                ),
+            )
+            return {"ok": True, **summary}
     service = getattr(container, "shared_bridge_service", None)
-    try:
-        tasks = service.list_tasks(limit=limit) if service else []
-    except Exception as exc:  # noqa: BLE001
-        if not service or not _bridge_store_read_is_recoverable(service, exc):
-            raise
-        cache_reader = getattr(service, "get_cached_tasks", None)
-        tasks = cache_reader(limit=limit) if callable(cache_reader) else []
-    tasks = [task for task in tasks if str(task.get("feature", "") or "").strip().lower() != "alarm_export"]
-    return {"ok": True, "tasks": [_bridge_present_task(task) for task in tasks]}
+    summary = build_bridge_tasks_summary(
+        [_bridge_present_task(task) for task in _list_visible_bridge_tasks(service, limit=safe_limit)],
+    )
+    return {"ok": True, **summary}
 
 
 @router.get("/api/bridge/tasks/{task_id}")
 def bridge_task_detail(task_id: str, request: Request) -> Dict[str, Any]:
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
-    try:
-        payload = service.get_task(task_id) if service else None
-    except Exception as exc:  # noqa: BLE001
-        if not service or not _bridge_store_read_is_recoverable(service, exc):
-            raise
-        cache_reader = getattr(service, "get_cached_task", None)
-        payload = cache_reader(task_id) if callable(cache_reader) else None
-    if not payload or str(payload.get("feature", "") or "").strip().lower() == "alarm_export":
+    payload = _get_visible_bridge_task(service, task_id)
+    if not payload:
         raise HTTPException(status_code=404, detail="共享任务不存在")
-    return {"ok": True, "task": _bridge_present_task(payload)}
+    return {"ok": True, "task": present_bridge_task(_bridge_present_task(payload))}
 
 
 @router.post("/api/bridge/tasks/{task_id}/cancel")
@@ -948,7 +893,13 @@ def bridge_task_cancel(task_id: str, request: Request) -> Dict[str, Any]:
         _raise_bridge_store_http_error(exc)
     if not cancelled:
         raise HTTPException(status_code=404, detail="共享任务不存在")
-    return {"ok": True}
+    task_payload = _get_visible_bridge_task(service, task_id)
+    return {
+        "ok": True,
+        "accepted": True,
+        "task": present_bridge_task(_bridge_present_task(task_payload)) if task_payload else None,
+        "bridge_tasks_summary": _build_bridge_tasks_summary_payload(service, limit=60),
+    }
 
 
 @router.post("/api/bridge/tasks/{task_id}/retry")
@@ -964,4 +915,10 @@ def bridge_task_retry(task_id: str, request: Request) -> Dict[str, Any]:
         _raise_bridge_store_http_error(exc)
     if not retried:
         raise HTTPException(status_code=404, detail="共享任务不存在")
-    return {"ok": True}
+    task_payload = _get_visible_bridge_task(service, task_id)
+    return {
+        "ok": True,
+        "accepted": True,
+        "task": present_bridge_task(_bridge_present_task(task_payload)) if task_payload else None,
+        "bridge_tasks_summary": _build_bridge_tasks_summary_payload(service, limit=60),
+    }

@@ -23,10 +23,20 @@ export function createActionGuard(vueApi) {
 
     const cooldownRaw = Number.parseInt(String(options.cooldownMs ?? 0), 10);
     const cooldownMs = Number.isFinite(cooldownRaw) && cooldownRaw > 0 ? cooldownRaw : 0;
+    const onCooldown = typeof options.onCooldown === "function" ? options.onCooldown : null;
     const now = Date.now();
     const lastDone = Number.parseInt(String(actionLastDoneAt[name] || 0), 10) || 0;
     if (lockMap[name]) return inflightPromiseMap[name];
-    if (cooldownMs > 0 && now - lastDone < cooldownMs) return undefined;
+    if (cooldownMs > 0 && now - lastDone < cooldownMs) {
+      if (onCooldown) {
+        try {
+          onCooldown();
+        } catch (_) {
+          // ignore cooldown callback errors
+        }
+      }
+      return false;
+    }
 
     lockMap[name] = true;
     const runningPromise = (async () => taskFn())();

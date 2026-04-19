@@ -61,6 +61,25 @@ def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _normalize_download_exception(exc: Exception, *, request_url: str = "") -> str:
+    text = str(exc or "").strip()
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        status = int(exc.response.status_code or 0)
+        body_text = ""
+        try:
+            body_text = str(exc.response.text or "").strip()
+        except Exception:  # noqa: BLE001
+            body_text = ""
+        lowered_body = body_text.lower()
+        if status == 403 and "large file require login" in lowered_body:
+            return (
+                "远端补丁包被 Gitee 标记为大文件，匿名 raw 下载被拒绝。"
+                "请重新发布更小的 patch，或调整更新源发布方式。"
+                f"{' URL=' + request_url if request_url else ''}"
+            )
+    return text
+
+
 def _safe_relative_path(value: str) -> Path:
     text = str(value or "").strip().replace("\\", "/").lstrip("/")
     path = Path(text)
@@ -150,7 +169,7 @@ class ManifestClient:
                         )
                 return save_to
             except Exception as exc:  # noqa: BLE001
-                last_error = str(exc)
+                last_error = _normalize_download_exception(exc, request_url=request_url)
                 try:
                     save_to.unlink(missing_ok=True)
                 except OSError:

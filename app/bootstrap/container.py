@@ -17,6 +17,9 @@ from app.config.settings_loader import load_bootstrap_settings, save_settings
 from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from app.modules.report_pipeline.service.job_service import JobService
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
+from app.modules.shared_bridge.service.bridge_status_presenter import (
+    apply_external_source_cache_backfill_overlays,
+)
 from app.modules.report_pipeline.service.system_alert_log_upload_service import (
     SystemAlertLogUploadService,
 )
@@ -137,6 +140,36 @@ class AppContainer:
             "node_id": node_id,
             "node_label": node_label,
         }
+
+    def _shared_bridge_runtime_deployment_snapshot(self) -> Dict[str, Any]:
+        service = self.shared_bridge_service
+        if service is None:
+            return {}
+        try:
+            snapshot = service.get_deployment_snapshot()
+        except Exception:  # noqa: BLE001
+            return {}
+        return snapshot if isinstance(snapshot, dict) else {}
+
+    def _shared_bridge_runtime_role_mode(self) -> str:
+        snapshot = self._shared_bridge_runtime_deployment_snapshot()
+        return normalize_role_mode(snapshot.get("role_mode", "") if isinstance(snapshot, dict) else "")
+
+    def _ensure_shared_bridge_service_matches_configured_role(self) -> None:
+        configured_role_mode = normalize_role_mode(self._configured_deployment_snapshot().get("role_mode", ""))
+        if configured_role_mode not in {"internal", "external"}:
+            return
+        if self.shared_bridge_service is None:
+            self.shared_bridge_service = self._build_shared_bridge_service()
+            return
+        runtime_role_mode = self._shared_bridge_runtime_role_mode()
+        if runtime_role_mode == configured_role_mode:
+            return
+        try:
+            self.shared_bridge_service.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        self.shared_bridge_service = self._build_shared_bridge_service()
 
     def _ensure_runtime_dependencies_initialized(self) -> None:
         if not self.wifi_service:
@@ -448,6 +481,12 @@ class AppContainer:
             app_version=self.version,
             job_service=self.job_service,
             emit_log=self.add_system_log,
+            request_runtime_status_refresh=lambda reason: (
+                getattr(self, "runtime_status_coordinator", None).request_refresh(reason=str(reason or "").strip() or "shared_bridge_runtime")
+                if getattr(self, "runtime_status_coordinator", None) is not None
+                and callable(getattr(getattr(self, "runtime_status_coordinator", None), "request_refresh", None))
+                else None
+            ),
         )
 
     def _scheduler_run_callback(self, source: str) -> tuple[bool, str]:
@@ -1049,8 +1088,9 @@ class AppContainer:
         return result
 
     def start_role_runtime_services(self, source: str = "启动确认") -> Dict[str, Any]:
-        role_mode = str(self.deployment_snapshot().get("role_mode", "") or "").strip().lower()
+        role_mode = str(self._configured_deployment_snapshot().get("role_mode", "") or "").strip().lower()
         self._ensure_runtime_dependencies_initialized()
+        self._ensure_shared_bridge_service_matches_configured_role()
         external_scheduler_autostart_state: Dict[str, Any] = {}
         if role_mode == "external":
             external_scheduler_autostart_state = self.apply_external_scheduler_autostart_state(source=source)
@@ -1585,6 +1625,7 @@ class AppContainer:
         return AppContainer._runtime_action_reason_text(reason)
 
     def start_shared_bridge(self, source: str = "自动") -> Dict[str, Any]:
+        self._ensure_shared_bridge_service_matches_configured_role()
         if not self.shared_bridge_service:
             self.shared_bridge_service = self._build_shared_bridge_service()
         result = self.shared_bridge_service.start()
@@ -1609,13 +1650,23 @@ class AppContainer:
         configured = self._configured_deployment_snapshot()
         if not self.shared_bridge_service:
             return configured
-        runtime_snapshot = self.shared_bridge_service.get_deployment_snapshot()
+        if not self.runtime_services_armed:
+            return configured
+        runtime_snapshot = self._shared_bridge_runtime_deployment_snapshot()
         if not isinstance(runtime_snapshot, dict):
+            return configured
+        configured_role_mode = normalize_role_mode(configured.get("role_mode", ""))
+        runtime_role_mode = normalize_role_mode(runtime_snapshot.get("role_mode", ""))
+        if (
+            configured_role_mode in {"internal", "external"}
+            and runtime_role_mode in {"internal", "external"}
+            and configured_role_mode != runtime_role_mode
+        ):
             return configured
         return {
             **configured,
             **{
-                "role_mode": str(runtime_snapshot.get("role_mode", "") or configured.get("role_mode", "")).strip().lower(),
+                "role_mode": str(runtime_role_mode or configured.get("role_mode", "")).strip().lower(),
                 "node_id": str(runtime_snapshot.get("node_id", "") or configured.get("node_id", "")).strip(),
                 "node_label": str(runtime_snapshot.get("node_label", "") or configured.get("node_label", "")).strip(),
             },
@@ -1665,6 +1716,37 @@ class AppContainer:
             }
         else:
             snapshot = self.shared_bridge_service.get_health_snapshot(mode=mode)
+            if str(mode or "").strip().lower() == "external_full":
+                try:
+                    internal_source_cache = (
+                        snapshot.get("internal_source_cache", {})
+                        if isinstance(snapshot.get("internal_source_cache", {}), dict)
+                        else {}
+                    )
+                    display_overview = (
+                        internal_source_cache.get("display_overview", {})
+                        if isinstance(internal_source_cache.get("display_overview", {}), dict)
+                        else {}
+                    )
+                    if display_overview:
+                        tasks = []
+                        get_cached_tasks = getattr(self.shared_bridge_service, "get_cached_tasks", None)
+                        if callable(get_cached_tasks):
+                            tasks = get_cached_tasks(limit=60)
+                        if not tasks:
+                            list_tasks = getattr(self.shared_bridge_service, "list_tasks", None)
+                            if callable(list_tasks):
+                                tasks = list_tasks(limit=60)
+                        if tasks:
+                            internal_source_cache = dict(internal_source_cache)
+                            internal_source_cache["display_overview"] = apply_external_source_cache_backfill_overlays(
+                                display_overview,
+                                tasks,
+                            )
+                            snapshot = dict(snapshot)
+                            snapshot["internal_source_cache"] = internal_source_cache
+                except Exception:
+                    pass
         role_mode = str(snapshot.get("role_mode", "") or self.deployment_snapshot().get("role_mode", "")).strip().lower()
         if role_mode != "internal":
             snapshot = dict(snapshot)
@@ -1701,6 +1783,16 @@ class AppContainer:
                 "last_error": "",
                 "local_version": "",
                 "remote_version": "",
+                "update_mode": "patch_zip",
+                "app_root_dir": "",
+                "persistent_user_data_dir": "",
+                "git_available": False,
+                "git_repo_detected": False,
+                "branch": "",
+                "local_commit": "",
+                "remote_commit": "",
+                "worktree_dirty": False,
+                "dirty_files": [],
                 "source_kind": "remote",
                 "source_label": "远端正式更新源",
                 "local_release_revision": 0,
@@ -2090,7 +2182,7 @@ class AppContainer:
             duration_ms=duration_ms,
         )
 
-    def reload_config(self, settings: Dict[str, Any]) -> None:
+    def _apply_runtime_config_snapshot(self, settings: Dict[str, Any]) -> None:
         self.config = copy.deepcopy(settings)
         self.runtime_config = adapt_runtime_config(self.config)
         self.job_service.update_log_buffer_size(int(self._console_cfg().get("log_buffer_size", 5000)))
@@ -2101,6 +2193,18 @@ class AppContainer:
             config_snapshot_getter=lambda: self.runtime_config,
             current_ssid_getter=lambda: self.wifi_service.current_ssid() if self.wifi_service else "",
         )
+
+    def apply_config_snapshot(self, settings: Dict[str, Any], *, mode: str = "light") -> None:
+        normalized_mode = str(mode or "light").strip().lower() or "light"
+        if normalized_mode == "full":
+            self.reload_config(settings)
+            return
+        if normalized_mode != "light":
+            raise ValueError(f"unsupported config apply mode: {mode}")
+        self._apply_runtime_config_snapshot(settings)
+
+    def reload_config(self, settings: Dict[str, Any]) -> None:
+        self._apply_runtime_config_snapshot(settings)
 
         was_running = self.scheduler.is_running() if self.scheduler else False
         was_handover_running = (

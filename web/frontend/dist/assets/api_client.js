@@ -36,7 +36,7 @@ async function apiJsonWithTimeout(url, options = {}, timeoutMs = 0) {
 }
 
 export async function getHealthApi(params = {}) {
-  return apiJsonWithTimeout(appendQuery("/api/health", { ...params, _t: Date.now() }), {}, 15000);
+  return apiJsonWithTimeout(appendQuery("/api/health", { ...params, _t: Date.now() }), {}, 25000);
 }
 
 export async function getBootstrapHealthApi() {
@@ -119,6 +119,10 @@ export async function getJobsApi(params = {}) {
 
 export async function getRuntimeResourcesApi() {
   return apiJson("/api/runtime/resources");
+}
+
+export async function getExternalDashboardSummaryApi() {
+  return apiJsonWithTimeout("/api/runtime/external-dashboard-summary", {}, 20000);
 }
 
 export async function getBridgeTasksApi(params = {}) {
@@ -442,8 +446,16 @@ export async function getHandoverReviewApi(buildingCode, params = {}, options = 
   return apiJson(appendQuery(`/api/handover/review/${buildingCode}`, params), options);
 }
 
+export async function getHandoverReviewBootstrapApi(buildingCode, params = {}, options = {}) {
+  return apiJson(appendQuery(`/api/handover/review/${buildingCode}/bootstrap`, params), options);
+}
+
 export async function getHandoverReviewStatusApi(buildingCode, params = {}, options = {}) {
   return apiJson(appendQuery(`/api/handover/review/${buildingCode}/status`, params), options);
+}
+
+export async function getHandoverReviewHistoryApi(buildingCode, params = {}, options = {}) {
+  return apiJson(appendQuery(`/api/handover/review/${buildingCode}/history`, params), options);
 }
 
 export async function claimHandoverReviewLockApi(buildingCode, payload = {}) {

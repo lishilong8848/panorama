@@ -23,6 +23,15 @@ from app.modules.shared_bridge.service.alarm_event_page_export_service import (
     write_alarm_event_json,
 )
 from app.modules.shared_bridge.service.alarm_external_selection import build_alarm_external_selection
+from app.modules.shared_bridge.service.bridge_status_presenter import (
+    present_alarm_event_family,
+    present_current_hour_refresh_overview,
+    present_external_source_cache_overview,
+    present_external_source_cache_family,
+    present_latest_selection_overview,
+    present_internal_source_cache_overview,
+    present_source_cache_family,
+)
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver, build_bitable_url
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
@@ -304,6 +313,30 @@ class SharedSourceCacheService:
         )
         if updated is not None:
             self._mark_external_full_snapshot_dirty()
+            if str(updated.get("bucket_kind", "") or "").strip().lower() == "latest":
+                with self._lock:
+                    self._ensure_light_family_cache_unlocked(
+                        source_family=str(updated.get("source_family", "") or "").strip(),
+                        bucket_key=str(updated.get("bucket_key", "") or "").strip(),
+                        buildings=[str(updated.get("building", "") or "").strip()],
+                    )
+                    self._set_light_building_status_unlocked(
+                        source_family=str(updated.get("source_family", "") or "").strip(),
+                        building=str(updated.get("building", "") or "").strip(),
+                        bucket_key=str(updated.get("bucket_key", "") or "").strip(),
+                        payload={
+                            "status": "failed",
+                            "ready": False,
+                            "downloaded_at": str(updated.get("downloaded_at", "") or "").strip(),
+                            "last_error": metadata_update["error"],
+                            "relative_path": str(updated.get("relative_path", "") or "").strip(),
+                            "resolved_file_path": "",
+                            "started_at": "",
+                            "blocked": False,
+                            "blocked_reason": "",
+                            "next_probe_at": "",
+                        },
+                    )
             self._log_source_cache_event(
                 f"{log_reason}: family={updated.get('source_family', '')}, "
                 f"building={updated.get('building', '')}, bucket={updated.get('bucket_kind', '')}/"
@@ -633,7 +666,7 @@ class SharedSourceCacheService:
         failed_buildings = [str(item.get("building", "") or "").strip() for item in building_rows if str(item.get("status", "") or "").strip().lower() == "failed"]
         blocked_buildings = [str(item.get("building", "") or "").strip() for item in building_rows if bool(item.get("blocked", False))]
         last_success_candidates = [str(item.get("downloaded_at", "") or "").strip() for item in building_rows if str(item.get("downloaded_at", "") or "").strip()]
-        return {
+        raw_family = {
             "ready_count": ready_count,
             "failed_buildings": failed_buildings,
             "blocked_buildings": blocked_buildings,
@@ -642,6 +675,13 @@ class SharedSourceCacheService:
             "buildings": building_rows,
             "latest_selection": {},
         }
+        bucket_scope_text = "本次定时" if self._normalize_source_family(source_family) == FAMILY_ALARM_EVENT else "本小时"
+        return present_source_cache_family(
+            raw_family,
+            title=FAMILY_LABELS.get(self._normalize_source_family(source_family), ""),
+            fallback_bucket=current_bucket,
+            bucket_scope_text=bucket_scope_text,
+        )
 
     def _build_external_full_snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -698,7 +738,7 @@ class SharedSourceCacheService:
             **alarm_family,
             "external_upload": alarm_external_upload,
         }
-        return {
+        snapshot = {
             "enabled": bool(self.enabled and self.role_mode in {"internal", "external"}),
             "scheduler_running": bool(self.role_mode == "internal" and self.is_running()),
             "current_hour_bucket": current_bucket,
@@ -712,6 +752,8 @@ class SharedSourceCacheService:
             FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
             FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
         }
+        snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
+        return snapshot
 
     def _build_alarm_external_selection(self, *, building: str = "") -> Dict[str, Any]:
         if self.store is None or self.shared_root is None:
@@ -742,7 +784,7 @@ class SharedSourceCacheService:
 
     def _build_alarm_external_health_snapshot(self) -> Dict[str, Any]:
         selection = self._build_alarm_external_selection()
-        return {
+        raw_family = {
             "ready_count": int(selection.get("ready_count", 0) or 0),
             "failed_buildings": list(selection.get("failed_buildings", []) or []),
             "blocked_buildings": list(selection.get("blocked_buildings", []) or []),
@@ -756,6 +798,13 @@ class SharedSourceCacheService:
             "missing_today_buildings": list(selection.get("missing_today_buildings", []) or []),
             "missing_both_days_buildings": list(selection.get("missing_both_days_buildings", []) or []),
         }
+        presented = present_alarm_event_family(
+            raw_family,
+            key=FAMILY_ALARM_EVENT,
+            title=FAMILY_LABELS.get(FAMILY_ALARM_EVENT, ""),
+        )
+        presented["display_overview"] = dict(presented)
+        return presented
 
     def _get_external_full_snapshot_cached(self) -> Dict[str, Any]:
         with self._lock:
@@ -952,7 +1001,7 @@ class SharedSourceCacheService:
                 "external_upload": alarm_external_upload,
                 "manual_refresh": manual_alarm_refresh,
             }
-            return {
+            snapshot = {
                 "enabled": bool(self.enabled and self.role_mode in {"internal", "external"}),
                 "scheduler_running": bool(self.role_mode == "internal" and self.is_running()),
                 "current_hour_bucket": current_bucket,
@@ -966,6 +1015,9 @@ class SharedSourceCacheService:
                 FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
                 FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
             }
+            snapshot["overview"] = present_internal_source_cache_overview(snapshot)
+            snapshot["current_hour_refresh_overview"] = present_current_hour_refresh_overview(current_hour_refresh)
+            return snapshot
         return self._get_external_full_snapshot_cached()
 
     def _get_source_cache_entry(
@@ -1156,7 +1208,7 @@ class SharedSourceCacheService:
             if include_latest_selection and self._normalize_source_family(source_family) != FAMILY_ALARM_EVENT
             else {}
         )
-        return {
+        raw_family = {
             "ready_count": ready_count,
             "failed_buildings": failed_buildings,
             "blocked_buildings": blocked_buildings,
@@ -1165,6 +1217,32 @@ class SharedSourceCacheService:
             "buildings": building_rows,
             "latest_selection": latest_selection,
         }
+        presented_live = present_source_cache_family(
+            raw_family,
+            title=FAMILY_LABELS.get(self._normalize_source_family(source_family), ""),
+            fallback_bucket=current_bucket,
+            bucket_scope_text="当前桶",
+        )
+        if latest_selection:
+            presented_live["latest_selection"] = present_latest_selection_overview(
+                latest_selection,
+                key=self._normalize_source_family(source_family),
+                title=FAMILY_LABELS.get(self._normalize_source_family(source_family), ""),
+            )
+            presented_live["display_overview"] = present_external_source_cache_family(
+                key=self._normalize_source_family(source_family),
+                title=FAMILY_LABELS.get(self._normalize_source_family(source_family), ""),
+                live_payload=presented_live,
+                latest_payload=presented_live["latest_selection"],
+            )
+        else:
+            presented_live["display_overview"] = present_source_cache_family(
+                raw_family,
+                title=FAMILY_LABELS.get(self._normalize_source_family(source_family), ""),
+                fallback_bucket=current_bucket,
+                bucket_scope_text="当前桶",
+            )
+        return presented_live
 
     def _ensure_dirs(self) -> None:
         if self.shared_root is None or self._tmp_root is None:
@@ -1254,6 +1332,21 @@ class SharedSourceCacheService:
             "target_path": target_path,
             "relative_path": target_path.relative_to(self.shared_root).as_posix() if self.shared_root else target_path.name,
         }
+
+    def _cache_file_compat(self, *, source_family: str, source_path: Path, target_path: Path) -> Dict[str, Any]:
+        try:
+            return self._cache_file(
+                source_family=source_family,
+                source_path=source_path,
+                target_path=target_path,
+            )
+        except TypeError as exc:
+            if "source_family" not in str(exc):
+                raise
+            return self._cache_file(
+                source_path=source_path,
+                target_path=target_path,
+            )
 
     def _family_root(self, source_family: str) -> Path:
         normalized_family = self._normalize_source_family(source_family)
@@ -1437,7 +1530,7 @@ class SharedSourceCacheService:
             f"条目已进入 refreshing: family={normalized_family}, building={building}, "
             f"bucket={bucket_kind}/{bucket_key}, target={target_relative_path}"
         )
-        cached = self._cache_file(
+        cached = self._cache_file_compat(
             source_family=normalized_family,
             source_path=source_path,
             target_path=target_path,
@@ -1611,9 +1704,10 @@ class SharedSourceCacheService:
         if not _is_accessible_cached_file(file_path):
             status_text = str(entry.get("status", "") or "").strip().lower()
             if status_text == "ready":
-                self._delete_entry_for_missing_file(
+                self._repair_entry_to_failed(
                     entry,
-                    log_reason="ready 条目已从共享缓存移除",
+                    error_text="共享文件缺失或不可访问",
+                    log_reason="ready 条目已修复为 failed",
                 )
             return None
         if normalized_family == FAMILY_HANDOVER_LOG:
@@ -2042,7 +2136,14 @@ class SharedSourceCacheService:
         duty_shift = _normalize_nullable_text(entry.get("duty_shift")).lower()
         if duty_date and duty_shift in {"day", "night"}:
             return {"duty_date": duty_date, "duty_shift": duty_shift}
-        return self._infer_handover_duty_context_from_bucket_key(str(entry.get("bucket_key", "") or "").strip())
+        inferred = self._infer_handover_duty_context_from_bucket_key(str(entry.get("bucket_key", "") or "").strip())
+        if duty_date and not inferred.get("duty_date"):
+            inferred["duty_date"] = duty_date
+        if duty_date and duty_shift == "all":
+            inferred["duty_date"] = duty_date
+            if not inferred.get("duty_shift"):
+                inferred["duty_shift"] = "all"
+        return inferred
 
     def get_latest_ready_selection(
         self,
@@ -2403,9 +2504,10 @@ class SharedSourceCacheService:
             file_path = self._resolve_relative_path_under_shared_root(str(entry.get("relative_path", "") or "").strip())
             if file_path is None or not _is_accessible_cached_file(file_path):
                 entry_id = str(entry.get("entry_id", "") or "").strip()
-                if entry_id and self._delete_entry_for_missing_file(
+                if entry_id and self._repair_entry_to_failed(
                     entry,
-                    log_reason="后台扫描已移除缺失共享文件索引",
+                    error_text="共享文件缺失或不可访问",
+                    log_reason="后台扫描已修复缺失共享文件为 failed",
                 ):
                     downgraded += 1
                 else:

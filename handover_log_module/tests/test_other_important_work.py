@@ -329,6 +329,60 @@ def test_other_important_work_builder_normalizes_specialty_for_executor_match(tm
     ]
 
 
+def test_other_important_work_builder_uses_shared_fire_supervisor_across_buildings(tmp_path: Path) -> None:
+    template_path = tmp_path / "other_work_fire_shared_template.xlsx"
+    _build_other_work_template(template_path)
+    cfg = {
+        "enabled": True,
+        "sections": {"other_important_work": "其他重要工作记录"},
+        "column_mapping": {
+            "resolve_by_header": True,
+            "header_alias": {
+                "description": ["描述"],
+                "completion": ["完成情况"],
+                "executor": ["执行人"],
+            },
+            "fallback_cols": {
+                "description": "B",
+                "completion": "F",
+                "executor": "H",
+            },
+        },
+    }
+    rows = [
+        OtherImportantWorkRow(
+            source_key="device_patrol",
+            source_label="设备轮巡",
+            record_id="rec-fire-shared",
+            building_values=["C楼"],
+            actual_start_time=datetime(2026, 3, 14, 9, 0, 0),
+            actual_end_time=None,
+            description_text="C楼消防专项巡检",
+            completion_text="已完成",
+            specialty_text="消防专项",
+            raw_fields={},
+        ),
+    ]
+    builder = OtherImportantWorkPayloadBuilder(
+        {"template": {"source_path": str(template_path), "sheet_name": "交接班日志"}},
+        repository=_FakeOtherWorkRepo(cfg, rows),
+        shift_roster_repo=_FakeShiftRosterRepo(
+            [{"building": "消防、安全", "specialty": "消防、安全", "supervisor": "明志勇"}]
+        ),
+    )
+
+    payload = builder.build(
+        building="C楼",
+        duty_date="2026-03-14",
+        duty_shift="day",
+        emit_log=lambda *_args: None,
+    )
+
+    assert payload["其他重要工作记录"] == [
+        {"cells": {"B": "C楼消防专项巡检", "F": "已完成", "H": "明志勇"}},
+    ]
+
+
 def test_other_important_work_builder_dedupes_duplicate_descriptions(tmp_path: Path) -> None:
     template_path = tmp_path / "other_work_dedupe_template.xlsx"
     _build_other_work_template(template_path)
@@ -448,3 +502,54 @@ def test_other_important_work_builder_uses_target_duty_for_engineer_directory(tm
     assert fake_shift_repo.calls
     assert fake_shift_repo.calls[-1]["duty_date"] == "2026-03-14"
     assert fake_shift_repo.calls[-1]["duty_shift"] == "day"
+
+
+def test_other_important_work_builder_reuses_preloaded_engineers(tmp_path: Path) -> None:
+    template_path = tmp_path / "other_work_preloaded_engineers.xlsx"
+    _build_other_work_template(template_path)
+    cfg = {
+        "enabled": True,
+        "sections": {"other_important_work": "其他重要工作记录"},
+        "column_mapping": {
+            "resolve_by_header": True,
+            "header_alias": {
+                "description": ["描述"],
+                "completion": ["完成情况"],
+                "executor": ["执行人"],
+            },
+            "fallback_cols": {"description": "B", "completion": "F", "executor": "H"},
+        },
+    }
+    fake_shift_repo = _FakeShiftRosterRepo([])
+    builder = OtherImportantWorkPayloadBuilder(
+        {"template": {"source_path": str(template_path), "sheet_name": "交接班日志"}},
+        repository=_FakeOtherWorkRepo(
+            cfg,
+            [
+                OtherImportantWorkRow(
+                    source_key="device_patrol",
+                    source_label="设备轮巡",
+                    record_id="rec-preloaded",
+                    building_values=["A楼"],
+                    actual_start_time=datetime(2026, 3, 14, 9, 0, 0),
+                    actual_end_time=None,
+                    description_text="轮巡事项",
+                    completion_text="已完成",
+                    specialty_text="电气",
+                    raw_fields={},
+                )
+            ],
+        ),
+        shift_roster_repo=fake_shift_repo,
+    )
+
+    payload = builder.build(
+        building="A楼",
+        duty_date="2026-03-14",
+        duty_shift="day",
+        preloaded_engineers=[{"building": "A楼", "specialty": "电气", "supervisor": "汪根尚"}],
+        emit_log=lambda *_args: None,
+    )
+
+    assert fake_shift_repo.calls == []
+    assert payload["其他重要工作记录"][0]["cells"]["H"] == "汪根尚"

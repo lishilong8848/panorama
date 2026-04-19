@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import copy
+import inspect
 import json
 import os
 import re
@@ -37,6 +38,17 @@ from app.modules.report_pipeline.service.resume_checkpoint_store import (
     resolve_resume_root_dir as resolve_monthly_resume_root_dir,
 )
 from app.modules.report_pipeline.service.calculation_service import CalculationService
+from app.modules.report_pipeline.service.job_panel_presenter import (
+    build_bridge_tasks_summary,
+    build_job_panel_summary,
+    present_bridge_task,
+    present_job_item,
+)
+from app.modules.report_pipeline.service.scheduler_state_presenter import (
+    present_scheduler_overview_items,
+    present_scheduler_overview_summary,
+    present_scheduler_state,
+)
 from app.modules.report_pipeline.service.job_service import JobBusyError, TaskEngineUnavailableError
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
@@ -46,6 +58,22 @@ from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import
 from app.modules.shared_bridge.service.shared_source_cache_service import (
     SharedSourceCacheService,
     is_accessible_cached_file_path,
+)
+from app.modules.shared_bridge.service.bridge_status_presenter import (
+    apply_external_source_cache_backfill_overlays,
+    present_external_internal_alert_overview,
+    present_external_source_cache_overview,
+)
+from app.modules.shared_bridge.service.dashboard_display_presenter import (
+    present_config_guidance_overview,
+    present_feature_target_displays,
+    present_external_dashboard_display,
+    present_external_module_hero_overviews,
+    present_external_scheduler_overview,
+    present_external_system_overview,
+    present_monthly_report_delivery_display,
+    present_monthly_report_last_run_display,
+    present_updater_mirror_overview,
 )
 from app.shared.utils.runtime_temp_workspace import (
     cleanup_runtime_temp_dir,
@@ -119,6 +147,11 @@ _HEALTH_CACHE_TTL_REVIEW_ACCESS_SEC = 3.0
 _HEALTH_CACHE_TTL_REVIEW_RECIPIENTS_SEC = 8.0
 _HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC = 10.0
 _HEALTH_CACHE_TTL_MONTHLY_DELIVERY_SEC = 12.0
+_HEALTH_CACHE_TTL_SHARED_ROOT_DIAGNOSTIC_SEC = 10.0
+
+
+def _invalidate_review_base_probe_cache() -> None:
+    return None
 
 
 def _mirror_handover_review_defaults_to_sqlite(
@@ -163,6 +196,24 @@ def _runtime_config(container) -> Dict[str, Any]:
     return copy.deepcopy(container.runtime_config)
 
 
+def _read_runtime_status_scope_payload(container, scope: str) -> Dict[str, Any] | None:
+    scope_text = str(scope or "").strip()
+    if not scope_text:
+        return None
+    coordinator = getattr(container, "runtime_status_coordinator", None)
+    if coordinator is None or not callable(getattr(coordinator, "is_running", None)) or not coordinator.is_running():
+        return None
+    try:
+        snapshot = coordinator.read_scope_snapshot(scope_text)
+        payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+        if isinstance(payload, dict):
+            return payload
+        coordinator.request_refresh(reason=f"scope:{scope_text}")
+    except Exception:
+        return None
+    return None
+
+
 def _health_cached_component(
     request: Request,
     *,
@@ -191,6 +242,133 @@ def _health_cached_component(
     with cache_lock:
         cache[key] = {"ts": time.monotonic(), "value": copy.deepcopy(value)}
     return value
+
+
+def _health_cached_component_async_default(
+    request: Request,
+    *,
+    key: str,
+    ttl_sec: float,
+    builder: Callable[[], Any],
+    default: Any,
+) -> Any:
+    state = request.app.state
+    cache = getattr(state, _HEALTH_COMPONENT_CACHE_ATTR, None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(state, _HEALTH_COMPONENT_CACHE_ATTR, cache)
+    cache_lock = getattr(state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, None)
+    if not isinstance(cache_lock, _THREAD_LOCK_TYPE):
+        cache_lock = threading.Lock()
+        setattr(state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, cache_lock)
+
+    ttl = max(0.0, float(ttl_sec or 0.0))
+    now = time.monotonic()
+    default_value = copy.deepcopy(default)
+    start_refresh = False
+    return_value = default_value
+
+    with cache_lock:
+        entry = cache.get(key)
+        if isinstance(entry, dict):
+            age_sec = now - float(entry.get("ts", 0.0) or 0.0)
+            if bool(entry.get("ready", False)):
+                return_value = copy.deepcopy(entry.get("value"))
+                if age_sec <= ttl:
+                    return return_value
+            if not bool(entry.get("refreshing", False)):
+                entry["refreshing"] = True
+                cache[key] = entry
+                start_refresh = True
+            return return_value
+        cache[key] = {
+            "ts": 0.0,
+            "value": copy.deepcopy(default_value),
+            "ready": False,
+            "refreshing": True,
+        }
+        start_refresh = True
+
+    if start_refresh:
+        app_ref = request.app
+
+        def _runner() -> None:
+            value = copy.deepcopy(default_value)
+            ready = False
+            try:
+                value = builder()
+                ready = True
+            except Exception:
+                value = copy.deepcopy(default_value)
+                ready = False
+            finally:
+                latest_cache = getattr(app_ref.state, _HEALTH_COMPONENT_CACHE_ATTR, None)
+                latest_lock = getattr(app_ref.state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, None)
+                if isinstance(latest_cache, dict) and isinstance(latest_lock, _THREAD_LOCK_TYPE):
+                    with latest_lock:
+                        latest_cache[key] = {
+                            "ts": time.monotonic(),
+                            "value": copy.deepcopy(value),
+                            "ready": ready,
+                            "refreshing": False,
+                        }
+
+        threading.Thread(
+            target=_runner,
+            name=f"health-cache-{key}".replace(":", "-"),
+            daemon=True,
+        ).start()
+
+    return return_value
+
+
+def _empty_job_panel_summary() -> Dict[str, Any]:
+    return {
+        "jobs": [],
+        "count": 0,
+        "active_job_ids": [],
+        "job_counts": {},
+        "display": {
+            "running_jobs": [],
+            "waiting_resource_items": [],
+            "recent_finished_jobs": [],
+            "overview": {
+                "reason_code": "pending_backend",
+                "running_count": 0,
+                "waiting_count": 0,
+                "bridge_active_count": 0,
+                "handover_generation_busy": False,
+                "handover_generation_status_text": "任务面板等待后台快照。",
+                "recent_failure_title": "",
+                "tone": "neutral",
+                "status_text": "等待后端任务状态",
+                "summary_text": "任务面板状态由后端聚合后返回。",
+                "detail_text": "当前等待后台任务快照。",
+                "next_action_text": "",
+                "focus_title": "等待后端任务状态",
+                "focus_meta": "",
+                "items": [],
+                "actions": [],
+            },
+        },
+    }
+
+
+def _empty_runtime_resources_summary() -> Dict[str, Any]:
+    return {
+        "network": {},
+        "controlled_browser": {"holder_job_id": "", "queue_length": 0},
+        "batch_locks": [],
+        "resources": [],
+    }
+
+
+def _shared_source_cache_overview_from_snapshot(payload: Any) -> Dict[str, Any]:
+    source_cache = payload if isinstance(payload, dict) else {}
+    display_overview = source_cache.get("display_overview", {})
+    if isinstance(display_overview, dict) and display_overview:
+        return copy.deepcopy(display_overview)
+    return present_external_source_cache_overview(source_cache)
 
 
 def _is_recoverable_resume_index_error(exc: Exception) -> bool:
@@ -301,13 +479,14 @@ def _shared_bridge_is_available(container) -> bool:
 
 
 def _blank_internal_download_pool_snapshot() -> Dict[str, Any]:
-    return {
+    payload = {
         "enabled": False,
         "browser_ready": False,
         "page_slots": [],
         "active_buildings": [],
         "last_error": "",
     }
+    return payload
 
 
 def _sanitize_shared_bridge_snapshot_for_role(snapshot: Any, *, role_mode: str) -> Dict[str, Any]:
@@ -326,34 +505,60 @@ def _shared_bridge_health_snapshot(container, request: Request, *, role_mode: st
     )
 
     def _build() -> Dict[str, Any]:
-        started_at = time.perf_counter()
-        snapshot: Dict[str, Any] = {}
-        if hasattr(container, "shared_bridge_snapshot"):
-            try:
-                snapshot = container.shared_bridge_snapshot(mode=snapshot_mode)
-            except TypeError:
-                snapshot = container.shared_bridge_snapshot()
-        elapsed = time.perf_counter() - started_at
-        if snapshot_mode == "internal_light" and elapsed >= _INTERNAL_HEALTH_SHARED_BRIDGE_SLOW_THRESHOLD_SEC:
-            now_monotonic = time.monotonic()
-            last_logged_at = float(
-                getattr(request.app.state, "_internal_health_shared_bridge_slow_logged_at", 0.0) or 0.0
-            )
-            if (now_monotonic - last_logged_at) >= _INTERNAL_HEALTH_SHARED_BRIDGE_SLOW_LOG_INTERVAL_SEC:
-                setattr(request.app.state, "_internal_health_shared_bridge_slow_logged_at", now_monotonic)
-                add_system_log = getattr(container, "add_system_log", None)
-                if callable(add_system_log):
-                    add_system_log(
-                        f"[health] shared_bridge snapshot took {elapsed * 1000:.0f}ms (mode={snapshot_mode})",
-                        source="system",
-                    )
-        return _sanitize_shared_bridge_snapshot_for_role(snapshot, role_mode=role_mode)
+        return _build_shared_bridge_health_snapshot(container, request, role_mode=role_mode)
 
     return _health_cached_component(
         request,
         key=f"shared_bridge_snapshot:{snapshot_mode}",
         ttl_sec=cache_ttl_sec,
         builder=_build,
+    )
+
+
+def _build_shared_bridge_health_snapshot(container, request: Request, *, role_mode: str) -> Dict[str, Any]:
+    snapshot_mode = "internal_light" if str(role_mode or "").strip().lower() == "internal" else "external_full"
+    started_at = time.perf_counter()
+    snapshot: Dict[str, Any] = {}
+    if hasattr(container, "shared_bridge_snapshot"):
+        try:
+            snapshot = container.shared_bridge_snapshot(mode=snapshot_mode)
+        except TypeError:
+            snapshot = container.shared_bridge_snapshot()
+    elapsed = time.perf_counter() - started_at
+    if snapshot_mode == "internal_light" and elapsed >= _INTERNAL_HEALTH_SHARED_BRIDGE_SLOW_THRESHOLD_SEC:
+        now_monotonic = time.monotonic()
+        last_logged_at = float(
+            getattr(request.app.state, "_internal_health_shared_bridge_slow_logged_at", 0.0) or 0.0
+        )
+        if (now_monotonic - last_logged_at) >= _INTERNAL_HEALTH_SHARED_BRIDGE_SLOW_LOG_INTERVAL_SEC:
+            setattr(request.app.state, "_internal_health_shared_bridge_slow_logged_at", now_monotonic)
+            add_system_log = getattr(container, "add_system_log", None)
+            if callable(add_system_log):
+                add_system_log(
+                    f"[health] shared_bridge snapshot took {elapsed * 1000:.0f}ms (mode={snapshot_mode})",
+                    source="system",
+                )
+    return _sanitize_shared_bridge_snapshot_for_role(snapshot, role_mode=role_mode)
+
+
+def _shared_bridge_health_snapshot_async_default(
+    container,
+    request: Request,
+    *,
+    role_mode: str,
+) -> Dict[str, Any]:
+    snapshot_mode = "internal_light" if str(role_mode or "").strip().lower() == "internal" else "external_full"
+    cache_ttl_sec = (
+        _HEALTH_CACHE_TTL_SHARED_BRIDGE_INTERNAL_SEC
+        if snapshot_mode == "internal_light"
+        else _HEALTH_CACHE_TTL_SHARED_BRIDGE_EXTERNAL_SEC
+    )
+    return _health_cached_component_async_default(
+        request,
+        key=f"shared_bridge_snapshot:{snapshot_mode}",
+        ttl_sec=cache_ttl_sec,
+        builder=lambda: _build_shared_bridge_health_snapshot(container, request, role_mode=role_mode),
+        default=_sanitize_shared_bridge_snapshot_for_role({}, role_mode=role_mode),
     )
 
 
@@ -375,6 +580,27 @@ def _shared_root_diagnostic_snapshot(
         except Exception:
             pass
     return {}
+
+
+def _shared_root_diagnostic_snapshot_async_default(
+    container,
+    request: Request,
+    *,
+    role_mode: str,
+    shared_bridge_snapshot: Dict[str, Any],
+    updater_snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    return _health_cached_component_async_default(
+        request,
+        key=f"shared_root_diagnostic:{normalize_role_mode(role_mode)}",
+        ttl_sec=_HEALTH_CACHE_TTL_SHARED_ROOT_DIAGNOSTIC_SEC,
+        builder=lambda: _shared_root_diagnostic_snapshot(
+            container,
+            shared_bridge_snapshot=shared_bridge_snapshot,
+            updater_snapshot=updater_snapshot,
+        ),
+        default={},
+    )
 
 
 def _shared_bridge_service_or_raise(container):
@@ -584,6 +810,33 @@ def _empty_handover_review_access() -> Dict[str, Any]:
     }
 
 
+def _build_latest_handover_review_status(container) -> Dict[str, Any]:
+    runtime_cfg = container.runtime_config if isinstance(getattr(container, "runtime_config", {}), dict) else container.config
+    handover_cfg = load_handover_config(runtime_cfg)
+    try:
+        review_service = ReviewSessionService(handover_cfg)
+        followup_service = ReviewFollowupTriggerService(handover_cfg)
+        status_payload = review_service.get_latest_batch_status()
+        target_batch_key = str(status_payload.get("batch_key", "")).strip()
+        status_payload["followup_progress"] = (
+            followup_service.get_followup_progress(target_batch_key)
+            if target_batch_key
+            else _empty_followup_progress()
+        )
+        return status_payload
+    except Exception:
+        return _empty_handover_review_status()
+
+
+def _latest_handover_review_status_cached(container, request: Request) -> Dict[str, Any]:
+    return _health_cached_component(
+        request,
+        key="handover_review_status:latest",
+        ttl_sec=_HEALTH_CACHE_TTL_REVIEW_STATUS_SEC,
+        builder=lambda: _build_latest_handover_review_status(container),
+    )
+
+
 def _job_resource_keys(*resource_keys: str, batch_key: str = "") -> list[str]:
     keys: list[str] = []
     for item in resource_keys:
@@ -661,6 +914,21 @@ def _start_background_job(
         run_func=run_func,
         **job_kwargs,
     )
+
+
+def _call_with_supported_kwargs(func: Callable[..., Any], **kwargs: Any) -> Any:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return func(**kwargs)
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+        return func(**kwargs)
+    supported_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if key in signature.parameters
+    }
+    return func(**supported_kwargs)
 
 
 def _review_access_now_text() -> str:
@@ -1199,6 +1467,15 @@ def schedule_handover_review_access_startup_probe(
     *,
     delay_sec: float = _REVIEW_BASE_STARTUP_PROBE_DELAY_SEC,
 ) -> None:
+    persisted_state = _load_review_access_state(container)
+    if bool(persisted_state.get("configured", False)) and str(
+        persisted_state.get("effective_base_url", "") or ""
+    ).strip():
+        try:
+            container.add_system_log("[交接班审核访问] 启动不再自动探测：已存在有效审核访问配置")
+        except Exception:  # noqa: BLE001
+            pass
+        return
     if getattr(container, "_handover_review_access_probe_scheduled", False):
         return
     setattr(container, "_handover_review_access_probe_scheduled", True)
@@ -1265,6 +1542,81 @@ def _collect_config_warnings(payload: Dict[str, Any]) -> list[str]:
     return warnings
 
 
+def _augment_health_scheduler_displays(payload: Dict[str, Any], *, role_mode: str) -> None:
+    if not isinstance(payload, dict):
+        return
+
+    scheduler_node = payload.get("scheduler")
+    if isinstance(scheduler_node, dict):
+        scheduler_node["display"] = present_scheduler_state(
+            scheduler_node,
+            role_mode=role_mode,
+            external_only=True,
+        )
+
+    handover_node = payload.get("handover_scheduler")
+    if isinstance(handover_node, dict):
+        handover_node["display"] = present_scheduler_state(
+            handover_node,
+            role_mode=role_mode,
+            external_only=True,
+        )
+        morning_node = handover_node.get("morning")
+        if isinstance(morning_node, dict):
+            morning_node["display"] = present_scheduler_state(
+                morning_node,
+                role_mode=role_mode,
+                external_only=True,
+            )
+        afternoon_node = handover_node.get("afternoon")
+        if isinstance(afternoon_node, dict):
+            afternoon_node["display"] = present_scheduler_state(
+                afternoon_node,
+                role_mode=role_mode,
+                external_only=True,
+            )
+
+    wet_bulb_container = payload.get("wet_bulb_collection")
+    if isinstance(wet_bulb_container, dict) and isinstance(wet_bulb_container.get("scheduler"), dict):
+        wet_bulb_container["scheduler"]["display"] = present_scheduler_state(
+            wet_bulb_container["scheduler"],
+            role_mode=role_mode,
+            external_only=True,
+        )
+
+    day_metric_container = payload.get("day_metric_upload")
+    if isinstance(day_metric_container, dict) and isinstance(day_metric_container.get("scheduler"), dict):
+        day_metric_container["scheduler"]["display"] = present_scheduler_state(
+            day_metric_container["scheduler"],
+            role_mode=role_mode,
+            external_only=True,
+        )
+
+    alarm_container = payload.get("alarm_event_upload")
+    if isinstance(alarm_container, dict) and isinstance(alarm_container.get("scheduler"), dict):
+        alarm_container["scheduler"]["display"] = present_scheduler_state(
+            alarm_container["scheduler"],
+            role_mode=role_mode,
+            external_only=True,
+        )
+
+    monthly_event_container = payload.get("monthly_event_report")
+    if isinstance(monthly_event_container, dict) and isinstance(monthly_event_container.get("scheduler"), dict):
+        monthly_event_container["scheduler"]["display"] = present_scheduler_state(
+            monthly_event_container["scheduler"],
+            role_mode=role_mode,
+            external_only=True,
+        )
+
+    monthly_change_container = payload.get("monthly_change_report")
+    if isinstance(monthly_change_container, dict) and isinstance(monthly_change_container.get("scheduler"), dict):
+        monthly_change_container["scheduler"]["display"] = present_scheduler_state(
+            monthly_change_container["scheduler"],
+            role_mode=role_mode,
+            external_only=True,
+        )
+
+
 @router.get("/api/health")
 def health(
     request: Request,
@@ -1275,6 +1627,22 @@ def health(
     container = request.app.state.container
     runtime_cfg = container.runtime_config
     role_mode = _deployment_role_mode(container)
+
+    def _live_shared_bridge_snapshot_for_role() -> Dict[str, Any]:
+        snapshot_mode = "internal_light" if role_mode == "internal" else "external_full"
+        if snapshot_mode == "external_full":
+            scoped_payload = _read_runtime_status_scope_payload(container, "external_shared_bridge_full")
+            if isinstance(scoped_payload, dict) and scoped_payload:
+                return scoped_payload
+        getter = getattr(container, "shared_bridge_snapshot", None)
+        if not callable(getter):
+            return {}
+        try:
+            payload = getter(mode=snapshot_mode)
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
     mode_text = str(health_mode or "").strip().lower()
     is_lite_mode = mode_text in {"lite", "fast", "initial"}
     runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
@@ -1284,6 +1652,9 @@ def health(
                 snapshot = runtime_status_coordinator.read_scope_snapshot("runtime_health_lite")
                 payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
                 if isinstance(payload, dict) and payload:
+                    live_shared_bridge = _live_shared_bridge_snapshot_for_role()
+                    if live_shared_bridge:
+                        payload = {**payload, "shared_bridge": live_shared_bridge}
                     return payload
                 runtime_status_coordinator.request_refresh(reason="health_lite_route")
         except Exception:
@@ -1358,7 +1729,13 @@ def health(
     if include_engineer_directory_target_preview or include_handover_runtime_context:
         handover_loaded_cfg = load_handover_config(runtime_cfg)
     wet_bulb_target_preview = (
-        WetBulbCollectionService(runtime_cfg).build_target_descriptor(force_refresh=False)
+        _health_cached_component_async_default(
+            request,
+            key="target_preview:wet_bulb",
+            ttl_sec=_HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC,
+            builder=lambda: WetBulbCollectionService(runtime_cfg).build_target_descriptor(force_refresh=False),
+            default={},
+        )
         if include_wet_bulb_target_preview
         else {}
     )
@@ -1386,63 +1763,92 @@ def health(
                 "error": str(exc),
             }
 
+    def _empty_monthly_delivery_snapshot(report_type: str) -> Dict[str, Any]:
+        return {
+            "last_run": monthly_report_delivery_service.get_last_run_snapshot(report_type),
+            "recipient_status_by_building": [],
+            "error": "",
+        }
+
     if include_monthly_delivery:
-        monthly_event_report_delivery_snapshot = _health_cached_component(
+        monthly_event_report_delivery_snapshot = _health_cached_component_async_default(
             request,
             key="monthly_delivery:event",
             ttl_sec=_HEALTH_CACHE_TTL_MONTHLY_DELIVERY_SEC,
             builder=lambda: _build_monthly_delivery_snapshot("event"),
+            default=_empty_monthly_delivery_snapshot("event"),
         )
-        monthly_change_report_delivery_snapshot = _health_cached_component(
+        monthly_change_report_delivery_snapshot = _health_cached_component_async_default(
             request,
             key="monthly_delivery:change",
             ttl_sec=_HEALTH_CACHE_TTL_MONTHLY_DELIVERY_SEC,
             builder=lambda: _build_monthly_delivery_snapshot("change"),
+            default=_empty_monthly_delivery_snapshot("change"),
         )
     else:
-        monthly_event_report_delivery_snapshot = {
-            "last_run": monthly_report_delivery_service.get_last_run_snapshot("event"),
-            "recipient_status_by_building": [],
-            "error": "",
-        }
-        monthly_change_report_delivery_snapshot = {
-            "last_run": monthly_report_delivery_service.get_last_run_snapshot("change"),
-            "recipient_status_by_building": [],
-            "error": "",
-        }
+        monthly_event_report_delivery_snapshot = _empty_monthly_delivery_snapshot("event")
+        monthly_change_report_delivery_snapshot = _empty_monthly_delivery_snapshot("change")
+    monthly_event_report_last_run_display = present_monthly_report_last_run_display(
+        "event",
+        monthly_event_report_last_run,
+    )
+    monthly_change_report_last_run_display = present_monthly_report_last_run_display(
+        "change",
+        monthly_change_report_last_run,
+    )
+    monthly_event_report_delivery_display = present_monthly_report_delivery_display(
+        "event",
+        monthly_event_report_last_run,
+        monthly_event_report_delivery_snapshot,
+    )
+    monthly_change_report_delivery_display = present_monthly_report_delivery_display(
+        "change",
+        monthly_change_report_last_run,
+        monthly_change_report_delivery_snapshot,
+    )
     day_metric_target_preview = (
-        _health_cached_component(
+        _health_cached_component_async_default(
             request,
             key="target_preview:day_metric",
             ttl_sec=_HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC,
             builder=lambda: DayMetricBitableExportService(runtime_cfg).build_target_descriptor(force_refresh=False),
+            default={},
         )
         if include_day_metric_target_preview
         else {}
     )
     engineer_directory_target_preview = (
-        _health_cached_component(
+        _health_cached_component_async_default(
             request,
             key="target_preview:engineer_directory",
             ttl_sec=_HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC,
             builder=lambda: ShiftRosterRepository(handover_loaded_cfg).build_engineer_directory_target_descriptor(
                 force_refresh=False
             ),
+            default={},
         )
         if include_engineer_directory_target_preview
         else {}
     )
     alarm_event_target_preview = (
-        _health_cached_component(
+        _health_cached_component_async_default(
             request,
             key="target_preview:alarm_event",
             ttl_sec=_HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC,
             builder=lambda: SharedSourceCacheService(runtime_config=runtime_cfg, store=None).get_alarm_event_upload_target_preview(
                 force_refresh=False
             ),
+            default={},
         )
         if include_alarm_event_target_preview
         else {}
+    )
+    feature_target_displays = present_feature_target_displays(
+        runtime_cfg,
+        engineer_directory_target_preview=engineer_directory_target_preview,
+        wet_bulb_target_preview=wet_bulb_target_preview,
+        day_metric_target_preview=day_metric_target_preview,
+        alarm_event_target_preview=alarm_event_target_preview,
     )
     handover_slots = (
         handover_scheduler_snapshot.get("slots", {})
@@ -1556,13 +1962,14 @@ def health(
             except Exception:  # noqa: BLE001
                 return _empty_handover_review_status()
 
-        handover_review_status = _health_cached_component(
+        handover_review_status = _health_cached_component_async_default(
             request,
             key=review_status_cache_key,
             ttl_sec=_HEALTH_CACHE_TTL_REVIEW_STATUS_SEC,
             builder=_build_handover_review_status,
+            default=_empty_handover_review_status(),
         )
-        handover_review_access = _health_cached_component(
+        handover_review_access = _health_cached_component_async_default(
             request,
             key=(
                 "handover_review_access:"
@@ -1576,6 +1983,7 @@ def health(
                 duty_date=str(handover_review_status.get("duty_date", "")).strip(),
                 duty_shift=str(handover_review_status.get("duty_shift", "")).strip().lower(),
             ),
+            default=_empty_handover_review_access(),
         )
 
         def _build_review_recipient_status_by_building() -> list[Dict[str, Any]]:
@@ -1587,11 +1995,12 @@ def health(
             except Exception:
                 return []
 
-        handover_review_recipient_status_by_building = _health_cached_component(
+        handover_review_recipient_status_by_building = _health_cached_component_async_default(
             request,
             key="handover_review_recipient_status_by_building",
             ttl_sec=_HEALTH_CACHE_TTL_REVIEW_RECIPIENTS_SEC,
             builder=_build_review_recipient_status_by_building,
+            default=[],
         )
     system_logs = list(getattr(container, "system_logs", []))[-200:]
     get_log_entries = getattr(container, "get_system_log_entries", None)
@@ -1617,9 +2026,15 @@ def health(
         )
         shared_root_diagnostic = {}
     else:
-        shared_bridge_snapshot = _shared_bridge_health_snapshot(container, request, role_mode=role_mode)
-        shared_root_diagnostic = _shared_root_diagnostic_snapshot(
+        shared_bridge_snapshot = (
+            _read_runtime_status_scope_payload(container, "external_shared_bridge_full")
+            if role_mode == "external"
+            else None
+        ) or _shared_bridge_health_snapshot(container, request, role_mode=role_mode)
+        shared_root_diagnostic = _shared_root_diagnostic_snapshot_async_default(
             container,
+            request,
+            role_mode=role_mode,
             shared_bridge_snapshot=shared_bridge_snapshot,
             updater_snapshot=updater_runtime,
         )
@@ -1711,6 +2126,7 @@ def health(
             },
             "engineer_directory": {
                 "target_preview": engineer_directory_target_preview,
+                "target_display": feature_target_displays.get("engineer_directory", {}),
             },
             "review_status": handover_review_status,
             "review_recipient_status_by_building": handover_review_recipient_status_by_building,
@@ -1757,6 +2173,7 @@ def health(
                     "callback_name": _safe_text_method("wet_bulb_collection_scheduler_executor_name"),
                 },
                 "target_preview": wet_bulb_target_preview,
+                "target_display": feature_target_displays.get("wet_bulb_collection", {}),
             },
             "monthly_event_report": {
                 "enabled": bool(monthly_event_report_service.is_enabled()),
@@ -1778,8 +2195,14 @@ def health(
                     "executor_bound": _safe_bool_method("is_monthly_event_report_scheduler_executor_bound"),
                     "callback_name": _safe_text_method("monthly_event_report_scheduler_executor_name"),
                 },
-                "last_run": monthly_event_report_last_run,
-                "delivery": monthly_event_report_delivery_snapshot,
+                "last_run": {
+                    **(monthly_event_report_last_run if isinstance(monthly_event_report_last_run, dict) else {}),
+                    "display": monthly_event_report_last_run_display,
+                },
+                "delivery": {
+                    **monthly_event_report_delivery_snapshot,
+                    "display": monthly_event_report_delivery_display,
+                },
             },
             "monthly_change_report": {
             "enabled": bool(monthly_change_report_service.is_enabled()),
@@ -1801,8 +2224,14 @@ def health(
                     "executor_bound": _safe_bool_method("is_monthly_change_report_scheduler_executor_bound"),
                     "callback_name": _safe_text_method("monthly_change_report_scheduler_executor_name"),
                 },
-                "last_run": monthly_change_report_last_run,
-                "delivery": monthly_change_report_delivery_snapshot,
+                "last_run": {
+                    **(monthly_change_report_last_run if isinstance(monthly_change_report_last_run, dict) else {}),
+                    "display": monthly_change_report_last_run_display,
+                },
+                "delivery": {
+                    **monthly_change_report_delivery_snapshot,
+                    "display": monthly_change_report_delivery_display,
+                },
             },
             "day_metric_upload": {
             "scheduler": {
@@ -1825,6 +2254,7 @@ def health(
                     "callback_name": _safe_text_method("day_metric_upload_scheduler_executor_name"),
                 },
                 "target_preview": day_metric_target_preview,
+                "target_display": feature_target_displays.get("day_metric_upload", {}),
             },
             "alarm_event_upload": {
             "enabled": bool(runtime_cfg.get("alarm_export", {}).get("enabled", True))
@@ -1850,6 +2280,7 @@ def health(
                     "callback_name": _safe_text_method("alarm_event_upload_scheduler_executor_name"),
                 },
                 "target_preview": alarm_event_target_preview,
+                "target_display": feature_target_displays.get("alarm_event_upload", {}),
             },
         "updater": {
             "enabled": bool(runtime_cfg.get("updater", {}).get("enabled", True))
@@ -1881,6 +2312,40 @@ def health(
             "internal_peer": dict(updater_runtime.get("internal_peer", {}))
             if isinstance(updater_runtime.get("internal_peer", {}), dict)
             else {},
+            "display_overview": present_updater_mirror_overview(
+                {
+                    "enabled": bool(runtime_cfg.get("updater", {}).get("enabled", True))
+                    if isinstance(runtime_cfg.get("updater", {}), dict)
+                    else True,
+                    "running": bool(updater_runtime.get("running", False)),
+                    "last_check_at": str(updater_runtime.get("last_check_at", "")),
+                    "last_result": str(updater_runtime.get("last_result", "")),
+                    "last_error": str(updater_runtime.get("last_error", "")),
+                    "local_version": str(updater_runtime.get("local_version", "")),
+                    "remote_version": str(updater_runtime.get("remote_version", "")),
+                    "source_kind": str(updater_runtime.get("source_kind", "remote") or "remote"),
+                    "source_label": str(updater_runtime.get("source_label", "远端正式更新源") or "远端正式更新源"),
+                    "local_release_revision": int(updater_runtime.get("local_release_revision", 0) or 0),
+                    "remote_release_revision": int(updater_runtime.get("remote_release_revision", 0) or 0),
+                    "state_path": str(updater_runtime.get("state_path", "")),
+                    "update_available": bool(updater_runtime.get("update_available", False)),
+                    "force_apply_available": bool(updater_runtime.get("force_apply_available", False)),
+                    "restart_required": bool(updater_runtime.get("restart_required", False)),
+                    "dependency_sync_status": str(updater_runtime.get("dependency_sync_status", "idle")),
+                    "dependency_sync_error": str(updater_runtime.get("dependency_sync_error", "")),
+                    "dependency_sync_at": str(updater_runtime.get("dependency_sync_at", "")),
+                    "queued_apply": dict(updater_runtime.get("queued_apply", {})),
+                    "mirror_ready": bool(updater_runtime.get("mirror_ready", False)),
+                    "mirror_version": str(updater_runtime.get("mirror_version", "")),
+                    "mirror_manifest_path": str(updater_runtime.get("mirror_manifest_path", "")),
+                    "last_publish_at": str(updater_runtime.get("last_publish_at", "")),
+                    "last_publish_error": str(updater_runtime.get("last_publish_error", "")),
+                    "internal_peer": dict(updater_runtime.get("internal_peer", {}))
+                    if isinstance(updater_runtime.get("internal_peer", {}), dict)
+                    else {},
+                    "disabled_reason": str(updater_runtime.get("disabled_reason", "")),
+                }
+            ),
         },
         "frontend": {
             "mode": str(getattr(container, "frontend_mode", "")),
@@ -1985,6 +2450,14 @@ def _normalize_handover_segment_payload(payload: Dict[str, Any]) -> tuple[int, D
     return base_revision, copy.deepcopy(data)
 
 
+def _apply_container_config_snapshot(container: Any, saved_config: Dict[str, Any], *, mode: str = "light") -> None:
+    apply_snapshot = getattr(container, "apply_config_snapshot", None)
+    if callable(apply_snapshot):
+        apply_snapshot(saved_config, mode=mode)
+        return
+    container.reload_config(saved_config)
+
+
 @router.get("/api/config-segments/handover/common")
 def get_handover_common_config_segment(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
@@ -2006,7 +2479,7 @@ def put_handover_common_config_segment(payload: Dict[str, Any], request: Request
             base_revision=base_revision,
             config_path=container.config_path,
         )
-        container.reload_config(saved_config)
+        _apply_container_config_snapshot(container, saved_config, mode="light")
         if aggregate_refresh_error:
             container.add_system_log(
                 f"[配置] 交接班公共配置已保存，但聚合配置刷新失败: {aggregate_refresh_error}"
@@ -2017,6 +2490,9 @@ def put_handover_common_config_segment(payload: Dict[str, Any], request: Request
             "revision": int(document.get("revision", 0) or 0),
             "updated_at": str(document.get("updated_at", "") or "").strip(),
             "data": mask_settings(copy.deepcopy(document.get("data", {}))),
+            "apply_mode": "business_only",
+            "reload_performed": False,
+            "applied_services": ["config_snapshot", "runtime_config", "job_service_config"],
         }
     except HandoverSegmentRevisionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2048,7 +2524,7 @@ def put_handover_building_config_segment(code: str, payload: Dict[str, Any], req
             base_revision=base_revision,
             config_path=container.config_path,
         )
-        container.reload_config(saved_config)
+        _apply_container_config_snapshot(container, saved_config, mode="light")
         _mirror_handover_review_defaults_to_sqlite(
             container,
             saved_config=saved_config,
@@ -2065,6 +2541,9 @@ def put_handover_building_config_segment(code: str, payload: Dict[str, Any], req
             "revision": int(document.get("revision", 0) or 0),
             "updated_at": str(document.get("updated_at", "") or "").strip(),
             "data": mask_settings(copy.deepcopy(document.get("data", {}))),
+            "apply_mode": "business_only",
+            "reload_performed": False,
+            "applied_services": ["config_snapshot", "runtime_config", "job_service_config"],
         }
     except HandoverSegmentRevisionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2107,7 +2586,12 @@ def put_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
             _strip_retired_wet_bulb_fields(merge_result.merged),
             container.config_path,
         )
-        saved = save_settings(merged, container.config_path)
+        save_kwargs: Dict[str, Any] = {}
+        if isinstance(clear_paths, list) and clear_paths:
+            save_kwargs["clear_paths"] = clear_paths
+        if force_overwrite:
+            save_kwargs["force_overwrite"] = force_overwrite
+        saved = save_settings(merged, container.config_path, **save_kwargs)
         container.reload_config(saved)
         _mirror_handover_review_defaults_to_sqlite(
             container,
@@ -3117,7 +3601,8 @@ async def job_handover_from_file(
         notify = WebhookNotifyService(config)
         try:
             orchestrator = OrchestratorService(config)
-            return orchestrator.run_handover_from_file(
+            return _call_with_supported_kwargs(
+                orchestrator.run_handover_from_file,
                 building=building,
                 file_path=str(temp_path),
                 capacity_source_file=capacity_source_file or None,
@@ -3232,7 +3717,8 @@ async def job_handover_from_files(
         notify = WebhookNotifyService(config)
         try:
             orchestrator = OrchestratorService(config)
-            return orchestrator.run_handover_from_files(
+            return _call_with_supported_kwargs(
+                orchestrator.run_handover_from_files,
                 building_files=building_files,
                 capacity_building_files=capacity_building_files or None,
                 end_time=end_time_text,
@@ -3584,20 +4070,61 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
         ))
         expected_count = len(selected_dates) * len(target_buildings)
         if len(cached_entries) < expected_count:
+            fill_history = getattr(bridge_service, "fill_day_metric_history", None)
+            if callable(fill_history):
+                try:
+                    container.add_system_log(
+                        "[共享缓存][12项] 按日缓存未齐全，先尝试直接复用现有交接班日志源文件"
+                    )
+                    fill_history(
+                        selected_dates=selected_dates,
+                        building_scope=building_scope,
+                        building=building or None,
+                        emit_log=container.add_system_log,
+                    )
+                    cached_entries = _filter_accessible_cached_entries(bridge_service.get_day_metric_by_date_cache_entries(
+                        selected_dates=selected_dates,
+                        buildings=target_buildings,
+                    ))
+                except Exception as exc:  # noqa: BLE001
+                    container.add_system_log(
+                        f"[共享缓存][12项] 直接复用交接班日志源文件失败，继续等待内网补采同步: {exc}"
+                    )
+        cached_entry_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
+        for item in cached_entries:
+            if not isinstance(item, dict):
+                continue
+            duty_date = str(item.get("duty_date", "") or "").strip()
+            building_name = str(item.get("building", "") or "").strip()
+            if not duty_date or not building_name:
+                continue
+            key = (duty_date, building_name)
+            if key not in cached_entry_by_key:
+                cached_entry_by_key[key] = item
+        ready_dates = [
+            duty_date
+            for duty_date in selected_dates
+            if all((duty_date, building_name) in cached_entry_by_key for building_name in target_buildings)
+        ]
+        missing_dates = [duty_date for duty_date in selected_dates if duty_date not in ready_dates]
+
+        waiting_job = None
+        waiting_task = None
+        if missing_dates:
             dedupe_key = _job_dedupe_key(
                 "day_metric_wait_shared_bridge",
-                selected_dates=selected_dates,
+                selected_dates=missing_dates,
                 building_scope=building_scope,
                 building=building or "",
                 buildings=target_buildings,
             )
-            job, task = start_waiting_bridge_job(
+            waiting_job, waiting_task = start_waiting_bridge_job(
                 job_service=container.job_service,
                 bridge_service=bridge_service,
                 name="12项独立上传-内网下载",
                 worker_handler="day_metric_from_download",
                 worker_payload={
-                    "selected_dates": selected_dates,
+                    "selected_dates": missing_dates,
                     "building_scope": building_scope,
                     "building": building or None,
                 },
@@ -3609,17 +4136,22 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
                 bridge_get_or_create_name="get_or_create_day_metric_from_download_task",
                 bridge_create_name="create_day_metric_from_download_task",
                 bridge_kwargs={
-                    "selected_dates": selected_dates,
+                    "selected_dates": missing_dates,
                     "building_scope": building_scope,
                     "building": building or None,
                 },
             )
             container.add_system_log(
                 "[共享桥接] 已受理12项共享桥接任务 "
-                f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
-                f"dates={','.join(selected_dates)}, scope={building_scope}, building={building or '-'}"
+                f"task_id={str(waiting_task.get('task_id', '') or '-').strip() or '-'}, "
+                f"dates={','.join(missing_dates)}, scope={building_scope}, building={building or '-'}"
             )
-            return _accepted_waiting_job_response(job, task)
+            if not ready_dates:
+                return _accepted_waiting_job_response(waiting_job, waiting_task)
+            container.add_system_log(
+                "[共享缓存][12项] 已命中可直接复用的日期，将先在外网端继续上传；"
+                f" 仍缺日期={','.join(missing_dates)}，等待内网补采后自动续跑"
+            )
 
         def _run_from_cache(emit_log):
             source_units = [
@@ -3628,11 +4160,14 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
                     "building": str(item.get("building", "") or "").strip(),
                     "source_file": str(item.get("file_path", "") or "").strip(),
                 }
-                for item in cached_entries
+                for duty_date in ready_dates
+                for building_name in target_buildings
+                if (entry := cached_entry_by_key.get((duty_date, building_name)))
+                for item in [entry]
             ]
             service = DayMetricStandaloneUploadService(config)
             return service.continue_from_source_files(
-                selected_dates=selected_dates,
+                selected_dates=ready_dates,
                 buildings=target_buildings,
                 source_units=source_units,
                 building_scope=building_scope,
@@ -3641,7 +4176,7 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
             )
         dedupe_key = _job_dedupe_key(
             "day_metric_cache_by_date",
-            selected_dates=selected_dates,
+            selected_dates=ready_dates,
             building_scope=building_scope,
             building=building or "",
             buildings=target_buildings,
@@ -3661,7 +4196,13 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
                 submitted_by="manual",
             )
             container.add_system_log(f"[任务] 已提交: 12项独立上传-使用共享文件 ({job.job_id})")
-            return job.to_dict()
+            payload = job.to_dict()
+            if waiting_job is not None and waiting_task is not None:
+                payload["partial_waiting"] = True
+                payload["partial_waiting_dates"] = list(missing_dates)
+                payload["partial_waiting_job"] = waiting_job.to_dict()
+                payload["partial_bridge_task"] = waiting_task
+            return payload
         except JobBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -3942,7 +4483,7 @@ def get_handover_engineer_directory(request: Request) -> Dict[str, Any]:
 def get_job(job_id: str, request: Request) -> Dict[str, Any]:
     container = request.app.state.container
     try:
-        return container.job_service.get_job(job_id)
+        return present_job_item(container.job_service.get_job(job_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except TaskEngineUnavailableError as exc:
@@ -3976,7 +4517,8 @@ def cancel_job(job_id: str, request: Request) -> Dict[str, Any]:
     return {
         "ok": True,
         "accepted": True,
-        "job": payload,
+        "job": present_job_item(payload) if isinstance(payload, dict) else payload,
+        "job_panel_summary": build_job_panel_summary(container, limit=60),
     }
 
 
@@ -3992,7 +4534,8 @@ def retry_job(job_id: str, request: Request) -> Dict[str, Any]:
     return {
         "ok": True,
         "accepted": True,
-        "job": payload,
+        "job": present_job_item(payload) if isinstance(payload, dict) else payload,
+        "job_panel_summary": build_job_panel_summary(container, limit=60),
     }
 
 
@@ -4005,6 +4548,7 @@ def list_jobs(request: Request, limit: int = 50, statuses: str = "") -> Dict[str
         if str(item or "").strip()
     ]
     runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
+    safe_limit = max(1, min(int(limit or 50), 200))
     if (
         not normalized_statuses
         and runtime_status_coordinator is not None
@@ -4015,30 +4559,28 @@ def list_jobs(request: Request, limit: int = 50, statuses: str = "") -> Dict[str
             snapshot = runtime_status_coordinator.read_scope_snapshot("job_panel_summary")
             payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
             if isinstance(payload, dict):
-                rows = payload.get("jobs", [])
-                if isinstance(rows, list):
-                    limited_rows = rows[: max(1, min(int(limit or 50), 200))]
-                    return {
-                        "jobs": limited_rows,
-                        "count": len(limited_rows),
-                        "active_job_ids": payload.get("active_job_ids", []) if isinstance(payload.get("active_job_ids", []), list) else [],
-                        "job_counts": payload.get("job_counts", {}) if isinstance(payload.get("job_counts", {}), dict) else {},
-                    }
-            runtime_status_coordinator.request_refresh(reason="jobs_route")
-            return {"jobs": [], "count": 0, "active_job_ids": [], "job_counts": {}}
+                return payload
         except Exception:
             pass
     try:
-        jobs = container.job_service.list_jobs(limit=max(1, min(int(limit or 50), 200)), statuses=normalized_statuses)
-        job_counts = container.job_service.job_counts()
+        if normalized_statuses:
+            raw_jobs = container.job_service.list_jobs(limit=safe_limit, statuses=normalized_statuses)
+            jobs = [
+                present_job_item(job)
+                for job in (raw_jobs if isinstance(raw_jobs, list) else [])
+                if isinstance(job, dict)
+            ]
+            job_counts = container.job_service.job_counts()
+            return {
+                "jobs": jobs,
+                "count": len(jobs),
+                "active_job_ids": container.job_service.active_job_ids(include_waiting=True),
+                "job_counts": job_counts,
+            }
+        payload = build_job_panel_summary(container, limit=safe_limit, strict=True)
     except TaskEngineUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {
-        "jobs": jobs,
-        "count": len(jobs),
-        "active_job_ids": container.job_service.active_job_ids(include_waiting=True),
-        "job_counts": job_counts,
-    }
+    return payload
 
 
 @router.get("/api/runtime/resources")
@@ -4068,3 +4610,315 @@ def get_runtime_resources(request: Request) -> Dict[str, Any]:
         return container.job_service.get_resource_snapshot()
     except TaskEngineUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/api/runtime/external-dashboard-summary")
+def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    _ensure_not_internal_role(container, "当前仅外网端支持首页聚合状态摘要")
+    coordinator = getattr(container, "runtime_status_coordinator", None)
+    runtime_cfg = _runtime_config(container)
+    coordinator_running = (
+        coordinator is not None
+        and callable(getattr(coordinator, "is_running", None))
+        and coordinator.is_running()
+    )
+
+    def _read_scope(scope: str) -> Dict[str, Any] | None:
+        if not coordinator_running:
+            return None
+        try:
+            snapshot = coordinator.read_scope_snapshot(scope)
+            payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+            if isinstance(payload, dict):
+                return payload
+            coordinator.request_refresh(reason=f"external_dashboard_summary:{scope}")
+        except Exception:
+            return None
+        return None
+
+    health_lite = _read_scope("runtime_health_lite") or {
+        "ok": True,
+        "health_mode": "lite",
+        "version": str(getattr(container, "version", "") or ""),
+        "config_version": int(container.config.get("version", 0) or 0)
+        if isinstance(getattr(container, "config", None), dict)
+        else 0,
+        "active_job_id": "",
+        "active_job_ids": [],
+        "job_counts": {},
+        "deployment": container.deployment_snapshot() if callable(getattr(container, "deployment_snapshot", None)) else {},
+        "shared_bridge": {},
+        "runtime_activated": False,
+        "activation_phase": "",
+        "activation_error": "",
+        "startup_role_confirmed": False,
+    }
+    live_shared_bridge = (
+        health_lite.get("shared_bridge", {})
+        if isinstance(health_lite.get("shared_bridge", {}), dict)
+        else {}
+    )
+    if not live_shared_bridge:
+        live_shared_bridge = _read_scope("external_shared_bridge_full") or {}
+    if not live_shared_bridge:
+        if not coordinator_running:
+            live_shared_bridge = _shared_bridge_health_snapshot(container, request, role_mode="external")
+        else:
+            live_shared_bridge = _shared_bridge_health_snapshot_async_default(
+                container,
+                request,
+                role_mode="external",
+            )
+    if live_shared_bridge:
+        health_lite = {**health_lite, "shared_bridge": live_shared_bridge}
+    handover_review_status = _health_cached_component_async_default(
+        request,
+        key="handover_review_status:latest",
+        ttl_sec=_HEALTH_CACHE_TTL_REVIEW_STATUS_SEC,
+        builder=lambda: _build_latest_handover_review_status(container),
+        default=_empty_handover_review_status(),
+    )
+    request_url = getattr(request, "url", None)
+    request_host = str(getattr(request_url, "hostname", "") or "").strip()
+    request_port = getattr(request_url, "port", None)
+    handover_review_access = _health_cached_component_async_default(
+        request,
+        key=(
+            "handover_review_access:"
+            f"{str(handover_review_status.get('duty_date', '')).strip()}:"
+            f"{str(handover_review_status.get('duty_shift', '')).strip().lower()}"
+        ),
+        ttl_sec=_HEALTH_CACHE_TTL_REVIEW_ACCESS_SEC,
+        builder=lambda: _build_handover_review_access_for_context(
+            container,
+            request_host=request_host,
+            port=request_port,
+            duty_date=str(handover_review_status.get("duty_date", "")).strip(),
+            duty_shift=str(handover_review_status.get("duty_shift", "")).strip().lower(),
+        ),
+        default=_empty_handover_review_access(),
+    )
+    def _build_review_recipient_status_by_building() -> list[Dict[str, Any]]:
+        try:
+            return ReviewLinkDeliveryService(
+                runtime_cfg,
+                config_path=container.config_path,
+            ).build_recipient_status_by_building()
+        except Exception:
+            return []
+    handover_review_recipient_status_by_building = _health_cached_component_async_default(
+        request,
+        key="handover_review_recipient_status_by_building",
+        ttl_sec=_HEALTH_CACHE_TTL_REVIEW_RECIPIENTS_SEC,
+        builder=_build_review_recipient_status_by_building,
+        default=[],
+    )
+    internal_alert_overview = present_external_internal_alert_overview(
+        live_shared_bridge.get("internal_alert_status", {})
+    )
+    job_panel_summary = (
+        _read_scope("job_panel_dashboard_summary")
+        or _read_scope("job_panel_summary")
+        or _empty_job_panel_summary()
+    )
+    bridge_tasks_summary = _read_scope("bridge_tasks_dashboard_summary")
+    if not isinstance(bridge_tasks_summary, dict):
+        bridge_tasks_summary_raw = _read_scope("bridge_tasks_summary") or {
+            "tasks": [],
+            "count": 0,
+        }
+        bridge_tasks_rows = (
+            bridge_tasks_summary_raw.get("tasks", [])
+            if isinstance(bridge_tasks_summary_raw, dict)
+            else []
+        )
+        bridge_tasks_summary = build_bridge_tasks_summary(
+            [present_bridge_task(task) for task in bridge_tasks_rows if isinstance(task, dict)],
+            count=int(
+                (bridge_tasks_summary_raw.get("count", 0) if isinstance(bridge_tasks_summary_raw, dict) else 0)
+                or len([task for task in bridge_tasks_rows if isinstance(task, dict)])
+            ),
+        )
+    bridge_tasks_rows = (
+        bridge_tasks_summary.get("tasks", [])
+        if isinstance(bridge_tasks_summary, dict)
+        else []
+    )
+    shared_source_cache_overview = apply_external_source_cache_backfill_overlays(
+        _shared_source_cache_overview_from_snapshot(
+            live_shared_bridge.get("internal_source_cache", {})
+        ),
+        bridge_tasks_rows,
+    )
+    runtime_resources_summary = _read_scope("runtime_resources_summary") or _empty_runtime_resources_summary()
+    deployment_payload = health_lite.get("deployment", {}) if isinstance(health_lite, dict) else {}
+    role_mode = normalize_role_mode(
+        deployment_payload.get("role_mode", "") if isinstance(deployment_payload, dict) else ""
+    )
+
+    def _safe_scheduler(method_name: str) -> Dict[str, Any]:
+        method = getattr(container, method_name, None)
+        if not callable(method):
+            return {}
+        try:
+            payload = method()
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    updater_summary = {}
+    try:
+        updater_summary = container.updater_snapshot()
+        if not isinstance(updater_summary, dict):
+            updater_summary = {}
+    except Exception:
+        updater_summary = {}
+    shared_root_diagnostic = _shared_root_diagnostic_snapshot_async_default(
+        container,
+        request,
+        role_mode=role_mode,
+        shared_bridge_snapshot=live_shared_bridge if isinstance(live_shared_bridge, dict) else {},
+        updater_snapshot=updater_summary if isinstance(updater_summary, dict) else {},
+    )
+    updater_display_overview = present_updater_mirror_overview(updater_summary)
+    if isinstance(updater_summary, dict):
+        updater_summary = {
+            **updater_summary,
+            "display_overview": updater_display_overview,
+        }
+
+    config_role_mode = normalize_role_mode(
+        runtime_cfg.get("deployment", {}).get("role_mode", "")
+        if isinstance(runtime_cfg.get("deployment", {}), dict)
+        else ""
+    )
+    day_metric_target_preview = (
+        _health_cached_component_async_default(
+            request,
+            key="target_preview:day_metric",
+            ttl_sec=_HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC,
+            builder=lambda: DayMetricBitableExportService(runtime_cfg).build_target_descriptor(force_refresh=False),
+            default={},
+        )
+        if role_mode != "internal"
+        else {}
+    )
+    alarm_event_target_preview = (
+        _health_cached_component_async_default(
+            request,
+            key="target_preview:alarm_event",
+            ttl_sec=_HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC,
+            builder=lambda: SharedSourceCacheService(runtime_config=runtime_cfg, store=None).get_alarm_event_upload_target_preview(
+                force_refresh=False
+            ),
+            default={},
+        )
+        if role_mode != "internal"
+        else {}
+    )
+    config_guidance_overview = present_config_guidance_overview(
+        runtime_cfg,
+        configured_role_mode=config_role_mode,
+        running_role_mode=role_mode,
+        day_metric_target_preview=day_metric_target_preview,
+        alarm_event_target_preview=alarm_event_target_preview,
+    )
+    feature_target_displays = present_feature_target_displays(
+        runtime_cfg,
+        day_metric_target_preview=day_metric_target_preview,
+        alarm_event_target_preview=alarm_event_target_preview,
+    )
+
+    scheduler_status_summary = {
+        "scheduler": _safe_scheduler("scheduler_status"),
+        "handover_scheduler": _safe_scheduler("handover_scheduler_status"),
+        "wet_bulb_collection_scheduler": _safe_scheduler("wet_bulb_collection_scheduler_status"),
+        "day_metric_upload_scheduler": _safe_scheduler("day_metric_upload_scheduler_status"),
+        "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
+        "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
+        "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
+    }
+
+    for key, snapshot in list(scheduler_status_summary.items()):
+        if isinstance(snapshot, dict):
+            scheduler_status_summary[key] = {
+                **snapshot,
+                "display": present_scheduler_state(snapshot, role_mode=role_mode),
+            }
+
+    scheduler_overview_items = present_scheduler_overview_items(
+        container.config,
+        scheduler_status_summary,
+        role_mode=role_mode,
+    )
+    scheduler_overview_summary = present_scheduler_overview_summary(scheduler_overview_items)
+
+    dashboard_display = present_external_dashboard_display(
+        shared_source_cache_overview=shared_source_cache_overview,
+        review_status=handover_review_status,
+        review_links=handover_review_access.get("review_links", []),
+        review_recipient_status_by_building=handover_review_recipient_status_by_building,
+        task_overview=(
+            job_panel_summary.get("display", {}).get("overview", {})
+            if isinstance(job_panel_summary.get("display", {}), dict)
+            else {}
+        ),
+        shared_root_diagnostic=shared_root_diagnostic,
+    )
+    dashboard_display = {
+        **dashboard_display,
+        "config_guidance_overview": config_guidance_overview,
+        "shared_source_cache_overview": shared_source_cache_overview,
+        "internal_alert_overview": internal_alert_overview,
+        "system_overview": present_external_system_overview(
+            health_lite=health_lite,
+            runtime_resources_summary=runtime_resources_summary,
+            task_overview=(
+                job_panel_summary.get("display", {}).get("overview", {})
+                if isinstance(job_panel_summary.get("display", {}), dict)
+                else {}
+            ),
+            shared_root_diagnostic=shared_root_diagnostic,
+            updater_overview=updater_display_overview,
+        ),
+        "scheduler_overview": present_external_scheduler_overview(
+            scheduler_overview_summary=scheduler_overview_summary,
+            scheduler_overview_items=scheduler_overview_items,
+        ),
+        "task_panel_overview": (
+            job_panel_summary.get("display", {}).get("overview", {})
+            if isinstance(job_panel_summary.get("display", {}), dict)
+            else {}
+        ),
+        "bridge_task_panel_overview": (
+            bridge_tasks_summary.get("display", {}).get("overview", {})
+            if isinstance(bridge_tasks_summary.get("display", {}), dict)
+            else {}
+        ),
+        "scheduler_overview_items": scheduler_overview_items,
+        "scheduler_overview_summary": scheduler_overview_summary,
+        "module_hero_overviews": present_external_module_hero_overviews(
+            scheduler_overview_summary=scheduler_overview_summary,
+            scheduler_status_summary=scheduler_status_summary,
+            review_status=handover_review_status,
+            shared_source_cache_overview=shared_source_cache_overview,
+            runtime_resources_summary=runtime_resources_summary,
+            job_panel_summary=job_panel_summary,
+            feature_target_displays=feature_target_displays,
+        ),
+        "updater_mirror_overview": updater_display_overview,
+    }
+
+    return {
+        "ok": True,
+        "health_lite": health_lite,
+        "scheduler_status_summary": scheduler_status_summary,
+        "job_panel_summary": job_panel_summary,
+        "bridge_tasks_summary": bridge_tasks_summary,
+        "runtime_resources_summary": runtime_resources_summary,
+        "updater_summary": updater_summary,
+        "shared_source_cache_overview": shared_source_cache_overview,
+        "internal_alert_overview": internal_alert_overview,
+        "display": dashboard_display,
+    }

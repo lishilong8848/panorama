@@ -1256,7 +1256,11 @@ function validateAndNormalizeHandoverReviewUi(payload) {
       const openId = String(rawItem.open_id || "").trim();
       if (!openId || seenOpenIds.has(openId)) continue;
       seenOpenIds.add(openId);
-      rows.push({ note, open_id: openId });
+      rows.push({
+        note,
+        open_id: openId,
+        enabled: rawItem.enabled === false ? false : true,
+      });
     }
     normalizedReviewRecipients[building] = rows;
   }
@@ -1726,6 +1730,8 @@ export function prepareConfigPayloadForSave({
   payload.handover_log = payload.handover_log || {};
   payload.handover_log.template = payload.handover_log.template || {};
   payload.handover_log.scheduler = payload.handover_log.scheduler || {};
+  payload.handover_log.capacity_report = payload.handover_log.capacity_report || {};
+  payload.handover_log.capacity_report.weather = payload.handover_log.capacity_report.weather || {};
   payload.handover_log.template.source_path = String(payload.handover_log.template.source_path || "").trim();
   if (!payload.handover_log.template.source_path) {
     return { ok: false, error: "交接班模板文件不能为空" };
@@ -1765,6 +1771,62 @@ export function prepareConfigPayloadForSave({
   }
   if (!payload.handover_log.scheduler.afternoon_state_file) {
     return { ok: false, error: "交接班下午状态文件不能为空" };
+  }
+  payload.handover_log.capacity_report.weather.provider = String(
+    payload.handover_log.capacity_report.weather.provider || "seniverse",
+  ).trim() || "seniverse";
+  payload.handover_log.capacity_report.weather.location = String(
+    payload.handover_log.capacity_report.weather.location || "崇川区",
+  ).trim() || "崇川区";
+  payload.handover_log.capacity_report.weather.fallback_locations = Array.isArray(
+    payload.handover_log.capacity_report.weather.fallback_locations,
+  )
+    ? payload.handover_log.capacity_report.weather.fallback_locations
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+    : String(payload.handover_log.capacity_report.weather.fallback_locations || "")
+      .split(/[，,]/)
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+  if (!payload.handover_log.capacity_report.weather.fallback_locations.length) {
+    payload.handover_log.capacity_report.weather.fallback_locations = ["南通"];
+  }
+  payload.handover_log.capacity_report.weather.language = String(
+    payload.handover_log.capacity_report.weather.language || "zh-Hans",
+  ).trim() || "zh-Hans";
+  payload.handover_log.capacity_report.weather.unit = String(
+    payload.handover_log.capacity_report.weather.unit || "c",
+  ).trim() || "c";
+  payload.handover_log.capacity_report.weather.auth_mode = String(
+    payload.handover_log.capacity_report.weather.auth_mode || "signed",
+  ).trim() || "signed";
+  payload.handover_log.capacity_report.weather.timeout_sec = Number.parseInt(
+    payload.handover_log.capacity_report.weather.timeout_sec ?? 8,
+    10,
+  );
+  payload.handover_log.capacity_report.weather.seniverse_public_key = String(
+    payload.handover_log.capacity_report.weather.seniverse_public_key || "",
+  ).trim();
+  payload.handover_log.capacity_report.weather.seniverse_private_key = String(
+    payload.handover_log.capacity_report.weather.seniverse_private_key || "",
+  ).trim();
+  if (
+    payload.handover_log.capacity_report.weather.provider === "seniverse"
+    && !payload.handover_log.capacity_report.weather.seniverse_public_key
+  ) {
+    return { ok: false, error: "交接班容量报表天气配置缺少心知公钥" };
+  }
+  if (
+    payload.handover_log.capacity_report.weather.provider === "seniverse"
+    && !payload.handover_log.capacity_report.weather.seniverse_private_key
+  ) {
+    return { ok: false, error: "交接班容量报表天气配置缺少心知私钥" };
+  }
+  if (
+    !Number.isInteger(payload.handover_log.capacity_report.weather.timeout_sec)
+    || payload.handover_log.capacity_report.weather.timeout_sec <= 0
+  ) {
+    return { ok: false, error: "交接班容量报表天气请求超时必须大于0秒" };
   }
 
   payload.download.custom_window_mode = String(payload.download.custom_window_mode || "absolute").trim();

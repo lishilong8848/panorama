@@ -167,3 +167,44 @@ def test_load_state_repairs_legacy_sessions_without_full_state_rewrite(tmp_path,
     assert repaired_state["review_latest_by_building"]["C楼"] == "C楼|2026-04-15|night"
     assert repaired_state["review_latest_batch_key"] == "2026-04-15|night"
     assert "C楼|2026-04-15|day" not in repaired_state["review_sessions"]
+
+
+def test_list_building_sessions_does_not_trigger_output_recovery(tmp_path, monkeypatch) -> None:
+    service = _service(tmp_path)
+    output_file = tmp_path / "outputs" / "A楼_latest.xlsx"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_bytes(b"demo")
+
+    state = service._review_state_store.load_state()
+    state["review_sessions"] = {
+        "A楼|2026-04-15|day": {
+            "session_id": "A楼|2026-04-15|day",
+            "building": "A楼",
+            "building_code": "a",
+            "duty_date": "2026-04-15",
+            "duty_shift": "day",
+            "batch_key": "2026-04-15|day",
+            "output_file": str(output_file),
+            "data_file": "",
+            "source_mode": "generated",
+            "revision": 2,
+            "confirmed": False,
+            "confirmed_at": "",
+            "confirmed_by": "",
+            "updated_at": "2026-04-15 09:00:00",
+            "cloud_sheet_sync": {},
+            "source_data_attachment_export": {},
+        }
+    }
+    state["review_latest_by_building"] = {}
+    service._review_state_store.save_state(state)
+    monkeypatch.setattr(service, "_is_legacy_test_output_file", lambda _path: False)
+
+    def _boom(_building):  # noqa: ANN001
+        raise AssertionError("history/list hot path should not trigger output recovery")
+
+    monkeypatch.setattr(service, "_recover_latest_session_from_output_file", _boom)
+
+    sessions = service.list_building_sessions("A楼")
+
+    assert [item["session_id"] for item in sessions] == ["A楼|2026-04-15|day"]

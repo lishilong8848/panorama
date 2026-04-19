@@ -42,10 +42,10 @@ class _FakeSharedBridgeService:
         ][:limit]
 
 
-def _fake_container() -> SimpleNamespace:
+def _fake_container(*, role_mode: str = "internal") -> SimpleNamespace:
     snapshot = {
         "enabled": True,
-        "role_mode": "internal",
+        "role_mode": role_mode,
         "db_status": "ok",
         "agent_status": "running",
         "last_error": "",
@@ -116,7 +116,11 @@ def _fake_container() -> SimpleNamespace:
         job_service=_FakeJobService(),
         shared_bridge_service=_FakeSharedBridgeService(),
         shared_bridge_snapshot=lambda mode="internal_light": snapshot,
-        deployment_snapshot=lambda: {"role_mode": "internal", "node_id": "node-1", "node_label": "内网端"},
+        deployment_snapshot=lambda: {
+            "role_mode": role_mode,
+            "node_id": "node-1",
+            "node_label": "外网端" if role_mode == "external" else "内网端",
+        },
     )
 
 
@@ -149,9 +153,9 @@ def test_runtime_status_coordinator_refreshes_sqlite_snapshots(tmp_path: Path) -
         assert _wait_until(lambda: coordinator.read_scope_snapshot("internal_runtime_summary") is not None)
         summary = coordinator.read_scope_snapshot("internal_runtime_summary")
         building = coordinator.read_building_snapshot("A楼")
-        jobs = coordinator.read_scope_snapshot("job_panel_summary")
+        jobs = coordinator.read_scope_snapshot("job_panel_dashboard_summary")
         resources = coordinator.read_scope_snapshot("runtime_resources_summary")
-        bridge_tasks = coordinator.read_scope_snapshot("bridge_tasks_summary")
+        bridge_tasks = coordinator.read_scope_snapshot("bridge_tasks_dashboard_summary")
         health_lite = coordinator.read_scope_snapshot("runtime_health_lite")
 
         assert summary is not None
@@ -168,6 +172,32 @@ def test_runtime_status_coordinator_refreshes_sqlite_snapshots(tmp_path: Path) -
         ]
         assert health_lite is not None
         assert health_lite["payload"]["runtime_activated"] is True
+    finally:
+        coordinator.stop()
+
+
+def test_runtime_status_coordinator_writes_external_shared_bridge_full_scope(tmp_path: Path) -> None:
+    coordinator = RuntimeStatusCoordinator(
+        container=_fake_container(role_mode="external"),
+        runtime_state_root=tmp_path,
+        app_state_getter=lambda: {
+            "runtime_activated": True,
+            "activation_phase": "activated",
+            "activation_error": "",
+            "startup_role_confirmed": True,
+            "started_at": "2026-04-15 09:00:00",
+        },
+        emit_log=None,
+        refresh_interval_sec=60.0,
+    )
+    coordinator.start()
+    try:
+        coordinator.request_refresh(reason="test-external")
+        assert _wait_until(lambda: coordinator.read_scope_snapshot("external_shared_bridge_full") is not None)
+        snapshot = coordinator.read_scope_snapshot("external_shared_bridge_full")
+        assert snapshot is not None
+        assert snapshot["payload"]["role_mode"] == "external"
+        assert snapshot["payload"]["internal_source_cache"]["handover_log_family"]["ready_count"] == 1
     finally:
         coordinator.stop()
 

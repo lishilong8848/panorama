@@ -12,7 +12,7 @@
           <button
             class="btn btn-warning"
             @click="confirmAllHandoverReview"
-            :disabled="isHandoverConfirmAllLocked || !health.handover.review_status.batch_key || !health.handover.review_status.has_any_session || health.handover.review_status.all_confirmed"
+            :disabled="isHandoverConfirmAllDisabled"
           >
             {{ handoverConfirmAllButtonText }}
           </button>
@@ -27,8 +27,8 @@
           <button
             v-if="canShowHandoverFollowupContinue"
             class="btn btn-secondary"
-            @click="continueHandoverFollowupUpload(health.handover.review_status.batch_key)"
-            :disabled="isHandoverFollowupContinueLocked"
+            @click="continueHandoverFollowupUpload(handoverFollowupBatchKey)"
+            :disabled="isHandoverFollowupContinueDisabled"
           >
             {{ handoverFollowupContinueButtonText }}
           </button>
@@ -64,10 +64,11 @@
               :key="'status-diagnosis-action-' + action.id"
               class="btn"
               :class="action.id === 'refresh_current_hour' ? 'btn-warning' : action.id === 'refresh_manual_alarm' ? 'btn-secondary' : 'btn-ghost'"
-              :disabled="isHomeQuickActionLocked(action.id)"
-              @click="runHomeQuickAction(action.id)"
+              :disabled="isHomeQuickActionLocked(action)"
+              :title="getHomeQuickActionDisabledReason(action)"
+              @click="runHomeQuickAction(action)"
             >
-              {{ action.label }}
+              {{ getHomeQuickActionButtonText(action) || action.label }}
             </button>
           </div>
         </article>
@@ -75,16 +76,22 @@
         <article v-if="!isInternalDeploymentRole" class="status-card">
           <div class="status-card-head">
             <div>
-              <span class="status-panel-kicker">系统与网络</span>
-              <h2 class="status-panel-title">当前运行环境</h2>
+              <span class="status-panel-kicker">{{ dashboardSystemOverview.kicker || '系统与网络' }}</span>
+              <h2 class="status-panel-title">{{ dashboardSystemOverview.title || '当前运行环境' }}</h2>
             </div>
+            <span class="status-badge status-badge-solid" :class="'tone-' + dashboardSystemOverview.tone">
+              {{ dashboardSystemOverview.statusText }}
+            </span>
           </div>
-          <div class="status-metric-grid">
+          <div class="hint" v-if="dashboardSystemOverview.summaryText">{{ dashboardSystemOverview.summaryText }}</div>
+          <div class="hint" v-if="dashboardSystemOverview.detailText">{{ dashboardSystemOverview.detailText }}</div>
+          <div class="status-metric-grid" v-if="dashboardSystemStatusItems && dashboardSystemStatusItems.length">
             <div class="status-metric" v-for="item in dashboardSystemStatusItems" :key="'status-system-' + item.label">
               <div class="status-metric-label">{{ item.label }}</div>
               <div class="status-badge status-badge-solid" :class="'tone-' + item.tone">{{ item.value }}</div>
             </div>
           </div>
+          <div class="hint" v-else>等待后端系统概览。</div>
         </article>
 
         <article v-if="!isInternalDeploymentRole" class="status-card">
@@ -175,16 +182,22 @@
         <article v-if="!isInternalDeploymentRole" class="status-card">
           <div class="status-card-head">
             <div>
-              <span class="status-panel-kicker">调度状态</span>
-              <h2 class="status-panel-title">月报与交接班调度</h2>
+              <span class="status-panel-kicker">{{ dashboardScheduleOverview.kicker || '调度状态' }}</span>
+              <h2 class="status-panel-title">{{ dashboardScheduleOverview.title || '月报与交接班调度' }}</h2>
             </div>
+            <span class="status-badge status-badge-solid" :class="'tone-' + dashboardScheduleOverview.tone">
+              {{ dashboardScheduleOverview.statusText }}
+            </span>
           </div>
-          <div class="status-list">
+          <div class="hint" v-if="dashboardScheduleOverview.summaryText">{{ dashboardScheduleOverview.summaryText }}</div>
+          <div class="hint" v-if="dashboardScheduleOverview.detailText">{{ dashboardScheduleOverview.detailText }}</div>
+          <div class="status-list" v-if="dashboardScheduleStatusItems && dashboardScheduleStatusItems.length">
             <div class="status-list-row" v-for="item in dashboardScheduleStatusItems" :key="'status-schedule-' + item.label">
               <span class="status-list-label">{{ item.label }}</span>
               <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
             </div>
           </div>
+          <div class="hint" v-else>等待后端调度概览。</div>
         </article>
 
         <article v-if="isInternalDeploymentRole" class="status-card status-card-wide">
@@ -200,18 +213,20 @@
               <button
                 class="btn btn-warning"
                 type="button"
-                @click="refreshCurrentHourSourceCache"
-                :disabled="isSourceCacheRefreshCurrentHourLocked"
+                @click="runHomeQuickAction(getStatusQuickAction('refresh_current_hour'))"
+                :disabled="isHomeQuickActionLocked(getStatusQuickAction('refresh_current_hour'))"
+                :title="getHomeQuickActionDisabledReason(getStatusQuickAction('refresh_current_hour'))"
               >
-                {{ currentHourRefreshButtonText }}
+                {{ getHomeQuickActionButtonText(getStatusQuickAction('refresh_current_hour')) || currentHourRefreshButtonText }}
               </button>
               <button
                 class="btn btn-secondary"
                 type="button"
-                @click="refreshManualAlarmSourceCache"
-                :disabled="isSourceCacheRefreshAlarmManualLocked"
+                @click="runHomeQuickAction(getStatusQuickAction('refresh_manual_alarm'))"
+                :disabled="isHomeQuickActionLocked(getStatusQuickAction('refresh_manual_alarm'))"
+                :title="getHomeQuickActionDisabledReason(getStatusQuickAction('refresh_manual_alarm'))"
               >
-                {{ manualAlarmRefreshButtonText }}
+                {{ getHomeQuickActionButtonText(getStatusQuickAction('refresh_manual_alarm')) || manualAlarmRefreshButtonText }}
               </button>
               <button
                 class="btn btn-secondary"
@@ -285,21 +300,23 @@
             </span>
           </div>
           <div class="hint">{{ internalRuntimeOverview.currentHourRefresh.summaryText }}</div>
-          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.lastRunAt">最近触发：{{ internalRuntimeOverview.currentHourRefresh.lastRunAt }}</div>
-          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.lastSuccessAt">最近完成：{{ internalRuntimeOverview.currentHourRefresh.lastSuccessAt }}</div>
-          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.runningBuildings && internalRuntimeOverview.currentHourRefresh.runningBuildings.length">
-            当前进行中：{{ internalRuntimeOverview.currentHourRefresh.runningBuildings.join(' / ') }}
+          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.detailText">
+            {{ internalRuntimeOverview.currentHourRefresh.detailText }}
           </div>
-          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.completedBuildings && internalRuntimeOverview.currentHourRefresh.completedBuildings.length">
-            本轮完成：{{ internalRuntimeOverview.currentHourRefresh.completedBuildings.join(' / ') }}
+          <div
+            class="status-list"
+            v-if="internalRuntimeOverview.currentHourRefresh.items && internalRuntimeOverview.currentHourRefresh.items.length"
+          >
+            <div
+              class="status-list-row"
+              v-for="item in internalRuntimeOverview.currentHourRefresh.items"
+              :key="'status-internal-current-hour-item-' + item.label"
+            >
+              <span class="status-list-label">{{ item.label }}</span>
+              <span class="status-badge status-badge-soft" :class="'tone-' + (item.tone || 'neutral')">{{ item.value }}</span>
+            </div>
           </div>
-          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.blockedBuildings && internalRuntimeOverview.currentHourRefresh.blockedBuildings.length">
-            等待恢复：{{ internalRuntimeOverview.currentHourRefresh.blockedBuildings.join(' / ') }}
-          </div>
-          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.failedBuildings && internalRuntimeOverview.currentHourRefresh.failedBuildings.length">
-            失败项：{{ internalRuntimeOverview.currentHourRefresh.failedBuildings.join(' / ') }}
-          </div>
-          <div class="hint" v-if="internalRuntimeOverview.currentHourRefresh.lastError">最近错误：{{ internalRuntimeOverview.currentHourRefresh.lastError }}</div>
+          <div class="hint" v-else>等待后端当前小时摘要。</div>
           <div class="status-subsection-head">
             <span class="status-panel-kicker">最新共享文件状态</span>
             <span class="status-inline-note">交接班源文件、交接班容量报表源文件、月报源文件和告警信息源文件实时同步显示</span>
@@ -361,6 +378,7 @@
                       type="button"
                       @click="refreshBuildingLatestSourceCache(family.key, building.building)"
                       :disabled="isInternalSourceCacheRefreshLocked(family, building)"
+                      :title="getInternalSourceCacheRefreshDisabledReason(family, building) || ''"
                     >
                       {{ getInternalSourceCacheRefreshButtonText(family, building) }}
                     </button>
@@ -433,20 +451,17 @@
             {{ sharedSourceCacheReadinessOverview.displayNoteText }}
           </div>
           <div class="hint">当前共享参考标识：{{ sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
-          <div class="status-metric-grid status-metric-grid-compact">
-            <div class="status-metric">
-              <div class="status-metric-label">主流程判断</div>
-              <strong class="status-metric-value">{{ sharedSourceCacheReadinessOverview.canProceed ? "可继续" : "需等待" }}</strong>
-            </div>
-            <div class="status-metric">
-              <div class="status-metric-label">显示文件类型</div>
-              <strong class="status-metric-value">{{ sharedSourceCacheReadinessOverview.families.length }}</strong>
-            </div>
-            <div class="status-metric">
-              <div class="status-metric-label">共享参考标识</div>
-              <strong class="status-metric-value">{{ sharedSourceCacheReadinessOverview.referenceBucketKey || "-" }}</strong>
+          <div class="status-list" v-if="sharedSourceCacheReadinessOverview.items && sharedSourceCacheReadinessOverview.items.length">
+            <div
+              v-for="(item, idx) in sharedSourceCacheReadinessOverview.items"
+              :key="'status-external-cache-overview-item-' + idx"
+              class="status-list-row"
+            >
+              <span class="status-list-label">{{ item.label }}</span>
+              <span class="status-list-value" :class="'tone-' + (item.tone || 'neutral')">{{ item.value }}</span>
             </div>
           </div>
+          <div v-else class="hint">等待后端共享文件摘要。</div>
           <div class="source-cache-family-grid" v-if="sharedSourceCacheReadinessOverview.families && sharedSourceCacheReadinessOverview.families.length">
             <div
               class="source-cache-family-card"
@@ -457,22 +472,27 @@
                 <span class="source-cache-family-card-title">{{ family.title }}</span>
                 <span class="status-badge status-badge-soft" :class="'tone-' + family.tone">{{ family.statusText }}</span>
               </div>
-              <div class="hint" v-if="family.key === 'alarm_event_family'">选择策略：当天最新一份，缺失则回退昨天最新</div>
-              <div class="hint" v-else>{{ family.referenceLabel || '最新时间桶' }}：{{ family.bestBucketKey || sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
-              <div class="hint" v-if="family.key === 'alarm_event_family' && family.selectionReferenceDate">参考日期：{{ family.selectionReferenceDate }}</div>
-              <div class="hint" v-else-if="family.bestBucketAgeText">{{ family.ageLabel || '距当前约' }} {{ family.bestBucketAgeText }}</div>
+              <template v-if="family.metaLines && family.metaLines.length">
+                <div class="hint" v-for="(line, idx) in family.metaLines" :key="'status-external-cache-family-line-' + family.key + '-' + idx">
+                  {{ line }}
+                </div>
+              </template>
+              <template v-else>
+                <div class="hint">等待后端明细</div>
+              </template>
               <div class="hint">{{ family.summaryText }}</div>
+              <div class="status-list" v-if="family.items && family.items.length">
+                <div
+                  v-for="(item, idx) in family.items"
+                  :key="'status-external-cache-family-item-' + family.key + '-' + idx"
+                  class="status-list-row"
+                >
+                  <span class="status-list-label">{{ item.label }}</span>
+                  <span class="status-list-value" :class="'tone-' + (item.tone || 'neutral')">{{ item.value }}</span>
+                </div>
+              </div>
               <div class="hint" v-if="family.backfillRunning && family.backfillText">{{ family.backfillLabel || '当前补采' }}：{{ family.backfillText }}</div>
               <div class="hint" v-if="family.backfillRunning && family.backfillScopeText">{{ family.backfillScopeLabel || '补采范围' }}：{{ family.backfillScopeText }}</div>
-              <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadLastRunAt">
-                最近上传：{{ family.uploadLastRunAt }} / 记录 {{ family.uploadRecordCount || 0 }} 条 / 文件 {{ family.uploadFileCount || 0 }} 份 / 源文件保留
-              </div>
-              <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadRunning">
-                {{ family.uploadRunningText }}
-              </div>
-              <div class="hint" v-if="family.key === 'alarm_event_family' && family.uploadLastError">
-                最近上传异常：{{ family.uploadLastError }}
-              </div>
               <div class="source-cache-building-grid" v-if="family.buildings && family.buildings.length">
                 <div
                   class="source-cache-building-card"
@@ -483,19 +503,16 @@
                     <span class="source-cache-building-card-title">{{ building.building }}</span>
                     <span class="status-badge status-badge-soft" :class="'tone-' + building.tone">{{ building.stateText }}</span>
                   </div>
-                  <div class="hint" v-if="family.key === 'alarm_event_family'">来源：{{ building.sourceKindText || '-' }}</div>
-                  <div class="hint" v-if="family.key === 'alarm_event_family'">选择：{{ building.selectionScopeText || '-' }}</div>
-                  <div class="hint" v-if="family.key === 'alarm_event_family'">选中文件时间：{{ building.selectedDownloadedAt || '-' }}</div>
-                  <div class="hint" v-else>{{ family.buildingReferenceLabel || '时间桶' }}：{{ building.bucketKey || family.bestBucketKey || sharedSourceCacheReadinessOverview.referenceBucketKey }}</div>
+                  <template v-if="building.metaLines && building.metaLines.length">
+                    <div class="hint" v-for="(line, idx) in building.metaLines" :key="'status-external-cache-building-line-' + family.key + '-' + building.building + '-' + idx">
+                      {{ line }}
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div class="hint">等待后端明细</div>
+                  </template>
                   <div class="hint" v-if="building.backfillRunning && building.backfillText">{{ family.backfillLabel || '当前补采' }}：{{ building.backfillText }}</div>
                   <div class="hint" v-if="building.backfillRunning && building.backfillScopeText">{{ family.backfillScopeLabel || '补采范围' }}：{{ building.backfillScopeText }}</div>
-                  <div class="hint" v-if="building.usingFallback && building.versionGap !== null">
-                    {{ family.dateSemantic ? '较当前日期文件落后 ' + building.versionGap + ' 桶' : '较最新版本落后 ' + building.versionGap + ' 桶' }}
-                  </div>
-                  <div class="hint">{{ building.lastError ? ("最近错误：" + building.lastError) : ("最近成功：" + (building.downloadedAt || "-")) }}</div>
-                  <div class="hint" v-if="building.resolvedFilePath">共享路径：{{ building.resolvedFilePath }}</div>
-                  <div class="hint" v-else-if="building.relativePath">缓存文件：{{ building.relativePath }}</div>
-                  <div class="hint" v-else-if="building.statusKey !== 'waiting'">共享文件未登记</div>
                 </div>
               </div>
               <div class="hint" v-else>暂无楼栋明细</div>
@@ -512,26 +529,26 @@
               <span class="status-panel-kicker">共享桥接</span>
               <h2 class="status-panel-title">当前认领与等待队列</h2>
             </div>
-            <span class="status-badge status-badge-solid" :class="bridgeTasksEnabled ? 'tone-success' : 'tone-neutral'">
-              {{ bridgeTasksEnabled ? '桥接已启用' : '桥接未启用' }}
+            <span class="status-badge status-badge-solid" :class="'tone-' + (bridgeTaskPanelOverview.tone || 'neutral')">
+              {{ bridgeTaskPanelOverview.statusText || (bridgeTasksEnabled ? '桥接已启用' : '桥接未启用') }}
             </span>
           </div>
-          <div class="status-list">
-            <div class="status-list-row">
-              <span class="status-list-label">当前处理中</span>
-              <span class="status-badge status-badge-soft" :class="(activeBridgeTasks && activeBridgeTasks.length) ? 'tone-warning' : 'tone-neutral'">
-                {{ (activeBridgeTasks && activeBridgeTasks.length) ? activeBridgeTasks.length + ' 项' : '无' }}
-              </span>
-            </div>
-            <div class="status-list-row">
-              <span class="status-list-label">最近完成</span>
-              <span class="status-badge status-badge-soft" :class="(recentFinishedBridgeTasks && recentFinishedBridgeTasks.length) ? 'tone-info' : 'tone-neutral'">
-                {{ (recentFinishedBridgeTasks && recentFinishedBridgeTasks.length) ? recentFinishedBridgeTasks.length + ' 项' : '无' }}
+          <div class="hint">{{ bridgeTaskPanelOverview.summaryText || '暂无共享桥接任务。' }}</div>
+          <div class="status-list" v-if="bridgeTaskPanelOverview?.items && bridgeTaskPanelOverview.items.length">
+            <div
+              class="status-list-row"
+              v-for="item in bridgeTaskPanelOverview.items.slice(0, 2)"
+              :key="'status-bridge-overview-' + item.label"
+            >
+              <span class="status-list-label">{{ item.label }}</span>
+              <span class="status-badge status-badge-soft" :class="'tone-' + (bridgeTaskPanelOverview.tone || 'neutral')">
+                {{ item.value }}
               </span>
             </div>
           </div>
-          <div class="hint" v-if="currentBridgeTask">
-            当前认领：{{ formatBridgeStageSummary(currentBridgeTask) }}
+          <div class="hint" v-else>等待后端共享桥接摘要。</div>
+          <div class="hint" v-if="bridgeTaskPanelOverview?.focusTitle || bridgeTaskPanelOverview?.focusMeta">
+            当前认领：{{ bridgeTaskPanelOverview?.focusTitle || '-' }}<span v-if="bridgeTaskPanelOverview?.focusMeta"> | {{ bridgeTaskPanelOverview.focusMeta }}</span>
           </div>
           <div class="status-list" v-if="activeBridgeTasks && activeBridgeTasks.length">
             <div
@@ -539,14 +556,14 @@
               v-for="task in activeBridgeTasks.slice(0, 5)"
               :key="'status-internal-bridge-' + task.task_id"
             >
-              <span class="status-list-label">{{ formatBridgeFeature(task.feature) }}</span>
-              <span class="status-badge status-badge-soft" :class="'tone-' + formatBridgeTaskTone(task.status)">
-                {{ formatBridgeTaskStatus(task) }}
+              <span class="status-list-label">{{ task.display_title || '-' }}</span>
+              <span class="status-badge status-badge-soft" :class="'tone-' + (task.tone || 'neutral')">
+                {{ task.status_text || '-' }}
               </span>
             </div>
           </div>
-          <div class="hint" v-if="activeBridgeTasks && activeBridgeTasks.length">
-            等待中的任务会在条件满足后自动继续；如状态显示“等待内网补采同步”，表示外网正在等待内网历史文件到位。
+          <div class="hint" v-if="bridgeTaskPanelOverview.nextActionText">
+            {{ bridgeTaskPanelOverview.nextActionText }}
           </div>
         </article>
 
@@ -596,17 +613,12 @@
           <div class="hint" v-if="internalSourceCacheHistoryOverview.lastError">
             最近错误：{{ internalSourceCacheHistoryOverview.lastError }}
           </div>
-          <div class="status-list" v-if="internalSourceCacheHistoryOverview.recentLogs && internalSourceCacheHistoryOverview.recentLogs.length">
-            <div
-              class="status-list-row"
-              v-for="(line, index) in internalSourceCacheHistoryOverview.recentLogs"
-              :key="'status-source-cache-history-log-' + index"
-            >
-              <span class="status-list-label">最近记录 {{ index + 1 }}</span>
-              <span class="status-inline-note">{{ line }}</span>
-            </div>
+          <div class="hint" v-if="internalSourceCacheHistoryOverview.detailText">
+            {{ internalSourceCacheHistoryOverview.detailText }}
           </div>
-          <div class="hint" v-else>当前还没有共享文件下载历史记录。</div>
+          <div class="hint" v-if="(!internalSourceCacheHistoryOverview.items || !internalSourceCacheHistoryOverview.items.length) && !internalSourceCacheHistoryOverview.detailText">
+            当前还没有后端历史摘要。
+          </div>
         </article>
 
         <article v-if="!isInternalDeploymentRole" class="status-card status-card-wide">
@@ -630,8 +642,8 @@
           <div class="hint" v-if="handoverReviewOverview.dutyText">
             本次上传云文档批次：{{ handoverReviewOverview.dutyText }}
           </div>
-          <div class="hint" v-if="handoverFollowupProgress.pendingCount || handoverFollowupProgress.failedCount">
-            后续上传待处理 {{ handoverFollowupProgress.pendingCount }} 项，失败 {{ handoverFollowupProgress.failedCount }} 项
+          <div class="hint" v-if="handoverFollowupProgress.statusText && handoverFollowupProgress.summaryText !== '已清空'">
+            {{ handoverFollowupProgress.statusText }}：{{ handoverFollowupProgress.summaryText }}
           </div>
           <div class="status-metric-grid status-metric-grid-compact">
             <div class="status-metric">
@@ -644,7 +656,7 @@
             </div>
             <div class="status-metric">
               <div class="status-metric-label">后续上传</div>
-              <strong class="status-metric-value">{{ handoverFollowupProgress.pendingCount || handoverFollowupProgress.failedCount ? ('待处理 ' + handoverFollowupProgress.pendingCount + ' / 失败 ' + handoverFollowupProgress.failedCount) : '已清空' }}</strong>
+              <strong class="status-metric-value">{{ handoverFollowupProgress.summaryText || '已清空' }}</strong>
             </div>
           </div>
           <div class="hint" v-if="health.handover.review_base_url_effective">

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import main as main_module
@@ -51,6 +53,20 @@ def test_portable_launcher_keeps_updater_enabled(monkeypatch) -> None:
     monkeypatch.delenv(main_module._SOURCE_RUN_DISABLE_UPDATER_ENV, raising=False)
     monkeypatch.setenv(main_module._PORTABLE_LAUNCHER_ENV, "1")
     monkeypatch.setattr(main_module.sys, "frozen", False, raising=False)
+
+    changed = main_module._apply_source_run_runtime_flags()
+
+    assert changed is False
+    assert main_module.os.environ.get(main_module._SOURCE_RUN_DISABLE_UPDATER_ENV, "") == ""
+
+
+def test_release_code_dir_keeps_updater_enabled_without_portable_env(monkeypatch, tmp_path: Path) -> None:
+    release_code_dir = tmp_path / "QJPT_V3_code"
+    release_code_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.delenv(main_module._SOURCE_RUN_DISABLE_UPDATER_ENV, raising=False)
+    monkeypatch.delenv(main_module._PORTABLE_LAUNCHER_ENV, raising=False)
+    monkeypatch.setattr(main_module.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(main_module, "PROJECT_ROOT", release_code_dir)
 
     changed = main_module._apply_source_run_runtime_flags()
 

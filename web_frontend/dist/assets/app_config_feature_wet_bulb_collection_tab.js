@@ -25,11 +25,11 @@
   <div class="config-panel-grid two-col">
     <div class="content-card config-panel-card">
       <div class="section-title">调度</div>
-      <div class="form-row"><label class="label">每 N 分钟运行一次</label><input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.interval_minutes" @change="saveWetBulbCollectionSchedulerQuickConfig" /></div>
-      <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.check_interval_sec" @change="saveWetBulbCollectionSchedulerQuickConfig" /></div>
-      <div class="form-row"><label><input type="checkbox" v-model="config.wet_bulb_collection.scheduler.retry_failed_on_next_tick" @change="saveWetBulbCollectionSchedulerQuickConfig" /> 失败后下一个周期继续重试</label></div>
-      <div class="form-row"><label class="label">状态文件名</label><input type="text" v-model="config.wet_bulb_collection.scheduler.state_file" @change="saveWetBulbCollectionSchedulerQuickConfig" /></div>
-      <div class="hint">{{ wetBulbSchedulerQuickSaving ? '调度配置保存中...' : '修改后自动保存。' }}</div>
+      <div class="form-row"><label class="label">每 N 分钟运行一次</label><input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.interval_minutes" /></div>
+      <div class="form-row"><label class="label">检查间隔（秒）</label><input type="number" min="1" v-model.number="config.wet_bulb_collection.scheduler.check_interval_sec" /></div>
+      <div class="form-row"><label><input type="checkbox" v-model="config.wet_bulb_collection.scheduler.retry_failed_on_next_tick" /> 失败后下一个周期继续重试</label></div>
+      <div class="form-row"><label class="label">状态文件名</label><input type="text" v-model="config.wet_bulb_collection.scheduler.state_file" /></div>
+      <div class="hint">修改后请点击上方“保存配置”。</div>
     </div>
 
     <div class="content-card config-panel-card">

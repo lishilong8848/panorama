@@ -9,7 +9,7 @@ from openpyxl.utils import get_column_letter
 from pipeline_utils import get_app_dir
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.core.section_layout import parse_category_sections
-from handover_log_module.core.specialty_normalizer import normalize_specialty_text
+from handover_log_module.core.specialty_normalizer import normalize_specialty_text, pick_engineer_supervisor
 from handover_log_module.repository.other_important_work_repository import (
     OtherImportantWorkRepository,
     OtherImportantWorkRow,
@@ -129,19 +129,11 @@ class OtherImportantWorkPayloadBuilder:
         building: str,
         specialty_text: str,
     ) -> str:
-        specialty = normalize_specialty_text(specialty_text)
-        current_building = str(building or "").strip()
-        if not specialty or not current_building:
-            return ""
-        for row in engineers:
-            if str(row.get("building", "")).strip() != current_building:
-                continue
-            if normalize_specialty_text(row.get("specialty", "")) != specialty:
-                continue
-            supervisor = str(row.get("supervisor", "")).strip()
-            if supervisor:
-                return supervisor
-        return ""
+        return pick_engineer_supervisor(
+            engineers,
+            building=building,
+            specialty_text=specialty_text,
+        )
 
     def _resolve_executor(
         self,
@@ -178,6 +170,7 @@ class OtherImportantWorkPayloadBuilder:
         duty_date: str,
         duty_shift: str,
         preloaded_rows_by_building: OtherImportantWorkRowsByBuilding | None = None,
+        preloaded_engineers: List[Dict[str, str]] | None = None,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cfg = self.repo.get_config()
@@ -198,15 +191,19 @@ class OtherImportantWorkPayloadBuilder:
         else:
             rows = list(preloaded_rows_by_building.get(building, []))
 
-        try:
-            engineers = self.shift_roster_repo.list_engineer_directory(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                emit_log=emit_log,
-            )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][其他重要工作] 工程师目录读取失败，执行人按 / 继续: {exc}")
-            engineers = []
+        if preloaded_engineers is not None:
+            engineers = list(preloaded_engineers)
+            emit_log(f"[交接班][其他重要工作] 命中批量预取工程师目录: count={len(engineers)}")
+        else:
+            try:
+                engineers = self.shift_roster_repo.list_engineer_directory(
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    emit_log=emit_log,
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][其他重要工作] 工程师目录读取失败，执行人按 / 继续: {exc}")
+                engineers = []
 
         sections_cfg = cfg.get("sections", {}) if isinstance(cfg.get("sections", {}), dict) else {}
         section_name = str(sections_cfg.get("other_important_work", "其他重要工作记录")).strip() or "其他重要工作记录"

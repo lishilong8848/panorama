@@ -391,7 +391,14 @@ def test_internal_runtime_status_returns_light_summary_for_internal_role() -> No
     assert response["ok"] is True
     assert response["summary"]["role_mode"] == "internal"
     assert response["summary"]["pool"]["browser_ready"] is True
+    assert len(response["summary"]["pool"]["page_slots"]) == 5
     assert response["summary"]["source_cache"]["current_hour_bucket"] == "2026-04-14 10"
+    assert len(response["summary"]["source_cache"]["handover_log_family"]["buildings"]) == 5
+    assert len(response["summary"]["source_cache"]["handover_capacity_report_family"]["buildings"]) == 5
+    assert len(response["summary"]["source_cache"]["monthly_report_family"]["buildings"]) == 5
+    assert len(response["summary"]["source_cache"]["alarm_event_family"]["buildings"]) == 5
+    assert response["summary"]["source_cache"]["handover_log_family"]["buildings"][0]["building"] == "A楼"
+    assert response["summary"]["source_cache"]["handover_log_family"]["buildings"][-1]["building"] == "E楼"
     assert service.health_modes == ["internal_light"]
 
 
@@ -407,6 +414,8 @@ def test_internal_runtime_status_building_returns_single_building_payload() -> N
     assert response["status"]["page_slot"]["in_use"] is True
     assert response["status"]["source_families"]["monthly_report_family"]["status"] == "failed"
     assert response["status"]["source_families"]["alarm_event_family"]["blocked"] is True
+    assert response["status"]["display"]["page_slot"]["status_text"] == "使用中"
+    assert response["status"]["display"]["source_families"]["monthly_report_family"]["status_text"] == "失败"
 
 
 def test_internal_runtime_status_rejects_external_role() -> None:
@@ -510,6 +519,7 @@ def test_internal_runtime_building_prefers_runtime_status_sqlite_snapshot() -> N
 
     assert response["ok"] is True
     assert response["status"]["page_slot"]["in_use"] is False
+    assert response["status"]["display"]["source_families"]["handover_log_family"]["status_text"] == "已就绪"
     assert service.health_modes == []
 
 

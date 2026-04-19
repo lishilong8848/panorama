@@ -30,6 +30,10 @@ _SEGMENT_BUILDINGS_DIR = "buildings"
 _SEGMENT_COMMON_FILE = "common.json"
 _MIGRATION_BACKUP_RETENTION = 5
 _handover_segment_write_lock = threading.RLock()
+_handover_segment_target_locks_guard = threading.Lock()
+_handover_segment_target_locks: dict[str, threading.RLock] = {}
+_handover_segment_aggregate_locks_guard = threading.Lock()
+_handover_segment_aggregate_locks: dict[str, threading.RLock] = {}
 
 
 class HandoverSegmentRevisionConflict(ValueError):
@@ -38,6 +42,31 @@ class HandoverSegmentRevisionConflict(ValueError):
 
 def handover_segment_write_lock() -> threading.RLock:
     return _handover_segment_write_lock
+
+
+def _normalized_segment_lock_key(config_path: str | Path, scope: str) -> str:
+    target = Path(config_path).resolve(strict=False)
+    return f"{str(target).casefold()}::{str(scope or '').strip().casefold()}"
+
+
+def handover_segment_target_lock(config_path: str | Path, segment_key: str) -> threading.RLock:
+    key = _normalized_segment_lock_key(config_path, f"segment:{segment_key}")
+    with _handover_segment_target_locks_guard:
+        lock = _handover_segment_target_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _handover_segment_target_locks[key] = lock
+        return lock
+
+
+def handover_segment_aggregate_lock(config_path: str | Path) -> threading.RLock:
+    key = _normalized_segment_lock_key(config_path, "aggregate")
+    with _handover_segment_aggregate_locks_guard:
+        lock = _handover_segment_aggregate_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _handover_segment_aggregate_locks[key] = lock
+        return lock
 
 
 def normalize_handover_building_code(code: str | None) -> str:
@@ -219,6 +248,29 @@ def _normalize_footer_defaults_by_building(payload: Any) -> dict[str, Any]:
     return output
 
 
+def _normalize_review_link_recipients_by_building(payload: Any) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    source = payload if isinstance(payload, Mapping) else {}
+    for raw_building, raw_items in source.items():
+        building = str(raw_building or "").strip()
+        if not building:
+            continue
+        rows = raw_items if isinstance(raw_items, list) else []
+        normalized_rows = []
+        for raw_row in rows:
+            if not isinstance(raw_row, Mapping):
+                continue
+            normalized_rows.append(
+                {
+                    "note": str(raw_row.get("note", "") or "").strip(),
+                    "open_id": str(raw_row.get("open_id", "") or "").strip(),
+                    "enabled": False if raw_row.get("enabled", True) is False else True,
+                }
+            )
+        output[building] = normalized_rows
+    return output
+
+
 def _ensure_child_dict(root: Dict[str, Any], key: str) -> Dict[str, Any]:
     child = root.get(key)
     if not isinstance(child, dict):
@@ -272,11 +324,13 @@ def _clear_segment_backed_handover_fields(handover: Dict[str, Any]) -> Dict[str,
         review_ui["footer_inventory_defaults_by_building"] = {}
     review_link_recipients = review_ui.get("review_link_recipients_by_building", {})
     if isinstance(review_link_recipients, dict):
-        review_ui["review_link_recipients_by_building"] = {
-            key: copy.deepcopy(value)
-            for key, value in review_link_recipients.items()
-            if key not in HANDOVER_SEGMENT_BUILDINGS
-        }
+        review_ui["review_link_recipients_by_building"] = _normalize_review_link_recipients_by_building(
+            {
+                key: copy.deepcopy(value)
+                for key, value in review_link_recipients.items()
+                if key not in HANDOVER_SEGMENT_BUILDINGS
+            }
+        )
     else:
         review_ui["review_link_recipients_by_building"] = {}
     return output
@@ -323,7 +377,9 @@ def extract_handover_building_data(cfg: Mapping[str, Any], building: str) -> Dic
         else {}
     )
     review_link_recipients_payload = (
-        {building_name: copy.deepcopy(review_link_recipients.get(building_name))}
+        _normalize_review_link_recipients_by_building(
+            {building_name: copy.deepcopy(review_link_recipients.get(building_name))}
+        )
         if isinstance(review_link_recipients, Mapping) and building_name in review_link_recipients
         else {}
     )

@@ -223,6 +223,17 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "oil_cache": {
                     "state_file": "handover_capacity_oil_cache.json",
                 },
+                "weather": {
+                    "provider": "seniverse",
+                    "location": "崇川区",
+                    "fallback_locations": ["南通"],
+                    "language": "zh-Hans",
+                    "unit": "c",
+                    "timeout_sec": 8,
+                    "auth_mode": "signed",
+                    "seniverse_public_key": "Pw-nkmTzcCorv7Dey",
+                    "seniverse_private_key": "SwWfUI324UukiuVs2",
+                },
             },
             "template": {
                 "source_path": "交接班日志空模板.xlsx",

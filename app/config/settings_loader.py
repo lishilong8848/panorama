@@ -7,7 +7,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
 from app.config.config_compat_cleanup import sanitize_day_metric_upload_config
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3, deep_merge_defaults
@@ -28,9 +28,11 @@ from app.config.handover_segment_store import (
     create_pre_handover_segment_backup,
     extract_handover_building_data,
     extract_handover_common_data,
+    handover_segment_aggregate_lock,
     handover_building_segment_path,
     handover_common_segment_path,
     handover_segment_write_lock,
+    handover_segment_target_lock,
     has_all_handover_segment_files,
     has_any_handover_segment_file,
     read_all_segment_documents,
@@ -511,6 +513,50 @@ def _validate_handover_download(cfg: Dict[str, Any]) -> None:
     for key in non_negative_keys:
         if int(download.get(key, 0)) < 0:
             raise ValueError(f"配置错误: features.handover_log.download.{key} 必须大于等于0")
+
+
+def _validate_handover_capacity_report_weather(cfg: Dict[str, Any]) -> None:
+    handover = cfg.get("features", {}).get("handover_log", {})
+    if not isinstance(handover, dict):
+        return
+    capacity_report = handover.get("capacity_report", {})
+    if not isinstance(capacity_report, dict):
+        raise ValueError("配置错误: features.handover_log.capacity_report 缺失或格式错误")
+    weather = capacity_report.get("weather", {})
+    if not isinstance(weather, dict):
+        raise ValueError("配置错误: features.handover_log.capacity_report.weather 缺失或格式错误")
+
+    provider = str(weather.get("provider", "") or "").strip()
+    location = str(weather.get("location", "") or "").strip()
+    language = str(weather.get("language", "") or "").strip()
+    unit = str(weather.get("unit", "") or "").strip()
+    auth_mode = str(weather.get("auth_mode", "") or "").strip()
+    timeout_sec = int(weather.get("timeout_sec", 0) or 0)
+    public_key = str(weather.get("seniverse_public_key", "") or "").strip()
+    private_key = str(weather.get("seniverse_private_key", "") or "").strip()
+    fallback_locations = weather.get("fallback_locations", [])
+
+    if provider and provider != "seniverse":
+        raise ValueError("配置错误: features.handover_log.capacity_report.weather.provider 当前仅支持 seniverse")
+    if not location:
+        raise ValueError("配置错误: features.handover_log.capacity_report.weather.location 不能为空")
+    if not language:
+        raise ValueError("配置错误: features.handover_log.capacity_report.weather.language 不能为空")
+    if not unit:
+        raise ValueError("配置错误: features.handover_log.capacity_report.weather.unit 不能为空")
+    if auth_mode and auth_mode != "signed":
+        raise ValueError("配置错误: features.handover_log.capacity_report.weather.auth_mode 当前仅支持 signed")
+    if timeout_sec <= 0:
+        raise ValueError("配置错误: features.handover_log.capacity_report.weather.timeout_sec 必须大于0")
+    if not public_key:
+        raise ValueError("配置错误: features.handover_log.capacity_report.weather.seniverse_public_key 不能为空")
+    if not private_key:
+        raise ValueError("配置错误: features.handover_log.capacity_report.weather.seniverse_private_key 不能为空")
+    if fallback_locations and (
+        not isinstance(fallback_locations, list)
+        or any(not str(item or "").strip() for item in fallback_locations)
+    ):
+        raise ValueError("配置错误: features.handover_log.capacity_report.weather.fallback_locations 必须是非空字符串数组")
 
 
 def _validate_handover_shift_roster(cfg: Dict[str, Any]) -> None:
@@ -1373,6 +1419,8 @@ def _validate_handover_review_ui(cfg: Dict[str, Any]) -> None:
 
     buildings = review_ui.get("buildings", [])
     fixed_cells = review_ui.get("fixed_cells", {})
+    # Deprecated compatibility field. The review UI now uses explicit saves,
+    # so we keep accepting the value without making it a required runtime knob.
     autosave_debounce_ms = int(review_ui.get("autosave_debounce_ms", 0) or 0)
     poll_interval_sec = int(review_ui.get("poll_interval_sec", 0) or 0)
     hidden_columns = review_ui.get("section_hidden_columns", [])
@@ -1429,8 +1477,6 @@ def _validate_handover_review_ui(cfg: Dict[str, Any]) -> None:
                     f"{block_name} 存在非法 label_cell: {label_cell}"
                 )
 
-    if autosave_debounce_ms <= 0:
-        raise ValueError("配置错误: features.handover_log.review_ui.autosave_debounce_ms 必须大于0")
     if poll_interval_sec <= 0:
         raise ValueError("配置错误: features.handover_log.review_ui.poll_interval_sec 必须大于0")
     if not isinstance(hidden_columns, list):
@@ -1710,6 +1756,7 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _validate_handover_scheduler(normalized_v3)
     _validate_handover_template(normalized_v3)
     _validate_handover_download(normalized_v3)
+    _validate_handover_capacity_report_weather(normalized_v3)
     _validate_handover_shift_roster(normalized_v3)
     _validate_handover_event_sections(normalized_v3)
     _validate_handover_monthly_event_report(normalized_v3)
@@ -2154,8 +2201,30 @@ def _compose_handover_segmented_config(cfg: Dict[str, Any], config_path: str | P
 
 
 def _ensure_handover_segment_files(cfg: Dict[str, Any], config_path: str | Path | None = None) -> bool:
-    _ = (cfg, config_path)
-    return False
+    try:
+        target = get_settings_path(config_path)
+    except FileNotFoundError:
+        return False
+    if has_all_handover_segment_files(target):
+        return False
+    with handover_segment_write_lock():
+        if has_all_handover_segment_files(target):
+            return False
+        source_cfg = copy.deepcopy(cfg if isinstance(cfg, dict) else {})
+        if has_any_handover_segment_file(target):
+            source_cfg = _compose_handover_segmented_config(source_cfg, target)
+        else:
+            create_pre_handover_segment_backup(target)
+        common_doc, building_docs = build_segment_documents_from_config(source_cfg)
+        common_path = handover_common_segment_path(target)
+        if not common_path.exists():
+            write_segment_document(common_path, common_doc)
+        for building in HANDOVER_SEGMENT_BUILDINGS:
+            building_path = handover_building_segment_path(target, building)
+            if building_path.exists():
+                continue
+            write_segment_document(building_path, building_docs[building])
+    return True
 
 
 def _preserve_segment_backed_handover(cfg: Dict[str, Any], config_path: str | Path | None = None) -> Dict[str, Any]:
@@ -2194,12 +2263,29 @@ def get_handover_building_segment(building_code: str, config_path: str | Path | 
     return build_segment_document(building_doc.get("data", {}), revision=0, updated_at="")
 
 
-def _refresh_handover_aggregate_view(cfg: Dict[str, Any], config_path: str | Path | None = None) -> str:
-    try:
-        write_settings_atomically(_normalize_footer_defaults_for_persistence(cfg), config_path)
-        return ""
-    except Exception as exc:  # noqa: BLE001
-        return str(exc)
+def _refresh_handover_aggregate_view(config_path: str | Path | None = None) -> tuple[Dict[str, Any], str]:
+    target = get_settings_path(config_path)
+    with handover_segment_aggregate_lock(target):
+        try:
+            raw_existing = load_pipeline_config(target)
+            common_doc, building_docs = read_all_segment_documents(target)
+            building_payloads = {
+                building: doc.get("data", {})
+                for building, doc in building_docs.items()
+                if isinstance(doc.get("data"), dict)
+            }
+            aggregate_payload = apply_handover_segment_data(
+                raw_existing,
+                common_data=common_doc.get("data", {}) if isinstance(common_doc.get("data"), dict) else {},
+                building_data_by_name=building_payloads,
+            )
+            write_settings_atomically(_normalize_footer_defaults_for_persistence(aggregate_payload), target)
+            return load_settings(target), ""
+        except Exception as exc:  # noqa: BLE001
+            try:
+                return load_settings(target), str(exc)
+            except Exception:  # noqa: BLE001
+                return {}, str(exc)
 
 
 def _normalize_footer_defaults_for_persistence(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -2242,7 +2328,7 @@ def save_handover_common_segment(
     config_path: str | Path | None = None,
 ) -> tuple[Dict[str, Any], Dict[str, Any], str]:
     target = get_settings_path(config_path)
-    with handover_segment_write_lock():
+    with handover_segment_target_lock(target, "common"):
         current_full = load_settings(target)
         current_doc = read_segment_document(handover_common_segment_path(target))
         current_revision = int(current_doc.get("revision", 0) or 0)
@@ -2259,8 +2345,8 @@ def save_handover_common_segment(
             revision=current_revision + 1,
         )
         write_segment_document(handover_common_segment_path(target), next_doc)
-        aggregate_refresh_error = _refresh_handover_aggregate_view(validated, target)
-        return validated, next_doc, aggregate_refresh_error
+    refreshed_config, aggregate_refresh_error = _refresh_handover_aggregate_view(target)
+    return refreshed_config, next_doc, aggregate_refresh_error
 
 
 def save_handover_building_segment(
@@ -2273,7 +2359,7 @@ def save_handover_building_segment(
     target = get_settings_path(config_path)
     building_path = handover_building_segment_path(target, building_code)
     target_building = building_name_from_segment_code(building_code)
-    with handover_segment_write_lock():
+    with handover_segment_target_lock(target, f"building:{str(building_code or '').strip().upper()}"):
         current_full = load_settings(target)
         current_doc = read_segment_document(building_path)
         current_revision = int(current_doc.get("revision", 0) or 0)
@@ -2293,8 +2379,8 @@ def save_handover_building_segment(
             revision=current_revision + 1,
         )
         write_segment_document(building_path, next_doc)
-        aggregate_refresh_error = _refresh_handover_aggregate_view(validated, target)
-        return validated, next_doc, aggregate_refresh_error
+    refreshed_config, aggregate_refresh_error = _refresh_handover_aggregate_view(target)
+    return refreshed_config, next_doc, aggregate_refresh_error
 
 
 def load_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
@@ -2325,9 +2411,29 @@ def save_settings(
     config_path: str | Path | None = None,
     *,
     preserve_segmented_handover: bool = True,
+    preserve_existing_user_values: bool = True,
+    clear_paths: Iterable[str] | None = None,
+    force_overwrite: bool = False,
 ) -> Dict[str, Any]:
     payload = _preserve_segment_backed_handover(cfg, config_path) if preserve_segmented_handover else copy.deepcopy(cfg)
     normalized = _normalize_footer_defaults_for_persistence(validate_settings(payload))
-    write_settings_atomically(normalized, config_path)
-    return normalized
+    final_payload = copy.deepcopy(normalized)
+    if preserve_existing_user_values:
+        try:
+            target = get_settings_path(config_path)
+        except FileNotFoundError:
+            target = None
+        if target is not None and target.exists():
+            from app.config.config_merge_guard import merge_user_config_payload
+
+            existing_raw = load_pipeline_config(target)
+            merge_result = merge_user_config_payload(
+                final_payload,
+                existing_raw,
+                clear_paths=clear_paths,
+                force_overwrite=force_overwrite,
+            )
+            final_payload = _normalize_footer_defaults_for_persistence(merge_result.merged)
+    write_settings_atomically(final_payload, config_path)
+    return final_payload
 

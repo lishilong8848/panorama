@@ -220,3 +220,66 @@ def test_force_sync_serializes_writer_access_for_same_output_file(tmp_path: Path
 
     assert sync_errors == []
     assert writer.max_active == 1
+
+
+def test_force_sync_allows_parallel_writer_access_for_distinct_buildings(tmp_path: Path) -> None:
+    output_a = tmp_path / "handover-a.xlsx"
+    output_b = tmp_path / "handover-b.xlsx"
+    _build_workbook(output_a)
+    _build_workbook(output_b)
+    writer = _SlowWorkbookWriter(delay_sec=0.05)
+    service = ReviewDocumentStateService(_config(tmp_path), writer=writer, emit_log=lambda *_: None)
+
+    session_a = _session(output_a)
+    session_b = {
+        **_session(output_b),
+        "session_id": "B楼|2026-04-15|day",
+        "building": "B楼",
+    }
+
+    document_a, _loaded_session_a = service.load_document(session_a)
+    document_b, _loaded_session_b = service.load_document(session_b)
+    _set_fixed_value(document_a, "B13", "A最新值")
+    _set_fixed_value(document_b, "B13", "B最新值")
+
+    state_a, _previous_a = service.save_document(
+        session=session_a,
+        document=document_a,
+        base_revision=1,
+        dirty_regions={"fixed_blocks": True},
+    )
+    state_b, _previous_b = service.save_document(
+        session=session_b,
+        document=document_b,
+        base_revision=1,
+        dirty_regions={"fixed_blocks": True},
+    )
+
+    sync_errors: list[Exception] = []
+    barrier = threading.Barrier(3)
+
+    def _run_force_sync(building: str, session_id: str, target_revision: int) -> None:
+        barrier.wait()
+        try:
+            service.force_sync_session(
+                building=building,
+                session_id=session_id,
+                target_revision=target_revision,
+                reason="parallel-buildings-test",
+                reconcile_sync_job=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            sync_errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_run_force_sync, args=("A楼", session_a["session_id"], state_a["revision"])),
+        threading.Thread(target=_run_force_sync, args=("B楼", session_b["session_id"], state_b["revision"])),
+    ]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert sync_errors == []
+    assert writer.max_active >= 2

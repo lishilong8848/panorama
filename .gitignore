@@ -40,6 +40,8 @@ __pycache__/
 *.tmp
 *.bak
 *.tmp_keep
+.npm-cache
+.playwright-cli
 
 # Project-specific backup and recovery files
 /表格计算部分代码.cpython-*.py

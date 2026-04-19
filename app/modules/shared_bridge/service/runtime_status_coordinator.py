@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict
 
+from app.config.config_adapter import normalize_role_mode
+from app.modules.report_pipeline.service.job_panel_presenter import build_job_panel_summary
 from app.modules.report_pipeline.service.job_service import TaskEngineUnavailableError
 from app.modules.shared_bridge.service.internal_runtime_status_presenter import (
     INTERNAL_RUNTIME_BUILDINGS,
@@ -17,8 +19,11 @@ from app.modules.shared_bridge.service.runtime_status_store import RuntimeStatus
 
 _SCOPE_RUNTIME_HEALTH_LITE = "runtime_health_lite"
 _SCOPE_INTERNAL_RUNTIME_SUMMARY = "internal_runtime_summary"
+_SCOPE_EXTERNAL_SHARED_BRIDGE_FULL = "external_shared_bridge_full"
 _SCOPE_JOB_PANEL_SUMMARY = "job_panel_summary"
+_SCOPE_DASHBOARD_JOB_PANEL_SUMMARY = "job_panel_dashboard_summary"
 _SCOPE_BRIDGE_TASKS_SUMMARY = "bridge_tasks_summary"
+_SCOPE_DASHBOARD_BRIDGE_TASKS_SUMMARY = "bridge_tasks_dashboard_summary"
 _SCOPE_RUNTIME_RESOURCES_SUMMARY = "runtime_resources_summary"
 
 _EVENT_TRIGGER_KEYWORDS = (
@@ -222,10 +227,36 @@ class RuntimeStatusCoordinator:
 
     def _refresh_all_snapshots(self) -> None:
         try:
-            self._writer.write_scope_snapshot(_SCOPE_RUNTIME_HEALTH_LITE, self._build_runtime_health_lite_snapshot())
-            self._writer.write_scope_snapshot(_SCOPE_JOB_PANEL_SUMMARY, self._build_job_panel_summary())
+            deployment = (
+                self._container.deployment_snapshot()
+                if hasattr(self._container, "deployment_snapshot")
+                else {}
+            )
+            role_mode = normalize_role_mode(
+                deployment.get("role_mode") if isinstance(deployment, dict) else ""
+            )
+            prebuilt_shared_bridge_snapshot: Dict[str, Any] | None = None
+            if role_mode == "external":
+                prebuilt_shared_bridge_snapshot = self._safe_shared_bridge_snapshot(mode="external_full")
+                self._writer.write_scope_snapshot(
+                    _SCOPE_EXTERNAL_SHARED_BRIDGE_FULL,
+                    prebuilt_shared_bridge_snapshot,
+                )
+            self._writer.write_scope_snapshot(
+                _SCOPE_RUNTIME_HEALTH_LITE,
+                self._build_runtime_health_lite_snapshot(
+                    shared_bridge_snapshot=prebuilt_shared_bridge_snapshot,
+                ),
+            )
+            self._writer.write_scope_snapshot(
+                _SCOPE_DASHBOARD_JOB_PANEL_SUMMARY,
+                self._build_job_panel_dashboard_summary(),
+            )
             self._writer.write_scope_snapshot(_SCOPE_RUNTIME_RESOURCES_SUMMARY, self._build_runtime_resources_summary())
-            self._writer.write_scope_snapshot(_SCOPE_BRIDGE_TASKS_SUMMARY, self._build_bridge_tasks_summary())
+            self._writer.write_scope_snapshot(
+                _SCOPE_DASHBOARD_BRIDGE_TASKS_SUMMARY,
+                self._build_bridge_tasks_dashboard_summary(),
+            )
             self._refresh_internal_runtime_snapshots()
         except Exception as exc:  # noqa: BLE001
             if callable(self._emit_log):
@@ -239,10 +270,6 @@ class RuntimeStatusCoordinator:
                 self._emit_log(f"[运行状态] 读取共享桥接轻量快照失败: {exc}")
             return
         normalized_snapshot = snapshot if isinstance(snapshot, dict) else {}
-        self._writer.write_scope_snapshot(
-            _SCOPE_INTERNAL_RUNTIME_SUMMARY,
-            build_internal_runtime_summary(normalized_snapshot),
-        )
         for building_code, building in INTERNAL_RUNTIME_BUILDINGS.items():
             self._writer.write_building_snapshot(
                 building,
@@ -252,15 +279,31 @@ class RuntimeStatusCoordinator:
                     building_code=building_code,
                 ),
             )
+        self._writer.write_scope_snapshot(
+            _SCOPE_INTERNAL_RUNTIME_SUMMARY,
+            build_internal_runtime_summary(normalized_snapshot),
+        )
 
-    def _build_runtime_health_lite_snapshot(self) -> Dict[str, Any]:
+    def _build_runtime_health_lite_snapshot(
+        self,
+        *,
+        shared_bridge_snapshot: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         app_state = self._app_state_getter() if callable(self._app_state_getter) else {}
         deployment = (
             self._container.deployment_snapshot()
             if hasattr(self._container, "deployment_snapshot")
             else {}
         )
-        shared_bridge = self._safe_shared_bridge_snapshot(mode="internal_light")
+        role_mode = normalize_role_mode(
+            deployment.get("role_mode") if isinstance(deployment, dict) else ""
+        )
+        shared_bridge_mode = "internal_light" if role_mode == "internal" else "external_full"
+        shared_bridge = (
+            dict(shared_bridge_snapshot)
+            if isinstance(shared_bridge_snapshot, dict)
+            else self._safe_shared_bridge_snapshot(mode=shared_bridge_mode)
+        )
         return {
             "ok": True,
             "health_mode": "lite",
@@ -293,21 +336,10 @@ class RuntimeStatusCoordinator:
         return {}
 
     def _build_job_panel_summary(self) -> Dict[str, Any]:
-        jobs = []
-        try:
-            jobs = self._container.job_service.list_jobs(limit=60)
-        except TaskEngineUnavailableError:
-            jobs = []
-        except Exception as exc:  # noqa: BLE001
-            if callable(self._emit_log):
-                self._emit_log(f"[运行状态] 刷新任务摘要失败: {exc}")
-            jobs = []
-        return {
-            "jobs": jobs if isinstance(jobs, list) else [],
-            "count": len(jobs) if isinstance(jobs, list) else 0,
-            "active_job_ids": self._safe_active_job_ids(),
-            "job_counts": self._safe_job_counts(),
-        }
+        return build_job_panel_summary(self._container, limit=60, emit_log=self._emit_log)
+
+    def _build_job_panel_dashboard_summary(self) -> Dict[str, Any]:
+        return build_job_panel_summary(self._container, limit=12, emit_log=self._emit_log)
 
     def _build_runtime_resources_summary(self) -> Dict[str, Any]:
         try:
@@ -328,17 +360,23 @@ class RuntimeStatusCoordinator:
         }
 
     def _build_bridge_tasks_summary(self) -> Dict[str, Any]:
+        return self._build_bridge_tasks_summary_with_limit(limit=60)
+
+    def _build_bridge_tasks_dashboard_summary(self) -> Dict[str, Any]:
+        return self._build_bridge_tasks_summary_with_limit(limit=12)
+
+    def _build_bridge_tasks_summary_with_limit(self, *, limit: int) -> Dict[str, Any]:
         service = getattr(self._container, "shared_bridge_service", None)
         tasks = []
         if service is None:
             return {"tasks": [], "count": 0}
         try:
-            tasks = service.list_tasks(limit=60)
+            tasks = service.list_tasks(limit=limit)
         except Exception as exc:  # noqa: BLE001
             checker = getattr(service, "_is_recoverable_store_error", None)
             if callable(checker) and checker(exc):
                 cache_reader = getattr(service, "get_cached_tasks", None)
-                tasks = cache_reader(limit=60) if callable(cache_reader) else []
+                tasks = cache_reader(limit=limit) if callable(cache_reader) else []
             else:
                 if callable(self._emit_log):
                     self._emit_log(f"[运行状态] 刷新共享桥接任务摘要失败: {exc}")

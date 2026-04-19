@@ -344,12 +344,14 @@ function buildDefaultHandoverRows() {
 function applyHandoverDefaults(cfg) {
   cfg.handover_log.chiller_mode = cfg.handover_log.chiller_mode || {};
   cfg.handover_log.scheduler = cfg.handover_log.scheduler || {};
+  cfg.handover_log.capacity_report = cfg.handover_log.capacity_report || {};
   cfg.handover_log.change_management_section = cfg.handover_log.change_management_section || {};
   cfg.handover_log.exercise_management_section = cfg.handover_log.exercise_management_section || {};
   cfg.handover_log.maintenance_management_section = cfg.handover_log.maintenance_management_section || {};
   cfg.handover_log.other_important_work_section = cfg.handover_log.other_important_work_section || {};
   const chillerMode = cfg.handover_log.chiller_mode;
   const scheduler = cfg.handover_log.scheduler;
+  const capacityReport = cfg.handover_log.capacity_report;
   const download = cfg.handover_log.download;
   const template = cfg.handover_log.template;
   const businessRoot = String(cfg.download.save_dir || cfg.input.excel_dir || "").trim() || "D:\\QLDownload";
@@ -380,6 +382,21 @@ function applyHandoverDefaults(cfg) {
   setNumberDefault(download, "site_start_delay_sec", 1);
   setBooleanDefault(download, "debug_step_log", true);
   setStringDefault(download, "export_button_text", "原样导出");
+  capacityReport.weather = capacityReport.weather || {};
+  setStringDefault(capacityReport.weather, "provider", "seniverse");
+  setStringDefault(capacityReport.weather, "location", "崇川区");
+  capacityReport.weather.fallback_locations = Array.isArray(capacityReport.weather.fallback_locations)
+    ? capacityReport.weather.fallback_locations.filter((item) => String(item || "").trim())
+    : ["南通"];
+  if (!capacityReport.weather.fallback_locations.length) {
+    capacityReport.weather.fallback_locations = ["南通"];
+  }
+  setStringDefault(capacityReport.weather, "language", "zh-Hans");
+  setStringDefault(capacityReport.weather, "unit", "c");
+  setNumberDefault(capacityReport.weather, "timeout_sec", 8);
+  setStringDefault(capacityReport.weather, "auth_mode", "signed");
+  setStringDefault(capacityReport.weather, "seniverse_public_key", "");
+  setStringDefault(capacityReport.weather, "seniverse_private_key", "");
   const shiftRoster = cfg.handover_log.shift_roster;
   const eventSections = cfg.handover_log.event_sections;
   const changeManagement = cfg.handover_log.change_management_section;

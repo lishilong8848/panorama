@@ -25,13 +25,22 @@ def _make_container(config_path: Path):
     container.runtime_config = config
     container.config_path = config_path
     container.logs = []
+    container.reload_calls = []
+    container.apply_calls = []
     container.add_system_log = container.logs.append
 
     def _reload(saved):
+        container.reload_calls.append(copy.deepcopy(saved))
+        container.config = saved
+        container.runtime_config = saved
+
+    def _apply(saved, *, mode="light"):
+        container.apply_calls.append(mode)
         container.config = saved
         container.runtime_config = saved
 
     container.reload_config = _reload
+    container.apply_config_snapshot = _apply
     return container
 
 
@@ -45,7 +54,7 @@ def test_handover_building_segment_routes_roundtrip(tmp_path: Path, monkeypatch)
     container = _make_container(config_path)
     request = _make_request(container)
 
-    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None)
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
 
     current = routes.get_handover_building_config_segment("A", request)
     next_payload = copy.deepcopy(current["data"])
@@ -59,7 +68,76 @@ def test_handover_building_segment_routes_roundtrip(tmp_path: Path, monkeypatch)
 
     assert response["revision"] == current["revision"] + 1
     assert container.config["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-路由保存"
+    assert container.apply_calls == ["light"]
+    assert container.reload_calls == []
+    assert response["apply_mode"] == "business_only"
+    assert response["reload_performed"] is False
+    assert response["applied_services"] == ["config_snapshot", "runtime_config", "job_service_config"]
     assert any("交接班A楼配置已保存" in item for item in container.logs)
+
+
+def test_handover_building_segment_persists_review_recipient_enabled_flag(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "表格计算配置.json"
+    _write_default_config(config_path)
+    container = _make_container(config_path)
+    request = _make_request(container)
+
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
+
+    current = routes.get_handover_building_config_segment("A", request)
+    next_payload = copy.deepcopy(current["data"])
+    next_payload.setdefault("review_ui", {})
+    next_payload["review_ui"]["review_link_recipients_by_building"] = {
+        "A楼": [
+            {"note": "值班经理", "open_id": "ou_enabled", "enabled": True},
+            {"note": "备用", "open_id": "ou_disabled", "enabled": False},
+        ]
+    }
+
+    response = routes.put_handover_building_config_segment(
+        "A",
+        {"base_revision": current["revision"], "data": next_payload},
+        request,
+    )
+
+    rows = response["data"]["review_ui"]["review_link_recipients_by_building"]["A楼"]
+    assert rows == [
+        {"note": "值班经理", "open_id": "ou_enabled", "enabled": True},
+        {"note": "备用", "open_id": "ou_disabled", "enabled": False},
+    ]
+
+
+def test_handover_building_segment_normalizes_missing_recipient_enabled_flag(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "表格计算配置.json"
+    _write_default_config(config_path)
+    container = _make_container(config_path)
+    request = _make_request(container)
+
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
+
+    current = routes.get_handover_building_config_segment("A", request)
+    next_payload = copy.deepcopy(current["data"])
+    next_payload.setdefault("review_ui", {})
+    next_payload["review_ui"]["review_link_recipients_by_building"] = {
+        "A楼": [
+            {"note": "默认启用", "open_id": "ou_default"},
+            {"note": "显式关闭", "open_id": "ou_disabled", "enabled": False},
+            {"note": "非布尔也按启用", "open_id": "ou_string", "enabled": "yes"},
+        ]
+    }
+
+    response = routes.put_handover_building_config_segment(
+        "A",
+        {"base_revision": current["revision"], "data": next_payload},
+        request,
+    )
+
+    rows = response["data"]["review_ui"]["review_link_recipients_by_building"]["A楼"]
+    assert rows == [
+        {"note": "默认启用", "open_id": "ou_default", "enabled": True},
+        {"note": "显式关闭", "open_id": "ou_disabled", "enabled": False},
+        {"note": "非布尔也按启用", "open_id": "ou_string", "enabled": True},
+    ]
 
 
 def test_handover_building_segment_route_rejects_stale_revision(tmp_path: Path, monkeypatch) -> None:
@@ -68,7 +146,7 @@ def test_handover_building_segment_route_rejects_stale_revision(tmp_path: Path, 
     container = _make_container(config_path)
     request = _make_request(container)
 
-    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None)
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
 
     current = routes.get_handover_building_config_segment("A", request)
     next_payload = copy.deepcopy(current["data"])
@@ -96,7 +174,7 @@ def test_handover_common_segment_routes_roundtrip(tmp_path: Path, monkeypatch) -
     container = _make_container(config_path)
     request = _make_request(container)
 
-    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None)
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
 
     current = routes.get_handover_common_config_segment(request)
     next_payload = copy.deepcopy(current["data"])
@@ -109,6 +187,11 @@ def test_handover_common_segment_routes_roundtrip(tmp_path: Path, monkeypatch) -
 
     assert response["revision"] == current["revision"] + 1
     assert container.config["features"]["handover_log"]["cloud_sheet_sync"]["root_wiki_url"] == "https://example.com/wiki/common"
+    assert container.apply_calls == ["light"]
+    assert container.reload_calls == []
+    assert response["apply_mode"] == "business_only"
+    assert response["reload_performed"] is False
+    assert response["applied_services"] == ["config_snapshot", "runtime_config", "job_service_config"]
     assert any("交接班公共配置已保存" in item for item in container.logs)
 
 
@@ -118,7 +201,7 @@ def test_handover_common_segment_route_rejects_stale_revision(tmp_path: Path, mo
     container = _make_container(config_path)
     request = _make_request(container)
 
-    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None)
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
 
     current = routes.get_handover_common_config_segment(request)
     next_payload = copy.deepcopy(current["data"])
@@ -144,7 +227,7 @@ def test_put_config_keeps_segment_backed_handover_values(tmp_path: Path, monkeyp
     container = _make_container(config_path)
     request = _make_request(container)
 
-    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None)
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
     monkeypatch.setattr(routes, "_materialize_review_access_snapshot", lambda _container: {"configured": False})
     monkeypatch.setattr(routes, "_persist_manual_review_access_snapshot", lambda _container: {"configured": True})
 
@@ -203,5 +286,5 @@ def test_day_metric_config_repair_route_no_change_does_not_save(tmp_path: Path, 
 
     assert response["ok"] is True
     assert response["repaired"] is False
-    assert response["notes"] == []
+    assert response["notes"] == ["12项规则已内置，无需修复"]
     assert any("无需修复" in item for item in container.logs)
