@@ -5,7 +5,6 @@
       "business_root_dir": "D:\\QLDownload",
       "runtime_state_root": ".runtime"
     },
-    
     "deployment": {
       "role_mode": "external",
       "last_started_role_mode": "external",
