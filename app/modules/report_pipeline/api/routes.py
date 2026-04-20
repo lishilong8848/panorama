@@ -423,6 +423,161 @@ def _remember_external_source_cache_overview(request: Request, payload: Any) -> 
     return overview
 
 
+def _copy_presented_keys(payload: Any, keys: tuple[str, ...]) -> Dict[str, Any]:
+    source = payload if isinstance(payload, dict) else {}
+    return {
+        key: copy.deepcopy(source[key])
+        for key in keys
+        if key in source
+    }
+
+
+_EXTERNAL_SOURCE_CACHE_BUILDING_DISPLAY_KEYS = (
+    "building",
+    "bucket_key",
+    "status",
+    "status_key",
+    "reason_code",
+    "ready",
+    "tone",
+    "status_text",
+    "detail_text",
+    "downloaded_at",
+    "selected_downloaded_at",
+    "last_error",
+    "relative_path",
+    "resolved_file_path",
+    "started_at",
+    "blocked",
+    "blocked_reason",
+    "next_probe_at",
+    "source_family",
+    "using_fallback",
+    "version_gap",
+    "source_kind",
+    "source_kind_text",
+    "selection_scope",
+    "selection_scope_text",
+    "meta_lines",
+    "actions",
+    "backfill_running",
+    "backfill_text",
+    "backfill_scope_text",
+    "backfill_task_id",
+)
+
+
+_EXTERNAL_SOURCE_CACHE_FAMILY_DISPLAY_KEYS = (
+    "key",
+    "title",
+    "display_title",
+    "current_bucket",
+    "best_bucket_key",
+    "best_bucket_age_hours",
+    "best_bucket_age_text",
+    "is_best_bucket_too_old",
+    "reference_label",
+    "age_label",
+    "building_reference_label",
+    "date_semantic",
+    "tone",
+    "status_text",
+    "summary_text",
+    "detail_text",
+    "reason_code",
+    "display_note_text",
+    "error_text",
+    "items",
+    "meta_lines",
+    "actions",
+    "can_proceed",
+    "ready_count",
+    "live_ready_count",
+    "live_downloading_count",
+    "live_failed_count",
+    "live_blocked_count",
+    "fallback_buildings",
+    "missing_buildings",
+    "stale_buildings",
+    "failed_buildings",
+    "blocked_buildings",
+    "last_success_at",
+    "has_failures",
+    "has_blocked",
+    "has_downloading",
+    "all_ready",
+    "manual_refresh",
+    "backfill_running",
+    "backfill_text",
+    "backfill_scope_text",
+    "backfill_task_id",
+    "backfill_label",
+    "backfill_scope_label",
+    "selection_policy",
+    "selection_reference_date",
+    "used_previous_day_fallback",
+    "missing_today_buildings",
+    "missing_both_days_buildings",
+    "today_selected_count",
+    "upload_last_run_at",
+    "upload_last_success_at",
+    "upload_last_error",
+    "upload_record_count",
+    "upload_file_count",
+    "upload_running",
+    "upload_started_at",
+    "upload_current_mode",
+    "upload_current_scope",
+    "upload_running_text",
+    "upload_status",
+)
+
+
+_EXTERNAL_SOURCE_CACHE_OVERVIEW_DISPLAY_KEYS = (
+    "tone",
+    "status_text",
+    "summary_text",
+    "detail_text",
+    "reason_code",
+    "display_note_text",
+    "reference_bucket_key",
+    "error_text",
+    "items",
+    "actions",
+    "can_proceed",
+    "can_proceed_latest",
+    "family_can_proceed",
+)
+
+
+def _slim_external_source_cache_building(payload: Any) -> Dict[str, Any]:
+    return _copy_presented_keys(payload, _EXTERNAL_SOURCE_CACHE_BUILDING_DISPLAY_KEYS)
+
+
+def _slim_external_source_cache_family(payload: Any) -> Dict[str, Any]:
+    family = payload if isinstance(payload, dict) else {}
+    slim = _copy_presented_keys(family, _EXTERNAL_SOURCE_CACHE_FAMILY_DISPLAY_KEYS)
+    buildings = family.get("buildings", [])
+    slim["buildings"] = [
+        _slim_external_source_cache_building(row)
+        for row in buildings
+        if isinstance(row, dict)
+    ] if isinstance(buildings, list) else []
+    return slim
+
+
+def _slim_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
+    overview = payload if isinstance(payload, dict) else {}
+    slim = _copy_presented_keys(overview, _EXTERNAL_SOURCE_CACHE_OVERVIEW_DISPLAY_KEYS)
+    families = overview.get("families", [])
+    slim["families"] = [
+        _slim_external_source_cache_family(family)
+        for family in families
+        if isinstance(family, dict)
+    ] if isinstance(families, list) else []
+    return slim
+
+
 def _is_recoverable_resume_index_error(exc: Exception) -> bool:
     if not isinstance(exc, OSError):
         return False
@@ -4945,7 +5100,6 @@ def _build_external_source_cache_module(request: Request) -> Dict[str, Any]:
             shared_source_cache_overview=shared_source_cache_overview,
             internal_alert_overview=internal_alert_overview,
             display={
-                "shared_source_cache_overview": shared_source_cache_overview,
                 "internal_alert_overview": internal_alert_overview,
             },
         )
@@ -5002,6 +5156,7 @@ def _build_external_source_cache_module(request: Request) -> Dict[str, Any]:
         request,
         shared_source_cache_overview,
     )
+    shared_source_cache_overview = _slim_external_source_cache_overview(shared_source_cache_overview)
     internal_alert_overview = present_external_internal_alert_overview(
         live_shared_bridge.get("internal_alert_status", {})
         if isinstance(live_shared_bridge, dict)
@@ -5015,7 +5170,6 @@ def _build_external_source_cache_module(request: Request) -> Dict[str, Any]:
         "shared_source_cache_overview": shared_source_cache_overview,
         "internal_alert_overview": internal_alert_overview,
         "display": {
-            "shared_source_cache_overview": shared_source_cache_overview,
             "internal_alert_overview": internal_alert_overview,
         },
     }

@@ -2145,7 +2145,63 @@ class SharedSourceCacheService:
     ) -> Dict[str, Any] | None:
         if self.store is None:
             return None
-        candidates: List[Dict[str, Any]] = []
+
+        def _normalize_candidate(entry: Dict[str, Any]) -> Dict[str, Any] | None:
+            file_path = self._resolve_entry_file_path(entry)
+            if file_path is None:
+                return None
+            effective_context = self._resolve_handover_entry_duty_context(entry)
+            if effective_context["duty_date"] != duty_date:
+                return None
+            normalized_entry = dict(entry)
+            normalized_entry["file_path"] = str(file_path)
+            normalized_entry["duty_date"] = effective_context["duty_date"]
+            normalized_entry["duty_shift"] = effective_context["duty_shift"]
+            return normalized_entry
+
+        def _sorted_by_hour(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            return sorted(
+                rows,
+                key=lambda row: (
+                    _parse_hour_bucket(str(row.get("bucket_key", "") or "").strip()) or datetime.min,
+                    str(row.get("downloaded_at", "") or "").strip(),
+                    str(row.get("updated_at", "") or "").strip(),
+                ),
+                reverse=True,
+            )
+
+        latest_candidates: List[Dict[str, Any]] = []
+        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                bucket_kind="latest",
+                duty_date=duty_date,
+                status="ready",
+                limit=50,
+            )
+            latest_candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in _sorted_by_hour(latest_candidates):
+            normalized = _normalize_candidate(entry)
+            if normalized is not None:
+                return normalized
+
+        latest_candidates = []
+        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                bucket_kind="latest",
+                status="ready",
+                limit=100,
+            )
+            latest_candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in _sorted_by_hour(latest_candidates):
+            normalized = _normalize_candidate(entry)
+            if normalized is not None:
+                return normalized
+
+        date_candidates: List[Dict[str, Any]] = []
         for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
             rows = self.store.list_source_cache_entries(
                 source_family=family_name,
@@ -2154,40 +2210,16 @@ class SharedSourceCacheService:
                 status="ready",
                 limit=50,
             )
-            candidates.extend(row for row in rows if isinstance(row, dict))
-        for entry in candidates:
-            file_path = self._resolve_entry_file_path(entry)
-            if file_path is None:
-                continue
-            effective_context = self._resolve_handover_entry_duty_context(entry)
-            if effective_context["duty_date"] != duty_date:
-                continue
-            normalized_entry = dict(entry)
-            normalized_entry["file_path"] = str(file_path)
-            normalized_entry["duty_date"] = effective_context["duty_date"]
-            normalized_entry["duty_shift"] = effective_context["duty_shift"]
-            return normalized_entry
-        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
-            rows = self.store.list_source_cache_entries(
-                source_family=family_name,
-                building=building,
-                bucket_kind="latest",
-                status="ready",
-                limit=50,
+            date_candidates.extend(
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and str(row.get("bucket_kind", "") or "").strip().lower() != "latest"
             )
-            candidates.extend(row for row in rows if isinstance(row, dict))
-        for entry in candidates:
-            file_path = self._resolve_entry_file_path(entry)
-            if file_path is None:
-                continue
-            effective_context = self._resolve_handover_entry_duty_context(entry)
-            if effective_context["duty_date"] != duty_date:
-                continue
-            normalized_entry = dict(entry)
-            normalized_entry["file_path"] = str(file_path)
-            normalized_entry["duty_date"] = effective_context["duty_date"]
-            normalized_entry["duty_shift"] = effective_context["duty_shift"]
-            return normalized_entry
+        for entry in date_candidates:
+            normalized = _normalize_candidate(entry)
+            if normalized is not None:
+                return normalized
         return None
 
     def _scan_handover_history_candidates(
@@ -2298,6 +2330,21 @@ class SharedSourceCacheService:
         current_bucket_key = self.current_hour_bucket()
         current_bucket_segment = self._bucket_path_segment(current_bucket_key, bucket_kind="latest") if is_today else ""
 
+        cached_entry = self._get_cached_ready_handover_entry_for_date(
+            building=building,
+            duty_date=duty_date,
+        )
+        if isinstance(cached_entry, dict):
+            normalized_entry = dict(cached_entry)
+            normalized_entry["resolution_source"] = (
+                "cache_latest"
+                if str(normalized_entry.get("bucket_kind", "") or "").strip().lower() == "latest"
+                else "cache_date"
+            )
+            normalized_entry["scanned_candidates"] = []
+            normalized_entry["redownload_attempted"] = False
+            return normalized_entry
+
         scan_info = self._scan_handover_history_candidates(building=building, duty_date=duty_date)
         selected = scan_info.get("selected") if isinstance(scan_info, dict) else None
         selected_bucket_key = str(selected.get("bucket_key", "") or "").strip() if isinstance(selected, dict) else ""
@@ -2351,23 +2398,7 @@ class SharedSourceCacheService:
                 redownload_attempted=redownload_attempted,
             )
 
-        cached_entry = self._get_cached_ready_handover_entry_for_date(
-            building=building,
-            duty_date=duty_date,
-        )
-        if not isinstance(cached_entry, dict):
-            return None
-        normalized_entry = dict(cached_entry)
-        normalized_entry["resolution_source"] = (
-            "cache_date"
-            if str(normalized_entry.get("bucket_kind", "") or "").strip().lower() == "date"
-            else "cache_latest"
-        )
-        normalized_entry["scanned_candidates"] = copy.deepcopy(
-            scan_info.get("candidates", []) if isinstance(scan_info, dict) else []
-        )
-        normalized_entry["redownload_attempted"] = bool(redownload_attempted)
-        return normalized_entry
+        return None
 
     def _find_latest_valid_handover_history_file(
         self,
@@ -2673,20 +2704,29 @@ class SharedSourceCacheService:
         output: List[Dict[str, Any]] = []
         for duty_date in [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]:
             for building in [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]:
-                entry = self._get_ready_entry(
-                    source_family=FAMILY_HANDOVER_LOG,
+                entry = self._get_cached_ready_handover_entry_for_date(
                     building=building,
-                    bucket_kind="date",
-                    bucket_key=duty_date,
                     duty_date=duty_date,
-                    duty_shift="all",
                 )
-                if not entry:
+                if not isinstance(entry, dict):
                     continue
-                file_path = self._resolve_entry_file_path(entry)
-                if file_path is None:
-                    continue
+                file_path = str(entry.get("file_path", "") or "").strip()
+                if not file_path:
+                    resolved = self._resolve_entry_file_path(entry)
+                    if resolved is None:
+                        continue
+                    file_path = str(resolved)
+                metadata = dict(entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {})
+                metadata.setdefault(
+                    "resolution_source",
+                    "cache_latest"
+                    if str(entry.get("bucket_kind", "") or "").strip().lower() == "latest"
+                    else "cache_date",
+                )
+                metadata.setdefault("selected_source_file", file_path)
                 output.append({**entry, "file_path": str(file_path)})
+                output[-1]["source_file"] = str(file_path)
+                output[-1]["metadata"] = metadata
         return output
 
     def repair_day_metric_ready_entries(
@@ -3163,30 +3203,43 @@ class SharedSourceCacheService:
             source_path = Path(str(item.get("source_file", "") or "").strip())
             if not duty_date or not building_name or not source_path.exists():
                 continue
-            output.append(
-                self._store_entry(
-                    source_family=FAMILY_HANDOVER_LOG,
-                    building=building_name,
-                    bucket_kind="date",
-                    bucket_key=duty_date,
-                    duty_date=duty_date,
-                    duty_shift="all",
-                    source_path=source_path,
-                    status="ready",
-                    metadata={
-                        "family": FAMILY_HANDOVER_LOG,
-                        "building": building_name,
-                        "duty_date": duty_date,
-                        "duty_shift": "all",
-                        "resolution_source": str(item.get("resolution_source", "") or "").strip(),
-                        "source_bucket_kind": str(item.get("cache_bucket_kind", "") or "").strip(),
-                        "source_bucket_key": str(item.get("cache_bucket_key", "") or "").strip(),
-                        "source_entry_id": str(item.get("cache_entry_id", "") or "").strip(),
-                        "selected_source_file": str(item.get("source_file", "") or "").strip(),
-                        "redownload_attempted": bool(item.get("redownload_attempted", False)),
-                        "scanned_candidates": int(item.get("scanned_candidates", 0) or 0),
-                    },
+            try:
+                relative_path = (
+                    source_path.relative_to(self.shared_root).as_posix()
+                    if self.shared_root is not None
+                    else str(source_path)
                 )
+            except ValueError:
+                relative_path = str(source_path)
+            metadata = {
+                "family": FAMILY_HANDOVER_LOG,
+                "building": building_name,
+                "duty_date": duty_date,
+                "duty_shift": "all",
+                "resolution_source": str(item.get("resolution_source", "") or "").strip(),
+                "source_bucket_kind": str(item.get("cache_bucket_kind", "") or "").strip(),
+                "source_bucket_key": str(item.get("cache_bucket_key", "") or "").strip(),
+                "source_entry_id": str(item.get("cache_entry_id", "") or "").strip(),
+                "selected_source_file": str(item.get("source_file", "") or "").strip(),
+                "redownload_attempted": bool(item.get("redownload_attempted", False)),
+                "scanned_candidates": int(item.get("scanned_candidates", 0) or 0),
+            }
+            output.append(
+                {
+                    "entry_id": str(item.get("cache_entry_id", "") or "").strip(),
+                    "source_family": FAMILY_HANDOVER_LOG,
+                    "building": building_name,
+                    "bucket_kind": str(item.get("cache_bucket_kind", "") or "").strip(),
+                    "bucket_key": str(item.get("cache_bucket_key", "") or "").strip(),
+                    "duty_date": duty_date,
+                    "duty_shift": "all",
+                    "downloaded_at": str(item.get("cache_downloaded_at", "") or "").strip(),
+                    "relative_path": relative_path,
+                    "status": "ready",
+                    "file_path": str(source_path),
+                    "source_file": str(source_path),
+                    "metadata": metadata,
+                }
             )
         return output
 

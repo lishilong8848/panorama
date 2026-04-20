@@ -68,8 +68,8 @@ def _register_shared_handover_entry(
         shared_root
         / "交接班日志源文件"
         / "202604"
-        / f"{duty_date.replace('-', '')}--白班"
-        / f"{duty_date.replace('-', '')}--白班--交接班日志源文件--{building}.xlsx"
+        / f"{duty_date.replace('-', '')}--16"
+        / f"{duty_date.replace('-', '')}--16--交接班日志源文件--{building}.xlsx"
     )
     _write_handover_source_xlsx(source_path, e_value=e_value)
     store.upsert_source_cache_entry(
@@ -114,6 +114,9 @@ def test_fill_day_metric_history_reuses_shared_handover_sources(work_dir: Path) 
     assert len(entries) == 1
     output_path = Path(entries[0]["file_path"])
     assert output_path.exists()
+    assert entries[0]["bucket_kind"] == "latest"
+    assert entries[0]["bucket_key"] == "2026-04-05 16"
+    assert "20260405--16" in entries[0]["relative_path"]
     rows = store.list_source_cache_entries(
         source_family=FAMILY_HANDOVER_LOG,
         building="A楼",
@@ -123,8 +126,7 @@ def test_fill_day_metric_history_reuses_shared_handover_sources(work_dir: Path) 
         duty_shift="all",
         status="ready",
     )
-    assert len(rows) == 1
-    assert rows[0]["relative_path"].endswith(".xlsx")
+    assert rows == []
 
 
 def test_fill_day_metric_history_raises_when_no_shared_handover_source(work_dir: Path) -> None:
@@ -196,9 +198,10 @@ def test_fill_day_metric_history_skips_empty_ready_entry_and_reuses_valid_latest
     finally:
         workbook.close()
     assert output_path.read_bytes() == latest_valid.read_bytes()
+    assert entries[0]["bucket_kind"] == "latest"
 
 
-def test_fill_day_metric_history_prefers_history_scan_over_valid_cache_entry(work_dir: Path) -> None:
+def test_fill_day_metric_history_prefers_cached_entry_over_history_scan(work_dir: Path) -> None:
     shared_root = work_dir / "shared"
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
@@ -240,10 +243,10 @@ def test_fill_day_metric_history_prefers_history_scan_over_valid_cache_entry(wor
     )
 
     assert len(entries) == 1
-    assert entries[0]["metadata"]["resolution_source"] == "history_scan"
+    assert entries[0]["metadata"]["resolution_source"] == "cache_date"
     workbook = openpyxl.load_workbook(Path(entries[0]["file_path"]), data_only=True)
     try:
-        assert workbook.active["E4"].value == 222.2
+        assert workbook.active["E4"].value == 111.1
     finally:
         workbook.close()
 
@@ -515,4 +518,5 @@ def test_fill_day_metric_history_falls_back_to_real_history_folder_when_store_mi
         assert workbook.active["E4"].value == 123.4
     finally:
         workbook.close()
-    assert entries[0]["bucket_kind"] == "date"
+    assert entries[0]["bucket_kind"] == "history_scan"
+    assert "20260411--11" in entries[0]["relative_path"]

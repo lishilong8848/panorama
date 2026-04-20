@@ -146,6 +146,14 @@ class _FakeCoordinator:
         _ = reason
 
 
+class _FakeFastSourceCacheService:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def get_external_source_cache_overview_fast(self):
+        return self.payload
+
+
 def test_get_external_dashboard_summary_returns_dashboard_display_without_runtime_cfg_error(monkeypatch):
     monkeypatch.setattr(routes, "DayMetricBitableExportService", _FakeDayMetricBitableExportService)
     monkeypatch.setattr(routes, "SharedSourceCacheService", _FakeSharedSourceCacheService)
@@ -983,3 +991,81 @@ def test_external_split_status_endpoints_return_module_payloads(monkeypatch):
     assert "handover_review_status" in routes.get_external_runtime_review_overview(request)
     assert "config_guidance_overview" in routes.get_external_runtime_config_guidance(request)
     assert "runtime_resources_summary" in routes.get_external_runtime_system(request)
+
+
+def test_external_source_cache_endpoint_returns_slim_display_payload():
+    raw_overview = {
+        "tone": "success",
+        "status_text": "共享文件已就绪",
+        "summary_text": "已齐套",
+        "reference_bucket_key": "2026-04-20 15",
+        "auto_retry_signature": "raw-diagnostic-only",
+        "families": [
+            {
+                "key": "handover_log_family",
+                "title": "交接班日志源文件",
+                "best_bucket_key": "2026-04-20 15",
+                "status_text": "共享文件已就绪",
+                "selected_entries": [
+                    {
+                        "entry_id": "raw-entry",
+                        "file_hash": "hash",
+                        "size_bytes": 123,
+                        "metadata": {"raw": True},
+                    }
+                ],
+                "buildings": [
+                    {
+                        "building": "A楼",
+                        "bucket_key": "2026-04-20 15",
+                        "status": "ready",
+                        "status_key": "ready",
+                        "status_text": "已就绪",
+                        "detail_text": "2026-04-20 15:12:39",
+                        "downloaded_at": "2026-04-20 15:12:39",
+                        "relative_path": "交接班日志源文件/test.xlsx",
+                        "resolved_file_path": r"\\172.16.1.2\share\交接班日志源文件\test.xlsx",
+                        "file_hash": "hash",
+                        "size_bytes": 123,
+                        "metadata": {"raw": True},
+                        "file_path": r"\\172.16.1.2\share\交接班日志源文件\test.xlsx",
+                    }
+                ],
+            }
+        ],
+        "family_retry_signatures": {"handover_log_family": "raw-diagnostic-only"},
+    }
+    container = SimpleNamespace(
+        config={"deployment": {"role_mode": "external"}},
+        runtime_config={"deployment": {"role_mode": "external"}},
+        deployment_snapshot=lambda: {"role_mode": "external", "node_label": "外网端"},
+        shared_bridge_service=_FakeFastSourceCacheService(raw_overview),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                container=container,
+                _health_component_cache={},
+                _health_component_cache_lock=threading.Lock(),
+                _external_source_cache_overview_last_non_empty=raw_overview,
+            )
+        )
+    )
+
+    payload = routes.get_external_runtime_source_cache(request)
+
+    overview = payload["shared_source_cache_overview"]
+    family = overview["families"][0]
+    building = family["buildings"][0]
+    assert overview["status_text"] == "共享文件已就绪"
+    assert family["status_text"] == "共享文件已就绪"
+    assert building["status_text"] == "已就绪"
+    assert building["resolved_file_path"] == r"\\172.16.1.2\share\交接班日志源文件\test.xlsx"
+    assert "selected_entries" not in family
+    assert "file_hash" not in building
+    assert "size_bytes" not in building
+    assert "metadata" not in building
+    assert "file_path" not in building
+    assert "auto_retry_signature" not in overview
+    assert "family_retry_signatures" not in overview
+    assert "shared_source_cache_overview" not in payload["display"]
