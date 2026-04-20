@@ -246,6 +246,7 @@ export function createAppState(vueApi) {
     version: "",
     startup_time: "",
     startup_role_confirmed: false,
+    startup_role_restorable: false,
     role_selection_required: false,
     startup_role_user_exited: false,
     startup_handoff: {
@@ -270,6 +271,7 @@ export function createAppState(vueApi) {
     },
     runtime_activated: false,
     activation_phase: "",
+    activation_step: "",
     activation_error: "",
     active_job_id: "",
     active_job_ids: [],
@@ -1948,9 +1950,19 @@ export function createAppState(vueApi) {
     };
   });
   const updaterMirrorOverview = computed(() => {
-    const backendOverview = mapBackendUpdaterMirrorOverview(
-      health.updater?.display_overview || health.dashboard_display?.updater_mirror_overview,
-    );
+    const dashboardOverview = (
+      health.dashboard_display?.updater_mirror_overview
+      && typeof health.dashboard_display.updater_mirror_overview === "object"
+    )
+      ? health.dashboard_display.updater_mirror_overview
+      : null;
+    const updaterOverview = (
+      health.updater?.display_overview
+      && typeof health.updater.display_overview === "object"
+    )
+      ? health.updater.display_overview
+      : null;
+    const backendOverview = mapBackendUpdaterMirrorOverview(dashboardOverview || updaterOverview);
     if (backendOverview) return backendOverview;
     return {
       tone: "neutral",

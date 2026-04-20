@@ -20,6 +20,7 @@ export function createStartupRoleUiHelpers(options = {}) {
     startupRoleLoadingTitle,
     startupRoleLoadingSubtitle,
     startupRoleLoadingStage,
+    startupRoleActivationInFlight,
     startupRoleCurrentMode,
     startupRoleCurrentToken,
     startupRoleCurrentNodeId,
@@ -116,6 +117,67 @@ export function createStartupRoleUiHelpers(options = {}) {
     const nodeId = String(health.deployment?.node_id || startupRoleCurrentNodeId.value || "").trim();
     if (!confirmedRole || !startupToken) return;
     writeStartupRoleSession?.(confirmedRole, startupToken, nodeId);
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, Math.max(0, Number(ms) || 0));
+    });
+  }
+
+  function resolveActivationProgressSubtitle(defaultText = "正在连接后台运行时，请稍候。") {
+    const step = String(health.activation_step || "").trim();
+    const phase = String(health.activation_phase || "").trim().toLowerCase();
+    if (phase === "failed") {
+      return String(health.activation_error || "").trim() || "后台运行时激活失败。";
+    }
+    if (step === "queued") {
+      return "后台运行时激活请求已受理，正在排队启动。";
+    }
+    if (step === "starting_runtime_services") {
+      return "正在启动调度、共享桥接和后台运行组件。";
+    }
+    if (step === "initializing_handover_daily_report_auth") {
+      return "正在初始化交接班日报截图登录态。";
+    }
+    if (step === "probing_handover_review_access") {
+      return "正在检查审核页访问地址与审核链接补发状态。";
+    }
+    if (step === "activated") {
+      return "后台运行时已就绪，正在进入页面。";
+    }
+    return defaultText;
+  }
+
+  async function waitForStartupActivationCompletion(targetRole) {
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      await fetchBootstrapHealth?.({ silentMessage: true });
+      const phase = String(health.activation_phase || "").trim().toLowerCase();
+      if (Boolean(health.runtime_activated) && Boolean(health.startup_role_confirmed)) {
+        return true;
+      }
+      if (phase === "failed") {
+        const errorText = String(health.activation_error || "").trim() || "后台运行时激活失败。";
+        hideStartupRoleLoading();
+        startupRoleFlowState.value = "selecting";
+        if (message) message.value = errorText;
+        return false;
+      }
+      showStartupRoleLoading({
+        title: `正在加载${formatDeploymentRoleLabel(targetRole || "internal")}`,
+        subtitle: resolveActivationProgressSubtitle(),
+        stage: "activating",
+      });
+      await sleep(3000);
+    }
+    hideStartupRoleLoading();
+    startupRoleFlowState.value = "selecting";
+    if (message) {
+      const step = String(health.activation_step || "").trim();
+      message.value = `后台运行时启动超时${step ? `（当前阶段：${step}）` : ""}。`;
+    }
+    return false;
   }
 
   function persistRuntimeRecoveryIntent(roleMode = "") {
@@ -237,6 +299,10 @@ export function createStartupRoleUiHelpers(options = {}) {
   }
 
   async function activateStartupRuntimeAfterSelection(source, options = {}) {
+    if (startupRoleActivationInFlight?.value) {
+      return false;
+    }
+    startupRoleActivationInFlight.value = true;
     const targetRole = normalizeDeploymentRoleMode(
       options?.targetRoleMode || startupRoleSelectorSelection.value || config.value?.deployment?.role_mode || startupRoleCurrentMode.value,
     );
@@ -278,53 +344,65 @@ export function createStartupRoleUiHelpers(options = {}) {
       subtitle: "正在连接后台运行时，请稍候。",
       stage: "activating",
     });
-    const activationResult = await activateStartupRuntime?.({
-      source,
-      roleMode: targetRole,
-      sharedBridge: sharedBridgePayload,
-      startupHandoffNonce: String(options?.startupHandoffNonce || "").trim(),
-    });
-    if (activationResult?.ok === false) {
+    try {
+      const activationResult = await activateStartupRuntime?.({
+        source,
+        roleMode: targetRole,
+        sharedBridge: sharedBridgePayload,
+        startupHandoffNonce: String(options?.startupHandoffNonce || "").trim(),
+      });
+      if (activationResult?.ok === false) {
+        hideStartupRoleLoading();
+        startupRoleFlowState.value = "selecting";
+        if (message) message.value = String(activationResult?.error || "").trim() || "后台运行时激活失败。";
+        return false;
+      }
+      if (activationResult?.pending) {
+        health.activation_phase = String(activationResult?.phase || "activating").trim();
+        health.activation_step = String(activationResult?.step || "queued").trim();
+        const completed = await waitForStartupActivationCompletion(targetRole);
+        if (!completed) {
+          return false;
+        }
+      } else {
+        health.runtime_activated = true;
+        health.startup_role_confirmed = true;
+        health.role_selection_required = false;
+        health.startup_role_user_exited = false;
+        if (targetRole) {
+          Object.assign(health.deployment, {
+            ...(health.deployment || {}),
+            role_mode: targetRole,
+            last_started_role_mode: targetRole,
+            node_label: formatDeploymentRoleLabel(targetRole),
+          });
+        }
+        if (activationResult?.savedRole && typeof activationResult.savedRole === "object") {
+          Object.assign(health.deployment, {
+            role_mode: String(activationResult.savedRole.role_mode || targetRole || "").trim(),
+            node_label: String(activationResult.savedRole.node_label || formatDeploymentRoleLabel(targetRole)).trim(),
+          });
+        }
+        await fetchBootstrapHealth?.({ silentMessage: true });
+      }
+      if (health.startup_handoff && typeof health.startup_handoff === "object") {
+        Object.assign(health.startup_handoff, {
+          active: false,
+          mode: "",
+          target_role_mode: "",
+          requested_at: "",
+          reason: "",
+          nonce: "",
+        });
+      }
+      startupRoleSuppressedHandoffNonce.value = "";
+      persistStartupRoleSession(targetRole);
       hideStartupRoleLoading();
-      startupRoleFlowState.value = "selecting";
-      if (message) message.value = String(activationResult?.error || "").trim() || "后台运行时激活失败。";
-      return false;
+      startupRoleFlowState.value = "activated";
+      return true;
+    } finally {
+      startupRoleActivationInFlight.value = false;
     }
-    health.runtime_activated = true;
-    health.startup_role_confirmed = true;
-    health.role_selection_required = false;
-    health.startup_role_user_exited = false;
-    if (targetRole) {
-      Object.assign(health.deployment, {
-        ...(health.deployment || {}),
-        role_mode: targetRole,
-        last_started_role_mode: targetRole,
-        node_label: formatDeploymentRoleLabel(targetRole),
-      });
-    }
-    if (activationResult?.savedRole && typeof activationResult.savedRole === "object") {
-      Object.assign(health.deployment, {
-        role_mode: String(activationResult.savedRole.role_mode || targetRole || "").trim(),
-        node_label: String(activationResult.savedRole.node_label || formatDeploymentRoleLabel(targetRole)).trim(),
-      });
-    }
-    if (health.startup_handoff && typeof health.startup_handoff === "object") {
-      Object.assign(health.startup_handoff, {
-        active: false,
-        mode: "",
-        target_role_mode: "",
-        requested_at: "",
-        reason: "",
-        nonce: "",
-      });
-    }
-    startupRoleSuppressedHandoffNonce.value = "";
-    await fetchBootstrapHealth?.({ silentMessage: true });
-    await fetchHealth?.({ silentTransientNetworkError: true, silentMessage: true });
-    persistStartupRoleSession(targetRole);
-    hideStartupRoleLoading();
-    startupRoleFlowState.value = "activated";
-    return true;
   }
 
   async function exitCurrentSystemToRoleSelector() {

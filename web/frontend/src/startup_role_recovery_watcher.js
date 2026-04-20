@@ -18,6 +18,7 @@ export function registerStartupRoleRecoveryWatcher(options = {}) {
     startupRoleSelectorVisible,
     startupRoleSelectorBusy,
     startupRoleLoadingVisible,
+    startupRoleActivationInFlight,
     startupRoleSelectorHandled,
     startupRoleDecisionReady,
     startupRoleSuppressedHandoffNonce,
@@ -52,7 +53,10 @@ export function registerStartupRoleRecoveryWatcher(options = {}) {
       selectorVisible: startupRoleSelectorVisible.value,
       selectorBusy: startupRoleSelectorBusy.value,
       loadingVisible: startupRoleLoadingVisible.value,
+      activationInFlight: Boolean(startupRoleActivationInFlight?.value),
+      activationPhase: String(health.activation_phase || "").trim().toLowerCase(),
       startupRoleConfirmed: Boolean(health.startup_role_confirmed),
+      startupRoleRestorable: Boolean(health.startup_role_restorable),
       runtimeActivated: Boolean(health.runtime_activated),
       roleSelectionRequired: Boolean(health.role_selection_required),
       startupRoleUserExited: Boolean(health.startup_role_user_exited),
@@ -67,10 +71,16 @@ export function registerStartupRoleRecoveryWatcher(options = {}) {
         return;
       }
       clearStartupRouteFallbackTimer();
+      if (state.activationInFlight) return;
       if (state.overlayVisible) return;
       const normalizedFlowState = String(state.flowState || "").trim().toLowerCase();
       const activationFlowInProgress = Boolean(
-        (state.loadingVisible || state.selectorBusy || ["activating", "recovering", "restarting"].includes(normalizedFlowState))
+        (
+          state.loadingVisible
+          || state.selectorBusy
+          || ["activating", "recovering", "restarting"].includes(normalizedFlowState)
+          || ["activating", "recovering", "restarting"].includes(String(state.activationPhase || "").trim().toLowerCase())
+        )
         && !state.runtimeActivated
       );
       if (activationFlowInProgress) return;
@@ -217,7 +227,7 @@ export function registerStartupRoleRecoveryWatcher(options = {}) {
         routeRole
         && savedRole
         && routeRole === savedRole
-        && state.startupRoleConfirmed
+        && (state.startupRoleConfirmed || state.startupRoleRestorable)
         && !state.roleSelectionRequired
       ) {
         const activationKey = `${state.currentStartupToken || ""}|${routeRole}|route_resume`;
@@ -251,7 +261,7 @@ export function registerStartupRoleRecoveryWatcher(options = {}) {
       if (
         !routeRole
         && savedRole
-        && state.startupRoleConfirmed
+        && state.startupRoleRestorable
         && !state.roleSelectionRequired
       ) {
         const activationKey = `${state.currentStartupToken || ""}|${savedRole}|saved_config_resume`;

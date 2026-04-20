@@ -41,6 +41,8 @@ function isResumeConflictError(err) {
 
 export function createRuntimeResumeActions(ctx) {
   const {
+    health,
+    bootstrapReady,
     config,
     message,
     currentJob,
@@ -54,7 +56,18 @@ export function createRuntimeResumeActions(ctx) {
     canRun,
     streamController,
     runSingleFlight,
+    shouldPauseRuntimeRequests,
   } = ctx;
+
+  function isRuntimeTrafficPaused() {
+    return Boolean(
+      (typeof shouldPauseRuntimeRequests === "function" && shouldPauseRuntimeRequests())
+      || Boolean(shouldPauseRuntimeRequests?.value)
+      || !Boolean(bootstrapReady?.value)
+      || !Boolean(health?.runtime_activated)
+      || !Boolean(health?.startup_role_confirmed)
+    );
+  }
 
   function getResumeRunId(run) {
     return normalizeRunId(run?.run_id);
@@ -84,6 +97,7 @@ export function createRuntimeResumeActions(ctx) {
   }
 
   async function fetchPendingResumeRuns(options = {}) {
+    if (isRuntimeTrafficPaused()) return false;
     const silentMessage = Boolean(options?.silentMessage);
     try {
       const data = await getPendingResumeRunsApi();

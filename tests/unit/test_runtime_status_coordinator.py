@@ -202,6 +202,35 @@ def test_runtime_status_coordinator_writes_external_shared_bridge_full_scope(tmp
         coordinator.stop()
 
 
+def test_runtime_status_coordinator_prefers_memory_cache_for_scope_reads(tmp_path: Path, monkeypatch) -> None:
+    coordinator = RuntimeStatusCoordinator(
+        container=_fake_container(role_mode="external"),
+        runtime_state_root=tmp_path,
+        app_state_getter=lambda: {
+            "runtime_activated": True,
+            "activation_phase": "activated",
+            "activation_error": "",
+            "startup_role_confirmed": True,
+            "started_at": "2026-04-15 09:00:00",
+        },
+        emit_log=None,
+        refresh_interval_sec=60.0,
+    )
+    coordinator.start()
+    try:
+        coordinator.refresh_now()
+
+        def _fail_store_read(_scope: str):
+            raise AssertionError("should read runtime scope from memory cache before SQLite fallback")
+
+        monkeypatch.setattr(coordinator.store, "read_scope_snapshot", _fail_store_read)
+        snapshot = coordinator.read_scope_snapshot("runtime_health_lite")
+        assert snapshot is not None
+        assert snapshot["payload"]["runtime_activated"] is True
+    finally:
+        coordinator.stop()
+
+
 def test_runtime_status_store_read_self_heals_when_db_file_exists_without_schema(tmp_path: Path) -> None:
     db_path = tmp_path / "runtime_status.sqlite"
     sqlite3.connect(str(db_path)).close()

@@ -162,6 +162,60 @@ def test_source_python_run_uses_manual_git_pull_mode(tmp_path: Path, monkeypatch
     assert "最新提交" in result["message"]
 
 
+def test_git_pull_init_does_not_touch_shared_snapshot_paths(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: tmp_path)
+    monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(updater_service_module.shutil, "which", lambda _name: "C:/Git/bin/git.exe")
+    monkeypatch.setattr(
+        UpdaterService,
+        "_mirror_runtime_snapshot",
+        lambda self: (_ for _ in ()).throw(AssertionError("constructor should not load shared mirror snapshot")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        UpdaterService,
+        "_internal_peer_runtime_snapshot",
+        lambda self: (_ for _ in ()).throw(AssertionError("constructor should not load internal peer snapshot")),
+        raising=False,
+    )
+
+    service = UpdaterService(
+        config=_build_role_config(tmp_path, role_mode="external", shared_root=tmp_path / "shared"),
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+
+    snapshot = dict(service.runtime)
+    assert service.update_mode == "git_pull"
+    assert snapshot["mirror_ready"] is False
+    assert snapshot["internal_peer"]["available"] is True
+
+
+def test_git_pull_start_does_not_block_on_shared_snapshot_refresh(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: tmp_path)
+    monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(updater_service_module.shutil, "which", lambda _name: "C:/Git/bin/git.exe")
+
+    service = UpdaterService(
+        config=_build_role_config(tmp_path, role_mode="external", shared_root=tmp_path / "shared"),
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+
+    monkeypatch.setattr(service, "_sync_mirror_runtime", lambda: (_ for _ in ()).throw(RuntimeError("shared mirror unavailable")))
+    monkeypatch.setattr(service, "_sync_shared_mirror_watch_signal", lambda: (_ for _ in ()).throw(RuntimeError("watch unavailable")))
+    monkeypatch.setattr(service, "_sync_git_runtime", lambda fetch_remote=False: {})
+
+    result = service.start()
+    if service._thread and service._thread.is_alive():
+        service._thread.join(timeout=1)
+
+    assert result["started"] is True
+    assert result["running"] is True
+
+
 def test_git_dirty_worktree_ignores_user_mutable_tracked_files(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: tmp_path)
     monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")

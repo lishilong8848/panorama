@@ -284,8 +284,8 @@ class UpdaterService:
         self._work_lock = threading.Lock()
         self._last_shared_mirror_signal: tuple[str, ...] = ()
         self._last_internal_peer_status_sync_monotonic = 0.0
-        mirror_runtime = self._mirror_runtime_snapshot()
-        internal_peer_runtime = self._internal_peer_runtime_snapshot()
+        mirror_runtime = self._initial_mirror_runtime_snapshot()
+        internal_peer_runtime = self._initial_internal_peer_runtime_snapshot()
         self.state.setdefault("source_kind", self.source_kind)
         self.state.setdefault("source_label", self.source_label)
         self.state.setdefault("update_mode", self.update_mode)
@@ -368,8 +368,51 @@ class UpdaterService:
             ),
             "internal_peer": internal_peer_runtime,
         }
+
     def _log(self, text: str) -> None:
         self.emit_log(f"[Updater] {text}")
+
+    def _initial_mirror_runtime_snapshot(self) -> Dict[str, Any]:
+        return {
+            "mirror_ready": bool(self.state.get("mirror_ready", False)),
+            "mirror_version": str(self.state.get("mirror_version", "") or "").strip(),
+            "mirror_manifest_path": str(self.state.get("mirror_manifest_path", "") or "").strip(),
+            "last_publish_at": str(self.state.get("last_publish_at", "") or "").strip(),
+            "last_publish_error": str(self.state.get("last_publish_error", "") or "").strip(),
+            "approved_commit": str(self.state.get("approved_commit", "") or "").strip(),
+            "approved_manifest": dict(self.state.get("approved_manifest", {}) or {}),
+        }
+
+    def _initial_internal_peer_runtime_snapshot(self) -> Dict[str, Any]:
+        return empty_internal_peer_snapshot(available=bool(self.role_mode == "external" and self.remote_control_store and self.shared_bridge_root))
+
+    def _safe_sync_mirror_runtime(self) -> Dict[str, Any]:
+        try:
+            return self._sync_mirror_runtime()
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"共享更新状态刷新失败，不阻断主流程: {exc}")
+            return self._initial_mirror_runtime_snapshot()
+
+    def _safe_sync_internal_peer_runtime(self) -> Dict[str, Any]:
+        try:
+            return self._sync_internal_peer_runtime()
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"内网端更新状态刷新失败，不阻断主流程: {exc}")
+            return self._initial_internal_peer_runtime_snapshot()
+
+    def _safe_sync_shared_mirror_watch_signal(self) -> tuple[str, ...]:
+        try:
+            return self._sync_shared_mirror_watch_signal()
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"共享更新监听状态刷新失败，不阻断主流程: {exc}")
+            return ()
+
+    def _safe_sync_git_runtime(self, *, fetch_remote: bool = False) -> Dict[str, Any]:
+        try:
+            return self._sync_git_runtime(fetch_remote=fetch_remote)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Git 更新状态刷新失败，不阻断主流程: {exc}")
+            return {}
 
     def _local_version_snapshot(self) -> tuple[str, int]:
         local_version = str(self.state.get("local_version", "") or self.runtime.get("local_version", "") or "").strip()
@@ -492,12 +535,6 @@ class UpdaterService:
             return "git_not_installed"
         if not self.git_repo_detected:
             return "git_repo_missing"
-        identity = self._detect_git_identity(self.git_branch)
-        self.git_branch = str(identity.get("branch", "") or self.git_branch).strip()
-        self.git_remote_name = str(identity.get("remote_name", "") or self.git_remote_name).strip()
-        self.git_repo_url = str(identity.get("remote_url", "") or self.git_repo_url).strip()
-        if not self.git_remote_name or not self.git_repo_url:
-            return "git_remote_missing"
         return ""
 
     def _run_git(self, *args: str) -> subprocess.CompletedProcess[str]:
@@ -933,26 +970,18 @@ class UpdaterService:
         if self.is_running():
             return {"started": False, "running": True, "reason": "already_running"}
 
-        self._sync_mirror_runtime()
-
         if self.update_mode == "git_pull":
-            try:
-                self._sync_git_runtime(fetch_remote=False)
-                self._set_runtime_and_state(
-                    enabled=True,
-                    disabled_reason="",
-                    last_error="",
-                    source_kind=self.source_kind,
-                    source_label=self.source_label,
-                    update_mode=self.update_mode,
-                    dependency_sync_status=str(self.state.get("dependency_sync_status", "idle") or "idle"),
-                    dependency_sync_error=str(self.state.get("dependency_sync_error", "") or ""),
-                    queued_apply=dict(self.state.get("queued_apply", self._empty_queue_payload()) or self._empty_queue_payload()),
-                )
-                self._log("源码直跑模式已启用手动代码拉取；启动阶段不会自动检查或拉取 Git 代码。")
-            except Exception as exc:  # noqa: BLE001
-                self._record_failure("初始化 Git 更新状态失败", exc)
-            self._sync_shared_mirror_watch_signal()
+            self._set_runtime_and_state(
+                enabled=True,
+                disabled_reason="",
+                last_error="",
+                source_kind=self.source_kind,
+                source_label=self.source_label,
+                update_mode=self.update_mode,
+                dependency_sync_status=str(self.state.get("dependency_sync_status", "idle") or "idle"),
+                dependency_sync_error=str(self.state.get("dependency_sync_error", "") or ""),
+                queued_apply=dict(self.state.get("queued_apply", self._empty_queue_payload()) or self._empty_queue_payload()),
+            )
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, daemon=True, name="qjpt-updater")
             self._thread.start()
@@ -970,7 +999,6 @@ class UpdaterService:
                 dependency_sync_error=str(self.state.get("dependency_sync_error", "") or ""),
                 queued_apply=dict(self.state.get("queued_apply", self._empty_queue_payload()) or self._empty_queue_payload()),
             )
-            self._sync_shared_mirror_watch_signal()
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, daemon=True, name="qjpt-updater")
             self._thread.start()
@@ -987,7 +1015,6 @@ class UpdaterService:
             )
         except Exception as exc:  # noqa: BLE001
             self._record_failure("启动检查失败", exc)
-        self._sync_shared_mirror_watch_signal()
 
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="qjpt-updater")
@@ -1002,13 +1029,9 @@ class UpdaterService:
         self._set_runtime(running=False)
         if self.role_mode == "internal":
             self._write_internal_peer_status(online=False, force=True)
-        elif self.role_mode == "external":
-            self._sync_internal_peer_runtime()
         return {"stopped": True, "running": False, "reason": "stopped"}
 
     def get_runtime_snapshot(self) -> Dict[str, Any]:
-        if self.role_mode == "external":
-            self._sync_internal_peer_runtime()
         with self._lock:
             return dict(self.runtime)
 
@@ -2196,10 +2219,14 @@ class UpdaterService:
 
     def _loop(self) -> None:
         self._set_runtime(running=True)
+        self._safe_sync_mirror_runtime()
+        self._safe_sync_shared_mirror_watch_signal()
+        if self.update_mode == "git_pull":
+            self._safe_sync_git_runtime(fetch_remote=False)
         if self.role_mode == "internal":
             self._write_internal_peer_status(online=True, force=True)
         elif self.role_mode == "external":
-            self._sync_internal_peer_runtime()
+            self._safe_sync_internal_peer_runtime()
         if self.update_mode == "git_pull":
             self._log("更新线程已启动: 源码直跑模式仅处理手动拉取、排队请求和远程命令，不会自动拉取代码。")
         else:
@@ -2210,7 +2237,7 @@ class UpdaterService:
                 self._write_internal_peer_status(online=True)
                 self._try_process_internal_peer_command()
             elif self.role_mode == "external":
-                self._sync_internal_peer_runtime()
+                self._safe_sync_internal_peer_runtime()
             self._try_process_queued_apply()
             if self.update_mode == "git_pull":
                 continue

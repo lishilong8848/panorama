@@ -1,5 +1,6 @@
-﻿from pathlib import Path
+from pathlib import Path
 import sys
+import time
 
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
@@ -253,6 +254,21 @@ def _build_app_with_lifespan(monkeypatch, tmp_path: Path, *, role_mode: str = "i
     return app_factory.create_app(enable_lifespan=True)
 
 
+def _wait_for_runtime_activation(client: TestClient, timeout_sec: float = 2.0):
+    deadline = time.time() + max(0.1, float(timeout_sec))
+    last_payload = None
+    while time.time() < deadline:
+        response = client.get("/api/health/bootstrap")
+        assert response.status_code == 200
+        last_payload = response.json()
+        if last_payload.get("runtime_activated") is True and last_payload.get("startup_role_confirmed") is True:
+            return last_payload
+        if str(last_payload.get("activation_phase") or "").strip().lower() == "failed":
+            return last_payload
+        time.sleep(0.02)
+    return last_payload
+
+
 def test_internal_role_blocks_business_job_routes(monkeypatch, tmp_path):
     app = _build_app(monkeypatch, tmp_path)
     app.state.runtime_services_activated = True
@@ -347,9 +363,11 @@ def test_startup_runtime_requires_explicit_activation(monkeypatch, tmp_path):
         assert response.status_code == 200
         payload = response.json()
         assert payload["ok"] is True
-        assert payload["activated"] is True
+        assert payload["pending"] is True
         assert payload["already_active"] is False
         assert payload["role_mode"] == "internal"
+        activated_payload = _wait_for_runtime_activation(client)
+        assert activated_payload["runtime_activated"] is True
         assert container.runtime_services_armed is True
         assert container.runtime_service_start_calls == ["test_activate"]
         assert app.state.startup_role_confirmed is True
@@ -387,6 +405,7 @@ def test_startup_runtime_clears_handoff_after_restart_resume(monkeypatch, tmp_pa
         assert response.status_code == 200
         payload = response.json()
         assert payload["ok"] is True
+        _wait_for_runtime_activation(client)
         assert container.startup_handoff_cleared == 1
         assert container.startup_handoff["active"] is False
 
@@ -400,9 +419,11 @@ def test_startup_runtime_rejects_missing_role(monkeypatch, tmp_path):
 
         assert response.status_code == 200
         payload = response.json()
-        assert payload["ok"] is False
-        assert payload["activated"] is False
-        assert payload["role_mode"] == ""
+        assert payload["ok"] is True
+        assert payload["pending"] is True
+        failed_payload = _wait_for_runtime_activation(client)
+        assert failed_payload["activation_phase"] == "failed"
+        assert failed_payload["activation_error"] != ""
         assert container.runtime_services_armed is False
         assert container.runtime_service_start_calls == []
         assert app.state.startup_role_confirmed is False
@@ -498,7 +519,8 @@ def test_lifespan_exposes_saved_role_as_restorable_without_reconfiguration(monke
         assert container.runtime_service_start_calls == []
         assert app.state.startup_role_confirmed is False
         assert payload["runtime_activated"] is False
-        assert payload["startup_role_confirmed"] is True
+        assert payload["startup_role_confirmed"] is False
+        assert payload["startup_role_restorable"] is True
         assert payload["role_selection_required"] is False
 
 
@@ -524,9 +546,9 @@ def test_activate_startup_with_role_saves_role_and_last_started(monkeypatch, tmp
         assert response.status_code == 200
         payload = response.json()
         assert payload["ok"] is True
-        assert payload["activated"] is True
+        assert payload["pending"] is True
         assert payload["role_mode"] == "external"
-        assert payload["saved_role"]["role_mode"] == "external"
+        _wait_for_runtime_activation(client)
         deployment = container.config["common"]["deployment"]
         assert deployment["role_mode"] == "external"
         assert deployment["last_started_role_mode"] == "external"
@@ -547,6 +569,7 @@ def test_activate_startup_switches_role_without_process_restart(monkeypatch, tmp
     with TestClient(app) as client:
         first = client.post("/api/runtime/activate-startup", json={"source": "initial"})
         assert first.status_code == 200
+        _wait_for_runtime_activation(client)
         assert app.state.runtime_services_activated is True
 
         response = client.post(
@@ -565,6 +588,7 @@ def test_activate_startup_switches_role_without_process_restart(monkeypatch, tmp
         payload = response.json()
         assert payload["ok"] is True
         assert payload["role_mode"] == "external"
+        _wait_for_runtime_activation(client)
         assert container.runtime_service_stop_calls == ["switch_to_external-切换角色前停止当前系统"]
         assert container.runtime_service_start_calls == ["initial", "switch_to_external"]
         assert container.config["common"]["deployment"]["role_mode"] == "external"
@@ -578,6 +602,7 @@ def test_exit_current_runtime_stops_role_services_and_returns_to_selector(monkey
     with TestClient(app) as client:
         activate = client.post("/api/runtime/activate-startup", json={"source": "test_activate"})
         assert activate.status_code == 200
+        _wait_for_runtime_activation(client)
         assert app.state.runtime_services_activated is True
         response = client.post("/api/runtime/exit-current", json={"source": "test_exit"})
 

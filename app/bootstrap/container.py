@@ -172,14 +172,26 @@ class AppContainer:
         self.shared_bridge_service = self._build_shared_bridge_service()
 
     def _ensure_runtime_dependencies_initialized(self) -> None:
+        progress_callback = getattr(self, "runtime_activation_progress_callback", None)
+
+        def _report_progress(step: str) -> None:
+            if callable(progress_callback):
+                try:
+                    progress_callback(str(step or "").strip())
+                except Exception:  # noqa: BLE001
+                    pass
+
+        _report_progress("initializing_wifi_service")
         if not self.wifi_service:
             self.wifi_service = WifiSwitchService(self.runtime_config)
+        _report_progress("configuring_job_service")
         self.job_service.configure_task_engine(
             runtime_config=self.runtime_config,
             app_dir=get_app_dir(),
             config_snapshot_getter=lambda: self.runtime_config,
             current_ssid_getter=lambda: self.wifi_service.current_ssid() if self.wifi_service else "",
         )
+        _report_progress("binding_job_log_sink")
         self.job_service.set_global_log_sink(
             lambda line: self.add_system_log(
                 line,
@@ -188,24 +200,34 @@ class AppContainer:
             )
         )
         if not self.scheduler:
+            _report_progress("building_monthly_scheduler")
             self.scheduler = self._build_scheduler()
         if not self.handover_scheduler_manager:
+            _report_progress("building_handover_scheduler_manager")
             self.handover_scheduler_manager = self._build_handover_scheduler_manager()
         if not self.wet_bulb_collection_scheduler:
+            _report_progress("building_wet_bulb_scheduler")
             self.wet_bulb_collection_scheduler = self._build_wet_bulb_collection_scheduler()
         if not self.day_metric_upload_scheduler:
+            _report_progress("building_day_metric_scheduler")
             self.day_metric_upload_scheduler = self._build_day_metric_upload_scheduler()
         if not self.alarm_event_upload_scheduler:
+            _report_progress("building_alarm_scheduler")
             self.alarm_event_upload_scheduler = self._build_alarm_event_upload_scheduler()
         if not self.monthly_change_report_scheduler:
+            _report_progress("building_monthly_change_scheduler")
             self.monthly_change_report_scheduler = self._build_monthly_change_report_scheduler()
         if not self.monthly_event_report_scheduler:
+            _report_progress("building_monthly_event_scheduler")
             self.monthly_event_report_scheduler = self._build_monthly_event_report_scheduler()
         if not self.updater_service:
+            _report_progress("building_updater_service")
             self.updater_service = self._build_updater_service()
         if not self.shared_bridge_service:
+            _report_progress("building_shared_bridge_service")
             self.shared_bridge_service = self._build_shared_bridge_service()
         if not self.alert_log_uploader:
+            _report_progress("building_alert_log_uploader")
             paths_cfg = self.runtime_config.get("paths", {}) if isinstance(self.runtime_config, dict) else {}
             runtime_state_root = (
                 str(paths_cfg.get("runtime_state_root", "") or "").strip()
@@ -224,21 +246,30 @@ class AppContainer:
                 mark_uploaded=self.mark_system_log_entries_uploaded,
             )
         if self.scheduler_callback and self.scheduler:
+            _report_progress("binding_monthly_scheduler_callback")
             self.scheduler.run_callback = self.scheduler_callback
         if self.handover_scheduler_callback and self.handover_scheduler_manager:
+            _report_progress("binding_handover_scheduler_callback")
             self.handover_scheduler_manager.set_run_callback(self.handover_scheduler_callback)
         if self.wet_bulb_collection_scheduler_callback and self.wet_bulb_collection_scheduler:
+            _report_progress("binding_wet_bulb_scheduler_callback")
             self.wet_bulb_collection_scheduler.run_callback = self.wet_bulb_collection_scheduler_callback
         if self.day_metric_upload_scheduler_callback and self.day_metric_upload_scheduler:
+            _report_progress("binding_day_metric_scheduler_callback")
             self.day_metric_upload_scheduler.run_callback = self.day_metric_upload_scheduler_callback
         if self.alarm_event_upload_scheduler_callback and self.alarm_event_upload_scheduler:
+            _report_progress("binding_alarm_scheduler_callback")
             self.alarm_event_upload_scheduler.run_callback = self.alarm_event_upload_scheduler_callback
         if self.monthly_change_report_scheduler_callback and self.monthly_change_report_scheduler:
+            _report_progress("binding_monthly_change_scheduler_callback")
             self.monthly_change_report_scheduler.run_callback = self.monthly_change_report_scheduler_callback
         if self.monthly_event_report_scheduler_callback and self.monthly_event_report_scheduler:
+            _report_progress("binding_monthly_event_scheduler_callback")
             self.monthly_event_report_scheduler.run_callback = self.monthly_event_report_scheduler_callback
         if self.updater_restart_callback and self.updater_service:
+            _report_progress("binding_updater_restart_callback")
             self.updater_service.restart_callback = self.updater_restart_callback
+        _report_progress("runtime_dependencies_initialized")
 
     def _console_cfg(self) -> Dict[str, Any]:
         return self.config.get("common", {}).get("console", {}) if isinstance(self.config, dict) else {}
@@ -1089,10 +1120,22 @@ class AppContainer:
 
     def start_role_runtime_services(self, source: str = "启动确认") -> Dict[str, Any]:
         role_mode = str(self._configured_deployment_snapshot().get("role_mode", "") or "").strip().lower()
+        progress_callback = getattr(self, "runtime_activation_progress_callback", None)
+
+        def _report_progress(step: str) -> None:
+            if callable(progress_callback):
+                try:
+                    progress_callback(str(step or "").strip())
+                except Exception:  # noqa: BLE001
+                    pass
+
+        _report_progress("ensuring_runtime_dependencies")
         self._ensure_runtime_dependencies_initialized()
+        _report_progress("ensuring_shared_bridge_role")
         self._ensure_shared_bridge_service_matches_configured_role()
         external_scheduler_autostart_state: Dict[str, Any] = {}
         if role_mode == "external":
+            _report_progress("applying_external_scheduler_autostart_state")
             external_scheduler_autostart_state = self.apply_external_scheduler_autostart_state(source=source)
         else:
             self.external_scheduler_autostart_runtime_state = {
@@ -1110,6 +1153,7 @@ class AppContainer:
         if role_mode == "internal":
             self.add_system_log("[调度] 当前为内网端，启动时不自动开启月报调度")
         elif self.scheduler and self.scheduler.enabled and self.scheduler.auto_start_in_gui:
+            _report_progress("starting_monthly_scheduler")
             self.start_scheduler(source=source)
         else:
             self.add_system_log("[调度] 启动时未自动开启")
@@ -1129,6 +1173,7 @@ class AppContainer:
             if not isinstance(handover_scheduler_cfg, dict):
                 handover_scheduler_cfg = {}
             if bool(handover_scheduler_cfg.get("auto_start_in_gui", False)):
+                _report_progress("starting_handover_scheduler")
                 self.start_handover_scheduler(source=source)
             else:
                 self.add_system_log("[交接班调度] 启动时未自动开启")
@@ -1150,6 +1195,7 @@ class AppContainer:
             if not isinstance(wet_bulb_scheduler_cfg, dict):
                 wet_bulb_scheduler_cfg = {}
             if bool(wet_bulb_scheduler_cfg.get("auto_start_in_gui", False)):
+                _report_progress("starting_wet_bulb_scheduler")
                 self.start_wet_bulb_collection_scheduler(source=source)
             else:
                 self.add_system_log("[湿球温度定时采集调度] 启动时未自动开启")
@@ -1171,6 +1217,7 @@ class AppContainer:
             if not isinstance(day_metric_scheduler_cfg, dict):
                 day_metric_scheduler_cfg = {}
             if bool(day_metric_scheduler_cfg.get("auto_start_in_gui", False)):
+                _report_progress("starting_day_metric_scheduler")
                 self.start_day_metric_upload_scheduler(source=source)
             else:
                 self.add_system_log("[12项独立上传调度] 启动时未自动开启")
@@ -1192,6 +1239,7 @@ class AppContainer:
             if not isinstance(alarm_scheduler_cfg, dict):
                 alarm_scheduler_cfg = {}
             if bool(alarm_scheduler_cfg.get("auto_start_in_gui", False)):
+                _report_progress("starting_alarm_scheduler")
                 self.start_alarm_event_upload_scheduler(source=source)
             else:
                 self.add_system_log("[告警信息上传调度] 启动时未自动开启")
@@ -1216,6 +1264,7 @@ class AppContainer:
             if not isinstance(monthly_change_scheduler_cfg, dict):
                 monthly_change_scheduler_cfg = {}
             if bool(monthly_change_scheduler_cfg.get("auto_start_in_gui", False)):
+                _report_progress("starting_monthly_change_scheduler")
                 self.start_monthly_change_report_scheduler(source=source)
             else:
                 self.add_system_log("[月度变更统计表调度] 启动时未自动开启")
@@ -1240,6 +1289,7 @@ class AppContainer:
             if not isinstance(monthly_event_scheduler_cfg, dict):
                 monthly_event_scheduler_cfg = {}
             if bool(monthly_event_scheduler_cfg.get("auto_start_in_gui", False)):
+                _report_progress("starting_monthly_event_scheduler")
                 self.start_monthly_event_report_scheduler(source=source)
             else:
                 self.add_system_log("[月度事件统计表调度] 启动时未自动开启")
@@ -1247,13 +1297,17 @@ class AppContainer:
             self.add_system_log("[月度事件统计表调度] 已禁用")
 
         if self.updater_service and self.updater_service.enabled:
+            _report_progress("starting_updater")
             self.start_updater(source=source)
         else:
             self.add_system_log("[更新] 启动时未自动开启")
 
         if role_mode != "internal" and self.alert_log_uploader:
+            _report_progress("starting_alert_log_uploader")
             self.start_alert_log_uploader(source=source)
+        _report_progress("starting_shared_bridge")
         self.start_shared_bridge(source=source)
+        _report_progress("runtime_services_started")
         return {
             "ok": True,
             "armed": True,

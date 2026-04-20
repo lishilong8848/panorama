@@ -241,6 +241,7 @@ def _initialize_handover_daily_report_auth(container) -> None:
 
 def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     container = build_container()
+    startup_runtime_activation_lock = threading.Lock()
 
     def _role_label(role_mode: str) -> str:
         role = normalize_role_mode(role_mode)
@@ -348,6 +349,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         _app.state.runtime_services_activated = False
         _app.state.runtime_activation_phase = "idle"
         _app.state.runtime_activation_error = ""
+        _app.state.runtime_activation_step = ""
+        _app.state.runtime_activation_started_at = ""
+        _app.state.runtime_activation_worker = None
         _app.state.startup_role_confirmed = False
         _app.state.startup_role_user_exited = False
         container.add_system_log("[启动] 等待启动角色确认完成后再激活后台运行时")
@@ -402,6 +406,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     app.state.runtime_services_activated = False
     app.state.runtime_activation_phase = "idle"
     app.state.runtime_activation_error = ""
+    app.state.runtime_activation_step = ""
+    app.state.runtime_activation_started_at = ""
+    app.state.runtime_activation_worker = None
     app.state.startup_role_confirmed = False
     app.state.startup_role_user_exited = False
     runtime_state_root = resolve_runtime_state_root(
@@ -415,12 +422,18 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             "runtime_activated": bool(getattr(app.state, "runtime_services_activated", False)),
             "activation_phase": str(getattr(app.state, "runtime_activation_phase", "") or "").strip(),
             "activation_error": str(getattr(app.state, "runtime_activation_error", "") or "").strip(),
+            "activation_step": str(getattr(app.state, "runtime_activation_step", "") or "").strip(),
             "startup_role_confirmed": bool(getattr(app.state, "startup_role_confirmed", False)),
             "startup_role_user_exited": bool(getattr(app.state, "startup_role_user_exited", False)),
             "started_at": str(getattr(app.state, "started_at", "") or "").strip(),
         },
         emit_log=lambda text: container.add_system_log(text, suppress_alert_upload=True),
         refresh_interval_sec=10.0,
+    )
+    container.runtime_activation_progress_callback = lambda step: setattr(
+        app.state,
+        "runtime_activation_step",
+        str(step or "").strip(),
     )
 
     @app.middleware("http")
@@ -511,6 +524,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
         app.state.runtime_activation_phase = "activating"
         app.state.runtime_activation_error = ""
+        app.state.runtime_activation_step = "starting_runtime_services"
+        app.state.runtime_activation_started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             result = container.start_role_runtime_services(source=source)
             container.add_system_log(
@@ -545,11 +560,14 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 "[访问控制] 已启用局域网页面隔离：仅对外开放 /handover/review/*、/api/handover/review/* 与 /assets/*"
             )
             if role_mode != "internal":
+                app.state.runtime_activation_step = "initializing_handover_daily_report_auth"
                 _initialize_handover_daily_report_auth(container)
+                app.state.runtime_activation_step = "probing_handover_review_access"
                 schedule_handover_review_access_startup_probe(container)
             app.state.runtime_services_activated = True
             app.state.runtime_activation_phase = "activated"
             app.state.runtime_activation_error = ""
+            app.state.runtime_activation_step = "activated"
             app.state.startup_role_confirmed = True
             app.state.startup_role_user_exited = False
             runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
@@ -584,6 +602,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             app.state.runtime_activation_phase = "failed"
             app.state.runtime_activation_error = str(exc)
+            app.state.runtime_activation_step = "failed"
             app.state.startup_role_confirmed = False
             return {
                 "ok": False,
@@ -629,39 +648,113 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         startup_handoff_nonce = str(payload.get("startup_handoff_nonce", "") or "").strip()
 
         def _activate_from_payload() -> Dict[str, Any]:
-            requested_role = normalize_role_mode(
-                payload.get("role_mode") or payload.get("target_role_mode") or ""
-            )
-            saved_role: Dict[str, Any] | None = None
-            if requested_role in {"internal", "external"}:
+            with startup_runtime_activation_lock:
+                requested_role = normalize_role_mode(
+                    payload.get("role_mode") or payload.get("target_role_mode") or ""
+                )
+                saved_role: Dict[str, Any] | None = None
+                if requested_role in {"internal", "external"}:
+                    current_role = _deployment_role_mode()
+                    if bool(getattr(app.state, "runtime_services_activated", False)) and current_role != requested_role:
+                        container.stop_role_runtime_services(source=f"{source}-切换角色前停止当前系统")
+                        app.state.runtime_services_activated = False
+                        app.state.runtime_activation_phase = "idle"
+                        app.state.runtime_activation_error = ""
+                        app.state.startup_role_confirmed = False
+                    saved_role = _persist_startup_role_selection(requested_role, payload)
+
+                result = _activate_runtime_services(source)
+                if saved_role is not None:
+                    result["saved_role"] = saved_role
+                result["phase"] = str(getattr(app.state, "runtime_activation_phase", "") or "").strip()
+                result["step"] = str(getattr(app.state, "runtime_activation_step", "") or "").strip()
+                return result
+
+        def _activation_worker_alive() -> bool:
+            worker = getattr(app.state, "runtime_activation_worker", None)
+            return isinstance(worker, threading.Thread) and worker.is_alive()
+
+        def _run_activation_in_background() -> None:
+            try:
+                result = _activate_from_payload()
+                if bool(result.get("ok", False)):
+                    get_startup_role_handoff = getattr(container, "get_startup_role_handoff", None)
+                    clear_startup_role_handoff = getattr(container, "clear_startup_role_handoff", None)
+                    if callable(get_startup_role_handoff) and callable(clear_startup_role_handoff):
+                        handoff = get_startup_role_handoff()
+                        handoff_nonce = str(handoff.get("nonce", "") or "").strip() if isinstance(handoff, dict) else ""
+                        if handoff_nonce and (
+                            source == "startup_role_resume_after_restart"
+                            or (startup_handoff_nonce and startup_handoff_nonce == handoff_nonce)
+                        ):
+                            clear_startup_role_handoff()
+            except Exception as exc:  # noqa: BLE001
+                app.state.runtime_activation_phase = "failed"
+                app.state.runtime_activation_error = str(exc)
+                app.state.runtime_activation_step = "failed"
+                try:
+                    container.add_system_log(f"[启动] 启动角色后台激活失败: {exc}")
+                except Exception:  # noqa: BLE001
+                    pass
+            finally:
+                app.state.runtime_activation_worker = None
+
+        def _start_activation() -> Dict[str, Any]:
+            with startup_runtime_activation_lock:
+                requested_role = normalize_role_mode(
+                    payload.get("role_mode") or payload.get("target_role_mode") or ""
+                )
                 current_role = _deployment_role_mode()
-                if bool(getattr(app.state, "runtime_services_activated", False)) and current_role != requested_role:
-                    container.stop_role_runtime_services(source=f"{source}-切换角色前停止当前系统")
-                    app.state.runtime_services_activated = False
+                effective_role = requested_role if requested_role in {"internal", "external"} else current_role
+                current_phase = str(getattr(app.state, "runtime_activation_phase", "") or "").strip().lower()
+                if effective_role in {"internal", "external"}:
+                    if bool(getattr(app.state, "runtime_services_activated", False)) and current_role == effective_role:
+                        return {
+                            "ok": True,
+                            "activated": True,
+                            "already_active": True,
+                            "pending": False,
+                            "role_mode": effective_role,
+                            "phase": current_phase or "activated",
+                            "step": str(getattr(app.state, "runtime_activation_step", "") or "").strip(),
+                        }
+                    if current_role == effective_role and current_phase == "activating" and _activation_worker_alive():
+                        return {
+                            "ok": True,
+                            "activated": False,
+                            "already_active": False,
+                            "pending": True,
+                            "role_mode": effective_role,
+                            "phase": current_phase,
+                            "step": str(getattr(app.state, "runtime_activation_step", "") or "").strip(),
+                        }
+                if current_phase == "activating" and not _activation_worker_alive():
                     app.state.runtime_activation_phase = "idle"
                     app.state.runtime_activation_error = ""
-                    app.state.startup_role_confirmed = False
-                saved_role = _persist_startup_role_selection(requested_role, payload)
-
-            result = _activate_runtime_services(source)
-            if saved_role is not None:
-                result["saved_role"] = saved_role
-            result["phase"] = str(getattr(app.state, "runtime_activation_phase", "") or "").strip()
-            return result
+                    app.state.runtime_activation_step = ""
+                app.state.runtime_activation_phase = "activating"
+                app.state.runtime_activation_error = ""
+                app.state.runtime_activation_step = "queued"
+                app.state.runtime_activation_started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                worker = threading.Thread(
+                    target=_run_activation_in_background,
+                    name="startup-runtime-activation",
+                    daemon=True,
+                )
+                app.state.runtime_activation_worker = worker
+                worker.start()
+                return {
+                    "ok": True,
+                    "activated": False,
+                    "already_active": False,
+                    "pending": True,
+                    "role_mode": effective_role,
+                    "phase": "activating",
+                    "step": str(getattr(app.state, "runtime_activation_step", "") or "").strip(),
+                }
 
         try:
-            result = await asyncio.to_thread(_activate_from_payload)
-            if bool(result.get("ok", False)):
-                get_startup_role_handoff = getattr(container, "get_startup_role_handoff", None)
-                clear_startup_role_handoff = getattr(container, "clear_startup_role_handoff", None)
-                if callable(get_startup_role_handoff) and callable(clear_startup_role_handoff):
-                    handoff = get_startup_role_handoff()
-                    handoff_nonce = str(handoff.get("nonce", "") or "").strip() if isinstance(handoff, dict) else ""
-                    if handoff_nonce and (
-                        source == "startup_role_resume_after_restart"
-                        or (startup_handoff_nonce and startup_handoff_nonce == handoff_nonce)
-                    ):
-                        clear_startup_role_handoff()
+            result = await asyncio.to_thread(_start_activation)
             return JSONResponse(content=result)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse(

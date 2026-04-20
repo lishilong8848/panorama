@@ -193,7 +193,9 @@ export function registerAppRuntimeWatchers(options = {}) {
       shouldLoadEngineerDirectory: shouldLoadEngineerDirectory.value,
       shouldPollInternalRuntime: shouldPollInternalRuntimeStatus.value,
     }),
-    (state) => {
+    (state, prevState) => {
+      const previous = prevState && typeof prevState === "object" ? prevState : {};
+      const wasRuntimeReady = Boolean(previous.runtimeReady);
       runtimeWarmupReady.value = Boolean(state.runtimeReady && state.role === "internal");
       if (state.role !== "internal") {
         internalRuntimeSummary.value = null;
@@ -202,28 +204,29 @@ export function registerAppRuntimeWatchers(options = {}) {
       if (!state.runtimeReady) {
         return;
       }
-      if (state.shouldPollExternalDashboardSummary) {
+      const justReady = !wasRuntimeReady && Boolean(state.runtimeReady);
+      if (state.shouldPollExternalDashboardSummary && (justReady || !Boolean(previous.shouldPollExternalDashboardSummary))) {
         void fetchExternalDashboardSummary({ silentMessage: true });
       }
-      if (state.shouldFetchHealth) {
+      if (state.shouldFetchHealth && (justReady || !Boolean(previous.shouldFetchHealth))) {
         void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
       }
-      if (state.shouldPollJobPanel) {
+      if (state.shouldPollJobPanel && (justReady || !Boolean(previous.shouldPollJobPanel))) {
         void fetchJobs({ silentMessage: true });
       }
-      if (state.shouldPollBridgeTasks) {
+      if (state.shouldPollBridgeTasks && (justReady || !Boolean(previous.shouldPollBridgeTasks))) {
         void fetchBridgeTasks({ silentMessage: true });
       }
-      if (state.shouldPollDailyReport) {
+      if (state.shouldPollDailyReport && (justReady || !Boolean(previous.shouldPollDailyReport))) {
         void fetchHandoverDailyReportContext({ silentTransientNetworkError: true, silentMessage: true });
       }
-      if (state.shouldFetchPendingResumeRuns) {
+      if (state.shouldFetchPendingResumeRuns && (justReady || !Boolean(previous.shouldFetchPendingResumeRuns))) {
         void fetchPendingResumeRuns({ silentMessage: true });
       }
-      if (state.shouldLoadEngineerDirectory) {
+      if (state.shouldLoadEngineerDirectory && (justReady || !Boolean(previous.shouldLoadEngineerDirectory))) {
         scheduleEngineerDirectoryPrefetch(300);
       }
-      if (state.shouldPollInternalRuntime) {
+      if (state.shouldPollInternalRuntime && (justReady || !Boolean(previous.shouldPollInternalRuntime))) {
         void fetchInternalRuntimeSummary({ silentMessage: true });
         void fetchAllInternalBuildingRuntimeStatuses({ silentMessage: true });
       }

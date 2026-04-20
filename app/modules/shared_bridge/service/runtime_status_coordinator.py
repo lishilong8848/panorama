@@ -148,6 +148,11 @@ class RuntimeStatusCoordinator:
         self._refresh_interval_sec = max(1.0, float(refresh_interval_sec or 10.0))
         self._store = RuntimeStatusStore(Path(runtime_state_root) / "runtime_status.sqlite")
         self._writer = RuntimeStatusWriter(self._store, emit_log=emit_log)
+        self._snapshot_cache_lock = threading.Lock()
+        self._scope_cache: Dict[str, Dict[str, Any]] = {}
+        self._building_cache: Dict[str, Dict[str, Any]] = {}
+        self._scope_seq = 0
+        self._building_seq = 0
         self._refresh_event = threading.Event()
         self._stop_event = threading.Event()
         self._refresh_requested = False
@@ -202,13 +207,71 @@ class RuntimeStatusCoordinator:
             self.request_refresh(reason="log")
 
     def read_scope_snapshot(self, scope: str) -> Dict[str, Any] | None:
-        return self._store.read_scope_snapshot(scope)
+        scope_text = str(scope or "").strip()
+        if not scope_text:
+            return None
+        with self._snapshot_cache_lock:
+            entry = self._scope_cache.get(scope_text)
+            if isinstance(entry, dict):
+                return copy.deepcopy(entry)
+        snapshot = self._store.read_scope_snapshot(scope_text)
+        if isinstance(snapshot, dict) and snapshot:
+            with self._snapshot_cache_lock:
+                self._scope_cache[scope_text] = copy.deepcopy(snapshot)
+        return snapshot
 
     def read_building_snapshot(self, building: str) -> Dict[str, Any] | None:
-        return self._store.read_building_snapshot(building)
+        building_text = str(building or "").strip()
+        if not building_text:
+            return None
+        with self._snapshot_cache_lock:
+            entry = self._building_cache.get(building_text)
+            if isinstance(entry, dict):
+                return copy.deepcopy(entry)
+        snapshot = self._store.read_building_snapshot(building_text)
+        if isinstance(snapshot, dict) and snapshot:
+            with self._snapshot_cache_lock:
+                self._building_cache[building_text] = copy.deepcopy(snapshot)
+        return snapshot
 
     def refresh_now(self) -> None:
         self._refresh_all_snapshots()
+
+    def _cache_scope_snapshot(self, scope: str, payload: Dict[str, Any]) -> None:
+        scope_text = str(scope or "").strip()
+        if not scope_text:
+            return
+        payload_value = copy.deepcopy(payload if isinstance(payload, dict) else {})
+        with self._snapshot_cache_lock:
+            self._scope_seq += 1
+            self._scope_cache[scope_text] = {
+                "scope": scope_text,
+                "payload": payload_value,
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "seq": self._scope_seq,
+            }
+
+    def _cache_building_snapshot(self, building: str, payload: Dict[str, Any]) -> None:
+        building_text = str(building or "").strip()
+        if not building_text:
+            return
+        payload_value = copy.deepcopy(payload if isinstance(payload, dict) else {})
+        with self._snapshot_cache_lock:
+            self._building_seq += 1
+            self._building_cache[building_text] = {
+                "building": building_text,
+                "payload": payload_value,
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "seq": self._building_seq,
+            }
+
+    def _write_scope_snapshot(self, scope: str, payload: Dict[str, Any]) -> None:
+        self._cache_scope_snapshot(scope, payload)
+        self._writer.write_scope_snapshot(scope, payload)
+
+    def _write_building_snapshot(self, building: str, payload: Dict[str, Any]) -> None:
+        self._cache_building_snapshot(building, payload)
+        self._writer.write_building_snapshot(building, payload)
 
     def _run_refresh_loop(self) -> None:
         next_run = time.monotonic()
@@ -238,22 +301,22 @@ class RuntimeStatusCoordinator:
             prebuilt_shared_bridge_snapshot: Dict[str, Any] | None = None
             if role_mode == "external":
                 prebuilt_shared_bridge_snapshot = self._safe_shared_bridge_snapshot(mode="external_full")
-                self._writer.write_scope_snapshot(
+                self._write_scope_snapshot(
                     _SCOPE_EXTERNAL_SHARED_BRIDGE_FULL,
                     prebuilt_shared_bridge_snapshot,
                 )
-            self._writer.write_scope_snapshot(
+            self._write_scope_snapshot(
                 _SCOPE_RUNTIME_HEALTH_LITE,
                 self._build_runtime_health_lite_snapshot(
                     shared_bridge_snapshot=prebuilt_shared_bridge_snapshot,
                 ),
             )
-            self._writer.write_scope_snapshot(
+            self._write_scope_snapshot(
                 _SCOPE_DASHBOARD_JOB_PANEL_SUMMARY,
                 self._build_job_panel_dashboard_summary(),
             )
-            self._writer.write_scope_snapshot(_SCOPE_RUNTIME_RESOURCES_SUMMARY, self._build_runtime_resources_summary())
-            self._writer.write_scope_snapshot(
+            self._write_scope_snapshot(_SCOPE_RUNTIME_RESOURCES_SUMMARY, self._build_runtime_resources_summary())
+            self._write_scope_snapshot(
                 _SCOPE_DASHBOARD_BRIDGE_TASKS_SUMMARY,
                 self._build_bridge_tasks_dashboard_summary(),
             )
@@ -271,7 +334,7 @@ class RuntimeStatusCoordinator:
             return
         normalized_snapshot = snapshot if isinstance(snapshot, dict) else {}
         for building_code, building in INTERNAL_RUNTIME_BUILDINGS.items():
-            self._writer.write_building_snapshot(
+            self._write_building_snapshot(
                 building,
                 build_internal_runtime_building_status(
                     normalized_snapshot,
@@ -279,7 +342,7 @@ class RuntimeStatusCoordinator:
                     building_code=building_code,
                 ),
             )
-        self._writer.write_scope_snapshot(
+        self._write_scope_snapshot(
             _SCOPE_INTERNAL_RUNTIME_SUMMARY,
             build_internal_runtime_summary(normalized_snapshot),
         )

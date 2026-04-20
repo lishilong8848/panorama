@@ -295,6 +295,7 @@ createApp({
     const startupRoleAutoActivationKey = ref("");
     const startupRoleSuppressedHandoffNonce = ref("");
     const startupRoleFlowState = ref("selecting");
+    const startupRoleActivationInFlight = ref(false);
     const startupRoleBridgeDraft = ref(buildStartupBridgeDraft({}));
     const startupRoleAdvancedVisible = ref(false);
     const startupRoleOptions = Object.freeze([
@@ -853,6 +854,10 @@ createApp({
       updaterUiOverlayStage,
       updaterUiOverlayKicker,
       updaterAwaitingRestartRecovery,
+      startupRoleSelectorHandled,
+      startupRoleSelectorVisible,
+      startupRoleLoadingVisible,
+      shouldPauseRuntimeRequests: () => shouldPauseRuntimeRequests.value,
       markRestartRecoveryIntent,
       clearRestartRecoveryIntent: clearStartupRuntimeRecovery,
       readUpdaterRecoveryIntent,
@@ -860,6 +865,7 @@ createApp({
       clearUpdaterRecoveryIntent,
       nextTick,
       scheduleExternalDashboardRefresh: queueExternalDashboardRefresh,
+      shouldPauseRuntimeRequests: () => shouldPauseRuntimeRequests.value,
       shouldIncludeHandoverHealthContext: () => shouldIncludeHandoverHealthContext.value,
       shouldFetchHandoverDailyReportContext: () => shouldPollHandoverDailyReportContext.value,
       shouldLoadEngineerDirectory: () => shouldLoadEngineerDirectory.value,
@@ -1043,6 +1049,7 @@ createApp({
       startupRoleBridgeDraft,
       startupRoleAdvancedVisible,
       startupRoleAutoActivationKey,
+      startupRoleActivationInFlight,
       browserRouteLastPath,
       browserRouteReady,
       currentView,
@@ -1235,6 +1242,7 @@ createApp({
       startupRoleSuppressedHandoffNonce,
       startupRoleSelectorSelection,
       startupRoleAutoActivationKey,
+      startupRoleActivationInFlight,
       health,
       selectStartupRole,
       syncStartupRoleBridgeDraft,
@@ -1272,6 +1280,7 @@ createApp({
       updaterAwaitingRestartRecovery,
       startupRoleSelectorVisible,
       startupRoleLoadingVisible,
+      startupRoleActivationInFlight,
       bootstrapReady,
       health,
       currentView,
@@ -1362,8 +1371,8 @@ createApp({
 
     watch(
       () => shouldPollBridgeTasks.value,
-      (enabled) => {
-        if (!enabled || !bootstrapReady.value) return;
+      (enabled, prevEnabled) => {
+        if (!enabled || !bootstrapReady.value || prevEnabled === enabled) return;
         void fetchBridgeTasks({ silentMessage: true });
       },
       { immediate: true },
@@ -1371,15 +1380,19 @@ createApp({
 
     watch(
       () => [currentView.value, dashboardActiveModule.value],
-      ([view]) => {
+      ([view], [prevView, prevModule] = []) => {
         if (!bootstrapReady.value) return;
-        if (String(view || "").trim().toLowerCase() === "dashboard" && shouldPollExternalDashboardSummary.value) {
+        const currentViewText = String(view || "").trim().toLowerCase();
+        const prevViewText = String(prevView || "").trim().toLowerCase();
+        const moduleChanged = String(dashboardActiveModule.value || "").trim() !== String(prevModule || "").trim();
+        const enteredDashboard = currentViewText === "dashboard" && prevViewText !== "dashboard";
+        if ((enteredDashboard || moduleChanged) && currentViewText === "dashboard" && shouldPollExternalDashboardSummary.value) {
           void fetchExternalDashboardSummary({ silentMessage: true });
         }
-        if (shouldFetchHealth.value) {
+        if (enteredDashboard && shouldFetchHealth.value) {
           void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
         }
-        if (shouldPollBridgeTasks.value) {
+        if (enteredDashboard && shouldPollBridgeTasks.value) {
           void fetchBridgeTasks({ silentMessage: true });
         }
       },
@@ -1496,7 +1509,7 @@ createApp({
       setMessage: (text) => {
         message.value = String(text || "");
       },
-      canAttachSystemStream: () => !shouldPauseRuntimeRequests.value,
+      canAttachSystemStream: () => runtimeRequestsReady.value,
       getSystemOffset: () => systemLogOffset.value,
       setSystemOffset: (offset) => {
         const next = Number.parseInt(String(offset), 10);

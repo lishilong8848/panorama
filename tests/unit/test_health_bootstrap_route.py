@@ -97,7 +97,8 @@ def test_health_bootstrap_restores_saved_role_without_requiring_reconfiguration(
 
     assert payload["deployment"]["role_mode"] == "internal"
     assert payload["deployment"]["node_label"] == "内网端"
-    assert payload["startup_role_confirmed"] is True
+    assert payload["startup_role_confirmed"] is False
+    assert payload["startup_role_restorable"] is True
     assert payload["role_selection_required"] is False
     assert payload["startup_handoff"]["active"] is False
     assert payload["runtime_activated"] is False
@@ -122,6 +123,7 @@ def test_health_bootstrap_skips_selector_after_current_process_is_confirmed(monk
     assert payload["deployment"]["role_mode"] == "external"
     assert payload["deployment"]["node_label"] == "外网端"
     assert payload["startup_role_confirmed"] is True
+    assert payload["startup_role_restorable"] is True
     assert payload["role_selection_required"] is False
 
 
@@ -139,6 +141,7 @@ def test_health_bootstrap_requires_selector_after_auto_start_failure(monkeypatch
     payload = routes.health_bootstrap(request)
 
     assert payload["startup_role_confirmed"] is False
+    assert payload["startup_role_restorable"] is False
     assert payload["role_selection_required"] is True
 
 
@@ -156,6 +159,7 @@ def test_health_bootstrap_requires_selector_after_user_exited_current_system(mon
     payload = routes.health_bootstrap(request)
 
     assert payload["startup_role_confirmed"] is False
+    assert payload["startup_role_restorable"] is False
     assert payload["startup_role_user_exited"] is True
     assert payload["role_selection_required"] is True
 
@@ -181,7 +185,8 @@ def test_health_bootstrap_update_handoff_auto_resumes_even_after_user_exit_flag(
 
     payload = routes.health_bootstrap(request)
 
-    assert payload["startup_role_confirmed"] is True
+    assert payload["startup_role_confirmed"] is False
+    assert payload["startup_role_restorable"] is True
     assert payload["startup_role_user_exited"] is True
     assert payload["role_selection_required"] is False
     assert payload["startup_handoff"]["active"] is True
@@ -215,6 +220,7 @@ def test_health_bootstrap_exposes_active_startup_handoff(monkeypatch):
     assert payload["startup_handoff"]["reason"] == "role_mode_switch"
     assert payload["startup_handoff"]["nonce"] == "handoff-123"
     assert payload["activation_phase"] == "idle"
+    assert payload["startup_role_restorable"] is True
 
 
 def test_health_bootstrap_sanitizes_legacy_role(monkeypatch):
@@ -232,4 +238,5 @@ def test_health_bootstrap_sanitizes_legacy_role(monkeypatch):
     assert payload["deployment"]["node_id"] == "legacy-node"
     assert payload["deployment"]["node_label"] == "旧角色"
     assert payload["startup_role_confirmed"] is False
+    assert payload["startup_role_restorable"] is False
     assert payload["role_selection_required"] is True

@@ -1221,6 +1221,7 @@ def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, An
     runtime_activated = bool(getattr(request.app.state, "runtime_services_activated", False))
     activation_phase = str(getattr(request.app.state, "runtime_activation_phase", "") or "").strip()
     activation_error = str(getattr(request.app.state, "runtime_activation_error", "") or "").strip()
+    activation_step = str(getattr(request.app.state, "runtime_activation_step", "") or "").strip()
     startup_role_confirmed = bool(getattr(request.app.state, "startup_role_confirmed", False))
     startup_role_user_exited = bool(getattr(request.app.state, "startup_role_user_exited", False))
     startup_handoff = {
@@ -1258,7 +1259,6 @@ def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, An
         startup_handoff_resume_ready
         or (saved_role_ready and activation_phase != "failed" and not startup_role_user_exited)
     )
-    effective_startup_role_confirmed = startup_role_confirmed or startup_role_restorable
     has_active_resume = False
     if runtime_activated and role_mode == "external":
         try:
@@ -1278,7 +1278,8 @@ def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, An
         "has_active_resume": has_active_resume,
         "startup_time": startup_time,
         "deployment": deployment_snapshot,
-        "startup_role_confirmed": effective_startup_role_confirmed,
+        "startup_role_confirmed": startup_role_confirmed,
+        "startup_role_restorable": startup_role_restorable,
         "role_selection_required": (
             not startup_handoff_resume_ready
             and ((not role_is_valid) or (not saved_role_ready) or activation_phase == "failed" or startup_role_user_exited)
@@ -1289,6 +1290,7 @@ def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, An
         "runtime_activated": runtime_activated,
         "activation_phase": activation_phase,
         "activation_error": activation_error,
+        "activation_step": activation_step,
     }
 
 

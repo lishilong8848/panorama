@@ -6,6 +6,7 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
     updaterAwaitingRestartRecovery,
     startupRoleSelectorVisible,
     startupRoleLoadingVisible,
+    startupRoleActivationInFlight,
     bootstrapReady,
     health,
     currentView,
@@ -17,12 +18,15 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
   } = options;
 
   const shouldPauseRuntimeRequests = computed(() => {
+    const activationPhase = String(health.activation_phase || "").trim().toLowerCase();
     return Boolean(
       !startupRoleSelectorHandled.value
       || updaterUiOverlayVisible.value
       || updaterAwaitingRestartRecovery.value
       || startupRoleSelectorVisible.value
       || startupRoleLoadingVisible.value
+      || Boolean(startupRoleActivationInFlight?.value)
+      || ["activating", "recovering", "restarting"].includes(activationPhase)
       || (Boolean(health.startup_role_user_exited) && !Boolean(health.runtime_activated))
     );
   });

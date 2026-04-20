@@ -161,6 +161,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     updaterUiOverlayStage,
     updaterUiOverlayKicker,
     updaterAwaitingRestartRecovery,
+    startupRoleSelectorHandled,
+    startupRoleSelectorVisible,
+    startupRoleLoadingVisible,
+    startupRoleActivationInFlight,
     markRestartRecoveryIntent,
     clearRestartRecoveryIntent,
     readUpdaterRecoveryIntent,
@@ -168,6 +172,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     clearUpdaterRecoveryIntent,
     nextTick,
     scheduleExternalDashboardRefresh,
+    shouldPauseRuntimeRequests,
     shouldIncludeHandoverHealthContext,
     shouldFetchHandoverDailyReportContext,
     shouldLoadEngineerDirectory,
@@ -187,10 +192,13 @@ export function createRuntimeHealthConfigActions(ctx) {
   let lastBridgeTasksFetchAt = 0;
   let handoverCommonSegmentRequestSeq = 0;
   let handoverBuildingSegmentRequestSeq = 0;
+  let bootstrapHealthRequestInFlight = null;
+  let startupActivationRequestInFlight = null;
   let bootstrapRetryTimer = null;
   let updaterReconnectTimer = null;
   let updaterQueueMonitorTimer = null;
   let updaterHealthHydratedOnce = false;
+  let bootstrapRuntimeHydrationQueued = false;
   let handoverReviewStatusBroadcastBound = false;
   let internalRuntimeSummaryRequestInFlight = null;
   let internalRuntimeSummaryRefetchQueued = false;
@@ -303,8 +311,13 @@ export function createRuntimeHealthConfigActions(ctx) {
     });
   }
 
-  function isUpdaterTrafficPaused() {
-    return Boolean(updaterUiOverlayVisible?.value || updaterAwaitingRestartRecovery?.value);
+  function isRuntimeTrafficPaused() {
+    return Boolean(
+      updaterUiOverlayVisible?.value
+      || updaterAwaitingRestartRecovery?.value
+      || (typeof shouldPauseRuntimeRequests === "function" && shouldPauseRuntimeRequests())
+      || Boolean(shouldPauseRuntimeRequests?.value),
+    );
   }
 
   function isLocallyExitedToRoleSelection() {
@@ -1230,6 +1243,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (!data || typeof data !== "object") return;
     const healthMode = String(data?.health_mode || "").trim().toLowerCase();
     const isLiteHealth = healthMode === "lite";
+    const activationInFlight = Boolean(startupRoleActivationInFlight?.value);
     const shouldPreserveExitedSelectorState = Boolean(
       isLocallyExitedToRoleSelection()
       && !Boolean(data?.startup_role_user_exited)
@@ -1239,18 +1253,34 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (shouldPreserveExitedSelectorState) {
       return;
     }
+    const preserveStartupActivationState = Boolean(
+      activationInFlight
+      && Boolean(health.runtime_activated || health.startup_role_confirmed)
+      && !Boolean(health.role_selection_required)
+      && data?.startup_role_user_exited !== true
+      && String(data?.activation_phase || "").trim().toLowerCase() !== "failed"
+    );
     health.version = String(data.version || "");
     health.startup_time = String(data.startup_time || health.startup_time || "");
-    health.startup_role_confirmed = Boolean(
-      typeof data.startup_role_confirmed === "boolean"
-        ? data.startup_role_confirmed
-        : health.startup_role_confirmed,
+    if (!preserveStartupActivationState || data?.startup_role_confirmed === true) {
+      health.startup_role_confirmed = Boolean(
+        typeof data.startup_role_confirmed === "boolean"
+          ? data.startup_role_confirmed
+          : health.startup_role_confirmed,
+      );
+    }
+    health.startup_role_restorable = Boolean(
+      typeof data.startup_role_restorable === "boolean"
+        ? data.startup_role_restorable
+        : health.startup_role_restorable,
     );
-    health.role_selection_required = Boolean(
-      typeof data.role_selection_required === "boolean"
-        ? data.role_selection_required
-        : health.role_selection_required,
-    );
+    if (!preserveStartupActivationState || data?.role_selection_required === false) {
+      health.role_selection_required = Boolean(
+        typeof data.role_selection_required === "boolean"
+          ? data.role_selection_required
+          : health.role_selection_required,
+      );
+    }
     health.startup_role_user_exited = Boolean(
       typeof data.startup_role_user_exited === "boolean"
         ? data.startup_role_user_exited
@@ -1289,12 +1319,32 @@ export function createRuntimeHealthConfigActions(ctx) {
         sqlite_busy_timeout_ms: data.startup_shared_bridge.sqlite_busy_timeout_ms,
       });
     }
-    health.runtime_activated = Boolean(
-      typeof data.runtime_activated === "boolean"
-        ? data.runtime_activated
-        : health.runtime_activated,
+    if (!preserveStartupActivationState || data?.runtime_activated === true) {
+      health.runtime_activated = Boolean(
+        typeof data.runtime_activated === "boolean"
+          ? data.runtime_activated
+          : health.runtime_activated,
+      );
+    }
+    const backendRuntimeReady = Boolean(
+      health.runtime_activated
+      && health.startup_role_confirmed
+      && !health.role_selection_required
+      && !health.startup_role_user_exited
     );
+    if (backendRuntimeReady) {
+      if (startupRoleSelectorHandled) {
+        startupRoleSelectorHandled.value = true;
+      }
+      if (startupRoleSelectorVisible) {
+        startupRoleSelectorVisible.value = false;
+      }
+      if (startupRoleLoadingVisible && !startupRoleActivationInFlight?.value) {
+        startupRoleLoadingVisible.value = false;
+      }
+    }
     health.activation_phase = String(data.activation_phase || health.activation_phase || "");
+    health.activation_step = String(data.activation_step || health.activation_step || "");
     health.activation_error = String(data.activation_error || health.activation_error || "");
     health.active_job_id = String(data.active_job_id || "");
     health.active_job_ids = Array.isArray(data.active_job_ids) ? data.active_job_ids : [];
@@ -1746,42 +1796,80 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchBootstrapHealth(options = {}) {
-    const silentMessage = Boolean(options?.silentMessage);
-    try {
-      const data = await getBootstrapHealthApi();
-      applyHealthSnapshot(data);
-      clearBootstrapRetryTimer();
-      if (bootstrapReady) {
-        bootstrapReady.value = true;
-      }
-      if (healthLoadError) {
-        healthLoadError.value = "";
-      }
-      return true;
-    } catch (err) {
-      if (isAbortError(err)) {
-        scheduleBootstrapHealthRetry();
-        return false;
-      }
-      if (healthLoadError) {
-        healthLoadError.value = String(err || "").trim();
-      }
-      if (isTransientNetworkError(err)) {
-        scheduleBootstrapHealthRetry();
-        return false;
-      }
-      if (!bootstrapReady?.value) {
-        scheduleBootstrapHealthRetry();
-      }
-      if (!silentMessage) {
-        message.value = `启动状态读取失败: ${err}`;
-      }
-      return false;
+    if (bootstrapHealthRequestInFlight) {
+      return bootstrapHealthRequestInFlight;
     }
+    const silentMessage = Boolean(options?.silentMessage);
+    bootstrapHealthRequestInFlight = (async () => {
+      try {
+        const data = await getBootstrapHealthApi();
+        applyHealthSnapshot(data);
+        clearBootstrapRetryTimer();
+        if (bootstrapReady) {
+          bootstrapReady.value = true;
+        }
+        if (healthLoadError) {
+          healthLoadError.value = "";
+        }
+        if (
+          Boolean(data?.runtime_activated)
+          && Boolean(data?.startup_role_confirmed)
+          && !Boolean(data?.role_selection_required)
+          && !Boolean(data?.startup_role_user_exited)
+          && !fullHealthLoaded?.value
+        ) {
+          const roleMode = resolveCurrentRoleMode();
+          if (
+            roleMode === "external"
+            && !isRuntimeTrafficPaused()
+            && !bootstrapRuntimeHydrationQueued
+          ) {
+            bootstrapRuntimeHydrationQueued = true;
+            window.setTimeout(() => {
+              void fetchExternalDashboardSummary({ silentMessage: true });
+            }, 0);
+          } else if (
+            roleMode === "internal"
+            && !isRuntimeTrafficPaused()
+            && !bootstrapRuntimeHydrationQueued
+          ) {
+            bootstrapRuntimeHydrationQueued = true;
+            window.setTimeout(() => {
+              void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+            }, 0);
+          }
+        } else if (!Boolean(data?.runtime_activated) || fullHealthLoaded?.value) {
+          bootstrapRuntimeHydrationQueued = false;
+        }
+        return true;
+      } catch (err) {
+        if (isAbortError(err)) {
+          scheduleBootstrapHealthRetry();
+          return false;
+        }
+        if (healthLoadError) {
+          healthLoadError.value = String(err || "").trim();
+        }
+        if (isTransientNetworkError(err)) {
+          scheduleBootstrapHealthRetry();
+          return false;
+        }
+        if (!bootstrapReady?.value) {
+          scheduleBootstrapHealthRetry();
+        }
+        if (!silentMessage) {
+          message.value = `启动状态读取失败: ${err}`;
+        }
+        return false;
+      } finally {
+        bootstrapHealthRequestInFlight = null;
+      }
+    })();
+    return bootstrapHealthRequestInFlight;
   }
 
   async function fetchHealth(options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady()) return false;
     const silentTransientNetworkError = Boolean(options?.silentTransientNetworkError);
     const silentMessage = Boolean(options?.silentMessage);
     const includeHandoverContext =
@@ -1843,7 +1931,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchJobs(options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady()) return false;
     const silentMessage = Boolean(options?.silentMessage);
     try {
       const data = await getJobsApi({ limit: 60 });
@@ -1896,7 +1984,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchRuntimeResources(options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady()) return false;
     const silentMessage = Boolean(options?.silentMessage);
     try {
       const data = await getRuntimeResourcesApi();
@@ -2256,7 +2344,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchExternalDashboardSummary(options = {}) {
-    if (isUpdaterTrafficPaused() || isLocallyExitedToRoleSelection() || !isRuntimeApiReady()) return false;
+    if (isRuntimeTrafficPaused() || isLocallyExitedToRoleSelection() || !isRuntimeApiReady()) return false;
     if (resolveCurrentRoleMode() === "internal") return false;
     const silentMessage = Boolean(options?.silentMessage);
     if (externalDashboardSummaryRequestInFlight) {
@@ -2279,6 +2367,17 @@ export function createRuntimeHealthConfigActions(ctx) {
           await tryRecoverFromRoleSelectionConflict();
           return false;
         }
+        if (healthLoadError) {
+          healthLoadError.value = String(err || "").trim();
+        }
+        if (
+          fullHealthLoaded
+          && !fullHealthLoaded.value
+          && Boolean(bootstrapReady?.value)
+          && Boolean(health?.runtime_activated)
+        ) {
+          fullHealthLoaded.value = true;
+        }
         if (!silentMessage) {
           message.value = `读取外网首页状态失败: ${err}`;
         }
@@ -2291,7 +2390,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchInternalRuntimeSummary(options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
     const silentMessage = Boolean(options?.silentMessage);
     const force = Boolean(options?.force);
     if (internalRuntimeSummaryRequestInFlight) {
@@ -2323,7 +2422,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         internalRuntimeSummaryRequestInFlight = null;
         if (internalRuntimeSummaryRefetchQueued) {
           internalRuntimeSummaryRefetchQueued = false;
-          if (!isUpdaterTrafficPaused() && isRuntimeApiReady() && canUseInternalRuntimeStatus()) {
+          if (!isRuntimeTrafficPaused() && isRuntimeApiReady() && canUseInternalRuntimeStatus()) {
             void fetchInternalRuntimeSummary({ silentMessage: true });
           }
         }
@@ -2333,7 +2432,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchInternalRuntimeBuildingRuntimeStatus(building, options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
     const buildingText = normalizeInternalRuntimeBuildingName(building);
     const buildingCode = normalizeInternalRuntimeBuildingCode(buildingText);
     const silentMessage = Boolean(options?.silentMessage);
@@ -2375,7 +2474,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         internalRuntimeBuildingRequestsInFlight.delete(buildingCode);
         if (internalRuntimeBuildingRefetchQueued.get(buildingCode)) {
           internalRuntimeBuildingRefetchQueued.delete(buildingCode);
-          if (!isUpdaterTrafficPaused() && isRuntimeApiReady() && canUseInternalRuntimeStatus()) {
+          if (!isRuntimeTrafficPaused() && isRuntimeApiReady() && canUseInternalRuntimeStatus()) {
             void fetchInternalRuntimeBuildingRuntimeStatus(buildingText, { silentMessage: true });
           }
         }
@@ -2386,7 +2485,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchAllInternalBuildingRuntimeStatuses(options = {}) {
-    if (isUpdaterTrafficPaused() || !canUseInternalRuntimeStatus()) return false;
+    if (isRuntimeTrafficPaused() || !canUseInternalRuntimeStatus()) return false;
     const results = await Promise.all(
       INTERNAL_RUNTIME_BUILDINGS.map((building) =>
         fetchInternalRuntimeBuildingRuntimeStatus(building, options),
@@ -2428,7 +2527,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchBridgeTaskDetail(taskId, options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (isRuntimeTrafficPaused()) return false;
     const taskIdText = String(taskId || "").trim();
     if (!taskIdText) {
       if (bridgeTaskDetail) bridgeTaskDetail.value = null;
@@ -2456,7 +2555,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchBridgeTasks(options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady()) return false;
     if (bridgeTasksRequestInFlight) return bridgeTasksRequestInFlight;
     const force = Boolean(options?.force);
     const now = Date.now();
@@ -2840,7 +2939,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchHandoverDailyReportContext(options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (isRuntimeTrafficPaused()) return false;
     if (dailyReportContextRequestInFlight) return dailyReportContextRequestInFlight;
     const silentTransientNetworkError = Boolean(options?.silentTransientNetworkError);
     const silentMessage = Boolean(options?.silentMessage);
@@ -2996,7 +3095,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchHandoverEngineerDirectory(options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (isRuntimeTrafficPaused()) return false;
     if (!handoverEngineerDirectory || !handoverEngineerLoading) return;
     const silentMessage = Boolean(options?.silentMessage);
     const forceRefresh = Boolean(options?.forceRefresh);
@@ -4260,40 +4359,52 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function activateStartupRuntime(options = {}) {
-    try {
-      const payload = {
-        source: String(options?.source || "").trim() || "启动角色确认",
-        startup_handoff_nonce: String(options?.startupHandoffNonce || "").trim(),
-      };
-      const roleMode = String(options?.roleMode || options?.role_mode || "").trim();
-      if (roleMode) {
-        payload.role_mode = roleMode;
-      }
-      const sharedBridge = options?.sharedBridge || options?.shared_bridge;
-      if (sharedBridge && typeof sharedBridge === "object" && !Array.isArray(sharedBridge)) {
-        payload.shared_bridge = sharedBridge;
-      }
-      const data = await activateStartupRuntimeApi(payload);
-      return {
-        ok: data?.ok !== false,
-        activated: Boolean(data?.activated),
-        alreadyActive: Boolean(data?.already_active),
-        roleMode: String(data?.role_mode || "").trim(),
-        savedRole: data?.saved_role && typeof data.saved_role === "object" ? data.saved_role : null,
-        phase: String(data?.phase || "").trim(),
-        error: String(data?.error || "").trim(),
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        activated: false,
-        alreadyActive: false,
-        roleMode: "",
-        savedRole: null,
-        phase: "failed",
-        error: String(err || "").trim() || "激活后台运行时失败",
-      };
+    if (startupActivationRequestInFlight) {
+      return startupActivationRequestInFlight;
     }
+    startupActivationRequestInFlight = (async () => {
+      try {
+        const payload = {
+          source: String(options?.source || "").trim() || "启动角色确认",
+          startup_handoff_nonce: String(options?.startupHandoffNonce || "").trim(),
+        };
+        const roleMode = String(options?.roleMode || options?.role_mode || "").trim();
+        if (roleMode) {
+          payload.role_mode = roleMode;
+        }
+        const sharedBridge = options?.sharedBridge || options?.shared_bridge;
+        if (sharedBridge && typeof sharedBridge === "object" && !Array.isArray(sharedBridge)) {
+          payload.shared_bridge = sharedBridge;
+        }
+        const data = await activateStartupRuntimeApi(payload);
+        return {
+          ok: data?.ok !== false,
+          activated: Boolean(data?.activated),
+          alreadyActive: Boolean(data?.already_active),
+          pending: Boolean(data?.pending),
+          roleMode: String(data?.role_mode || "").trim(),
+          savedRole: data?.saved_role && typeof data.saved_role === "object" ? data.saved_role : null,
+          phase: String(data?.phase || "").trim(),
+          step: String(data?.step || "").trim(),
+          error: String(data?.error || "").trim(),
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          activated: false,
+          alreadyActive: false,
+          pending: false,
+          roleMode: "",
+          savedRole: null,
+          phase: "failed",
+          step: "",
+          error: String(err || "").trim() || "激活后台运行时失败",
+        };
+      } finally {
+        startupActivationRequestInFlight = null;
+      }
+    })();
+    return startupActivationRequestInFlight;
   }
 
   async function exitCurrentRuntime(options = {}) {
