@@ -68,7 +68,12 @@ export function registerStartupRoleRecoveryWatcher(options = {}) {
       }
       clearStartupRouteFallbackTimer();
       if (state.overlayVisible) return;
-      if (state.loadingVisible && state.flowState !== "recovering") return;
+      const normalizedFlowState = String(state.flowState || "").trim().toLowerCase();
+      const activationFlowInProgress = Boolean(
+        (state.loadingVisible || state.selectorBusy || ["activating", "recovering", "restarting"].includes(normalizedFlowState))
+        && !state.runtimeActivated
+      );
+      if (activationFlowInProgress) return;
       const savedRole = normalizeDeploymentRoleMode(state.currentRole || routeRole);
       if (state.startupRoleUserExited) {
         startupRoleDecisionReady.value = true;
@@ -278,6 +283,9 @@ export function registerStartupRoleRecoveryWatcher(options = {}) {
         return;
       }
       if (state.selectorVisible || state.selectorBusy) return;
+      if (savedRole && !state.roleSelectionRequired) {
+        return;
+      }
       clearLegacyStartupRoleRestartState();
       startupRoleAutoActivationKey.value = "";
       selectStartupRole(savedRole || startupRoleSelectorSelection.value || "internal");
