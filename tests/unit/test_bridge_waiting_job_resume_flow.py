@@ -39,11 +39,35 @@ class _FakeWaitingJob:
         }
 
 
+class _FakeDispatchJob:
+    def __init__(self, job_id: str, *, name: str, feature: str) -> None:
+        self.job_id = job_id
+        self.name = name
+        self.feature = feature
+
+    def to_dict(self) -> dict:
+        return {
+            "job_id": self.job_id,
+            "name": self.name,
+            "feature": self.feature,
+            "status": "queued",
+        }
+
+
 class _FakeRouteJobService:
     def __init__(self) -> None:
+        self.start_job_calls: list[dict] = []
         self.waiting_calls: list[dict] = []
         self.bind_calls: list[tuple[str, str]] = []
         self.last_job: _FakeWaitingJob | None = None
+
+    def start_job(self, **kwargs):  # noqa: ANN003
+        self.start_job_calls.append(dict(kwargs))
+        return _FakeDispatchJob(
+            f"job-dispatch-{len(self.start_job_calls)}",
+            name=str(kwargs.get("name", "") or "").strip(),
+            feature=str(kwargs.get("feature", "") or "").strip(),
+        )
 
     def create_waiting_worker_job(self, **kwargs):  # noqa: ANN003
         self.waiting_calls.append(dict(kwargs))
@@ -108,10 +132,16 @@ def test_auto_once_route_creates_waiting_job_and_binds_bridge_task() -> None:
 
     response = routes.job_auto_once(request)
 
-    assert response["accepted"] is True
-    assert response["job"]["status"] == "waiting_resource"
-    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
-    assert response["job"]["bridge_task_id"] == "bridge-monthly-auto-once-1"
+    assert response["job_id"] == "job-dispatch-1"
+    assert response["status"] == "queued"
+    assert job_service.start_job_calls[0]["feature"] == "monthly_external_dispatch"
+
+    result = job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+
+    assert result["waiting"]["accepted"] is True
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
+    assert result["waiting"]["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert result["waiting"]["job"]["bridge_task_id"] == "bridge-monthly-auto-once-1"
     assert job_service.bind_calls == [("job-waiting-1", "bridge-monthly-auto-once-1")]
     assert bridge_service.create_calls[0]["resume_job_id"] == "job-waiting-1"
 

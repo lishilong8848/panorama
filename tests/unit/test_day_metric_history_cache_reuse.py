@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import shutil
 import uuid
@@ -93,7 +93,7 @@ def test_fill_day_metric_history_reuses_shared_handover_sources(work_dir: Path) 
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -115,9 +115,49 @@ def test_fill_day_metric_history_reuses_shared_handover_sources(work_dir: Path) 
     assert len(entries) == 1
     output_path = Path(entries[0]["file_path"])
     assert output_path.exists()
-    assert entries[0]["bucket_kind"] == "latest"
-    assert entries[0]["bucket_key"] == "2026-04-05 16"
+    assert entries[0]["bucket_kind"] == "date"
+    assert entries[0]["bucket_key"] == "2026-04-05"
+    assert entries[0]["metadata"]["alias_only"] is True
+    assert entries[0]["metadata"]["canonical_relative_path"] == entries[0]["relative_path"]
     assert "20260405--16" in entries[0]["relative_path"]
+    rows = store.list_source_cache_entries(
+        source_family=FAMILY_HANDOVER_LOG,
+        building="A楼",
+        bucket_kind="date",
+        bucket_key="2026-04-05",
+        duty_date="2026-04-05",
+        duty_shift="all",
+        status="ready",
+    )
+    assert len(rows) == 1
+    assert rows[0]["metadata"]["alias_only"] is True
+
+
+def test_fill_day_metric_history_rejects_external_writer(work_dir: Path) -> None:
+    shared_root = work_dir / "shared"
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    _register_shared_handover_entry(
+        store=store,
+        shared_root=shared_root,
+        building="A楼",
+        duty_date="2026-04-05",
+        downloaded_at="2026-04-05 12:00:00",
+    )
+
+    with pytest.raises(RuntimeError, match="仅允许内网端"):
+        service.fill_day_metric_history(
+            selected_dates=["2026-04-05"],
+            building_scope="single",
+            building="A楼",
+            emit_log=lambda *_args, **_kwargs: None,
+        )
+
     rows = store.list_source_cache_entries(
         source_family=FAMILY_HANDOVER_LOG,
         building="A楼",
@@ -135,7 +175,7 @@ def test_fill_day_metric_history_raises_when_no_shared_handover_source(work_dir:
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -154,7 +194,7 @@ def test_fill_day_metric_history_skips_empty_ready_entry_and_reuses_valid_latest
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -199,15 +239,16 @@ def test_fill_day_metric_history_skips_empty_ready_entry_and_reuses_valid_latest
     finally:
         workbook.close()
     assert output_path.read_bytes() == latest_valid.read_bytes()
-    assert entries[0]["bucket_kind"] == "latest"
+    assert entries[0]["bucket_kind"] == "date"
+    assert entries[0]["metadata"]["alias_only"] is True
 
 
-def test_fill_day_metric_history_prefers_cached_entry_over_history_scan(work_dir: Path) -> None:
+def test_fill_day_metric_history_ignores_unindexed_history_file_when_alias_exists(work_dir: Path) -> None:
     shared_root = work_dir / "shared"
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -252,12 +293,12 @@ def test_fill_day_metric_history_prefers_cached_entry_over_history_scan(work_dir
         workbook.close()
 
 
-def test_fill_day_metric_history_falls_back_to_valid_cache_when_history_missing(work_dir: Path) -> None:
+def test_fill_day_metric_history_uses_indexed_cache_without_directory_lookup(work_dir: Path) -> None:
     shared_root = work_dir / "shared"
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -298,7 +339,7 @@ def test_repair_day_metric_ready_entries_downgrades_empty_ready_rows(work_dir: P
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -350,7 +391,7 @@ def test_sweep_invalid_ready_entries_only_scans_latest_and_recent_window(work_di
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -432,7 +473,7 @@ def test_background_sweep_candidates_only_include_recent_three_hours(work_dir: P
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -491,7 +532,7 @@ def test_sweep_invalid_ready_entries_pauses_and_returns_next_index(work_dir: Pat
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -540,7 +581,7 @@ def test_sweep_invalid_ready_entries_downgrades_missing_ready_entry_to_failed(wo
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -582,12 +623,12 @@ def test_sweep_invalid_ready_entries_downgrades_missing_ready_entry_to_failed(wo
     assert len(failed_rows) == 1
 
 
-def test_fill_day_metric_history_falls_back_to_real_history_folder_when_store_missing_valid_entry(work_dir: Path) -> None:
+def test_fill_day_metric_history_does_not_scan_real_history_folder_when_store_missing_valid_entry(work_dir: Path) -> None:
     shared_root = work_dir / "shared"
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
     service = SharedSourceCacheService(
-        runtime_config=_build_runtime_config(role_mode="external", shared_root=shared_root),
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
         store=store,
         emit_log=lambda *_args, **_kwargs: None,
     )
@@ -616,20 +657,10 @@ def test_fill_day_metric_history_falls_back_to_real_history_folder_when_store_mi
     )
     _write_handover_source_xlsx(history_path)
 
-    entries = service.fill_day_metric_history(
-        selected_dates=["2026-04-11"],
-        building_scope="single",
-        building="A楼",
-        emit_log=lambda *_args, **_kwargs: None,
-    )
-
-    assert len(entries) == 1
-    output_path = Path(entries[0]["file_path"])
-    workbook = openpyxl.load_workbook(output_path, data_only=True)
-    try:
-        assert workbook.active["D4"].value == "市电总功率"
-        assert workbook.active["E4"].value == 123.4
-    finally:
-        workbook.close()
-    assert entries[0]["bucket_kind"] == "history_scan"
-    assert "20260411--11" in entries[0]["relative_path"]
+    with pytest.raises(RuntimeError, match="缺少可复用的交接班源文件"):
+        service.fill_day_metric_history(
+            selected_dates=["2026-04-11"],
+            building_scope="single",
+            building="A楼",
+            emit_log=lambda *_args, **_kwargs: None,
+        )

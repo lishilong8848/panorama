@@ -1247,6 +1247,480 @@ def _start_background_job(
     )
 
 
+def _run_external_day_metric_shared_flow(
+    *,
+    container,
+    config: Dict[str, Any],
+    selected_dates: List[str],
+    building_scope: str,
+    building: str,
+    emit_log: Callable[[str], None],
+) -> Dict[str, Any]:
+    bridge_service = _shared_bridge_service_or_raise(container)
+    target_buildings = [building] if building_scope == "single" else bridge_service.get_source_cache_buildings()
+    target_buildings = [item for item in target_buildings if item]
+    emit_log(
+        "[12项独立上传] 已进入后台共享文件处理: "
+        f"dates={','.join(selected_dates)}, scope={building_scope}, building={building or '-'}"
+    )
+    cached_entries = _filter_accessible_cached_entries(bridge_service.get_day_metric_by_date_cache_entries(
+        selected_dates=selected_dates,
+        buildings=target_buildings,
+    ))
+    expected_count = len(selected_dates) * len(target_buildings)
+    if len(cached_entries) < expected_count:
+        emit_log("[共享缓存][12项] 外网端只读取内网端已登记索引，缺失项将交由内网端补采")
+    cached_entry_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for item in cached_entries:
+        if not isinstance(item, dict):
+            continue
+        duty_date = str(item.get("duty_date", "") or "").strip()
+        building_name = str(item.get("building", "") or "").strip()
+        if not duty_date or not building_name:
+            continue
+        key = (duty_date, building_name)
+        if key not in cached_entry_by_key:
+            cached_entry_by_key[key] = item
+    ready_dates = [
+        duty_date
+        for duty_date in selected_dates
+        if all((duty_date, building_name) in cached_entry_by_key for building_name in target_buildings)
+    ]
+    missing_dates = [duty_date for duty_date in selected_dates if duty_date not in ready_dates]
+
+    waiting_payload: Dict[str, Any] | None = None
+    if missing_dates:
+        dedupe_key = _job_dedupe_key(
+            "day_metric_wait_shared_bridge",
+            selected_dates=missing_dates,
+            building_scope=building_scope,
+            building=building or "",
+            buildings=target_buildings,
+        )
+        waiting_job, waiting_task = start_waiting_bridge_job(
+            job_service=container.job_service,
+            bridge_service=bridge_service,
+            name="12项独立上传-内网下载",
+            worker_handler="day_metric_from_download",
+            worker_payload={
+                "selected_dates": missing_dates,
+                "building_scope": building_scope,
+                "building": building or None,
+            },
+            resource_keys=_job_resource_keys("shared_bridge:day_metric"),
+            priority="manual",
+            feature="day_metric_from_download",
+            dedupe_key=dedupe_key,
+            submitted_by="manual",
+            bridge_get_or_create_name="get_or_create_day_metric_from_download_task",
+            bridge_create_name="create_day_metric_from_download_task",
+            bridge_kwargs={
+                "selected_dates": missing_dates,
+                "building_scope": building_scope,
+                "building": building or None,
+            },
+        )
+        emit_log(
+            "[共享桥接] 已受理12项共享桥接任务 "
+            f"task_id={str(waiting_task.get('task_id', '') or '-').strip() or '-'}, "
+            f"dates={','.join(missing_dates)}, scope={building_scope}, building={building or '-'}"
+        )
+        waiting_payload = _accepted_waiting_job_response(waiting_job, waiting_task)
+        if not ready_dates:
+            return {
+                "ok": True,
+                "mode": "waiting_shared_bridge",
+                "selected_dates": list(selected_dates),
+                "missing_dates": list(missing_dates),
+                "waiting": waiting_payload,
+            }
+        emit_log(
+            "[共享缓存][12项] 已命中可直接复用的日期，将先在外网端继续上传；"
+            f" 仍缺日期={','.join(missing_dates)}，等待内网补采后自动续跑"
+        )
+
+    source_units = [
+        {
+            "duty_date": str(item.get("duty_date", "") or "").strip(),
+            "building": str(item.get("building", "") or "").strip(),
+            "source_file": str(item.get("file_path", "") or "").strip(),
+        }
+        for duty_date in ready_dates
+        for building_name in target_buildings
+        if (entry := cached_entry_by_key.get((duty_date, building_name)))
+        for item in [entry]
+    ]
+    service = DayMetricStandaloneUploadService(config)
+    result = service.continue_from_source_files(
+        selected_dates=ready_dates,
+        buildings=target_buildings,
+        source_units=source_units,
+        building_scope=building_scope,
+        building=building or None,
+        emit_log=emit_log,
+    )
+    if waiting_payload is not None:
+        return {
+            "ok": True,
+            "mode": "partial_ready",
+            "selected_dates": list(ready_dates),
+            "missing_dates": list(missing_dates),
+            "upload_result": result,
+            "waiting": waiting_payload,
+        }
+    return result
+
+
+def _run_external_monthly_auto_once_shared_flow(
+    *,
+    container,
+    config: Dict[str, Any],
+    emit_log: Callable[[str], None],
+) -> Dict[str, Any]:
+    bridge_service = _shared_bridge_service_or_raise(container)
+    target_buildings = bridge_service.get_source_cache_buildings()
+    emit_log("[月报自动流程] 已进入后台共享文件处理")
+    selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
+        source_family="monthly_report_family",
+        buildings=target_buildings,
+    ))
+    cached_entries = selection["selected_entries"]
+    if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
+        dedupe_key = _job_dedupe_key(
+            "monthly_auto_once_wait_shared_bridge",
+            bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
+            buildings=target_buildings,
+        )
+        waiting_job, task = start_waiting_bridge_job(
+            job_service=container.job_service,
+            bridge_service=bridge_service,
+            name="月报自动流程",
+            worker_handler="auto_once",
+            worker_payload={"source": "月报共享桥接自动恢复"},
+            resource_keys=_job_resource_keys("shared_bridge:monthly_report"),
+            priority="manual",
+            feature="auto_once",
+            dedupe_key=dedupe_key,
+            submitted_by="manual",
+            bridge_get_or_create_name="get_or_create_monthly_auto_once_task",
+            bridge_create_name="create_monthly_auto_once_task",
+            bridge_kwargs={"source": "manual"},
+        )
+        emit_log(
+            "[共享桥接] 已受理月报自动流程共享桥接任务 "
+            f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
+            f"reason={_build_latest_cache_wait_detail(feature_name='全景平台月报', selection=selection)}"
+        )
+        return {
+            "ok": True,
+            "mode": "waiting_shared_bridge",
+            "waiting": _accepted_waiting_job_response(waiting_job, task),
+        }
+
+    file_items = [
+        {
+            "building": str(item.get("building", "") or "").strip(),
+            "file_path": str(item.get("file_path", "") or "").strip(),
+            "upload_date": str(item.get("metadata", {}).get("upload_date", "") or item.get("duty_date", "") or _current_hour_bucket()[:10]).strip(),
+        }
+        for item in cached_entries
+    ]
+    return run_monthly_from_file_items(
+        config,
+        file_items=file_items,
+        emit_log=emit_log,
+        source_label="月报共享文件",
+    )
+
+
+def _run_external_wet_bulb_shared_flow(
+    *,
+    container,
+    config: Dict[str, Any],
+    emit_log: Callable[[str], None],
+) -> Dict[str, Any]:
+    bridge_service = _shared_bridge_service_or_raise(container)
+    target_buildings = bridge_service.get_source_cache_buildings()
+    emit_log("[湿球温度定时采集] 已进入后台共享文件处理")
+    selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
+        source_family="handover_log_family",
+        buildings=target_buildings,
+    ))
+    cached_entries = selection["selected_entries"]
+    if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
+        dedupe_key = _job_dedupe_key(
+            "wet_bulb_wait_shared_bridge",
+            bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
+            buildings=target_buildings,
+        )
+        waiting_job, task = start_waiting_bridge_job(
+            job_service=container.job_service,
+            bridge_service=bridge_service,
+            name="湿球温度定时采集",
+            worker_handler="wet_bulb_collection_run",
+            worker_payload={"source": "湿球温度定时采集"},
+            resource_keys=_job_resource_keys("shared_bridge:wet_bulb"),
+            priority="manual",
+            feature="wet_bulb_collection_run",
+            dedupe_key=dedupe_key,
+            submitted_by="manual",
+            bridge_get_or_create_name="get_or_create_wet_bulb_collection_task",
+            bridge_create_name="create_wet_bulb_collection_task",
+            bridge_kwargs={"buildings": target_buildings},
+        )
+        emit_log(
+            "[共享桥接] 已受理湿球温度共享桥接任务 "
+            f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
+            f"reason={_build_latest_cache_wait_detail(feature_name='交接班日志', selection=selection)}"
+        )
+        return {
+            "ok": True,
+            "mode": "waiting_shared_bridge",
+            "waiting": _accepted_waiting_job_response(waiting_job, task),
+        }
+
+    source_units = [
+        {
+            "building": str(item.get("building", "") or "").strip(),
+            "file_path": str(item.get("file_path", "") or "").strip(),
+        }
+        for item in cached_entries
+    ]
+    service = WetBulbCollectionService(config)
+    return service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
+
+
+def _run_external_multi_date_shared_flow(
+    *,
+    container,
+    config: Dict[str, Any],
+    selected_dates: List[str],
+    emit_log: Callable[[str], None],
+) -> Dict[str, Any]:
+    bridge_service = _shared_bridge_service_or_raise(container)
+    target_buildings = bridge_service.get_source_cache_buildings()
+    emit_log(f"[多日期自动流程] 已进入后台共享文件处理: dates={','.join(selected_dates)}")
+    cached_entries = _filter_accessible_cached_entries(bridge_service.get_monthly_by_date_cache_entries(
+        selected_dates=selected_dates,
+        buildings=target_buildings,
+    ))
+    expected_count = len(selected_dates) * len(target_buildings)
+    if len(cached_entries) < expected_count:
+        dedupe_key = _job_dedupe_key(
+            "multi_date_wait_shared_bridge",
+            selected_dates=selected_dates,
+            buildings=target_buildings,
+        )
+        waiting_job, task = start_waiting_bridge_job(
+            job_service=container.job_service,
+            bridge_service=bridge_service,
+            name="多日期自动流程",
+            worker_handler="multi_date",
+            worker_payload={"selected_dates": selected_dates},
+            resource_keys=_job_resource_keys("shared_bridge:monthly_report"),
+            priority="manual",
+            feature="multi_date",
+            dedupe_key=dedupe_key,
+            submitted_by="manual",
+            bridge_get_or_create_name="get_or_create_monthly_cache_fill_task",
+            bridge_create_name="create_monthly_cache_fill_task",
+            bridge_kwargs={"selected_dates": selected_dates},
+        )
+        emit_log(
+            "[共享缓存] 已提交月报历史日期补采任务 "
+            f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, dates={','.join(selected_dates)}"
+        )
+        return {
+            "ok": True,
+            "mode": "waiting_shared_bridge",
+            "waiting": _accepted_waiting_job_response(waiting_job, task),
+        }
+
+    file_items = [
+        {
+            "building": str(item.get("building", "") or "").strip(),
+            "file_path": str(item.get("file_path", "") or "").strip(),
+            "upload_date": str(item.get("metadata", {}).get("upload_date", "") or item.get("duty_date", "") or "").strip(),
+        }
+        for item in cached_entries
+    ]
+    return run_monthly_from_file_items(
+        config,
+        file_items=file_items,
+        emit_log=emit_log,
+        source_label="月报历史共享文件",
+    )
+
+
+def _run_external_handover_shared_flow(
+    *,
+    container,
+    config: Dict[str, Any],
+    buildings: List[str],
+    end_time_text: str | None,
+    duty_date_text: str | None,
+    duty_shift_text: str | None,
+    emit_log: Callable[[str], None],
+) -> Dict[str, Any]:
+    bridge_service = _shared_bridge_service_or_raise(container)
+    target_buildings = buildings or bridge_service.get_source_cache_buildings()
+    emit_log(
+        "[交接班日志] 已进入后台共享文件处理: "
+        f"buildings={','.join(target_buildings) or '-'}, "
+        f"duty_date={duty_date_text or '-'}, duty_shift={duty_shift_text or '-'}"
+    )
+    selection: Dict[str, Any] = {}
+    if duty_date_text and duty_shift_text:
+        cached_entries = _filter_accessible_cached_entries(bridge_service.get_handover_by_date_cache_entries(
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            buildings=target_buildings,
+        ))
+        capacity_cached_entries = _filter_accessible_cached_entries(
+            bridge_service.get_handover_capacity_by_date_cache_entries(
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                buildings=target_buildings,
+            )
+        )
+        if len(cached_entries) < len(target_buildings) or len(capacity_cached_entries) < len(target_buildings):
+            dedupe_key = _job_dedupe_key(
+                "handover_history_wait_shared_bridge",
+                duty_date=duty_date_text or "",
+                duty_shift=duty_shift_text or "",
+                buildings=target_buildings,
+                end_time=end_time_text or "",
+            )
+            waiting_job, task = start_waiting_bridge_job(
+                job_service=container.job_service,
+                bridge_service=bridge_service,
+                name="交接班日志-内网下载生成",
+                worker_handler="handover_from_download",
+                worker_payload={
+                    "buildings": target_buildings,
+                    "end_time": end_time_text,
+                    "duty_date": duty_date_text,
+                    "duty_shift": duty_shift_text,
+                },
+                resource_keys=_job_resource_keys("shared_bridge:handover"),
+                priority="manual",
+                feature="handover_from_download",
+                dedupe_key=dedupe_key,
+                submitted_by="manual",
+                bridge_get_or_create_name="get_or_create_handover_cache_fill_task",
+                bridge_create_name="create_handover_cache_fill_task",
+                bridge_kwargs={
+                    "continuation_kind": "handover",
+                    "buildings": target_buildings,
+                    "duty_date": duty_date_text,
+                    "duty_shift": duty_shift_text,
+                    "selected_dates": None,
+                    "building_scope": None,
+                    "building": None,
+                },
+            )
+            emit_log(
+                "[共享缓存] 已提交交接班历史缓存补采任务 "
+                f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
+                f"duty_date={duty_date_text}, duty_shift={duty_shift_text}"
+            )
+            return {
+                "ok": True,
+                "mode": "waiting_shared_bridge",
+                "waiting": _accepted_waiting_job_response(waiting_job, task),
+            }
+        building_files = [(str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip()) for item in cached_entries]
+        capacity_building_files = [
+            (str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip())
+            for item in capacity_cached_entries
+        ]
+    else:
+        selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
+            source_family="handover_log_family",
+            buildings=target_buildings,
+        ))
+        cached_entries = selection["selected_entries"]
+        capacity_building_files = []
+        for item in cached_entries:
+            building = str(item.get("building", "") or "").strip()
+            duty_date_value = str(item.get("duty_date", "") or "").strip()
+            duty_shift_value = str(item.get("duty_shift", "") or "").strip().lower()
+            if not building or not duty_date_value or duty_shift_value not in {"day", "night"}:
+                continue
+            matched = _filter_accessible_cached_entries(
+                bridge_service.get_handover_capacity_by_date_cache_entries(
+                    duty_date=duty_date_value,
+                    duty_shift=duty_shift_value,
+                    buildings=[building],
+                )
+            )
+            if not matched:
+                continue
+            capacity_building_files.append(
+                (
+                    str(matched[0].get("building", "") or "").strip(),
+                    str(matched[0].get("file_path", "") or "").strip(),
+                )
+            )
+        if (
+            not selection["can_proceed"]
+            or len(cached_entries) < len(target_buildings)
+            or len(capacity_building_files) < len(target_buildings)
+        ):
+            dedupe_key = _job_dedupe_key(
+                "handover_latest_wait_shared_bridge",
+                bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
+                buildings=target_buildings,
+                end_time=end_time_text or "",
+            )
+            waiting_job, task = start_waiting_bridge_job(
+                job_service=container.job_service,
+                bridge_service=bridge_service,
+                name="交接班日志-内网下载生成",
+                worker_handler="handover_from_download",
+                worker_payload={
+                    "buildings": target_buildings,
+                    "end_time": end_time_text,
+                    "duty_date": None,
+                    "duty_shift": None,
+                },
+                resource_keys=_job_resource_keys("shared_bridge:handover"),
+                priority="manual",
+                feature="handover_from_download",
+                dedupe_key=dedupe_key,
+                submitted_by="manual",
+                bridge_get_or_create_name="get_or_create_handover_from_download_task",
+                bridge_create_name="create_handover_from_download_task",
+                bridge_kwargs={
+                    "buildings": target_buildings,
+                    "end_time": end_time_text,
+                    "duty_date": None,
+                    "duty_shift": None,
+                },
+            )
+            emit_log(
+                "[共享桥接] 已受理交接班 latest 共享桥接任务 "
+                f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
+                f"reason={_build_latest_cache_wait_detail(feature_name='交接班日志', selection=selection)}"
+            )
+            return {
+                "ok": True,
+                "mode": "waiting_shared_bridge",
+                "waiting": _accepted_waiting_job_response(waiting_job, task),
+            }
+        building_files = [(str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip()) for item in cached_entries]
+
+    orchestrator = OrchestratorService(config)
+    return orchestrator.run_handover_from_files(
+        building_files=building_files,
+        capacity_building_files=capacity_building_files,
+        end_time=end_time_text,
+        duty_date=duty_date_text,
+        duty_shift=duty_shift_text,
+        emit_log=emit_log,
+    )
+
+
 def _call_with_supported_kwargs(func: Callable[..., Any], **kwargs: Any) -> Any:
     try:
         signature = inspect.signature(func)
@@ -3156,76 +3630,30 @@ def job_auto_once(request: Request) -> Dict[str, Any]:
     if role_mode == "internal":
         raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起月报共享桥接任务")
     if role_mode == "external":
-        bridge_service = _shared_bridge_service_or_raise(container)
-        target_buildings = bridge_service.get_source_cache_buildings()
-        selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
-            source_family="monthly_report_family",
-            buildings=target_buildings,
-        ))
-        cached_entries = selection["selected_entries"]
-        if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
-            dedupe_key = _job_dedupe_key(
-                "monthly_auto_once_wait_shared_bridge",
-                bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
-                buildings=target_buildings,
-            )
-            job, task = start_waiting_bridge_job(
-                job_service=container.job_service,
-                bridge_service=bridge_service,
-                name="月报自动流程",
-                worker_handler="auto_once",
-                worker_payload={"source": "月报共享桥接自动恢复"},
-                resource_keys=_job_resource_keys("shared_bridge:monthly_report"),
-                priority="manual",
-                feature="auto_once",
-                dedupe_key=dedupe_key,
-                submitted_by="manual",
-                bridge_get_or_create_name="get_or_create_monthly_auto_once_task",
-                bridge_create_name="create_monthly_auto_once_task",
-                bridge_kwargs={"source": "manual"},
-            )
-            container.add_system_log(
-                "[共享桥接] 已受理月报自动流程共享桥接任务 "
-                f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
-                f"reason={_build_latest_cache_wait_detail(feature_name='全景平台月报', selection=selection)}"
-            )
-            return _accepted_waiting_job_response(job, task)
+        _shared_bridge_service_or_raise(container)
+        dedupe_key = _job_dedupe_key("monthly_auto_once_external_dispatch", source="manual")
 
-        def _run_from_cache(emit_log):
-            file_items = [
-                {
-                    "building": str(item.get("building", "") or "").strip(),
-                    "file_path": str(item.get("file_path", "") or "").strip(),
-                    "upload_date": str(item.get("metadata", {}).get("upload_date", "") or item.get("duty_date", "") or _current_hour_bucket()[:10]).strip(),
-                }
-                for item in cached_entries
-            ]
-            return run_monthly_from_file_items(
-                config,
-                file_items=file_items,
+        def _run_external_shared(emit_log):
+            return _run_external_monthly_auto_once_shared_flow(
+                container=container,
+                config=config,
                 emit_log=emit_log,
-                source_label="月报共享文件",
             )
-        dedupe_key = _job_dedupe_key(
-            "monthly_cache_latest",
-            bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
-            buildings=[str(item.get("building", "") or "").strip() for item in cached_entries],
-        )
 
         try:
             job = _start_background_job(
                 container,
-                name="月报自动流程-读取共享文件",
-                run_func=_run_from_cache,
+                name="月报自动流程-共享文件处理",
+                run_func=_run_external_shared,
                 worker_handler="",
                 worker_payload={},
                 resource_keys=_job_resource_keys("shared_bridge:monthly_report"),
                 priority="manual",
-                feature="monthly_cache_latest",
+                feature="monthly_external_dispatch",
                 dedupe_key=dedupe_key,
                 submitted_by="manual",
             )
-            container.add_system_log(f"[任务] 已提交: 月报自动流程-读取共享文件 ({job.job_id})")
+            container.add_system_log(f"[任务] 已提交: 月报自动流程-共享文件处理 ({job.job_id})")
             return job.to_dict()
         except JobBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3271,71 +3699,30 @@ def job_wet_bulb_collection_run(request: Request) -> Dict[str, Any]:
     if role_mode == "internal":
         raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起湿球温度共享桥接任务")
     if role_mode == "external":
-        bridge_service = _shared_bridge_service_or_raise(container)
-        target_buildings = bridge_service.get_source_cache_buildings()
-        selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
-            source_family="handover_log_family",
-            buildings=target_buildings,
-        ))
-        cached_entries = selection["selected_entries"]
-        if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
-            dedupe_key = _job_dedupe_key(
-                "wet_bulb_wait_shared_bridge",
-                bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
-                buildings=target_buildings,
-            )
-            job, task = start_waiting_bridge_job(
-                job_service=container.job_service,
-                bridge_service=bridge_service,
-                name="湿球温度定时采集",
-                worker_handler="wet_bulb_collection_run",
-                worker_payload={"source": "湿球温度定时采集"},
-                resource_keys=_job_resource_keys("shared_bridge:wet_bulb"),
-                priority="manual",
-                feature="wet_bulb_collection_run",
-                dedupe_key=dedupe_key,
-                submitted_by="manual",
-                bridge_get_or_create_name="get_or_create_wet_bulb_collection_task",
-                bridge_create_name="create_wet_bulb_collection_task",
-                bridge_kwargs={"buildings": target_buildings},
-            )
-            container.add_system_log(
-                "[共享桥接] 已受理湿球温度共享桥接任务 "
-                f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
-                f"reason={_build_latest_cache_wait_detail(feature_name='交接班日志', selection=selection)}"
-            )
-            return _accepted_waiting_job_response(job, task)
+        _shared_bridge_service_or_raise(container)
+        dedupe_key = _job_dedupe_key("wet_bulb_external_dispatch", source="manual")
 
-        def _run_from_cache(emit_log):
-            source_units = [
-                {
-                    "building": str(item.get("building", "") or "").strip(),
-                    "file_path": str(item.get("file_path", "") or "").strip(),
-                }
-                for item in cached_entries
-            ]
-            service = WetBulbCollectionService(config)
-            return service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
-        dedupe_key = _job_dedupe_key(
-            "wet_bulb_cache_latest",
-            bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
-            buildings=[str(item.get("building", "") or "").strip() for item in cached_entries],
-        )
+        def _run_external_shared(emit_log):
+            return _run_external_wet_bulb_shared_flow(
+                container=container,
+                config=config,
+                emit_log=emit_log,
+            )
 
         try:
             job = _start_background_job(
                 container,
-                name="湿球温度定时采集-读取共享文件",
-                run_func=_run_from_cache,
+                name="湿球温度定时采集-共享文件处理",
+                run_func=_run_external_shared,
                 worker_handler="",
                 worker_payload={},
                 resource_keys=_job_resource_keys("shared_bridge:wet_bulb"),
                 priority="manual",
-                feature="wet_bulb_cache_latest",
+                feature="wet_bulb_external_dispatch",
                 dedupe_key=dedupe_key,
                 submitted_by="manual",
             )
-            container.add_system_log(f"[任务] 已提交: 湿球温度定时采集-读取共享文件 ({job.job_id})")
+            container.add_system_log(f"[任务] 已提交: 湿球温度定时采集-共享文件处理 ({job.job_id})")
             return job.to_dict()
         except JobBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3577,75 +3964,34 @@ def job_multi_date(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     if role_mode == "internal":
             raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起月报共享桥接任务")
     if role_mode == "external":
-        bridge_service = _shared_bridge_service_or_raise(container)
-        target_buildings = bridge_service.get_source_cache_buildings()
-        cached_entries = _filter_accessible_cached_entries(bridge_service.get_monthly_by_date_cache_entries(
-            selected_dates=selected_dates,
-            buildings=target_buildings,
-        ))
-        expected_count = len(selected_dates) * len(target_buildings)
-        if len(cached_entries) < expected_count:
-            dedupe_key = _job_dedupe_key(
-                "multi_date_wait_shared_bridge",
-                selected_dates=selected_dates,
-                buildings=target_buildings,
-            )
-            job, task = start_waiting_bridge_job(
-                job_service=container.job_service,
-                bridge_service=bridge_service,
-                name="多日期自动流程",
-                worker_handler="multi_date",
-                worker_payload={"selected_dates": selected_dates},
-                resource_keys=_job_resource_keys("shared_bridge:monthly_report"),
-                priority="manual",
-                feature="multi_date",
-                dedupe_key=dedupe_key,
-                submitted_by="manual",
-                bridge_get_or_create_name="get_or_create_monthly_cache_fill_task",
-                bridge_create_name="create_monthly_cache_fill_task",
-                bridge_kwargs={"selected_dates": selected_dates},
-            )
-            container.add_system_log(
-                "[共享缓存] 已提交月报历史日期补采任务 "
-                f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, dates={','.join(selected_dates)}"
-            )
-            return _accepted_waiting_job_response(job, task)
-
-        def _run_from_cache(emit_log):
-            file_items = [
-                {
-                    "building": str(item.get("building", "") or "").strip(),
-                    "file_path": str(item.get("file_path", "") or "").strip(),
-                    "upload_date": str(item.get("metadata", {}).get("upload_date", "") or item.get("duty_date", "") or "").strip(),
-                }
-                for item in cached_entries
-            ]
-            return run_monthly_from_file_items(
-                config,
-                file_items=file_items,
-                emit_log=emit_log,
-                source_label="月报历史共享文件",
-            )
+        _shared_bridge_service_or_raise(container)
         dedupe_key = _job_dedupe_key(
-            "monthly_cache_by_date",
+            "multi_date_external_dispatch",
             selected_dates=selected_dates,
-            buildings=target_buildings,
         )
+
+        def _run_external_shared(emit_log):
+            return _run_external_multi_date_shared_flow(
+                container=container,
+                config=config,
+                selected_dates=selected_dates,
+                emit_log=emit_log,
+            )
 
         try:
             job = _start_background_job(
                 container,
-                name="月报多日期-读取共享文件",
-                run_func=_run_from_cache,
+                name="月报多日期-共享文件处理",
+                run_func=_run_external_shared,
                 worker_handler="",
                 worker_payload={},
                 resource_keys=_job_resource_keys("shared_bridge:monthly_report"),
                 priority="manual",
-                feature="monthly_cache_by_date",
+                feature="multi_date_external_dispatch",
                 dedupe_key=dedupe_key,
                 submitted_by="manual",
             )
-            container.add_system_log(f"[任务] 已提交: 月报多日期-读取共享文件 ({job.job_id})")
+            container.add_system_log(f"[任务] 已提交: 月报多日期-共享文件处理 ({job.job_id})")
             return job.to_dict()
         except JobBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -4127,174 +4473,41 @@ def job_handover_from_download(payload: Dict[str, Any], request: Request) -> Dic
     if role_mode == "internal":
         raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起交接班桥接任务")
     if role_mode == "external":
-        bridge_service = _shared_bridge_service_or_raise(container)
-        target_buildings = buildings or bridge_service.get_source_cache_buildings()
-        if duty_date_text and duty_shift_text:
-            cached_entries = _filter_accessible_cached_entries(bridge_service.get_handover_by_date_cache_entries(
-                duty_date=duty_date_text,
-                duty_shift=duty_shift_text,
-                buildings=target_buildings,
-            ))
-            capacity_cached_entries = _filter_accessible_cached_entries(
-                bridge_service.get_handover_capacity_by_date_cache_entries(
-                    duty_date=duty_date_text,
-                    duty_shift=duty_shift_text,
-                    buildings=target_buildings,
-                )
-            )
-            if len(cached_entries) < len(target_buildings) or len(capacity_cached_entries) < len(target_buildings):
-                dedupe_key = _job_dedupe_key(
-                    "handover_history_wait_shared_bridge",
-                    duty_date=duty_date_text or "",
-                    duty_shift=duty_shift_text or "",
-                    buildings=target_buildings,
-                    end_time=end_time_text or "",
-                )
-                job, task = start_waiting_bridge_job(
-                    job_service=container.job_service,
-                    bridge_service=bridge_service,
-                    name="交接班日志-内网下载生成",
-                    worker_handler="handover_from_download",
-                    worker_payload={
-                        "buildings": target_buildings,
-                        "end_time": end_time_text,
-                        "duty_date": duty_date_text,
-                        "duty_shift": duty_shift_text,
-                    },
-                    resource_keys=_job_resource_keys("shared_bridge:handover"),
-                    priority="manual",
-                    feature="handover_from_download",
-                    dedupe_key=dedupe_key,
-                    submitted_by="manual",
-                    bridge_get_or_create_name="get_or_create_handover_cache_fill_task",
-                    bridge_create_name="create_handover_cache_fill_task",
-                    bridge_kwargs={
-                        "continuation_kind": "handover",
-                        "buildings": target_buildings,
-                        "duty_date": duty_date_text,
-                        "duty_shift": duty_shift_text,
-                        "selected_dates": None,
-                        "building_scope": None,
-                        "building": None,
-                    },
-                )
-                container.add_system_log(
-                    "[共享缓存] 已提交交接班历史缓存补采任务 "
-                    f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
-                    f"duty_date={duty_date_text}, duty_shift={duty_shift_text}"
-                )
-                return _accepted_waiting_job_response(job, task)
-            building_files = [(str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip()) for item in cached_entries]
-            capacity_building_files = [
-                (str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip())
-                for item in capacity_cached_entries
-            ]
-        else:
-            selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
-                source_family="handover_log_family",
-                buildings=target_buildings,
-            ))
-            cached_entries = selection["selected_entries"]
-            capacity_building_files = []
-            for item in cached_entries:
-                building = str(item.get("building", "") or "").strip()
-                duty_date_value = str(item.get("duty_date", "") or "").strip()
-                duty_shift_value = str(item.get("duty_shift", "") or "").strip().lower()
-                if not building or not duty_date_value or duty_shift_value not in {"day", "night"}:
-                    continue
-                matched = _filter_accessible_cached_entries(
-                    bridge_service.get_handover_capacity_by_date_cache_entries(
-                        duty_date=duty_date_value,
-                        duty_shift=duty_shift_value,
-                        buildings=[building],
-                    )
-                )
-                if not matched:
-                    continue
-                capacity_building_files.append(
-                    (
-                        str(matched[0].get("building", "") or "").strip(),
-                        str(matched[0].get("file_path", "") or "").strip(),
-                    )
-                )
-            if (
-                not selection["can_proceed"]
-                or len(cached_entries) < len(target_buildings)
-                or len(capacity_building_files) < len(target_buildings)
-            ):
-                dedupe_key = _job_dedupe_key(
-                    "handover_latest_wait_shared_bridge",
-                    bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
-                    buildings=target_buildings,
-                    end_time=end_time_text or "",
-                )
-                job, task = start_waiting_bridge_job(
-                    job_service=container.job_service,
-                    bridge_service=bridge_service,
-                    name="交接班日志-内网下载生成",
-                    worker_handler="handover_from_download",
-                    worker_payload={
-                        "buildings": target_buildings,
-                        "end_time": end_time_text,
-                        "duty_date": None,
-                        "duty_shift": None,
-                    },
-                    resource_keys=_job_resource_keys("shared_bridge:handover"),
-                    priority="manual",
-                    feature="handover_from_download",
-                    dedupe_key=dedupe_key,
-                    submitted_by="manual",
-                    bridge_get_or_create_name="get_or_create_handover_from_download_task",
-                    bridge_create_name="create_handover_from_download_task",
-                    bridge_kwargs={
-                        "buildings": target_buildings,
-                        "end_time": end_time_text,
-                        "duty_date": None,
-                        "duty_shift": None,
-                    },
-                )
-                container.add_system_log(
-                    "[共享桥接] 已受理交接班 latest 共享桥接任务 "
-                    f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, "
-                    f"reason={_build_latest_cache_wait_detail(feature_name='交接班日志', selection=selection)}"
-                )
-                return _accepted_waiting_job_response(job, task)
-            building_files = [(str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip()) for item in cached_entries]
-
-        def _run_from_cache(emit_log):
-            orchestrator = OrchestratorService(config)
-            return orchestrator.run_handover_from_files(
-                building_files=building_files,
-                capacity_building_files=capacity_building_files,
-                end_time=end_time_text,
-                duty_date=duty_date_text,
-                duty_shift=duty_shift_text,
-                emit_log=emit_log,
-            )
+        _shared_bridge_service_or_raise(container)
         dedupe_key = _job_dedupe_key(
-            "handover_cache_continue",
+            "handover_external_dispatch",
             mode="by_date" if (duty_date_text and duty_shift_text) else "latest",
-            bucket_key=str(selection.get("best_bucket_key", "") or "").strip() if not (duty_date_text and duty_shift_text) else "",
-            buildings=[item[0] for item in building_files],
+            buildings=buildings,
             duty_date=duty_date_text or "",
             duty_shift=duty_shift_text or "",
             end_time=end_time_text or "",
         )
 
+        def _run_external_shared(emit_log):
+            return _run_external_handover_shared_flow(
+                container=container,
+                config=config,
+                buildings=buildings,
+                end_time_text=end_time_text,
+                duty_date_text=duty_date_text,
+                duty_shift_text=duty_shift_text,
+                emit_log=emit_log,
+            )
+
         try:
             job = _start_background_job(
                 container,
-                name="交接班日志-使用共享文件生成",
-                run_func=_run_from_cache,
+                name="交接班日志-共享文件处理",
+                run_func=_run_external_shared,
                 worker_handler="",
                 worker_payload={},
                 resource_keys=_job_resource_keys("shared_bridge:handover"),
                 priority="manual",
-                feature="handover_cache_continue",
+                feature="handover_external_dispatch",
                 dedupe_key=dedupe_key,
                 submitted_by="manual",
             )
-            container.add_system_log(f"[任务] 已提交: 交接班日志-使用共享文件生成 ({job.job_id})")
+            container.add_system_log(f"[任务] 已提交: 交接班日志-共享文件处理 ({job.job_id})")
             return job.to_dict()
         except JobBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -4385,148 +4598,38 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
     if role_mode == "internal":
         raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起12项桥接任务")
     if role_mode == "external":
-        bridge_service = _shared_bridge_service_or_raise(container)
-        target_buildings = [building] if building_scope == "single" else bridge_service.get_source_cache_buildings()
-        target_buildings = [item for item in target_buildings if item]
-        cached_entries = _filter_accessible_cached_entries(bridge_service.get_day_metric_by_date_cache_entries(
-            selected_dates=selected_dates,
-            buildings=target_buildings,
-        ))
-        expected_count = len(selected_dates) * len(target_buildings)
-        if len(cached_entries) < expected_count:
-            fill_history = getattr(bridge_service, "fill_day_metric_history", None)
-            if callable(fill_history):
-                try:
-                    container.add_system_log(
-                        "[共享缓存][12项] 按日缓存未齐全，先尝试直接复用现有交接班日志源文件"
-                    )
-                    fill_history(
-                        selected_dates=selected_dates,
-                        building_scope=building_scope,
-                        building=building or None,
-                        emit_log=container.add_system_log,
-                    )
-                    cached_entries = _filter_accessible_cached_entries(bridge_service.get_day_metric_by_date_cache_entries(
-                        selected_dates=selected_dates,
-                        buildings=target_buildings,
-                    ))
-                except Exception as exc:  # noqa: BLE001
-                    container.add_system_log(
-                        f"[共享缓存][12项] 直接复用交接班日志源文件失败，继续等待内网补采同步: {exc}"
-                    )
-        cached_entry_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
-        for item in cached_entries:
-            if not isinstance(item, dict):
-                continue
-            duty_date = str(item.get("duty_date", "") or "").strip()
-            building_name = str(item.get("building", "") or "").strip()
-            if not duty_date or not building_name:
-                continue
-            key = (duty_date, building_name)
-            if key not in cached_entry_by_key:
-                cached_entry_by_key[key] = item
-        ready_dates = [
-            duty_date
-            for duty_date in selected_dates
-            if all((duty_date, building_name) in cached_entry_by_key for building_name in target_buildings)
-        ]
-        missing_dates = [duty_date for duty_date in selected_dates if duty_date not in ready_dates]
-
-        waiting_job = None
-        waiting_task = None
-        if missing_dates:
-            dedupe_key = _job_dedupe_key(
-                "day_metric_wait_shared_bridge",
-                selected_dates=missing_dates,
-                building_scope=building_scope,
-                building=building or "",
-                buildings=target_buildings,
-            )
-            waiting_job, waiting_task = start_waiting_bridge_job(
-                job_service=container.job_service,
-                bridge_service=bridge_service,
-                name="12项独立上传-内网下载",
-                worker_handler="day_metric_from_download",
-                worker_payload={
-                    "selected_dates": missing_dates,
-                    "building_scope": building_scope,
-                    "building": building or None,
-                },
-                resource_keys=_job_resource_keys("shared_bridge:day_metric"),
-                priority="manual",
-                feature="day_metric_from_download",
-                dedupe_key=dedupe_key,
-                submitted_by="manual",
-                bridge_get_or_create_name="get_or_create_day_metric_from_download_task",
-                bridge_create_name="create_day_metric_from_download_task",
-                bridge_kwargs={
-                    "selected_dates": missing_dates,
-                    "building_scope": building_scope,
-                    "building": building or None,
-                },
-            )
-            container.add_system_log(
-                "[共享桥接] 已受理12项共享桥接任务 "
-                f"task_id={str(waiting_task.get('task_id', '') or '-').strip() or '-'}, "
-                f"dates={','.join(missing_dates)}, scope={building_scope}, building={building or '-'}"
-            )
-            if not ready_dates:
-                return _accepted_waiting_job_response(waiting_job, waiting_task)
-            container.add_system_log(
-                "[共享缓存][12项] 已命中可直接复用的日期，将先在外网端继续上传；"
-                f" 仍缺日期={','.join(missing_dates)}，等待内网补采后自动续跑"
-            )
-
-        def _run_from_cache(emit_log):
-            source_units = [
-                {
-                    "duty_date": str(item.get("duty_date", "") or "").strip(),
-                    "building": str(item.get("building", "") or "").strip(),
-                    "source_file": str(item.get("file_path", "") or "").strip(),
-                }
-                for duty_date in ready_dates
-                for building_name in target_buildings
-                if (entry := cached_entry_by_key.get((duty_date, building_name)))
-                for item in [entry]
-            ]
-            service = DayMetricStandaloneUploadService(config)
-            return service.continue_from_source_files(
-                selected_dates=ready_dates,
-                buildings=target_buildings,
-                source_units=source_units,
-                building_scope=building_scope,
-                building=building or None,
-                emit_log=emit_log,
-            )
         dedupe_key = _job_dedupe_key(
-            "day_metric_cache_by_date",
-            selected_dates=ready_dates,
+            "day_metric_external_dispatch",
+            selected_dates=selected_dates,
             building_scope=building_scope,
             building=building or "",
-            buildings=target_buildings,
         )
+
+        def _run_external_shared(emit_log):
+            return _run_external_day_metric_shared_flow(
+                container=container,
+                config=config,
+                selected_dates=selected_dates,
+                building_scope=building_scope,
+                building=building,
+                emit_log=emit_log,
+            )
 
         try:
             job = _start_background_job(
                 container,
-                name="12项独立上传-使用共享文件",
-                run_func=_run_from_cache,
+                name="12项独立上传-共享文件处理",
+                run_func=_run_external_shared,
                 worker_handler="",
                 worker_payload={},
                 resource_keys=_job_resource_keys("shared_bridge:day_metric"),
                 priority="manual",
-                feature="day_metric_cache_by_date",
+                feature="day_metric_external_dispatch",
                 dedupe_key=dedupe_key,
                 submitted_by="manual",
             )
-            container.add_system_log(f"[任务] 已提交: 12项独立上传-使用共享文件 ({job.job_id})")
-            payload = job.to_dict()
-            if waiting_job is not None and waiting_task is not None:
-                payload["partial_waiting"] = True
-                payload["partial_waiting_dates"] = list(missing_dates)
-                payload["partial_waiting_job"] = waiting_job.to_dict()
-                payload["partial_bridge_task"] = waiting_task
-            return payload
+            container.add_system_log(f"[任务] 已提交: 12项独立上传-共享文件处理 ({job.job_id})")
+            return job.to_dict()
         except JobBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 

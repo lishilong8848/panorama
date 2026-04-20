@@ -133,14 +133,21 @@ def _fake_request(*, ready: bool, base_dir: Path | None = None):
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
 
 
+def _run_first_started_job(request):
+    return request.app.state.container.job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+
+
 def test_wet_bulb_route_waits_for_latest_cache_when_missing() -> None:
     request = _fake_request(ready=False)
 
     response = routes.job_wet_bulb_collection_run(request)
 
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
-    assert response["job"]["status"] == "waiting_resource"
+    assert response["job_id"] == "job-1"
+    result = _run_first_started_job(request)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["accepted"] is True
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
 
 
 def test_wet_bulb_route_starts_from_latest_cache_on_external_role() -> None:
@@ -149,10 +156,8 @@ def test_wet_bulb_route_starts_from_latest_cache_on_external_role() -> None:
     response = routes.job_wet_bulb_collection_run(request)
 
     assert response["job_id"] == "job-1"
-    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "wet_bulb_cache_latest"
-    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("wet_bulb_cache_latest:")
-    assert '"bucket_key":"2026-03-29 10"' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
-    assert '"buildings":["A楼","B楼"]' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "wet_bulb_external_dispatch"
+    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("wet_bulb_external_dispatch:")
     assert request.app.state.container.job_service.worker_calls == []
 
 
@@ -210,9 +215,11 @@ def test_wet_bulb_route_waits_when_fallback_is_stale() -> None:
 
     response = routes.job_wet_bulb_collection_run(request)
 
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
-    assert response["job"]["status"] == "waiting_resource"
+    assert response["job_id"] == "job-1"
+    result = _run_first_started_job(request)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
 
 
 def test_wet_bulb_route_waits_when_best_bucket_is_older_than_three_hours() -> None:
@@ -236,6 +243,8 @@ def test_wet_bulb_route_waits_when_best_bucket_is_older_than_three_hours() -> No
 
     response = routes.job_wet_bulb_collection_run(request)
 
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
-    assert response["job"]["status"] == "waiting_resource"
+    assert response["job_id"] == "job-1"
+    result = _run_first_started_job(request)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-wet-bulb-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"

@@ -237,7 +237,7 @@ def test_smoke_monthly_latest_ready_continues_locally(work_dir: Path) -> None:
     response = routes.job_auto_once(request)
 
     assert response["job_id"] == "job-1"
-    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "monthly_cache_latest"
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "monthly_external_dispatch"
 
 
 def test_smoke_monthly_latest_too_old_creates_bridge_task(work_dir: Path) -> None:
@@ -260,11 +260,13 @@ def test_smoke_monthly_latest_too_old_creates_bridge_task(work_dir: Path) -> Non
 
     response = routes.job_auto_once(request)
 
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
-    assert response["job"]["status"] == "waiting_resource"
-    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
-    assert request.app.state.container.job_service.start_job_calls == []
+    assert response["job_id"] == "job-1"
+    result = request.app.state.container.job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["accepted"] is True
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
+    assert result["waiting"]["job"]["wait_reason"] == "waiting:shared_bridge"
 
 
 def test_smoke_handover_latest_missing_creates_bridge_task(work_dir: Path) -> None:
@@ -284,9 +286,12 @@ def test_smoke_handover_latest_missing_creates_bridge_task(work_dir: Path) -> No
 
     response = routes.job_handover_from_download({"buildings": ["A楼", "B楼"]}, request)
 
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-handover-latest-1"
-    assert response["job"]["status"] == "waiting_resource"
+    assert response["job_id"] == "job-1"
+    result = request.app.state.container.job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["accepted"] is True
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-handover-latest-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
 
 
 def test_smoke_day_metric_by_date_missing_creates_cache_fill_task(work_dir: Path) -> None:
@@ -298,9 +303,12 @@ def test_smoke_day_metric_by_date_missing_creates_cache_fill_task(work_dir: Path
         request,
     )
 
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
-    assert response["job"]["status"] == "waiting_resource"
+    assert response["job_id"] == "job-1"
+    result = request.app.state.container.job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["accepted"] is True
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
 
 
 def test_smoke_day_metric_by_date_ready_continues_locally(work_dir: Path) -> None:
@@ -316,7 +324,7 @@ def test_smoke_day_metric_by_date_ready_continues_locally(work_dir: Path) -> Non
     )
 
     assert response["job_id"] == "job-1"
-    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "day_metric_cache_by_date"
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "day_metric_external_dispatch"
 
 
 def test_smoke_scheduler_latest_missing_creates_bridge_task(monkeypatch: pytest.MonkeyPatch, work_dir: Path) -> None:

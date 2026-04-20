@@ -265,10 +265,9 @@ def test_handover_from_download_route_starts_from_latest_cache_on_external_role(
     response = routes.job_handover_from_download(payload, request)
 
     assert response["job_id"] == "job-cache-1"
-    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "handover_cache_continue"
-    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("handover_cache_continue:")
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "handover_external_dispatch"
+    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("handover_external_dispatch:")
     assert '"mode":"latest"' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
-    assert '"bucket_key":"2026-03-29 10"' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
     assert request.app.state.container.job_service.worker_calls == []
 
 
@@ -323,12 +322,14 @@ def test_handover_from_download_route_creates_cache_fill_on_external_role_for_hi
 
     response = routes.job_handover_from_download(payload, request)
 
-    assert response["ok"] is True
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-cache-fill-1"
-    assert response["job"]["status"] == "waiting_resource"
-    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
-    assert response["job"]["bridge_task_id"] == "bridge-cache-fill-1"
+    assert response["job_id"] == "job-cache-1"
+    result = request.app.state.container.job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["accepted"] is True
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-cache-fill-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
+    assert result["waiting"]["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert result["waiting"]["job"]["bridge_task_id"] == "bridge-cache-fill-1"
     assert (
         "create_handover_cache_fill_task",
         {

@@ -100,6 +100,7 @@ class SharedBridgeRuntimeService:
     BACKGROUND_SELF_HEAL_RECENT_HOURS = 3
     BACKGROUND_SELF_HEAL_IDLE_QUIET_SEC = 600
     BACKGROUND_SELF_HEAL_RESUME_SKIP_BEFORE_NEXT_SEC = 1200
+    SOURCE_CACHE_PREWARM_INTERVAL_SEC = 3600
     BACKGROUND_SELF_HEAL_LOOKBACK_DAYS = 7
     BACKGROUND_SELF_HEAL_SCAN_LIMIT = 5000
     WAITING_JOB_RECONCILE_INTERVAL_SEC = 30
@@ -159,6 +160,8 @@ class SharedBridgeRuntimeService:
         key = str(task_key or "").strip().lower()
         if key == "source_cache_sweep":
             return "共享缓存库后台扫描"
+        if key == "source_cache_prewarm":
+            return "共享缓存按钮预热"
         if key == "artifact_self_heal":
             return "共享桥接产物后台自愈"
         return key or "后台任务"
@@ -186,6 +189,7 @@ class SharedBridgeRuntimeService:
     def _build_initial_background_task_state(cls) -> Dict[str, Dict[str, Any]]:
         return {
             "source_cache_sweep": cls._build_background_task_snapshot("source_cache_sweep"),
+            "source_cache_prewarm": cls._build_background_task_snapshot("source_cache_prewarm"),
             "artifact_self_heal": cls._build_background_task_snapshot("artifact_self_heal"),
         }
 
@@ -716,6 +720,7 @@ class SharedBridgeRuntimeService:
         with self._lock:
             return [
                 copy.deepcopy(self._background_task_state.get("source_cache_sweep", self._build_background_task_snapshot("source_cache_sweep"))),
+                copy.deepcopy(self._background_task_state.get("source_cache_prewarm", self._build_background_task_snapshot("source_cache_prewarm"))),
                 copy.deepcopy(self._background_task_state.get("artifact_self_heal", self._build_background_task_snapshot("artifact_self_heal"))),
             ]
 
@@ -966,9 +971,14 @@ class SharedBridgeRuntimeService:
         normalized_key = self._normalize_background_task_key(task_key)
         status = str(result.get("status", "") or "").strip().lower() if isinstance(result, dict) else ""
         if status == "success":
+            interval_sec = (
+                self.SOURCE_CACHE_PREWARM_INTERVAL_SEC
+                if normalized_key == "source_cache_prewarm"
+                else self.BACKGROUND_SELF_HEAL_INTERVAL_SEC
+            )
             self._set_background_task_due_monotonic(
                 normalized_key,
-                time.monotonic() + max(5, int(self.BACKGROUND_SELF_HEAL_INTERVAL_SEC)),
+                time.monotonic() + max(5, int(interval_sec)),
             )
             return
         if isinstance(result, dict) and bool(result.get("paused", False)):
@@ -1657,6 +1667,7 @@ class SharedBridgeRuntimeService:
     def _empty_background_tasks_snapshot(cls) -> List[Dict[str, Any]]:
         return [
             cls._build_background_task_snapshot("source_cache_sweep"),
+            cls._build_background_task_snapshot("source_cache_prewarm"),
             cls._build_background_task_snapshot("artifact_self_heal"),
         ]
 
@@ -3068,6 +3079,96 @@ class SharedBridgeRuntimeService:
             **source_cache_summary,
         }
 
+    def _run_source_cache_prewarm(self) -> Dict[str, Any]:
+        source_cache = self._source_cache_service
+        if source_cache is None:
+            return {"status": "skipped", "summary": "共享缓存服务未初始化", "checked": 0}
+        checked = 0
+        errors: List[str] = []
+        buildings: List[str] = []
+        try:
+            buildings = [str(item or "").strip() for item in source_cache.get_enabled_buildings() if str(item or "").strip()]
+            checked += 1
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"buildings={exc}")
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        def _guard(label: str, func: Callable[[], Any]) -> None:
+            nonlocal checked
+            if self._background_scan_should_pause():
+                raise RuntimeError("foreground_busy")
+            try:
+                func()
+                checked += 1
+            except RuntimeError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{label}={exc}")
+
+        paused = False
+        try:
+            for family in (FAMILY_HANDOVER_LOG, FAMILY_HANDOVER_CAPACITY_REPORT, FAMILY_MONTHLY_REPORT):
+                _guard(
+                    f"latest:{family}",
+                    lambda family_name=family: source_cache.get_latest_ready_selection(
+                        source_family=family_name,
+                        buildings=buildings,
+                    ),
+                )
+            for shift in ("day", "night"):
+                _guard(
+                    f"handover:{shift}",
+                    lambda shift_name=shift: source_cache.get_handover_by_date_entries(
+                        duty_date=today,
+                        duty_shift=shift_name,
+                        buildings=buildings,
+                    ),
+                )
+                _guard(
+                    f"capacity:{shift}",
+                    lambda shift_name=shift: source_cache.get_handover_capacity_by_date_entries(
+                        duty_date=today,
+                        duty_shift=shift_name,
+                        buildings=buildings,
+                    ),
+                )
+            _guard(
+                "day_metric:today",
+                lambda: source_cache.get_day_metric_by_date_entries(
+                    selected_dates=[today],
+                    buildings=buildings,
+                ),
+            )
+            _guard(
+                "monthly:recent_dates",
+                lambda: source_cache.get_monthly_by_date_entries(
+                    selected_dates=[today, yesterday],
+                    buildings=buildings,
+                ),
+            )
+            _guard("external_overview", source_cache.get_external_source_cache_overview_fast)
+        except RuntimeError as exc:
+            if str(exc) == "foreground_busy":
+                paused = True
+            else:
+                errors.append(str(exc))
+
+        summary_text = (
+            f"共享缓存按钮预热已让出前台任务: checked={checked}"
+            if paused
+            else f"共享缓存按钮预热完成: buildings={len(buildings)}, checked={checked}, errors={len(errors)}"
+        )
+        self._emit_system_log(f"[共享桥接][后台任务] {summary_text}")
+        return {
+            "status": "deferred" if paused else ("success" if not errors else "partial_failed"),
+            "paused": paused,
+            "summary": summary_text,
+            "checked": checked,
+            "error_count": len(errors),
+            "errors": errors[:5],
+        }
+
     def _run_artifact_background_self_heal(self) -> Dict[str, Any]:
         task_key = "artifact_self_heal"
         session = self._get_background_scan_session(task_key)
@@ -3903,19 +4004,23 @@ class SharedBridgeRuntimeService:
                     emit_log=emit_log,
                 )
             artifacts: List[Dict[str, Any]] = []
-            for item in internal_result.get("downloaded_files", []) if isinstance(internal_result.get("downloaded_files", []), list) else []:
-                if not isinstance(item, dict):
-                    continue
-                duty_date = str(item.get("duty_date", "") or "").strip()
-                building = str(item.get("building", "") or "").strip()
-                source_file = str(item.get("source_file", "") or "").strip()
-                if not duty_date or not building or not source_file:
-                    continue
-                artifacts.append(self._copy_day_metric_source_artifact(task_id=task_id, duty_date=duty_date, building=building, source_file=source_file, emit_log=emit_log))
+            if self._source_cache_service is None:
+                for item in internal_result.get("downloaded_files", []) if isinstance(internal_result.get("downloaded_files", []), list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    duty_date = str(item.get("duty_date", "") or "").strip()
+                    building = str(item.get("building", "") or "").strip()
+                    source_file = str(item.get("source_file", "") or "").strip()
+                    if not duty_date or not building or not source_file:
+                        continue
+                    artifacts.append(self._copy_day_metric_source_artifact(task_id=task_id, duty_date=duty_date, building=building, source_file=source_file, emit_log=emit_log))
+            else:
+                emit_log("[共享桥接][12项][内网] 已使用 source cache canonical 文件，不再复制第二份12项源文件")
             stage_result = dict(internal_result)
             stage_result["artifacts"] = list(artifacts)
             stage_result["artifact_count"] = len(artifacts)
-            if artifacts:
+            downloaded_files = internal_result.get("downloaded_files", []) if isinstance(internal_result.get("downloaded_files", []), list) else []
+            if artifacts or downloaded_files:
                 self._store.complete_stage(
                     task_id=task_id,
                     stage_id=stage_id,
@@ -3993,15 +4098,22 @@ class SharedBridgeRuntimeService:
 
             source_units_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
             expected_count = len(selected_dates) * len(buildings)
+            for item in internal_result.get("downloaded_files", []) if isinstance(internal_result.get("downloaded_files", []), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                duty_date = str(item.get("duty_date", "") or "").strip()
+                building_name = str(item.get("building", "") or "").strip()
+                source_file = str(item.get("source_file", "") or "").strip()
+                if not duty_date or not building_name or not source_file:
+                    continue
+                source_units_by_key[(duty_date, building_name)] = {
+                    "duty_date": duty_date,
+                    "building": building_name,
+                    "source_file": source_file,
+                }
             if self._source_cache_service is not None and selected_dates and buildings:
                 try:
-                    emit_log("[共享桥接][12项][外网] 优先在外网端重新解析共享源文件")
-                    self._source_cache_service.fill_day_metric_history(
-                        selected_dates=selected_dates,
-                        building_scope=str(request.get("building_scope", "") or "").strip() or "all_enabled",
-                        building=str(request.get("building", "") or "").strip() or None,
-                        emit_log=emit_log,
-                    )
+                    emit_log("[共享桥接][12项][外网] 只读取内网端已登记的共享源文件索引")
                     cached_entries = self._source_cache_service.get_day_metric_by_date_entries(
                         selected_dates=selected_dates,
                         buildings=buildings,
@@ -4016,7 +4128,7 @@ class SharedBridgeRuntimeService:
                             continue
                         metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
                         emit_log(
-                            f"[共享桥接][12项][外网] 已重解析共享源文件: duty_date={duty_date}, "
+                            f"[共享桥接][12项][外网] 已读取共享源文件索引: duty_date={duty_date}, "
                             f"building={building}, source={source_file}, "
                             f"resolution={str(metadata.get('resolution_source', '') or '').strip() or '-'}, "
                             f"source_bucket={str(metadata.get('source_bucket_kind', '') or '').strip()}/"
@@ -4028,7 +4140,7 @@ class SharedBridgeRuntimeService:
                             "source_file": source_file,
                         }
                 except Exception as exc:  # noqa: BLE001
-                    emit_log(f"[共享桥接][12项][外网] 外网端重解析共享源文件失败，回退artifact: {exc}")
+                    emit_log(f"[共享桥接][12项][外网] 读取共享源文件索引失败，回退artifact: {exc}")
 
             if len(source_units_by_key) < expected_count:
                 artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
@@ -4043,19 +4155,6 @@ class SharedBridgeRuntimeService:
                         continue
                     file_path = self._resolve_ready_artifact_file_path(item)
                     if file_path is None:
-                        continue
-                    try:
-                        self._validate_day_metric_source_file(
-                            path=file_path,
-                            duty_date=duty_date,
-                            building=building,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        self._repair_artifact_to_failed(item, error_text=str(exc))
-                        emit_log(
-                            f"[共享桥接][12项][外网] 已忽略无效artifact: duty_date={duty_date}, "
-                            f"building={building}, artifact={file_path}, error={exc}"
-                        )
                         continue
                     emit_log(
                         f"[共享桥接][12项][外网] 回退使用artifact源文件: duty_date={duty_date}, "
@@ -5132,6 +5231,7 @@ class SharedBridgeRuntimeService:
         next_heartbeat = 0.0
         next_cleanup = 0.0
         next_source_cache_sweep = 0.0
+        next_source_cache_prewarm = 0.0
         next_artifact_self_heal = 0.0
         next_internal_alert_refresh = 0.0
         next_waiting_job_reconcile = 0.0
@@ -5154,6 +5254,12 @@ class SharedBridgeRuntimeService:
                             task_key="source_cache_sweep",
                             target=self._run_source_cache_background_sweep,
                             interval_sec=self.BACKGROUND_SELF_HEAL_INTERVAL_SEC,
+                        )
+                    if now_monotonic >= next_source_cache_prewarm:
+                        next_source_cache_prewarm = self._schedule_background_task_if_due(
+                            task_key="source_cache_prewarm",
+                            target=self._run_source_cache_prewarm,
+                            interval_sec=self.SOURCE_CACHE_PREWARM_INTERVAL_SEC,
                         )
                     if now_monotonic >= next_artifact_self_heal:
                         next_artifact_self_heal = self._schedule_background_task_if_due(

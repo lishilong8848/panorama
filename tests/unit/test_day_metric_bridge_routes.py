@@ -152,12 +152,16 @@ def test_day_metric_from_download_route_creates_cache_fill_task_when_missing() -
 
     response = routes.job_day_metric_from_download(payload, request)
 
-    assert response["ok"] is True
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
-    assert response["job"]["status"] == "waiting_resource"
-    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
-    assert response["job"]["bridge_task_id"] == "bridge-day-metric-from-download-1"
+    assert response["job_id"] == "job-1"
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "day_metric_external_dispatch"
+    result = request.app.state.container.job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+    assert result["ok"] is True
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["accepted"] is True
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
+    assert result["waiting"]["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert result["waiting"]["job"]["bridge_task_id"] == "bridge-day-metric-from-download-1"
     assert ("create_day_metric_from_download_task", {
         "selected_dates": ["2026-03-20"],
         "building_scope": "single",
@@ -178,14 +182,14 @@ def test_day_metric_from_download_route_starts_from_shared_cache_when_ready() ->
     response = routes.job_day_metric_from_download(payload, request)
 
     assert response["job_id"] == "job-1"
-    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "day_metric_cache_by_date"
-    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("day_metric_cache_by_date:")
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "day_metric_external_dispatch"
+    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("day_metric_external_dispatch:")
     assert '"selected_dates":["2026-03-20"]' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
     assert '"building":"A楼"' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
     assert request.app.state.container.job_service.worker_calls == []
 
 
-def test_day_metric_from_download_route_fills_day_cache_from_existing_handover_files_before_waiting() -> None:
+def test_day_metric_from_download_route_does_not_fill_day_cache_on_external_side() -> None:
     request = _fake_request(ready=False)
     request.app.state.container.shared_bridge_service.fill_history_ready = True
     payload = {
@@ -197,13 +201,12 @@ def test_day_metric_from_download_route_fills_day_cache_from_existing_handover_f
     response = routes.job_day_metric_from_download(payload, request)
 
     assert response["job_id"] == "job-1"
-    assert ("fill_day_metric_history", {
-        "selected_dates": ["2026-03-20"],
-        "building_scope": "single",
-        "building": "A楼",
-    }) in request.app.state.container.shared_bridge_service.calls
-    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "day_metric_cache_by_date"
-    assert request.app.state.container.job_service.waiting_calls == []
+    result = request.app.state.container.job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+    assert all(call[0] != "fill_day_metric_history" for call in request.app.state.container.shared_bridge_service.calls)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "day_metric_external_dispatch"
+    assert request.app.state.container.job_service.waiting_calls[0]["feature"] == "day_metric_from_download"
+    assert request.app.state.container.job_service.waiting_calls[0]["worker_payload"]["selected_dates"] == ["2026-03-20"]
 
 
 def test_day_metric_from_download_route_creates_cache_fill_when_indexed_file_is_missing() -> None:
@@ -223,9 +226,11 @@ def test_day_metric_from_download_route_creates_cache_fill_when_indexed_file_is_
 
     response = routes.job_day_metric_from_download(payload, request)
 
-    assert response["ok"] is True
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
+    assert response["job_id"] == "job-1"
+    result = request.app.state.container.job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+    assert result["ok"] is True
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
 
 
 def test_day_metric_from_download_route_creates_cache_fill_when_indexed_file_is_inaccessible(monkeypatch) -> None:
@@ -247,9 +252,11 @@ def test_day_metric_from_download_route_creates_cache_fill_when_indexed_file_is_
 
     response = routes.job_day_metric_from_download(payload, request)
 
-    assert response["ok"] is True
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
+    assert response["job_id"] == "job-1"
+    result = request.app.state.container.job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+    assert result["ok"] is True
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
 
 
 def test_day_metric_from_download_route_uses_cached_file_path_verbatim(monkeypatch) -> None:
@@ -361,11 +368,12 @@ def test_day_metric_from_download_route_runs_ready_dates_and_waits_missing_dates
     result = run_func(lambda *_args, **_kwargs: None)
 
     assert response["job_id"] == "job-1"
-    assert response["partial_waiting"] is True
-    assert response["partial_waiting_dates"] == ["2026-03-20"]
-    assert response["partial_bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
-    assert response["partial_waiting_job"]["status"] == "waiting_resource"
-    assert result == {"ok": True}
+    assert result["ok"] is True
+    assert result["mode"] == "partial_ready"
+    assert result["missing_dates"] == ["2026-03-20"]
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-day-metric-from-download-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
+    assert result["upload_result"] == {"ok": True}
     assert captured["selected_dates"] == ["2026-03-19"]
     assert captured["buildings"] == ["A楼", "B楼"]
     assert captured["building_scope"] == "all_enabled"

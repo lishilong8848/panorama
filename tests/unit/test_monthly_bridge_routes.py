@@ -202,6 +202,10 @@ def _fake_request(*, role_mode: str = "external", bridge_enabled: bool = True, b
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
 
 
+def _run_first_started_job(request):
+    return request.app.state.container.job_service.start_job_calls[0]["run_func"](lambda *_args, **_kwargs: None)
+
+
 def test_auto_once_route_starts_from_latest_cache_on_external_role() -> None:
     request = _fake_request(role_mode="external", bridge_enabled=True)
 
@@ -209,14 +213,8 @@ def test_auto_once_route_starts_from_latest_cache_on_external_role() -> None:
 
     assert response["job_id"] == "job-1"
     assert request.app.state.container.job_service.worker_calls == []
-    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "monthly_cache_latest"
-    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("monthly_cache_latest:")
-    assert '"bucket_key":"2026-03-29 10"' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
-    assert '"buildings":["A楼","B楼"]' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
-    assert request.app.state.container.shared_bridge_service.calls[:2] == [
-        ("get_source_cache_buildings", {}),
-        ("get_latest_source_cache_selection", {"source_family": "monthly_report_family", "buildings": ["A楼", "B楼"]}),
-    ]
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "monthly_external_dispatch"
+    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("monthly_auto_once_external_dispatch:")
 
 
 def test_auto_once_route_waits_when_indexed_file_is_missing() -> None:
@@ -242,11 +240,14 @@ def test_auto_once_route_waits_when_indexed_file_is_missing() -> None:
 
     response = routes.job_auto_once(request)
 
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
-    assert response["job"]["status"] == "waiting_resource"
-    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
-    assert response["job"]["bridge_task_id"] == "bridge-monthly-auto-once-1"
+    assert response["job_id"] == "job-1"
+    result = _run_first_started_job(request)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["accepted"] is True
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
+    assert result["waiting"]["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert result["waiting"]["job"]["bridge_task_id"] == "bridge-monthly-auto-once-1"
 
 
 def test_auto_once_route_waits_when_indexed_file_is_inaccessible(monkeypatch) -> None:
@@ -274,8 +275,10 @@ def test_auto_once_route_waits_when_indexed_file_is_inaccessible(monkeypatch) ->
 
     response = routes.job_auto_once(request)
 
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
+    assert response["job_id"] == "job-1"
+    result = _run_first_started_job(request)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
 
 
 def test_auto_once_route_uses_cached_file_path_verbatim_on_external_role(monkeypatch) -> None:
@@ -365,8 +368,10 @@ def test_auto_once_route_waits_when_fallback_is_stale() -> None:
 
     response = routes.job_auto_once(request)
 
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
+    assert response["job_id"] == "job-1"
+    result = _run_first_started_job(request)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
 
 
 def test_auto_once_route_waits_when_best_bucket_is_older_than_three_hours() -> None:
@@ -390,8 +395,10 @@ def test_auto_once_route_waits_when_best_bucket_is_older_than_three_hours() -> N
 
     response = routes.job_auto_once(request)
 
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
+    assert response["job_id"] == "job-1"
+    result = _run_first_started_job(request)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
 
 
 def test_multi_date_route_creates_cache_fill_task_when_missing() -> None:
@@ -399,12 +406,15 @@ def test_multi_date_route_creates_cache_fill_task_when_missing() -> None:
 
     response = routes.job_multi_date({"dates": ["2026-03-20", "2026-03-21"]}, request)
 
-    assert response["ok"] is True
-    assert response["accepted"] is True
-    assert response["bridge_task"]["task_id"] == "bridge-monthly-cache-fill-1"
-    assert response["job"]["status"] == "waiting_resource"
-    assert response["job"]["wait_reason"] == "waiting:shared_bridge"
-    assert response["job"]["bridge_task_id"] == "bridge-monthly-cache-fill-1"
+    assert response["job_id"] == "job-1"
+    result = _run_first_started_job(request)
+    assert result["ok"] is True
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["accepted"] is True
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-monthly-cache-fill-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
+    assert result["waiting"]["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert result["waiting"]["job"]["bridge_task_id"] == "bridge-monthly-cache-fill-1"
     assert (
         "create_monthly_cache_fill_task",
         {"selected_dates": ["2026-03-20", "2026-03-21"], "resume_job_id": "job-waiting-1", "requested_by": "manual"},
@@ -418,10 +428,9 @@ def test_multi_date_route_starts_from_shared_cache_when_ready() -> None:
     response = routes.job_multi_date({"dates": ["2026-03-20", "2026-03-21"]}, request)
 
     assert response["job_id"] == "job-1"
-    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "monthly_cache_by_date"
-    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("monthly_cache_by_date:")
+    assert request.app.state.container.job_service.start_job_calls[0]["feature"] == "multi_date_external_dispatch"
+    assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("multi_date_external_dispatch:")
     assert '"selected_dates":["2026-03-20","2026-03-21"]' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
-    assert '"buildings":["A楼","B楼"]' in request.app.state.container.job_service.start_job_calls[0]["dedupe_key"]
 
 
 def test_resume_routes_use_bridge_on_external_role() -> None:
