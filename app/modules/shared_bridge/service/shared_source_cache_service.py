@@ -1917,16 +1917,18 @@ class SharedSourceCacheService:
         file_path = self._resolve_entry_file_path(origin_entry)
         if file_path is None:
             raise RuntimeError("源文件索引别名指向的 canonical 文件不可用")
-        relative_path = str(origin_entry.get("relative_path", "") or "").replace("\\", "/").strip()
-        if not relative_path:
-            relative_path = file_path.relative_to(self.shared_root).as_posix() if self.shared_root is not None else str(file_path)
         origin_metadata = origin_entry.get("metadata", {}) if isinstance(origin_entry.get("metadata", {}), dict) else {}
+        canonical_relative_path = str(origin_metadata.get("canonical_relative_path", "") or "").replace("\\", "/").strip()
+        if not canonical_relative_path:
+            canonical_relative_path = str(origin_entry.get("relative_path", "") or "").replace("\\", "/").strip()
+        if not canonical_relative_path:
+            canonical_relative_path = file_path.relative_to(self.shared_root).as_posix() if self.shared_root is not None else str(file_path)
         alias_metadata = dict(origin_metadata)
         alias_metadata.update(metadata or {})
         alias_metadata["canonical"] = False
         alias_metadata["alias_only"] = True
         alias_metadata["origin_entry_id"] = str(origin_entry.get("entry_id", "") or "").strip()
-        alias_metadata["canonical_relative_path"] = relative_path
+        alias_metadata["canonical_relative_path"] = canonical_relative_path
         alias_metadata.setdefault("naming_version", 2)
         downloaded_at = str(origin_entry.get("downloaded_at", "") or "").strip() or _now_text()
         file_hash = str(origin_entry.get("file_hash", "") or "").strip()
@@ -1944,7 +1946,7 @@ class SharedSourceCacheService:
             duty_date=duty_date,
             duty_shift=duty_shift,
             downloaded_at=downloaded_at,
-            relative_path=relative_path,
+            relative_path=canonical_relative_path,
             status="ready",
             file_hash=file_hash,
             size_bytes=size_bytes,
@@ -1970,7 +1972,7 @@ class SharedSourceCacheService:
             "duty_date": duty_date,
             "duty_shift": duty_shift,
             "downloaded_at": downloaded_at,
-            "relative_path": relative_path,
+            "relative_path": canonical_relative_path,
             "status": "ready",
             "file_hash": file_hash,
             "size_bytes": size_bytes,
@@ -2075,7 +2077,13 @@ class SharedSourceCacheService:
     def _resolve_entry_file_path(self, entry: Dict[str, Any] | None) -> Path | None:
         if not isinstance(entry, dict):
             return None
-        file_path = self._resolve_relative_path_under_shared_root(str(entry.get("relative_path", "") or "").strip())
+        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+        relative_path = str(entry.get("relative_path", "") or "").strip()
+        if bool(metadata.get("alias_only", False)):
+            canonical_relative_path = str(metadata.get("canonical_relative_path", "") or "").strip()
+            if canonical_relative_path:
+                relative_path = canonical_relative_path
+        file_path = self._resolve_relative_path_under_shared_root(relative_path)
         if file_path is None:
             return None
         normalized_family = self._normalize_source_family(entry.get("source_family", ""))
@@ -2257,24 +2265,6 @@ class SharedSourceCacheService:
                 reverse=True,
             )
 
-        alias_candidates: List[Dict[str, Any]] = []
-        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
-            rows = self.store.list_source_cache_entries(
-                source_family=family_name,
-                building=building,
-                bucket_kind="date",
-                bucket_key=duty_date,
-                duty_date=duty_date,
-                duty_shift="all",
-                status="ready",
-                limit=10,
-            )
-            alias_candidates.extend(row for row in rows if isinstance(row, dict))
-        for entry in alias_candidates:
-            normalized = _normalize_candidate(entry)
-            if normalized is not None:
-                return normalized
-
         latest_candidates: List[Dict[str, Any]] = []
         for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
             rows = self.store.list_source_cache_entries(
@@ -2302,6 +2292,24 @@ class SharedSourceCacheService:
             )
             latest_candidates.extend(row for row in rows if isinstance(row, dict))
         for entry in _sorted_by_hour(latest_candidates):
+            normalized = _normalize_candidate(entry)
+            if normalized is not None:
+                return normalized
+
+        alias_candidates: List[Dict[str, Any]] = []
+        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                bucket_kind="date",
+                bucket_key=duty_date,
+                duty_date=duty_date,
+                duty_shift="all",
+                status="ready",
+                limit=10,
+            )
+            alias_candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in alias_candidates:
             normalized = _normalize_candidate(entry)
             if normalized is not None:
                 return normalized

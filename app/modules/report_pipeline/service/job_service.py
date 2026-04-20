@@ -545,6 +545,16 @@ class JobService:
         return ", ".join(tokens)
 
     @staticmethod
+    def _blocks_resource_queue(candidate: JobState) -> bool:
+        status = str(candidate.status or "").strip().lower()
+        if status not in {"queued", "waiting_resource"}:
+            return False
+        wait_reason = str(candidate.wait_reason or "").strip().lower()
+        if status == "waiting_resource" and wait_reason == "waiting:shared_bridge":
+            return False
+        return True
+
+    @staticmethod
     def _json_ready(value: Any) -> Any:
         return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
@@ -1582,7 +1592,7 @@ class JobService:
                     break
                 if resource_key not in candidate.resource_keys:
                     continue
-                if candidate.status not in {"queued", "waiting_resource"}:
+                if not self._blocks_resource_queue(candidate):
                     continue
                 if self._priority_weight(candidate.priority) > self._priority_weight(job.priority):
                     continue
@@ -1608,7 +1618,7 @@ class JobService:
                 break
             if resource_key not in candidate.resource_keys:
                 continue
-            if candidate.status not in {"queued", "waiting_resource"}:
+            if not self._blocks_resource_queue(candidate):
                 continue
             if self._priority_weight(candidate.priority) > self._priority_weight(job.priority):
                 continue
@@ -1644,7 +1654,7 @@ class JobService:
                     break
                 if resource_key not in candidate.resource_keys:
                     continue
-                if candidate.status not in {"queued", "waiting_resource"}:
+                if not self._blocks_resource_queue(candidate):
                     continue
                 candidate_priority = self._priority_weight(candidate.priority)
                 current_priority = self._priority_weight(job.priority)

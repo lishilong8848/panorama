@@ -334,6 +334,77 @@ def test_fill_day_metric_history_uses_indexed_cache_without_directory_lookup(wor
         workbook.close()
 
 
+def test_fill_day_metric_history_prefers_latest_canonical_entry_over_stale_date_alias(work_dir: Path) -> None:
+    shared_root = work_dir / "shared"
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode="internal", shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    stale_alias_path = (
+        shared_root
+        / "交接班日志源文件"
+        / "202604"
+        / "20260420--交接班"
+        / "20260420--交接班--交接班日志源文件--A楼.xlsx"
+    )
+    _write_handover_source_xlsx(stale_alias_path, e_value=111.1)
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_HANDOVER_LOG,
+        building="A楼",
+        bucket_kind="date",
+        bucket_key="2026-04-20",
+        duty_date="2026-04-20",
+        duty_shift="all",
+        downloaded_at="2026-04-20 16:00:00",
+        relative_path=stale_alias_path.relative_to(shared_root).as_posix(),
+        status="ready",
+        metadata={
+            "family": FAMILY_HANDOVER_LOG,
+            "building": "A楼",
+            "duty_date": "2026-04-20",
+            "duty_shift": "all",
+            "alias_only": True,
+            "canonical_relative_path": stale_alias_path.relative_to(shared_root).as_posix(),
+        },
+    )
+    latest_valid = _register_shared_handover_entry(
+        store=store,
+        shared_root=shared_root,
+        building="A楼",
+        duty_date="2026-04-20",
+        downloaded_at="2026-04-20 15:12:07",
+        e_value=222.2,
+    )
+
+    entries = service.fill_day_metric_history(
+        selected_dates=["2026-04-20"],
+        building_scope="single",
+        building="A楼",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    assert len(entries) == 1
+    assert entries[0]["metadata"]["resolution_source"] == "cache_latest"
+    assert Path(entries[0]["file_path"]) == latest_valid
+    assert entries[0]["relative_path"] == latest_valid.relative_to(shared_root).as_posix()
+    rows = store.list_source_cache_entries(
+        source_family=FAMILY_HANDOVER_LOG,
+        building="A楼",
+        bucket_kind="date",
+        bucket_key="2026-04-20",
+        duty_date="2026-04-20",
+        duty_shift="all",
+        status="ready",
+    )
+    assert len(rows) == 1
+    assert rows[0]["relative_path"] == latest_valid.relative_to(shared_root).as_posix()
+    assert rows[0]["metadata"]["canonical_relative_path"] == latest_valid.relative_to(shared_root).as_posix()
+
+
 def test_repair_day_metric_ready_entries_downgrades_empty_ready_rows(work_dir: Path) -> None:
     shared_root = work_dir / "shared"
     store = SharedBridgeStore(shared_root)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 from app.modules.report_pipeline.service.job_service import JobService
 
@@ -105,3 +106,42 @@ def test_updater_global_blocks_new_business_jobs() -> None:
     release.set()
     service.wait_job(job.job_id, timeout_sec=2)
     assert service.get_job(job.job_id)["status"] == "success"
+
+
+def test_waiting_shared_bridge_job_does_not_block_new_foreground_job(tmp_path: Path) -> None:
+    service = JobService()
+    service.configure_task_engine(
+        runtime_config={"paths": {}},
+        app_dir=tmp_path,
+        config_snapshot_getter=lambda: {"paths": {}},
+    )
+
+    waiting_job = service.create_waiting_worker_job(
+        "bridge-waiting",
+        worker_handler="day_metric_from_download",
+        worker_payload={"selected_dates": ["2026-04-20"]},
+        resource_keys=["shared_bridge:day_metric"],
+        feature="day_metric_from_download",
+        wait_reason="waiting:shared_bridge",
+        summary="等待内网补采同步",
+    )
+    assert service.get_job_state(waiting_job.job_id).status == "waiting_resource"
+
+    started = threading.Event()
+
+    def foreground_job(_emit_log):  # noqa: ANN001
+        started.set()
+        return {"status": "ok"}
+
+    job = service.start_job(
+        "foreground",
+        foreground_job,
+        resource_keys=["shared_bridge:day_metric"],
+        feature="day_metric_external_dispatch",
+    )
+
+    _wait_until(lambda: started.is_set() or service.get_job_state(job.job_id).status == "success")
+    service.wait_job(job.job_id, timeout_sec=2)
+
+    assert service.get_job(job.job_id)["status"] == "success"
+    assert service.get_job_state(waiting_job.job_id).status == "waiting_resource"
