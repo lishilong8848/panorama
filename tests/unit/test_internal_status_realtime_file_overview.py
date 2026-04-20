@@ -97,30 +97,52 @@ appState.health.shared_bridge.internal_source_cache = {{
       }},
     ],
   }},
+  handover_capacity_report_family: {{
+    current_bucket: "2026-04-01 09",
+    last_success_at: "2026-04-01 09:12:00",
+    buildings: [
+      {{
+        building: "B楼",
+        bucket_key: "2026-04-01 09",
+        status: "ready",
+        ready: true,
+        downloaded_at: "2026-04-01 09:12:00",
+        relative_path: "交接班容量报表源文件/202604/20260401--09/B楼.xlsx",
+      }},
+    ],
+  }},
+}};
+appState.internalRuntimeSummary.value = {{
+  source_cache: appState.health.shared_bridge.internal_source_cache,
+  pool: {{}},
 }};
 
 const families = appState.internalRealtimeSourceFamilies.value;
 console.log(JSON.stringify({{
   familyTitles: families.map((item) => item.title),
   handoverBuildings: families[0].buildings.map((item) => item.building),
-  monthlyBuildings: families[1].buildings.map((item) => item.building),
-  alarmBuildings: families[2].buildings.map((item) => item.building),
+  capacityBuildings: families[1].buildings.map((item) => item.building),
+  monthlyBuildings: families[2].buildings.map((item) => item.building),
+  alarmBuildings: families[3].buildings.map((item) => item.building),
   handoverStatusC: families[0].buildings[2].stateText,
   handoverStatusA: families[0].buildings[0].stateText,
-  monthlyStatusA: families[1].buildings[0].stateText,
-  alarmStatusE: families[2].buildings[4].stateText,
-  alarmStatusA: families[2].buildings[0].stateText,
+  capacityStatusB: families[1].buildings[1].stateText,
+  monthlyStatusA: families[2].buildings[0].stateText,
+  alarmStatusE: families[3].buildings[4].stateText,
+  alarmStatusA: families[3].buildings[0].stateText,
 }}));
 """
 
     payload = _run_node_script(work_dir, script)
 
-    assert payload["familyTitles"] == ["交接班日志源文件", "全景平台月报源文件", "告警信息源文件"]
+    assert payload["familyTitles"] == ["交接班日志源文件", "交接班容量报表源文件", "全景平台月报源文件", "告警信息源文件"]
     assert payload["handoverBuildings"] == ["A楼", "B楼", "C楼", "D楼", "E楼"]
+    assert payload["capacityBuildings"] == ["A楼", "B楼", "C楼", "D楼", "E楼"]
     assert payload["monthlyBuildings"] == ["A楼", "B楼", "C楼", "D楼", "E楼"]
     assert payload["alarmBuildings"] == ["A楼", "B楼", "C楼", "D楼", "E楼"]
     assert payload["handoverStatusC"] == "已就绪"
-    assert payload["handoverStatusA"] == "等待中"
+    assert payload["handoverStatusA"] == "等待后端状态"
+    assert payload["capacityStatusB"] == "已就绪"
     assert payload["monthlyStatusA"] == "已就绪"
     assert payload["alarmStatusE"] == "已就绪"
-    assert payload["alarmStatusA"] == "等待中"
+    assert payload["alarmStatusA"] == "等待后端状态"

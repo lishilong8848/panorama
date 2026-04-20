@@ -71,6 +71,10 @@ appState.health.shared_bridge.internal_download_pool = {{
     }}
   ]
 }};
+appState.internalRuntimeSummary.value = {{
+  pool: appState.health.shared_bridge.internal_download_pool,
+  source_cache: {{}},
+}};
 
 const overview = appState.internalDownloadPoolOverview.value;
 const target = overview.slots.find((item) => item.building === "A楼");
@@ -126,6 +130,10 @@ appState.health.shared_bridge.internal_download_pool = {{
       next_probe_at: "2026-03-31 23:00:00"
     }}
   ]
+}};
+appState.internalRuntimeSummary.value = {{
+  pool: appState.health.shared_bridge.internal_download_pool,
+  source_cache: {{}},
 }};
 
 const overview = appState.internalDownloadPoolOverview.value;

@@ -493,7 +493,7 @@ def bridge_health(request: Request) -> Dict[str, Any]:
 
 @router.get("/api/bridge/internal-runtime-status")
 def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
-    _ensure_internal_bridge_runtime_allowed(request)
+    role_mode = _deployment_role_mode(request)
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
     coordinator = getattr(container, "runtime_status_coordinator", None)
@@ -518,6 +518,12 @@ def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
             ),
         )
         return summary
+
+    if role_mode != "internal":
+        summary = build_empty_internal_runtime_summary(role_mode=role_mode or "external")
+        summary["runtime_available"] = False
+        summary["reason_code"] = "role_mismatch"
+        return {"ok": True, "summary": _attach_display(summary)}
 
     if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
         live_payload = _read_live_internal_summary(service)
@@ -569,7 +575,7 @@ def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
 
 @router.get("/api/bridge/internal-runtime-status/buildings/{building_code}")
 def bridge_internal_runtime_status_building(building_code: str, request: Request) -> Dict[str, Any]:
-    _ensure_internal_bridge_runtime_allowed(request)
+    role_mode = _deployment_role_mode(request)
     normalized_code, building = _normalize_internal_runtime_building(building_code)
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
@@ -579,6 +585,15 @@ def bridge_internal_runtime_status_building(building_code: str, request: Request
         status = copy.deepcopy(status_payload if isinstance(status_payload, dict) else {})
         status["display"] = present_internal_runtime_building_display(status)
         return status
+
+    if role_mode != "internal":
+        status = build_empty_internal_runtime_building_status(
+            building=building,
+            building_code=normalized_code,
+        )
+        status["runtime_available"] = False
+        status["reason_code"] = "role_mismatch"
+        return {"ok": True, "status": _attach_display(status)}
 
     if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
         live_payload = _read_live_internal_building_status(service, building=building, building_code=normalized_code)

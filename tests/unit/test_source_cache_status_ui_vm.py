@@ -116,6 +116,19 @@ appState.health.shared_bridge.internal_source_cache = {{
     }}
   }}
 }};
+const sourceCache = appState.health.shared_bridge.internal_source_cache;
+appState.health.dashboard_display.shared_source_cache_overview = {{
+  reason_code: "pending_files",
+  tone: "warning",
+  status_text: "等待共享文件就绪",
+  summary_text: "部分楼栋共享文件版本过旧，等待更新后会自动重试默认入口。",
+  reference_bucket_key: "2026-03-31 09",
+  can_proceed_latest: false,
+  families: [
+    {{ key: "handover_log_family", ...sourceCache.handover_log_family.latest_selection }},
+    {{ key: "monthly_report_family", ...sourceCache.monthly_report_family.latest_selection }},
+  ],
+}};
 
 const externalOverview = appState.sharedSourceCacheReadinessOverview.value;
 
@@ -133,8 +146,8 @@ console.log(JSON.stringify({{
     firstFamilyFallbackGap: externalOverview.families[0].buildings[1].versionGap,
     firstFamilyFallbackPath: externalOverview.families[0].buildings[1].resolvedFilePath,
     secondFamilyStatus: externalOverview.families[1].statusText,
-    secondFamilyStaleState: externalOverview.families[1].buildings[1].stateText,
-    secondFamilyStaleGap: externalOverview.families[1].buildings[1].versionGap
+    secondFamilyStaleState: externalOverview.families[1].buildings[4].stateText,
+    secondFamilyStaleGap: externalOverview.families[1].buildings[4].versionGap
   }},
   emptyRole: {{
     statusText: emptyRoleOverview.statusText,

@@ -418,13 +418,25 @@ def test_internal_runtime_status_building_returns_single_building_payload() -> N
     assert response["status"]["display"]["source_families"]["monthly_report_family"]["status_text"] == "失败"
 
 
-def test_internal_runtime_status_rejects_external_role() -> None:
+def test_internal_runtime_status_returns_empty_payload_for_external_role_transition() -> None:
     request = _fake_request(_FakeBridgeService(), role_mode="external")
 
-    with pytest.raises(HTTPException) as excinfo:
-        routes.bridge_internal_runtime_status(request)
+    response = routes.bridge_internal_runtime_status(request)
 
-    assert excinfo.value.status_code == 409
+    assert response["ok"] is True
+    assert response["summary"]["runtime_available"] is False
+    assert response["summary"]["reason_code"] == "role_mismatch"
+
+
+def test_internal_runtime_status_building_returns_empty_payload_for_external_role_transition() -> None:
+    request = _fake_request(_FakeBridgeService(), role_mode="external")
+
+    response = routes.bridge_internal_runtime_status_building("c", request)
+
+    assert response["ok"] is True
+    assert response["status"]["building"] == "C楼"
+    assert response["status"]["runtime_available"] is False
+    assert response["status"]["reason_code"] == "role_mismatch"
 
 
 def test_internal_runtime_status_repairs_placeholder_sqlite_snapshot_from_live_state() -> None:

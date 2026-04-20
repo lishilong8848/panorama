@@ -486,3 +486,19 @@ def test_get_external_dashboard_summary_reuses_prebuilt_shared_source_cache_disp
 
     assert payload["shared_source_cache_overview"]["families"][0]["backfill_running"] is True
     assert payload["shared_source_cache_overview"]["families"][0]["buildings"][0]["status_text"] == "补采中"
+
+
+def test_external_dashboard_summary_role_mismatch_returns_empty_display():
+    container = SimpleNamespace(
+        config={"deployment": {"role_mode": "internal"}},
+        runtime_config={"deployment": {"role_mode": "internal"}},
+        deployment_snapshot=lambda: {"role_mode": "internal", "node_label": "内网端"},
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
+
+    payload = routes.get_external_dashboard_summary(request)
+
+    assert payload["ok"] is True
+    assert payload["reason_code"] == "role_mismatch"
+    assert payload["shared_source_cache_overview"]["reason_code"] == "role_mismatch"
+    assert payload["display"]["shared_source_cache_overview"]["families"] == []

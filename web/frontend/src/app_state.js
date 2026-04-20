@@ -584,6 +584,7 @@ export function createAppState(vueApi) {
       node_id: "",
       node_label: "",
     },
+    dashboard_display: {},
     shared_root_diagnostic: {
       role_mode: "",
       role_label: "",
@@ -1121,7 +1122,7 @@ export function createAppState(vueApi) {
   const internalRuntimeBridgeSnapshot = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
     if (roleMode !== "internal" || !internalRuntimeSummary.value || typeof internalRuntimeSummary.value !== "object") {
-      return health.shared_bridge || {};
+      return {};
     }
     const summary = internalRuntimeSummary.value;
     const buildingMap = internalBuildingRuntimeStatusMap.value && typeof internalBuildingRuntimeStatusMap.value === "object"
@@ -1175,7 +1176,9 @@ export function createAppState(vueApi) {
     const currentHourBucket = String(sourceCacheSummary.current_hour_bucket || "").trim();
     const alarmBucket = String(sourceCacheSummary.alarm_event_family?.current_bucket || "").trim() || currentHourBucket;
     return {
-      ...health.shared_bridge,
+      enabled: Boolean(summary.enabled ?? health.shared_bridge?.enabled),
+      role_mode: "internal",
+      root_dir: String(summary.root_dir || health.shared_bridge?.root_dir || "").trim(),
       internal_download_pool: {
         enabled: Boolean(poolSummary.enabled),
         browser_ready: Boolean(poolSummary.browser_ready),
@@ -1481,7 +1484,10 @@ export function createAppState(vueApi) {
       };
     }
     const rawPool = internalRuntimeBridgeSnapshot.value?.internal_download_pool || {};
-    const backendOverview = rawPool.overview && typeof rawPool.overview === "object" ? rawPool.overview : null;
+    const backendOverview =
+      rawPool.overview && typeof rawPool.overview === "object" && Object.keys(rawPool.overview).length > 0
+        ? rawPool.overview
+        : null;
     if (backendOverview) {
       return {
         tone: String(backendOverview.tone || "").trim() || "neutral",
@@ -1515,7 +1521,10 @@ export function createAppState(vueApi) {
       };
     }
     const rawCache = internalRuntimeBridgeSnapshot.value?.internal_source_cache || {};
-    const backendOverview = rawCache.overview && typeof rawCache.overview === "object" ? rawCache.overview : null;
+    const backendOverview =
+      rawCache.overview && typeof rawCache.overview === "object" && Object.keys(rawCache.overview).length > 0
+        ? rawCache.overview
+        : null;
     if (backendOverview) {
       const backendFamilies = Array.isArray(backendOverview.families) ? backendOverview.families : [];
       return {
@@ -1635,7 +1644,13 @@ export function createAppState(vueApi) {
         internalBuildings: INTERNAL_BUILDINGS,
       });
     }
-    return buildLegacyExternalInternalAlertOverview(health.shared_bridge?.internal_alert_status || {});
+    return {
+      tone: "neutral",
+      statusText: "等待后端内网告警状态",
+      summaryText: "内网告警状态由外网聚合接口返回，当前等待首轮状态快照。",
+      items: [],
+      buildings: [],
+    };
   });
   const currentHourRefreshOverview = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
@@ -1912,9 +1927,6 @@ export function createAppState(vueApi) {
         canProceedLatest: Boolean(backendOverview.can_proceed_latest ?? backendOverview.canProceedLatest),
         actions: mapBackendActionsState(backendOverview.actions),
       };
-    }
-    if (roleMode === "external") {
-      return buildLegacyExternalSharedSourceCacheOverview(health.shared_bridge?.internal_source_cache || {});
     }
     if (roleMode !== "external") {
       return {

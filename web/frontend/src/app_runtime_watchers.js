@@ -18,6 +18,7 @@ export function registerAppRuntimeWatchers(options = {}) {
     shouldPollInternalRuntimeStatus,
     runtimeWarmupReady,
     deploymentRoleMode,
+    health,
     internalRuntimeSummary,
     internalBuildingRuntimeStatusMap,
     createEmptyInternalBuildingRuntimeStatusMap,
@@ -55,6 +56,8 @@ export function registerAppRuntimeWatchers(options = {}) {
     scheduleEngineerDirectoryPrefetch,
     fetchInternalRuntimeSummary,
     fetchAllInternalBuildingRuntimeStatuses,
+    resetInternalRuntimeRequestState,
+    resetExternalDashboardRequestState,
     ensureHandoverEngineerDirectoryLoaded,
     applyDashboardRoleMode,
     dashboardActiveModule,
@@ -183,7 +186,7 @@ export function registerAppRuntimeWatchers(options = {}) {
   watch(
     () => ({
       runtimeReady: runtimeRequestsReady.value,
-      role: deploymentRoleMode.value,
+      role: String(health?.deployment?.role_mode || deploymentRoleMode.value || "").trim().toLowerCase(),
       shouldPollExternalDashboardSummary: shouldPollExternalDashboardSummary.value,
       shouldFetchHealth: shouldFetchHealth.value,
       shouldPollJobPanel: shouldPollJobPanel.value,
@@ -198,8 +201,14 @@ export function registerAppRuntimeWatchers(options = {}) {
       const wasRuntimeReady = Boolean(previous.runtimeReady);
       runtimeWarmupReady.value = Boolean(state.runtimeReady && state.role === "internal");
       if (state.role !== "internal") {
+        if (typeof resetInternalRuntimeRequestState === "function") {
+          resetInternalRuntimeRequestState();
+        }
         internalRuntimeSummary.value = null;
         internalBuildingRuntimeStatusMap.value = createEmptyInternalBuildingRuntimeStatusMap();
+      }
+      if (state.role !== "external" && typeof resetExternalDashboardRequestState === "function") {
+        resetExternalDashboardRequestState();
       }
       if (!state.runtimeReady) {
         return;

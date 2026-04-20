@@ -115,7 +115,7 @@ class _ExplodingSharedSourceCacheService:
         raise AssertionError("external health cold path should not block on alarm target preview")
 
 
-def test_external_health_hides_internal_download_pool_but_keeps_shared_file_readiness_and_alert_projection(monkeypatch, tmp_path):
+def test_external_health_exposes_only_basic_shared_bridge_status(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, 'get_app_dir', lambda: tmp_path)
     monkeypatch.setattr(routes, 'WetBulbCollectionService', _FakeWetBulbCollectionService)
     monkeypatch.setattr(routes, 'DayMetricBitableExportService', _FakeDayMetricBitableExportService)
@@ -277,18 +277,12 @@ def test_external_health_hides_internal_download_pool_but_keeps_shared_file_read
 
     assert payload['ok'] is True
     assert payload['deployment']['role_mode'] == 'external'
-    assert payload['shared_bridge']['internal_download_pool'] == {
-        'enabled': False,
-        'browser_ready': False,
-        'page_slots': [],
-        'active_buildings': [],
-        'last_error': '',
-    }
-    assert payload['shared_bridge']['internal_source_cache']['handover_log_family']['latest_selection']['best_bucket_key'] == '2026-04-01 09'
-    assert payload['shared_bridge']['internal_source_cache']['handover_log_family']['latest_selection']['can_proceed'] is True
-    assert payload['shared_bridge']['internal_alert_status']['active_count'] == 1
-    assert payload['shared_bridge']['internal_alert_status']['buildings'][0]['building'] == 'A楼'
-    assert payload['shared_bridge']['internal_alert_status']['buildings'][0]['status'] == 'problem'
+    assert payload['shared_bridge']['enabled'] is True
+    assert payload['shared_bridge']['role_mode'] == 'external'
+    assert payload['shared_bridge']['root_dir'] == 'Z:/share'
+    assert 'internal_download_pool' not in payload['shared_bridge']
+    assert 'internal_source_cache' not in payload['shared_bridge']
+    assert 'internal_alert_status' not in payload['shared_bridge']
     assert payload['shared_root_diagnostic']['status_text'] == '路径写法不同但目录一致'
     assert payload['shared_root_diagnostic']['paths'][1]['path'] == r'Z:\share'
     assert payload['day_metric_upload']['target_preview']['target_kind'] == 'wiki_token_pair'

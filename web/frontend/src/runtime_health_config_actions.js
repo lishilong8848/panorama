@@ -228,7 +228,27 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function canUseInternalRuntimeStatus() {
-    return resolveCurrentRoleMode() === "internal" && Boolean(runtimeWarmupReady?.value);
+    return String(health?.deployment?.role_mode || "").trim().toLowerCase() === "internal"
+      && Boolean(runtimeWarmupReady?.value);
+  }
+
+  function canUseExternalDashboardSummary() {
+    return String(health?.deployment?.role_mode || "").trim().toLowerCase() === "external";
+  }
+
+  function resetExternalDashboardRequestState() {
+    lastExternalDashboardSummaryFetchAt = 0;
+  }
+
+  function resetInternalRuntimeRequestState() {
+    if (internalRuntimeRefreshDebounceTimer) {
+      window.clearTimeout(internalRuntimeRefreshDebounceTimer);
+      internalRuntimeRefreshDebounceTimer = null;
+    }
+    internalRuntimeRefreshAllPending = false;
+    internalRuntimeRefreshBuildingsPending.clear();
+    internalRuntimeSummaryRefetchQueued = false;
+    internalRuntimeBuildingRefetchQueued.clear();
   }
 
   function normalizeInternalRuntimeBuildingName(building) {
@@ -265,7 +285,10 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function scheduleInternalRuntimeStatusRefresh(options = {}) {
-    if (!canUseInternalRuntimeStatus()) return;
+    if (!canUseInternalRuntimeStatus()) {
+      resetInternalRuntimeRequestState();
+      return;
+    }
     const buildingText = String(options?.building || "").trim();
     if (buildingText) {
       internalRuntimeRefreshBuildingsPending.add(normalizeInternalRuntimeBuildingName(buildingText));
@@ -1707,63 +1730,8 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
     if (data.shared_bridge && typeof data.shared_bridge === "object") {
       const nextSharedBridge = { ...data.shared_bridge };
-      if (
-        nextSharedBridge.internal_source_cache
-        && typeof nextSharedBridge.internal_source_cache === "object"
-        && health.shared_bridge?.internal_source_cache
-        && typeof health.shared_bridge.internal_source_cache === "object"
-      ) {
-        nextSharedBridge.internal_source_cache = mergeLiteInternalSourceCache(
-          health.shared_bridge.internal_source_cache,
-          nextSharedBridge.internal_source_cache,
-        );
-      }
-      if (
-        nextSharedBridge.internal_download_pool
-        && typeof nextSharedBridge.internal_download_pool === "object"
-        && health.shared_bridge?.internal_download_pool
-        && typeof health.shared_bridge.internal_download_pool === "object"
-      ) {
-        nextSharedBridge.internal_download_pool = mergePresentedPayload(
-          health.shared_bridge.internal_download_pool,
-          nextSharedBridge.internal_download_pool,
-          ["overview"],
-        );
-      }
-      if (
-        nextSharedBridge.internal_alert_status
-        && typeof nextSharedBridge.internal_alert_status === "object"
-        && health.shared_bridge?.internal_alert_status
-        && typeof health.shared_bridge.internal_alert_status === "object"
-      ) {
-        nextSharedBridge.internal_alert_status = mergePresentedPayload(
-          health.shared_bridge.internal_alert_status,
-          nextSharedBridge.internal_alert_status,
-          ["display_overview"],
-        );
-      }
-      if (isLiteHealth) {
-        if (
-          (!nextSharedBridge.internal_source_cache || typeof nextSharedBridge.internal_source_cache !== "object")
-          && health.shared_bridge?.internal_source_cache
-          && typeof health.shared_bridge.internal_source_cache === "object"
-        ) {
-          nextSharedBridge.internal_source_cache = health.shared_bridge.internal_source_cache;
-        }
-        if (
-          (!nextSharedBridge.internal_download_pool || typeof nextSharedBridge.internal_download_pool !== "object")
-          && health.shared_bridge?.internal_download_pool
-          && typeof health.shared_bridge.internal_download_pool === "object"
-        ) {
-          nextSharedBridge.internal_download_pool = health.shared_bridge.internal_download_pool;
-        }
-        if (
-          (!nextSharedBridge.internal_alert_status || typeof nextSharedBridge.internal_alert_status !== "object")
-          && health.shared_bridge?.internal_alert_status
-          && typeof health.shared_bridge.internal_alert_status === "object"
-        ) {
-          nextSharedBridge.internal_alert_status = health.shared_bridge.internal_alert_status;
-        }
+      if (String(health?.deployment?.role_mode || "").trim().toLowerCase() !== "internal") {
+        delete nextSharedBridge.internal_download_pool;
       }
       Object.assign(health.shared_bridge, nextSharedBridge);
     }
@@ -2358,7 +2326,10 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   async function fetchExternalDashboardSummary(options = {}) {
     if (isRuntimeTrafficPaused() || isLocallyExitedToRoleSelection() || !isRuntimeApiReady()) return false;
-    if (resolveCurrentRoleMode() === "internal") return false;
+    if (!canUseExternalDashboardSummary()) {
+      resetExternalDashboardRequestState();
+      return false;
+    }
     const silentMessage = Boolean(options?.silentMessage);
     const force = Boolean(options?.force);
     const now = Date.now();
@@ -2413,7 +2384,10 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchInternalRuntimeSummary(options = {}) {
-    if (isRuntimeTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) {
+      resetInternalRuntimeRequestState();
+      return false;
+    }
     const silentMessage = Boolean(options?.silentMessage);
     const force = Boolean(options?.force);
     if (internalRuntimeSummaryRequestInFlight) {
@@ -2455,7 +2429,10 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchInternalRuntimeBuildingRuntimeStatus(building, options = {}) {
-    if (isRuntimeTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) {
+      resetInternalRuntimeRequestState();
+      return false;
+    }
     const buildingText = normalizeInternalRuntimeBuildingName(building);
     const buildingCode = normalizeInternalRuntimeBuildingCode(buildingText);
     const silentMessage = Boolean(options?.silentMessage);
@@ -2508,7 +2485,10 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchAllInternalBuildingRuntimeStatuses(options = {}) {
-    if (isRuntimeTrafficPaused() || !canUseInternalRuntimeStatus()) return false;
+    if (isRuntimeTrafficPaused() || !canUseInternalRuntimeStatus()) {
+      resetInternalRuntimeRequestState();
+      return false;
+    }
     const results = await Promise.all(
       INTERNAL_RUNTIME_BUILDINGS.map((building) =>
         fetchInternalRuntimeBuildingRuntimeStatus(building, options),
@@ -2529,24 +2509,22 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function patchAlarmUploadRunningState(data, fallbackMode, fallbackScope) {
-    const family =
-      health.shared_bridge?.internal_source_cache?.alarm_event_family &&
-      typeof health.shared_bridge.internal_source_cache.alarm_event_family === "object"
-        ? health.shared_bridge.internal_source_cache.alarm_event_family
+    const overview =
+      health.dashboard_display?.shared_source_cache_overview &&
+      typeof health.dashboard_display.shared_source_cache_overview === "object"
+        ? health.dashboard_display.shared_source_cache_overview
         : null;
+    const families = Array.isArray(overview?.families) ? overview.families : [];
+    const family = families.find((item) =>
+      item && typeof item === "object" && String(item.key || "").trim() === "alarm_event_family"
+    );
     if (!family) return;
-    const uploadState =
-      family.external_upload && typeof family.external_upload === "object"
-        ? family.external_upload
-        : {};
-    family.external_upload = {
-      ...uploadState,
-      running: Boolean(data?.running),
-      started_at: String(data?.started_at || uploadState.started_at || "").trim(),
-      current_mode: String(data?.mode || fallbackMode || uploadState.current_mode || "").trim(),
-      current_scope: String(data?.scope || fallbackScope || uploadState.current_scope || "").trim(),
-      last_error: "",
-    };
+    family.upload_running = Boolean(data?.running);
+    family.upload_started_at = String(data?.started_at || family.upload_started_at || family.uploadStartedAt || "").trim();
+    family.upload_current_mode = String(data?.mode || fallbackMode || family.upload_current_mode || family.uploadCurrentMode || "").trim();
+    family.upload_current_scope = String(data?.scope || fallbackScope || family.upload_current_scope || family.uploadCurrentScope || "").trim();
+    family.upload_last_error = "";
+    family.upload_running_text = family.upload_running ? "告警上传进行中" : "";
   }
 
   async function fetchBridgeTaskDetail(taskId, options = {}) {
@@ -4878,6 +4856,8 @@ export function createRuntimeHealthConfigActions(ctx) {
     fetchInternalRuntimeBuildingRuntimeStatus,
     fetchAllInternalBuildingRuntimeStatuses,
     scheduleInternalRuntimeStatusRefresh,
+    resetInternalRuntimeRequestState,
+    resetExternalDashboardRequestState,
     fetchHandoverDailyReportContext,
     fetchConfig,
     fetchHandoverCommonConfigSegment,

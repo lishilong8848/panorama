@@ -51,29 +51,57 @@ const computed = (getter) => ({{
 
 const appState = createAppState({{ reactive, ref, computed }});
 appState.health.deployment.role_mode = 'external';
-appState.health.shared_bridge.internal_alert_status = {{
+appState.health.dashboard_display.internal_alert_overview = {{
+  tone: 'warning',
+  status_text: '存在异常楼栋',
+  summary_text: '当前有 1 个楼栋存在未恢复的内网告警。',
   buildings: [
     {{
       building: 'A楼',
-      status: 'problem',
-      summary: 'A楼 登录失败，等待内网恢复',
-      detail: '页面无响应，请检查楼栋页面服务或网络',
-      last_problem_at: '2026-04-01 09:10:00',
-      last_recovered_at: '',
+      tone: 'warning',
+      status_text: '异常',
+      summary_text: 'A楼 登录失败，等待内网恢复',
+      detail_text: '页面无响应，请检查楼栋页面服务或网络',
+      time_text: '2026-04-01 09:10:00',
       active_count: 1,
     }},
     {{
       building: 'B楼',
-      status: 'normal',
-      summary: '正常',
-      detail: '',
-      last_problem_at: '',
-      last_recovered_at: '2026-04-01 09:20:00',
+      tone: 'success',
+      status_text: '正常',
+      summary_text: '已恢复正常',
+      detail_text: '',
+      time_text: '2026-04-01 09:20:00',
+      active_count: 0,
+    }},
+    {{
+      building: 'C楼',
+      tone: 'success',
+      status_text: '正常',
+      summary_text: '已恢复正常',
+      detail_text: '',
+      time_text: '2026-04-01 09:20:00',
+      active_count: 0,
+    }},
+    {{
+      building: 'D楼',
+      tone: 'success',
+      status_text: '正常',
+      summary_text: '已恢复正常',
+      detail_text: '',
+      time_text: '2026-04-01 09:20:00',
+      active_count: 0,
+    }},
+    {{
+      building: 'E楼',
+      tone: 'success',
+      status_text: '正常',
+      summary_text: '已恢复正常',
+      detail_text: '',
+      time_text: '2026-04-01 09:20:00',
       active_count: 0,
     }}
   ],
-  active_count: 1,
-  last_notified_at: '2026-04-01 09:21:00',
 }};
 
 const overview = appState.externalInternalAlertOverview.value;

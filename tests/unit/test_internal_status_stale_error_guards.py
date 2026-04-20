@@ -81,6 +81,19 @@ appState.health.shared_bridge.internal_source_cache = {{
     running_buildings: [],
     completed_buildings: ["A楼", "B楼", "C楼", "D楼", "E楼"],
   }},
+  current_hour_refresh_overview: {{
+    reason_code: "success",
+    tone: "success",
+    status_text: "最近一轮已完成",
+    summary_text: "当前小时共享文件补拉已完成，本轮没有失败或阻塞楼栋。",
+    last_run_at: "2026-04-05 11:56:00",
+    last_success_at: "2026-04-05 11:58:00",
+    last_error: "",
+    failed_buildings: [],
+    blocked_buildings: [],
+    running_buildings: [],
+    completed_buildings: ["A楼", "B楼", "C楼", "D楼", "E楼"],
+  }},
   handover_log_family: {{
     current_bucket: "2026-04-05 11",
     last_success_at: "2026-04-05 11:58:00",
@@ -107,6 +120,19 @@ appState.health.shared_bridge.internal_source_cache = {{
       {{ building: "E楼", status: "ready", ready: true }},
     ],
   }},
+  handover_capacity_report_family: {{
+    current_bucket: "2026-04-05 11",
+    last_success_at: "2026-04-05 11:58:00",
+    failed_buildings: [],
+    blocked_buildings: [],
+    buildings: [
+      {{ building: "A楼", status: "ready", ready: true }},
+      {{ building: "B楼", status: "ready", ready: true }},
+      {{ building: "C楼", status: "ready", ready: true }},
+      {{ building: "D楼", status: "ready", ready: true }},
+      {{ building: "E楼", status: "ready", ready: true }},
+    ],
+  }},
   alarm_event_family: {{
     current_bucket: "2026-04-05 08",
     last_success_at: "2026-04-05 08:05:00",
@@ -120,6 +146,10 @@ appState.health.shared_bridge.internal_source_cache = {{
       {{ building: "E楼", status: "ready", ready: true }},
     ],
   }},
+}};
+appState.internalRuntimeSummary.value = {{
+  pool: appState.health.shared_bridge.internal_download_pool,
+  source_cache: appState.health.shared_bridge.internal_source_cache,
 }};
 
 console.log(JSON.stringify({{
@@ -138,4 +168,3 @@ console.log(JSON.stringify({{
     assert payload["currentHourTone"] == "success"
     assert payload["currentHourStatus"] == "最近一轮已完成"
     assert payload["currentHourLastError"] == ""
-

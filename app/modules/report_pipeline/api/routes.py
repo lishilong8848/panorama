@@ -496,6 +496,17 @@ def _sanitize_shared_bridge_snapshot_for_role(snapshot: Any, *, role_mode: str) 
     return payload
 
 
+def _basic_shared_bridge_status(snapshot: Any, *, role_mode: str) -> Dict[str, Any]:
+    payload = dict(snapshot) if isinstance(snapshot, dict) else {}
+    return {
+        "enabled": bool(payload.get("enabled", False)),
+        "role_mode": normalize_role_mode(payload.get("role_mode", role_mode)),
+        "root_dir": str(payload.get("root_dir", "") or "").strip(),
+        "internal_root_dir": str(payload.get("internal_root_dir", "") or "").strip(),
+        "external_root_dir": str(payload.get("external_root_dir", "") or "").strip(),
+    }
+
+
 def _shared_bridge_health_snapshot(container, request: Request, *, role_mode: str) -> Dict[str, Any]:
     snapshot_mode = "internal_light" if str(role_mode or "").strip().lower() == "internal" else "external_full"
     cache_ttl_sec = (
@@ -1654,9 +1665,13 @@ def health(
                 snapshot = runtime_status_coordinator.read_scope_snapshot("runtime_health_lite")
                 payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
                 if isinstance(payload, dict) and payload:
-                    live_shared_bridge = _live_shared_bridge_snapshot_for_role()
-                    if live_shared_bridge:
-                        payload = {**payload, "shared_bridge": live_shared_bridge}
+                    payload = {
+                        **payload,
+                        "shared_bridge": _basic_shared_bridge_status(
+                            payload.get("shared_bridge", {}),
+                            role_mode=role_mode,
+                        ),
+                    }
                     return payload
                 runtime_status_coordinator.request_refresh(reason="health_lite_route")
         except Exception:
@@ -2018,7 +2033,7 @@ def health(
         shared_bridge_cfg = runtime_cfg.get("shared_bridge", {}) if isinstance(runtime_cfg, dict) else {}
         if not isinstance(shared_bridge_cfg, dict):
             shared_bridge_cfg = {}
-        shared_bridge_snapshot = _sanitize_shared_bridge_snapshot_for_role(
+        shared_bridge_snapshot = _basic_shared_bridge_status(
             {
                 "enabled": bool(shared_bridge_cfg.get("enabled", False)),
                 "root_dir": str(shared_bridge_cfg.get("root_dir", "") or "").strip(),
@@ -2028,11 +2043,14 @@ def health(
         )
         shared_root_diagnostic = {}
     else:
-        shared_bridge_snapshot = (
-            _read_runtime_status_scope_payload(container, "external_shared_bridge_full")
-            if role_mode == "external"
-            else None
-        ) or _shared_bridge_health_snapshot(container, request, role_mode=role_mode)
+        shared_bridge_snapshot = _basic_shared_bridge_status(
+            (
+                _read_runtime_status_scope_payload(container, "external_shared_bridge_full")
+                if role_mode == "external"
+                else None
+            ) or _shared_bridge_health_snapshot(container, request, role_mode=role_mode),
+            role_mode=role_mode,
+        )
         shared_root_diagnostic = _shared_root_diagnostic_snapshot_async_default(
             container,
             request,
@@ -4617,7 +4635,58 @@ def get_runtime_resources(request: Request) -> Dict[str, Any]:
 @router.get("/api/runtime/external-dashboard-summary")
 def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    _ensure_not_internal_role(container, "当前仅外网端支持首页聚合状态摘要")
+    if _deployment_role_mode(container) == "internal":
+        shared_source_cache_overview = {
+            "reason_code": "role_mismatch",
+            "tone": "neutral",
+            "status_text": "当前不是外网端",
+            "summary_text": "外网业务控制台状态仅在外网端运行时返回。",
+            "detail_text": "",
+            "display_note_text": "",
+            "reference_bucket_key": "-",
+            "error_text": "",
+            "items": [],
+            "families": [],
+            "can_proceed": False,
+            "can_proceed_latest": False,
+            "actions": {},
+        }
+        internal_alert_overview = {
+            "reason_code": "role_mismatch",
+            "tone": "neutral",
+            "status_text": "当前不是外网端",
+            "summary_text": "",
+            "detail_text": "",
+            "items": [],
+            "buildings": [],
+            "actions": {},
+        }
+        dashboard_display = {
+            "shared_source_cache_overview": shared_source_cache_overview,
+            "internal_alert_overview": internal_alert_overview,
+        }
+        return {
+            "ok": True,
+            "reason_code": "role_mismatch",
+            "health_lite": {
+                "ok": True,
+                "health_mode": "lite",
+                "deployment": container.deployment_snapshot()
+                if callable(getattr(container, "deployment_snapshot", None))
+                else {"role_mode": "internal"},
+                "runtime_activated": bool(getattr(container, "runtime_activated", False)),
+                "startup_role_confirmed": bool(getattr(container, "startup_role_confirmed", False)),
+                "shared_bridge": _basic_shared_bridge_status({}, role_mode="internal"),
+            },
+            "scheduler_status_summary": {},
+            "job_panel_summary": _empty_job_panel_summary(),
+            "bridge_tasks_summary": build_bridge_tasks_summary([], count=0),
+            "runtime_resources_summary": _empty_runtime_resources_summary(),
+            "updater_summary": {},
+            "shared_source_cache_overview": shared_source_cache_overview,
+            "internal_alert_overview": internal_alert_overview,
+            "display": dashboard_display,
+        }
     coordinator = getattr(container, "runtime_status_coordinator", None)
     runtime_cfg = _runtime_config(container)
     coordinator_running = (
@@ -4656,11 +4725,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         "activation_error": "",
         "startup_role_confirmed": False,
     }
-    live_shared_bridge = (
-        health_lite.get("shared_bridge", {})
-        if isinstance(health_lite.get("shared_bridge", {}), dict)
-        else {}
-    )
+    live_shared_bridge: Dict[str, Any] = {}
     if not live_shared_bridge:
         live_shared_bridge = _read_scope("external_shared_bridge_full") or {}
     if not live_shared_bridge:

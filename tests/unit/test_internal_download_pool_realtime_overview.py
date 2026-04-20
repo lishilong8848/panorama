@@ -65,6 +65,10 @@ appState.health.shared_bridge.internal_download_pool = {{
     }}
   ]
 }};
+appState.internalRuntimeSummary.value = {{
+  pool: appState.health.shared_bridge.internal_download_pool,
+  source_cache: {{}},
+}};
 
 const overview = appState.internalDownloadPoolOverview.value;
 console.log(JSON.stringify({{

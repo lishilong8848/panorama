@@ -115,6 +115,20 @@ appState.health.shared_bridge.internal_source_cache = {{
     }},
   }},
 }};
+const sourceCache = appState.health.shared_bridge.internal_source_cache;
+appState.health.dashboard_display.shared_source_cache_overview = {{
+  reason_code: "ready",
+  tone: "success",
+  status_text: "共享文件已就绪",
+  summary_text: "共享文件已就绪，默认入口可继续执行。",
+  reference_bucket_key: "2026-04-03 09",
+  can_proceed_latest: true,
+  families: [
+    {{ key: "handover_log_family", ...sourceCache.handover_log_family.latest_selection }},
+    {{ key: "monthly_report_family", ...sourceCache.monthly_report_family.latest_selection }},
+    {{ key: "alarm_event_family", ...sourceCache.alarm_event_family }},
+  ],
+}};
 
 const overview = appState.sharedSourceCacheReadinessOverview.value;
 const alarmFamily = overview.families[2];
