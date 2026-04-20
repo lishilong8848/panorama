@@ -411,10 +411,24 @@ def test_internal_runtime_status_building_returns_single_building_payload() -> N
     assert response["ok"] is True
     assert response["status"]["building"] == "A楼"
     assert response["status"]["building_code"] == "a"
+    assert "page_slot" not in response["status"]
+    assert response["status"]["display"]["page_slot"]["in_use"] is True
+    assert response["status"]["display"]["source_families"]["monthly_report_family"]["status"] == "failed"
+    assert response["status"]["display"]["source_families"]["alarm_event_family"]["blocked"] is True
+    assert response["status"]["display"]["page_slot"]["status_text"] == "使用中"
+    assert response["status"]["display"]["source_families"]["monthly_report_family"]["status_text"] == "失败"
+
+
+def test_internal_runtime_status_building_can_return_raw_payload_for_diagnostics() -> None:
+    service = _FakeBridgeService()
+    request = _fake_request(service, role_mode="internal")
+
+    response = routes.bridge_internal_runtime_status_building("a", request, include_raw=True)
+
+    assert response["ok"] is True
+    assert response["status"]["building"] == "A楼"
     assert response["status"]["page_slot"]["in_use"] is True
     assert response["status"]["source_families"]["monthly_report_family"]["status"] == "failed"
-    assert response["status"]["source_families"]["alarm_event_family"]["blocked"] is True
-    assert response["status"]["display"]["page_slot"]["status_text"] == "使用中"
     assert response["status"]["display"]["source_families"]["monthly_report_family"]["status_text"] == "失败"
 
 
@@ -532,7 +546,7 @@ def test_internal_runtime_building_prefers_live_state_over_sqlite_snapshot() -> 
     response = routes.bridge_internal_runtime_status_building("a", request)
 
     assert response["ok"] is True
-    assert response["status"]["page_slot"]["in_use"] is True
+    assert response["status"]["display"]["page_slot"]["in_use"] is True
     assert response["status"]["display"]["source_families"]["handover_log_family"]["status_text"] == "下载中"
     assert service.health_modes == ["internal_light"]
 

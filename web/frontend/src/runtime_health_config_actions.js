@@ -1369,13 +1369,21 @@ export function createRuntimeHealthConfigActions(ctx) {
       if (startupRoleSelectorVisible) {
         startupRoleSelectorVisible.value = false;
       }
-      if (startupRoleLoadingVisible && !startupRoleActivationInFlight?.value) {
+      if (startupRoleLoadingVisible) {
         startupRoleLoadingVisible.value = false;
+      }
+      if (startupRoleActivationInFlight) {
+        startupRoleActivationInFlight.value = false;
       }
     }
     health.activation_phase = String(data.activation_phase || health.activation_phase || "");
     health.activation_step = String(data.activation_step || health.activation_step || "");
     health.activation_error = String(data.activation_error || health.activation_error || "");
+    if (backendRuntimeReady && String(health.activation_phase || "").trim().toLowerCase() !== "failed") {
+      health.activation_phase = "activated";
+      health.activation_step = "activated";
+      health.activation_error = "";
+    }
     health.active_job_id = String(data.active_job_id || "");
     health.active_job_ids = Array.isArray(data.active_job_ids) ? data.active_job_ids : [];
     health.job_counts = data.job_counts && typeof data.job_counts === "object" ? { ...data.job_counts } : {};
@@ -2286,6 +2294,12 @@ export function createRuntimeHealthConfigActions(ctx) {
       applyHealthSnapshot(healthLite);
     }
     const nextDisplay = data.display && typeof data.display === "object" ? data.display : null;
+    const topLevelSharedSourceOverview = data.shared_source_cache_overview && typeof data.shared_source_cache_overview === "object"
+      ? data.shared_source_cache_overview
+      : null;
+    const topLevelInternalAlertOverview = data.internal_alert_overview && typeof data.internal_alert_overview === "object"
+      ? data.internal_alert_overview
+      : null;
     if (nextDisplay) {
       const previousDisplay = health.dashboard_display && typeof health.dashboard_display === "object"
         ? health.dashboard_display
@@ -2293,9 +2307,24 @@ export function createRuntimeHealthConfigActions(ctx) {
       health.dashboard_display = {
         ...previousDisplay,
         ...nextDisplay,
+        ...(topLevelSharedSourceOverview && !nextDisplay.shared_source_cache_overview
+          ? { shared_source_cache_overview: topLevelSharedSourceOverview }
+          : {}),
+        ...(topLevelInternalAlertOverview && !nextDisplay.internal_alert_overview
+          ? { internal_alert_overview: topLevelInternalAlertOverview }
+          : {}),
       };
     } else if (!health.dashboard_display || typeof health.dashboard_display !== "object") {
-      health.dashboard_display = {};
+      health.dashboard_display = {
+        ...(topLevelSharedSourceOverview ? { shared_source_cache_overview: topLevelSharedSourceOverview } : {}),
+        ...(topLevelInternalAlertOverview ? { internal_alert_overview: topLevelInternalAlertOverview } : {}),
+      };
+    } else {
+      health.dashboard_display = {
+        ...health.dashboard_display,
+        ...(topLevelSharedSourceOverview ? { shared_source_cache_overview: topLevelSharedSourceOverview } : {}),
+        ...(topLevelInternalAlertOverview ? { internal_alert_overview: topLevelInternalAlertOverview } : {}),
+      };
     }
     applyExternalSchedulerSummary(
       data.scheduler_status_summary && typeof data.scheduler_status_summary === "object"

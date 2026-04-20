@@ -574,17 +574,136 @@ def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
 
 
 @router.get("/api/bridge/internal-runtime-status/buildings/{building_code}")
-def bridge_internal_runtime_status_building(building_code: str, request: Request) -> Dict[str, Any]:
+def bridge_internal_runtime_status_building(
+    building_code: str,
+    request: Request,
+    include_raw: bool = False,
+) -> Dict[str, Any]:
     role_mode = _deployment_role_mode(request)
     normalized_code, building = _normalize_internal_runtime_building(building_code)
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
     coordinator = getattr(container, "runtime_status_coordinator", None)
 
+    def _slim_action(payload: Any, *, label: str = "") -> Dict[str, Any]:
+        action = payload if isinstance(payload, dict) else {}
+        return {
+            "allowed": bool(action.get("allowed", False)),
+            "pending": bool(action.get("pending", False)),
+            "label": str(action.get("label", "") or label).strip(),
+            "disabled_reason": str(action.get("disabled_reason", "") or "").strip(),
+        }
+
+    def _slim_page_slot(payload: Any) -> Dict[str, Any]:
+        slot = payload if isinstance(payload, dict) else {}
+        keys = (
+            "building",
+            "browser_ready",
+            "page_ready",
+            "login_state",
+            "last_login_at",
+            "login_error",
+            "in_use",
+            "last_used_at",
+            "last_result",
+            "last_error",
+            "suspended",
+            "suspend_reason",
+            "next_probe_at",
+            "status_key",
+            "tone",
+            "status_text",
+            "detail_text",
+            "login_tone",
+            "login_text",
+        )
+        result = {key: slot.get(key) for key in keys if key in slot}
+        result["building"] = str(result.get("building") or building).strip()
+        return result
+
+    def _slim_source_family(key: str, payload: Any) -> Dict[str, Any]:
+        row = payload if isinstance(payload, dict) else {}
+        keys = (
+            "building",
+            "bucket_key",
+            "status",
+            "status_key",
+            "ready",
+            "downloaded_at",
+            "last_error",
+            "started_at",
+            "blocked",
+            "blocked_reason",
+            "next_probe_at",
+            "source_family",
+            "tone",
+            "status_text",
+            "detail_text",
+            "reason_code",
+            "key",
+            "title",
+        )
+        result = {field: row.get(field) for field in keys if field in row}
+        result["building"] = str(result.get("building") or building).strip()
+        result["key"] = str(result.get("key") or key).strip()
+        result["source_family"] = str(result.get("source_family") or key).strip()
+        result["actions"] = {
+            "refresh": _slim_action(
+                (row.get("actions") or {}).get("refresh") if isinstance(row.get("actions"), dict) else {},
+                label="重新拉取",
+            )
+        }
+        return result
+
+    def _slim_display(display_payload: Any) -> Dict[str, Any]:
+        display = display_payload if isinstance(display_payload, dict) else {}
+        source_families = display.get("source_families", {}) if isinstance(display.get("source_families", {}), dict) else {}
+        slim_family_map = {
+            str(key): _slim_source_family(str(key), value)
+            for key, value in source_families.items()
+            if isinstance(value, dict)
+        }
+        family_order = display.get("families", []) if isinstance(display.get("families", []), list) else []
+        slim_family_items = []
+        seen_keys = set()
+        for item in family_order:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or item.get("source_family") or "").strip()
+            if not key:
+                continue
+            slim_item = slim_family_map.get(key) or _slim_source_family(key, item)
+            slim_family_items.append(slim_item)
+            seen_keys.add(key)
+        for key, item in slim_family_map.items():
+            if key not in seen_keys:
+                slim_family_items.append(item)
+        return {
+            "building": str(display.get("building") or building).strip(),
+            "tone": str(display.get("tone", "") or "neutral").strip(),
+            "status_text": str(display.get("status_text", "") or "").strip(),
+            "summary_text": str(display.get("summary_text", "") or "").strip(),
+            "reason_code": str(display.get("reason_code", "") or "").strip(),
+            "page_slot": _slim_page_slot(display.get("page_slot", {})),
+            "source_families": slim_family_map,
+            "families": slim_family_items,
+            "items": display.get("items", []) if isinstance(display.get("items", []), list) else [],
+        }
+
     def _attach_display(status_payload: Dict[str, Any]) -> Dict[str, Any]:
         status = copy.deepcopy(status_payload if isinstance(status_payload, dict) else {})
-        status["display"] = present_internal_runtime_building_display(status)
-        return status
+        display = present_internal_runtime_building_display(status)
+        status["display"] = display
+        if include_raw:
+            return status
+        return {
+            "updated_at": str(status.get("updated_at", "") or "").strip(),
+            "building": str(status.get("building", "") or building).strip(),
+            "building_code": str(status.get("building_code", "") or normalized_code).strip(),
+            "runtime_available": bool(status.get("runtime_available", True)),
+            "reason_code": str(status.get("reason_code", "") or "").strip(),
+            "display": _slim_display(display),
+        }
 
     if role_mode != "internal":
         status = build_empty_internal_runtime_building_status(

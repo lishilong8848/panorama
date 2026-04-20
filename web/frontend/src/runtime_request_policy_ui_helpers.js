@@ -19,14 +19,20 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
 
   const shouldPauseRuntimeRequests = computed(() => {
     const activationPhase = String(health.activation_phase || "").trim().toLowerCase();
+    const backendRuntimeReady = Boolean(
+      health.runtime_activated
+      && health.startup_role_confirmed
+      && !health.role_selection_required
+      && !health.startup_role_user_exited
+    );
     return Boolean(
       !startupRoleSelectorHandled.value
       || updaterUiOverlayVisible.value
       || updaterAwaitingRestartRecovery.value
       || startupRoleSelectorVisible.value
-      || startupRoleLoadingVisible.value
-      || Boolean(startupRoleActivationInFlight?.value)
-      || ["activating", "recovering", "restarting"].includes(activationPhase)
+      || (!backendRuntimeReady && startupRoleLoadingVisible.value)
+      || (!backendRuntimeReady && Boolean(startupRoleActivationInFlight?.value))
+      || (!backendRuntimeReady && ["activating", "recovering", "restarting"].includes(activationPhase))
       || (Boolean(health.startup_role_user_exited) && !Boolean(health.runtime_activated))
     );
   });
@@ -54,7 +60,7 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
     if (!runtimeRequestsReady.value) return false;
     if (runningRoleMode.value !== "external") return false;
     const view = String(currentView.value || "").trim().toLowerCase();
-    return view === "dashboard";
+    return view === "dashboard" || view === "status";
   });
 
   const shouldPollJobPanel = computed(() => false);
