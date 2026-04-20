@@ -806,6 +806,296 @@ class SharedSourceCacheService:
         presented["display_overview"] = dict(presented)
         return presented
 
+    def _fast_entry_file_path_text(self, entry: Dict[str, Any]) -> str:
+        relative_path = str(entry.get("relative_path", "") or "").strip()
+        if not relative_path or self.shared_root is None:
+            return ""
+        return str(self.shared_root / relative_path)
+
+    def _fast_ready_entries_for_family(self, source_family: str) -> List[Dict[str, Any]]:
+        if self.store is None:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for family_name in self._source_family_candidates(source_family):
+            rows.extend(
+                row
+                for row in self.store.list_source_cache_entries(
+                    source_family=family_name,
+                    bucket_kind="latest",
+                    status="ready",
+                    limit=1000,
+                )
+                if isinstance(row, dict)
+            )
+        return rows
+
+    def _build_fast_latest_selection_from_index(
+        self,
+        *,
+        source_family: str,
+        buildings: List[str],
+        max_version_gap: int = 3,
+        max_selection_age_hours: float = 3.0,
+    ) -> Dict[str, Any]:
+        rows = self._fast_ready_entries_for_family(source_family)
+        candidates_by_building: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            building = str(row.get("building", "") or "").strip()
+            if building not in buildings:
+                continue
+            bucket_key = str(row.get("bucket_key", "") or "").strip()
+            bucket_dt = _parse_hour_bucket(bucket_key)
+            if bucket_dt is None:
+                continue
+            current = candidates_by_building.get(building)
+            current_dt = _parse_hour_bucket(str(current.get("bucket_key", "") or "").strip()) if current else None
+            if current is None or current_dt is None or bucket_dt > current_dt:
+                candidates_by_building[building] = row
+
+        latest_bucket_dt: datetime | None = None
+        latest_bucket_key = ""
+        for row in candidates_by_building.values():
+            bucket_dt = _parse_hour_bucket(str(row.get("bucket_key", "") or "").strip())
+            if bucket_dt is not None and (latest_bucket_dt is None or bucket_dt > latest_bucket_dt):
+                latest_bucket_dt = bucket_dt
+                latest_bucket_key = str(row.get("bucket_key", "") or "").strip()
+
+        best_bucket_age_hours: float | None = None
+        is_best_bucket_too_old = False
+        if latest_bucket_dt is not None:
+            best_bucket_age_hours = round(max(0.0, (_now_dt() - latest_bucket_dt).total_seconds() / 3600.0), 3)
+            is_best_bucket_too_old = best_bucket_age_hours > float(max_selection_age_hours)
+
+        building_rows: List[Dict[str, Any]] = []
+        selected_entries: List[Dict[str, Any]] = []
+        fallback_buildings: List[str] = []
+        missing_buildings: List[str] = []
+        stale_buildings: List[str] = []
+        for building in buildings:
+            row = candidates_by_building.get(building)
+            if row is None or latest_bucket_dt is None:
+                missing_buildings.append(building)
+                building_rows.append(
+                    {
+                        "building": building,
+                        "bucket_key": latest_bucket_key,
+                        "status": "waiting",
+                        "using_fallback": False,
+                        "version_gap": None,
+                        "downloaded_at": "",
+                        "last_error": "",
+                        "relative_path": "",
+                        "resolved_file_path": "",
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "next_probe_at": "",
+                    }
+                )
+                continue
+            bucket_key = str(row.get("bucket_key", "") or "").strip()
+            bucket_dt = _parse_hour_bucket(bucket_key)
+            version_gap = 0
+            if bucket_dt is not None:
+                version_gap = max(0, int((latest_bucket_dt - bucket_dt).total_seconds() // 3600))
+            status = "ready"
+            if version_gap > max_version_gap:
+                status = "stale"
+                stale_buildings.append(building)
+            elif version_gap > 0:
+                fallback_buildings.append(building)
+            resolved_path = self._fast_entry_file_path_text(row)
+            output_row = {
+                "building": building,
+                "bucket_key": bucket_key,
+                "status": status,
+                "using_fallback": version_gap > 0,
+                "version_gap": version_gap,
+                "downloaded_at": str(row.get("downloaded_at", "") or "").strip(),
+                "last_error": "",
+                "relative_path": str(row.get("relative_path", "") or "").strip(),
+                "resolved_file_path": resolved_path,
+                "blocked": False,
+                "blocked_reason": "",
+                "next_probe_at": "",
+            }
+            building_rows.append(output_row)
+            if status == "ready":
+                selected_entries.append({**row, "file_path": resolved_path})
+
+        return {
+            "best_bucket_key": latest_bucket_key,
+            "best_bucket_age_hours": best_bucket_age_hours,
+            "is_best_bucket_too_old": is_best_bucket_too_old,
+            "selected_entries": selected_entries,
+            "fallback_buildings": fallback_buildings,
+            "missing_buildings": missing_buildings,
+            "stale_buildings": stale_buildings,
+            "blocked_buildings": [],
+            "buildings": building_rows,
+            "can_proceed": bool(buildings)
+            and not missing_buildings
+            and not stale_buildings
+            and not is_best_bucket_too_old
+            and len(selected_entries) == len(buildings),
+        }
+
+    def _build_fast_external_family_from_index(self, *, source_family: str, current_bucket: str, buildings: List[str]) -> Dict[str, Any]:
+        latest_selection = self._build_fast_latest_selection_from_index(
+            source_family=source_family,
+            buildings=buildings,
+        )
+        live_rows = [
+            {
+                "building": row.get("building", ""),
+                "bucket_key": row.get("bucket_key", ""),
+                "status": row.get("status", "waiting"),
+                "ready": row.get("status") == "ready",
+                "downloaded_at": row.get("downloaded_at", ""),
+                "last_error": row.get("last_error", ""),
+                "relative_path": row.get("relative_path", ""),
+                "resolved_file_path": row.get("resolved_file_path", ""),
+                "blocked": False,
+                "blocked_reason": "",
+                "next_probe_at": "",
+            }
+            for row in latest_selection.get("buildings", [])
+            if isinstance(row, dict)
+        ]
+        live_payload = {
+            "ready_count": sum(1 for row in live_rows if row.get("status") == "ready"),
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "last_success_at": max(
+                (str(row.get("downloaded_at", "") or "").strip() for row in live_rows if str(row.get("downloaded_at", "") or "").strip()),
+                default="",
+            ),
+            "current_bucket": current_bucket,
+            "buildings": live_rows,
+            "latest_selection": latest_selection,
+        }
+        display_overview = present_external_source_cache_family(
+            key=self._normalize_source_family(source_family),
+            title=FAMILY_LABELS.get(self._normalize_source_family(source_family), ""),
+            live_payload=live_payload,
+            latest_payload=latest_selection,
+        )
+        return {**live_payload, "display_overview": display_overview}
+
+    def _build_fast_alarm_external_family_from_index(self, *, buildings: List[str]) -> Dict[str, Any]:
+        if self.store is None:
+            return present_alarm_event_family(
+                {"current_bucket": _now_dt().date().isoformat(), "buildings": []},
+                key=FAMILY_ALARM_EVENT,
+                title=FAMILY_LABELS.get(FAMILY_ALARM_EVENT, ""),
+            )
+        reference_date = _now_dt().date()
+        yesterday = reference_date - timedelta(days=1)
+        rows = self._fast_ready_entries_for_family(FAMILY_ALARM_EVENT)
+        by_building: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            building = str(row.get("building", "") or "").strip()
+            if building not in buildings:
+                continue
+            bucket_dt = _parse_hour_bucket(str(row.get("bucket_key", "") or "").strip())
+            downloaded_dt = _parse_datetime_text(row.get("downloaded_at", ""))
+            candidate_dt = bucket_dt or downloaded_dt
+            if candidate_dt is None or candidate_dt.date() not in {reference_date, yesterday}:
+                continue
+            current = by_building.get(building)
+            current_dt = _parse_datetime_text(current.get("selected_downloaded_at", "")) if current else None
+            if current is None or current_dt is None or candidate_dt > current_dt:
+                scope = "today" if candidate_dt.date() == reference_date else "yesterday_fallback"
+                by_building[building] = {
+                    "building": building,
+                    "bucket_key": str(row.get("bucket_key", "") or "").strip(),
+                    "status": "ready",
+                    "downloaded_at": str(row.get("downloaded_at", "") or "").strip(),
+                    "selected_downloaded_at": str(row.get("downloaded_at", "") or "").strip(),
+                    "last_error": "",
+                    "relative_path": str(row.get("relative_path", "") or "").strip(),
+                    "resolved_file_path": self._fast_entry_file_path_text(row),
+                    "blocked": False,
+                    "blocked_reason": "",
+                    "source_kind": str(row.get("bucket_kind", "") or "latest").strip().lower(),
+                    "selection_scope": scope,
+                }
+        output_rows: List[Dict[str, Any]] = []
+        used_previous_day_fallback: List[str] = []
+        missing_today_buildings: List[str] = []
+        missing_both_days_buildings: List[str] = []
+        for building in buildings:
+            row = by_building.get(building)
+            if row is None:
+                missing_today_buildings.append(building)
+                missing_both_days_buildings.append(building)
+                output_rows.append({"building": building, "status": "waiting", "selection_scope": "missing"})
+                continue
+            if row.get("selection_scope") == "yesterday_fallback":
+                used_previous_day_fallback.append(building)
+            output_rows.append(row)
+        raw_family = {
+            "ready_count": sum(1 for row in output_rows if row.get("status") == "ready"),
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "last_success_at": max(
+                (str(row.get("downloaded_at", "") or "").strip() for row in output_rows if str(row.get("downloaded_at", "") or "").strip()),
+                default="",
+            ),
+            "current_bucket": reference_date.isoformat(),
+            "buildings": output_rows,
+            "latest_selection": {},
+            "selection_policy": "today_latest_else_yesterday_fallback",
+            "selection_reference_date": reference_date.isoformat(),
+            "used_previous_day_fallback": used_previous_day_fallback,
+            "missing_today_buildings": missing_today_buildings,
+            "missing_both_days_buildings": missing_both_days_buildings,
+        }
+        presented = present_alarm_event_family(
+            raw_family,
+            key=FAMILY_ALARM_EVENT,
+            title=FAMILY_LABELS.get(FAMILY_ALARM_EVENT, ""),
+        )
+        presented["display_overview"] = dict(presented)
+        return presented
+
+    def get_external_source_cache_overview_fast(self) -> Dict[str, Any]:
+        """Fast external UI snapshot from the cache index only.
+
+        This intentionally avoids network file stat/open/Excel validation so the
+        external dashboard can render known status and paths immediately. The
+        full shared-bridge snapshot still performs validation in the background.
+        """
+        buildings = self.get_enabled_buildings()
+        current_bucket = self._current_hour_bucket or self.current_hour_bucket()
+        snapshot = {
+            "enabled": bool(self.enabled and self.role_mode in {"internal", "external"}),
+            "scheduler_running": False,
+            "current_hour_bucket": current_bucket,
+            "last_run_at": self._last_run_at,
+            "last_success_at": self._last_success_at,
+            "last_error": self._last_error,
+            "cache_root": str(self.shared_root) if self.shared_root else "",
+            "current_hour_refresh": copy.deepcopy(self._current_hour_refresh),
+            FAMILY_HANDOVER_LOG: self._build_fast_external_family_from_index(
+                source_family=FAMILY_HANDOVER_LOG,
+                current_bucket=current_bucket,
+                buildings=buildings,
+            ),
+            FAMILY_HANDOVER_CAPACITY_REPORT: self._build_fast_external_family_from_index(
+                source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+                current_bucket=current_bucket,
+                buildings=buildings,
+            ),
+            FAMILY_MONTHLY_REPORT: self._build_fast_external_family_from_index(
+                source_family=FAMILY_MONTHLY_REPORT,
+                current_bucket=current_bucket,
+                buildings=buildings,
+            ),
+            FAMILY_ALARM_EVENT: self._build_fast_alarm_external_family_from_index(buildings=buildings),
+        }
+        snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
+        return copy.deepcopy(snapshot["display_overview"])
+
     def _get_external_full_snapshot_cached(self) -> Dict[str, Any]:
         with self._lock:
             should_rebuild = self._external_full_snapshot_dirty or not self._external_full_snapshot_cache

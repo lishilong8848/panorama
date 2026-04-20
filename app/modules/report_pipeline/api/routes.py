@@ -4950,8 +4950,20 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         if isinstance(bridge_tasks_summary, dict)
         else []
     )
+    fast_source_cache_overview: Dict[str, Any] = {}
+    bridge_service = getattr(container, "shared_bridge_service", None)
+    fast_overview_getter = getattr(bridge_service, "get_external_source_cache_overview_fast", None)
+    if callable(fast_overview_getter):
+        try:
+            fast_payload = fast_overview_getter()
+            if isinstance(fast_payload, dict):
+                fast_source_cache_overview = fast_payload
+        except Exception:
+            fast_source_cache_overview = {}
     shared_source_cache_overview = apply_external_source_cache_backfill_overlays(
-        _shared_source_cache_overview_from_snapshot(
+        fast_source_cache_overview
+        if _external_source_cache_overview_has_runtime_rows(fast_source_cache_overview)
+        else _shared_source_cache_overview_from_snapshot(
             live_shared_bridge.get("internal_source_cache", {})
         ),
         bridge_tasks_rows,

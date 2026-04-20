@@ -2324,6 +2324,11 @@ class SharedBridgeRuntimeService:
             return []
         return self._source_cache_service.get_latest_ready_entries(source_family=source_family, buildings=buildings)
 
+    def get_external_source_cache_overview_fast(self) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            return {}
+        return self._source_cache_service.get_external_source_cache_overview_fast()
+
     def get_latest_source_cache_selection(
         self,
         *,

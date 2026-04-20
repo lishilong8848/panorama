@@ -228,6 +228,40 @@ def test_health_snapshot_contains_building_level_current_hour_statuses(work_dir:
     assert snapshot[FAMILY_HANDOVER_LOG]['failed_buildings'] == ['B楼']
 
 
+def test_external_source_cache_fast_overview_reads_index_without_file_validation(work_dir: Path) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    bucket_key = '2026-04-20 14'
+    relative_path = '交接班日志源文件/202604/20260420--14/20260420--14--交接班日志源文件--A楼.xlsx'
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key=bucket_key,
+        duty_date='',
+        duty_shift='',
+        downloaded_at='2026-04-20 14:05:00',
+        relative_path=relative_path,
+        status='ready',
+        file_hash='hash-a',
+        size_bytes=123,
+    )
+
+    overview = service.get_external_source_cache_overview_fast()
+    families = {item['key']: item for item in overview['families']}
+    handover_rows = {item['building']: item for item in families[FAMILY_HANDOVER_LOG]['buildings']}
+
+    assert handover_rows['A楼']['status_key'] == 'ready'
+    assert handover_rows['A楼']['relative_path'] == relative_path
+    assert handover_rows['A楼']['resolved_file_path'].endswith('20260420--14--交接班日志源文件--A楼.xlsx')
+
+
 def test_health_snapshot_does_not_mark_missing_ready_file_as_ready(work_dir: Path) -> None:
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)
