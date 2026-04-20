@@ -427,7 +427,7 @@ def test_internal_runtime_status_rejects_external_role() -> None:
     assert excinfo.value.status_code == 409
 
 
-def test_internal_runtime_status_prefers_runtime_status_sqlite_snapshot() -> None:
+def test_internal_runtime_status_repairs_placeholder_sqlite_snapshot_from_live_state() -> None:
     service = _FakeBridgeService()
     service.health_snapshot["internal_download_pool"]["browser_ready"] = False
 
@@ -477,8 +477,10 @@ def test_internal_runtime_status_prefers_runtime_status_sqlite_snapshot() -> Non
     response = routes.bridge_internal_runtime_status(request)
 
     assert response["ok"] is True
-    assert response["summary"]["pool"]["browser_ready"] is True
-    assert service.health_modes == []
+    assert response["summary"]["pool"]["browser_ready"] is False
+    assert response["summary"]["pool"]["page_slots"][0]["login_text"] == "已登录"
+    assert response["summary"]["source_cache"]["current_hour_bucket"] == "2026-04-14 10"
+    assert service.health_modes == ["internal_light"]
 
 
 def test_internal_runtime_building_prefers_runtime_status_sqlite_snapshot() -> None:

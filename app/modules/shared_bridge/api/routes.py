@@ -78,6 +78,84 @@ _INTERNAL_RUNTIME_BUILDINGS = {
 }
 
 
+def _internal_summary_has_runtime_signal(payload: Any) -> bool:
+    summary = payload if isinstance(payload, dict) else {}
+    pool = summary.get("pool", {}) if isinstance(summary.get("pool", {}), dict) else {}
+    cache = summary.get("source_cache", {}) if isinstance(summary.get("source_cache", {}), dict) else {}
+    slots = pool.get("page_slots", []) if isinstance(pool.get("page_slots", []), list) else []
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        if bool(slot.get("page_ready", False)) or str(slot.get("login_state", "") or "").strip().lower() in {
+            "ready",
+            "logging_in",
+            "failed",
+            "expired",
+        }:
+            return True
+    for key in ("handover_log_family", "handover_capacity_report_family", "monthly_report_family", "alarm_event_family"):
+        family = cache.get(key, {}) if isinstance(cache.get(key, {}), dict) else {}
+        rows = family.get("buildings", []) if isinstance(family.get("buildings", []), list) else []
+        if any(
+            isinstance(row, dict)
+            and (
+                str(row.get("status", "") or row.get("status_key", "") or "").strip().lower() not in {"", "waiting"}
+                or bool(row.get("ready", False))
+                or bool(row.get("blocked", False))
+            )
+            for row in rows
+        ):
+            return True
+    return False
+
+
+def _internal_building_status_has_runtime_signal(payload: Any) -> bool:
+    status = payload if isinstance(payload, dict) else {}
+    slot = status.get("page_slot", {}) if isinstance(status.get("page_slot", {}), dict) else {}
+    if bool(slot.get("page_ready", False)) or str(slot.get("login_state", "") or "").strip().lower() in {
+        "ready",
+        "logging_in",
+        "failed",
+        "expired",
+    }:
+        return True
+    families = status.get("source_families", {}) if isinstance(status.get("source_families", {}), dict) else {}
+    for row in families.values():
+        if isinstance(row, dict) and (
+            str(row.get("status", "") or row.get("status_key", "") or "").strip().lower() not in {"", "waiting"}
+            or bool(row.get("ready", False))
+            or bool(row.get("blocked", False))
+        ):
+            return True
+    return False
+
+
+def _read_live_internal_summary(service: Any) -> Dict[str, Any] | None:
+    if service is None or not hasattr(service, "get_health_snapshot"):
+        return None
+    try:
+        live_snapshot = service.get_health_snapshot(mode="internal_light")
+    except Exception:
+        return None
+    return presenter_build_internal_runtime_summary(
+        live_snapshot if isinstance(live_snapshot, dict) else {},
+    )
+
+
+def _read_live_internal_building_status(service: Any, *, building: str, building_code: str) -> Dict[str, Any] | None:
+    if service is None or not hasattr(service, "get_health_snapshot"):
+        return None
+    try:
+        live_snapshot = service.get_health_snapshot(mode="internal_light")
+    except Exception:
+        return None
+    return presenter_build_internal_runtime_building_status(
+        live_snapshot if isinstance(live_snapshot, dict) else {},
+        building=building,
+        building_code=building_code,
+    )
+
+
 
 def _deployment_role_mode(request: Request) -> str:
     container = request.app.state.container
@@ -445,6 +523,16 @@ def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
         snapshot = coordinator.read_scope_snapshot("internal_runtime_summary")
         payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
         if isinstance(payload, dict):
+            if not _internal_summary_has_runtime_signal(payload):
+                live_payload = _read_live_internal_summary(service)
+                if isinstance(live_payload, dict) and _internal_summary_has_runtime_signal(live_payload):
+                    try:
+                        refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
+                        if callable(refresher):
+                            refresher(reason="internal_runtime_summary_route_live_repair")
+                    except Exception:
+                        pass
+                    return {"ok": True, "summary": _attach_display(live_payload)}
             return {"ok": True, "summary": _attach_display(payload)}
         try:
             refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
@@ -456,24 +544,14 @@ def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
             pass
         return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
 
-    if service is not None and hasattr(service, "get_health_snapshot"):
+    live_payload = _read_live_internal_summary(service)
+    if isinstance(live_payload, dict):
         try:
-            live_snapshot = service.get_health_snapshot(mode="internal_light")
-            try:
-                if coordinator is not None and callable(getattr(coordinator, "request_refresh", None)):
-                    coordinator.request_refresh(reason="internal_runtime_summary_route")
-            except Exception:
-                pass
-            return {
-                "ok": True,
-                "summary": _attach_display(
-                    presenter_build_internal_runtime_summary(
-                        live_snapshot if isinstance(live_snapshot, dict) else {},
-                    )
-                ),
-            }
+            if coordinator is not None and callable(getattr(coordinator, "request_internal_runtime_refresh", None)):
+                coordinator.request_internal_runtime_refresh(reason="internal_runtime_summary_route")
         except Exception:
             pass
+        return {"ok": True, "summary": _attach_display(live_payload)}
 
     if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
         return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
@@ -498,6 +576,16 @@ def bridge_internal_runtime_status_building(building_code: str, request: Request
         snapshot = coordinator.read_building_snapshot(building)
         payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
         if isinstance(payload, dict):
+            if not _internal_building_status_has_runtime_signal(payload):
+                live_payload = _read_live_internal_building_status(service, building=building, building_code=normalized_code)
+                if isinstance(live_payload, dict) and _internal_building_status_has_runtime_signal(live_payload):
+                    try:
+                        refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
+                        if callable(refresher):
+                            refresher(reason=f"internal_runtime_building_route_live_repair:{building}")
+                    except Exception:
+                        pass
+                    return {"ok": True, "status": _attach_display(live_payload)}
             return {"ok": True, "status": _attach_display(payload)}
         try:
             refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
@@ -517,26 +605,14 @@ def bridge_internal_runtime_status_building(building_code: str, request: Request
             ),
         }
 
-    if service is not None and hasattr(service, "get_health_snapshot"):
+    live_payload = _read_live_internal_building_status(service, building=building, building_code=normalized_code)
+    if isinstance(live_payload, dict):
         try:
-            live_snapshot = service.get_health_snapshot(mode="internal_light")
-            try:
-                if coordinator is not None and callable(getattr(coordinator, "request_refresh", None)):
-                    coordinator.request_refresh(reason=f"internal_runtime_building_route:{building}")
-            except Exception:
-                pass
-            return {
-                "ok": True,
-                "status": _attach_display(
-                    presenter_build_internal_runtime_building_status(
-                        live_snapshot if isinstance(live_snapshot, dict) else {},
-                        building=building,
-                        building_code=normalized_code,
-                    )
-                ),
-            }
+            if coordinator is not None and callable(getattr(coordinator, "request_internal_runtime_refresh", None)):
+                coordinator.request_internal_runtime_refresh(reason=f"internal_runtime_building_route:{building}")
         except Exception:
             pass
+        return {"ok": True, "status": _attach_display(live_payload)}
 
     if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
         return {
