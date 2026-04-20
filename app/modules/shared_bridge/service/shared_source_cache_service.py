@@ -1485,7 +1485,7 @@ class SharedSourceCacheService:
         return bool(bucket_dt)
 
     def _alarm_manual_bucket(self, when: datetime | None = None) -> str:
-        return (when or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+        return self.current_alarm_bucket(when)
 
     def _store_entry(self, *, source_family: str, building: str, bucket_kind: str, bucket_key: str, duty_date: str, duty_shift: str, source_path: Path, status: str, metadata: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if self.store is None:
@@ -3017,7 +3017,9 @@ class SharedSourceCacheService:
     def fill_alarm_event_manual(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
         if self.download_browser_pool is None or not hasattr(self.download_browser_pool, "submit_building_alarm_job"):
             raise RuntimeError("内网下载浏览器池未启动")
-        temp_root = self._alarm_temp_root(bucket_key=bucket_key, building=building, bucket_kind="manual")
+        # 手动拉取也是补齐当前小时最新源文件，不再写入独立 manual 桶，
+        # 避免外网端读取 latest 状态时看不到刚手动拉取的告警文件。
+        temp_root = self._alarm_temp_root(bucket_key=bucket_key, building=building, bucket_kind="latest")
         temp_root.mkdir(parents=True, exist_ok=True)
         json_path = temp_root / f"{building}.json"
 
@@ -3028,7 +3030,7 @@ class SharedSourceCacheService:
                 output_path=json_path,
                 source_family=FAMILY_ALARM_EVENT,
                 building=building,
-                bucket_kind="manual",
+                bucket_kind="latest",
                 bucket_key=bucket_key,
                 emit_log=emit_log,
                 log_prefix=f"[共享缓存][告警API][{building}] ",
@@ -3042,7 +3044,7 @@ class SharedSourceCacheService:
             document = build_alarm_event_json_document(
                 source_family=FAMILY_ALARM_EVENT,
                 building=building,
-                bucket_kind="manual",
+                bucket_kind="latest",
                 bucket_key=bucket_key,
                 payload=payload,
             )
@@ -3050,7 +3052,7 @@ class SharedSourceCacheService:
         return self._store_entry(
             source_family=FAMILY_ALARM_EVENT,
             building=building,
-            bucket_kind="manual",
+            bucket_kind="latest",
             bucket_key=bucket_key,
             duty_date="",
             duty_shift="",
@@ -3140,7 +3142,7 @@ class SharedSourceCacheService:
                         self._record_failed_entry(
                             source_family=FAMILY_ALARM_EVENT,
                             building=building,
-                            bucket_kind="manual",
+                            bucket_kind="latest",
                             bucket_key=bucket_key,
                             error_text=error_text,
                             metadata={

@@ -696,7 +696,7 @@ def test_run_manual_alarm_refresh_impl_returns_parallel_summary(
         }
 
     monkeypatch.setattr(service, 'fill_alarm_event_manual', _fake_fill)
-    monkeypatch.setattr(service, '_alarm_manual_bucket', lambda when=None: '2026-04-01 17:26:16')
+    monkeypatch.setattr(service, '_alarm_manual_bucket', lambda when=None: '2026-04-01 17')
 
     result = service._run_manual_alarm_refresh_impl()
 
@@ -1375,7 +1375,7 @@ def test_refresh_family_bucket_skips_suspended_building_without_failed_entry(wor
     assert service._family_status[FAMILY_HANDOVER_LOG]['blocked_buildings'] == ['A楼']
 
 
-def test_fill_alarm_event_manual_indexes_manual_bucket_and_manual_path(work_dir: Path) -> None:
+def test_fill_alarm_event_manual_indexes_latest_hour_bucket_and_path(work_dir: Path) -> None:
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)
     store.ensure_ready()
@@ -1402,22 +1402,38 @@ def test_fill_alarm_event_manual_indexes_manual_bucket_and_manual_path(work_dir:
 
     entry = service.fill_alarm_event_manual(
         building='A楼',
-        bucket_key='2026-04-01 manual-1200',
+        bucket_key='2026-04-01 12',
         emit_log=lambda *_args, **_kwargs: None,
     )
 
-    assert entry['bucket_kind'] == 'manual'
-    assert '--manual--告警信息源文件--A楼.json' in entry['relative_path']
+    assert entry['bucket_kind'] == 'latest'
+    assert '20260401--12/20260401--12--告警信息源文件--A楼.json' in entry['relative_path']
     rows = store.list_source_cache_entries(
         source_family=FAMILY_ALARM_EVENT,
         building='A楼',
-        bucket_kind='manual',
-        bucket_key='2026-04-01 manual-1200',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 12',
         status='ready',
         limit=1,
     )
     assert len(rows) == 1
     assert rows[0]['metadata']['manual'] is True
+
+    second_entry = service.fill_alarm_event_manual(
+        building='A楼',
+        bucket_key='2026-04-01 12',
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    assert second_entry['relative_path'] == entry['relative_path']
+    rows_after_overwrite = store.list_source_cache_entries(
+        source_family=FAMILY_ALARM_EVENT,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-01 12',
+        status='ready',
+        limit=10,
+    )
+    assert len(rows_after_overwrite) == 1
 
 
 def test_delete_manual_alarm_files_only_deletes_manual_entries(work_dir: Path) -> None:
@@ -1578,7 +1594,7 @@ def test_internal_light_snapshot_includes_manual_alarm_refresh_summary(work_dir:
         count = row_count_map.get(building, 0)
         return {
             'building': building,
-            'bucket_kind': 'manual',
+            'bucket_kind': 'latest',
             'bucket_key': bucket_key,
             'downloaded_at': '2026-04-03 00:20:18',
             'relative_path': f'告警信息源文件/test/{building}.json',
