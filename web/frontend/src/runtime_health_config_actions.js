@@ -1290,9 +1290,24 @@ export function createRuntimeHealthConfigActions(ctx) {
       && data?.startup_role_user_exited !== true
       && String(data?.activation_phase || "").trim().toLowerCase() !== "failed"
     );
+    const currentRuntimeReady = Boolean(
+      health.runtime_activated
+      && health.startup_role_confirmed
+      && !health.role_selection_required
+      && !health.startup_role_user_exited
+    );
+    const incomingActivationFailed = String(data?.activation_phase || "").trim().toLowerCase() === "failed";
+    const incomingExplicitExit = Boolean(data?.startup_role_user_exited);
+    const incomingAllowsReadyPreserve = Boolean(
+      currentRuntimeReady
+      && !incomingActivationFailed
+      && !incomingExplicitExit
+    );
     health.version = String(data.version || "");
     health.startup_time = String(data.startup_time || health.startup_time || "");
-    if (!preserveStartupActivationState || data?.startup_role_confirmed === true) {
+    if (incomingAllowsReadyPreserve && data?.startup_role_confirmed === false) {
+      health.startup_role_confirmed = true;
+    } else if (!preserveStartupActivationState || data?.startup_role_confirmed === true) {
       health.startup_role_confirmed = Boolean(
         typeof data.startup_role_confirmed === "boolean"
           ? data.startup_role_confirmed
@@ -1304,18 +1319,24 @@ export function createRuntimeHealthConfigActions(ctx) {
         ? data.startup_role_restorable
         : health.startup_role_restorable,
     );
-    if (!preserveStartupActivationState || data?.role_selection_required === false) {
+    if (incomingAllowsReadyPreserve && data?.role_selection_required === true) {
+      health.role_selection_required = false;
+    } else if (!preserveStartupActivationState || data?.role_selection_required === false) {
       health.role_selection_required = Boolean(
         typeof data.role_selection_required === "boolean"
           ? data.role_selection_required
           : health.role_selection_required,
       );
     }
-    health.startup_role_user_exited = Boolean(
-      typeof data.startup_role_user_exited === "boolean"
-        ? data.startup_role_user_exited
-        : health.startup_role_user_exited,
-    );
+    if (incomingAllowsReadyPreserve && data?.startup_role_user_exited === false) {
+      health.startup_role_user_exited = false;
+    } else {
+      health.startup_role_user_exited = Boolean(
+        typeof data.startup_role_user_exited === "boolean"
+          ? data.startup_role_user_exited
+          : health.startup_role_user_exited,
+      );
+    }
     if (data.startup_handoff && typeof data.startup_handoff === "object") {
       Object.assign(health.startup_handoff, {
         active: Boolean(data.startup_handoff.active),
@@ -1349,7 +1370,9 @@ export function createRuntimeHealthConfigActions(ctx) {
         sqlite_busy_timeout_ms: data.startup_shared_bridge.sqlite_busy_timeout_ms,
       });
     }
-    if (!preserveStartupActivationState || data?.runtime_activated === true) {
+    if (incomingAllowsReadyPreserve && data?.runtime_activated === false) {
+      health.runtime_activated = true;
+    } else if (!preserveStartupActivationState || data?.runtime_activated === true) {
       health.runtime_activated = Boolean(
         typeof data.runtime_activated === "boolean"
           ? data.runtime_activated

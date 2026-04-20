@@ -239,7 +239,7 @@ def _health_cached_component(
         entry = cache.get(key)
         if isinstance(entry, dict):
             age_sec = now - float(entry.get("ts", 0.0) or 0.0)
-            if age_sec <= ttl:
+            if age_sec <= ttl and entry.get("ready", True) is not False:
                 return copy.deepcopy(entry.get("value"))
     value = builder()
     with cache_lock:
@@ -372,6 +372,35 @@ def _shared_source_cache_overview_from_snapshot(payload: Any) -> Dict[str, Any]:
     if isinstance(display_overview, dict) and display_overview:
         return copy.deepcopy(display_overview)
     return present_external_source_cache_overview(source_cache)
+
+
+def _external_source_cache_overview_has_runtime_rows(payload: Any) -> bool:
+    overview = payload if isinstance(payload, dict) else {}
+    families = overview.get("families", []) if isinstance(overview.get("families", []), list) else []
+    if not families:
+        return False
+    for family in families:
+        if not isinstance(family, dict):
+            continue
+        bucket_text = str(
+            family.get("current_bucket")
+            or family.get("best_bucket_key")
+            or family.get("reference_bucket_key")
+            or ""
+        ).strip()
+        if bucket_text and bucket_text != "-":
+            return True
+        buildings = family.get("buildings", []) if isinstance(family.get("buildings", []), list) else []
+        for row in buildings:
+            if not isinstance(row, dict):
+                continue
+            status_key = str(row.get("status_key") or row.get("status") or "").strip().lower()
+            detail_text = str(row.get("detail_text", "") or "").strip()
+            if status_key and status_key != "waiting":
+                return True
+            if detail_text and detail_text not in {"等待后端明细", "等待共享文件就绪"}:
+                return True
+    return False
 
 
 def _is_recoverable_resume_index_error(exc: Exception) -> bool:
@@ -1389,7 +1418,8 @@ def _build_bootstrap_health_payload(container, request: Request) -> Dict[str, An
     has_active_resume = False
     if runtime_activated and role_mode == "external":
         try:
-            pending_runs = OrchestratorService(_runtime_config(container)).list_pending_resume_runs()
+            pending_payload = _read_pending_resume_runs_cached(container, role_mode=role_mode)
+            pending_runs = pending_payload.get("runs", []) if isinstance(pending_payload, dict) else []
             has_active_resume = bool(pending_runs)
         except Exception:  # noqa: BLE001
             has_active_resume = False
@@ -4929,6 +4959,24 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         ),
         bridge_tasks_rows,
     )
+    if not _external_source_cache_overview_has_runtime_rows(shared_source_cache_overview):
+        direct_shared_bridge = _shared_bridge_health_snapshot(container, request, role_mode="external")
+        direct_source_overview = apply_external_source_cache_backfill_overlays(
+            _shared_source_cache_overview_from_snapshot(
+                direct_shared_bridge.get("internal_source_cache", {})
+                if isinstance(direct_shared_bridge, dict)
+                else {}
+            ),
+            bridge_tasks_rows,
+        )
+        if _external_source_cache_overview_has_runtime_rows(direct_source_overview):
+            live_shared_bridge = direct_shared_bridge if isinstance(direct_shared_bridge, dict) else live_shared_bridge
+            shared_source_cache_overview = direct_source_overview
+            internal_alert_overview = present_external_internal_alert_overview(
+                live_shared_bridge.get("internal_alert_status", {})
+                if isinstance(live_shared_bridge, dict)
+                else {}
+            )
     runtime_resources_summary = _read_scope("runtime_resources_summary") or _empty_runtime_resources_summary()
     deployment_payload = health_lite.get("deployment", {}) if isinstance(health_lite, dict) else {}
     role_mode = normalize_role_mode(
