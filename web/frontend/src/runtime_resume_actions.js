@@ -5,6 +5,8 @@
 } from "./api_client.js";
 import { isTransientNetworkError } from "./config_helpers.js";
 
+const PENDING_RESUME_FETCH_COOLDOWN_MS = 5000;
+
 function isBusyJob(job) {
   const status = String(job?.status || "").trim().toLowerCase();
   return status === "running" || status === "queued";
@@ -58,6 +60,7 @@ export function createRuntimeResumeActions(ctx) {
     runSingleFlight,
     shouldPauseRuntimeRequests,
   } = ctx;
+  let lastPendingResumeFetchAt = 0;
 
   function isRuntimeTrafficPaused() {
     return Boolean(
@@ -98,6 +101,12 @@ export function createRuntimeResumeActions(ctx) {
 
   async function fetchPendingResumeRuns(options = {}) {
     if (isRuntimeTrafficPaused()) return false;
+    const force = Boolean(options?.force);
+    const now = Date.now();
+    if (!force && lastPendingResumeFetchAt > 0 && now - lastPendingResumeFetchAt < PENDING_RESUME_FETCH_COOLDOWN_MS) {
+      return true;
+    }
+    lastPendingResumeFetchAt = now;
     const silentMessage = Boolean(options?.silentMessage);
     try {
       const data = await getPendingResumeRunsApi();

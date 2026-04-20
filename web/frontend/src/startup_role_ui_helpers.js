@@ -50,6 +50,8 @@ export function createStartupRoleUiHelpers(options = {}) {
     writeStartupRuntimeRecovery,
     onRuntimeExited,
   } = options || {};
+  const STARTUP_ACTIVATION_LOCK_KEY = "qjpt_startup_activation_lock_v1";
+  const STARTUP_ACTIVATION_LOCK_TTL_MS = 90 * 1000;
 
   function closeStartupRoleSelector({ handled = false } = {}) {
     startupRoleSelectorVisible.value = false;
@@ -123,6 +125,58 @@ export function createStartupRoleUiHelpers(options = {}) {
     return new Promise((resolve) => {
       window.setTimeout(resolve, Math.max(0, Number(ms) || 0));
     });
+  }
+
+  function readStartupActivationLock() {
+    if (typeof window === "undefined" || !window.localStorage) return null;
+    try {
+      const raw = window.localStorage.getItem(STARTUP_ACTIVATION_LOCK_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return null;
+      const expiresAt = Number.parseInt(String(parsed.expires_at || 0), 10) || 0;
+      if (expiresAt && expiresAt < Date.now()) {
+        window.localStorage.removeItem(STARTUP_ACTIVATION_LOCK_KEY);
+        return null;
+      }
+      return parsed;
+    } catch (_) {
+      try {
+        window.localStorage.removeItem(STARTUP_ACTIVATION_LOCK_KEY);
+      } catch (_) {
+        // ignore storage cleanup errors
+      }
+      return null;
+    }
+  }
+
+  function writeStartupActivationLock(lock) {
+    if (typeof window === "undefined" || !window.localStorage) return false;
+    try {
+      window.localStorage.setItem(STARTUP_ACTIVATION_LOCK_KEY, JSON.stringify(lock || {}));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function clearStartupActivationLock(owner = "") {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    try {
+      const current = readStartupActivationLock();
+      const ownerText = String(owner || "").trim();
+      if (ownerText && current && String(current.owner || "").trim() !== ownerText) return;
+      window.localStorage.removeItem(STARTUP_ACTIVATION_LOCK_KEY);
+    } catch (_) {
+      // ignore storage cleanup errors
+    }
+  }
+
+  function buildStartupActivationLockKey(roleMode) {
+    return [
+      String(startupRoleCurrentToken.value || "").trim(),
+      normalizeDeploymentRoleMode(roleMode) || "",
+    ].join("|");
   }
 
   function resolveActivationProgressSubtitle(defaultText = "正在连接后台运行时，请稍候。") {
@@ -302,10 +356,40 @@ export function createStartupRoleUiHelpers(options = {}) {
     if (startupRoleActivationInFlight?.value) {
       return false;
     }
-    startupRoleActivationInFlight.value = true;
     const targetRole = normalizeDeploymentRoleMode(
       options?.targetRoleMode || startupRoleSelectorSelection.value || config.value?.deployment?.role_mode || startupRoleCurrentMode.value,
     );
+    const activationLockKey = buildStartupActivationLockKey(targetRole);
+    const existingLock = readStartupActivationLock();
+    const existingLockAgeMs = existingLock
+      ? Math.max(0, Date.now() - (Number.parseInt(String(existingLock.started_at || 0), 10) || Date.now()))
+      : 0;
+    const backendActivationBusy = ["activating", "recovering", "restarting"].includes(
+      String(health.activation_phase || "").trim().toLowerCase(),
+    );
+    if (
+      existingLock
+      && String(existingLock.key || "").trim() === activationLockKey
+      && !Boolean(health.runtime_activated)
+      && (backendActivationBusy || existingLockAgeMs < 8000)
+    ) {
+      showStartupRoleLoading({
+        title: `正在加载${formatDeploymentRoleLabel(targetRole || "internal")}`,
+        subtitle: "已有启动请求正在处理中，正在等待后台运行时就绪。",
+        stage: "activating",
+      });
+      return waitForStartupActivationCompletion(targetRole);
+    }
+    const lockOwner = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    writeStartupActivationLock({
+      key: activationLockKey,
+      owner: lockOwner,
+      role_mode: targetRole,
+      source: String(source || "").trim(),
+      started_at: Date.now(),
+      expires_at: Date.now() + STARTUP_ACTIVATION_LOCK_TTL_MS,
+    });
+    startupRoleActivationInFlight.value = true;
     const bridgeRoot = String(startupRoleBridgeDraft.value?.root_dir || "").trim();
     const roleRootKey = targetRole === "internal" ? "internal_root_dir" : "external_root_dir";
     const sharedBridgePayload = {
@@ -402,6 +486,7 @@ export function createStartupRoleUiHelpers(options = {}) {
       return true;
     } finally {
       startupRoleActivationInFlight.value = false;
+      clearStartupActivationLock(lockOwner);
     }
   }
 

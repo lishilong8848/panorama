@@ -857,7 +857,7 @@ createApp({
       startupRoleSelectorHandled,
       startupRoleSelectorVisible,
       startupRoleLoadingVisible,
-      shouldPauseRuntimeRequests: () => shouldPauseRuntimeRequests.value,
+      startupRoleActivationInFlight,
       markRestartRecoveryIntent,
       clearRestartRecoveryIntent: clearStartupRuntimeRecovery,
       readUpdaterRecoveryIntent,

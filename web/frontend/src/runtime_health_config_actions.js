@@ -194,6 +194,10 @@ export function createRuntimeHealthConfigActions(ctx) {
   let handoverBuildingSegmentRequestSeq = 0;
   let bootstrapHealthRequestInFlight = null;
   let startupActivationRequestInFlight = null;
+  let lastBootstrapHealthFetchAt = 0;
+  let lastExternalDashboardSummaryFetchAt = 0;
+  let lastDailyReportContextFetchAt = 0;
+  let lastPendingRuntimeRefreshAt = 0;
   let bootstrapRetryTimer = null;
   let updaterReconnectTimer = null;
   let updaterQueueMonitorTimer = null;
@@ -210,6 +214,9 @@ export function createRuntimeHealthConfigActions(ctx) {
   let internalRuntimeRefreshAllPending = false;
   const internalRuntimeRefreshBuildingsPending = new Set();
   const BRIDGE_TASKS_FETCH_COOLDOWN_MS = 1200;
+  const BOOTSTRAP_FETCH_COOLDOWN_MS = 2500;
+  const EXTERNAL_DASHBOARD_SUMMARY_COOLDOWN_MS = 4000;
+  const DAILY_REPORT_CONTEXT_COOLDOWN_MS = 5000;
   const INTERNAL_RUNTIME_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"];
 
   function shouldLoadConfigNow() {
@@ -1799,6 +1806,12 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (bootstrapHealthRequestInFlight) {
       return bootstrapHealthRequestInFlight;
     }
+    const force = Boolean(options?.force);
+    const now = Date.now();
+    if (!force && lastBootstrapHealthFetchAt > 0 && now - lastBootstrapHealthFetchAt < BOOTSTRAP_FETCH_COOLDOWN_MS) {
+      return true;
+    }
+    lastBootstrapHealthFetchAt = now;
     const silentMessage = Boolean(options?.silentMessage);
     bootstrapHealthRequestInFlight = (async () => {
       try {
@@ -2347,9 +2360,19 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (isRuntimeTrafficPaused() || isLocallyExitedToRoleSelection() || !isRuntimeApiReady()) return false;
     if (resolveCurrentRoleMode() === "internal") return false;
     const silentMessage = Boolean(options?.silentMessage);
+    const force = Boolean(options?.force);
+    const now = Date.now();
+    if (
+      !force
+      && lastExternalDashboardSummaryFetchAt > 0
+      && now - lastExternalDashboardSummaryFetchAt < EXTERNAL_DASHBOARD_SUMMARY_COOLDOWN_MS
+    ) {
+      return true;
+    }
     if (externalDashboardSummaryRequestInFlight) {
       return externalDashboardSummaryRequestInFlight;
     }
+    lastExternalDashboardSummaryFetchAt = now;
     externalDashboardSummaryRequestInFlight = (async () => {
       try {
         const data = await getExternalDashboardSummaryApi();
@@ -2943,6 +2966,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (dailyReportContextRequestInFlight) return dailyReportContextRequestInFlight;
     const silentTransientNetworkError = Boolean(options?.silentTransientNetworkError);
     const silentMessage = Boolean(options?.silentMessage);
+    const force = Boolean(options?.force);
     const dutyDate = String(handoverDutyDate?.value || "").trim();
     const dutyShift = String(handoverDutyShift?.value || "").trim().toLowerCase();
     if (!dutyDate || !["day", "night"].includes(dutyShift)) {
@@ -2981,6 +3005,11 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
       return true;
     }
+    const now = Date.now();
+    if (!force && lastDailyReportContextFetchAt > 0 && now - lastDailyReportContextFetchAt < DAILY_REPORT_CONTEXT_COOLDOWN_MS) {
+      return true;
+    }
+    lastDailyReportContextFetchAt = now;
     dailyReportContextRequestInFlight = (async () => {
       try {
         const data = await getHandoverDailyReportContextApi({
