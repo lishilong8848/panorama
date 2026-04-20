@@ -890,3 +890,96 @@ def test_external_dashboard_summary_role_mismatch_returns_empty_display():
     assert payload["reason_code"] == "role_mismatch"
     assert payload["shared_source_cache_overview"]["reason_code"] == "role_mismatch"
     assert payload["display"]["shared_source_cache_overview"]["families"] == []
+
+
+def test_external_split_status_endpoints_return_role_mismatch_without_409():
+    container = SimpleNamespace(
+        config={"deployment": {"role_mode": "internal"}},
+        runtime_config={"deployment": {"role_mode": "internal"}},
+        deployment_snapshot=lambda: {"role_mode": "internal", "node_label": "内网端"},
+        runtime_activated=True,
+        startup_role_confirmed=True,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
+
+    endpoints = [
+        routes.get_external_runtime_bootstrap,
+        routes.get_external_runtime_source_cache,
+        routes.get_external_runtime_jobs,
+        routes.get_external_runtime_bridge_tasks,
+        routes.get_external_runtime_schedulers,
+        routes.get_external_runtime_updater,
+        routes.get_external_runtime_review_overview,
+        routes.get_external_runtime_config_guidance,
+        routes.get_external_runtime_system,
+    ]
+
+    for endpoint in endpoints:
+        payload = endpoint(request)
+        assert payload["ok"] is True
+        assert payload["reason_code"] == "role_mismatch"
+        assert isinstance(payload.get("display", {}), dict)
+
+
+def test_external_split_status_endpoints_return_module_payloads(monkeypatch):
+    monkeypatch.setattr(routes, "DayMetricBitableExportService", _FakeDayMetricBitableExportService)
+    monkeypatch.setattr(routes, "SharedSourceCacheService", _FakeSharedSourceCacheService)
+    monkeypatch.setattr(routes, "ReviewLinkDeliveryService", _FakeReviewLinkDeliveryService)
+    monkeypatch.setattr(
+        routes,
+        "_build_latest_handover_review_status",
+        lambda _container: routes._empty_handover_review_status(),
+    )
+    monkeypatch.setattr(
+        routes,
+        "build_bridge_tasks_summary",
+        lambda tasks, count=0: {
+            "tasks": tasks,
+            "count": count,
+            "display": {"overview": {"tone": "neutral", "status_text": "当前空闲", "summary_text": "暂无共享桥接任务。"}},
+        },
+    )
+    monkeypatch.setattr(routes, "present_bridge_task", lambda task: task)
+
+    container = SimpleNamespace(
+        config={"deployment": {"role_mode": "external"}},
+        runtime_config={
+            "deployment": {"role_mode": "external"},
+            "shared_bridge": {"root_dir": r"C:\share"},
+            "feishu": {"app_id": "cli_xxx", "app_secret": "secret"},
+            "handover_log": {"template": {"source_path": r"D:\tpl\handover.xlsx"}},
+        },
+        runtime_status_coordinator=_FakeCoordinator(),
+        deployment_snapshot=lambda: {"role_mode": "external", "node_label": "外网端"},
+        config_path="settings.json",
+        updater_snapshot=lambda: {},
+        shared_root_diagnostic_snapshot=lambda **_kwargs: {},
+        scheduler_status=lambda: {},
+        handover_scheduler_status=lambda: {},
+        wet_bulb_collection_scheduler_status=lambda: {},
+        day_metric_upload_scheduler_status=lambda: {},
+        alarm_event_upload_scheduler_status=lambda: {},
+        monthly_event_report_scheduler_status=lambda: {},
+        monthly_change_report_scheduler_status=lambda: {},
+        runtime_activated=True,
+        startup_role_confirmed=True,
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                container=container,
+                _health_component_cache={},
+                _health_component_cache_lock=threading.Lock(),
+            )
+        )
+    )
+
+    assert routes.get_external_runtime_bootstrap(request)["health_lite"]["deployment"]["role_mode"] == "external"
+    assert "shared_source_cache_overview" in routes.get_external_runtime_source_cache(request)
+    assert "job_panel_summary" in routes.get_external_runtime_jobs(request)
+    assert "bridge_tasks_summary" in routes.get_external_runtime_bridge_tasks(request)
+    assert "scheduler_status_summary" in routes.get_external_runtime_schedulers(request)
+    assert "updater_summary" in routes.get_external_runtime_updater(request)
+    assert "handover_review_status" in routes.get_external_runtime_review_overview(request)
+    assert "config_guidance_overview" in routes.get_external_runtime_config_guidance(request)
+    assert "runtime_resources_summary" in routes.get_external_runtime_system(request)

@@ -29,7 +29,15 @@ import {
   buildHandoverDailyReportCaptureAssetUrl,
   getBootstrapHealthApi,
   getConfigApi,
-  getExternalDashboardSummaryApi,
+  getExternalRuntimeBootstrapApi,
+  getExternalRuntimeBridgeTasksApi,
+  getExternalRuntimeConfigGuidanceApi,
+  getExternalRuntimeJobsApi,
+  getExternalRuntimeReviewOverviewApi,
+  getExternalRuntimeSchedulersApi,
+  getExternalRuntimeSourceCacheApi,
+  getExternalRuntimeSystemApi,
+  getExternalRuntimeUpdaterApi,
   getHandoverBuildingConfigSegmentApi,
   getHandoverCommonConfigSegmentApi,
   getHandoverDailyReportContextApi,
@@ -2376,6 +2384,25 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
   }
 
+  async function fetchExternalDashboardModule(label, fetcher, options = {}) {
+    const silentMessage = Boolean(options?.silentMessage);
+    try {
+      const data = await fetcher();
+      applyExternalDashboardSummary(data || {});
+      return true;
+    } catch (err) {
+      if (isAbortError(err)) return false;
+      if (isRoleSelectionConflictError(err)) {
+        await tryRecoverFromRoleSelectionConflict();
+        return false;
+      }
+      if (!silentMessage) {
+        message.value = `读取外网${label}失败: ${err}`;
+      }
+      return false;
+    }
+  }
+
   async function fetchExternalDashboardSummary(options = {}) {
     if (isRuntimeTrafficPaused() || isLocallyExitedToRoleSelection() || !isRuntimeApiReady()) return false;
     if (!canUseExternalDashboardSummary()) {
@@ -2398,14 +2425,31 @@ export function createRuntimeHealthConfigActions(ctx) {
     lastExternalDashboardSummaryFetchAt = now;
     externalDashboardSummaryRequestInFlight = (async () => {
       try {
-        const data = await getExternalDashboardSummaryApi();
-        applyExternalDashboardSummary(data || {});
+        const bootstrapOk = await fetchExternalDashboardModule(
+          "基础状态",
+          getExternalRuntimeBootstrapApi,
+          options,
+        );
+        if (bootstrapOk === false && !health?.runtime_activated) {
+          return false;
+        }
         if (fullHealthLoaded) {
           fullHealthLoaded.value = true;
         }
         if (healthLoadError) {
           healthLoadError.value = "";
         }
+        const moduleFetches = [
+          ["源文件状态", getExternalRuntimeSourceCacheApi],
+          ["任务状态", getExternalRuntimeJobsApi],
+          ["共享桥接任务", getExternalRuntimeBridgeTasksApi],
+          ["调度状态", getExternalRuntimeSchedulersApi],
+          ["更新状态", getExternalRuntimeUpdaterApi],
+          ["审核概览", getExternalRuntimeReviewOverviewApi],
+          ["配置状态", getExternalRuntimeConfigGuidanceApi],
+          ["系统概览", getExternalRuntimeSystemApi],
+        ].map(([label, fetcher]) => fetchExternalDashboardModule(label, fetcher, { silentMessage: true }));
+        await Promise.allSettled(moduleFetches);
         return true;
       } catch (err) {
         if (isAbortError(err)) return false;

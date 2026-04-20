@@ -71,6 +71,8 @@ from app.modules.shared_bridge.service.dashboard_display_presenter import (
     present_external_module_hero_overviews,
     present_external_scheduler_overview,
     present_external_system_overview,
+    present_handover_review_overview,
+    present_shared_root_diagnostic_overview,
     present_monthly_report_delivery_display,
     present_monthly_report_last_run_display,
     present_updater_mirror_overview,
@@ -4777,6 +4779,655 @@ def get_runtime_resources(request: Request) -> Dict[str, Any]:
         return container.job_service.get_resource_snapshot()
     except TaskEngineUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _external_updated_at() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _external_empty_role_mismatch_display(title: str = "当前不是外网端") -> Dict[str, Any]:
+    return {
+        "reason_code": "role_mismatch",
+        "tone": "neutral",
+        "status_text": title,
+        "summary_text": "该状态仅在外网端运行时返回。",
+        "detail_text": "",
+        "actions": {},
+    }
+
+
+def _external_role_mismatch_response(container, **payload: Any) -> Dict[str, Any]:
+    deployment = (
+        container.deployment_snapshot()
+        if callable(getattr(container, "deployment_snapshot", None))
+        else {"role_mode": _deployment_role_mode(container) or "internal"}
+    )
+    return {
+        "ok": True,
+        "reason_code": "role_mismatch",
+        "updated_at": _external_updated_at(),
+        "error_text": "",
+        "health_lite": {
+            "ok": True,
+            "health_mode": "lite",
+            "deployment": deployment,
+            "runtime_activated": bool(getattr(container, "runtime_activated", False)),
+            "startup_role_confirmed": bool(getattr(container, "startup_role_confirmed", False)),
+            "shared_bridge": _basic_shared_bridge_status({}, role_mode="internal"),
+        },
+        **payload,
+    }
+
+
+def _external_read_scope(container, scope: str, *, reason_prefix: str) -> Dict[str, Any] | None:
+    coordinator = getattr(container, "runtime_status_coordinator", None)
+    if (
+        coordinator is None
+        or not callable(getattr(coordinator, "is_running", None))
+        or not coordinator.is_running()
+    ):
+        return None
+    scope_text = str(scope or "").strip()
+    if not scope_text:
+        return None
+    try:
+        snapshot = coordinator.read_scope_snapshot(scope_text)
+        payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+        if isinstance(payload, dict):
+            return payload
+        coordinator.request_refresh(reason=f"{reason_prefix}:{scope_text}")
+    except Exception:
+        return None
+    return None
+
+
+def _build_external_health_lite_payload(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    health_lite = _external_read_scope(
+        container,
+        "runtime_health_lite",
+        reason_prefix="external_bootstrap",
+    ) or {
+        "ok": True,
+        "health_mode": "lite",
+        "version": str(getattr(container, "version", "") or ""),
+        "config_version": int(container.config.get("version", 0) or 0)
+        if isinstance(getattr(container, "config", None), dict)
+        else 0,
+        "active_job_id": "",
+        "active_job_ids": [],
+        "job_counts": {},
+        "deployment": container.deployment_snapshot() if callable(getattr(container, "deployment_snapshot", None)) else {},
+        "shared_bridge": {},
+        "runtime_activated": False,
+        "activation_phase": "",
+        "activation_error": "",
+        "startup_role_confirmed": False,
+    }
+    runtime_activated = bool(getattr(container, "runtime_activated", False))
+    startup_role_confirmed = bool(getattr(container, "startup_role_confirmed", False))
+    if runtime_activated or startup_role_confirmed:
+        health_lite = {
+            **health_lite,
+            "runtime_activated": runtime_activated,
+            "startup_role_confirmed": startup_role_confirmed,
+            "role_selection_required": False,
+            "startup_role_user_exited": False,
+            "activation_phase": "activated" if runtime_activated and startup_role_confirmed else health_lite.get("activation_phase", ""),
+            "activation_error": "" if runtime_activated and startup_role_confirmed else health_lite.get("activation_error", ""),
+        }
+    shared_bridge = _external_read_scope(
+        container,
+        "external_shared_bridge_full",
+        reason_prefix="external_bootstrap",
+    )
+    if isinstance(shared_bridge, dict) and shared_bridge:
+        health_lite = {**health_lite, "shared_bridge": _basic_shared_bridge_status(shared_bridge, role_mode="external")}
+    else:
+        health_lite = {
+            **health_lite,
+            "shared_bridge": _basic_shared_bridge_status(
+                health_lite.get("shared_bridge", {}) if isinstance(health_lite.get("shared_bridge", {}), dict) else {},
+                role_mode="external",
+            ),
+        }
+    return health_lite
+
+
+def _build_external_bridge_tasks_summary_fast(container) -> Dict[str, Any]:
+    bridge_tasks_summary = _external_read_scope(
+        container,
+        "bridge_tasks_dashboard_summary",
+        reason_prefix="external_bridge_tasks",
+    )
+    if isinstance(bridge_tasks_summary, dict):
+        return bridge_tasks_summary
+    bridge_tasks_summary_raw = _external_read_scope(
+        container,
+        "bridge_tasks_summary",
+        reason_prefix="external_bridge_tasks",
+    ) or {"tasks": [], "count": 0}
+    bridge_tasks_rows = (
+        bridge_tasks_summary_raw.get("tasks", [])
+        if isinstance(bridge_tasks_summary_raw, dict)
+        else []
+    )
+    return build_bridge_tasks_summary(
+        [present_bridge_task(task) for task in bridge_tasks_rows if isinstance(task, dict)],
+        count=int(
+            (bridge_tasks_summary_raw.get("count", 0) if isinstance(bridge_tasks_summary_raw, dict) else 0)
+            or len([task for task in bridge_tasks_rows if isinstance(task, dict)])
+        ),
+    )
+
+
+def _build_external_source_cache_module(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    if _deployment_role_mode(container) == "internal":
+        shared_source_cache_overview = {
+            "reason_code": "role_mismatch",
+            "tone": "neutral",
+            "status_text": "当前不是外网端",
+            "summary_text": "外网共享源文件状态仅在外网端运行时返回。",
+            "detail_text": "",
+            "display_note_text": "",
+            "reference_bucket_key": "-",
+            "error_text": "",
+            "items": [],
+            "families": [],
+            "can_proceed": False,
+            "can_proceed_latest": False,
+            "actions": {},
+        }
+        internal_alert_overview = _external_empty_role_mismatch_display("当前不是外网端")
+        return _external_role_mismatch_response(
+            container,
+            shared_source_cache_overview=shared_source_cache_overview,
+            internal_alert_overview=internal_alert_overview,
+            display={
+                "shared_source_cache_overview": shared_source_cache_overview,
+                "internal_alert_overview": internal_alert_overview,
+            },
+        )
+    bridge_tasks_summary = _build_external_bridge_tasks_summary_fast(container)
+    bridge_tasks_rows = (
+        bridge_tasks_summary.get("tasks", [])
+        if isinstance(bridge_tasks_summary, dict)
+        else []
+    )
+    live_shared_bridge = _external_read_scope(
+        container,
+        "external_shared_bridge_full",
+        reason_prefix="external_source_cache",
+    ) or {}
+    fast_source_cache_overview: Dict[str, Any] = {}
+    bridge_service = getattr(container, "shared_bridge_service", None)
+    fast_overview_getter = getattr(bridge_service, "get_external_source_cache_overview_fast", None)
+    if callable(fast_overview_getter):
+        try:
+            last_overview = getattr(request.app.state, "_external_source_cache_overview_last_non_empty", None)
+        except Exception:
+            last_overview = None
+        fast_payload = _health_cached_component_async_default(
+            request,
+            key="external_source_cache_overview_fast",
+            ttl_sec=1.0,
+            builder=fast_overview_getter,
+            default=copy.deepcopy(last_overview) if isinstance(last_overview, dict) else {},
+        )
+        if isinstance(fast_payload, dict):
+            fast_source_cache_overview = fast_payload
+    shared_source_cache_overview = apply_external_source_cache_backfill_overlays(
+        fast_source_cache_overview
+        if _external_source_cache_overview_has_runtime_rows(fast_source_cache_overview)
+        else _shared_source_cache_overview_from_snapshot(
+            live_shared_bridge.get("internal_source_cache", {})
+            if isinstance(live_shared_bridge, dict)
+            else {}
+        ),
+        bridge_tasks_rows,
+    )
+    if not _external_source_cache_overview_has_runtime_rows(shared_source_cache_overview):
+        coordinator = getattr(container, "runtime_status_coordinator", None)
+        if (
+            coordinator is not None
+            and callable(getattr(coordinator, "is_running", None))
+            and coordinator.is_running()
+        ):
+            try:
+                coordinator.request_refresh(reason="external_source_cache:empty")
+            except Exception:
+                pass
+    shared_source_cache_overview = _remember_external_source_cache_overview(
+        request,
+        shared_source_cache_overview,
+    )
+    internal_alert_overview = present_external_internal_alert_overview(
+        live_shared_bridge.get("internal_alert_status", {})
+        if isinstance(live_shared_bridge, dict)
+        else {}
+    )
+    return {
+        "ok": True,
+        "reason_code": "ok",
+        "updated_at": _external_updated_at(),
+        "error_text": "",
+        "shared_source_cache_overview": shared_source_cache_overview,
+        "internal_alert_overview": internal_alert_overview,
+        "display": {
+            "shared_source_cache_overview": shared_source_cache_overview,
+            "internal_alert_overview": internal_alert_overview,
+        },
+    }
+
+
+def _build_external_jobs_module(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    if _deployment_role_mode(container) == "internal":
+        summary = _empty_job_panel_summary()
+        return _external_role_mismatch_response(
+            container,
+            job_panel_summary=summary,
+            display={
+                "task_panel_overview": summary["display"]["overview"],
+                "current_task_overview": summary["display"]["overview"],
+            },
+        )
+    job_panel_summary = (
+        _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_jobs")
+        or _external_read_scope(container, "job_panel_summary", reason_prefix="external_jobs")
+        or _empty_job_panel_summary()
+    )
+    overview = (
+        job_panel_summary.get("display", {}).get("overview", {})
+        if isinstance(job_panel_summary.get("display", {}), dict)
+        else {}
+    )
+    return {
+        "ok": True,
+        "reason_code": "ok",
+        "updated_at": _external_updated_at(),
+        "error_text": "",
+        "job_panel_summary": job_panel_summary,
+        "display": {
+            "task_panel_overview": overview,
+            "current_task_overview": overview,
+        },
+    }
+
+
+def _build_external_bridge_tasks_module(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    if _deployment_role_mode(container) == "internal":
+        summary = build_bridge_tasks_summary([], count=0)
+        return _external_role_mismatch_response(
+            container,
+            bridge_tasks_summary=summary,
+            display={"bridge_task_panel_overview": summary.get("display", {}).get("overview", {})},
+        )
+    bridge_tasks_summary = _build_external_bridge_tasks_summary_fast(container)
+    return {
+        "ok": True,
+        "reason_code": "ok",
+        "updated_at": _external_updated_at(),
+        "error_text": "",
+        "bridge_tasks_summary": bridge_tasks_summary,
+        "display": {
+            "bridge_task_panel_overview": (
+                bridge_tasks_summary.get("display", {}).get("overview", {})
+                if isinstance(bridge_tasks_summary.get("display", {}), dict)
+                else {}
+            ),
+        },
+    }
+
+
+def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str, Any]:
+    def _safe_scheduler(method_name: str) -> Dict[str, Any]:
+        method = getattr(container, method_name, None)
+        if not callable(method):
+            return {}
+        try:
+            payload = method()
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    summary = {
+        "scheduler": _safe_scheduler("scheduler_status"),
+        "handover_scheduler": _safe_scheduler("handover_scheduler_status"),
+        "wet_bulb_collection_scheduler": _safe_scheduler("wet_bulb_collection_scheduler_status"),
+        "day_metric_upload_scheduler": _safe_scheduler("day_metric_upload_scheduler_status"),
+        "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
+        "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
+        "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
+    }
+    for key, snapshot in list(summary.items()):
+        if isinstance(snapshot, dict):
+            summary[key] = {**snapshot, "display": present_scheduler_state(snapshot, role_mode=role_mode)}
+    return summary
+
+
+def _build_external_schedulers_module(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        return _external_role_mismatch_response(
+            container,
+            scheduler_status_summary={},
+            scheduler_overview_items=[],
+            scheduler_overview_summary={},
+            display={"scheduler_overview": _external_empty_role_mismatch_display("当前不是外网端")},
+        )
+    scheduler_status_summary = _external_scheduler_status_summary(container, role_mode=role_mode or "external")
+    scheduler_overview_items = present_scheduler_overview_items(
+        container.config,
+        scheduler_status_summary,
+        role_mode=role_mode or "external",
+    )
+    scheduler_overview_summary = present_scheduler_overview_summary(scheduler_overview_items)
+    scheduler_overview = present_external_scheduler_overview(
+        scheduler_overview_summary=scheduler_overview_summary,
+        scheduler_overview_items=scheduler_overview_items,
+    )
+    return {
+        "ok": True,
+        "reason_code": "ok",
+        "updated_at": _external_updated_at(),
+        "error_text": "",
+        "scheduler_status_summary": scheduler_status_summary,
+        "scheduler_overview_items": scheduler_overview_items,
+        "scheduler_overview_summary": scheduler_overview_summary,
+        "display": {
+            "scheduler_overview": scheduler_overview,
+            "scheduler_overview_items": scheduler_overview_items,
+            "scheduler_overview_summary": scheduler_overview_summary,
+        },
+    }
+
+
+def _build_external_updater_module(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    if _deployment_role_mode(container) == "internal":
+        return _external_role_mismatch_response(
+            container,
+            updater_summary={},
+            display={
+                "updater_mirror_overview": _external_empty_role_mismatch_display("当前不是外网端"),
+                "shared_root_diagnostic_overview": _external_empty_role_mismatch_display("当前不是外网端"),
+            },
+        )
+    try:
+        updater_summary = container.updater_snapshot()
+        if not isinstance(updater_summary, dict):
+            updater_summary = {}
+    except Exception:
+        updater_summary = {}
+    live_shared_bridge = _external_read_scope(
+        container,
+        "external_shared_bridge_full",
+        reason_prefix="external_updater",
+    ) or {}
+    health_lite = _build_external_health_lite_payload(request)
+    deployment_payload = health_lite.get("deployment", {}) if isinstance(health_lite, dict) else {}
+    role_mode = normalize_role_mode(
+        deployment_payload.get("role_mode", "") if isinstance(deployment_payload, dict) else "external"
+    ) or "external"
+    shared_root_diagnostic = _shared_root_diagnostic_snapshot_async_default(
+        container,
+        request,
+        role_mode=role_mode,
+        shared_bridge_snapshot=live_shared_bridge if isinstance(live_shared_bridge, dict) else {},
+        updater_snapshot=updater_summary,
+    )
+    updater_display_overview = present_updater_mirror_overview(updater_summary)
+    updater_summary = {**updater_summary, "display_overview": updater_display_overview}
+    return {
+        "ok": True,
+        "reason_code": "ok",
+        "updated_at": _external_updated_at(),
+        "error_text": "",
+        "updater_summary": updater_summary,
+        "shared_root_diagnostic": shared_root_diagnostic,
+        "display": {
+            "updater_mirror_overview": updater_display_overview,
+            "shared_root_diagnostic_overview": present_shared_root_diagnostic_overview(shared_root_diagnostic),
+        },
+    }
+
+
+def _build_external_review_module(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    if _deployment_role_mode(container) == "internal":
+        return _external_role_mismatch_response(
+            container,
+            handover_review_status=_empty_handover_review_status(),
+            handover_review_access=_empty_handover_review_access(),
+            handover_review_recipient_status_by_building=[],
+            display={"handover_review_overview": _external_empty_role_mismatch_display("当前不是外网端")},
+        )
+    runtime_cfg = _runtime_config(container)
+    handover_review_status = _health_cached_component_async_default(
+        request,
+        key="handover_review_status:latest",
+        ttl_sec=_HEALTH_CACHE_TTL_REVIEW_STATUS_SEC,
+        builder=lambda: _build_latest_handover_review_status(container),
+        default=_empty_handover_review_status(),
+    )
+    request_url = getattr(request, "url", None)
+    request_host = str(getattr(request_url, "hostname", "") or "").strip()
+    request_port = getattr(request_url, "port", None)
+    handover_review_access = _health_cached_component_async_default(
+        request,
+        key=(
+            "handover_review_access:"
+            f"{str(handover_review_status.get('duty_date', '')).strip()}:"
+            f"{str(handover_review_status.get('duty_shift', '')).strip().lower()}"
+        ),
+        ttl_sec=_HEALTH_CACHE_TTL_REVIEW_ACCESS_SEC,
+        builder=lambda: _build_handover_review_access_for_context(
+            container,
+            request_host=request_host,
+            port=request_port,
+            duty_date=str(handover_review_status.get("duty_date", "")).strip(),
+            duty_shift=str(handover_review_status.get("duty_shift", "")).strip().lower(),
+        ),
+        default=_empty_handover_review_access(),
+    )
+
+    def _build_review_recipient_status_by_building() -> list[Dict[str, Any]]:
+        try:
+            return ReviewLinkDeliveryService(
+                runtime_cfg,
+                config_path=container.config_path,
+            ).build_recipient_status_by_building()
+        except Exception:
+            return []
+
+    recipients = _health_cached_component_async_default(
+        request,
+        key="handover_review_recipient_status_by_building",
+        ttl_sec=_HEALTH_CACHE_TTL_REVIEW_RECIPIENTS_SEC,
+        builder=_build_review_recipient_status_by_building,
+        default=[],
+    )
+    overview = present_handover_review_overview(
+        handover_review_status,
+        review_links=handover_review_access.get("review_links", []) if isinstance(handover_review_access, dict) else [],
+        recipient_status_by_building=recipients,
+    )
+    return {
+        "ok": True,
+        "reason_code": "ok",
+        "updated_at": _external_updated_at(),
+        "error_text": "",
+        "handover_review_status": handover_review_status,
+        "handover_review_access": handover_review_access,
+        "handover_review_recipient_status_by_building": recipients,
+        "display": {"handover_review_overview": overview},
+    }
+
+
+def _build_external_config_guidance_module(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    if _deployment_role_mode(container) == "internal":
+        return _external_role_mismatch_response(
+            container,
+            config_guidance_overview=_external_empty_role_mismatch_display("当前不是外网端"),
+            feature_target_displays={},
+            display={"config_guidance_overview": _external_empty_role_mismatch_display("当前不是外网端")},
+        )
+    runtime_cfg = _runtime_config(container)
+    health_lite = _build_external_health_lite_payload(request)
+    deployment_payload = health_lite.get("deployment", {}) if isinstance(health_lite, dict) else {}
+    role_mode = normalize_role_mode(
+        deployment_payload.get("role_mode", "") if isinstance(deployment_payload, dict) else ""
+    ) or "external"
+    config_role_mode = normalize_role_mode(
+        runtime_cfg.get("deployment", {}).get("role_mode", "")
+        if isinstance(runtime_cfg.get("deployment", {}), dict)
+        else ""
+    )
+    day_metric_target_preview = _health_cached_component_async_default(
+        request,
+        key="target_preview:day_metric",
+        ttl_sec=_HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC,
+        builder=lambda: DayMetricBitableExportService(runtime_cfg).build_target_descriptor(force_refresh=False),
+        default={},
+    )
+    alarm_event_target_preview = _health_cached_component_async_default(
+        request,
+        key="target_preview:alarm_event",
+        ttl_sec=_HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC,
+        builder=lambda: SharedSourceCacheService(runtime_config=runtime_cfg, store=None).get_alarm_event_upload_target_preview(
+            force_refresh=False
+        ),
+        default={},
+    )
+    config_guidance_overview = present_config_guidance_overview(
+        runtime_cfg,
+        configured_role_mode=config_role_mode,
+        running_role_mode=role_mode,
+        day_metric_target_preview=day_metric_target_preview,
+        alarm_event_target_preview=alarm_event_target_preview,
+    )
+    feature_target_displays = present_feature_target_displays(
+        runtime_cfg,
+        day_metric_target_preview=day_metric_target_preview,
+        alarm_event_target_preview=alarm_event_target_preview,
+    )
+    return {
+        "ok": True,
+        "reason_code": "ok",
+        "updated_at": _external_updated_at(),
+        "error_text": "",
+        "config_guidance_overview": config_guidance_overview,
+        "feature_target_displays": feature_target_displays,
+        "display": {"config_guidance_overview": config_guidance_overview},
+    }
+
+
+def _build_external_system_module(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    if _deployment_role_mode(container) == "internal":
+        return _external_role_mismatch_response(
+            container,
+            runtime_resources_summary=_empty_runtime_resources_summary(),
+            display={"system_overview": _external_empty_role_mismatch_display("当前不是外网端")},
+        )
+    health_lite = _build_external_health_lite_payload(request)
+    runtime_resources_summary = (
+        _external_read_scope(container, "runtime_resources_summary", reason_prefix="external_system")
+        or _empty_runtime_resources_summary()
+    )
+    task_overview = {}
+    job_panel_summary = (
+        _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_system")
+        or _external_read_scope(container, "job_panel_summary", reason_prefix="external_system")
+        or _empty_job_panel_summary()
+    )
+    if isinstance(job_panel_summary.get("display", {}), dict):
+        task_overview = job_panel_summary.get("display", {}).get("overview", {})
+    updater_summary = {}
+    try:
+        updater_summary = container.updater_snapshot()
+        if not isinstance(updater_summary, dict):
+            updater_summary = {}
+    except Exception:
+        updater_summary = {}
+    shared_root_diagnostic = {}
+    system_overview = present_external_system_overview(
+        health_lite=health_lite,
+        runtime_resources_summary=runtime_resources_summary,
+        task_overview=task_overview,
+        shared_root_diagnostic=shared_root_diagnostic,
+        updater_overview=present_updater_mirror_overview(updater_summary),
+    )
+    return {
+        "ok": True,
+        "reason_code": "ok",
+        "updated_at": _external_updated_at(),
+        "error_text": "",
+        "health_lite": health_lite,
+        "runtime_resources_summary": runtime_resources_summary,
+        "display": {"system_overview": system_overview},
+    }
+
+
+@router.get("/api/runtime/external/bootstrap")
+def get_external_runtime_bootstrap(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    if _deployment_role_mode(container) == "internal":
+        return _external_role_mismatch_response(container, display={"bootstrap": _external_empty_role_mismatch_display("当前不是外网端")})
+    health_lite = _build_external_health_lite_payload(request)
+    return {
+        "ok": True,
+        "reason_code": "ok",
+        "updated_at": _external_updated_at(),
+        "error_text": "",
+        "health_lite": health_lite,
+        "display": {"bootstrap": {"reason_code": "ok", "status_text": "外网端基础状态已加载", "tone": "success"}},
+    }
+
+
+@router.get("/api/runtime/external/source-cache")
+def get_external_runtime_source_cache(request: Request) -> Dict[str, Any]:
+    return _build_external_source_cache_module(request)
+
+
+@router.get("/api/runtime/external/jobs")
+def get_external_runtime_jobs(request: Request) -> Dict[str, Any]:
+    return _build_external_jobs_module(request)
+
+
+@router.get("/api/runtime/external/bridge-tasks")
+def get_external_runtime_bridge_tasks(request: Request) -> Dict[str, Any]:
+    return _build_external_bridge_tasks_module(request)
+
+
+@router.get("/api/runtime/external/schedulers")
+def get_external_runtime_schedulers(request: Request) -> Dict[str, Any]:
+    return _build_external_schedulers_module(request)
+
+
+@router.get("/api/runtime/external/updater")
+def get_external_runtime_updater(request: Request) -> Dict[str, Any]:
+    return _build_external_updater_module(request)
+
+
+@router.get("/api/runtime/external/review-overview")
+def get_external_runtime_review_overview(request: Request) -> Dict[str, Any]:
+    return _build_external_review_module(request)
+
+
+@router.get("/api/runtime/external/config-guidance")
+def get_external_runtime_config_guidance(request: Request) -> Dict[str, Any]:
+    return _build_external_config_guidance_module(request)
+
+
+@router.get("/api/runtime/external/system")
+def get_external_runtime_system(request: Request) -> Dict[str, Any]:
+    return _build_external_system_module(request)
 
 
 @router.get("/api/runtime/external-dashboard-summary")

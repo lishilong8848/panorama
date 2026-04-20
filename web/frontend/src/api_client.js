@@ -125,6 +125,42 @@ export async function getExternalDashboardSummaryApi() {
   return apiJsonWithTimeout("/api/runtime/external-dashboard-summary", {}, 20000);
 }
 
+export async function getExternalRuntimeBootstrapApi() {
+  return apiJsonWithTimeout("/api/runtime/external/bootstrap", {}, 5000);
+}
+
+export async function getExternalRuntimeSourceCacheApi() {
+  return apiJsonWithTimeout("/api/runtime/external/source-cache", {}, 5000);
+}
+
+export async function getExternalRuntimeJobsApi() {
+  return apiJsonWithTimeout("/api/runtime/external/jobs", {}, 5000);
+}
+
+export async function getExternalRuntimeBridgeTasksApi() {
+  return apiJsonWithTimeout("/api/runtime/external/bridge-tasks", {}, 5000);
+}
+
+export async function getExternalRuntimeSchedulersApi() {
+  return apiJsonWithTimeout("/api/runtime/external/schedulers", {}, 5000);
+}
+
+export async function getExternalRuntimeUpdaterApi() {
+  return apiJsonWithTimeout("/api/runtime/external/updater", {}, 5000);
+}
+
+export async function getExternalRuntimeReviewOverviewApi() {
+  return apiJsonWithTimeout("/api/runtime/external/review-overview", {}, 5000);
+}
+
+export async function getExternalRuntimeConfigGuidanceApi() {
+  return apiJsonWithTimeout("/api/runtime/external/config-guidance", {}, 5000);
+}
+
+export async function getExternalRuntimeSystemApi() {
+  return apiJsonWithTimeout("/api/runtime/external/system", {}, 5000);
+}
+
 export async function getBridgeTasksApi(params = {}) {
   return apiJson(appendQuery("/api/bridge/tasks", params));
 }
