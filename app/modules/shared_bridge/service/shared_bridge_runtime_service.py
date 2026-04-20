@@ -96,7 +96,10 @@ class SharedBridgeRuntimeService:
     INTERNAL_BROWSER_ALERT_DEDUPE_SEC = 3600
     INTERNAL_ALERT_STATUS_REFRESH_INTERVAL_SEC = 30
     CLEANUP_INTERVAL_SEC = 600
-    BACKGROUND_SELF_HEAL_INTERVAL_SEC = 300
+    BACKGROUND_SELF_HEAL_INTERVAL_SEC = 7200
+    BACKGROUND_SELF_HEAL_RECENT_HOURS = 3
+    BACKGROUND_SELF_HEAL_IDLE_QUIET_SEC = 600
+    BACKGROUND_SELF_HEAL_RESUME_SKIP_BEFORE_NEXT_SEC = 1200
     BACKGROUND_SELF_HEAL_LOOKBACK_DAYS = 7
     BACKGROUND_SELF_HEAL_SCAN_LIMIT = 5000
     WAITING_JOB_RECONCILE_INTERVAL_SEC = 30
@@ -145,6 +148,9 @@ class SharedBridgeRuntimeService:
         self._active_bridge_task_count = 0
         self._background_task_threads: Dict[str, threading.Thread] = {}
         self._background_task_state = self._build_initial_background_task_state()
+        self._background_scan_sessions: Dict[str, Dict[str, Any]] = {}
+        self._background_task_next_due_monotonic: Dict[str, float] = {}
+        self._last_foreground_busy_monotonic = 0.0
         self._source_cache_start_thread: threading.Thread | None = None
         self._refresh_config()
 
@@ -803,6 +809,104 @@ class SharedBridgeRuntimeService:
         with self._lock:
             return bool(int(self._active_bridge_task_count or 0) > 0)
 
+    def _has_active_foreground_work(self) -> bool:
+        busy = self._has_active_business_task()
+        if self._job_service is not None and hasattr(self._job_service, "has_incomplete_jobs"):
+            try:
+                busy = bool(busy or self._job_service.has_incomplete_jobs())
+            except Exception:
+                busy = bool(busy)
+        if busy:
+            with self._lock:
+                self._last_foreground_busy_monotonic = time.monotonic()
+        return bool(busy)
+
+    def _background_idle_quiet_due(self, now_monotonic: float) -> float:
+        with self._lock:
+            last_busy = float(self._last_foreground_busy_monotonic or 0.0)
+        if last_busy <= 0:
+            return 0.0
+        quiet_due = last_busy + max(0, int(self.BACKGROUND_SELF_HEAL_IDLE_QUIET_SEC))
+        return quiet_due if now_monotonic < quiet_due else 0.0
+
+    @staticmethod
+    def _normalize_background_task_key(task_key: str) -> str:
+        return str(task_key or "").strip().lower() or "background_task"
+
+    def _get_background_scan_session(self, task_key: str) -> Dict[str, Any] | None:
+        normalized_key = self._normalize_background_task_key(task_key)
+        with self._lock:
+            session = self._background_scan_sessions.get(normalized_key)
+            return copy.deepcopy(session) if isinstance(session, dict) else None
+
+    def _put_background_scan_session(self, task_key: str, session: Dict[str, Any]) -> None:
+        normalized_key = self._normalize_background_task_key(task_key)
+        with self._lock:
+            self._background_scan_sessions[normalized_key] = copy.deepcopy(session)
+
+    def _clear_background_scan_session(self, task_key: str) -> None:
+        normalized_key = self._normalize_background_task_key(task_key)
+        with self._lock:
+            self._background_scan_sessions.pop(normalized_key, None)
+
+    def _background_scan_counts_from_session(self, session: Dict[str, Any] | None) -> Dict[str, int]:
+        counts = session.get("counts", {}) if isinstance(session, dict) and isinstance(session.get("counts"), dict) else {}
+        return {
+            "scanned": int(counts.get("scanned", 0) or 0),
+            "downgraded": int(counts.get("downgraded", 0) or 0),
+            "kept": int(counts.get("kept", 0) or 0),
+            "skipped": int(counts.get("skipped", 0) or 0),
+        }
+
+    def _make_background_scan_session(
+        self,
+        task_key: str,
+        *,
+        candidates: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        now_monotonic = time.monotonic()
+        return {
+            "task_key": self._normalize_background_task_key(task_key),
+            "candidates": copy.deepcopy(candidates),
+            "next_index": 0,
+            "counts": {"scanned": 0, "downgraded": 0, "kept": 0, "skipped": 0},
+            "paused": False,
+            "paused_at_monotonic": 0.0,
+            "created_at_monotonic": now_monotonic,
+            "formal_next_due_monotonic": now_monotonic + max(5, int(self.BACKGROUND_SELF_HEAL_INTERVAL_SEC)),
+        }
+
+    def _update_background_scan_session_from_result(self, task_key: str, result: Dict[str, Any]) -> None:
+        if not isinstance(result, dict):
+            return
+        if not bool(result.get("paused", False)):
+            self._clear_background_scan_session(task_key)
+            return
+        session = self._get_background_scan_session(task_key) or {
+            "task_key": self._normalize_background_task_key(task_key),
+            "candidates": [],
+            "formal_next_due_monotonic": time.monotonic() + max(5, int(self.BACKGROUND_SELF_HEAL_INTERVAL_SEC)),
+        }
+        session["paused"] = True
+        session["paused_at_monotonic"] = time.monotonic()
+        session["next_index"] = max(0, int(result.get("next_index", 0) or 0))
+        session["counts"] = {
+            "scanned": int(result.get("scanned", 0) or 0),
+            "downgraded": int(result.get("downgraded", 0) or 0),
+            "kept": int(result.get("kept", 0) or 0),
+            "skipped": int(result.get("skipped", 0) or 0),
+        }
+        self._put_background_scan_session(task_key, session)
+
+    def _set_background_task_due_monotonic(self, task_key: str, when_monotonic: float) -> None:
+        normalized_key = self._normalize_background_task_key(task_key)
+        with self._lock:
+            self._background_task_next_due_monotonic[normalized_key] = float(when_monotonic or 0.0)
+        self._set_background_task_next_run(normalized_key, when_monotonic=when_monotonic)
+
+    def _background_scan_should_pause(self) -> bool:
+        return self._has_active_foreground_work()
+
     def _background_task_is_running(self, task_key: str) -> bool:
         thread = self._background_task_threads.get(str(task_key or "").strip().lower() or "background_task")
         return bool(thread and thread.is_alive())
@@ -838,6 +942,7 @@ class SharedBridgeRuntimeService:
                 summary=summary or self._background_task_title(task_key),
                 result=result if isinstance(result, dict) else {},
             )
+            self._finalize_background_task_schedule(task_key, result if isinstance(result, dict) else {})
         except Exception as exc:  # noqa: BLE001
             self._mark_background_task_finished(
                 task_key,
@@ -856,6 +961,24 @@ class SharedBridgeRuntimeService:
                 thread = self._background_task_threads.get(task_key)
                 if thread is not None and not thread.is_alive():
                     self._background_task_threads.pop(task_key, None)
+
+    def _finalize_background_task_schedule(self, task_key: str, result: Dict[str, Any]) -> None:
+        normalized_key = self._normalize_background_task_key(task_key)
+        status = str(result.get("status", "") or "").strip().lower() if isinstance(result, dict) else ""
+        if status == "success":
+            self._set_background_task_due_monotonic(
+                normalized_key,
+                time.monotonic() + max(5, int(self.BACKGROUND_SELF_HEAL_INTERVAL_SEC)),
+            )
+            return
+        if isinstance(result, dict) and bool(result.get("paused", False)):
+            session = self._get_background_scan_session(normalized_key)
+            paused_at = float(session.get("paused_at_monotonic", 0.0) or 0.0) if isinstance(session, dict) else 0.0
+            next_check = max(
+                time.monotonic() + max(5, int(self.BACKGROUND_TASK_BUSY_RETRY_SEC)),
+                paused_at + max(0, int(self.BACKGROUND_SELF_HEAL_IDLE_QUIET_SEC)) if paused_at > 0 else 0.0,
+            )
+            self._set_background_task_next_run(normalized_key, when_monotonic=next_check)
 
     def _refresh_internal_alert_status_cache(self) -> None:
         if self._store is None or not hasattr(self._store, "list_external_alert_projections"):
@@ -2829,22 +2952,46 @@ class SharedBridgeRuntimeService:
         text = str(value or "").strip()
         if not text:
             return None
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y%m%d", "%Y%m%d%H%M%S"):
+        normalized = text.replace("/", "-")
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d %H",
+            "%Y-%m-%d",
+            "%Y%m%d--%H",
+            "%Y%m%d-%H",
+            "%Y%m%d%H%M%S",
+            "%Y%m%d%H",
+            "%Y%m%d",
+        ):
             try:
-                return datetime.strptime(text, fmt)
+                return datetime.strptime(normalized, fmt)
             except ValueError:
                 continue
         return None
 
-    def _should_background_sweep_artifact(self, artifact: Dict[str, Any] | None, *, lookback_days: int) -> bool:
+    def _should_background_sweep_artifact(
+        self,
+        artifact: Dict[str, Any] | None,
+        *,
+        lookback_days: int = 7,
+        recent_hours: int | None = None,
+    ) -> bool:
         if not isinstance(artifact, dict):
             return False
         if str(artifact.get("artifact_kind", "") or "").strip().lower() != "source_file":
             return False
-        cutoff = datetime.now() - timedelta(days=max(1, int(lookback_days or 1)))
+        if recent_hours is not None:
+            cutoff = datetime.now() - timedelta(hours=max(1, int(recent_hours or 1)))
+        else:
+            cutoff = datetime.now() - timedelta(days=max(1, int(lookback_days or 1)))
         metadata = artifact.get("metadata", {}) if isinstance(artifact.get("metadata", {}), dict) else {}
         for candidate in (
             metadata.get("duty_date"),
+            metadata.get("bucket_key"),
+            metadata.get("downloaded_at"),
+            metadata.get("updated_at"),
+            metadata.get("created_at"),
             artifact.get("updated_at"),
             artifact.get("created_at"),
         ):
@@ -2853,16 +3000,62 @@ class SharedBridgeRuntimeService:
                 return True
         return False
 
+    def _build_artifact_background_candidates(self) -> List[Dict[str, Any]]:
+        if self._store is None:
+            return []
+        recent_hours = max(1, int(self.BACKGROUND_SELF_HEAL_RECENT_HOURS))
+        cutoff = datetime.now() - timedelta(hours=recent_hours)
+        artifacts = self._store.list_artifacts(
+            artifact_kind="source_file",
+            status="ready",
+            updated_after=cutoff.strftime("%Y-%m-%d %H:%M:%S"),
+            limit=self.BACKGROUND_SELF_HEAL_SCAN_LIMIT,
+        )
+        return [
+            artifact
+            for artifact in artifacts
+            if self._should_background_sweep_artifact(artifact, recent_hours=recent_hours)
+        ]
+
     def _run_source_cache_background_sweep(self) -> Dict[str, Any]:
-        source_cache_summary = {"scanned": 0, "downgraded": 0, "kept": 0, "skipped": 0}
+        task_key = "source_cache_sweep"
+        source_cache_summary: Dict[str, Any] = {
+            "status": "success",
+            "scanned": 0,
+            "downgraded": 0,
+            "kept": 0,
+            "skipped": 0,
+            "next_index": 0,
+            "total_candidates": 0,
+            "paused": False,
+        }
         if self._source_cache_service is not None:
+            session = self._get_background_scan_session(task_key)
+            if not isinstance(session, dict):
+                session = self._make_background_scan_session(
+                    task_key,
+                    candidates=self._source_cache_service.list_background_sweep_candidates(
+                        recent_hours=self.BACKGROUND_SELF_HEAL_RECENT_HOURS,
+                        limit=self.BACKGROUND_SELF_HEAL_SCAN_LIMIT,
+                    ),
+                )
+                self._put_background_scan_session(task_key, session)
             source_cache_summary = self._source_cache_service.sweep_invalid_ready_entries(
-                lookback_days=self.BACKGROUND_SELF_HEAL_LOOKBACK_DAYS,
+                recent_hours=self.BACKGROUND_SELF_HEAL_RECENT_HOURS,
                 limit=self.BACKGROUND_SELF_HEAL_SCAN_LIMIT,
                 emit_log=self._emit_system_log,
+                candidates=list(session.get("candidates", []) if isinstance(session.get("candidates", []), list) else []),
+                start_index=int(session.get("next_index", 0) or 0),
+                initial_counts=self._background_scan_counts_from_session(session),
+                should_pause=self._background_scan_should_pause,
             )
+            self._update_background_scan_session_from_result(task_key, source_cache_summary)
+        paused = bool(source_cache_summary.get("paused", False))
+        summary_prefix = "共享缓存库后台扫描已暂停: " if paused else "共享缓存库后台扫描完成: "
         summary_text = (
-            "共享缓存库后台扫描完成: "
+            summary_prefix
+            + f"候选={int(source_cache_summary.get('total_candidates', 0) or 0)}, "
+            f"进度={int(source_cache_summary.get('next_index', 0) or 0)}/{int(source_cache_summary.get('total_candidates', 0) or 0)}, "
             f"已扫描={int(source_cache_summary.get('scanned', 0) or 0)}, "
             f"已降级={int(source_cache_summary.get('downgraded', 0) or 0)}, "
             f"保持有效={int(source_cache_summary.get('kept', 0) or 0)}, "
@@ -2870,33 +3063,42 @@ class SharedBridgeRuntimeService:
         )
         self._emit_system_log(f"[共享桥接][后台任务] {summary_text}")
         return {
-            "status": "success",
+            "status": "deferred" if paused else "success",
             "summary": summary_text,
             **source_cache_summary,
         }
 
     def _run_artifact_background_self_heal(self) -> Dict[str, Any]:
-        artifact_scanned = 0
-        artifact_downgraded = 0
-        artifact_kept = 0
-        artifact_skipped = 0
-        if self._store is not None:
-            artifacts = self._store.list_artifacts(
-                artifact_kind="source_file",
-                status="ready",
-                limit=self.BACKGROUND_SELF_HEAL_SCAN_LIMIT,
+        task_key = "artifact_self_heal"
+        session = self._get_background_scan_session(task_key)
+        if not isinstance(session, dict):
+            session = self._make_background_scan_session(
+                task_key,
+                candidates=self._build_artifact_background_candidates(),
             )
-            for artifact in artifacts:
-                if not self._should_background_sweep_artifact(
-                    artifact,
-                    lookback_days=self.BACKGROUND_SELF_HEAL_LOOKBACK_DAYS,
-                ):
-                    artifact_skipped += 1
+            self._put_background_scan_session(task_key, session)
+        artifacts = list(session.get("candidates", []) if isinstance(session.get("candidates", []), list) else [])
+        counts = self._background_scan_counts_from_session(session)
+        artifact_scanned = counts["scanned"]
+        artifact_downgraded = counts["downgraded"]
+        artifact_kept = counts["kept"]
+        artifact_skipped = counts["skipped"]
+        next_index = max(0, min(int(session.get("next_index", 0) or 0), len(artifacts)))
+        paused = False
+        if self._store is not None:
+            for index, artifact in enumerate(artifacts[next_index:], start=next_index):
+                if self._background_scan_should_pause():
+                    paused = True
+                    next_index = index
+                    break
+                if not isinstance(artifact, dict):
+                    next_index = index + 1
                     continue
                 artifact_scanned += 1
                 file_path = self._resolve_ready_artifact_file_path(artifact)
                 if file_path is None:
                     artifact_downgraded += 1
+                    next_index = index + 1
                     continue
                 metadata = artifact.get("metadata", {}) if isinstance(artifact.get("metadata", {}), dict) else {}
                 duty_date = str(metadata.get("duty_date", "") or "").strip()
@@ -2914,21 +3116,32 @@ class SharedBridgeRuntimeService:
                         metadata_update={"validated_by": "background_sweep"},
                     )
                     artifact_downgraded += 1
+                    next_index = index + 1
                     continue
                 artifact_kept += 1
+                next_index = index + 1
+        result = {
+            "status": "deferred" if paused else "success",
+            "scanned": artifact_scanned,
+            "downgraded": artifact_downgraded,
+            "kept": artifact_kept,
+            "skipped": artifact_skipped,
+            "next_index": next_index,
+            "total_candidates": len(artifacts),
+            "paused": paused,
+        }
+        self._update_background_scan_session_from_result(task_key, result)
+        summary_prefix = "共享桥接产物后台自愈已暂停: " if paused else "共享桥接产物后台自愈完成: "
         summary_text = (
-            "共享桥接产物后台自愈完成: "
+            summary_prefix
+            + f"候选={len(artifacts)}, 进度={next_index}/{len(artifacts)}, "
             f"已扫描={artifact_scanned}, 已降级={artifact_downgraded}, "
             f"保持有效={artifact_kept}, 已跳过={artifact_skipped}"
         )
         self._emit_system_log(f"[共享桥接][后台任务] {summary_text}")
         return {
-            "status": "success",
+            **result,
             "summary": summary_text,
-            "scanned": artifact_scanned,
-            "downgraded": artifact_downgraded,
-            "kept": artifact_kept,
-            "skipped": artifact_skipped,
         }
 
     def _run_background_self_heal_scan(self) -> None:
@@ -2936,22 +3149,73 @@ class SharedBridgeRuntimeService:
         self._run_artifact_background_self_heal()
 
     def _schedule_background_task_if_due(self, *, task_key: str, target: Callable[[], Dict[str, Any]], interval_sec: int) -> float:
+        normalized_key = self._normalize_background_task_key(task_key)
         now_monotonic = time.monotonic()
-        if self._has_active_business_task():
-            next_due = now_monotonic + min(
-                max(5, int(self.BACKGROUND_TASK_BUSY_RETRY_SEC)),
-                max(5, int(interval_sec or self.BACKGROUND_SELF_HEAL_INTERVAL_SEC)),
-            )
+        interval = max(5, int(interval_sec or self.BACKGROUND_SELF_HEAL_INTERVAL_SEC))
+        busy_retry = max(5, int(self.BACKGROUND_TASK_BUSY_RETRY_SEC))
+        if self._background_task_is_running(normalized_key):
+            return now_monotonic + min(busy_retry, interval)
+
+        session = self._get_background_scan_session(normalized_key)
+        if isinstance(session, dict) and bool(session.get("paused", False)):
+            formal_next_due = float(session.get("formal_next_due_monotonic", 0.0) or 0.0)
+            if formal_next_due > 0 and formal_next_due - now_monotonic <= max(0, int(self.BACKGROUND_SELF_HEAL_RESUME_SKIP_BEFORE_NEXT_SEC)):
+                self._clear_background_scan_session(normalized_key)
+                next_due = max(now_monotonic + 5, formal_next_due)
+                self._set_background_task_due_monotonic(normalized_key, next_due)
+                self._mark_background_task_deferred(
+                    normalized_key,
+                    reason="距离下次正式扫描不足20分钟，本轮后台续扫已放弃",
+                    next_monotonic=next_due,
+                )
+                return next_due
+            if self._has_active_foreground_work():
+                next_due = now_monotonic + min(busy_retry, interval)
+                self._mark_background_task_deferred(
+                    normalized_key,
+                    reason="前台任务执行中，后台扫描已让路",
+                    next_monotonic=next_due,
+                )
+                return next_due
+            quiet_due = self._background_idle_quiet_due(now_monotonic)
+            if quiet_due > 0:
+                self._mark_background_task_deferred(
+                    normalized_key,
+                    reason="等待前台任务结束后空闲10分钟，再继续后台扫描",
+                    next_monotonic=quiet_due,
+                )
+                return quiet_due
+            self._start_background_task_worker(normalized_key, target=target)
+            return now_monotonic + min(busy_retry, interval)
+
+        with self._lock:
+            next_due = float(self._background_task_next_due_monotonic.get(normalized_key, 0.0) or 0.0)
+        if self._has_active_foreground_work():
+            next_check = now_monotonic + min(busy_retry, interval)
             self._mark_background_task_deferred(
-                task_key,
-                reason="业务任务执行中，后台任务已让路",
-                next_monotonic=next_due,
+                normalized_key,
+                reason="前台任务执行中，后台扫描已让路",
+                next_monotonic=next_check,
             )
+            return next_check
+        quiet_due = self._background_idle_quiet_due(now_monotonic)
+        if quiet_due > 0:
+            self._mark_background_task_deferred(
+                normalized_key,
+                reason="等待前台任务结束后空闲10分钟，再启动后台扫描",
+                next_monotonic=quiet_due,
+            )
+            return quiet_due
+        if next_due <= 0:
+            next_due = now_monotonic + interval
+            self._set_background_task_due_monotonic(normalized_key, next_due)
             return next_due
-        next_due = now_monotonic + max(5, int(interval_sec or self.BACKGROUND_SELF_HEAL_INTERVAL_SEC))
-        self._set_background_task_next_run(task_key, when_monotonic=next_due)
-        self._start_background_task_worker(task_key, target=target)
-        return next_due
+        if now_monotonic < next_due:
+            self._set_background_task_next_run(normalized_key, when_monotonic=next_due)
+            return next_due
+
+        self._start_background_task_worker(normalized_key, target=target)
+        return now_monotonic + min(busy_retry, interval)
 
     def _repair_task_artifacts(self, task: Dict[str, Any] | None) -> bool:
         if not isinstance(task, dict):

@@ -400,6 +400,34 @@ def test_background_task_scheduler_defers_when_business_task_running(tmp_path: P
     assert "让路" in str(task_row["last_summary"] or "")
 
 
+def test_background_task_scheduler_defers_when_job_service_busy(tmp_path: Path) -> None:
+    class _BusyJobService:
+        def has_incomplete_jobs(self) -> bool:
+            return True
+
+    service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        job_service=_BusyJobService(),  # type: ignore[arg-type]
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    assert service._store is not None
+    service._store.ensure_ready()
+
+    next_due = service._schedule_background_task_if_due(
+        task_key="source_cache_sweep",
+        target=lambda: {"status": "success", "summary": "ok"},
+        interval_sec=runtime_module.SharedBridgeRuntimeService.BACKGROUND_SELF_HEAL_INTERVAL_SEC,
+    )
+
+    assert next_due > time.monotonic()
+    snapshot = service.get_health_snapshot()
+    task_row = next(item for item in snapshot["background_tasks"] if item["task_key"] == "source_cache_sweep")
+    assert task_row["running"] is False
+    assert task_row["status"] == "deferred"
+    assert "前台任务执行中" in str(task_row["last_summary"] or "")
+
+
 def test_background_task_scheduler_starts_worker_without_blocking(tmp_path: Path) -> None:
     service = runtime_module.SharedBridgeRuntimeService(
         runtime_config=_runtime_config(tmp_path, "external"),
@@ -415,11 +443,12 @@ def test_background_task_scheduler_starts_worker_without_blocking(tmp_path: Path
         time.sleep(0.2)
         return {"status": "success", "summary": "ok"}
 
+    service._set_background_task_due_monotonic("artifact_self_heal", time.monotonic() - 1)
     begin = time.monotonic()
     next_due = service._schedule_background_task_if_due(
         task_key="artifact_self_heal",
         target=_target,
-        interval_sec=300,
+        interval_sec=runtime_module.SharedBridgeRuntimeService.BACKGROUND_SELF_HEAL_INTERVAL_SEC,
     )
     elapsed = time.monotonic() - begin
 
@@ -432,3 +461,77 @@ def test_background_task_scheduler_starts_worker_without_blocking(tmp_path: Path
     assert task_row["running"] is False
     assert task_row["status"] == "success"
     assert str(task_row["last_summary"] or "").strip() == "ok"
+
+
+def test_background_self_heal_defaults_are_low_frequency_recent_window() -> None:
+    assert runtime_module.SharedBridgeRuntimeService.BACKGROUND_SELF_HEAL_INTERVAL_SEC == 7200
+    assert runtime_module.SharedBridgeRuntimeService.BACKGROUND_SELF_HEAL_RECENT_HOURS == 3
+    assert runtime_module.SharedBridgeRuntimeService.BACKGROUND_SELF_HEAL_RESUME_SKIP_BEFORE_NEXT_SEC == 1200
+
+
+def test_background_task_pauses_then_resumes_from_session(tmp_path: Path) -> None:
+    service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    service._put_background_scan_session(
+        "artifact_self_heal",
+        {
+            "task_key": "artifact_self_heal",
+            "candidates": [{"artifact_id": "a1"}, {"artifact_id": "a2"}],
+            "next_index": 1,
+            "counts": {"scanned": 1, "downgraded": 0, "kept": 1, "skipped": 0},
+            "paused": True,
+            "paused_at_monotonic": time.monotonic() - service.BACKGROUND_SELF_HEAL_IDLE_QUIET_SEC - 1,
+            "formal_next_due_monotonic": time.monotonic() + 3600,
+        },
+    )
+    started = threading.Event()
+
+    def _target() -> dict:
+        started.set()
+        return {"status": "success", "summary": "resumed"}
+
+    next_due = service._schedule_background_task_if_due(
+        task_key="artifact_self_heal",
+        target=_target,
+        interval_sec=service.BACKGROUND_SELF_HEAL_INTERVAL_SEC,
+    )
+
+    assert next_due > time.monotonic()
+    assert started.wait(timeout=1.0) is True
+
+
+def test_background_task_drops_paused_session_near_next_scan(tmp_path: Path) -> None:
+    service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    assert service._store is not None
+    service._store.ensure_ready()
+    service._put_background_scan_session(
+        "source_cache_sweep",
+        {
+            "task_key": "source_cache_sweep",
+            "candidates": [{"entry_id": "e1"}],
+            "next_index": 0,
+            "counts": {"scanned": 0, "downgraded": 0, "kept": 0, "skipped": 0},
+            "paused": True,
+            "paused_at_monotonic": time.monotonic() - service.BACKGROUND_SELF_HEAL_IDLE_QUIET_SEC - 1,
+            "formal_next_due_monotonic": time.monotonic() + service.BACKGROUND_SELF_HEAL_RESUME_SKIP_BEFORE_NEXT_SEC,
+        },
+    )
+
+    service._schedule_background_task_if_due(
+        task_key="source_cache_sweep",
+        target=lambda: {"status": "success", "summary": "should not run"},
+        interval_sec=service.BACKGROUND_SELF_HEAL_INTERVAL_SEC,
+    )
+
+    assert service._get_background_scan_session("source_cache_sweep") is None
+    snapshot = service.get_health_snapshot()
+    task_row = next(item for item in snapshot["background_tasks"] if item["task_key"] == "source_cache_sweep")
+    assert task_row["status"] == "deferred"
+    assert "不足20分钟" in str(task_row["last_summary"] or "")

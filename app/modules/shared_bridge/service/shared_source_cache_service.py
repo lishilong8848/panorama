@@ -2787,49 +2787,129 @@ class SharedSourceCacheService:
         text = str(value or "").strip()
         if not text:
             return None
-        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y%m%d", "%Y%m%d%H%M%S"):
+        normalized = text.replace("/", "-")
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d %H",
+            "%Y-%m-%d",
+            "%Y%m%d--%H",
+            "%Y%m%d-%H",
+            "%Y%m%d%H%M%S",
+            "%Y%m%d%H",
+            "%Y%m%d",
+        ):
             try:
-                return datetime.strptime(text, fmt)
+                return datetime.strptime(normalized, fmt)
             except ValueError:
                 continue
         return None
 
-    def _should_background_sweep_entry(self, entry: Dict[str, Any] | None, *, lookback_days: int) -> bool:
+    def _should_background_sweep_entry(
+        self,
+        entry: Dict[str, Any] | None,
+        *,
+        lookback_days: int = 7,
+        recent_hours: int | None = None,
+    ) -> bool:
         if not isinstance(entry, dict):
             return False
         bucket_kind = str(entry.get("bucket_kind", "") or "").strip().lower()
-        if bucket_kind == "latest":
+        if recent_hours is None and bucket_kind == "latest":
             return True
-        cutoff = datetime.now() - timedelta(days=max(1, int(lookback_days or 1)))
-        for candidate in (
-            entry.get("duty_date"),
-            entry.get("downloaded_at"),
-        ):
+        if recent_hours is not None:
+            cutoff = datetime.now() - timedelta(hours=max(1, int(recent_hours or 1)))
+        else:
+            cutoff = datetime.now() - timedelta(days=max(1, int(lookback_days or 1)))
+        candidates = (
+            (
+                entry.get("bucket_key"),
+                entry.get("downloaded_at"),
+                entry.get("updated_at"),
+                entry.get("created_at"),
+            )
+            if recent_hours is not None
+            else (
+                entry.get("bucket_key"),
+                entry.get("duty_date"),
+                entry.get("downloaded_at"),
+            )
+        )
+        for candidate in candidates:
             parsed = self._parse_date_text(candidate)
             if parsed is not None and parsed >= cutoff:
                 return True
         return False
 
+    def list_background_sweep_candidates(self, *, recent_hours: int = 3, limit: int = 5000) -> List[Dict[str, Any]]:
+        if self.store is None:
+            return []
+        cutoff = datetime.now() - timedelta(hours=max(1, int(recent_hours or 1)))
+        since_text = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        since_bucket_key = cutoff.strftime("%Y-%m-%d %H")
+        if hasattr(self.store, "list_recent_source_cache_entries"):
+            rows = self.store.list_recent_source_cache_entries(
+                status="ready",
+                since_text=since_text,
+                since_bucket_key=since_bucket_key,
+                limit=max(1, int(limit or 5000)),
+            )
+        else:
+            rows = self.store.list_source_cache_entries(status="ready", limit=max(1, int(limit or 5000)))
+        return [
+            entry
+            for entry in rows
+            if self._should_background_sweep_entry(entry, recent_hours=max(1, int(recent_hours or 1)))
+        ]
+
     def sweep_invalid_ready_entries(
         self,
         *,
         lookback_days: int = 7,
+        recent_hours: int | None = None,
         limit: int = 5000,
         emit_log: Callable[[str], None],
-    ) -> Dict[str, int]:
+        candidates: List[Dict[str, Any]] | None = None,
+        start_index: int = 0,
+        initial_counts: Dict[str, int] | None = None,
+        should_pause: Callable[[], bool] | None = None,
+    ) -> Dict[str, Any]:
         if self.store is None:
-            return {"scanned": 0, "downgraded": 0, "kept": 0, "skipped": 0}
+            return {
+                "status": "success",
+                "scanned": 0,
+                "downgraded": 0,
+                "kept": 0,
+                "skipped": 0,
+                "next_index": 0,
+                "total_candidates": 0,
+                "paused": False,
+            }
         self._repair_stale_refreshing_entries()
-        rows = self.store.list_source_cache_entries(status="ready", limit=max(1, int(limit or 5000)))
-        scanned = 0
-        downgraded = 0
-        kept = 0
-        skipped = 0
-        for entry in rows:
+        rows = list(candidates) if isinstance(candidates, list) else self.store.list_source_cache_entries(status="ready", limit=max(1, int(limit or 5000)))
+        counts = initial_counts if isinstance(initial_counts, dict) else {}
+        scanned = int(counts.get("scanned", 0) or 0)
+        downgraded = int(counts.get("downgraded", 0) or 0)
+        kept = int(counts.get("kept", 0) or 0)
+        skipped = int(counts.get("skipped", 0) or 0)
+        paused = False
+        normalized_start_index = max(0, min(int(start_index or 0), len(rows)))
+        next_index = normalized_start_index
+        for index, entry in enumerate(rows[normalized_start_index:], start=normalized_start_index):
+            if callable(should_pause) and should_pause():
+                paused = True
+                next_index = index
+                break
             if not isinstance(entry, dict):
+                next_index = index + 1
                 continue
-            if not self._should_background_sweep_entry(entry, lookback_days=lookback_days):
+            if not self._should_background_sweep_entry(
+                entry,
+                lookback_days=lookback_days,
+                recent_hours=recent_hours,
+            ):
                 skipped += 1
+                next_index = index + 1
                 continue
             scanned += 1
             file_path = self._resolve_relative_path_under_shared_root(str(entry.get("relative_path", "") or "").strip())
@@ -2843,6 +2923,7 @@ class SharedSourceCacheService:
                     downgraded += 1
                 else:
                     downgraded += 1
+                next_index = index + 1
                 continue
             try:
                 self._validate_cached_source_file(
@@ -2869,19 +2950,37 @@ class SharedSourceCacheService:
                     f"bucket={entry.get('bucket_kind', '')}/{entry.get('bucket_key', '')}, "
                     f"relative_path={entry.get('relative_path', '')}, error={exc}"
                 )
+                next_index = index + 1
                 continue
             kept += 1
+            next_index = index + 1
 
-        emit_log(
-            "[共享缓存] 后台扫描完成: "
-            f"观察窗口={max(1, int(lookback_days or 1))}天, 已扫描={scanned}, "
-            f"已降级={downgraded}, 保持有效={kept}, 已跳过={skipped}"
+        window_text = (
+            f"最近{max(1, int(recent_hours or 1))}小时"
+            if recent_hours is not None
+            else f"{max(1, int(lookback_days or 1))}天"
         )
+        if paused:
+            emit_log(
+                "[共享缓存] 后台扫描已暂停: "
+                f"观察窗口={window_text}, 进度={next_index}/{len(rows)}, 已扫描={scanned}, "
+                f"已降级={downgraded}, 保持有效={kept}, 已跳过={skipped}"
+            )
+        else:
+            emit_log(
+                "[共享缓存] 后台扫描完成: "
+                f"观察窗口={window_text}, 已扫描={scanned}, "
+                f"已降级={downgraded}, 保持有效={kept}, 已跳过={skipped}"
+            )
         return {
+            "status": "deferred" if paused else "success",
             "scanned": scanned,
             "downgraded": downgraded,
             "kept": kept,
             "skipped": skipped,
+            "next_index": next_index,
+            "total_candidates": len(rows),
+            "paused": paused,
         }
 
     def get_monthly_by_date_entries(self, *, selected_dates: List[str], buildings: List[str] | None = None) -> List[Dict[str, Any]]:

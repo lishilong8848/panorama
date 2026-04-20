@@ -111,6 +111,8 @@ class SharedBridgeStore:
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_bridge_artifacts_task ON bridge_artifacts(task_id, status, artifact_kind);
+                CREATE INDEX IF NOT EXISTS idx_bridge_artifacts_kind_status_updated
+                    ON bridge_artifacts(artifact_kind, status, updated_at, created_at);
                 CREATE TABLE IF NOT EXISTS bridge_events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL DEFAULT '',
@@ -152,6 +154,8 @@ class SharedBridgeStore:
                     ON source_cache_entries(source_family, bucket_kind, bucket_key, building, status, downloaded_at);
                 CREATE INDEX IF NOT EXISTS idx_source_cache_family_date
                     ON source_cache_entries(source_family, duty_date, duty_shift, building, status, downloaded_at);
+                CREATE INDEX IF NOT EXISTS idx_source_cache_status_times
+                    ON source_cache_entries(status, downloaded_at, updated_at, created_at, bucket_key);
                 CREATE TABLE IF NOT EXISTS bridge_internal_issue_alerts (
                     alert_key TEXT PRIMARY KEY,
                     building TEXT NOT NULL DEFAULT '',
@@ -2075,18 +2079,23 @@ class SharedBridgeStore:
         *,
         artifact_kind: str = "",
         status: str = "",
+        updated_after: str = "",
         limit: int = 500,
     ) -> List[Dict[str, Any]]:
         clauses: List[str] = []
         params: List[Any] = []
         kind_text = str(artifact_kind or "").strip()
         status_text = str(status or "").strip()
+        updated_after_text = str(updated_after or "").strip()
         if kind_text:
             clauses.append("artifact_kind=?")
             params.append(kind_text)
         if status_text:
             clauses.append("status=?")
             params.append(status_text)
+        if updated_after_text:
+            clauses.append("(updated_at>=? OR created_at>=?)")
+            params.extend([updated_after_text, updated_after_text])
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.connect(read_only=True) as conn:
             rows = conn.execute(
@@ -2351,6 +2360,45 @@ class SharedBridgeStore:
                 LIMIT ?
                 """,
                 [*params, max(1, int(limit or 200))],
+            ).fetchall()
+        return [self._row_to_source_cache_entry_dict(row) for row in rows]
+
+    def list_recent_source_cache_entries(
+        self,
+        *,
+        status: str = "",
+        since_text: str = "",
+        since_bucket_key: str = "",
+        limit: int = 5000,
+    ) -> List[Dict[str, Any]]:
+        since_text = str(since_text or "").strip()
+        since_bucket_key = str(since_bucket_key or "").strip()
+        clauses: List[str] = []
+        params: List[Any] = []
+        if str(status or "").strip():
+            clauses.append("status=?")
+            params.append(str(status or "").strip())
+        recent_clauses: List[str] = []
+        if since_text:
+            recent_clauses.extend(["downloaded_at>=?", "updated_at>=?", "created_at>=?"])
+            params.extend([since_text, since_text, since_text])
+        if since_bucket_key:
+            recent_clauses.append("bucket_key>=?")
+            params.append(since_bucket_key)
+        if recent_clauses:
+            clauses.append(f"({' OR '.join(recent_clauses)})")
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,
+                       downloaded_at, relative_path, status, file_hash, size_bytes, metadata_json, created_at, updated_at
+                FROM source_cache_entries
+                {where_sql}
+                ORDER BY downloaded_at DESC, updated_at DESC, entry_id DESC
+                LIMIT ?
+                """,
+                [*params, max(1, int(limit or 5000))],
             ).fetchall()
         return [self._row_to_source_cache_entry_dict(row) for row in rows]
 
