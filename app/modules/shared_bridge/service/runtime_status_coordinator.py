@@ -154,9 +154,12 @@ class RuntimeStatusCoordinator:
         self._scope_seq = 0
         self._building_seq = 0
         self._refresh_event = threading.Event()
+        self._internal_refresh_event = threading.Event()
         self._stop_event = threading.Event()
         self._refresh_requested = False
+        self._internal_refresh_requested = False
         self._refresh_thread: threading.Thread | None = None
+        self._internal_refresh_thread: threading.Thread | None = None
 
     @property
     def store(self) -> RuntimeStatusStore:
@@ -179,15 +182,26 @@ class RuntimeStatusCoordinator:
             daemon=True,
         )
         self._refresh_thread.start()
+        self._internal_refresh_thread = threading.Thread(
+            target=self._run_internal_refresh_loop,
+            name="runtime-status-internal-refresh",
+            daemon=True,
+        )
+        self._internal_refresh_thread.start()
         self.request_refresh(reason="startup")
 
     def stop(self) -> None:
         self._stop_event.set()
         self._refresh_event.set()
+        self._internal_refresh_event.set()
         thread = self._refresh_thread
         if thread and thread.is_alive():
             thread.join(timeout=2.0)
         self._refresh_thread = None
+        internal_thread = self._internal_refresh_thread
+        if internal_thread and internal_thread.is_alive():
+            internal_thread.join(timeout=2.0)
+        self._internal_refresh_thread = None
         self._writer.stop()
 
     def is_running(self) -> bool:
@@ -198,6 +212,13 @@ class RuntimeStatusCoordinator:
         _ = reason
         self._refresh_requested = True
         self._refresh_event.set()
+        self._internal_refresh_requested = True
+        self._internal_refresh_event.set()
+
+    def request_internal_runtime_refresh(self, *, reason: str = "") -> None:
+        _ = reason
+        self._internal_refresh_requested = True
+        self._internal_refresh_event.set()
 
     def observe_log_line(self, text: str) -> None:
         raw = str(text or "").strip()
@@ -236,6 +257,7 @@ class RuntimeStatusCoordinator:
 
     def refresh_now(self) -> None:
         self._refresh_all_snapshots()
+        self._refresh_internal_runtime_snapshots()
 
     def _cache_scope_snapshot(self, scope: str, payload: Dict[str, Any]) -> None:
         scope_text = str(scope or "").strip()
@@ -282,11 +304,27 @@ class RuntimeStatusCoordinator:
             if self._stop_event.is_set():
                 break
             now = time.monotonic()
-            if now < next_run and not self._refresh_requested:
+            if now < next_run:
                 continue
             self._refresh_requested = False
             self._refresh_all_snapshots()
             next_run = time.monotonic() + self._refresh_interval_sec
+
+    def _run_internal_refresh_loop(self) -> None:
+        next_run = time.monotonic()
+        interval_sec = min(2.0, self._refresh_interval_sec)
+        while not self._stop_event.is_set():
+            timeout = max(0.0, next_run - time.monotonic())
+            self._internal_refresh_event.wait(timeout=timeout)
+            self._internal_refresh_event.clear()
+            if self._stop_event.is_set():
+                break
+            now = time.monotonic()
+            if now < next_run:
+                continue
+            self._internal_refresh_requested = False
+            self._refresh_internal_runtime_snapshots()
+            next_run = time.monotonic() + interval_sec
 
     def _refresh_all_snapshots(self) -> None:
         try:
@@ -320,13 +358,22 @@ class RuntimeStatusCoordinator:
                 _SCOPE_DASHBOARD_BRIDGE_TASKS_SUMMARY,
                 self._build_bridge_tasks_dashboard_summary(),
             )
-            self._refresh_internal_runtime_snapshots()
         except Exception as exc:  # noqa: BLE001
             if callable(self._emit_log):
                 self._emit_log(f"[运行状态] 刷新状态快照失败: {exc}")
 
     def _refresh_internal_runtime_snapshots(self) -> None:
         try:
+            deployment = (
+                self._container.deployment_snapshot()
+                if hasattr(self._container, "deployment_snapshot")
+                else {}
+            )
+            role_mode = normalize_role_mode(
+                deployment.get("role_mode") if isinstance(deployment, dict) else ""
+            )
+            if role_mode != "internal":
+                return
             snapshot = self._safe_shared_bridge_snapshot(mode="internal_light")
         except Exception as exc:  # noqa: BLE001
             if callable(self._emit_log):

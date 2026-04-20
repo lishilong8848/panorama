@@ -422,7 +422,15 @@ def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
 
     def _attach_display(summary_payload: Dict[str, Any]) -> Dict[str, Any]:
         summary = copy.deepcopy(summary_payload if isinstance(summary_payload, dict) else {})
-        task_summary = build_job_panel_summary(container, limit=20)
+        task_summary: Dict[str, Any] = {}
+        if coordinator is not None and callable(getattr(coordinator, "read_scope_snapshot", None)):
+            try:
+                job_snapshot = coordinator.read_scope_snapshot("job_panel_dashboard_summary")
+                payload = job_snapshot.get("payload") if isinstance(job_snapshot, dict) else None
+                if isinstance(payload, dict):
+                    task_summary = payload
+            except Exception:
+                task_summary = {}
         summary["display"] = present_internal_runtime_display(
             summary,
             task_overview=(
@@ -439,11 +447,14 @@ def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
         if isinstance(payload, dict):
             return {"ok": True, "summary": _attach_display(payload)}
         try:
-            coordinator.request_refresh(reason="internal_runtime_summary_route")
+            refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
+            if callable(refresher):
+                refresher(reason="internal_runtime_summary_route")
+            else:
+                coordinator.request_refresh(reason="internal_runtime_summary_route")
         except Exception:
             pass
-        if service is None or not hasattr(service, "get_health_snapshot"):
-            return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
+        return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
 
     if service is not None and hasattr(service, "get_health_snapshot"):
         try:
@@ -489,19 +500,22 @@ def bridge_internal_runtime_status_building(building_code: str, request: Request
         if isinstance(payload, dict):
             return {"ok": True, "status": _attach_display(payload)}
         try:
-            coordinator.request_refresh(reason=f"internal_runtime_building_route:{building}")
+            refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
+            if callable(refresher):
+                refresher(reason=f"internal_runtime_building_route:{building}")
+            else:
+                coordinator.request_refresh(reason=f"internal_runtime_building_route:{building}")
         except Exception:
             pass
-        if service is None or not hasattr(service, "get_health_snapshot"):
-            return {
-                "ok": True,
-                "status": _attach_display(
-                    build_empty_internal_runtime_building_status(
-                        building=building,
-                        building_code=normalized_code,
-                    )
-                ),
-            }
+        return {
+            "ok": True,
+            "status": _attach_display(
+                build_empty_internal_runtime_building_status(
+                    building=building,
+                    building_code=normalized_code,
+                )
+            ),
+        }
 
     if service is not None and hasattr(service, "get_health_snapshot"):
         try:

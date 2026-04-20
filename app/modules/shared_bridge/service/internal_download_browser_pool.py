@@ -930,7 +930,7 @@ class InternalDownloadBrowserPool:
             loop.close()
             self._loop = None
 
-    def start(self) -> Dict[str, Any]:
+    def start(self, *, wait_ready: bool = True, ready_timeout_sec: float = 30.0) -> Dict[str, Any]:
         if self.is_running():
             return {"started": False, "running": True, "reason": "already_running"}
         self._startup_error = ""
@@ -941,7 +941,9 @@ class InternalDownloadBrowserPool:
             daemon=True,
         )
         self._thread.start()
-        self._ready_event.wait(timeout=30)
+        if not wait_ready:
+            return {"started": True, "running": True, "reason": "starting"}
+        self._ready_event.wait(timeout=max(0.0, float(ready_timeout_sec or 0.0)))
         if self._startup_error:
             return {
                 "started": False,
@@ -950,6 +952,24 @@ class InternalDownloadBrowserPool:
                 "error": self._startup_error,
             }
         return {"started": True, "running": True, "reason": "started"}
+
+    def wait_until_ready(self, *, timeout_sec: float = 120.0) -> Dict[str, Any]:
+        self._ready_event.wait(timeout=max(0.0, float(timeout_sec or 0.0)))
+        if self._startup_error:
+            return {
+                "ready": False,
+                "running": False,
+                "reason": "startup_failed",
+                "error": self._startup_error,
+            }
+        if not self._ready_event.is_set():
+            return {
+                "ready": False,
+                "running": self.is_running(),
+                "reason": "timeout",
+                "error": "内网下载浏览器池启动仍在进行",
+            }
+        return {"ready": True, "running": self.is_running(), "reason": "ready"}
 
     def stop(self) -> Dict[str, Any]:
         loop = self._loop

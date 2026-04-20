@@ -145,6 +145,7 @@ class SharedBridgeRuntimeService:
         self._active_bridge_task_count = 0
         self._background_task_threads: Dict[str, threading.Thread] = {}
         self._background_task_state = self._build_initial_background_task_state()
+        self._source_cache_start_thread: threading.Thread | None = None
         self._refresh_config()
 
     @classmethod
@@ -902,6 +903,52 @@ class SharedBridgeRuntimeService:
     def _should_run(self) -> bool:
         return self.role_mode in {"internal", "external"} and self.shared_bridge_enabled and bool(self.shared_bridge_root)
 
+    def _start_source_cache_after_internal_pool_ready(self) -> None:
+        pool = self._internal_download_pool
+        source_cache = self._source_cache_service
+        if pool is None or source_cache is None:
+            return
+        existing = self._source_cache_start_thread
+        if existing and existing.is_alive():
+            return
+
+        def _worker() -> None:
+            try:
+                wait_ready = getattr(pool, "wait_until_ready", None)
+                if callable(wait_ready):
+                    ready_result = wait_ready(timeout_sec=120)
+                else:
+                    try:
+                        health = pool.get_health_snapshot() if hasattr(pool, "get_health_snapshot") else {}
+                    except Exception:  # noqa: BLE001
+                        health = {}
+                    ready_result = {
+                        "ready": bool(health.get("browser_ready", False)) if isinstance(health, dict) else False,
+                        "reason": "ready",
+                    }
+                if self._stop_event.is_set():
+                    return
+                if not bool(ready_result.get("ready", False)):
+                    reason = str(ready_result.get("error") or ready_result.get("reason") or "内网下载浏览器池未就绪").strip()
+                    self._last_error = reason
+                    self._emit_system_log(f"[共享缓存] 内网下载浏览器池尚未就绪，已延后启动源文件调度: {reason}")
+                    return
+                source_cache.update_download_browser_pool(pool)
+                source_cache.start()
+            except Exception as exc:  # noqa: BLE001
+                self._last_error = str(exc)
+                self._emit_system_log(f"[共享缓存] 源文件调度后台启动失败: {exc}")
+            finally:
+                if self._source_cache_start_thread is threading.current_thread():
+                    self._source_cache_start_thread = None
+
+        self._source_cache_start_thread = threading.Thread(
+            target=_worker,
+            name="shared-source-cache-start-after-browser-ready",
+            daemon=True,
+        )
+        self._source_cache_start_thread.start()
+
     def start(self) -> Dict[str, Any]:
         with self._lock:
             if self._thread and self._thread.is_alive():
@@ -919,6 +966,7 @@ class SharedBridgeRuntimeService:
             if not self._should_run():
                 self._db_status = "disabled"
                 self._counts = {"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0, "node_count": 0}
+                self._source_cache_start_thread = None
                 if self._source_cache_service is not None:
                     self._source_cache_service.stop()
                 if self._internal_download_pool is not None:
@@ -934,7 +982,10 @@ class SharedBridgeRuntimeService:
                         emit_log=self._emit_system_log,
                         request_runtime_status_refresh=lambda reason: self._request_runtime_status_refresh(reason=reason),
                     )
-                pool_result = self._internal_download_pool.start()
+                try:
+                    pool_result = self._internal_download_pool.start(wait_ready=False)
+                except TypeError:
+                    pool_result = self._internal_download_pool.start()
                 if not bool(pool_result.get("running", False)):
                     error_text = str(pool_result.get("error", "") or "内网下载浏览器池启动失败").strip()
                     self._last_error = error_text
@@ -947,8 +998,9 @@ class SharedBridgeRuntimeService:
                 set_internal_download_browser_pool(self._internal_download_pool)
                 if self._source_cache_service is not None:
                     self._source_cache_service.update_download_browser_pool(self._internal_download_pool)
-                    self._source_cache_service.start()
+                    self._start_source_cache_after_internal_pool_ready()
             else:
+                self._source_cache_start_thread = None
                 if self._internal_download_pool is not None:
                     clear_internal_download_browser_pool(self._internal_download_pool)
                     self._internal_download_pool.stop()
@@ -967,6 +1019,7 @@ class SharedBridgeRuntimeService:
             background_threads = [item for item in self._background_task_threads.values() if item]
             self._background_task_threads = {}
             if not thread:
+                self._source_cache_start_thread = None
                 if self._source_cache_service is not None:
                     self._source_cache_service.stop()
                 if self._internal_download_pool is not None:
@@ -986,6 +1039,7 @@ class SharedBridgeRuntimeService:
                 return {"stopped": False, "running": False, "reason": "not_running"}
             self._stop_event.set()
             self._thread = None
+            self._source_cache_start_thread = None
         thread.join(timeout=5)
         for background_thread in background_threads:
             try:

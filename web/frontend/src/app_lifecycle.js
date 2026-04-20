@@ -154,7 +154,7 @@
         scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
       }, delayMs);
     };
-    const internalRuntimePollIntervalMs = 10000;
+    const internalRuntimePollIntervalMs = 3000;
     const scheduleInternalRuntimePoll = (delayMs = internalRuntimePollIntervalMs) => {
       if (timers.internalRuntimeTimer) clearTimeout(timers.internalRuntimeTimer);
       timers.internalRuntimeTimer = window.setTimeout(async () => {
