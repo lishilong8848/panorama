@@ -78,6 +78,22 @@ export function createStartupRoleUiHelpers(options = {}) {
   }
 
   function showStartupRoleLoading({ title = "", subtitle = "", stage = "" } = {}) {
+    const backendRuntimeReady = Boolean(
+      health?.runtime_activated
+      && health?.startup_role_confirmed
+      && !health?.role_selection_required
+      && !health?.startup_role_user_exited
+    );
+    if (backendRuntimeReady) {
+      startupRoleSelectorVisible.value = false;
+      startupRoleSelectorBusy.value = false;
+      startupRoleLoadingVisible.value = false;
+      startupRoleLoadingTitle.value = "";
+      startupRoleLoadingSubtitle.value = "";
+      startupRoleLoadingStage.value = "";
+      startupRoleFlowState.value = "activated";
+      return;
+    }
     startupRoleSelectorVisible.value = false;
     startupRoleLoadingVisible.value = true;
     startupRoleLoadingTitle.value = String(title || "").trim();

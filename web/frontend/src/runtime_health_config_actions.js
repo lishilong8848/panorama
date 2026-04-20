@@ -2307,10 +2307,10 @@ export function createRuntimeHealthConfigActions(ctx) {
       health.dashboard_display = {
         ...previousDisplay,
         ...nextDisplay,
-        ...(topLevelSharedSourceOverview && !nextDisplay.shared_source_cache_overview
+        ...(topLevelSharedSourceOverview
           ? { shared_source_cache_overview: topLevelSharedSourceOverview }
           : {}),
-        ...(topLevelInternalAlertOverview && !nextDisplay.internal_alert_overview
+        ...(topLevelInternalAlertOverview
           ? { internal_alert_overview: topLevelInternalAlertOverview }
           : {}),
       };

@@ -1,5 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +8,22 @@ import pytest
 from fastapi import HTTPException
 
 from app.modules.report_pipeline.api import routes
+
+
+def _clear_pending_resume_cache() -> None:
+    with routes._PENDING_RESUME_CACHE_LOCK:  # noqa: SLF001
+        routes._PENDING_RESUME_CACHE.clear()  # noqa: SLF001
+
+
+def _wait_pending_resume_refresh(request, *, role_mode: str = "external") -> dict:
+    key = routes._pending_resume_cache_key(request.app.state.container, role_mode=role_mode)  # noqa: SLF001
+    for _ in range(50):
+        with routes._PENDING_RESUME_CACHE_LOCK:  # noqa: SLF001
+            entry = dict(routes._PENDING_RESUME_CACHE.get(key, {}))  # noqa: SLF001
+        if entry and not bool(entry.get("refreshing", False)):
+            return routes.list_resume_pending(request)
+        time.sleep(0.01)
+    return routes.list_resume_pending(request)
 
 
 class _FakeJob:
@@ -408,9 +425,12 @@ def test_multi_date_route_starts_from_shared_cache_when_ready() -> None:
 
 
 def test_resume_routes_use_bridge_on_external_role() -> None:
+    _clear_pending_resume_cache()
     request = _fake_request(role_mode="external", bridge_enabled=True)
 
     pending = routes.list_resume_pending(request)
+    assert pending["refreshing"] is True
+    pending = _wait_pending_resume_refresh(request, role_mode="external")
     submit = routes.job_resume_upload({"run_id": "run-1", "auto": False}, request)
     deleted = routes.delete_resume_run({"run_id": "run-1"}, request)
 
@@ -432,14 +452,18 @@ def test_resume_routes_use_bridge_on_external_role() -> None:
 
 
 def test_resume_pending_returns_empty_list_on_internal_role() -> None:
+    _clear_pending_resume_cache()
     request = _fake_request(role_mode="internal", bridge_enabled=True)
 
     response = routes.list_resume_pending(request)
 
-    assert response == {"runs": [], "count": 0}
+    assert response["runs"] == []
+    assert response["count"] == 0
+    assert response["reason_code"] == "role_internal"
 
 
 def test_resume_pending_downgrades_on_recoverable_network_oserror(monkeypatch) -> None:
+    _clear_pending_resume_cache()
     logs = []
     request = _fake_request(role_mode="", bridge_enabled=False)
     request.app.state.container.add_system_log = logs.append
@@ -454,9 +478,13 @@ def test_resume_pending_downgrades_on_recoverable_network_oserror(monkeypatch) -
     monkeypatch.setattr(routes, "OrchestratorService", _BrokenOrchestrator)
 
     response = routes.list_resume_pending(request)
+    assert response["refreshing"] is True
+    response = _wait_pending_resume_refresh(request, role_mode="")
 
-    assert response == {"runs": [], "count": 0}
-    assert any("续传索引暂不可用" in line for line in logs)
+    assert response["runs"] == []
+    assert response["count"] == 0
+    assert response["reason_code"] == "index_unavailable"
+    assert "指定的网络名" in response["last_error"]
 
 
 def test_auto_once_route_rejects_internal_role() -> None:
@@ -464,3 +492,4 @@ def test_auto_once_route_rejects_internal_role() -> None:
     with pytest.raises(HTTPException) as excinfo:
         routes.job_auto_once(request)
     assert excinfo.value.status_code == 409
+

@@ -12,7 +12,7 @@ import time
 from datetime import date, datetime
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
@@ -148,6 +148,9 @@ _HEALTH_CACHE_TTL_REVIEW_RECIPIENTS_SEC = 8.0
 _HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC = 10.0
 _HEALTH_CACHE_TTL_MONTHLY_DELIVERY_SEC = 12.0
 _HEALTH_CACHE_TTL_SHARED_ROOT_DIAGNOSTIC_SEC = 10.0
+_PENDING_RESUME_CACHE_TTL_SEC = 15.0
+_PENDING_RESUME_CACHE: Dict[str, Dict[str, Any]] = {}
+_PENDING_RESUME_CACHE_LOCK = threading.Lock()
 
 
 def _invalidate_review_base_probe_cache() -> None:
@@ -389,6 +392,119 @@ def _is_recoverable_resume_index_error(exc: Exception) -> bool:
         "设备尚未就绪",
     )
     return any(token in text for token in recoverable_tokens)
+
+
+def _pending_resume_cache_key(container, *, role_mode: str) -> str:
+    normalized_role = normalize_role_mode(role_mode)
+    if normalized_role == "external":
+        bridge_service = getattr(container, "shared_bridge_service", None)
+        root = str(getattr(bridge_service, "shared_bridge_root", "") or "").strip()
+        return f"external:{root or '-'}"
+    return f"{normalized_role or 'standalone'}:{id(container)}"
+
+
+def _resolve_pending_resume_runs_now(container, *, role_mode: str) -> List[Dict[str, Any]]:
+    normalized_role = normalize_role_mode(role_mode)
+    if normalized_role == "internal":
+        return []
+    if normalized_role == "external":
+        bridge_service = getattr(container, "shared_bridge_service", None)
+        if bridge_service is not None and _shared_bridge_is_available(container):
+            runs = bridge_service.list_monthly_pending_resume_runs()
+            return runs if isinstance(runs, list) else []
+        return []
+    config = _runtime_config(container)
+    orchestrator = OrchestratorService(config)
+    runs = orchestrator.list_pending_resume_runs()
+    return runs if isinstance(runs, list) else []
+
+
+def _read_pending_resume_runs_cached(container, *, role_mode: str) -> Dict[str, Any]:
+    normalized_role = normalize_role_mode(role_mode)
+    if normalized_role == "internal":
+        return {
+            "runs": [],
+            "count": 0,
+            "cached": True,
+            "refreshing": False,
+            "updated_at": "",
+            "last_error": "",
+            "reason_code": "role_internal",
+        }
+    key = _pending_resume_cache_key(container, role_mode=normalized_role)
+    now = time.monotonic()
+    with _PENDING_RESUME_CACHE_LOCK:
+        entry = _PENDING_RESUME_CACHE.get(key)
+        if isinstance(entry, dict):
+            age_sec = now - float(entry.get("updated_monotonic", 0.0) or 0.0)
+            if age_sec <= _PENDING_RESUME_CACHE_TTL_SEC and not bool(entry.get("refreshing", False)):
+                rows = entry.get("runs", []) if isinstance(entry.get("runs", []), list) else []
+                return {
+                    "runs": copy.deepcopy(rows),
+                    "count": len(rows),
+                    "cached": True,
+                    "refreshing": False,
+                    "updated_at": str(entry.get("updated_at", "") or "").strip(),
+                    "last_error": str(entry.get("last_error", "") or "").strip(),
+                    "reason_code": str(entry.get("reason_code", "") or "ready").strip(),
+                }
+        if isinstance(entry, dict) and bool(entry.get("refreshing", False)):
+            rows = entry.get("runs", []) if isinstance(entry.get("runs", []), list) else []
+            return {
+                "runs": copy.deepcopy(rows),
+                "count": len(rows),
+                "cached": True,
+                "refreshing": True,
+                "updated_at": str(entry.get("updated_at", "") or "").strip(),
+                "last_error": str(entry.get("last_error", "") or "").strip(),
+                "reason_code": "refreshing",
+            }
+        stale_rows = entry.get("runs", []) if isinstance(entry, dict) and isinstance(entry.get("runs", []), list) else []
+        stale_updated_at = str(entry.get("updated_at", "") or "").strip() if isinstance(entry, dict) else ""
+        stale_error = str(entry.get("last_error", "") or "").strip() if isinstance(entry, dict) else ""
+        _PENDING_RESUME_CACHE[key] = {
+            "runs": copy.deepcopy(stale_rows),
+            "updated_at": stale_updated_at,
+            "updated_monotonic": float(entry.get("updated_monotonic", 0.0) or 0.0) if isinstance(entry, dict) else 0.0,
+            "last_error": stale_error,
+            "reason_code": "refreshing",
+            "refreshing": True,
+        }
+
+    def _refresh() -> None:
+        rows: List[Dict[str, Any]] = []
+        last_error = ""
+        reason_code = "ready"
+        try:
+            rows = _resolve_pending_resume_runs_now(container, role_mode=normalized_role)
+        except Exception as exc:  # noqa: BLE001
+            if _is_recoverable_resume_index_error(exc):
+                last_error = str(exc)
+                reason_code = "index_unavailable"
+            else:
+                last_error = str(exc)
+                reason_code = "failed"
+        with _PENDING_RESUME_CACHE_LOCK:
+            _PENDING_RESUME_CACHE[key] = {
+                "runs": copy.deepcopy(rows),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_monotonic": time.monotonic(),
+                "last_error": last_error,
+                "reason_code": reason_code,
+                "refreshing": False,
+            }
+
+    thread = threading.Thread(target=_refresh, name="pending-resume-refresh", daemon=True)
+    thread.start()
+    return {
+        "runs": copy.deepcopy(stale_rows),
+        "count": len(stale_rows),
+        "cached": True,
+        "refreshing": True,
+        "updated_at": stale_updated_at,
+        "last_error": stale_error,
+        "reason_code": "refreshing",
+    }
 
 
 def _runtime_state_config(container) -> Dict[str, Any]:
@@ -3360,24 +3476,7 @@ def job_multi_date(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
 def list_resume_pending(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
     role_mode = _deployment_role_mode(container)
-    if role_mode == "internal":
-        return {"runs": [], "count": 0}
-    if role_mode == "external":
-        bridge_service = getattr(container, "shared_bridge_service", None)
-        if bridge_service is not None and _shared_bridge_is_available(container):
-            runs = bridge_service.list_monthly_pending_resume_runs()
-            return {"runs": runs, "count": len(runs)}
-        return {"runs": [], "count": 0}
-    config = _runtime_config(container)
-    orchestrator = OrchestratorService(config)
-    try:
-        runs = orchestrator.list_pending_resume_runs()
-    except Exception as exc:  # noqa: BLE001
-        if _is_recoverable_resume_index_error(exc):
-            container.add_system_log(f"[断点续传] 续传索引暂不可用，已降级为空结果: {exc}")
-            return {"runs": [], "count": 0}
-        raise
-    return {"runs": runs, "count": len(runs)}
+    return _read_pending_resume_runs_cached(container, role_mode=role_mode)
 
 
 @router.post("/api/jobs/resume-upload")
@@ -4725,6 +4824,18 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         "activation_error": "",
         "startup_role_confirmed": False,
     }
+    runtime_activated = bool(getattr(container, "runtime_activated", False))
+    startup_role_confirmed = bool(getattr(container, "startup_role_confirmed", False))
+    if runtime_activated or startup_role_confirmed:
+        health_lite = {
+            **health_lite,
+            "runtime_activated": runtime_activated,
+            "startup_role_confirmed": startup_role_confirmed,
+            "role_selection_required": False,
+            "startup_role_user_exited": False,
+            "activation_phase": "activated" if runtime_activated and startup_role_confirmed else health_lite.get("activation_phase", ""),
+            "activation_error": "" if runtime_activated and startup_role_confirmed else health_lite.get("activation_error", ""),
+        }
     live_shared_bridge: Dict[str, Any] = {}
     if not live_shared_bridge:
         live_shared_bridge = _read_scope("external_shared_bridge_full") or {}
