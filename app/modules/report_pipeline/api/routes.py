@@ -4870,14 +4870,11 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
     if not live_shared_bridge:
         live_shared_bridge = _read_scope("external_shared_bridge_full") or {}
     if not live_shared_bridge:
-        if not coordinator_running:
-            live_shared_bridge = _shared_bridge_health_snapshot(container, request, role_mode="external")
-        else:
-            live_shared_bridge = _shared_bridge_health_snapshot_async_default(
-                container,
-                request,
-                role_mode="external",
-            )
+        live_shared_bridge = _shared_bridge_health_snapshot_async_default(
+            container,
+            request,
+            role_mode="external",
+        )
     if live_shared_bridge:
         health_lite = {**health_lite, "shared_bridge": live_shared_bridge}
     handover_review_status = _health_cached_component_async_default(
@@ -4960,7 +4957,16 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         bridge_tasks_rows,
     )
     if not _external_source_cache_overview_has_runtime_rows(shared_source_cache_overview):
-        direct_shared_bridge = _shared_bridge_health_snapshot(container, request, role_mode="external")
+        if coordinator_running:
+            try:
+                coordinator.request_refresh(reason="external_dashboard_summary:source_cache_empty")
+            except Exception:
+                pass
+        direct_shared_bridge = _shared_bridge_health_snapshot_async_default(
+            container,
+            request,
+            role_mode="external",
+        )
         direct_source_overview = apply_external_source_cache_backfill_overlays(
             _shared_source_cache_overview_from_snapshot(
                 direct_shared_bridge.get("internal_source_cache", {})

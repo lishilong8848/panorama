@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import threading
+import time
 
 from app.modules.report_pipeline.api import routes
 
@@ -491,7 +492,7 @@ def test_get_external_dashboard_summary_reuses_prebuilt_shared_source_cache_disp
     assert payload["shared_source_cache_overview"]["families"][0]["buildings"][0]["status_text"] == "补采中"
 
 
-def test_get_external_dashboard_summary_falls_back_to_live_shared_bridge_source_cache(monkeypatch):
+def test_get_external_dashboard_summary_falls_back_to_cached_shared_bridge_source_cache(monkeypatch):
     monkeypatch.setattr(routes, "DayMetricBitableExportService", _FakeDayMetricBitableExportService)
     monkeypatch.setattr(routes, "SharedSourceCacheService", _FakeSharedSourceCacheService)
     monkeypatch.setattr(routes, "ReviewLinkDeliveryService", _FakeReviewLinkDeliveryService)
@@ -587,11 +588,19 @@ def test_get_external_dashboard_summary_falls_back_to_live_shared_bridge_source_
         monthly_event_report_scheduler_status=lambda: {},
         monthly_change_report_scheduler_status=lambda: {},
     )
+    cached_shared_bridge = container.shared_bridge_snapshot()
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 container=container,
-                _health_component_cache={},
+                _health_component_cache={
+                    "shared_bridge_snapshot:external_full": {
+                        "ts": routes.time.monotonic(),
+                        "value": cached_shared_bridge,
+                        "ready": True,
+                        "refreshing": False,
+                    }
+                },
                 _health_component_cache_lock=threading.Lock(),
             )
         )
@@ -605,6 +614,66 @@ def test_get_external_dashboard_summary_falls_back_to_live_shared_bridge_source_
     assert family["current_bucket"] == "2026-04-20 13"
     assert family["buildings"][0]["status_text"] == "已就绪"
     assert payload["display"]["shared_source_cache_overview"]["families"][0]["buildings"][0]["status_text"] == "已就绪"
+
+
+def test_get_external_dashboard_summary_does_not_block_on_shared_bridge_snapshot_without_coordinator(monkeypatch):
+    monkeypatch.setattr(routes, "DayMetricBitableExportService", _FakeDayMetricBitableExportService)
+    monkeypatch.setattr(routes, "SharedSourceCacheService", _FakeSharedSourceCacheService)
+    monkeypatch.setattr(routes, "ReviewLinkDeliveryService", _FakeReviewLinkDeliveryService)
+    monkeypatch.setattr(
+        routes,
+        "_build_latest_handover_review_status",
+        lambda _container: routes._empty_handover_review_status(),
+    )
+
+    def _slow_shared_bridge_snapshot(*_args, **_kwargs):
+        time.sleep(1.0)
+        return {
+            "enabled": True,
+            "role_mode": "external",
+            "internal_source_cache": {},
+            "internal_alert_status": {},
+        }
+
+    monkeypatch.setattr(routes, "_build_shared_bridge_health_snapshot", _slow_shared_bridge_snapshot)
+
+    container = SimpleNamespace(
+        config={"deployment": {"role_mode": "external"}},
+        runtime_config={
+            "deployment": {"role_mode": "external"},
+            "shared_bridge": {"root_dir": r"C:\share"},
+            "feishu": {"app_id": "cli_xxx", "app_secret": "secret"},
+            "handover_log": {"template": {"source_path": r"D:\tpl\handover.xlsx"}},
+        },
+        runtime_status_coordinator=None,
+        deployment_snapshot=lambda: {"role_mode": "external", "node_label": "外网端"},
+        config_path="settings.json",
+        updater_snapshot=lambda: {},
+        shared_root_diagnostic_snapshot=lambda **_kwargs: {},
+        scheduler_status=lambda: {},
+        handover_scheduler_status=lambda: {},
+        wet_bulb_collection_scheduler_status=lambda: {},
+        day_metric_upload_scheduler_status=lambda: {},
+        alarm_event_upload_scheduler_status=lambda: {},
+        monthly_event_report_scheduler_status=lambda: {},
+        monthly_change_report_scheduler_status=lambda: {},
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                container=container,
+                _health_component_cache={},
+                _health_component_cache_lock=threading.Lock(),
+            )
+        )
+    )
+
+    started_at = time.perf_counter()
+    payload = routes.get_external_dashboard_summary(request)
+    elapsed = time.perf_counter() - started_at
+
+    assert payload["ok"] is True
+    assert elapsed < 0.5
 
 
 def test_external_dashboard_summary_role_mismatch_returns_empty_display():

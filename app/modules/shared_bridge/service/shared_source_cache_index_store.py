@@ -110,6 +110,25 @@ class SharedSourceCacheIndexStore:
             bucket_key=normalized["bucket_key"],
             duty_shift=normalized["duty_shift"],
         )
+        entry_id = normalized["entry_id"]
+        if entry_id:
+            for candidate in self._iter_candidate_paths(
+                source_family=normalized["source_family"],
+                building=normalized["building"],
+            ):
+                if candidate == path:
+                    continue
+                try:
+                    payload = json.loads(candidate.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if _normalize_entry(payload)["entry_id"] == entry_id:
+                    try:
+                        candidate.unlink(missing_ok=True)
+                    except Exception:
+                        pass
         now_text = _now_text()
         if not normalized["created_at"]:
             normalized["created_at"] = now_text

@@ -55,6 +55,66 @@ def test_source_cache_entries_dual_write_json_index_and_read_prefer_index(tmp_pa
     assert rows[0]["relative_path"] == source_file.relative_to(shared_root).as_posix()
 
 
+def test_source_cache_index_upsert_removes_same_entry_old_shift_path(tmp_path) -> None:
+    shared_root = tmp_path / "share"
+    index = SharedSourceCacheIndexStore(shared_root)
+
+    base_entry = {
+        "entry_id": "entry-same-1",
+        "source_family": "handover_capacity_report_family",
+        "building": "B楼",
+        "bucket_kind": "latest",
+        "bucket_key": "2026-04-20 11",
+        "duty_date": "",
+        "duty_shift": "",
+        "downloaded_at": "2026-04-20 11:10:00",
+        "relative_path": "交接班容量报表源文件/202604/20260420--11/B楼.xlsx",
+        "status": "refreshing",
+        "file_hash": "",
+        "size_bytes": 0,
+        "metadata": {"refreshing_at": "2026-04-20 11:10:00"},
+        "created_at": "2026-04-20 11:10:00",
+        "updated_at": "2026-04-20 11:10:00",
+    }
+    index.upsert_entry(base_entry)
+
+    old_path = (
+        shared_root
+        / "source_cache_index"
+        / "handover_capacity_report_family"
+        / "B楼"
+        / "2026-04-20_11.json"
+    )
+    assert old_path.exists()
+
+    updated_entry = {
+        **base_entry,
+        "duty_shift": "none",
+        "status": "failed",
+        "metadata": {"error": "共享文件刷新超时"},
+        "updated_at": "2026-04-20 14:30:14",
+    }
+    index.upsert_entry(updated_entry)
+
+    new_path = (
+        shared_root
+        / "source_cache_index"
+        / "handover_capacity_report_family"
+        / "B楼"
+        / "2026-04-20_11--none.json"
+    )
+    assert not old_path.exists()
+    assert new_path.exists()
+    rows = index.list_entries(
+        source_family="handover_capacity_report_family",
+        building="B楼",
+        bucket_kind="latest",
+        bucket_key="2026-04-20 11",
+        status="refreshing",
+    )
+    assert rows == []
+
+
 def test_runtime_service_falls_back_to_mailbox_when_shared_db_is_busy(tmp_path, monkeypatch) -> None:
     shared_root = tmp_path / "share"
     runtime_config = {
