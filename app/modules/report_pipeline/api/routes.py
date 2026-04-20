@@ -403,6 +403,24 @@ def _external_source_cache_overview_has_runtime_rows(payload: Any) -> bool:
     return False
 
 
+def _remember_external_source_cache_overview(request: Request, payload: Any) -> Dict[str, Any]:
+    overview = copy.deepcopy(payload) if isinstance(payload, dict) else {}
+    attr_name = "_external_source_cache_overview_last_non_empty"
+    if _external_source_cache_overview_has_runtime_rows(overview):
+        try:
+            setattr(request.app.state, attr_name, copy.deepcopy(overview))
+        except Exception:
+            pass
+        return overview
+    try:
+        cached = getattr(request.app.state, attr_name, None)
+    except Exception:
+        cached = None
+    if isinstance(cached, dict) and _external_source_cache_overview_has_runtime_rows(cached):
+        return copy.deepcopy(cached)
+    return overview
+
+
 def _is_recoverable_resume_index_error(exc: Exception) -> bool:
     if not isinstance(exc, OSError):
         return False
@@ -4955,11 +4973,19 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
     fast_overview_getter = getattr(bridge_service, "get_external_source_cache_overview_fast", None)
     if callable(fast_overview_getter):
         try:
-            fast_payload = fast_overview_getter()
-            if isinstance(fast_payload, dict):
-                fast_source_cache_overview = fast_payload
+            last_overview = getattr(request.app.state, "_external_source_cache_overview_last_non_empty", None)
         except Exception:
-            fast_source_cache_overview = {}
+            last_overview = None
+        fast_default = copy.deepcopy(last_overview) if isinstance(last_overview, dict) else {}
+        fast_payload = _health_cached_component_async_default(
+            request,
+            key="external_source_cache_overview_fast",
+            ttl_sec=1.0,
+            builder=fast_overview_getter,
+            default=fast_default,
+        )
+        if isinstance(fast_payload, dict):
+            fast_source_cache_overview = fast_payload
     shared_source_cache_overview = apply_external_source_cache_backfill_overlays(
         fast_source_cache_overview
         if _external_source_cache_overview_has_runtime_rows(fast_source_cache_overview)
@@ -4995,6 +5021,10 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
                 if isinstance(live_shared_bridge, dict)
                 else {}
             )
+    shared_source_cache_overview = _remember_external_source_cache_overview(
+        request,
+        shared_source_cache_overview,
+    )
     runtime_resources_summary = _read_scope("runtime_resources_summary") or _empty_runtime_resources_summary()
     deployment_payload = health_lite.get("deployment", {}) if isinstance(health_lite, dict) else {}
     role_mode = normalize_role_mode(

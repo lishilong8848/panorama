@@ -616,6 +616,111 @@ def test_get_external_dashboard_summary_falls_back_to_cached_shared_bridge_sourc
     assert payload["display"]["shared_source_cache_overview"]["families"][0]["buildings"][0]["status_text"] == "已就绪"
 
 
+def test_get_external_dashboard_summary_keeps_last_non_empty_source_cache_when_current_snapshot_empty(monkeypatch):
+    monkeypatch.setattr(routes, "DayMetricBitableExportService", _FakeDayMetricBitableExportService)
+    monkeypatch.setattr(routes, "SharedSourceCacheService", _FakeSharedSourceCacheService)
+    monkeypatch.setattr(routes, "ReviewLinkDeliveryService", _FakeReviewLinkDeliveryService)
+    monkeypatch.setattr(
+        routes,
+        "_build_latest_handover_review_status",
+        lambda _container: routes._empty_handover_review_status(),
+    )
+    monkeypatch.setattr(
+        routes,
+        "build_bridge_tasks_summary",
+        lambda tasks, count=0: {
+            "tasks": [],
+            "count": 0,
+            "display": {"overview": {"tone": "neutral", "status_text": "当前空闲", "summary_text": "暂无共享桥接任务。"}},
+        },
+    )
+    monkeypatch.setattr(routes, "present_bridge_task", lambda task: task)
+
+    class _EmptySourceCoordinator(_FakeCoordinator):
+        def read_scope_snapshot(self, scope):
+            if scope == "external_shared_bridge_full":
+                return {"payload": {"enabled": True, "role_mode": "external", "internal_source_cache": {}, "internal_alert_status": {}}}
+            if scope == "bridge_tasks_dashboard_summary":
+                return {"payload": {"tasks": [], "count": 0, "display": {"overview": {"tone": "neutral", "status_text": "当前空闲", "summary_text": "暂无共享桥接任务。"}}}}
+            if scope == "bridge_tasks_summary":
+                return {"payload": {"tasks": [], "count": 0}}
+            return super().read_scope_snapshot(scope)
+
+    last_non_empty = {
+        "tone": "success",
+        "status_text": "共享文件已就绪",
+        "summary_text": "上一份有效源文件状态。",
+        "detail_text": "上一份有效源文件状态。",
+        "reference_bucket_key": "2026-04-20 13",
+        "families": [
+            {
+                "key": "handover_log_family",
+                "title": "交接班日志源文件",
+                "tone": "success",
+                "status_text": "共享文件已就绪",
+                "summary_text": "当前参考桶的共享文件已准备完成。",
+                "detail_text": "",
+                "current_bucket": "2026-04-20 13",
+                "best_bucket_key": "2026-04-20 13",
+                "can_proceed": True,
+                "buildings": [
+                    {
+                        "building": "A楼",
+                        "status_key": "ready",
+                        "status_text": "已就绪",
+                        "detail_text": "2026-04-20 13:31:43",
+                        "bucket_key": "2026-04-20 13",
+                        "relative_path": "交接班日志源文件/test.xlsx",
+                    }
+                ],
+            }
+        ],
+    }
+    container = SimpleNamespace(
+        config={"deployment": {"role_mode": "external"}},
+        runtime_config={
+            "deployment": {"role_mode": "external"},
+            "shared_bridge": {"root_dir": r"C:\share"},
+            "feishu": {"app_id": "cli_xxx", "app_secret": "secret"},
+            "handover_log": {"template": {"source_path": r"D:\tpl\handover.xlsx"}},
+        },
+        runtime_status_coordinator=_EmptySourceCoordinator(),
+        deployment_snapshot=lambda: {"role_mode": "external", "node_label": "外网端"},
+        config_path="settings.json",
+        shared_bridge_snapshot=lambda mode="external_full": {
+            "enabled": True,
+            "role_mode": "external",
+            "internal_source_cache": {},
+            "internal_alert_status": {},
+        },
+        updater_snapshot=lambda: {},
+        shared_root_diagnostic_snapshot=lambda **_kwargs: {},
+        scheduler_status=lambda: {},
+        handover_scheduler_status=lambda: {},
+        wet_bulb_collection_scheduler_status=lambda: {},
+        day_metric_upload_scheduler_status=lambda: {},
+        alarm_event_upload_scheduler_status=lambda: {},
+        monthly_event_report_scheduler_status=lambda: {},
+        monthly_change_report_scheduler_status=lambda: {},
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                container=container,
+                _external_source_cache_overview_last_non_empty=last_non_empty,
+                _health_component_cache={},
+                _health_component_cache_lock=threading.Lock(),
+            )
+        )
+    )
+
+    payload = routes.get_external_dashboard_summary(request)
+
+    assert payload["shared_source_cache_overview"]["families"][0]["buildings"][0]["status_text"] == "已就绪"
+    assert payload["shared_source_cache_overview"]["families"][0]["buildings"][0]["relative_path"] == "交接班日志源文件/test.xlsx"
+    assert payload["display"]["shared_source_cache_overview"]["families"][0]["buildings"][0]["status_text"] == "已就绪"
+
+
 def test_get_external_dashboard_summary_does_not_block_on_shared_bridge_snapshot_without_coordinator(monkeypatch):
     monkeypatch.setattr(routes, "DayMetricBitableExportService", _FakeDayMetricBitableExportService)
     monkeypatch.setattr(routes, "SharedSourceCacheService", _FakeSharedSourceCacheService)
@@ -674,6 +779,101 @@ def test_get_external_dashboard_summary_does_not_block_on_shared_bridge_snapshot
 
     assert payload["ok"] is True
     assert elapsed < 0.5
+
+
+def test_get_external_dashboard_summary_does_not_block_on_fast_source_cache_overview(monkeypatch):
+    monkeypatch.setattr(routes, "DayMetricBitableExportService", _FakeDayMetricBitableExportService)
+    monkeypatch.setattr(routes, "SharedSourceCacheService", _FakeSharedSourceCacheService)
+    monkeypatch.setattr(routes, "ReviewLinkDeliveryService", _FakeReviewLinkDeliveryService)
+    monkeypatch.setattr(
+        routes,
+        "_build_latest_handover_review_status",
+        lambda _container: routes._empty_handover_review_status(),
+    )
+
+    class _SlowBridgeService:
+        def get_external_source_cache_overview_fast(self):
+            time.sleep(1.0)
+            return {
+                "families": [
+                    {
+                        "key": "handover_log_family",
+                        "current_bucket": "2026-04-20 14",
+                        "buildings": [
+                            {
+                                "building": "A楼",
+                                "status_key": "ready",
+                                "status_text": "已就绪",
+                                "detail_text": "共享文件已就绪",
+                                "bucket_key": "2026-04-20 14",
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    class _EmptySourceCoordinator(_FakeCoordinator):
+        def read_scope_snapshot(self, scope):
+            if scope == "external_shared_bridge_full":
+                return {
+                    "payload": {
+                        "enabled": True,
+                        "role_mode": "external",
+                        "internal_source_cache": {},
+                        "internal_alert_status": {},
+                    }
+                }
+            return super().read_scope_snapshot(scope)
+
+    container = SimpleNamespace(
+        config={"deployment": {"role_mode": "external"}},
+        runtime_config={
+            "deployment": {"role_mode": "external"},
+            "shared_bridge": {"root_dir": r"C:\share"},
+            "feishu": {"app_id": "cli_xxx", "app_secret": "secret"},
+            "handover_log": {"template": {"source_path": r"D:\tpl\handover.xlsx"}},
+        },
+        runtime_status_coordinator=_EmptySourceCoordinator(),
+        shared_bridge_service=_SlowBridgeService(),
+        deployment_snapshot=lambda: {"role_mode": "external", "node_label": "外网端"},
+        config_path="settings.json",
+        shared_bridge_snapshot=lambda mode="external_full": {
+            "enabled": True,
+            "role_mode": "external",
+            "internal_source_cache": {},
+            "internal_alert_status": {},
+        },
+        updater_snapshot=lambda: {},
+        shared_root_diagnostic_snapshot=lambda **_kwargs: {},
+        scheduler_status=lambda: {},
+        handover_scheduler_status=lambda: {},
+        wet_bulb_collection_scheduler_status=lambda: {},
+        day_metric_upload_scheduler_status=lambda: {},
+        alarm_event_upload_scheduler_status=lambda: {},
+        monthly_event_report_scheduler_status=lambda: {},
+        monthly_change_report_scheduler_status=lambda: {},
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                container=container,
+                _health_component_cache={},
+                _health_component_cache_lock=threading.Lock(),
+            )
+        )
+    )
+
+    started_at = time.perf_counter()
+    payload = routes.get_external_dashboard_summary(request)
+    elapsed = time.perf_counter() - started_at
+
+    assert payload["ok"] is True
+    assert elapsed < 0.5
+    time.sleep(1.1)
+    refreshed_payload = routes.get_external_dashboard_summary(request)
+    family = refreshed_payload["shared_source_cache_overview"]["families"][0]
+    assert family["buildings"][0]["status_text"] == "已就绪"
+    assert family["buildings"][0]["bucket_key"] == "2026-04-20 14"
 
 
 def test_external_dashboard_summary_role_mismatch_returns_empty_display():
