@@ -951,7 +951,8 @@ class SharedSourceCacheService:
 
     def get_health_snapshot(self, *, mode: str = "external_full") -> Dict[str, Any]:
         normalized_mode = str(mode or "external_full").strip().lower() or "external_full"
-        self._repair_stale_refreshing_entries()
+        if normalized_mode != "internal_light":
+            self._repair_stale_refreshing_entries()
         with self._lock:
             current_bucket = self._current_hour_bucket or self.current_hour_bucket()
             families = copy.deepcopy(self._family_status)

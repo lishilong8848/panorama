@@ -483,7 +483,7 @@ def test_internal_runtime_status_repairs_placeholder_sqlite_snapshot_from_live_s
     assert service.health_modes == ["internal_light"]
 
 
-def test_internal_runtime_building_prefers_runtime_status_sqlite_snapshot() -> None:
+def test_internal_runtime_building_prefers_live_state_over_sqlite_snapshot() -> None:
     service = _FakeBridgeService()
 
     class _Coordinator:
@@ -520,9 +520,9 @@ def test_internal_runtime_building_prefers_runtime_status_sqlite_snapshot() -> N
     response = routes.bridge_internal_runtime_status_building("a", request)
 
     assert response["ok"] is True
-    assert response["status"]["page_slot"]["in_use"] is False
-    assert response["status"]["display"]["source_families"]["handover_log_family"]["status_text"] == "已就绪"
-    assert service.health_modes == []
+    assert response["status"]["page_slot"]["in_use"] is True
+    assert response["status"]["display"]["source_families"]["handover_log_family"]["status_text"] == "下载中"
+    assert service.health_modes == ["internal_light"]
 
 
 def test_bridge_shared_root_self_check_returns_diagnostics() -> None:
