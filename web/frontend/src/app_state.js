@@ -976,7 +976,15 @@ export function createAppState(vueApi) {
   });
 
   const canRun = computed(() => {
-    return updaterMirrorOverview.value?.businessActions?.allowed === true;
+    const businessActions = updaterMirrorOverview.value?.businessActions;
+    if (!businessActions || typeof businessActions !== "object") {
+      return true;
+    }
+    const reasonCode = String(businessActions.reasonCode || "").trim().toLowerCase();
+    if (reasonCode === "pending_backend") {
+      return true;
+    }
+    return businessActions.allowed !== false;
   });
   const isStatusView = computed(() => currentView.value === "status");
   const isDashboardView = computed(() => currentView.value === "dashboard");
