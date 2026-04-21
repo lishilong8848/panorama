@@ -327,6 +327,70 @@ def _health_cached_component_async_default(
     return return_value
 
 
+def _health_cached_component_sync_default(
+    request: Request,
+    *,
+    key: str,
+    ttl_sec: float,
+    builder: Callable[[], Any],
+    default: Any,
+) -> Any:
+    state = request.app.state
+    cache = getattr(state, _HEALTH_COMPONENT_CACHE_ATTR, None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(state, _HEALTH_COMPONENT_CACHE_ATTR, cache)
+    cache_lock = getattr(state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, None)
+    if not isinstance(cache_lock, _THREAD_LOCK_TYPE):
+        cache_lock = threading.Lock()
+        setattr(state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, cache_lock)
+
+    ttl = max(0.0, float(ttl_sec or 0.0))
+    now = time.monotonic()
+    default_value = copy.deepcopy(default)
+    stale_value = copy.deepcopy(default_value)
+    stale_ready = False
+
+    with cache_lock:
+        entry = cache.get(key)
+        if isinstance(entry, dict):
+            age_sec = now - float(entry.get("ts", 0.0) or 0.0)
+            if bool(entry.get("ready", False)):
+                stale_value = copy.deepcopy(entry.get("value"))
+                stale_ready = True
+                if age_sec <= ttl:
+                    return stale_value
+            if bool(entry.get("refreshing", False)):
+                return stale_value
+            entry["refreshing"] = True
+            cache[key] = entry
+        else:
+            cache[key] = {
+                "ts": 0.0,
+                "value": copy.deepcopy(default_value),
+                "ready": False,
+                "refreshing": True,
+            }
+
+    value = copy.deepcopy(stale_value)
+    ready = stale_ready
+    try:
+        value = builder()
+        ready = True
+    except Exception:
+        value = copy.deepcopy(stale_value)
+        ready = stale_ready
+    finally:
+        with cache_lock:
+            cache[key] = {
+                "ts": time.monotonic(),
+                "value": copy.deepcopy(value),
+                "ready": ready,
+                "refreshing": False,
+            }
+    return copy.deepcopy(value)
+
+
 def _empty_job_panel_summary() -> Dict[str, Any]:
     return {
         "jobs": [],
@@ -5225,7 +5289,7 @@ def _build_external_source_cache_module(request: Request) -> Dict[str, Any]:
             last_overview = getattr(request.app.state, "_external_source_cache_overview_last_non_empty", None)
         except Exception:
             last_overview = None
-        fast_payload = _health_cached_component_async_default(
+        fast_payload = _health_cached_component_sync_default(
             request,
             key="external_source_cache_overview_fast",
             ttl_sec=1.0,
@@ -5885,7 +5949,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         except Exception:
             last_overview = None
         fast_default = copy.deepcopy(last_overview) if isinstance(last_overview, dict) else {}
-        fast_payload = _health_cached_component_async_default(
+        fast_payload = _health_cached_component_sync_default(
             request,
             key="external_source_cache_overview_fast",
             ttl_sec=1.0,

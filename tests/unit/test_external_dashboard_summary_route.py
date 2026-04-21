@@ -789,7 +789,7 @@ def test_get_external_dashboard_summary_does_not_block_on_shared_bridge_snapshot
     assert elapsed < 0.5
 
 
-def test_get_external_dashboard_summary_does_not_block_on_fast_source_cache_overview(monkeypatch):
+def test_get_external_dashboard_summary_returns_fresh_fast_source_cache_overview_on_first_request(monkeypatch):
     monkeypatch.setattr(routes, "DayMetricBitableExportService", _FakeDayMetricBitableExportService)
     monkeypatch.setattr(routes, "SharedSourceCacheService", _FakeSharedSourceCacheService)
     monkeypatch.setattr(routes, "ReviewLinkDeliveryService", _FakeReviewLinkDeliveryService)
@@ -799,14 +799,43 @@ def test_get_external_dashboard_summary_does_not_block_on_fast_source_cache_over
         lambda _container: routes._empty_handover_review_status(),
     )
 
-    class _SlowBridgeService:
+    stale_overview = {
+        "tone": "warning",
+        "status_text": "共享文件已就绪",
+        "summary_text": "旧小时",
+        "reference_bucket_key": "2026-04-20 12",
+        "families": [
+            {
+                "key": "handover_log_family",
+                "title": "交接班日志源文件",
+                "best_bucket_key": "2026-04-20 12",
+                "status_text": "共享文件已就绪",
+                "buildings": [
+                    {
+                        "building": "A楼",
+                        "status_key": "ready",
+                        "status_text": "已就绪",
+                        "detail_text": "共享文件已就绪",
+                        "bucket_key": "2026-04-20 12",
+                        "relative_path": "交接班日志源文件/old.xlsx",
+                    }
+                ],
+            }
+        ],
+    }
+
+    class _FreshBridgeService:
         def get_external_source_cache_overview_fast(self):
-            time.sleep(1.0)
             return {
+                "tone": "success",
+                "status_text": "共享文件已就绪",
+                "summary_text": "新小时",
+                "reference_bucket_key": "2026-04-20 14",
                 "families": [
                     {
                         "key": "handover_log_family",
-                        "current_bucket": "2026-04-20 14",
+                        "title": "交接班日志源文件",
+                        "best_bucket_key": "2026-04-20 14",
                         "buildings": [
                             {
                                 "building": "A楼",
@@ -814,6 +843,7 @@ def test_get_external_dashboard_summary_does_not_block_on_fast_source_cache_over
                                 "status_text": "已就绪",
                                 "detail_text": "共享文件已就绪",
                                 "bucket_key": "2026-04-20 14",
+                                "relative_path": "交接班日志源文件/new.xlsx",
                             }
                         ],
                     }
@@ -842,7 +872,7 @@ def test_get_external_dashboard_summary_does_not_block_on_fast_source_cache_over
             "handover_log": {"template": {"source_path": r"D:\tpl\handover.xlsx"}},
         },
         runtime_status_coordinator=_EmptySourceCoordinator(),
-        shared_bridge_service=_SlowBridgeService(),
+        shared_bridge_service=_FreshBridgeService(),
         deployment_snapshot=lambda: {"role_mode": "external", "node_label": "外网端"},
         config_path="settings.json",
         shared_bridge_snapshot=lambda mode="external_full": {
@@ -867,21 +897,18 @@ def test_get_external_dashboard_summary_does_not_block_on_fast_source_cache_over
                 container=container,
                 _health_component_cache={},
                 _health_component_cache_lock=threading.Lock(),
+                _external_source_cache_overview_last_non_empty=stale_overview,
             )
         )
     )
 
-    started_at = time.perf_counter()
     payload = routes.get_external_dashboard_summary(request)
-    elapsed = time.perf_counter() - started_at
 
     assert payload["ok"] is True
-    assert elapsed < 0.5
-    time.sleep(1.1)
-    refreshed_payload = routes.get_external_dashboard_summary(request)
-    family = refreshed_payload["shared_source_cache_overview"]["families"][0]
+    family = payload["shared_source_cache_overview"]["families"][0]
     assert family["buildings"][0]["status_text"] == "已就绪"
     assert family["buildings"][0]["bucket_key"] == "2026-04-20 14"
+    assert family["buildings"][0]["relative_path"] == "交接班日志源文件/new.xlsx"
 
 
 def test_external_dashboard_summary_role_mismatch_returns_empty_display():
@@ -1069,3 +1096,86 @@ def test_external_source_cache_endpoint_returns_slim_display_payload():
     assert "auto_retry_signature" not in overview
     assert "family_retry_signatures" not in overview
     assert "shared_source_cache_overview" not in payload["display"]
+
+
+def test_external_source_cache_endpoint_returns_fresh_fast_overview_on_first_request():
+    stale_overview = {
+        "tone": "warning",
+        "status_text": "共享文件已就绪",
+        "summary_text": "旧小时",
+        "reference_bucket_key": "2026-04-21 12",
+        "families": [
+            {
+                "key": "handover_log_family",
+                "title": "交接班日志源文件",
+                "best_bucket_key": "2026-04-21 12",
+                "status_text": "共享文件已就绪",
+                "buildings": [
+                    {
+                        "building": "A楼",
+                        "bucket_key": "2026-04-21 12",
+                        "status": "ready",
+                        "status_key": "ready",
+                        "status_text": "已就绪",
+                        "detail_text": "2026-04-21 12:05:00",
+                        "downloaded_at": "2026-04-21 12:05:00",
+                        "relative_path": "交接班日志源文件/old.xlsx",
+                        "resolved_file_path": r"\\172.16.1.2\share\交接班日志源文件\old.xlsx",
+                    }
+                ],
+            }
+        ],
+    }
+    fresh_overview = {
+        "tone": "success",
+        "status_text": "共享文件已就绪",
+        "summary_text": "新小时",
+        "reference_bucket_key": "2026-04-21 15",
+        "families": [
+            {
+                "key": "handover_log_family",
+                "title": "交接班日志源文件",
+                "best_bucket_key": "2026-04-21 15",
+                "status_text": "共享文件已就绪",
+                "buildings": [
+                    {
+                        "building": "A楼",
+                        "bucket_key": "2026-04-21 15",
+                        "status": "ready",
+                        "status_key": "ready",
+                        "status_text": "已就绪",
+                        "detail_text": "2026-04-21 15:05:00",
+                        "downloaded_at": "2026-04-21 15:05:00",
+                        "relative_path": "交接班日志源文件/new.xlsx",
+                        "resolved_file_path": r"\\172.16.1.2\share\交接班日志源文件\new.xlsx",
+                    }
+                ],
+            }
+        ],
+    }
+    container = SimpleNamespace(
+        config={"deployment": {"role_mode": "external"}},
+        runtime_config={"deployment": {"role_mode": "external"}},
+        deployment_snapshot=lambda: {"role_mode": "external", "node_label": "外网端"},
+        shared_bridge_service=_FakeFastSourceCacheService(fresh_overview),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                container=container,
+                _health_component_cache={},
+                _health_component_cache_lock=threading.Lock(),
+                _external_source_cache_overview_last_non_empty=stale_overview,
+            )
+        )
+    )
+
+    payload = routes.get_external_runtime_source_cache(request)
+
+    overview = payload["shared_source_cache_overview"]
+    family = overview["families"][0]
+    building = family["buildings"][0]
+    assert overview["reference_bucket_key"] == "2026-04-21 15"
+    assert family["best_bucket_key"] == "2026-04-21 15"
+    assert building["bucket_key"] == "2026-04-21 15"
+    assert building["relative_path"] == "交接班日志源文件/new.xlsx"
