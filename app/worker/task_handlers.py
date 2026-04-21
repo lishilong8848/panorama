@@ -10,6 +10,7 @@ from app.modules.report_pipeline.service.calculation_service import CalculationS
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
 from app.modules.sheet_import.service.sheet_import_service import SheetImportService
+from app.modules.shared_bridge.service import shared_bridge_runtime_service as shared_bridge_runtime_module
 from app.shared.utils.runtime_temp_workspace import cleanup_runtime_temp_dir
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
@@ -197,6 +198,54 @@ def handle_multi_date(
     except Exception as exc:  # noqa: BLE001
         notify.send_failure(stage="多日期自动流程", detail=str(exc), emit_log=emit_log)
         raise
+
+
+def handle_alarm_event_upload(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    emit_log: Callable[[str], None],
+) -> Dict[str, Any]:
+    notify = WebhookNotifyService(config)
+    mode = str(payload.get("mode", "") or "").strip().lower() or "full"
+    building = str(payload.get("building", "") or "").strip()
+    runtime = shared_bridge_runtime_module.SharedBridgeRuntimeService(
+        runtime_config=config,
+        app_version="worker",
+        emit_log=emit_log,
+    )
+    try:
+        if mode == "single_building":
+            result = runtime.upload_alarm_event_source_cache_single_building_to_bitable(
+                building=building,
+                emit_log=emit_log,
+            )
+        else:
+            result = runtime.upload_alarm_event_source_cache_full_to_bitable(emit_log=emit_log)
+        accepted = bool(result.get("accepted"))
+        reason = str(result.get("reason", "") or "").strip().lower()
+        if not accepted:
+            raise RuntimeError(str(result.get("error", "") or "").strip() or "告警信息上传失败")
+        if reason == "partial_completed":
+            failed_entries = ", ".join(
+                str(item or "").strip()
+                for item in (result.get("failed_entries", []) if isinstance(result.get("failed_entries", []), list) else [])
+                if str(item or "").strip()
+            )
+            raise RuntimeError(f"存在失败楼栋，请查看日志{f'：{failed_entries}' if failed_entries else ''}")
+        return result
+    except Exception as exc:  # noqa: BLE001
+        notify.send_failure(
+            stage="告警信息上传",
+            detail=str(exc),
+            building=building or None,
+            emit_log=emit_log,
+        )
+        raise
+    finally:
+        try:
+            runtime.stop()
+        except Exception:
+            pass
 
 
 def handle_resume_upload(
@@ -764,6 +813,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "wet_bulb_collection_run": handle_wet_bulb_collection_run,
     "auto_once": handle_auto_once,
     "multi_date": handle_multi_date,
+    "alarm_event_upload": handle_alarm_event_upload,
     "resume_upload": handle_resume_upload,
     "manual_upload": handle_manual_upload,
     "handover_from_file": handle_handover_from_file,

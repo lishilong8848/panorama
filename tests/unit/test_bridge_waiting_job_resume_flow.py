@@ -403,10 +403,7 @@ def test_handover_external_continue_fails_bound_job_when_artifact_missing(monkey
 
     updated_after_internal = internal_service.get_task(task["task_id"])
     assert updated_after_internal is not None
-    artifact_relative_path = str(
-        next(item for item in updated_after_internal["artifacts"] if item.get("artifact_kind") == "source_file")["relative_path"]
-    )
-    (tmp_path / artifact_relative_path).unlink()
+    Path(updated_after_internal["result"]["internal"]["handover_files"][0]["file_path"]).unlink()
 
     job_service = _FakeResumeJobService()
     external_service = runtime_module.SharedBridgeRuntimeService(
@@ -570,10 +567,7 @@ def test_reconcile_waiting_jobs_fails_when_bridge_success_but_resume_files_missi
 
     updated_after_success = external_service.get_task(task["task_id"])
     assert updated_after_success is not None
-    artifact_relative_path = str(
-        next(item for item in updated_after_success["artifacts"] if item.get("artifact_kind") == "source_file")["relative_path"]
-    )
-    (tmp_path / artifact_relative_path).unlink()
+    Path(updated_after_success["result"]["internal"]["handover_files"][0]["file_path"]).unlink()
 
     reconcile_job_service = _FakeReconcileJobService(
         [
@@ -598,7 +592,7 @@ def test_reconcile_waiting_jobs_fails_when_bridge_success_but_resume_files_missi
     assert len(reconcile_job_service.fail_calls) == 1
     assert reconcile_job_service.fail_calls[0]["job_id"] == "job-origin-reconcile-2"
     assert "自动恢复原任务失败" in reconcile_job_service.fail_calls[0]["error_text"]
-    assert "共享目录中没有可继续处理的交接班源文件" in reconcile_job_service.fail_calls[0]["error_text"]
+    assert "交接班共享源文件不存在或不可访问" in reconcile_job_service.fail_calls[0]["error_text"]
 
 
 def test_monthly_cache_fill_external_resumes_bound_job_when_resume_job_id_present(monkeypatch, tmp_path: Path) -> None:
@@ -784,6 +778,265 @@ def test_monthly_resume_upload_external_resumes_bound_job_when_resume_job_id_pre
     assert job_service.resume_calls[0]["job_id"] == "job-origin-4"
     assert job_service.resume_calls[0]["worker_payload"]["run_id"] == "run-1"
     assert job_service.resume_calls[0]["worker_payload"]["bridge_task_id"] == task["task_id"]
+
+
+def test_reconcile_waiting_jobs_resumes_monthly_auto_once_job_from_canonical_entries(tmp_path: Path) -> None:
+    a_file = tmp_path / "monthly-latest" / "A楼.xlsx"
+    b_file = tmp_path / "monthly-latest" / "B楼.xlsx"
+    _write_workbook(a_file)
+    _write_workbook(b_file)
+
+    class _FakeSourceCacheService:
+        def get_enabled_buildings(self):
+            return ["A楼", "B楼"]
+
+        def fill_monthly_latest(self, *, building, bucket_key, emit_log):  # noqa: ANN001
+            emit_log(f"fill:{building}:{bucket_key}")
+            file_path = a_file if building == "A楼" else b_file
+            return [
+                {
+                    "building": building,
+                    "file_path": str(file_path),
+                    "duty_date": "2026-04-21",
+                    "metadata": {"upload_date": "2026-04-21"},
+                }
+            ]
+
+        def get_latest_ready_entries(self, *, source_family, buildings, bucket_key):  # noqa: ANN001
+            assert source_family == runtime_module.FAMILY_MONTHLY_REPORT
+            assert bucket_key == "2026-04-21 10"
+            output = []
+            for building in buildings:
+                file_path = a_file if building == "A楼" else b_file
+                output.append(
+                    {
+                        "building": building,
+                        "file_path": str(file_path),
+                        "duty_date": "2026-04-21",
+                        "metadata": {"upload_date": "2026-04-21"},
+                    }
+                )
+            return output
+
+    internal_service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "internal"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    internal_service._source_cache_service = _FakeSourceCacheService()
+    task = internal_service.create_monthly_auto_once_task(
+        resume_job_id="job-origin-monthly-auto",
+        target_bucket_key="2026-04-21 10",
+        requested_by="manual",
+        source="manual",
+    )
+    claimed_internal = internal_service._store.claim_next_task(role_target="internal", node_id="internal-node", lease_sec=30)
+    assert claimed_internal is not None
+    internal_service._run_monthly_internal_download(claimed_internal)
+
+    first_resume_service = _FakeResumeJobService()
+    external_service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+        job_service=first_resume_service,
+    )
+    external_service._source_cache_service = _FakeSourceCacheService()
+    claimed_external = external_service._store.claim_next_task(role_target="external", node_id="external-node", lease_sec=30)
+    assert claimed_external is not None
+    external_service._run_monthly_external_resume(claimed_external)
+
+    reconcile_job_service = _FakeReconcileJobService(
+        [
+            {
+                "job_id": "job-origin-monthly-auto",
+                "status": "waiting_resource",
+                "wait_reason": "waiting:shared_bridge",
+                "bridge_task_id": task["task_id"],
+            }
+        ]
+    )
+    restarted_service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+        job_service=reconcile_job_service,
+    )
+    restarted_service._source_cache_service = _FakeSourceCacheService()
+
+    restarted_service._reconcile_waiting_jobs()
+
+    assert reconcile_job_service.fail_calls == []
+    assert len(reconcile_job_service.resume_calls) == 1
+    payload = reconcile_job_service.resume_calls[0]["worker_payload"]
+    assert payload["resume_kind"] == "shared_bridge_monthly_auto_once"
+    assert payload["bridge_task_id"] == task["task_id"]
+    assert payload["file_items"] == [
+        {"building": "A楼", "file_path": str(a_file), "upload_date": "2026-04-21"},
+        {"building": "B楼", "file_path": str(b_file), "upload_date": "2026-04-21"},
+    ]
+
+
+def test_reconcile_waiting_jobs_keeps_monthly_auto_once_waiting_when_canonical_temporarily_missing(tmp_path: Path) -> None:
+    a_file = tmp_path / "monthly-latest" / "A楼.xlsx"
+    _write_workbook(a_file)
+
+    class _ReadySourceCacheService:
+        def get_enabled_buildings(self):
+            return ["A楼"]
+
+        def fill_monthly_latest(self, *, building, bucket_key, emit_log):  # noqa: ANN001
+            emit_log(f"fill:{building}:{bucket_key}")
+            return [
+                {
+                    "building": building,
+                    "file_path": str(a_file),
+                    "duty_date": "2026-04-21",
+                    "metadata": {"upload_date": "2026-04-21"},
+                }
+            ]
+
+        def get_latest_ready_entries(self, *, source_family, buildings, bucket_key):  # noqa: ANN001
+            return [
+                {
+                    "building": "A楼",
+                    "file_path": str(a_file),
+                    "duty_date": "2026-04-21",
+                    "metadata": {"upload_date": "2026-04-21"},
+                }
+            ]
+
+    class _MissingSourceCacheService:
+        def get_enabled_buildings(self):
+            return ["A楼"]
+
+        def get_latest_ready_entries(self, *, source_family, buildings, bucket_key):  # noqa: ANN001
+            assert source_family == runtime_module.FAMILY_MONTHLY_REPORT
+            assert buildings == ["A楼"]
+            assert bucket_key == "2026-04-21 10"
+            return []
+
+    internal_service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "internal"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    internal_service._source_cache_service = _ReadySourceCacheService()
+    task = internal_service.create_monthly_auto_once_task(
+        resume_job_id="job-origin-monthly-wait",
+        target_bucket_key="2026-04-21 10",
+        requested_by="manual",
+        source="manual",
+    )
+    claimed_internal = internal_service._store.claim_next_task(role_target="internal", node_id="internal-node", lease_sec=30)
+    assert claimed_internal is not None
+    internal_service._run_monthly_internal_download(claimed_internal)
+
+    first_resume_service = _FakeResumeJobService()
+    external_service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+        job_service=first_resume_service,
+    )
+    external_service._source_cache_service = _ReadySourceCacheService()
+    claimed_external = external_service._store.claim_next_task(role_target="external", node_id="external-node", lease_sec=30)
+    assert claimed_external is not None
+    external_service._run_monthly_external_resume(claimed_external)
+
+    reconcile_job_service = _FakeReconcileJobService(
+        [
+            {
+                "job_id": "job-origin-monthly-wait",
+                "status": "waiting_resource",
+                "wait_reason": "waiting:shared_bridge",
+                "bridge_task_id": task["task_id"],
+            }
+        ]
+    )
+    restarted_service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+        job_service=reconcile_job_service,
+    )
+    restarted_service._source_cache_service = _MissingSourceCacheService()
+
+    restarted_service._reconcile_waiting_jobs()
+
+    assert reconcile_job_service.resume_calls == []
+    assert reconcile_job_service.fail_calls == []
+
+
+def test_alarm_event_upload_external_resumes_bound_job_when_resume_job_id_present(tmp_path: Path) -> None:
+    class _FakeSourceCacheService:
+        def __init__(self) -> None:
+            self.filled_buildings: set[str] = set()
+
+        def get_enabled_buildings(self):
+            return ["A楼"]
+
+        def get_alarm_event_upload_selection(self, *, building: str = ""):
+            target = [building] if building else ["A楼"]
+            selected_entries = [
+                {"building": item, "file_path": f"Z:/share/alarm/{item}.json"}
+                for item in target
+                if item in self.filled_buildings
+            ]
+            return {
+                "selected_entries": selected_entries,
+                "selection_reference_date": "2026-04-21",
+                "missing_both_days_buildings": [item for item in target if item not in self.filled_buildings],
+            }
+
+        def fill_alarm_event_latest(self, *, building: str, bucket_key: str, emit_log):  # noqa: ANN001
+            emit_log(f"fill:{building}:{bucket_key}")
+            self.filled_buildings.add(building)
+            return {"building": building, "file_path": f"Z:/share/alarm/{building}.json"}
+
+    fake_source_cache = _FakeSourceCacheService()
+    internal_service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "internal"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    internal_service._source_cache_service = fake_source_cache
+    task = internal_service.create_alarm_event_upload_task(
+        mode="single_building",
+        building="A楼",
+        resume_job_id="job-origin-alarm-upload",
+        target_bucket_key="2026-04-21 10",
+        requested_by="manual",
+    )
+    claimed_internal = internal_service._store.claim_next_task(role_target="internal", node_id="internal-node", lease_sec=30)
+    assert claimed_internal is not None
+    internal_service._run_alarm_event_upload_internal_fill(claimed_internal)
+
+    job_service = _FakeResumeJobService()
+    external_service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(tmp_path, "external"),
+        app_version="test",
+        emit_log=lambda *_args, **_kwargs: None,
+        job_service=job_service,
+    )
+    external_service._source_cache_service = fake_source_cache
+    claimed_external = external_service._store.claim_next_task(role_target="external", node_id="external-node", lease_sec=30)
+    assert claimed_external is not None
+
+    external_service._run_alarm_event_upload_external(claimed_external)
+
+    updated = external_service.get_task(task["task_id"])
+    assert updated is not None
+    assert updated["status"] == "success"
+    assert updated["result"]["resume_job_id"] == "job-origin-alarm-upload"
+    assert len(job_service.resume_calls) == 1
+    assert job_service.resume_calls[0]["job_id"] == "job-origin-alarm-upload"
+    assert job_service.resume_calls[0]["worker_payload"] == {
+        "resume_kind": "shared_bridge_alarm_event_upload",
+        "mode": "single_building",
+        "building": "A楼",
+        "bridge_task_id": task["task_id"],
+    }
 
 
 def test_day_metric_cache_fill_external_resumes_bound_job_when_resume_job_id_present(monkeypatch, tmp_path: Path) -> None:

@@ -782,6 +782,9 @@ class SharedSourceCacheService:
             building=building,
         )
 
+    def get_alarm_event_upload_selection(self, *, building: str = "") -> Dict[str, Any]:
+        return self._build_alarm_external_selection(building=building)
+
     def _build_alarm_external_health_snapshot(self) -> Dict[str, Any]:
         selection = self._build_alarm_external_selection()
         raw_family = {
@@ -2137,30 +2140,30 @@ class SharedSourceCacheService:
     ) -> Dict[str, Any] | None:
         if self.store is None:
             return None
-        candidates: List[Dict[str, Any]] = []
-        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
-            rows = self.store.list_source_cache_entries(
-                source_family=family_name,
-                building=building,
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                status="ready",
-                limit=20,
+
+        def _sorted_by_hour(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            return sorted(
+                rows,
+                key=lambda row: (
+                    _parse_hour_bucket(str(row.get("bucket_key", "") or "").strip()) or datetime.min,
+                    str(row.get("downloaded_at", "") or "").strip(),
+                    str(row.get("updated_at", "") or "").strip(),
+                ),
+                reverse=True,
             )
-            candidates.extend(row for row in rows if isinstance(row, dict))
-        for entry in candidates:
-            if self._resolve_entry_file_path(entry) is not None:
-                return entry
+
+        latest_candidates: List[Dict[str, Any]] = []
         for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
             rows = self.store.list_source_cache_entries(
                 source_family=family_name,
                 building=building,
                 bucket_kind="latest",
+                duty_date=duty_date,
                 status="ready",
                 limit=50,
             )
-            candidates.extend(row for row in rows if isinstance(row, dict))
-        for entry in candidates:
+            latest_candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in _sorted_by_hour(latest_candidates):
             file_path = self._resolve_entry_file_path(entry)
             if file_path is None:
                 continue
@@ -2172,6 +2175,58 @@ class SharedSourceCacheService:
                 normalized_entry = dict(entry)
                 normalized_entry["duty_date"] = effective_context["duty_date"]
                 normalized_entry["duty_shift"] = effective_context["duty_shift"]
+                normalized_entry["file_path"] = str(file_path)
+                return normalized_entry
+
+        latest_candidates = []
+        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                bucket_kind="latest",
+                status="ready",
+                limit=100,
+            )
+            latest_candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in _sorted_by_hour(latest_candidates):
+            file_path = self._resolve_entry_file_path(entry)
+            if file_path is None:
+                continue
+            effective_context = self._resolve_handover_entry_duty_context(entry)
+            if (
+                effective_context["duty_date"] == duty_date
+                and effective_context["duty_shift"] == duty_shift
+            ):
+                normalized_entry = dict(entry)
+                normalized_entry["duty_date"] = effective_context["duty_date"]
+                normalized_entry["duty_shift"] = effective_context["duty_shift"]
+                normalized_entry["file_path"] = str(file_path)
+                return normalized_entry
+
+        date_candidates: List[Dict[str, Any]] = []
+        for family_name in self._source_family_candidates(FAMILY_HANDOVER_LOG):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                status="ready",
+                limit=20,
+            )
+            date_candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in date_candidates:
+            file_path = self._resolve_entry_file_path(entry)
+            if file_path is None:
+                continue
+            effective_context = self._resolve_handover_entry_duty_context(entry)
+            if (
+                effective_context["duty_date"] == duty_date
+                and effective_context["duty_shift"] == duty_shift
+            ):
+                normalized_entry = dict(entry)
+                normalized_entry["duty_date"] = effective_context["duty_date"]
+                normalized_entry["duty_shift"] = effective_context["duty_shift"]
+                normalized_entry["file_path"] = str(file_path)
                 return normalized_entry
         return None
 
@@ -2192,7 +2247,42 @@ class SharedSourceCacheService:
             )
         if self.store is None:
             return None
-        candidates: List[Dict[str, Any]] = []
+
+        def _sorted_by_hour(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            return sorted(
+                rows,
+                key=lambda row: (
+                    _parse_hour_bucket(str(row.get("bucket_key", "") or "").strip()) or datetime.min,
+                    str(row.get("downloaded_at", "") or "").strip(),
+                    str(row.get("updated_at", "") or "").strip(),
+                ),
+                reverse=True,
+            )
+
+        latest_candidates: List[Dict[str, Any]] = []
+        for family_name in self._source_family_candidates(normalized_family):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                bucket_kind="latest",
+                duty_date=duty_date,
+                status="ready",
+                limit=50,
+            )
+            latest_candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in _sorted_by_hour(latest_candidates):
+            file_path = self._resolve_entry_file_path(entry)
+            if file_path is None:
+                continue
+            if (
+                _normalize_nullable_text(entry.get("duty_date")) == duty_date
+                and _normalize_nullable_text(entry.get("duty_shift")).lower() == duty_shift
+            ):
+                normalized_entry = dict(entry)
+                normalized_entry["file_path"] = str(file_path)
+                return normalized_entry
+
+        date_candidates: List[Dict[str, Any]] = []
         for family_name in self._source_family_candidates(normalized_family):
             rows = self.store.list_source_cache_entries(
                 source_family=family_name,
@@ -2202,24 +2292,8 @@ class SharedSourceCacheService:
                 status="ready",
                 limit=20,
             )
-            candidates.extend(row for row in rows if isinstance(row, dict))
-        for entry in candidates:
-            file_path = self._resolve_entry_file_path(entry)
-            if file_path is None:
-                continue
-            normalized_entry = dict(entry)
-            normalized_entry["file_path"] = str(file_path)
-            return normalized_entry
-        for family_name in self._source_family_candidates(normalized_family):
-            rows = self.store.list_source_cache_entries(
-                source_family=family_name,
-                building=building,
-                bucket_kind="latest",
-                status="ready",
-                limit=50,
-            )
-            candidates.extend(row for row in rows if isinstance(row, dict))
-        for entry in candidates:
+            date_candidates.extend(row for row in rows if isinstance(row, dict))
+        for entry in date_candidates:
             file_path = self._resolve_entry_file_path(entry)
             if file_path is None:
                 continue
@@ -2951,15 +3025,15 @@ class SharedSourceCacheService:
                 entry = self._get_ready_entry(
                     source_family=FAMILY_MONTHLY_REPORT,
                     building=building,
-                    bucket_kind="date",
-                    bucket_key=duty_date,
+                    bucket_kind="latest",
                     duty_date=duty_date,
                 )
                 if not entry:
                     entry = self._get_ready_entry(
                         source_family=FAMILY_MONTHLY_REPORT,
                         building=building,
-                        bucket_kind="latest",
+                        bucket_kind="date",
+                        bucket_key=duty_date,
                         duty_date=duty_date,
                     )
                 if not entry:

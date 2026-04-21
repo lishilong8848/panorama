@@ -137,16 +137,19 @@ def test_upload_results_to_feishu_success_flow(tmp_path: Path) -> None:
 
     assert len(clients) == 1
     client_calls = [c[0] for c in clients[0].calls]
-    assert client_calls == [
-        "list_records",
-        "list_records",
-        "batch_delete_records",
-        "batch_delete_records",
+    assert client_calls.count("list_records") == 2
+    assert client_calls.count("batch_delete_records") == 2
+    assert client_calls[-3:] == [
         "upload_calc_records",
         "upload_attachment",
         "upload_attachment_record",
     ]
+    list_calls = [call for call in clients[0].calls if call[0] == "list_records"]
+    assert "CurrentValue.[楼栋]" in list_calls[0][5]
+    assert "CurrentValue.[日期]" in list_calls[0][5]
+    assert "CurrentValue.[类型]" in list_calls[1][5]
     assert any("PUE=1.235" in line for line in logs)
+    assert any("开始准备覆盖查询" in line for line in logs)
     assert any("文件上传成功" in line for line in logs)
 
 
@@ -177,7 +180,7 @@ def test_upload_results_to_feishu_calc_stage_failure() -> None:
     assert any("文件流程失败" in line and "计算记录上传" in line for line in logs)
 
 
-def test_upload_results_to_feishu_prefetches_old_records_once_for_multiple_buildings(tmp_path: Path) -> None:
+def test_upload_results_to_feishu_queries_old_records_by_building_and_date(tmp_path: Path) -> None:
     logs: List[str] = []
     clients: List[_FakeClient] = []
 
@@ -225,8 +228,12 @@ def test_upload_results_to_feishu_prefetches_old_records_once_for_multiple_build
 
     assert len(clients) == 1
     list_calls = [call for call in clients[0].calls if call[0] == "list_records"]
-    assert len(list_calls) == 2
-    assert [call[1] for call in list_calls] == ["calc_table", "attach_table"]
+    assert len(list_calls) == 4
+    assert [call[1] for call in list_calls] == ["calc_table", "attach_table", "calc_table", "attach_table"]
+    assert "A楼" in list_calls[0][5]
+    assert "A楼" in list_calls[1][5]
+    assert "B楼" in list_calls[2][5]
+    assert "B楼" in list_calls[3][5]
     delete_calls = [call for call in clients[0].calls if call[0] == "batch_delete_records"]
     assert len(delete_calls) == 4
     assert any("楼栋=A楼" in line and "已读取旧计算记录" in line for line in logs)

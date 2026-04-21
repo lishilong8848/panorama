@@ -41,26 +41,30 @@ def _runtime_config(shared_root: Path, role_mode: str) -> dict:
 
 def test_monthly_internal_stage_moves_task_to_ready_for_external(monkeypatch) -> None:
     shared_root = _make_temp_dir('monthly-internal-')
-
-    def _fake_internal_runner(*_args, **kwargs):  # noqa: ANN002, ANN003
-        task_id = str(kwargs.get('task_id', '')).strip() or 'unknown'
-        source_root = runtime_module.resolve_monthly_bridge_source_root(shared_root, task_id)
-        return {
-            'status': 'ok',
-            'run_id': f'run-{task_id}',
-            'run_save_dir': str(source_root),
-            'pending_upload_count': 2,
-            'file_items': [{'building': 'A楼', 'file_path': str(source_root / 'A.xlsx')}],
-        }
-
-    monkeypatch.setattr(runtime_module, 'run_bridge_download_only_auto_once', _fake_internal_runner)
+    monthly_file = shared_root / '全景平台月报源文件' / '202604' / '20260420--月报' / '20260420--月报--全景平台月报源文件--A楼.xlsx'
+    monthly_file.parent.mkdir(parents=True, exist_ok=True)
+    monthly_file.write_bytes(b'monthly-a')
 
     service = runtime_module.SharedBridgeRuntimeService(
         runtime_config=_runtime_config(shared_root, 'internal'),
         app_version='test',
         emit_log=lambda *_args, **_kwargs: None,
     )
-    task = service.create_monthly_auto_once_task(requested_by='manual', source='manual')
+    assert service._source_cache_service is not None
+    service._source_cache_service.get_enabled_buildings = lambda: ['A楼']  # type: ignore[method-assign]
+    service._source_cache_service.fill_monthly_latest = lambda **_kwargs: [  # type: ignore[method-assign]
+        {
+            'building': 'A楼',
+            'file_path': str(monthly_file),
+            'duty_date': '2026-04-20',
+            'metadata': {'upload_date': '2026-04-20'},
+        }
+    ]
+    task = service.create_monthly_auto_once_task(
+        requested_by='manual',
+        source='manual',
+        target_bucket_key='2026-04-21 10',
+    )
     claimed = service._store.claim_next_task(role_target='internal', node_id='internal-node', lease_sec=30)
     assert claimed is not None
 
@@ -69,7 +73,9 @@ def test_monthly_internal_stage_moves_task_to_ready_for_external(monkeypatch) ->
     updated = service.get_task(task['task_id'])
     assert updated is not None
     assert updated['status'] == 'ready_for_external'
-    assert updated['result']['internal']['run_id'] == f"run-{task['task_id']}"
+    assert updated['result']['internal']['target_bucket_key'] == '2026-04-21 10'
+    assert updated['result']['internal']['cached_count'] == 1
+    assert updated['result']['internal']['cached_entries'][0]['file_path'] == str(monthly_file)
     assert any(str(item.get('artifact_kind', '')).strip() == 'resume_state' for item in updated['artifacts'])
 
 
@@ -185,6 +191,67 @@ def test_monthly_external_resume_stage_marks_partial_failed_and_sets_task_error(
     assert updated['status'] == 'partial_failed'
     assert updated['error'] == 'upload failed'
     assert updated['result']['external']['status'] == 'partial_failed'
+
+
+def test_monthly_external_resume_requeues_when_canonical_files_temporarily_missing() -> None:
+    shared_root = _make_temp_dir('monthly-external-requeue-')
+    monthly_file = shared_root / '全景平台月报源文件' / '202604' / '20260420--月报' / '20260420--月报--全景平台月报源文件--A楼.xlsx'
+    monthly_file.parent.mkdir(parents=True, exist_ok=True)
+    monthly_file.write_bytes(b'monthly-a')
+
+    internal_service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(shared_root, 'internal'),
+        app_version='test',
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+    assert internal_service._source_cache_service is not None
+    internal_service._source_cache_service.get_enabled_buildings = lambda: ['A楼']  # type: ignore[method-assign]
+    internal_service._source_cache_service.fill_monthly_latest = lambda **_kwargs: [  # type: ignore[method-assign]
+        {
+            'building': 'A楼',
+            'file_path': str(monthly_file),
+            'duty_date': '2026-04-20',
+            'metadata': {'upload_date': '2026-04-20'},
+        }
+    ]
+    task = internal_service.create_monthly_auto_once_task(
+        requested_by='manual',
+        source='manual',
+        target_bucket_key='2026-04-21 10',
+        resume_job_id='job-origin-monthly-requeue',
+    )
+    claimed_internal = internal_service._store.claim_next_task(role_target='internal', node_id='internal-node', lease_sec=30)
+    assert claimed_internal is not None
+    internal_service._run_monthly_internal_download(claimed_internal)
+
+    external_service = runtime_module.SharedBridgeRuntimeService(
+        runtime_config=_runtime_config(shared_root, 'external'),
+        app_version='test',
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    class _MissingSourceCacheService:
+        def get_enabled_buildings(self):
+            return ['A楼']
+
+        def get_latest_ready_entries(self, *, source_family, buildings, bucket_key):  # noqa: ANN001
+            assert source_family == runtime_module.FAMILY_MONTHLY_REPORT
+            assert buildings == ['A楼']
+            assert bucket_key == '2026-04-21 10'
+            return []
+
+    external_service._source_cache_service = _MissingSourceCacheService()
+    claimed_external = external_service._store.claim_next_task(role_target='external', node_id='external-node', lease_sec=30)
+    assert claimed_external is not None
+
+    external_service._run_monthly_external_resume(claimed_external)
+
+    updated = external_service.get_task(task['task_id'])
+    assert updated is not None
+    assert updated['status'] == 'ready_for_external'
+    assert updated['error'] == ''
+    assert updated['result']['status'] == 'ready_for_external'
+    assert any(item['event_type'] == 'waiting_source_sync' for item in updated['events'])
 
 
 

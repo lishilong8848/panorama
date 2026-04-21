@@ -1059,6 +1059,14 @@ class JobService:
             payload={"action": "requeue", "summary": summary, "timestamp": self._now_text()},
         )
 
+    @staticmethod
+    def _should_preserve_waiting_job_on_restore(job: JobState, stage: StageState) -> bool:
+        previous_status = str(stage.status or job.status or "").strip().lower()
+        wait_reason = str(job.wait_reason or "").strip().lower()
+        if previous_status != "waiting_resource":
+            return False
+        return wait_reason == "waiting:shared_bridge"
+
     def _launch_existing_worker_job(self, job: JobState, stage: StageState, *, payload_path: Path, worker_handler: str) -> None:
         normalized_handler = str(worker_handler or "").strip()
         if not normalized_handler:
@@ -2150,6 +2158,22 @@ class JobService:
                     summary="restart_payload_missing",
                     error="restart_payload_missing",
                     worker_status="failed",
+                )
+                continue
+            if self._should_preserve_waiting_job_on_restore(job, stage):
+                job.wait_started_monotonic = time.monotonic()
+                self._persist_job_snapshot(job)
+                self._record_job_event(
+                    job,
+                    stage_id=stage.stage_id,
+                    stream="job",
+                    event_type="recovery",
+                    level="info",
+                    payload={
+                        "action": "preserve_waiting_shared_bridge",
+                        "summary": str(job.summary or "等待内网补采同步").strip() or "等待内网补采同步",
+                        "timestamp": self._now_text(),
+                    },
                 )
                 continue
             previous_status = str(stage.status or job.status or "").strip().lower()

@@ -427,6 +427,96 @@ def test_day_metric_from_download_internal_prefers_shared_history_cache(monkeypa
     ]
 
 
+def test_day_metric_from_download_internal_backfills_missing_handover_history(monkeypatch, tmp_path: Path) -> None:
+    class _UnexpectedDayMetricService:
+        def __init__(self, *_args, **_kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def run_download_only(self, **_kwargs):  # noqa: ANN003
+            raise AssertionError("共享桥接 day_metric_from_download 内网阶段应优先走交接班历史补采，不应退回12项原下载")
+
+    monkeypatch.setattr(runtime_module, "DayMetricStandaloneUploadService", _UnexpectedDayMetricService)
+
+    internal, external, cache = _build_services(tmp_path)
+    state = {"history_ready": False}
+
+    def _fill_day_metric_history(*, selected_dates, building_scope, building, emit_log):  # noqa: ANN001
+        cache.calls.append(
+            (
+                "fill_day_metric_history",
+                {
+                    "selected_dates": list(selected_dates),
+                    "building_scope": building_scope,
+                    "building": building,
+                },
+            )
+        )
+        emit_log("fill day metric")
+        if not state["history_ready"]:
+            raise RuntimeError("缺少可复用的交接班源文件: A楼(2026-04-16)")
+        return [
+            {
+                "building": "A楼",
+                "duty_date": "2026-04-16",
+                "file_path": str(cache.day_metric_file),
+            }
+        ]
+
+    def _fill_handover_history(*, buildings, duty_date, duty_shift, emit_log):  # noqa: ANN001
+        cache.calls.append(
+            (
+                "fill_handover_history",
+                {"buildings": list(buildings), "duty_date": duty_date, "duty_shift": duty_shift},
+            )
+        )
+        emit_log("fill handover")
+        state["history_ready"] = True
+        return [
+            {
+                "building": "A楼",
+                "duty_date": duty_date,
+                "duty_shift": duty_shift,
+                "file_path": str(cache.handover_file),
+            }
+        ]
+
+    cache.fill_day_metric_history = _fill_day_metric_history  # type: ignore[method-assign]
+    cache.fill_handover_history = _fill_handover_history  # type: ignore[method-assign]
+
+    task = external.create_day_metric_from_download_task(
+        selected_dates=["2026-04-16"],
+        building_scope="single",
+        building="A楼",
+        requested_by="manual",
+    )
+
+    internal._process_one_task_if_needed()
+
+    updated = external.get_task(task["task_id"])
+    assert updated is not None
+    assert updated["status"] == "ready_for_external"
+    handover_calls = [call for call in cache.calls if call[0] == "fill_handover_history"]
+    assert len(handover_calls) == 1
+    assert handover_calls[0][1]["buildings"] == ["A楼"]
+    assert handover_calls[0][1]["duty_date"] == "2026-04-16"
+    assert handover_calls[0][1]["duty_shift"] == "day"
+    assert cache.calls.count(
+        (
+            "fill_day_metric_history",
+            {"selected_dates": ["2026-04-16"], "building_scope": "single", "building": "A楼"},
+        )
+    ) == 2
+    internal_result = updated.get("result", {}).get("internal", {})
+    assert internal_result.get("downloaded_file_count") == 1
+    assert internal_result.get("downloaded_files") == [
+        {
+            "duty_date": "2026-04-16",
+            "building": "A楼",
+            "source_file": str(cache.day_metric_file),
+        }
+    ]
+
+
 def test_monthly_cache_fill_waits_for_sync_then_resumes_success(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

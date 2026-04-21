@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 import sqlite3
 import socket
 import threading
@@ -228,6 +229,35 @@ class SharedBridgeRuntimeService:
             return []
         return [str(item or "").strip() for item in values if str(item or "").strip()]
 
+    @staticmethod
+    def _parse_missing_day_metric_handover_units(
+        error_text: str,
+        *,
+        selected_dates: List[str],
+        target_buildings: List[str],
+    ) -> Dict[str, List[str]]:
+        text = str(error_text or "").strip()
+        if ":" in text:
+            text = text.split(":", 1)[1].strip()
+        output: Dict[str, List[str]] = {}
+        for building, duty_date in re.findall(r"(?:^|,\s*)([^,()]+)\((\d{4}-\d{2}-\d{2})\)", text):
+            building_text = str(building or "").strip()
+            duty_date_text = str(duty_date or "").strip()
+            if not building_text or not duty_date_text:
+                continue
+            output.setdefault(duty_date_text, [])
+            if building_text not in output[duty_date_text]:
+                output[duty_date_text].append(building_text)
+        if output:
+            return output
+        normalized_dates = [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]
+        normalized_buildings = [str(item or "").strip() for item in (target_buildings or []) if str(item or "").strip()]
+        return {
+            duty_date: list(normalized_buildings)
+            for duty_date in normalized_dates
+            if duty_date
+        }
+
     def _require_accessible_cached_file(self, file_path: Any, *, description: str) -> str:
         file_text = str(file_path or "").strip()
         if not file_text or not is_accessible_cached_file_path(file_text):
@@ -239,28 +269,54 @@ class SharedBridgeRuntimeService:
             raise RuntimeError("共享桥接存储未初始化")
         task_id = str(task.get("task_id", "") or "").strip()
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
-        artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+        prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
+        internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
         building_files: List[Dict[str, str]] = []
-        for item in artifacts:
-            relative_path = str(item.get("relative_path", "") or "").strip()
-            building = str(item.get("building", "") or "").strip()
-            if not relative_path or not building:
+        for item in internal_result.get("handover_files", []) if isinstance(internal_result.get("handover_files", []), list) else []:
+            if not isinstance(item, dict):
                 continue
-            file_path = self._resolve_ready_artifact_file_path(item)
-            if file_path is None:
-                raise RuntimeError(f"共享目录中没有可继续处理的交接班源文件: {relative_path}")
-            building_files.append({"building": building, "file_path": str(file_path)})
-        capacity_artifacts = self._store.get_artifacts(task_id, artifact_kind="capacity_source_file", status="ready")
+            building = str(item.get("building", "") or "").strip()
+            file_path = self._require_accessible_cached_file(
+                item.get("file_path", ""),
+                description="交接班共享源文件",
+            ) if building else ""
+            if not building or not file_path:
+                continue
+            building_files.append({"building": building, "file_path": file_path})
+        if not building_files:
+            artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+            for item in artifacts:
+                relative_path = str(item.get("relative_path", "") or "").strip()
+                building = str(item.get("building", "") or "").strip()
+                if not relative_path or not building:
+                    continue
+                file_path = self._resolve_ready_artifact_file_path(item)
+                if file_path is None:
+                    raise RuntimeError(f"共享目录中没有可继续处理的交接班源文件: {relative_path}")
+                building_files.append({"building": building, "file_path": str(file_path)})
         capacity_items: List[Dict[str, str]] = []
-        for item in capacity_artifacts:
-            relative_path = str(item.get("relative_path", "") or "").strip()
-            building = str(item.get("building", "") or "").strip()
-            if not relative_path or not building:
+        for item in internal_result.get("capacity_files", []) if isinstance(internal_result.get("capacity_files", []), list) else []:
+            if not isinstance(item, dict):
                 continue
-            file_path = self._resolve_ready_artifact_file_path(item)
-            if file_path is None:
-                raise RuntimeError(f"共享目录中没有完整可继续处理的交接班容量源文件: {relative_path}")
-            capacity_items.append({"building": building, "file_path": str(file_path)})
+            building = str(item.get("building", "") or "").strip()
+            file_path = self._require_accessible_cached_file(
+                item.get("file_path", ""),
+                description="交接班容量共享源文件",
+            ) if building else ""
+            if not building or not file_path:
+                continue
+            capacity_items.append({"building": building, "file_path": file_path})
+        if not capacity_items:
+            capacity_artifacts = self._store.get_artifacts(task_id, artifact_kind="capacity_source_file", status="ready")
+            for item in capacity_artifacts:
+                relative_path = str(item.get("relative_path", "") or "").strip()
+                building = str(item.get("building", "") or "").strip()
+                if not relative_path or not building:
+                    continue
+                file_path = self._resolve_ready_artifact_file_path(item)
+                if file_path is None:
+                    raise RuntimeError(f"共享目录中没有完整可继续处理的交接班容量源文件: {relative_path}")
+                capacity_items.append({"building": building, "file_path": str(file_path)})
         if not building_files:
             raise RuntimeError("共享目录中没有可继续处理的交接班源文件")
         handover_buildings = {item["building"] for item in building_files if item.get("building")}
@@ -505,6 +561,52 @@ class SharedBridgeRuntimeService:
                 "log_text": f"[共享桥接] 任务={task_id} 续传状态已就绪，正在自动恢复原任务",
             }
         source_root = str(internal_result.get("source_root", "") or "").strip()
+        if mode == "auto_once" and self._source_cache_service is not None:
+            target_bucket_key = (
+                str(request.get("target_bucket_key", "") or "").strip()
+                or str(internal_result.get("target_bucket_key", "") or "").strip()
+                or self.current_source_cache_bucket()
+            )
+            target_buildings = [
+                str(item or "").strip()
+                for item in self._source_cache_service.get_enabled_buildings()
+                if str(item or "").strip()
+            ]
+            cached_entries = self._source_cache_service.get_latest_ready_entries(
+                source_family=FAMILY_MONTHLY_REPORT,
+                buildings=target_buildings,
+                bucket_key=target_bucket_key,
+            )
+            if target_buildings and len(cached_entries) >= len(target_buildings):
+                file_items = [
+                    {
+                        "building": str(item.get("building", "") or "").strip(),
+                        "file_path": self._require_accessible_cached_file(
+                            item.get("file_path", ""),
+                            description="月报共享源文件",
+                        ),
+                        "upload_date": str(
+                            item.get("metadata", {}).get("upload_date", "")
+                            or item.get("duty_date", "")
+                            or ""
+                        ).strip(),
+                    }
+                    for item in cached_entries
+                    if str(item.get("building", "") or "").strip()
+                ]
+                if file_items:
+                    return {
+                        "worker_payload": {
+                            "resume_kind": "shared_bridge_monthly_auto_once",
+                            "file_items": file_items,
+                            "source": str(request.get("source", "") or "共享桥接月报自动流程").strip() or "共享桥接月报自动流程",
+                            "bridge_task_id": task_id,
+                        },
+                        "summary": "共享文件已到位，正在继续处理月报自动流程",
+                        "log_text": f"[共享桥接] 任务={task_id} 月报 canonical 共享文件已齐全，正在自动恢复原任务",
+                    }
+            if not source_root:
+                raise RuntimeError("月报共享桥接缺少可继续处理的 canonical 源文件")
         if not source_root:
             raise RuntimeError("月报共享桥接缺少 source_root")
         file_items = []
@@ -530,6 +632,42 @@ class SharedBridgeRuntimeService:
             "log_text": f"[共享桥接] 任务={task_id} 月报共享文件已齐全，正在自动恢复原任务",
         }
 
+    def _build_alarm_event_upload_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            raise RuntimeError("共享源缓存服务未初始化")
+        task_id = str(task.get("task_id", "") or "").strip()
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        mode = str(task.get("mode", "") or request.get("mode", "") or "").strip().lower() or "full"
+        building = str(request.get("building", "") or "").strip()
+        selection = self._source_cache_service.get_alarm_event_upload_selection(
+            building=building if mode == "single_building" else "",
+        )
+        target_buildings = [building] if mode == "single_building" and building else self._source_cache_service.get_enabled_buildings()
+        if not target_buildings:
+            target_buildings = [
+                str(item.get("building", "") or "").strip()
+                for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
+                if isinstance(item, dict) and str(item.get("building", "") or "").strip()
+            ]
+        ready_buildings = {
+            str(item.get("building", "") or "").strip()
+            for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
+            if isinstance(item, dict) and str(item.get("building", "") or "").strip()
+        }
+        missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
+        if missing_buildings:
+            raise RuntimeError(f"告警共享源文件未齐全: {','.join(missing_buildings)}")
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_alarm_event_upload",
+                "mode": mode,
+                "building": building or None,
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续上传告警信息",
+            "log_text": f"[共享桥接] 任务={task_id} 告警共享文件已齐全，正在自动恢复原任务",
+        }
+
     def _build_waiting_job_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
         feature = str(task.get("feature", "") or "").strip().lower()
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
@@ -539,6 +677,8 @@ class SharedBridgeRuntimeService:
             return self._build_day_metric_resume_binding_from_artifacts(task)
         if feature == "wet_bulb_collection":
             return self._build_wet_bulb_resume_binding_from_artifacts(task)
+        if feature == "alarm_event_upload":
+            return self._build_alarm_event_upload_resume_binding(task)
         if feature == "handover_cache_fill":
             continuation_kind = str(request.get("continuation_kind", "") or "").strip().lower()
             if continuation_kind == "handover":
@@ -2162,6 +2302,28 @@ class SharedBridgeRuntimeService:
             requested_by=requested_by,
         )
 
+    def create_alarm_event_upload_task(
+        self,
+        *,
+        mode: str,
+        building: str | None = None,
+        resume_job_id: str | None = None,
+        target_bucket_key: str | None = None,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        return self._store.create_alarm_event_upload_task(
+            mode=mode,
+            building=building,
+            resume_job_id=resume_job_id,
+            target_bucket_key=target_bucket_key,
+            created_by_role=self.role_mode,
+            created_by_node_id=self.node_id,
+            requested_by=requested_by,
+        )
+
     def get_or_create_day_metric_from_download_task(
         self,
         *,
@@ -2195,6 +2357,40 @@ class SharedBridgeRuntimeService:
             building_scope=building_scope,
             building=building,
             resume_job_id=resume_job_id,
+            requested_by=requested_by,
+        )
+
+    def get_or_create_alarm_event_upload_task(
+        self,
+        *,
+        mode: str,
+        building: str | None = None,
+        resume_job_id: str | None = None,
+        target_bucket_key: str | None = None,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        normalized_mode = str(mode or "").strip().lower() or "full"
+        normalized_building = str(building or "").strip()
+        resolved_bucket_key = str(target_bucket_key or "").strip() or self.current_alarm_event_bucket()
+        dedupe_key = "|".join(
+            [
+                "alarm_event_upload",
+                normalized_mode,
+                normalized_building or "all",
+                resolved_bucket_key or _now_text()[:13],
+            ]
+        )
+        existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
+        if existing:
+            return existing
+        return self.create_alarm_event_upload_task(
+            mode=normalized_mode,
+            building=normalized_building or None,
+            resume_job_id=resume_job_id,
+            target_bucket_key=resolved_bucket_key,
             requested_by=requested_by,
         )
 
@@ -2453,6 +2649,14 @@ class SharedBridgeRuntimeService:
                 pass
         return _now_text()[:13]
 
+    def current_alarm_event_bucket(self) -> str:
+        if self._source_cache_service is not None:
+            try:
+                return str(self._source_cache_service.current_alarm_bucket() or "").strip()
+            except Exception:
+                pass
+        return self.current_source_cache_bucket()
+
     def get_latest_source_cache_entries(self, *, source_family: str, buildings: List[str] | None = None) -> List[Dict[str, Any]]:
         if self._source_cache_service is None:
             return []
@@ -2551,6 +2755,15 @@ class SharedBridgeRuntimeService:
         if self._source_cache_service is None:
             return []
         return self._source_cache_service.get_enabled_buildings()
+
+    def get_alarm_event_upload_selection(self, *, building: str = "") -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            return {
+                "selected_entries": [],
+                "selection_reference_date": _now_text()[:10],
+                "missing_both_days_buildings": [],
+            }
+        return self._source_cache_service.get_alarm_event_upload_selection(building=building)
 
     def start_current_hour_source_cache_refresh(self) -> Dict[str, Any]:
         if self._source_cache_service is None:
@@ -3687,46 +3900,45 @@ class SharedBridgeRuntimeService:
                 switch_network=False,
                 emit_log=emit_log,
             )
-            artifacts: List[Dict[str, Any]] = []
             handover_result = result.get("handover", {}) if isinstance(result.get("handover", {}), dict) else {}
             capacity_result = result.get("capacity", {}) if isinstance(result.get("capacity", {}), dict) else {}
-            for item in handover_result.get("success_files", []) if isinstance(handover_result.get("success_files", []), list) else []:
-                if not isinstance(item, dict):
-                    continue
-                building = str(item.get("building", "") or "").strip()
-                file_path = str(item.get("file_path", "") or "").strip()
-                if not building or not file_path:
-                    continue
-                artifacts.append(self._copy_handover_source_artifact(task_id=task_id, building=building, source_file=file_path, emit_log=emit_log))
-            capacity_artifacts: List[Dict[str, Any]] = []
-            for item in capacity_result.get("success_files", []) if isinstance(capacity_result.get("success_files", []), list) else []:
-                if not isinstance(item, dict):
-                    continue
-                building = str(item.get("building", "") or "").strip()
-                file_path = str(item.get("file_path", "") or "").strip()
-                if not building or not file_path:
-                    continue
-                capacity_artifacts.append(
-                    self._copy_handover_capacity_source_artifact(
-                        task_id=task_id,
-                        building=building,
-                        source_file=file_path,
-                        emit_log=emit_log,
-                    )
-                )
+            handover_success_files = handover_result.get("success_files", []) if isinstance(handover_result.get("success_files", []), list) else []
+            capacity_success_files = capacity_result.get("success_files", []) if isinstance(capacity_result.get("success_files", []), list) else []
+            handover_files = [
+                {
+                    "building": str(item.get("building", "") or "").strip(),
+                    "file_path": str(item.get("file_path", "") or "").strip(),
+                }
+                for item in handover_success_files
+                if isinstance(item, dict)
+                and str(item.get("building", "") or "").strip()
+                and str(item.get("file_path", "") or "").strip()
+            ]
+            capacity_files = [
+                {
+                    "building": str(item.get("building", "") or "").strip(),
+                    "file_path": str(item.get("file_path", "") or "").strip(),
+                }
+                for item in capacity_success_files
+                if isinstance(item, dict)
+                and str(item.get("building", "") or "").strip()
+                and str(item.get("file_path", "") or "").strip()
+            ]
             stage_result = dict(result)
-            stage_result["artifacts"] = list(artifacts)
-            stage_result["capacity_artifacts"] = list(capacity_artifacts)
-            stage_result["artifact_count"] = len(artifacts)
-            stage_result["capacity_artifact_count"] = len(capacity_artifacts)
+            stage_result["handover_files"] = list(handover_files)
+            stage_result["capacity_files"] = list(capacity_files)
+            stage_result["artifacts"] = []
+            stage_result["capacity_artifacts"] = []
+            stage_result["artifact_count"] = 0
+            stage_result["capacity_artifact_count"] = 0
             handover_artifact_buildings = {
                 str(item.get("building", "") or "").strip()
-                for item in artifacts
+                for item in handover_files
                 if str(item.get("building", "") or "").strip()
             }
             capacity_artifact_buildings = {
                 str(item.get("building", "") or "").strip()
-                for item in capacity_artifacts
+                for item in capacity_files
                 if str(item.get("building", "") or "").strip()
             }
             if handover_artifact_buildings and handover_artifact_buildings.issubset(capacity_artifact_buildings):
@@ -3792,28 +4004,52 @@ class SharedBridgeRuntimeService:
         internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
         try:
-            artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+            handover_file_items = internal_result.get("handover_files", []) if isinstance(internal_result.get("handover_files", []), list) else []
             building_files: List[tuple[str, str]] = []
-            for item in artifacts:
-                relative_path = str(item.get("relative_path", "") or "").strip()
-                building = str(item.get("building", "") or "").strip()
-                if not relative_path or not building:
+            for item in handover_file_items:
+                if not isinstance(item, dict):
                     continue
-                file_path = self._resolve_ready_artifact_file_path(item)
-                if file_path is None:
-                    raise FileNotFoundError(f"共享目录中的交接班源文件不存在或不可访问: {relative_path}")
-                building_files.append((building, str(file_path)))
-            capacity_artifacts = self._store.get_artifacts(task_id, artifact_kind="capacity_source_file", status="ready")
+                building = str(item.get("building", "") or "").strip()
+                file_path = str(item.get("file_path", "") or "").strip()
+                if not building or not file_path:
+                    continue
+                if not is_accessible_cached_file_path(file_path):
+                    raise FileNotFoundError(f"共享目录中的交接班源文件不存在或不可访问: {file_path}")
+                building_files.append((building, file_path))
+            if not building_files:
+                artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+                for item in artifacts:
+                    relative_path = str(item.get("relative_path", "") or "").strip()
+                    building = str(item.get("building", "") or "").strip()
+                    if not relative_path or not building:
+                        continue
+                    file_path = self._resolve_ready_artifact_file_path(item)
+                    if file_path is None:
+                        raise FileNotFoundError(f"共享目录中的交接班源文件不存在或不可访问: {relative_path}")
+                    building_files.append((building, str(file_path)))
+            capacity_file_items = internal_result.get("capacity_files", []) if isinstance(internal_result.get("capacity_files", []), list) else []
             capacity_building_files: List[tuple[str, str]] = []
-            for item in capacity_artifacts:
-                relative_path = str(item.get("relative_path", "") or "").strip()
-                building = str(item.get("building", "") or "").strip()
-                if not relative_path or not building:
+            for item in capacity_file_items:
+                if not isinstance(item, dict):
                     continue
-                file_path = self._resolve_ready_artifact_file_path(item)
-                if file_path is None:
-                    raise FileNotFoundError(f"共享目录中的交接班容量源文件不存在或不可访问: {relative_path}")
-                capacity_building_files.append((building, str(file_path)))
+                building = str(item.get("building", "") or "").strip()
+                file_path = str(item.get("file_path", "") or "").strip()
+                if not building or not file_path:
+                    continue
+                if not is_accessible_cached_file_path(file_path):
+                    raise FileNotFoundError(f"共享目录中的交接班容量源文件不存在或不可访问: {file_path}")
+                capacity_building_files.append((building, file_path))
+            if not capacity_building_files:
+                capacity_artifacts = self._store.get_artifacts(task_id, artifact_kind="capacity_source_file", status="ready")
+                for item in capacity_artifacts:
+                    relative_path = str(item.get("relative_path", "") or "").strip()
+                    building = str(item.get("building", "") or "").strip()
+                    if not relative_path or not building:
+                        continue
+                    file_path = self._resolve_ready_artifact_file_path(item)
+                    if file_path is None:
+                        raise FileNotFoundError(f"共享目录中的交接班容量源文件不存在或不可访问: {relative_path}")
+                    capacity_building_files.append((building, str(file_path)))
             if not building_files:
                 raise RuntimeError("共享目录中没有可继续处理的交接班源文件")
             handover_buildings = {building for building, _ in building_files if building}
@@ -3912,17 +4148,58 @@ class SharedBridgeRuntimeService:
             ]
             building_scope = str(request.get("building_scope", "") or "").strip() or "all_enabled"
             building = str(request.get("building", "") or "").strip() or None
+            target_buildings = (
+                [building]
+                if building_scope == "single" and building
+                else (
+                    self._source_cache_service.get_enabled_buildings()
+                    if self._source_cache_service is not None
+                    else []
+                )
+            )
+            target_buildings = [str(item or "").strip() for item in target_buildings if str(item or "").strip()]
 
             if self._source_cache_service is not None:
                 emit_log("[共享桥接][12项][内网] 优先复用交接班按日共享缓存")
-                cached_entries = self._source_cache_service.fill_day_metric_history(
-                    selected_dates=selected_dates,
-                    building_scope=building_scope,
-                    building=building,
-                    emit_log=emit_log,
-                )
-                target_buildings = [building] if building_scope == "single" and building else self._source_cache_service.get_enabled_buildings()
-                target_buildings = [str(item or "").strip() for item in target_buildings if str(item or "").strip()]
+                try:
+                    cached_entries = self._source_cache_service.fill_day_metric_history(
+                        selected_dates=selected_dates,
+                        building_scope=building_scope,
+                        building=building,
+                        emit_log=emit_log,
+                    )
+                except RuntimeError as exc:
+                    error_text = str(exc or "").strip()
+                    if "缺少可复用的交接班源文件" not in error_text:
+                        raise
+                    missing_by_date = self._parse_missing_day_metric_handover_units(
+                        error_text,
+                        selected_dates=selected_dates,
+                        target_buildings=target_buildings,
+                    )
+                    if not missing_by_date:
+                        raise
+                    emit_log(
+                        "[共享桥接][12项][内网] 缺少目标日期交接班日志，开始触发真正历史补采: "
+                        + ", ".join(
+                            f"{duty_date} -> {','.join(buildings) or '-'}"
+                            for duty_date, buildings in missing_by_date.items()
+                        )
+                    )
+                    for duty_date, missing_buildings in missing_by_date.items():
+                        self._source_cache_service.fill_handover_history(
+                            buildings=list(missing_buildings),
+                            duty_date=duty_date,
+                            duty_shift="day",
+                            emit_log=emit_log,
+                        )
+                    emit_log("[共享桥接][12项][内网] 历史交接班源文件补采完成，重新登记12项按日共享索引")
+                    cached_entries = self._source_cache_service.fill_day_metric_history(
+                        selected_dates=selected_dates,
+                        building_scope=building_scope,
+                        building=building,
+                        emit_log=emit_log,
+                    )
                 rows_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
                 downloaded_files: List[Dict[str, str]] = []
                 for item in cached_entries:
@@ -4098,7 +4375,8 @@ class SharedBridgeRuntimeService:
 
             source_units_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
             expected_count = len(selected_dates) * len(buildings)
-            for item in internal_result.get("downloaded_files", []) if isinstance(internal_result.get("downloaded_files", []), list) else []:
+            downloaded_files = internal_result.get("downloaded_files", []) if isinstance(internal_result.get("downloaded_files", []), list) else []
+            for item in downloaded_files:
                 if not isinstance(item, dict):
                     continue
                 duty_date = str(item.get("duty_date", "") or "").strip()
@@ -4255,26 +4533,22 @@ class SharedBridgeRuntimeService:
                 buildings=request.get("buildings") if isinstance(request.get("buildings"), list) else None,
                 emit_log=emit_log,
             )
-            artifacts: List[Dict[str, Any]] = []
-            for item in internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []:
-                if not isinstance(item, dict):
-                    continue
-                building = str(item.get("building", "") or "").strip()
-                source_file = str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
-                if not building or not source_file:
-                    continue
-                artifacts.append(
-                    self._copy_wet_bulb_source_artifact(
-                        task_id=task_id,
-                        building=building,
-                        source_file=source_file,
-                        emit_log=emit_log,
-                    )
-                )
             stage_result = dict(internal_result)
-            stage_result["artifacts"] = list(artifacts)
-            stage_result["artifact_count"] = len(artifacts)
-            if artifacts:
+            internal_source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
+            source_units = [
+                {
+                    "building": str(item.get("building", "") or "").strip(),
+                    "file_path": str(item.get("file_path", "") or item.get("source_file", "") or "").strip(),
+                }
+                for item in internal_source_units
+                if isinstance(item, dict)
+                and str(item.get("building", "") or "").strip()
+                and str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
+            ]
+            stage_result["artifacts"] = []
+            stage_result["artifact_count"] = 0
+            stage_result["source_units"] = list(source_units)
+            if source_units:
                 self._store.complete_stage(
                     task_id=task_id,
                     stage_id=stage_id,
@@ -4347,17 +4621,29 @@ class SharedBridgeRuntimeService:
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
         service = WetBulbCollectionService(self.runtime_config)
         try:
-            artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+            internal_source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
             source_units: List[Dict[str, Any]] = []
-            for item in artifacts:
-                relative_path = str(item.get("relative_path", "") or "").strip()
-                building = str(item.get("building", "") or "").strip()
-                if not relative_path or not building:
+            for item in internal_source_units:
+                if not isinstance(item, dict):
                     continue
-                file_path = self._resolve_ready_artifact_file_path(item)
-                if file_path is None:
-                    raise FileNotFoundError(f"共享目录中的湿球温度源文件不存在或不可访问: {relative_path}")
-                source_units.append({"building": building, "file_path": str(file_path)})
+                building = str(item.get("building", "") or "").strip()
+                file_path = str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
+                if not building or not file_path:
+                    continue
+                if not is_accessible_cached_file_path(file_path):
+                    raise FileNotFoundError(f"共享目录中的湿球温度源文件不存在或不可访问: {file_path}")
+                source_units.append({"building": building, "file_path": file_path})
+            if not source_units:
+                artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+                for item in artifacts:
+                    relative_path = str(item.get("relative_path", "") or "").strip()
+                    building = str(item.get("building", "") or "").strip()
+                    if not relative_path or not building:
+                        continue
+                    file_path = self._resolve_ready_artifact_file_path(item)
+                    if file_path is None:
+                        raise FileNotFoundError(f"共享目录中的湿球温度源文件不存在或不可访问: {relative_path}")
+                    source_units.append({"building": building, "file_path": str(file_path)})
             if not source_units:
                 raise RuntimeError("共享目录中没有可继续处理的湿球温度源文件")
             resume_job_id = self._resume_job_id_from_task(task)
@@ -4416,6 +4702,228 @@ class SharedBridgeRuntimeService:
                 task_result={"status": "failed", "error": error_text, "internal": internal_result},
             )
             self._emit_system_log(f"[共享桥接][外网端] 任务={task_id} 湿球温度外网继续失败: {error_text}")
+
+
+    def _run_alarm_event_upload_internal_fill(self, task: Dict[str, Any]) -> None:
+        if not self._store or self._source_cache_service is None:
+            return
+        task_id = str(task.get("task_id", "") or "").strip()
+        stage_id = "internal_fill"
+        claim_token = self._stage_claim_token(task, stage_id)
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        mode = str(task.get("mode", "") or request.get("mode", "") or "").strip().lower() or "full"
+        building = str(request.get("building", "") or "").strip()
+        emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="internal", claim_token=claim_token)
+        try:
+            target_buildings = [building] if mode == "single_building" and building else self._source_cache_service.get_enabled_buildings()
+            target_buildings = [item for item in target_buildings if item]
+            selection = self._source_cache_service.get_alarm_event_upload_selection(
+                building=building if mode == "single_building" else "",
+            )
+            selected_entries = [
+                item
+                for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
+                if isinstance(item, dict)
+            ]
+            ready_buildings = {
+                str(item.get("building", "") or "").strip()
+                for item in selected_entries
+                if str(item.get("building", "") or "").strip()
+            }
+            missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
+            target_bucket_key = str(request.get("target_bucket_key", "") or "").strip() or self.current_alarm_event_bucket()
+            filled_entries: List[Dict[str, Any]] = []
+            if missing_buildings:
+                emit_log(
+                    "[共享桥接][告警上传][内网] 开始补采缺失楼栋: "
+                    f"mode={mode}, buildings={','.join(missing_buildings)}, bucket={target_bucket_key or '-'}"
+                )
+                for item in missing_buildings:
+                    filled = self._source_cache_service.fill_alarm_event_latest(
+                        building=item,
+                        bucket_key=target_bucket_key,
+                        emit_log=emit_log,
+                    )
+                    if isinstance(filled, dict):
+                        filled_entries.append(dict(filled))
+                selection = self._source_cache_service.get_alarm_event_upload_selection(
+                    building=building if mode == "single_building" else "",
+                )
+                selected_entries = [
+                    item
+                    for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
+                    if isinstance(item, dict)
+                ]
+                ready_buildings = {
+                    str(item.get("building", "") or "").strip()
+                    for item in selected_entries
+                    if str(item.get("building", "") or "").strip()
+                }
+                missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
+            if missing_buildings:
+                raise RuntimeError(f"告警共享文件补采后仍缺失楼栋: {','.join(missing_buildings)}")
+            stage_result = {
+                "status": "ready_for_external",
+                "mode": mode,
+                "building": building,
+                "target_bucket_key": target_bucket_key,
+                "requested_buildings": list(target_buildings),
+                "selected_buildings": sorted(ready_buildings),
+                "selection_reference_date": str(selection.get("selection_reference_date", "") or "").strip(),
+                "selected_entry_count": len(selected_entries),
+                "filled_buildings": [str(item.get("building", "") or "").strip() for item in filled_entries if str(item.get("building", "") or "").strip()],
+            }
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="internal",
+                stage_result=stage_result,
+                next_task_status="ready_for_external",
+                task_result={"internal": stage_result, "status": "ready_for_external"},
+                record_event=False,
+                sync_mailbox=False,
+            )
+            self._store.append_event(
+                task_id=task_id,
+                stage_id=stage_id,
+                side="internal",
+                level="info",
+                event_type="await_external",
+                payload={"message": "告警共享文件已齐全，等待外网继续上传"},
+            )
+            self._request_runtime_status_refresh(reason=f"alarm_event_upload_internal_fill_completed:{task_id}")
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="internal",
+                stage_result={"status": "failed", "error": error_text},
+                stage_error=error_text,
+                next_task_status="failed",
+                task_error=error_text,
+                stage_status="failed",
+                task_result={"status": "failed", "error": error_text},
+            )
+            self._emit_system_log(f"[共享桥接][内网端] 任务={task_id} 告警共享文件补采失败: {error_text}")
+            self._request_runtime_status_refresh(reason=f"alarm_event_upload_internal_fill_exception:{task_id}")
+
+    def _run_alarm_event_upload_external(self, task: Dict[str, Any]) -> None:
+        if not self._store or self._source_cache_service is None:
+            return
+        task_id = str(task.get("task_id", "") or "").strip()
+        stage_id = "external_upload"
+        claim_token = self._stage_claim_token(task, stage_id)
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
+        internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
+        mode = str(task.get("mode", "") or request.get("mode", "") or "").strip().lower() or "full"
+        building = str(request.get("building", "") or "").strip()
+        emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
+        try:
+            selection = self._source_cache_service.get_alarm_event_upload_selection(
+                building=building if mode == "single_building" else "",
+            )
+            target_buildings = [building] if mode == "single_building" and building else self._source_cache_service.get_enabled_buildings()
+            target_buildings = [item for item in target_buildings if item]
+            ready_buildings = {
+                str(item.get("building", "") or "").strip()
+                for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
+                if isinstance(item, dict) and str(item.get("building", "") or "").strip()
+            }
+            missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
+            if missing_buildings:
+                self._requeue_external_waiting_task(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    side="external",
+                    wait_message="等待内网补采同步",
+                    detail=f"告警共享文件仍未齐全，等待内网补采同步后自动继续。楼栋={','.join(missing_buildings)}",
+                )
+                return
+            resume_job_id = self._resume_job_id_from_task(task)
+            if resume_job_id:
+                emit_log("[共享桥接][告警上传][外网] 共享文件已齐全，准备唤醒原任务")
+                self._resume_bound_job(
+                    task,
+                    worker_payload={
+                        "resume_kind": "shared_bridge_alarm_event_upload",
+                        "mode": mode,
+                        "building": building or None,
+                        "bridge_task_id": task_id,
+                    },
+                    summary="共享文件已到位，正在继续上传告警信息",
+                )
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="external",
+                    stage_result={"status": "resumed", "resume_job_id": resume_job_id},
+                    next_task_status="success",
+                    task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": resume_job_id, "internal": internal_result},
+                )
+                return
+            emit_log("[共享桥接][告警上传][外网] 共享文件已齐全，开始继续上传")
+            if mode == "single_building":
+                external_result = self.upload_alarm_event_source_cache_single_building_to_bitable(
+                    building=building,
+                    emit_log=emit_log,
+                )
+            else:
+                external_result = self.upload_alarm_event_source_cache_full_to_bitable(
+                    emit_log=emit_log,
+                )
+            accepted = bool(external_result.get("accepted"))
+            reason = str(external_result.get("reason", "") or "").strip().lower()
+            if not accepted and reason == "already_running":
+                self._requeue_external_waiting_task(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    side="external",
+                    wait_message="等待当前告警上传完成",
+                    detail="告警上传资源当前正忙，稍后自动继续。",
+                )
+                return
+            if not accepted:
+                raise RuntimeError(str(external_result.get("error", "") or "").strip() or "告警信息上传失败")
+            final_status = "success"
+            if reason == "partial_completed":
+                final_status = "partial_failed"
+            task_error = (
+                str(external_result.get("error", "") or external_result.get("last_error", "") or "").strip()
+                if final_status in {"partial_failed", "failed"}
+                else ""
+            )
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="external",
+                stage_result=external_result,
+                next_task_status=final_status,
+                task_error=task_error,
+                task_result={"status": final_status, "bridge_task_id": task_id, "internal": internal_result, "external": external_result},
+            )
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="external",
+                stage_result={"status": "failed", "error": error_text},
+                stage_error=error_text,
+                next_task_status="failed",
+                task_error=error_text,
+                stage_status="failed",
+                task_result={"status": "failed", "error": error_text, "internal": internal_result},
+            )
+            self._emit_system_log(f"[共享桥接][外网端] 任务={task_id} 告警信息上传失败: {error_text}")
 
 
     def _run_handover_cache_fill_internal(self, task: Dict[str, Any]) -> None:
@@ -4851,6 +5359,71 @@ class SharedBridgeRuntimeService:
         mode = str(task.get("mode", "") or "").strip().lower()
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="internal", claim_token=claim_token)
         try:
+            if mode == "auto_once" and self._source_cache_service is not None:
+                target_bucket_key = str(request.get("target_bucket_key", "") or "").strip() or self.current_source_cache_bucket()
+                emit_log(
+                    "[共享桥接][月报][内网] 开始 canonical 源文件登记阶段, "
+                    f"bucket={target_bucket_key or '-'}"
+                )
+                target_buildings = [
+                    str(item or "").strip()
+                    for item in self._source_cache_service.get_enabled_buildings()
+                    if str(item or "").strip()
+                ]
+                cached_entries: List[Dict[str, Any]] = []
+                for building in target_buildings:
+                    cached_entries.extend(
+                        self._source_cache_service.fill_monthly_latest(
+                            building=building,
+                            bucket_key=target_bucket_key,
+                            emit_log=emit_log,
+                        )
+                    )
+                if not cached_entries:
+                    raise RuntimeError("月报 canonical 源文件登记未生成任何共享源文件")
+                resume_artifact = self._save_monthly_resume_state_artifact(
+                    task_id=task_id,
+                    payload={
+                        "run_id": "",
+                        "run_save_dir": "",
+                        "pending_upload_count": 0,
+                        "source_root": "",
+                        "resume_root": str(resolve_monthly_bridge_resume_root(self.shared_bridge_root)),
+                        "mode": mode,
+                        "target_bucket_key": target_bucket_key,
+                    },
+                    emit_log=emit_log,
+                )
+                stage_result = {
+                    "status": "ready_for_external",
+                    "mode": mode,
+                    "target_bucket_key": target_bucket_key,
+                    "cached_entries": cached_entries,
+                    "cached_count": len(cached_entries),
+                    "resume_root": str(resolve_monthly_bridge_resume_root(self.shared_bridge_root)),
+                    "resume_artifact": resume_artifact,
+                    "artifact_count": 1,
+                }
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="internal",
+                    stage_result=stage_result,
+                    next_task_status="ready_for_external",
+                    task_result={"internal": stage_result, "status": "ready_for_external"},
+                    record_event=False,
+                    sync_mailbox=False,
+                )
+                self._store.append_event(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    side="internal",
+                    level="info",
+                    event_type="await_external",
+                    payload={"message": "月报内网阶段完成，等待外网继续断点续传"},
+                )
+                return
             if mode == "auto_once":
                 emit_log("[共享桥接][月报][内网] 开始自动流程下载阶段")
                 internal_result = run_bridge_download_only_auto_once(
@@ -5001,17 +5574,54 @@ class SharedBridgeRuntimeService:
                     task_result={"status": final_status, "bridge_task_id": task_id, "internal": internal_result, "external": external_result},
                 )
                 return
-            source_root = str(internal_result.get("source_root", "") or "").strip()
-            if not source_root:
-                raise RuntimeError("月报共享桥接缺少 source_root")
             file_items = []
-            source_root_path = Path(source_root)
-            for file_path in sorted(source_root_path.rglob("*.xlsx")):
-                if not file_path.is_file():
-                    continue
-                building = str(file_path.stem.split("--")[-1] if "--" in file_path.stem else "").strip()
-                upload_date = str(file_path.parent.name.split("--")[0] if "--" in file_path.parent.name else "").strip()
-                file_items.append({"building": building, "file_path": str(file_path), "upload_date": upload_date})
+            if mode == "auto_once" and self._source_cache_service is not None:
+                target_bucket_key = (
+                    str(request.get("target_bucket_key", "") or "").strip()
+                    or str(internal_result.get("target_bucket_key", "") or "").strip()
+                    or self.current_source_cache_bucket()
+                )
+                target_buildings = [
+                    str(item or "").strip()
+                    for item in self._source_cache_service.get_enabled_buildings()
+                    if str(item or "").strip()
+                ]
+                cached_entries = self._source_cache_service.get_latest_ready_entries(
+                    source_family=FAMILY_MONTHLY_REPORT,
+                    buildings=target_buildings,
+                    bucket_key=target_bucket_key,
+                )
+                for item in cached_entries:
+                    if not isinstance(item, dict):
+                        continue
+                    building = str(item.get("building", "") or "").strip()
+                    file_path = str(item.get("file_path", "") or "").strip()
+                    upload_date = str(item.get("metadata", {}).get("upload_date", "") or item.get("duty_date", "") or "").strip()
+                    if not building or not file_path:
+                        continue
+                    file_items.append({"building": building, "file_path": file_path, "upload_date": upload_date})
+                if target_buildings and len(file_items) < len(target_buildings):
+                    source_root = str(internal_result.get("source_root", "") or "").strip()
+                    if not source_root:
+                        self._requeue_external_waiting_task(
+                            task_id=task_id,
+                            stage_id=stage_id,
+                            side="external",
+                            wait_message="等待内网补采同步",
+                            detail=f"月报 canonical 共享文件暂未齐全，等待共享目录同步后自动继续。bucket={target_bucket_key or '-'}",
+                        )
+                        return
+            if not file_items:
+                source_root = str(internal_result.get("source_root", "") or "").strip()
+                if not source_root:
+                    raise RuntimeError("月报共享桥接缺少 source_root")
+                source_root_path = Path(source_root)
+                for file_path in sorted(source_root_path.rglob("*.xlsx")):
+                    if not file_path.is_file():
+                        continue
+                    building = str(file_path.stem.split("--")[-1] if "--" in file_path.stem else "").strip()
+                    upload_date = str(file_path.parent.name.split("--")[0] if "--" in file_path.parent.name else "").strip()
+                    file_items.append({"building": building, "file_path": str(file_path), "upload_date": upload_date})
             if not file_items:
                 raise RuntimeError("月报共享桥接未找到可继续处理的共享源文件")
             if resume_job_id:
@@ -5105,6 +5715,24 @@ class SharedBridgeRuntimeService:
         if retried:
             self._emit_system_log(f"[共享桥接][外网端] 任务={task_text} {detail}")
 
+    def _should_keep_waiting_job_for_retry(self, task: Dict[str, Any], exc: Exception) -> bool:
+        feature = str(task.get("feature", "") or "").strip().lower()
+        mode = str(task.get("mode", "") or "").strip().lower()
+        if feature != "monthly_report_pipeline" or mode != "auto_once":
+            return False
+        error_text = str(exc or "").strip()
+        if not error_text:
+            return False
+        return any(
+            marker in error_text
+            for marker in (
+                "月报共享桥接缺少可继续处理的 canonical 源文件",
+                "月报共享桥接缺少 source_root",
+                "月报共享桥接未找到可继续处理的共享源文件",
+                "月报共享源文件不存在或不可访问",
+            )
+        )
+
     def _reconcile_waiting_jobs(self) -> None:
         if self._job_service is None or not self._store:
             return
@@ -5141,6 +5769,11 @@ class SharedBridgeRuntimeService:
                         summary=str(binding.get("summary", "") or "共享文件已到位，正在继续处理").strip() or "共享文件已到位，正在继续处理",
                     )
                 except Exception as exc:  # noqa: BLE001
+                    if self._should_keep_waiting_job_for_retry(task, exc):
+                        self._emit_system_log(
+                            f"[共享桥接] 任务={bridge_task_id} 月报 canonical 文件暂未可见，保留 waiting job 稍后重试: {exc}"
+                        )
+                        continue
                     self._job_service.fail_waiting_job(
                         job_id,
                         error_text=f"共享桥接已完成，但自动恢复原任务失败: {exc}",
@@ -5188,6 +5821,13 @@ class SharedBridgeRuntimeService:
                     return
                 if self.role_mode == "external":
                     self._run_wet_bulb_external_continue(task)
+                    return
+            if feature == "alarm_event_upload":
+                if self.role_mode == "internal":
+                    self._run_alarm_event_upload_internal_fill(task)
+                    return
+                if self.role_mode == "external":
+                    self._run_alarm_event_upload_external(task)
                     return
             if feature == "handover_cache_fill":
                 if self.role_mode == "internal":

@@ -12,6 +12,9 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 
 from pipeline_utils import configure_playwright_environment
 
+from app.shared.runtime.internal_download_browser_pool_runtime import (
+    get_internal_download_browser_pool,
+)
 from app.shared.utils.playwright_page_reuse import prepare_reusable_page
 
 
@@ -41,6 +44,53 @@ def _resolve_site_url(site: Dict[str, Any]) -> str:
     if not host:
         return ""
     return f"http://{host}/page/main/main.html"
+
+
+async def _await_ready_browser_pool(*, browser_pool: Any | None) -> Any | None:
+    config = _RUNTIME_CONFIG if isinstance(_RUNTIME_CONFIG, dict) else {}
+    download_cfg = config.get("download", {}) if isinstance(config.get("download", {}), dict) else {}
+    deployment_cfg = config.get("deployment", {}) if isinstance(config.get("deployment", {}), dict) else {}
+    role_mode = str(deployment_cfg.get("role_mode", "") or "").strip().lower()
+    wait_timeout_sec = 0.0
+    try:
+        configured_timeout = float(download_cfg.get("browser_pool_wait_timeout_sec", 0) or 0)
+    except Exception:  # noqa: BLE001
+        configured_timeout = 0.0
+    if configured_timeout > 0:
+        wait_timeout_sec = configured_timeout
+    elif role_mode == "internal":
+        wait_timeout_sec = 30.0
+    if wait_timeout_sec <= 0:
+        return browser_pool or get_internal_download_browser_pool()
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_timeout_sec
+    candidate = browser_pool
+    while loop.time() < deadline:
+        candidate = candidate or get_internal_download_browser_pool()
+        if candidate is None:
+            await asyncio.sleep(0.25)
+            continue
+        wait_until_ready = getattr(candidate, "wait_until_ready", None)
+        if callable(wait_until_ready):
+            remaining = max(0.1, deadline - loop.time())
+            try:
+                ready_result = await asyncio.to_thread(wait_until_ready, timeout_sec=remaining)
+            except TypeError:
+                ready_result = await asyncio.to_thread(wait_until_ready, remaining)
+            except Exception:  # noqa: BLE001
+                ready_result = {}
+            if bool(ready_result.get("ready", False)):
+                return candidate
+        is_running = getattr(candidate, "is_running", None)
+        if callable(is_running):
+            try:
+                if bool(is_running()):
+                    return candidate
+            except Exception:  # noqa: BLE001
+                pass
+        await asyncio.sleep(0.25)
+    return candidate
 
 
 def _normalize_text(value: Any, default: str = "-") -> str:
@@ -690,6 +740,8 @@ class DownloadGateway:
 
         if not site_entries:
             return [result_by_index[idx] for idx in sorted(result_by_index.keys())]
+
+        browser_pool = await _await_ready_browser_pool(browser_pool=browser_pool)
 
         if browser_pool is not None:
             async def _run_entry_with_pool(

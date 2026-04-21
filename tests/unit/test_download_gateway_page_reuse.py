@@ -239,3 +239,93 @@ def test_handover_batch_uses_browser_pool_pages(monkeypatch, tmp_path: Path) -> 
     assert fake_pool.calls == ["A楼", "B楼"]
     assert seen_pages[0] is fake_pool.pages["A楼"]
     assert seen_pages[1] is fake_pool.pages["B楼"]
+
+
+def test_handover_batch_waits_for_late_browser_pool(monkeypatch, tmp_path: Path) -> None:
+    fake_pool = _FakePool()
+    seen_pages: list[_FakePage] = []
+    pool_reads = {"count": 0}
+
+    gateway = DownloadGateway(
+        {
+            "download": {
+                "browser_headless": True,
+                "browser_channel": "",
+                "browser_pool_wait_timeout_sec": 1,
+            },
+            "handover_log": {
+                "sites": [
+                    {"building": "A楼", "enabled": True, "host": "a.example.invalid"},
+                ]
+            },
+        }
+    )
+
+    async def _fake_download_single_building_with_retry(self, page, **kwargs):
+        seen_pages.append(page)
+        return {
+            "success": True,
+            "building": kwargs["building"],
+            "file_path": str(tmp_path / f'{kwargs["building"]}.xlsx'),
+            "used_url": "http://example.invalid/page/main/main.html",
+            "error": "",
+            "failed_step": "",
+        }
+
+    def _fake_get_pool():
+        pool_reads["count"] += 1
+        if pool_reads["count"] < 3:
+            return None
+        return fake_pool
+
+    monkeypatch.setattr(
+        gateway_module,
+        "_RUNTIME_CONFIG",
+        {"deployment": {"role_mode": "internal"}, "download": {"browser_pool_wait_timeout_sec": 1}},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "get_internal_download_browser_pool",
+        _fake_get_pool,
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "async_playwright",
+        lambda: (_ for _ in ()).throw(AssertionError("late browser pool path should not launch local browser")),
+    )
+    monkeypatch.setattr(
+        DownloadGateway,
+        "_download_single_building_with_retry",
+        _fake_download_single_building_with_retry,
+    )
+
+    rows = asyncio.run(
+        gateway._download_handover_xlsx_batch_async(
+            buildings=["A楼"],
+            start_time="2026-03-29 00:00:00",
+            end_time="2026-03-29 01:00:00",
+            scale_label="小时",
+            template_name="交接班日志（李世龙）",
+            save_dir=str(tmp_path),
+            query_result_timeout_ms=1000,
+            download_event_timeout_ms=1000,
+            login_fill_timeout_ms=1000,
+            menu_visible_timeout_ms=1000,
+            iframe_timeout_ms=1000,
+            start_end_visible_timeout_ms=1000,
+            page_refresh_retry_count=0,
+            max_retries=1,
+            retry_wait_sec=0,
+            force_iframe_reopen_each_task=False,
+            export_button_text="导出",
+            menu_path=["报表报告", "数据查询", "即时报表"],
+            parallel_by_building=False,
+            site_start_delay_sec=0,
+            debug_step_log=False,
+            browser_pool=None,
+        )
+    )
+
+    assert [row["building"] for row in rows] == ["A楼"]
+    assert fake_pool.calls == ["A楼"]
+    assert seen_pages[0] is fake_pool.pages["A楼"]

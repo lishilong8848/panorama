@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 
 def _text(value: Any) -> str:
@@ -35,6 +35,36 @@ def _date_field_matches(value: Any, *, date_text: str, target_value: Any) -> boo
     return False
 
 
+def _formula_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        return "TRUE()" if value else "FALSE()"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(int(value)) if isinstance(value, int) else str(value)
+    text = _text(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
+
+
+def _build_calc_record_filter_formula(*, building: str, date_text: str, target_value: Any) -> str:
+    return (
+        f'AND(CurrentValue.[楼栋]={_formula_literal(building)}, '
+        f'CurrentValue.[日期]={_formula_literal(target_value or date_text)})'
+    )
+
+
+def _build_attachment_record_filter_formula(
+    *,
+    report_type: str,
+    building: str,
+    date_text: str,
+    target_value: Any,
+) -> str:
+    return (
+        f'AND(CurrentValue.[类型]={_formula_literal(report_type)}, '
+        f'CurrentValue.[楼栋]={_formula_literal(building)}, '
+        f'CurrentValue.[日期]={_formula_literal(target_value or date_text)})'
+    )
+
+
 def _collect_calc_record_ids_for_replace(
     *,
     client: Any,
@@ -42,8 +72,21 @@ def _collect_calc_record_ids_for_replace(
     building: str,
     date_text: str,
 ) -> List[str]:
-    records = client.list_records(table_id=calc_table_id, page_size=500, max_records=0)
     target_date_value = _date_value_for_compare(client, date_text)
+    filter_formula = _build_calc_record_filter_formula(
+        building=building,
+        date_text=date_text,
+        target_value=target_date_value,
+    )
+    try:
+        records = client.list_records(
+            table_id=calc_table_id,
+            page_size=500,
+            max_records=500,
+            filter_formula=filter_formula,
+        )
+    except Exception:  # noqa: BLE001
+        records = client.list_records(table_id=calc_table_id, page_size=500, max_records=0)
     record_ids: List[str] = []
     for item in records:
         if not isinstance(item, dict):
@@ -68,8 +111,22 @@ def _collect_attachment_record_ids_for_replace(
     building: str,
     date_text: str,
 ) -> List[str]:
-    records = client.list_records(table_id=attachment_table_id, page_size=500, max_records=0)
     target_date_value = _date_value_for_compare(client, date_text)
+    filter_formula = _build_attachment_record_filter_formula(
+        report_type=report_type,
+        building=building,
+        date_text=date_text,
+        target_value=target_date_value,
+    )
+    try:
+        records = client.list_records(
+            table_id=attachment_table_id,
+            page_size=500,
+            max_records=500,
+            filter_formula=filter_formula,
+        )
+    except Exception:  # noqa: BLE001
+        records = client.list_records(table_id=attachment_table_id, page_size=500, max_records=0)
     record_ids: List[str] = []
     for item in records:
         if not isinstance(item, dict):
@@ -86,98 +143,6 @@ def _collect_attachment_record_ids_for_replace(
             continue
         record_ids.append(record_id)
     return record_ids
-
-
-def _replace_key(building: str, date_text: str) -> Tuple[str, str]:
-    return (_text(building), _text(date_text))
-
-
-def _prefetch_calc_record_ids_for_replace(
-    *,
-    client: Any,
-    calc_table_id: str,
-    target_pairs: List[Tuple[str, str]],
-) -> Dict[Tuple[str, str], List[str]]:
-    if not target_pairs:
-        return {}
-    target_key_set = {
-        _replace_key(building_text, date_text)
-        for building_text, date_text in target_pairs
-        if _text(building_text) and _text(date_text)
-    }
-    if not target_key_set:
-        return {}
-    target_dates = {
-        date_text: _date_value_for_compare(client, date_text)
-        for _building, date_text in target_key_set
-    }
-    grouped: Dict[Tuple[str, str], List[str]] = {key: [] for key in target_key_set}
-    records = client.list_records(table_id=calc_table_id, page_size=500, max_records=0)
-    for item in records:
-        if not isinstance(item, dict):
-            continue
-        record_id = _text(item.get("record_id"))
-        fields = item.get("fields", {})
-        if not record_id or not isinstance(fields, dict):
-            continue
-        building_text = _text(fields.get("楼栋"))
-        if not building_text:
-            continue
-        for date_text, target_value in target_dates.items():
-            key = (building_text, date_text)
-            if key not in grouped:
-                continue
-            if not _date_field_matches(fields.get("日期"), date_text=date_text, target_value=target_value):
-                continue
-            grouped[key].append(record_id)
-            break
-    return grouped
-
-
-def _prefetch_attachment_record_ids_for_replace(
-    *,
-    client: Any,
-    attachment_table_id: str,
-    report_type: str,
-    target_pairs: List[Tuple[str, str]],
-) -> Dict[Tuple[str, str], List[str]]:
-    if not target_pairs:
-        return {}
-    target_key_set = {
-        _replace_key(building_text, date_text)
-        for building_text, date_text in target_pairs
-        if _text(building_text) and _text(date_text)
-    }
-    if not target_key_set:
-        return {}
-    target_dates = {
-        date_text: _date_value_for_compare(client, date_text)
-        for _building, date_text in target_key_set
-    }
-    grouped: Dict[Tuple[str, str], List[str]] = {key: [] for key in target_key_set}
-    records = client.list_records(table_id=attachment_table_id, page_size=500, max_records=0)
-    report_type_text = _text(report_type)
-    for item in records:
-        if not isinstance(item, dict):
-            continue
-        record_id = _text(item.get("record_id"))
-        fields = item.get("fields", {})
-        if not record_id or not isinstance(fields, dict):
-            continue
-        if _text(fields.get("类型")) != report_type_text:
-            continue
-        building_text = _text(fields.get("楼栋"))
-        if not building_text:
-            continue
-        for date_text, target_value in target_dates.items():
-            key = (building_text, date_text)
-            if key not in grouped:
-                continue
-            if not _date_field_matches(fields.get("日期"), date_text=date_text, target_value=target_value):
-                continue
-            grouped[key].append(record_id)
-            break
-    return grouped
 
 
 def upload_results_to_feishu(
@@ -248,24 +213,11 @@ def upload_results_to_feishu(
             normalized_source_dates[source_path] = str(day_text).strip()
 
     resolved_upload_dates: Dict[str, str] = {}
-    target_pairs: List[Tuple[str, str]] = []
     for result in results:
         source_key = str(Path(result.source_file).resolve())
         upload_date_text = normalized_source_dates.get(source_key, "") or date_override or result.month
         resolved_upload_dates[source_key] = upload_date_text
-        target_pairs.append((_text(result.building), _text(upload_date_text)))
-
-    calc_replace_index = _prefetch_calc_record_ids_for_replace(
-        client=client,
-        calc_table_id=calc_table_id,
-        target_pairs=target_pairs,
-    )
-    attachment_replace_index = _prefetch_attachment_record_ids_for_replace(
-        client=client,
-        attachment_table_id=attachment_table_id,
-        report_type=report_type,
-        target_pairs=target_pairs,
-    )
+    emit_log(f"[飞书上传] 开始准备覆盖查询: results={len(results)}")
 
     for result in results:
         source_key = str(Path(result.source_file).resolve())
@@ -278,8 +230,11 @@ def upload_results_to_feishu(
         emit_log(f"[飞书上传] 楼栋={building_text} 日期={date_text} PUE={pue_text}")
 
         try:
-            calc_delete_ids = list(
-                calc_replace_index.get(_replace_key(result.building, upload_date_text), [])
+            calc_delete_ids = _collect_calc_record_ids_for_replace(
+                client=client,
+                calc_table_id=calc_table_id,
+                building=result.building,
+                date_text=upload_date_text,
             )
             emit_log(
                 f"[飞书上传][覆盖] 已读取旧计算记录: 楼栋={building_text}, 日期={date_text}, count={len(calc_delete_ids)}"
@@ -301,8 +256,12 @@ def upload_results_to_feishu(
             raise
 
         try:
-            attachment_delete_ids = list(
-                attachment_replace_index.get(_replace_key(result.building, upload_date_text), [])
+            attachment_delete_ids = _collect_attachment_record_ids_for_replace(
+                client=client,
+                attachment_table_id=attachment_table_id,
+                report_type=report_type,
+                building=result.building,
+                date_text=upload_date_text,
             )
             emit_log(
                 f"[飞书上传][覆盖] 已读取旧附件记录: 楼栋={building_text}, 日期={date_text}, count={len(attachment_delete_ids)}"

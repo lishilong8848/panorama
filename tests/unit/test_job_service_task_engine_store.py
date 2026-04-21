@@ -183,6 +183,50 @@ def test_job_service_can_cancel_waiting_resource_job_restored_from_sqlite(tmp_pa
     assert restored_service.get_job("job-waiting-restored")["status"] == "cancelled"
 
 
+def test_job_service_preserves_shared_bridge_waiting_job_on_restore(tmp_path: Path) -> None:
+    first_service = JobService()
+    first_service.configure_task_engine(
+        runtime_config={"paths": {}},
+        app_dir=tmp_path,
+        config_snapshot_getter=lambda: {"paths": {}},
+    )
+    waiting_job = first_service.create_waiting_worker_job(
+        "bridge-waiting",
+        worker_handler="multi_date",
+        worker_payload={"selected_dates": ["2026-04-21"]},
+        resource_keys=["shared_bridge:monthly_report"],
+        feature="multi_date",
+        wait_reason="waiting:shared_bridge",
+        summary="等待内网补采同步",
+        bridge_task_id="bridge-task-1",
+    )
+    assert first_service.get_job_state(waiting_job.job_id).status == "waiting_resource"
+
+    launch_calls: list[str] = []
+    original_launch = JobService._launch_existing_worker_job
+
+    def _fake_launch(self, job, stage, *, payload_path, worker_handler):  # noqa: ANN001
+        launch_calls.append(str(job.job_id))
+
+    JobService._launch_existing_worker_job = _fake_launch
+    try:
+        restored_service = JobService()
+        restored_service.configure_task_engine(
+            runtime_config={"paths": {}},
+            app_dir=tmp_path,
+            config_snapshot_getter=lambda: {"paths": {}},
+        )
+    finally:
+        JobService._launch_existing_worker_job = original_launch
+
+    restored = restored_service.get_job_state(waiting_job.job_id)
+    assert restored is not None
+    assert restored.status == "waiting_resource"
+    assert restored.wait_reason == "waiting:shared_bridge"
+    assert restored.bridge_task_id == "bridge-task-1"
+    assert launch_calls == []
+
+
 def test_job_service_task_engine_runtime_snapshot_and_shutdown(tmp_path: Path) -> None:
     service = JobService()
     service.configure_task_engine(

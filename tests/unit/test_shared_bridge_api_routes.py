@@ -10,6 +10,7 @@ from app.modules.shared_bridge.api import routes
 
 class _FakeBridgeService:
     def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
         self.health_modes: list[str] = []
         self.list_tasks_error: Exception | None = None
         self.get_task_error: Exception | None = None
@@ -221,6 +222,9 @@ class _FakeBridgeService:
                 },
             },
         }
+        self.alarm_buildings = ["A楼", "B楼", "C楼", "D楼", "E楼"]
+        self.alarm_selection_ready = True
+        self.alarm_bucket_key = "2026-04-20 10"
 
     def list_tasks(self, limit: int = 100):  # noqa: ANN001
         if self.list_tasks_error is not None:
@@ -299,6 +303,43 @@ class _FakeBridgeService:
             "failed_entries": [],
         }
 
+    def get_source_cache_buildings(self):
+        self.calls.append(("get_source_cache_buildings", {}))
+        return list(self.alarm_buildings)
+
+    def current_alarm_event_bucket(self):
+        return self.alarm_bucket_key
+
+    def get_alarm_event_upload_selection(self, *, building: str = ""):
+        self.calls.append(("get_alarm_event_upload_selection", {"building": building}))
+        target_buildings = [building] if building else list(self.alarm_buildings)
+        if not self.alarm_selection_ready:
+            return {
+                "selected_entries": [],
+                "selection_reference_date": "2026-04-20",
+                "missing_both_days_buildings": list(target_buildings),
+            }
+        return {
+            "selected_entries": [
+                {"building": item, "file_path": f"Z:/share/alarm/{item}.json"}
+                for item in target_buildings
+            ],
+            "selection_reference_date": "2026-04-20",
+            "missing_both_days_buildings": [],
+        }
+
+    def create_alarm_event_upload_task(self, **kwargs):  # noqa: ANN003
+        self.calls.append(("create_alarm_event_upload_task", dict(kwargs)))
+        return {
+            "task_id": "bridge-alarm-upload-1",
+            "feature": "alarm_event_upload",
+            "status": "queued_for_internal",
+            "request": dict(kwargs),
+        }
+
+    def get_or_create_alarm_event_upload_task(self, **kwargs):  # noqa: ANN003
+        return self.create_alarm_event_upload_task(**kwargs)
+
     def diagnose_shared_root(self, *, initialize: bool = True, ready_limit_per_family: int = 400):
         return {
             **self.shared_root_self_check_result,
@@ -314,6 +355,7 @@ class _FakeBridgeService:
 class _FakeJob:
     def __init__(self, payload):
         self._payload = dict(payload)
+        self.job_id = str(self._payload.get("job_id", "") or "").strip()
 
     def to_dict(self):
         return dict(self._payload)
@@ -323,6 +365,9 @@ class _FakeJobService:
     def __init__(self) -> None:
         self.active_by_dedupe: dict[str, dict] = {}
         self.started_jobs: list[dict] = []
+        self.waiting_jobs: list[dict] = []
+        self.bind_calls: list[tuple[str, str]] = []
+        self.last_waiting_job: _FakeJob | None = None
 
     def find_active_job_by_dedupe_key(self, dedupe_key: str):
         return self.active_by_dedupe.get(str(dedupe_key or "").strip())
@@ -358,6 +403,35 @@ class _FakeJobService:
         if dedupe_key:
             self.active_by_dedupe[str(dedupe_key).strip()] = dict(payload)
         return _FakeJob(payload)
+
+    def create_waiting_worker_job(self, **kwargs):  # noqa: ANN003
+        payload = {
+            "job_id": f"job-waiting-{len(self.waiting_jobs) + 1}",
+            "name": str(kwargs.get("name", "") or "").strip(),
+            "status": "waiting_resource",
+            "feature": str(kwargs.get("feature", "") or "").strip(),
+            "dedupe_key": str(kwargs.get("dedupe_key", "") or "").strip(),
+            "summary": str(kwargs.get("summary", "") or "").strip(),
+            "wait_reason": str(kwargs.get("wait_reason", "") or "").strip(),
+            "created_at": "2026-04-03 02:00:00",
+        }
+        self.waiting_jobs.append({"payload": dict(payload), "kwargs": dict(kwargs)})
+        if payload["dedupe_key"]:
+            self.active_by_dedupe[payload["dedupe_key"]] = dict(payload)
+        job = _FakeJob(payload)
+        self.last_waiting_job = job
+        return job
+
+    def bind_bridge_task(self, job_id: str, bridge_task_id: str):
+        self.bind_calls.append((job_id, bridge_task_id))
+        if self.last_waiting_job and self.last_waiting_job.to_dict().get("job_id") == job_id:
+            payload = self.last_waiting_job.to_dict()
+            payload["bridge_task_id"] = bridge_task_id
+            self.last_waiting_job = _FakeJob(payload)
+            if payload.get("dedupe_key"):
+                self.active_by_dedupe[str(payload["dedupe_key"])] = dict(payload)
+            return self.last_waiting_job
+        return _FakeJob({"job_id": job_id, "bridge_task_id": bridge_task_id})
 
 
 def _fake_request(service: _FakeBridgeService | None = None, *, role_mode: str = "external"):
@@ -817,6 +891,65 @@ def test_bridge_source_cache_alarm_upload_building_accepts_external_role() -> No
     assert response["scope"] == "C楼"
     assert response["job"]["dedupe_key"] == "alarm_event_upload:building:C楼"
     assert "使用共享文件上传60天" in response["message"]
+
+
+def test_bridge_source_cache_alarm_upload_full_run_func_creates_waiting_bridge_job_when_missing() -> None:
+    service = _FakeBridgeService()
+    service.alarm_selection_ready = False
+    request = _fake_request(service, role_mode="external")
+
+    response = routes.bridge_source_cache_alarm_upload_full(request)
+    result = request.app.state.container.job_service.started_jobs[0]["run_func"](lambda *_args, **_kwargs: None)
+
+    assert response["ok"] is True
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
+    assert result["waiting"]["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-alarm-upload-1"
+    assert (
+        "create_alarm_event_upload_task",
+        {
+            "mode": "full",
+            "building": None,
+            "resume_job_id": "job-waiting-1",
+            "target_bucket_key": "2026-04-20 10",
+            "requested_by": "manual",
+        },
+    ) in service.calls
+
+
+def test_bridge_source_cache_alarm_upload_building_run_func_uses_ready_selection_directly() -> None:
+    service = _FakeBridgeService()
+    request = _fake_request(service, role_mode="external")
+
+    response = routes.bridge_source_cache_alarm_upload_building(request, building="C楼")
+    result = request.app.state.container.job_service.started_jobs[0]["run_func"](lambda *_args, **_kwargs: None)
+
+    assert response["ok"] is True
+    assert result["accepted"] is True
+    assert result["mode"] == "single_building"
+    assert result["scope"] == "C楼"
+    assert all(call[0] != "create_alarm_event_upload_task" for call in service.calls)
+
+
+def test_bridge_source_cache_alarm_upload_full_run_func_returns_already_running_instead_of_failing() -> None:
+    service = _FakeBridgeService()
+    request = _fake_request(service, role_mode="external")
+    service.upload_alarm_event_source_cache_full_to_bitable = lambda *, emit_log=None: {  # noqa: E731
+        "accepted": False,
+        "running": True,
+        "reason": "already_running",
+        "mode": "full",
+        "scope": "all",
+    }
+
+    response = routes.bridge_source_cache_alarm_upload_full(request)
+    result = request.app.state.container.job_service.started_jobs[0]["run_func"](lambda *_args, **_kwargs: None)
+
+    assert response["ok"] is True
+    assert result["accepted"] is False
+    assert result["reason"] == "already_running"
+    assert result["running"] is True
 
 
 def test_bridge_source_cache_alarm_upload_full_returns_running_state_when_already_running() -> None:

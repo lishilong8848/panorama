@@ -11,6 +11,9 @@ from app.modules.report_pipeline.service.job_panel_presenter import (
     build_bridge_tasks_summary,
     present_bridge_task,
 )
+from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import (
+    start_waiting_bridge_job,
+)
 from app.modules.shared_bridge.service.dashboard_display_presenter import (
     present_internal_runtime_display,
     present_internal_runtime_building_display,
@@ -30,6 +33,7 @@ _BRIDGE_FEATURE_LABELS = {
     "day_metric_from_download": "12项使用共享文件上传",
     "wet_bulb_collection": "湿球温度采集",
     "monthly_report_pipeline": "月报主流程",
+    "alarm_event_upload": "告警信息上传",
     "handover_cache_fill": "交接班历史共享文件补采",
     "monthly_cache_fill": "月报历史共享文件补采",
     "internal_browser_alert": "内网环境告警",
@@ -255,6 +259,110 @@ def _start_local_background_job(
     return {"job": job.to_dict(), "reused": False}
 
 
+def _accepted_waiting_job_response(job, task: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = {
+        "ok": True,
+        "accepted": True,
+        "job": job.to_dict() if hasattr(job, "to_dict") else dict(job or {}),
+    }
+    if isinstance(task, dict) and task:
+        payload["bridge_task"] = task
+    return payload
+
+
+def _run_external_alarm_upload_shared_flow(
+    *,
+    container,
+    service,
+    mode: str,
+    building: str,
+    emit_log: Callable[[str], None],
+) -> Dict[str, Any]:
+    normalized_mode = str(mode or "").strip().lower() or "full"
+    target_buildings = [building] if normalized_mode == "single_building" and building else service.get_source_cache_buildings()
+    target_buildings = [item for item in target_buildings if item]
+    emit_log(
+        "[告警信息上传] 已进入后台共享文件处理: "
+        f"mode={normalized_mode}, building={building or '-'}"
+    )
+    selection = service.get_alarm_event_upload_selection(
+        building=building if normalized_mode == "single_building" else "",
+    )
+    target_bucket_key = ""
+    current_alarm_bucket = getattr(service, "current_alarm_event_bucket", None)
+    if callable(current_alarm_bucket):
+        try:
+            target_bucket_key = str(current_alarm_bucket() or "").strip()
+        except Exception:
+            target_bucket_key = ""
+    if not target_bucket_key:
+        target_bucket_key = str(
+            selection.get("target_bucket_key", "")
+            or selection.get("current_bucket", "")
+            or selection.get("selection_reference_date", "")
+            or ""
+        ).strip()
+    selected_entries = [
+        item
+        for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
+        if isinstance(item, dict)
+    ]
+    ready_buildings = {
+        str(item.get("building", "") or "").strip()
+        for item in selected_entries
+        if str(item.get("building", "") or "").strip()
+    }
+    missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
+    if missing_buildings:
+        waiting_job, waiting_task = start_waiting_bridge_job(
+            job_service=container.job_service,
+            bridge_service=service,
+            name="使用共享文件上传60天-全部楼栋" if normalized_mode == "full" else f"使用共享文件上传60天-{building}",
+            worker_handler="alarm_event_upload",
+            worker_payload={
+                "resume_kind": "shared_bridge_alarm_event_upload",
+                "mode": normalized_mode,
+                "building": building or None,
+            },
+            resource_keys=["alarm_upload:global"],
+            priority="manual",
+            feature="alarm_event_upload",
+            dedupe_key=":".join(
+                [
+                    "alarm_event_upload_wait_shared_bridge",
+                    normalized_mode,
+                    building or "all",
+                    target_bucket_key or "-",
+                ]
+            ),
+            submitted_by="manual",
+            bridge_get_or_create_name="get_or_create_alarm_event_upload_task",
+            bridge_create_name="create_alarm_event_upload_task",
+            bridge_kwargs={
+                "mode": normalized_mode,
+                "building": building or None,
+                "target_bucket_key": target_bucket_key or None,
+            },
+        )
+        emit_log(
+            "[共享桥接] 已受理告警上传共享桥接任务 "
+            f"task_id={str(waiting_task.get('task_id', '') or '-').strip() or '-'}, "
+            f"mode={normalized_mode}, missing={','.join(missing_buildings)}"
+        )
+        return {
+            "ok": True,
+            "mode": "waiting_shared_bridge",
+            "missing_buildings": list(missing_buildings),
+            "waiting": _accepted_waiting_job_response(waiting_job, waiting_task),
+        }
+    if normalized_mode == "single_building":
+        return service.upload_alarm_event_source_cache_single_building_to_bitable(
+            building=building,
+            emit_log=emit_log,
+        )
+    return service.upload_alarm_event_source_cache_full_to_bitable(emit_log=emit_log)
+
+
 def _bridge_text(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -309,6 +417,8 @@ def _bridge_stage_label(*, feature: Any, mode: Any, stage_id: Any, handler: Any 
             return "准备月报共享文件"
         return "准备共享文件"
     if key == "internal_fill":
+        if feature_text == "alarm_event_upload":
+            return "补采告警共享文件"
         if feature_text == "monthly_cache_fill":
             return "补采月报历史共享文件"
         if feature_text == "handover_cache_fill" and mode_text == "day_metric":
@@ -321,6 +431,8 @@ def _bridge_stage_label(*, feature: Any, mode: Any, stage_id: Any, handler: Any 
     if key == "external_upload":
         if feature_text == "day_metric_from_download":
             return "使用共享文件上传12项"
+        if feature_text == "alarm_event_upload":
+            return "使用共享文件上传告警信息"
         return "外网继续上传"
     if key == "external_extract_and_upload":
         return "使用共享文件上传湿球温度"
@@ -952,15 +1064,19 @@ def bridge_source_cache_alarm_upload_full(request: Request) -> Dict[str, Any]:
     dedupe_key = "alarm_event_upload:full"
 
     def _run(emit_log) -> Dict[str, Any]:
-        def _combined_log(line: str) -> None:
-            text = str(line or "").strip()
-            if not text:
-                return
-            emit_log(text)
-
-        result = service.upload_alarm_event_source_cache_full_to_bitable(emit_log=_combined_log)
+        result = _run_external_alarm_upload_shared_flow(
+            container=container,
+            service=service,
+            mode="full",
+            building="",
+            emit_log=emit_log,
+        )
+        if str(result.get("mode", "") or "").strip().lower() == "waiting_shared_bridge":
+            return result
         accepted = bool(result.get("accepted"))
         reason = str(result.get("reason", "") or "").strip()
+        if not accepted and reason == "already_running":
+            return result
         if not accepted:
             error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
             raise RuntimeError(error_text)
@@ -1017,18 +1133,19 @@ def bridge_source_cache_alarm_upload_building(
     building_text = str(building or "").strip()
 
     def _run(emit_log) -> Dict[str, Any]:
-        def _combined_log(line: str) -> None:
-            text = str(line or "").strip()
-            if not text:
-                return
-            emit_log(text)
-
-        result = service.upload_alarm_event_source_cache_single_building_to_bitable(
+        result = _run_external_alarm_upload_shared_flow(
+            container=container,
+            service=service,
+            mode="single_building",
             building=building_text,
-            emit_log=_combined_log,
+            emit_log=emit_log,
         )
+        if str(result.get("mode", "") or "").strip().lower() == "waiting_shared_bridge":
+            return result
         accepted = bool(result.get("accepted"))
         reason = str(result.get("reason", "") or "").strip()
+        if not accepted and reason == "already_running":
+            return result
         if not accepted:
             error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
             raise RuntimeError(error_text)

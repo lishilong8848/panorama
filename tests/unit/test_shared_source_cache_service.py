@@ -964,6 +964,104 @@ def test_get_handover_by_date_entries_reuses_latest_entry_with_legacy_none_duty_
     assert entries[0]['file_path'] == str(latest_file)
 
 
+def test_get_handover_by_date_entries_prefers_latest_over_stale_date_alias(work_dir: Path) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    stale_file = shared_root / '交接班日志源文件' / '202603' / '20260330--白班' / '20260330--白班--交接班日志源文件--A楼.xlsx'
+    _write_minimal_handover_workbook(stale_file)
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='date',
+        bucket_key='2026-03-30',
+        duty_date='2026-03-30',
+        duty_shift='day',
+        downloaded_at='2026-03-30 20:00:00',
+        relative_path=stale_file.relative_to(shared_root).as_posix(),
+        status='ready',
+        file_hash='hash-handover-stale',
+        size_bytes=10,
+    )
+
+    latest_file = shared_root / '交接班日志源文件' / '202603' / '20260331--21' / '20260331--21--交接班日志源文件--A楼.xlsx'
+    _write_minimal_handover_workbook(latest_file)
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_HANDOVER_LOG,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-03-31 21',
+        duty_date='2026-03-30',
+        duty_shift='day',
+        downloaded_at='2026-03-31 21:05:00',
+        relative_path=latest_file.relative_to(shared_root).as_posix(),
+        status='ready',
+        file_hash='hash-handover-latest',
+        size_bytes=10,
+    )
+
+    entries = service.get_handover_by_date_entries(duty_date='2026-03-30', duty_shift='day', buildings=['A楼'])
+
+    assert len(entries) == 1
+    assert entries[0]['bucket_kind'] == 'latest'
+    assert entries[0]['file_path'] == str(latest_file)
+
+
+def test_get_handover_capacity_by_date_entries_prefers_latest_over_stale_date_alias(work_dir: Path) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    stale_file = shared_root / '交接班容量报表源文件' / '202603' / '20260330--白班' / '20260330--白班--交接班容量报表源文件--A楼.xlsx'
+    _write_minimal_handover_workbook(stale_file)
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+        building='A楼',
+        bucket_kind='date',
+        bucket_key='2026-03-30',
+        duty_date='2026-03-30',
+        duty_shift='day',
+        downloaded_at='2026-03-30 20:00:00',
+        relative_path=stale_file.relative_to(shared_root).as_posix(),
+        status='ready',
+        file_hash='hash-capacity-stale',
+        size_bytes=10,
+    )
+
+    latest_file = shared_root / '交接班容量报表源文件' / '202603' / '20260331--21' / '20260331--21--交接班容量报表源文件--A楼.xlsx'
+    _write_minimal_handover_workbook(latest_file)
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-03-31 21',
+        duty_date='2026-03-30',
+        duty_shift='day',
+        downloaded_at='2026-03-31 21:05:00',
+        relative_path=latest_file.relative_to(shared_root).as_posix(),
+        status='ready',
+        file_hash='hash-capacity-latest',
+        size_bytes=10,
+    )
+
+    entries = service.get_handover_capacity_by_date_entries(duty_date='2026-03-30', duty_shift='day', buildings=['A楼'])
+
+    assert len(entries) == 1
+    assert entries[0]['bucket_kind'] == 'latest'
+    assert entries[0]['file_path'] == str(latest_file)
+
+
 def test_fill_handover_latest_infers_duty_context_when_downloader_returns_none(
     monkeypatch: pytest.MonkeyPatch,
     work_dir: Path,
@@ -1050,6 +1148,57 @@ def test_get_monthly_by_date_entries_ignores_inaccessible_indexed_files(
     entries = service.get_monthly_by_date_entries(selected_dates=['2026-03-29'], buildings=['A楼'])
 
     assert entries == []
+
+
+def test_get_monthly_by_date_entries_prefers_latest_over_stale_date_entry(work_dir: Path) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='internal', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    stale_file = shared_root / '全景平台月报源文件' / '202604' / '20260420--月报' / '20260420--月报--全景平台月报源文件--A楼.xlsx'
+    stale_file.parent.mkdir(parents=True, exist_ok=True)
+    stale_file.write_bytes(b'stale')
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_MONTHLY_REPORT,
+        building='A楼',
+        bucket_kind='date',
+        bucket_key='2026-04-20',
+        duty_date='2026-04-20',
+        duty_shift='',
+        downloaded_at='2026-04-20 16:00:00',
+        relative_path=stale_file.relative_to(shared_root).as_posix(),
+        status='ready',
+        file_hash='hash-monthly-stale',
+        size_bytes=5,
+    )
+
+    latest_file = shared_root / '全景平台月报源文件' / '202604' / '20260420--21' / '20260420--21--全景平台月报源文件--A楼.xlsx'
+    latest_file.parent.mkdir(parents=True, exist_ok=True)
+    latest_file.write_bytes(b'latest')
+    store.upsert_source_cache_entry(
+        source_family=FAMILY_MONTHLY_REPORT,
+        building='A楼',
+        bucket_kind='latest',
+        bucket_key='2026-04-20 21',
+        duty_date='2026-04-20',
+        duty_shift='',
+        downloaded_at='2026-04-20 21:05:00',
+        relative_path=latest_file.relative_to(shared_root).as_posix(),
+        status='ready',
+        file_hash='hash-monthly-latest',
+        size_bytes=6,
+    )
+
+    entries = service.get_monthly_by_date_entries(selected_dates=['2026-04-20'], buildings=['A楼'])
+
+    assert len(entries) == 1
+    assert entries[0]['bucket_kind'] == 'latest'
+    assert entries[0]['file_path'] == str(latest_file)
 
 
 def test_external_health_snapshot_resolves_file_path_from_external_root_dir(work_dir: Path) -> None:

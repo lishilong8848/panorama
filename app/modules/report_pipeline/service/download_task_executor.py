@@ -22,6 +22,56 @@ def _resolve_used_url(site: Any) -> str:
     return f"http://{raw}"
 
 
+async def _await_ready_browser_pool(
+    *,
+    config: Dict[str, Any],
+    browser_pool: Any | None,
+) -> Any | None:
+    download_cfg = config.get("download", {}) if isinstance(config.get("download", {}), dict) else {}
+    deployment_cfg = config.get("deployment", {}) if isinstance(config.get("deployment", {}), dict) else {}
+    role_mode = str(deployment_cfg.get("role_mode", "") or "").strip().lower()
+    wait_timeout_sec = 0.0
+    try:
+        configured_timeout = float(download_cfg.get("browser_pool_wait_timeout_sec", 0) or 0)
+    except Exception:  # noqa: BLE001
+        configured_timeout = 0.0
+    if configured_timeout > 0:
+        wait_timeout_sec = configured_timeout
+    elif role_mode == "internal":
+        wait_timeout_sec = 30.0
+    if wait_timeout_sec <= 0:
+        return browser_pool or get_internal_download_browser_pool()
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_timeout_sec
+    candidate = browser_pool
+    while loop.time() < deadline:
+        candidate = candidate or get_internal_download_browser_pool()
+        if candidate is None:
+            await asyncio.sleep(0.25)
+            continue
+        wait_until_ready = getattr(candidate, "wait_until_ready", None)
+        if callable(wait_until_ready):
+            remaining = max(0.1, deadline - loop.time())
+            try:
+                ready_result = await asyncio.to_thread(wait_until_ready, timeout_sec=remaining)
+            except TypeError:
+                ready_result = await asyncio.to_thread(wait_until_ready, remaining)
+            except Exception:  # noqa: BLE001
+                ready_result = {}
+            if bool(ready_result.get("ready", False)):
+                return candidate
+        is_running = getattr(candidate, "is_running", None)
+        if callable(is_running):
+            try:
+                if bool(is_running()):
+                    return candidate
+            except Exception:  # noqa: BLE001
+                pass
+        await asyncio.sleep(0.25)
+    return candidate
+
+
 async def run_download_tasks_by_building(
     *,
     config: Dict[str, Any],
@@ -47,7 +97,7 @@ async def run_download_tasks_by_building(
     grouped_tasks = group_download_tasks_by_building(download_tasks)
     if not grouped_tasks:
         return []
-    browser_pool = browser_pool or get_internal_download_browser_pool()
+    browser_pool = await _await_ready_browser_pool(config=config, browser_pool=browser_pool)
 
     if browser_pool is not None:
         pairs: List[Tuple[Any, Any]] = []
