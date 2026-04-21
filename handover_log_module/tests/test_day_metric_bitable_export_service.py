@@ -171,6 +171,10 @@ def test_list_existing_records_for_unit_filters_building_date_and_type(monkeypat
     matched = service.list_existing_records_for_unit(building="A楼", duty_date="2026-03-24")
 
     assert [item["record_id"] for item in matched] == ["rec_1"]
+    assert "CurrentValue.[日期]>=" in fake_client.list_calls[0]["filter_formula"]
+    assert "CurrentValue.[日期]<" in fake_client.list_calls[0]["filter_formula"]
+    assert 'TODATE("2026-03-24")' in fake_client.list_calls[0]["filter_formula"]
+    assert 'TODATE("2026-03-25")' in fake_client.list_calls[0]["filter_formula"]
 
 
 def test_rewrite_from_output_file_upserts_existing_records(monkeypatch) -> None:
@@ -214,4 +218,62 @@ def test_rewrite_from_output_file_upserts_existing_records(monkeypatch) -> None:
     assert fake_client.created_calls == []
     assert [item["record_id"] for item in fake_client.updated_calls[0]["records"]] == ["rec_1", "rec_2"]
     assert "CurrentValue.[楼栋]" in fake_client.list_calls[0]["filter_formula"]
-    assert "CurrentValue.[日期]" in fake_client.list_calls[0]["filter_formula"]
+    assert "CurrentValue.[日期]>=" in fake_client.list_calls[0]["filter_formula"]
+    assert "CurrentValue.[日期]<" in fake_client.list_calls[0]["filter_formula"]
+    assert 'TODATE("2026-03-24")' in fake_client.list_calls[0]["filter_formula"]
+
+
+def test_rewrite_from_output_file_falls_back_to_building_scope_when_exact_filter_misses(monkeypatch) -> None:
+    service = DayMetricBitableExportService(_cfg())
+    target_ms = service._midnight_timestamp_ms("2026-03-24")
+    fake_client = _FakeClient([])
+
+    def _list_records(*, table_id, page_size, max_records, filter_formula=""):  # noqa: ANN001
+        fake_client.list_calls.append(
+            {
+                "table_id": table_id,
+                "page_size": page_size,
+                "max_records": max_records,
+                "filter_formula": filter_formula,
+            }
+        )
+        if "CurrentValue.[日期]>=" in filter_formula:
+            return []
+        return [
+            {"record_id": "rec_1", "fields": {"楼栋": "A楼", "日期": target_ms + 12 * 60 * 60 * 1000, "类型": "总负荷（KW）"}},
+            {"record_id": "rec_2", "fields": {"楼栋": "A楼", "日期": target_ms + 12 * 60 * 60 * 1000, "类型": "IT总负荷（KW）"}},
+        ]
+
+    fake_client.list_records = _list_records  # type: ignore[method-assign]
+    monkeypatch.setattr(service, "_resolve_target", lambda _cfg: {"app_token": "app", "table_id": "tbl_demo"})
+    monkeypatch.setattr(service, "_new_client", lambda _cfg, **kwargs: fake_client)
+    monkeypatch.setattr(
+        service,
+        "_prepare_records",
+        lambda **kwargs: (  # noqa: ARG005
+            [
+                {"楼栋": "A楼", "日期": target_ms, "类型": "总负荷（KW）", "数值": 11, "位置/编号": "A-401"},
+                {"楼栋": "A楼", "日期": target_ms, "类型": "IT总负荷（KW）", "数值": 22, "位置/编号": ""},
+            ],
+            [{"楼栋": "A楼", "日期": target_ms, "类型": "总负荷（KW）", "数值": 11, "位置/编号": "A-401"}],
+        ),
+    )
+    logs: list[str] = []
+
+    result = service.rewrite_from_output_file(
+        building="A楼",
+        duty_date="2026-03-24",
+        duty_shift="day",
+        output_file="demo.xlsx",
+        metric_values_by_id={"city_power": 11, "it_power": 22},
+        metric_origin_context={},
+        emit_log=logs.append,
+    )
+
+    assert result["status"] == "ok"
+    assert result["updated_records"] == 2
+    assert len(fake_client.list_calls) == 2
+    assert "CurrentValue.[日期]>=" in fake_client.list_calls[0]["filter_formula"]
+    assert 'TODATE("2026-03-24")' in fake_client.list_calls[0]["filter_formula"]
+    assert "CurrentValue.[日期]" not in fake_client.list_calls[1]["filter_formula"]
+    assert any("范围过滤匹配旧记录" in line for line in logs)

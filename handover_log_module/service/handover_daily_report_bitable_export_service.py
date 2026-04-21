@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -235,9 +235,20 @@ class HandoverDailyReportBitableExportService:
         year_field = str(fields.get("year", "年度") or "年度").strip()
         date_field = str(fields.get("date", "日期") or "日期").strip()
         shift_field = str(fields.get("shift", "班次") or "班次").strip()
+        next_date = (datetime.strptime(str(duty_date or "").strip(), "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
         return (
             f"AND(CurrentValue.[{year_field}]={self._formula_literal(self._year_text(duty_date))}, "
-            f"CurrentValue.[{date_field}]={self._formula_literal(self._midnight_timestamp_ms(duty_date))}, "
+            f"CurrentValue.[{date_field}]>=TODATE({self._formula_literal(duty_date)}), "
+            f"CurrentValue.[{date_field}]<TODATE({self._formula_literal(next_date)}), "
+            f"CurrentValue.[{shift_field}]={self._formula_literal(self._shift_text(duty_shift))})"
+        )
+
+    def _build_record_scoped_filter_formula(self, *, duty_date: str, duty_shift: str, cfg: Dict[str, Any]) -> str:
+        fields = cfg.get("fields", {})
+        year_field = str(fields.get("year", "年度") or "年度").strip()
+        shift_field = str(fields.get("shift", "班次") or "班次").strip()
+        return (
+            f"AND(CurrentValue.[{year_field}]={self._formula_literal(self._year_text(duty_date))}, "
             f"CurrentValue.[{shift_field}]={self._formula_literal(self._shift_text(duty_shift))})"
         )
 
@@ -309,6 +320,57 @@ class HandoverDailyReportBitableExportService:
                 matched.append(record_id)
         return matched
 
+    def _list_existing_records_for_upsert(
+        self,
+        *,
+        client: Any,
+        table_id: str,
+        cfg: Dict[str, Any],
+        target: Dict[str, Any],
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None],
+    ) -> List[Dict[str, Any]]:
+        page_size = int(target.get("page_size", 500) or 500)
+        max_records = int(target.get("max_records", 5000) or 5000)
+        attempts = [
+            ("exact", self._build_record_filter_formula(duty_date=duty_date, duty_shift=duty_shift, cfg=cfg)),
+            ("year_shift", self._build_record_scoped_filter_formula(duty_date=duty_date, duty_shift=duty_shift, cfg=cfg)),
+        ]
+        collected: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for label, filter_formula in attempts:
+            existing_records = client.list_records(
+                table_id=table_id,
+                page_size=page_size,
+                max_records=max_records,
+                filter_formula=filter_formula,
+            )
+            for item in existing_records:
+                if not isinstance(item, dict):
+                    continue
+                record_id = str(item.get("record_id", "") or "").strip()
+                dedupe_key = record_id or f"{label}:{len(collected)}"
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                collected.append(item)
+            matched_ids = self._match_existing_record_ids(
+                existing_records=collected,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                cfg=cfg,
+            )
+            if matched_ids:
+                if label != "exact":
+                    emit_log(
+                        f"[交接班][日报多维] 精确过滤未命中，已使用范围过滤匹配旧记录: batch={duty_date}|{duty_shift}, strategy={label}, matched={len(matched_ids)}"
+                    )
+                return collected
+            if label == "exact" and existing_records:
+                return collected
+        return []
+
     def export_record(
         self,
         *,
@@ -337,15 +399,14 @@ class HandoverDailyReportBitableExportService:
         except Exception as exc:  # noqa: BLE001
             fields_meta = []
             emit_log(f"[交接班][日报多维] 字段元数据读取失败，按纯文本链接回退: {exc}")
-        existing_records = client.list_records(
+        existing_records = self._list_existing_records_for_upsert(
+            client=client,
             table_id=table_id,
-            page_size=int(target.get("page_size", 500) or 500),
-            max_records=int(target.get("max_records", 5000) or 5000),
-            filter_formula=self._build_record_filter_formula(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                cfg=cfg,
-            ),
+            cfg=cfg,
+            target=target,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=emit_log,
         )
         matched_ids = self._match_existing_record_ids(
             existing_records=existing_records,

@@ -157,6 +157,77 @@ def test_run_from_source_file_replaces_existing_record_by_strict_tuple(tmp_path:
     assert updated_row["附件"] == [{"file_token": "file-token-1"}]
 
 
+def test_run_from_source_file_falls_back_to_scoped_query_when_exact_filter_misses(tmp_path: Path) -> None:
+    source_file = tmp_path / "source.xlsx"
+    source_file.write_bytes(b"demo")
+    client = _FakeClient()
+    service = _ServiceWithFakeClient(
+        {
+            "source_data_attachment_export": {
+                "enabled": True,
+                "source": {
+                    "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+                    "table_id": "tblF13MQ10PslIdI",
+                    "page_size": 500,
+                    "max_records": 5000,
+                },
+                "fields": {
+                    "type": "类型",
+                    "building": "楼栋",
+                    "date": "日期",
+                    "shift": "班次",
+                    "attachment": "附件",
+                },
+                "fixed_values": {
+                    "type": "动环数据",
+                    "shift_text": {"day": "白班", "night": "夜班"},
+                },
+                "replace_existing": True,
+            }
+        },
+        client,
+    )
+    existing = {
+        "record_id": "rec-existing",
+        "fields": {
+            "类型": "动环数据",
+            "楼栋": "E楼",
+            "日期": service._midnight_timestamp_ms("2026-04-21"),
+            "班次": "白班",
+        },
+    }
+
+    def _list_records(**kwargs):  # noqa: ANN001
+        client.list_calls.append(dict(kwargs))
+        formula = str(kwargs.get("filter_formula", ""))
+        if "CurrentValue.[日期]" in formula:
+            return []
+        return [existing]
+
+    client.list_records = _list_records  # type: ignore[method-assign]
+    logs: list[str] = []
+
+    result = service.run_from_source_file(
+        building="E楼",
+        duty_date="2026-04-21",
+        duty_shift="day",
+        data_file=str(source_file),
+        emit_log=logs.append,
+    )
+
+    assert result["status"] == "ok"
+    assert result["updated_record_id"] == "rec-existing"
+    assert client.created == []
+    assert client.updated[0]["record_id"] == "rec-existing"
+    assert len(client.list_calls) == 2
+    assert "CurrentValue.[日期]>=" in client.list_calls[0]["filter_formula"]
+    assert "CurrentValue.[日期]<" in client.list_calls[0]["filter_formula"]
+    assert 'TODATE("2026-04-21")' in client.list_calls[0]["filter_formula"]
+    assert 'TODATE("2026-04-22")' in client.list_calls[0]["filter_formula"]
+    assert "CurrentValue.[日期]" not in client.list_calls[1]["filter_formula"]
+    assert any("范围过滤匹配旧记录" in line for line in logs)
+
+
 def test_review_session_service_persists_data_file_and_attachment_state(tmp_path: Path) -> None:
     cfg = ensure_v3_config({})
     cfg.setdefault("features", {}).setdefault("handover_log", {}).setdefault("event_sections", {}).setdefault(

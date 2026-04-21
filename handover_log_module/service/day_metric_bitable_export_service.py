@@ -2,7 +2,7 @@
 
 import copy
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -280,14 +280,20 @@ class DayMetricBitableExportService:
         text = str(value or "").strip().replace("\\", "\\\\").replace('"', '\\"')
         return f'"{text}"'
 
+    @staticmethod
+    def _next_date_text(duty_date: str) -> str:
+        dt = datetime.strptime(str(duty_date or "").strip(), "%Y-%m-%d")
+        return (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+
     def _build_unit_filter_formula(self, *, building: str, duty_date: str, cfg: Dict[str, Any]) -> str:
         fields = cfg.get("fields", {})
         building_field = str(fields.get("building", "楼栋")).strip() or "楼栋"
         date_field = str(fields.get("date", "日期")).strip() or "日期"
-        target_ms = self._midnight_timestamp_ms(duty_date)
+        next_day = self._next_date_text(duty_date)
         return (
             f"AND(CurrentValue.[{building_field}]={self._formula_literal(building)}, "
-            f"CurrentValue.[{date_field}]={self._formula_literal(target_ms)})"
+            f"CurrentValue.[{date_field}]>=TODATE({self._formula_literal(duty_date)}), "
+            f"CurrentValue.[{date_field}]<TODATE({self._formula_literal(next_day)}))"
         )
 
     def _list_existing_records_for_unit(
@@ -299,20 +305,47 @@ class DayMetricBitableExportService:
         cfg: Dict[str, Any],
         building: str,
         duty_date: str,
+        emit_log: Callable[[str], None] | None = None,
     ) -> List[Dict[str, Any]]:
-        filter_formula = self._build_unit_filter_formula(building=building, duty_date=duty_date, cfg=cfg)
-        existing_records = client.list_records(
-            table_id=table_id,
-            page_size=int(source.get("page_size", 500) or 500),
-            max_records=int(source.get("max_records", 5000) or 5000),
-            filter_formula=filter_formula,
-        )
-        return self._matching_existing_records(
-            existing_records=existing_records,
-            building=building,
-            duty_date=duty_date,
-            cfg=cfg,
-        )
+        page_size = int(source.get("page_size", 500) or 500)
+        max_records = int(source.get("max_records", 5000) or 5000)
+        attempts = [
+            ("exact", self._build_unit_filter_formula(building=building, duty_date=duty_date, cfg=cfg)),
+            ("building", f"CurrentValue.[{str(cfg.get('fields', {}).get('building', '楼栋')).strip() or '楼栋'}]={self._formula_literal(building)}"),
+        ]
+        collected: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for label, filter_formula in attempts:
+            existing_records = client.list_records(
+                table_id=table_id,
+                page_size=page_size,
+                max_records=max_records,
+                filter_formula=filter_formula,
+            )
+            for item in existing_records:
+                if not isinstance(item, dict):
+                    continue
+                record_id = str(item.get("record_id", "") or "").strip()
+                dedupe_key = record_id or f"{label}:{len(collected)}"
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                collected.append(item)
+            matched = self._matching_existing_records(
+                existing_records=collected,
+                building=building,
+                duty_date=duty_date,
+                cfg=cfg,
+            )
+            if matched:
+                if label != "exact" and callable(emit_log):
+                    emit_log(
+                        f"[12项独立上传] 精确过滤未命中，已使用范围过滤匹配旧记录: building={building}, duty_date={duty_date}, strategy={label}, matched={len(matched)}"
+                    )
+                return matched
+            if label == "exact" and existing_records:
+                return matched
+        return []
 
     @staticmethod
     def _normalize_cell_values(values: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -702,6 +735,7 @@ class DayMetricBitableExportService:
             cfg=cfg,
             building=building,
             duty_date=duty_date,
+            emit_log=emit_log,
         )
         record_ids = [
             str(item.get("record_id", "")).strip()
@@ -769,6 +803,7 @@ class DayMetricBitableExportService:
                 cfg=cfg,
                 building=building,
                 duty_date=duty_date,
+                emit_log=emit_log,
             )
             fields = cfg.get("fields", {})
             type_field = str(fields.get("type", "类型")).strip()

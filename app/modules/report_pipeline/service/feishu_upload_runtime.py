@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -45,7 +46,13 @@ def _date_field_matches(value: Any, *, date_text: str, target_value: Any) -> boo
     if value_text and value_text == _text(date_text):
         return True
     if isinstance(value, (int, float)) and isinstance(target_value, (int, float)):
-        return int(value) == int(target_value)
+        value_ms = int(value)
+        target_ms = int(target_value)
+        if value_ms < 10**11:
+            value_ms *= 1000
+        if target_ms < 10**11:
+            target_ms *= 1000
+        return target_ms <= value_ms < target_ms + 86_400_000
     # 日期字符串容错: 允许 "YYYY-MM-DD HH:MM:SS" 或 ISO 字符串前缀匹配
     if len(value_text) >= 10 and value_text[:10] == _text(date_text):
         return True
@@ -61,11 +68,39 @@ def _formula_literal(value: Any) -> str:
     return f'"{text}"'
 
 
+def _next_date_text(date_text: str) -> str:
+    current = _text(date_text)
+    if not current:
+        return ""
+    try:
+        parsed = datetime.strptime(current, "%Y-%m-%d")
+    except ValueError:
+        return current
+    return (parsed + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _date_range_formula(field_name: str, *, date_text: str, target_value: Any) -> str:
+    if isinstance(target_value, (int, float)) and not isinstance(target_value, bool):
+        start_text = _text(date_text)
+        next_text = _next_date_text(start_text)
+        if start_text and next_text:
+            return (
+                f"CurrentValue.[{field_name}]>=TODATE({_formula_literal(start_text)}), "
+                f"CurrentValue.[{field_name}]<TODATE({_formula_literal(next_text)})"
+            )
+        return f"CurrentValue.[{field_name}]={_formula_literal(target_value)}"
+    return f"CurrentValue.[{field_name}]={_formula_literal(target_value or date_text)}"
+
+
 def _build_calc_record_filter_formula(*, building: str, date_text: str, target_value: Any) -> str:
     return (
         f'AND(CurrentValue.[楼栋]={_formula_literal(building)}, '
-        f'CurrentValue.[日期]={_formula_literal(target_value or date_text)})'
+        f'{_date_range_formula("日期", date_text=date_text, target_value=target_value)})'
     )
+
+
+def _build_calc_record_building_only_filter_formula(*, building: str) -> str:
+    return f'CurrentValue.[楼栋]={_formula_literal(building)}'
 
 
 def _build_attachment_record_filter_formula(
@@ -78,7 +113,14 @@ def _build_attachment_record_filter_formula(
     return (
         f'AND(CurrentValue.[类型]={_formula_literal(report_type)}, '
         f'CurrentValue.[楼栋]={_formula_literal(building)}, '
-        f'CurrentValue.[日期]={_formula_literal(target_value or date_text)})'
+        f'{_date_range_formula("日期", date_text=date_text, target_value=target_value)})'
+    )
+
+
+def _build_attachment_record_scoped_filter_formula(*, report_type: str, building: str) -> str:
+    return (
+        f'AND(CurrentValue.[类型]={_formula_literal(report_type)}, '
+        f'CurrentValue.[楼栋]={_formula_literal(building)})'
     )
 
 
@@ -96,33 +138,60 @@ def _list_calc_records_for_upsert(
     calc_table_id: str,
     building: str,
     date_text: str,
+    emit_log: Callable[[str], None] | None = None,
 ) -> List[Dict[str, Any]]:
     target_date_value = _date_value_for_compare(client, date_text)
-    filter_formula = _build_calc_record_filter_formula(
-        building=building,
-        date_text=date_text,
-        target_value=target_date_value,
-    )
-    records = client.list_records(
-        table_id=calc_table_id,
-        page_size=500,
-        max_records=500,
-        filter_formula=filter_formula,
-    )
-    matched: List[Dict[str, Any]] = []
-    for item in records:
-        if not isinstance(item, dict):
-            continue
-        record_id = _text(item.get("record_id"))
-        fields = item.get("fields", {})
-        if not record_id or not isinstance(fields, dict):
-            continue
-        if _field_text(fields.get("楼栋")) != _text(building):
-            continue
-        if not _date_field_matches(fields.get("日期"), date_text=date_text, target_value=target_date_value):
-            continue
-        matched.append(item)
-    return matched
+    attempts = [
+        (
+            "exact",
+            _build_calc_record_filter_formula(
+                building=building,
+                date_text=date_text,
+                target_value=target_date_value,
+            ),
+        ),
+        ("building", _build_calc_record_building_only_filter_formula(building=building)),
+    ]
+    collected: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for label, filter_formula in attempts:
+        records = client.list_records(
+            table_id=calc_table_id,
+            page_size=500,
+            max_records=500,
+            filter_formula=filter_formula,
+        )
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            record_id = _text(item.get("record_id"))
+            dedupe_key = record_id or f"{label}:{len(collected)}"
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            collected.append(item)
+        matched: List[Dict[str, Any]] = []
+        for item in collected:
+            if not isinstance(item, dict):
+                continue
+            record_id = _text(item.get("record_id"))
+            fields = item.get("fields", {})
+            if not record_id or not isinstance(fields, dict):
+                continue
+            if _field_text(fields.get("楼栋")) != _text(building):
+                continue
+            if not _date_field_matches(fields.get("日期"), date_text=date_text, target_value=target_date_value):
+                continue
+            matched.append(item)
+        if matched:
+            if label != "exact" and callable(emit_log):
+                emit_log(
+                    f"[飞书上传][upsert] 精确过滤未命中，已使用范围过滤匹配计算记录: 楼栋={building}, 日期={date_text}, strategy={label}, matched={len(matched)}"
+                )
+            return matched
+        if label == "exact" and records:
+            return matched
+    return []
 
 
 def _list_attachment_records_for_upsert(
@@ -132,36 +201,67 @@ def _list_attachment_records_for_upsert(
     report_type: str,
     building: str,
     date_text: str,
+    emit_log: Callable[[str], None] | None = None,
 ) -> List[Dict[str, Any]]:
     target_date_value = _date_value_for_compare(client, date_text)
-    filter_formula = _build_attachment_record_filter_formula(
-        report_type=report_type,
-        building=building,
-        date_text=date_text,
-        target_value=target_date_value,
-    )
-    records = client.list_records(
-        table_id=attachment_table_id,
-        page_size=500,
-        max_records=500,
-        filter_formula=filter_formula,
-    )
-    matched: List[Dict[str, Any]] = []
-    for item in records:
-        if not isinstance(item, dict):
-            continue
-        record_id = _text(item.get("record_id"))
-        fields = item.get("fields", {})
-        if not record_id or not isinstance(fields, dict):
-            continue
-        if _field_text(fields.get("类型")) != _text(report_type):
-            continue
-        if _field_text(fields.get("楼栋")) != _text(building):
-            continue
-        if not _date_field_matches(fields.get("日期"), date_text=date_text, target_value=target_date_value):
-            continue
-        matched.append(item)
-    return matched
+    attempts = [
+        (
+            "exact",
+            _build_attachment_record_filter_formula(
+                report_type=report_type,
+                building=building,
+                date_text=date_text,
+                target_value=target_date_value,
+            ),
+        ),
+        (
+            "type_building",
+            _build_attachment_record_scoped_filter_formula(report_type=report_type, building=building),
+        ),
+        ("building", _build_calc_record_building_only_filter_formula(building=building)),
+    ]
+    collected: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for label, filter_formula in attempts:
+        records = client.list_records(
+            table_id=attachment_table_id,
+            page_size=500,
+            max_records=500,
+            filter_formula=filter_formula,
+        )
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            record_id = _text(item.get("record_id"))
+            dedupe_key = record_id or f"{label}:{len(collected)}"
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            collected.append(item)
+        matched: List[Dict[str, Any]] = []
+        for item in collected:
+            if not isinstance(item, dict):
+                continue
+            record_id = _text(item.get("record_id"))
+            fields = item.get("fields", {})
+            if not record_id or not isinstance(fields, dict):
+                continue
+            if _field_text(fields.get("类型")) != _text(report_type):
+                continue
+            if _field_text(fields.get("楼栋")) != _text(building):
+                continue
+            if not _date_field_matches(fields.get("日期"), date_text=date_text, target_value=target_date_value):
+                continue
+            matched.append(item)
+        if matched:
+            if label != "exact" and callable(emit_log):
+                emit_log(
+                    f"[飞书上传][upsert] 精确过滤未命中，已使用范围过滤匹配附件记录: 楼栋={building}, 日期={date_text}, strategy={label}, matched={len(matched)}"
+                )
+            return matched
+        if label == "exact" and records:
+            return matched
+    return []
 
 
 def _first_record_ids_by_calc_key(records: List[Dict[str, Any]]) -> Dict[tuple[str, str, str], str]:
@@ -295,6 +395,7 @@ def upload_results_to_feishu(
                 calc_table_id=calc_table_id,
                 building=result.building,
                 date_text=upload_date_text,
+                emit_log=emit_log,
             )
             emit_log(
                 f"[飞书上传][upsert] 已按日期读取计算记录: 楼栋={building_text}, 日期={date_text}, count={len(existing_calc_records)}"
@@ -313,6 +414,7 @@ def upload_results_to_feishu(
                 report_type=report_type,
                 building=result.building,
                 date_text=upload_date_text,
+                emit_log=emit_log,
             )
             emit_log(
                 f"[飞书上传][upsert] 已按日期读取附件记录: 楼栋={building_text}, 日期={date_text}, count={len(existing_attachment_records)}"

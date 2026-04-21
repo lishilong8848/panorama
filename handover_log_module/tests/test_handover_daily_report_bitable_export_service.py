@@ -95,6 +95,10 @@ def test_daily_report_bitable_export_replaces_existing_record(tmp_path, monkeypa
     assert result["status"] == "success"
     assert fake_client.deleted == []
     assert fake_client.created == []
+    assert "CurrentValue.[日期]>=" in fake_client.list_calls[0]["filter_formula"]
+    assert "CurrentValue.[日期]<" in fake_client.list_calls[0]["filter_formula"]
+    assert 'TODATE("2026-03-24")' in fake_client.list_calls[0]["filter_formula"]
+    assert 'TODATE("2026-03-25")' in fake_client.list_calls[0]["filter_formula"]
     assert fake_client.updated[0]["record_id"] == "rec_old"
     payload_fields = fake_client.updated[0]["fields"]
     assert payload_fields["年度"] == "2026年度"
@@ -166,3 +170,55 @@ def test_daily_report_bitable_export_retries_url_object_after_url_field_conv_fai
     assert first_payload["交接班日报"] == "https://example.com/wiki"
     assert second_payload["交接班日报"] == {"text": "https://example.com/wiki", "link": "https://example.com/wiki"}
     assert any("URL 字段写入回退重试" in line for line in logs)
+
+
+def test_daily_report_bitable_export_falls_back_to_year_shift_scope_when_exact_filter_misses(tmp_path, monkeypatch):
+    summary = tmp_path / "summary_sheet.png"
+    external = tmp_path / "external_page.png"
+    summary.write_bytes(b"summary")
+    external.write_bytes(b"external")
+
+    fake_client = _FakeClient(existing_records=[])
+
+    def _list_records(**kwargs):
+        fake_client.list_calls.append(kwargs)
+        formula = str(kwargs.get("filter_formula", ""))
+        if "CurrentValue.[日期]>=" in formula:
+            return []
+        return [
+            {
+                "record_id": "rec_old",
+                "fields": {
+                    "年度": "2026年度",
+                    "日期": "2026-03-24 12:00:00",
+                    "班次": "夜班",
+                },
+            }
+        ]
+
+    fake_client.list_records = _list_records  # type: ignore[method-assign]
+    service = HandoverDailyReportBitableExportService(
+        {
+            "_global_feishu": {"app_id": "app", "app_secret": "secret"},
+            "daily_report_bitable_export": {"enabled": True},
+        }
+    )
+    monkeypatch.setattr(service, "_new_client", lambda _cfg: fake_client)
+    logs = []
+
+    result = service.export_record(
+        duty_date="2026-03-24",
+        duty_shift="night",
+        spreadsheet_url="https://example.com/wiki",
+        summary_screenshot_path=str(summary),
+        external_screenshot_path=str(external),
+        emit_log=logs.append,
+    )
+
+    assert result["status"] == "success"
+    assert len(fake_client.list_calls) == 2
+    assert "CurrentValue.[日期]>=" in fake_client.list_calls[0]["filter_formula"]
+    assert 'TODATE("2026-03-24")' in fake_client.list_calls[0]["filter_formula"]
+    assert "CurrentValue.[日期]" not in fake_client.list_calls[1]["filter_formula"]
+    assert fake_client.updated[0]["record_id"] == "rec_old"
+    assert any("范围过滤匹配旧记录" in line for line in logs)

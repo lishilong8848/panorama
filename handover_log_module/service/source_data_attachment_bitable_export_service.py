@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -215,18 +215,130 @@ class SourceDataAttachmentBitableExportService:
         duty_date: str,
         duty_shift: str,
         cfg: Dict[str, Any],
+        include_type: bool = True,
+        include_date: bool = True,
+        include_shift: bool = True,
     ) -> str:
         fields = cfg.get("fields", {})
         fixed_values = cfg.get("fixed_values", {})
         shift_text_cfg = fixed_values.get("shift_text", {}) if isinstance(fixed_values.get("shift_text", {}), dict) else {}
         shift_key = str(duty_shift or "").strip().lower()
         target_shift = str(shift_text_cfg.get(shift_key, "白班" if shift_key == "day" else "夜班")).strip()
-        return (
-            f"AND(CurrentValue.[{fields.get('type', '类型')}]={self._formula_literal(fixed_values.get('type', '动环数据'))}, "
-            f"CurrentValue.[{fields.get('building', '楼栋')}]={self._formula_literal(building)}, "
-            f"CurrentValue.[{fields.get('date', '日期')}]={self._formula_literal(self._midnight_timestamp_ms(duty_date))}, "
-            f"CurrentValue.[{fields.get('shift', '班次')}]={self._formula_literal(target_shift)})"
-        )
+        clauses = [f"CurrentValue.[{fields.get('building', '楼栋')}]={self._formula_literal(building)}"]
+        if include_type:
+            clauses.insert(
+                0,
+                f"CurrentValue.[{fields.get('type', '类型')}]={self._formula_literal(fixed_values.get('type', '动环数据'))}",
+            )
+        if include_date:
+            next_date = (datetime.strptime(str(duty_date or "").strip(), "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            clauses.append(
+                f"CurrentValue.[{fields.get('date', '日期')}]>=TODATE({self._formula_literal(duty_date)})"
+            )
+            clauses.append(
+                f"CurrentValue.[{fields.get('date', '日期')}]<TODATE({self._formula_literal(next_date)})"
+            )
+        if include_shift:
+            clauses.append(f"CurrentValue.[{fields.get('shift', '班次')}]={self._formula_literal(target_shift)}")
+        if len(clauses) == 1:
+            return clauses[0]
+        return f"AND({', '.join(clauses)})"
+
+    def _list_records_for_attachment_context(
+        self,
+        *,
+        client: Any,
+        table_id: str,
+        source: Dict[str, Any],
+        cfg: Dict[str, Any],
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None],
+    ) -> List[Dict[str, Any]]:
+        page_size = int(source.get("page_size", 500) or 500)
+        max_records = int(source.get("max_records", 5000) or 5000)
+        attempts = [
+            (
+                "exact",
+                self._build_attachment_filter_formula(
+                    building=building,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    cfg=cfg,
+                ),
+            ),
+            (
+                "without_date",
+                self._build_attachment_filter_formula(
+                    building=building,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    cfg=cfg,
+                    include_date=False,
+                ),
+            ),
+            (
+                "building_shift",
+                self._build_attachment_filter_formula(
+                    building=building,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    cfg=cfg,
+                    include_type=False,
+                    include_date=False,
+                ),
+            ),
+            (
+                "building",
+                self._build_attachment_filter_formula(
+                    building=building,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    cfg=cfg,
+                    include_type=False,
+                    include_date=False,
+                    include_shift=False,
+                ),
+            ),
+        ]
+        collected: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for label, filter_formula in attempts:
+            records = client.list_records(
+                table_id=table_id,
+                page_size=page_size,
+                max_records=max_records,
+                filter_formula=filter_formula,
+            )
+            added = 0
+            for item in records:
+                if not isinstance(item, dict):
+                    continue
+                record_id = str(item.get("record_id", "") or "").strip()
+                dedupe_key = record_id or f"{label}:{len(collected)}"
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                collected.append(item)
+                added += 1
+            matched_ids = self._matching_existing_record_ids(
+                existing_records=collected,
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                cfg=cfg,
+            )
+            if matched_ids:
+                if label != "exact":
+                    self._emit(
+                        emit_log,
+                        f"精确过滤未命中，已使用范围过滤匹配旧记录: strategy={label}, matched={len(matched_ids)}",
+                    )
+                return collected
+            if label == "exact" and added > 0:
+                return collected
+        return collected
 
     def build_deferred_state(self, *, duty_shift: str) -> Dict[str, Any]:
         cfg = self._normalize_cfg()
@@ -283,16 +395,15 @@ class SourceDataAttachmentBitableExportService:
         source = cfg.get("source", {})
         table_id = str(source.get("table_id", "")).strip()
         client = self._new_client(cfg)
-        records = client.list_records(
+        records = self._list_records_for_attachment_context(
+            client=client,
             table_id=table_id,
-            page_size=int(source.get("page_size", 500) or 500),
-            max_records=int(source.get("max_records", 5000) or 5000),
-            filter_formula=self._build_attachment_filter_formula(
-                building=building,
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                cfg=cfg,
-            ),
+            source=source,
+            cfg=cfg,
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=emit_log,
         )
         matched_ids = self._matching_existing_record_ids(
             existing_records=records,
@@ -394,16 +505,15 @@ class SourceDataAttachmentBitableExportService:
             if isinstance(existing_records, list):
                 cached_records = list(existing_records)
             else:
-                cached_records = client.list_records(
+                cached_records = self._list_records_for_attachment_context(
+                    client=client,
                     table_id=table_id,
-                    page_size=int(source.get("page_size", 500) or 500),
-                    max_records=int(source.get("max_records", 5000) or 5000),
-                    filter_formula=self._build_attachment_filter_formula(
-                        building=building_text,
-                        duty_date=duty_date_text,
-                        duty_shift=shift_key,
-                        cfg=cfg,
-                    ),
+                    source=source,
+                    cfg=cfg,
+                    building=building_text,
+                    duty_date=duty_date_text,
+                    duty_shift=shift_key,
+                    emit_log=emit_log,
                 )
                 self._emit(
                     emit_log,
