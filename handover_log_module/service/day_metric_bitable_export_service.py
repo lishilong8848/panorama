@@ -272,6 +272,49 @@ class DayMetricBitableExportService:
         return int(dt.timestamp() * 1000)
 
     @staticmethod
+    def _formula_literal(value: Any) -> str:
+        if isinstance(value, bool):
+            return "TRUE()" if value else "FALSE()"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(int(value)) if isinstance(value, int) else str(value)
+        text = str(value or "").strip().replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{text}"'
+
+    def _build_unit_filter_formula(self, *, building: str, duty_date: str, cfg: Dict[str, Any]) -> str:
+        fields = cfg.get("fields", {})
+        building_field = str(fields.get("building", "楼栋")).strip() or "楼栋"
+        date_field = str(fields.get("date", "日期")).strip() or "日期"
+        target_ms = self._midnight_timestamp_ms(duty_date)
+        return (
+            f"AND(CurrentValue.[{building_field}]={self._formula_literal(building)}, "
+            f"CurrentValue.[{date_field}]={self._formula_literal(target_ms)})"
+        )
+
+    def _list_existing_records_for_unit(
+        self,
+        *,
+        client: Any,
+        table_id: str,
+        source: Dict[str, Any],
+        cfg: Dict[str, Any],
+        building: str,
+        duty_date: str,
+    ) -> List[Dict[str, Any]]:
+        filter_formula = self._build_unit_filter_formula(building=building, duty_date=duty_date, cfg=cfg)
+        existing_records = client.list_records(
+            table_id=table_id,
+            page_size=int(source.get("page_size", 500) or 500),
+            max_records=int(source.get("max_records", 5000) or 5000),
+            filter_formula=filter_formula,
+        )
+        return self._matching_existing_records(
+            existing_records=existing_records,
+            building=building,
+            duty_date=duty_date,
+            cfg=cfg,
+        )
+
+    @staticmethod
     def _normalize_cell_values(values: Dict[str, Any] | None) -> Dict[str, Any]:
         if not isinstance(values, dict):
             return {}
@@ -631,16 +674,13 @@ class DayMetricBitableExportService:
         resolved_target = self._resolve_target(cfg)
         client = self._new_client(cfg, resolved_target=resolved_target)
         table_id = str(resolved_target.get("table_id", "")).strip()
-        existing_records = client.list_records(
+        return self._list_existing_records_for_unit(
+            client=client,
             table_id=table_id,
-            page_size=int(source.get("page_size", 500) or 500),
-            max_records=int(source.get("max_records", 5000) or 5000),
-        )
-        return self._matching_existing_records(
-            existing_records=existing_records,
+            source=source,
+            cfg=cfg,
             building=building,
             duty_date=duty_date,
-            cfg=cfg,
         )
 
     def delete_existing_records_for_unit(
@@ -655,16 +695,13 @@ class DayMetricBitableExportService:
         resolved_target = self._resolve_target(cfg)
         client = self._new_client(cfg, resolved_target=resolved_target)
         table_id = str(resolved_target.get("table_id", "")).strip()
-        existing_records = client.list_records(
+        matched = self._list_existing_records_for_unit(
+            client=client,
             table_id=table_id,
-            page_size=int(source.get("page_size", 500) or 500),
-            max_records=int(source.get("max_records", 5000) or 5000),
-        )
-        matched = self._matching_existing_records(
-            existing_records=existing_records,
+            source=source,
+            cfg=cfg,
             building=building,
             duty_date=duty_date,
-            cfg=cfg,
         )
         record_ids = [
             str(item.get("record_id", "")).strip()
@@ -718,47 +755,59 @@ class DayMetricBitableExportService:
                 "status": "failed",
                 "uploaded_count": 0,
                 "created_records": 0,
+                "updated_records": 0,
                 "deleted_records": 0,
                 "error": str(exc),
             }
 
         emit_log(f"[12项独立上传] 开始写入 building={building}, duty_date={duty_date}, records={len(records)}")
         try:
-            existing_records = client.list_records(
+            matched = self._list_existing_records_for_unit(
+                client=client,
                 table_id=table_id,
-                page_size=int(source.get("page_size", 500) or 500),
-                max_records=int(source.get("max_records", 5000) or 5000),
-            )
-            matched = self._matching_existing_records(
-                existing_records=existing_records,
+                source=source,
+                cfg=cfg,
                 building=building,
                 duty_date=duty_date,
-                cfg=cfg,
             )
-            record_ids = [
-                str(item.get("record_id", "")).strip()
-                for item in matched
-                if str(item.get("record_id", "")).strip()
-            ]
-            deleted_count = 0
-            if record_ids:
-                deleted_count = client.batch_delete_records(
-                    table_id=table_id,
-                    record_ids=record_ids,
-                    batch_size=int(source.get("delete_batch_size", 200) or 200),
-                )
+            fields = cfg.get("fields", {})
+            type_field = str(fields.get("type", "类型")).strip()
+            existing_by_type: Dict[str, str] = {}
+            for item in matched:
+                if not isinstance(item, dict):
+                    continue
+                record_id = str(item.get("record_id", "")).strip()
+                payload_fields = item.get("fields", {})
+                if not record_id or not isinstance(payload_fields, dict):
+                    continue
+                type_text = self._normalize_text_field(payload_fields.get(type_field))
+                if type_text and type_text not in existing_by_type:
+                    existing_by_type[type_text] = record_id
+
+            update_payloads: List[Dict[str, Any]] = []
+            create_fields: List[Dict[str, Any]] = []
+            for row_fields in records:
+                type_text = self._normalize_text_field(row_fields.get(type_field)) if isinstance(row_fields, dict) else ""
+                record_id = existing_by_type.get(type_text)
+                if record_id:
+                    update_payloads.append({"record_id": record_id, "fields": row_fields})
+                else:
+                    create_fields.append(row_fields)
+
+            if update_payloads:
+                client.batch_update_records(table_id=table_id, records=update_payloads, batch_size=batch_size)
+            if create_fields:
+                client.batch_create_records(table_id=table_id, fields_list=create_fields, batch_size=batch_size)
             emit_log(
-                f"[12项独立上传] 删除旧记录完成 building={building}, duty_date={duty_date}, count={deleted_count}"
-            )
-            client.batch_create_records(table_id=table_id, fields_list=records, batch_size=batch_size)
-            emit_log(
-                f"[12项独立上传] 写入完成 building={building}, duty_date={duty_date}, created={len(records)}"
+                f"[12项独立上传] 写入完成 building={building}, duty_date={duty_date}, "
+                f"updated={len(update_payloads)}, created={len(create_fields)}"
             )
             return {
                 "status": "ok",
                 "uploaded_count": len(records),
-                "created_records": len(records),
-                "deleted_records": deleted_count,
+                "created_records": len(create_fields),
+                "updated_records": len(update_payloads),
+                "deleted_records": 0,
                 "records_preview": preview,
                 "error": "",
             }
@@ -768,6 +817,7 @@ class DayMetricBitableExportService:
                 "status": "failed",
                 "uploaded_count": 0,
                 "created_records": 0,
+                "updated_records": 0,
                 "deleted_records": 0,
                 "records_preview": preview,
                 "error": str(exc),

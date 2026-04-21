@@ -41,6 +41,16 @@ class _ClientForTest(FeishuBitableClient):
         return [{"data": {"items": []}}]
 
 
+class _RequestClient(FeishuBitableClient):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.requests: List[Dict[str, Any]] = []
+
+    def _request_json_with_auth_retry(self, method: str, url: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+        self.requests.append({"method": method, "url": url, "kwargs": kwargs})
+        return {"code": 0, "data": {"records": []}}
+
+
 def _new_client(date_mode: str = "timestamp") -> _ClientForTest:
     return _ClientForTest(
         app_id="app_id",
@@ -81,3 +91,87 @@ def test_upload_calc_records_mapping_and_date_override() -> None:
     assert c.created[0]["类型"] == "用电量拆分"
     assert c.created[0]["项目"] == "PUE"
     assert c.created[0]["日期"] == 1234567890000
+
+
+def test_update_record_uses_put_record_endpoint() -> None:
+    c = _RequestClient(
+        app_id="app_id",
+        app_secret="app_secret",
+        app_token="app_token",
+        calc_table_id="tbl_calc",
+        attachment_table_id="tbl_attach",
+        date_field_mode="timestamp",
+        date_field_day=1,
+        date_tz_offset_hours=8,
+        timeout=30,
+        request_retry_count=0,
+        request_retry_interval_sec=0,
+        date_text_to_timestamp_ms_fn=lambda **_kwargs: 1234567890000,
+        canonical_metric_name_fn=lambda x: str(x),
+        dimension_mapping={},
+    )
+
+    c.update_record(table_id="tbl_calc", record_id="rec_1", fields={"A": 1})
+
+    assert c.requests[0]["method"] == "PUT"
+    assert c.requests[0]["url"].endswith("/tables/tbl_calc/records/rec_1")
+    assert c.requests[0]["kwargs"]["payload"] == {"fields": {"A": 1}}
+
+
+def test_batch_update_records_sends_chunks() -> None:
+    c = _RequestClient(
+        app_id="app_id",
+        app_secret="app_secret",
+        app_token="app_token",
+        calc_table_id="tbl_calc",
+        attachment_table_id="tbl_attach",
+        date_field_mode="timestamp",
+        date_field_day=1,
+        date_tz_offset_hours=8,
+        timeout=30,
+        request_retry_count=0,
+        request_retry_interval_sec=0,
+        date_text_to_timestamp_ms_fn=lambda **_kwargs: 1234567890000,
+        canonical_metric_name_fn=lambda x: str(x),
+        dimension_mapping={},
+    )
+
+    c.batch_update_records(
+        table_id="tbl_calc",
+        records=[
+            {"record_id": "rec_1", "fields": {"A": 1}},
+            {"record_id": "rec_2", "fields": {"A": 2}},
+        ],
+        batch_size=1,
+    )
+
+    assert len(c.requests) == 2
+    assert all(item["method"] == "POST" for item in c.requests)
+    assert all(item["url"].endswith("/tables/tbl_calc/records/batch_update") for item in c.requests)
+    assert c.requests[0]["kwargs"]["payload"] == {
+        "records": [{"record_id": "rec_1", "fields": {"A": 1}}]
+    }
+
+
+def test_list_records_sends_filter_formula() -> None:
+    c = _RequestClient(
+        app_id="app_id",
+        app_secret="app_secret",
+        app_token="app_token",
+        calc_table_id="tbl_calc",
+        attachment_table_id="tbl_attach",
+        date_field_mode="timestamp",
+        date_field_day=1,
+        date_tz_offset_hours=8,
+        timeout=30,
+        request_retry_count=0,
+        request_retry_interval_sec=0,
+        date_text_to_timestamp_ms_fn=lambda **_kwargs: 1234567890000,
+        canonical_metric_name_fn=lambda x: str(x),
+        dimension_mapping={},
+    )
+
+    c.list_records(table_id="tbl_calc", filter_formula='CurrentValue.[日期]="2026-03-01"')
+
+    assert c.requests[0]["method"] == "GET"
+    assert c.requests[0]["kwargs"]["params"]["filter"] == 'CurrentValue.[日期]="2026-03-01"'

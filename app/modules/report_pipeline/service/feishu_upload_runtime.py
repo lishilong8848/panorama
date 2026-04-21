@@ -8,6 +8,23 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _field_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("name", "text", "value"):
+            text = _text(value.get(key))
+            if text:
+                return text
+        return ""
+    if isinstance(value, list):
+        parts = [_field_text(item) for item in value]
+        return ",".join(part for part in parts if part)
+    return _text(value)
+
+
 def _date_value_for_compare(client: Any, date_text: str) -> Any:
     converter = getattr(client, "_to_feishu_date", None)
     if callable(converter):
@@ -65,29 +82,34 @@ def _build_attachment_record_filter_formula(
     )
 
 
-def _collect_calc_record_ids_for_replace(
+def _calc_business_key(fields: Dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        _field_text(fields.get("类型")),
+        _field_text(fields.get("分类")),
+        _field_text(fields.get("项目")),
+    )
+
+
+def _list_calc_records_for_upsert(
     *,
     client: Any,
     calc_table_id: str,
     building: str,
     date_text: str,
-) -> List[str]:
+) -> List[Dict[str, Any]]:
     target_date_value = _date_value_for_compare(client, date_text)
     filter_formula = _build_calc_record_filter_formula(
         building=building,
         date_text=date_text,
         target_value=target_date_value,
     )
-    try:
-        records = client.list_records(
-            table_id=calc_table_id,
-            page_size=500,
-            max_records=500,
-            filter_formula=filter_formula,
-        )
-    except Exception:  # noqa: BLE001
-        records = client.list_records(table_id=calc_table_id, page_size=500, max_records=0)
-    record_ids: List[str] = []
+    records = client.list_records(
+        table_id=calc_table_id,
+        page_size=500,
+        max_records=500,
+        filter_formula=filter_formula,
+    )
+    matched: List[Dict[str, Any]] = []
     for item in records:
         if not isinstance(item, dict):
             continue
@@ -95,22 +117,22 @@ def _collect_calc_record_ids_for_replace(
         fields = item.get("fields", {})
         if not record_id or not isinstance(fields, dict):
             continue
-        if _text(fields.get("楼栋")) != _text(building):
+        if _field_text(fields.get("楼栋")) != _text(building):
             continue
         if not _date_field_matches(fields.get("日期"), date_text=date_text, target_value=target_date_value):
             continue
-        record_ids.append(record_id)
-    return record_ids
+        matched.append(item)
+    return matched
 
 
-def _collect_attachment_record_ids_for_replace(
+def _list_attachment_records_for_upsert(
     *,
     client: Any,
     attachment_table_id: str,
     report_type: str,
     building: str,
     date_text: str,
-) -> List[str]:
+) -> List[Dict[str, Any]]:
     target_date_value = _date_value_for_compare(client, date_text)
     filter_formula = _build_attachment_record_filter_formula(
         report_type=report_type,
@@ -118,16 +140,13 @@ def _collect_attachment_record_ids_for_replace(
         date_text=date_text,
         target_value=target_date_value,
     )
-    try:
-        records = client.list_records(
-            table_id=attachment_table_id,
-            page_size=500,
-            max_records=500,
-            filter_formula=filter_formula,
-        )
-    except Exception:  # noqa: BLE001
-        records = client.list_records(table_id=attachment_table_id, page_size=500, max_records=0)
-    record_ids: List[str] = []
+    records = client.list_records(
+        table_id=attachment_table_id,
+        page_size=500,
+        max_records=500,
+        filter_formula=filter_formula,
+    )
+    matched: List[Dict[str, Any]] = []
     for item in records:
         if not isinstance(item, dict):
             continue
@@ -135,14 +154,55 @@ def _collect_attachment_record_ids_for_replace(
         fields = item.get("fields", {})
         if not record_id or not isinstance(fields, dict):
             continue
-        if _text(fields.get("类型")) != _text(report_type):
+        if _field_text(fields.get("类型")) != _text(report_type):
             continue
-        if _text(fields.get("楼栋")) != _text(building):
+        if _field_text(fields.get("楼栋")) != _text(building):
             continue
         if not _date_field_matches(fields.get("日期"), date_text=date_text, target_value=target_date_value):
             continue
-        record_ids.append(record_id)
-    return record_ids
+        matched.append(item)
+    return matched
+
+
+def _first_record_ids_by_calc_key(records: List[Dict[str, Any]]) -> Dict[tuple[str, str, str], str]:
+    out: Dict[tuple[str, str, str], str] = {}
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        record_id = _text(item.get("record_id"))
+        fields = item.get("fields", {})
+        if not record_id or not isinstance(fields, dict):
+            continue
+        key = _calc_business_key(fields)
+        if all(key) and key not in out:
+            out[key] = record_id
+    return out
+
+
+def _build_calc_record_fields_for_upsert(
+    *,
+    client: Any,
+    records: List[Any],
+    skip_zero_records: bool,
+    date_override: str,
+) -> List[Dict[str, Any]]:
+    builder = getattr(client, "build_calc_record_fields", None)
+    if callable(builder):
+        return list(
+            builder(
+                records,
+                skip_zero_records=skip_zero_records,
+                date_override=date_override,
+            )
+            or []
+        )
+    fields_list: List[Dict[str, Any]] = []
+    for record in records:
+        if isinstance(record, dict):
+            fields_list.append(dict(record))
+            continue
+        raise AttributeError("client 缺少 build_calc_record_fields，无法执行按键 upsert")
+    return fields_list
 
 
 def upload_results_to_feishu(
@@ -217,7 +277,7 @@ def upload_results_to_feishu(
         source_key = str(Path(result.source_file).resolve())
         upload_date_text = normalized_source_dates.get(source_key, "") or date_override or result.month
         resolved_upload_dates[source_key] = upload_date_text
-    emit_log(f"[飞书上传] 开始准备覆盖查询: results={len(results)}")
+    emit_log(f"[飞书上传] 开始准备按日期 upsert: results={len(results)}")
 
     for result in results:
         source_key = str(Path(result.source_file).resolve())
@@ -230,33 +290,24 @@ def upload_results_to_feishu(
         emit_log(f"[飞书上传] 楼栋={building_text} 日期={date_text} PUE={pue_text}")
 
         try:
-            calc_delete_ids = _collect_calc_record_ids_for_replace(
+            existing_calc_records = _list_calc_records_for_upsert(
                 client=client,
                 calc_table_id=calc_table_id,
                 building=result.building,
                 date_text=upload_date_text,
             )
             emit_log(
-                f"[飞书上传][覆盖] 已读取旧计算记录: 楼栋={building_text}, 日期={date_text}, count={len(calc_delete_ids)}"
+                f"[飞书上传][upsert] 已按日期读取计算记录: 楼栋={building_text}, 日期={date_text}, count={len(existing_calc_records)}"
             )
-            if calc_delete_ids:
-                deleted_calc = client.batch_delete_records(
-                    table_id=calc_table_id,
-                    record_ids=calc_delete_ids,
-                    batch_size=500,
-                )
-                emit_log(
-                    f"[飞书上传][覆盖] 已删除旧计算记录: 楼栋={building_text}, 日期={date_text}, count={int(deleted_calc or 0)}"
-                )
         except Exception as exc:  # noqa: BLE001
             emit_log(
-                f"[文件流程失败] 功能={log_feature} 阶段=飞书旧计算记录覆盖删除 楼栋={building_text} "
+                f"[文件流程失败] 功能={log_feature} 阶段=飞书计算记录按日期查询 楼栋={building_text} "
                 f"文件={file_text} 日期={date_text} 错误={exc}"
             )
             raise
 
         try:
-            attachment_delete_ids = _collect_attachment_record_ids_for_replace(
+            existing_attachment_records = _list_attachment_records_for_upsert(
                 client=client,
                 attachment_table_id=attachment_table_id,
                 report_type=report_type,
@@ -264,29 +315,41 @@ def upload_results_to_feishu(
                 date_text=upload_date_text,
             )
             emit_log(
-                f"[飞书上传][覆盖] 已读取旧附件记录: 楼栋={building_text}, 日期={date_text}, count={len(attachment_delete_ids)}"
+                f"[飞书上传][upsert] 已按日期读取附件记录: 楼栋={building_text}, 日期={date_text}, count={len(existing_attachment_records)}"
             )
-            if attachment_delete_ids:
-                deleted_attachment = client.batch_delete_records(
-                    table_id=attachment_table_id,
-                    record_ids=attachment_delete_ids,
-                    batch_size=500,
-                )
-                emit_log(
-                    f"[飞书上传][覆盖] 已删除旧附件记录: 楼栋={building_text}, 日期={date_text}, count={int(deleted_attachment or 0)}"
-                )
         except Exception as exc:  # noqa: BLE001
             emit_log(
-                f"[文件流程失败] 功能={log_feature} 阶段=飞书旧附件记录覆盖删除 楼栋={building_text} "
+                f"[文件流程失败] 功能={log_feature} 阶段=飞书附件记录按日期查询 楼栋={building_text} "
                 f"文件={file_text} 日期={date_text} 错误={exc}"
             )
             raise
 
         try:
-            client.upload_calc_records(
-                result.records,
+            calc_fields = _build_calc_record_fields_for_upsert(
+                client=client,
+                records=result.records,
                 skip_zero_records=skip_zero_records,
                 date_override=upload_date_text,
+            )
+            existing_by_key = _first_record_ids_by_calc_key(existing_calc_records)
+            update_payloads: List[Dict[str, Any]] = []
+            create_fields: List[Dict[str, Any]] = []
+            for fields in calc_fields:
+                if not isinstance(fields, dict):
+                    continue
+                key = _calc_business_key(fields)
+                record_id = existing_by_key.get(key) if all(key) else ""
+                if record_id:
+                    update_payloads.append({"record_id": record_id, "fields": fields})
+                else:
+                    create_fields.append(fields)
+            if update_payloads:
+                client.batch_update_records(table_id=calc_table_id, records=update_payloads, batch_size=200)
+            if create_fields:
+                client.batch_create_records(table_id=calc_table_id, fields_list=create_fields, batch_size=200)
+            emit_log(
+                f"[飞书上传][upsert] 计算记录完成: 楼栋={building_text}, 日期={date_text}, "
+                f"updated={len(update_payloads)}, created={len(create_fields)}"
             )
         except Exception as exc:  # noqa: BLE001
             emit_log(
@@ -305,11 +368,30 @@ def upload_results_to_feishu(
             raise
 
         try:
-            client.upload_attachment_record(
-                report_type=report_type,
-                building=result.building,
-                date_text=upload_date_text,
-                attachment_tokens=[file_token],
+            attachment_fields = {
+                "类型": report_type,
+                "楼栋": result.building,
+                "日期": _date_value_for_compare(client, upload_date_text),
+                "附件": [{"file_token": file_token}],
+            }
+            attachment_record_id = ""
+            for item in existing_attachment_records:
+                if isinstance(item, dict):
+                    attachment_record_id = _text(item.get("record_id"))
+                    if attachment_record_id:
+                        break
+            if attachment_record_id:
+                client.update_record(
+                    table_id=attachment_table_id,
+                    record_id=attachment_record_id,
+                    fields=attachment_fields,
+                )
+                attachment_action = "updated"
+            else:
+                client.batch_create_records(table_id=attachment_table_id, fields_list=[attachment_fields], batch_size=1)
+                attachment_action = "created"
+            emit_log(
+                f"[飞书上传][upsert] 附件记录完成: 楼栋={building_text}, 日期={date_text}, action={attachment_action}"
             )
         except Exception as exc:  # noqa: BLE001
             emit_log(
@@ -320,5 +402,5 @@ def upload_results_to_feishu(
 
         emit_log(
             f"[文件上传成功] 功能={log_feature} 阶段=飞书上传完成 楼栋={building_text} "
-            f"文件={file_text} 日期={date_text} 详情=已按覆盖策略写入新记录"
+            f"文件={file_text} 日期={date_text} 详情=已按日期 upsert 写入"
         )

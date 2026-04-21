@@ -199,6 +199,35 @@ class SourceDataAttachmentBitableExportService:
             return None
         return int(dt.timestamp() * 1000)
 
+    @staticmethod
+    def _formula_literal(value: Any) -> str:
+        if isinstance(value, bool):
+            return "TRUE()" if value else "FALSE()"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(int(value)) if isinstance(value, int) else str(value)
+        text = str(value or "").strip().replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{text}"'
+
+    def _build_attachment_filter_formula(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        cfg: Dict[str, Any],
+    ) -> str:
+        fields = cfg.get("fields", {})
+        fixed_values = cfg.get("fixed_values", {})
+        shift_text_cfg = fixed_values.get("shift_text", {}) if isinstance(fixed_values.get("shift_text", {}), dict) else {}
+        shift_key = str(duty_shift or "").strip().lower()
+        target_shift = str(shift_text_cfg.get(shift_key, "白班" if shift_key == "day" else "夜班")).strip()
+        return (
+            f"AND(CurrentValue.[{fields.get('type', '类型')}]={self._formula_literal(fixed_values.get('type', '动环数据'))}, "
+            f"CurrentValue.[{fields.get('building', '楼栋')}]={self._formula_literal(building)}, "
+            f"CurrentValue.[{fields.get('date', '日期')}]={self._formula_literal(self._midnight_timestamp_ms(duty_date))}, "
+            f"CurrentValue.[{fields.get('shift', '班次')}]={self._formula_literal(target_shift)})"
+        )
+
     def build_deferred_state(self, *, duty_shift: str) -> Dict[str, Any]:
         cfg = self._normalize_cfg()
         shift_text = str(duty_shift or "").strip().lower()
@@ -241,6 +270,40 @@ class SourceDataAttachmentBitableExportService:
         )
         self._emit(emit_log, f"旧记录读取完成: table_id={table_id}, total={len(records)}")
         return records
+
+    def list_existing_records_for_context(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None] = print,
+    ) -> List[Dict[str, Any]]:
+        cfg = self._normalize_cfg()
+        source = cfg.get("source", {})
+        table_id = str(source.get("table_id", "")).strip()
+        client = self._new_client(cfg)
+        records = client.list_records(
+            table_id=table_id,
+            page_size=int(source.get("page_size", 500) or 500),
+            max_records=int(source.get("max_records", 5000) or 5000),
+            filter_formula=self._build_attachment_filter_formula(
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                cfg=cfg,
+            ),
+        )
+        matched_ids = self._matching_existing_record_ids(
+            existing_records=records,
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            cfg=cfg,
+        )
+        matched = [item for item in records if str(item.get("record_id", "")).strip() in set(matched_ids)]
+        self._emit(emit_log, f"旧记录按日期读取完成: table_id={table_id}, total={len(matched)}")
+        return matched
 
     def _matching_existing_record_ids(
         self,
@@ -328,26 +391,32 @@ class SourceDataAttachmentBitableExportService:
         )
 
         try:
-            cached_records = list(existing_records) if isinstance(existing_records, list) else self.list_existing_records(
-                emit_log=emit_log
-            )
-            deleted_record_ids = self._matching_existing_record_ids(
+            if isinstance(existing_records, list):
+                cached_records = list(existing_records)
+            else:
+                cached_records = client.list_records(
+                    table_id=table_id,
+                    page_size=int(source.get("page_size", 500) or 500),
+                    max_records=int(source.get("max_records", 5000) or 5000),
+                    filter_formula=self._build_attachment_filter_formula(
+                        building=building_text,
+                        duty_date=duty_date_text,
+                        duty_shift=shift_key,
+                        cfg=cfg,
+                    ),
+                )
+                self._emit(
+                    emit_log,
+                    f"旧记录按日期读取完成: table_id={table_id}, total={len(cached_records)}",
+                )
+            matched_record_ids = self._matching_existing_record_ids(
                 existing_records=cached_records,
                 building=building_text,
                 duty_date=duty_date_text,
                 duty_shift=shift_key,
                 cfg=cfg,
             )
-            if deleted_record_ids and cfg.get("replace_existing", True):
-                client.batch_delete_records(
-                    table_id=table_id,
-                    record_ids=deleted_record_ids,
-                    batch_size=int(source.get("delete_batch_size", 200) or 200),
-                )
-                self._emit(
-                    emit_log,
-                    f"已删除旧记录: building={building_text}, duty_date={duty_date_text}, duty_shift={shift_key}, count={len(deleted_record_ids)}",
-                )
+            update_record_id = matched_record_ids[0] if matched_record_ids and cfg.get("replace_existing", True) else ""
 
             file_token = client.upload_attachment(data_file_text)
             row_fields = {
@@ -357,11 +426,16 @@ class SourceDataAttachmentBitableExportService:
                 str(fields.get("shift", "班次")).strip(): shift_text,
                 str(fields.get("attachment", "附件")).strip(): [{"file_token": file_token}],
             }
-            client.batch_create_records(table_id=table_id, fields_list=[row_fields], batch_size=1)
+            if update_record_id:
+                client.update_record(table_id=table_id, record_id=update_record_id, fields=row_fields)
+                action_text = "更新"
+            else:
+                client.batch_create_records(table_id=table_id, fields_list=[row_fields], batch_size=1)
+                action_text = "新增"
             uploaded_at = self._now_text()
             self._emit(
                 emit_log,
-                f"上传完成: building={building_text}, type={fixed_values.get('type', '动环数据')}, shift={shift_text}, uploaded=1",
+                f"上传完成: building={building_text}, type={fixed_values.get('type', '动环数据')}, shift={shift_text}, action={action_text}",
             )
             return {
                 "status": "ok",
@@ -370,7 +444,9 @@ class SourceDataAttachmentBitableExportService:
                 "error": "",
                 "uploaded_at": uploaded_at,
                 "uploaded_revision": 0,
-                "deleted_record_ids": deleted_record_ids,
+                "deleted_record_ids": [],
+                "updated_record_id": update_record_id,
+                "created_record_count": 0 if update_record_id else 1,
                 "file_token": file_token,
             }
         except Exception as exc:  # noqa: BLE001

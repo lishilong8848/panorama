@@ -13,9 +13,12 @@ class _FakeClient:
     def __init__(self) -> None:
         self.deleted: list[dict] = []
         self.created: list[dict] = []
+        self.updated: list[dict] = []
         self.uploaded: list[str] = []
+        self.list_calls: list[dict] = []
 
-    def list_records(self, **_kwargs):
+    def list_records(self, **kwargs):
+        self.list_calls.append(dict(kwargs))
         return []
 
     def batch_delete_records(self, table_id: str, record_ids: list[str], batch_size: int = 200) -> int:
@@ -29,6 +32,10 @@ class _FakeClient:
     def batch_create_records(self, table_id: str, fields_list: list[dict], batch_size: int = 1):
         self.created.append({"table_id": table_id, "fields_list": list(fields_list), "batch_size": batch_size})
         return [{"code": 0}]
+
+    def update_record(self, table_id: str, record_id: str, fields: dict):
+        self.updated.append({"table_id": table_id, "record_id": record_id, "fields": dict(fields)})
+        return {"code": 0}
 
 
 class _ServiceWithFakeClient(SourceDataAttachmentBitableExportService):
@@ -137,17 +144,17 @@ def test_run_from_source_file_replaces_existing_record_by_strict_tuple(tmp_path:
     )
 
     assert result["status"] == "ok"
-    assert result["deleted_record_ids"] == ["rec-match"]
-    assert client.deleted == [
-        {"table_id": "tblF13MQ10PslIdI", "record_ids": ["rec-match"], "batch_size": 200}
-    ]
+    assert result["deleted_record_ids"] == []
+    assert result["updated_record_id"] == "rec-match"
+    assert client.deleted == []
     assert client.uploaded == [str(source_file)]
-    created_row = client.created[0]["fields_list"][0]
-    assert created_row["类型"] == "动环数据"
-    assert created_row["楼栋"] == "A楼"
-    assert created_row["日期"] == service._midnight_timestamp_ms("2026-03-15")
-    assert created_row["班次"] == "白班"
-    assert created_row["附件"] == [{"file_token": "file-token-1"}]
+    assert client.created == []
+    updated_row = client.updated[0]["fields"]
+    assert updated_row["类型"] == "动环数据"
+    assert updated_row["楼栋"] == "A楼"
+    assert updated_row["日期"] == service._midnight_timestamp_ms("2026-03-15")
+    assert updated_row["班次"] == "白班"
+    assert updated_row["附件"] == [{"file_token": "file-token-1"}]
 
 
 def test_review_session_service_persists_data_file_and_attachment_state(tmp_path: Path) -> None:
@@ -167,7 +174,6 @@ def test_review_session_service_persists_data_file_and_attachment_state(tmp_path
         data_file=r"D:\QLDownload\A楼源数据.xlsx",
         output_file=r"D:\QLDownload\A楼交接班.xlsx",
         source_mode="from_file",
-        day_metric_export={"status": "pending_review", "reason": "await_all_confirmed"},
         source_data_attachment_export={"status": "pending_review", "reason": "await_all_confirmed"},
     )
 

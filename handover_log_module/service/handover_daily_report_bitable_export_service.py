@@ -221,6 +221,67 @@ class HandoverDailyReportBitableExportService:
             error_detail=str(detail or "").strip(),
         )
 
+    @staticmethod
+    def _formula_literal(value: Any) -> str:
+        if isinstance(value, bool):
+            return "TRUE()" if value else "FALSE()"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(int(value)) if isinstance(value, int) else str(value)
+        text = str(value or "").strip().replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{text}"'
+
+    def _build_record_filter_formula(self, *, duty_date: str, duty_shift: str, cfg: Dict[str, Any]) -> str:
+        fields = cfg.get("fields", {})
+        year_field = str(fields.get("year", "年度") or "年度").strip()
+        date_field = str(fields.get("date", "日期") or "日期").strip()
+        shift_field = str(fields.get("shift", "班次") or "班次").strip()
+        return (
+            f"AND(CurrentValue.[{year_field}]={self._formula_literal(self._year_text(duty_date))}, "
+            f"CurrentValue.[{date_field}]={self._formula_literal(self._midnight_timestamp_ms(duty_date))}, "
+            f"CurrentValue.[{shift_field}]={self._formula_literal(self._shift_text(duty_shift))})"
+        )
+
+    def _write_record_with_url_fallback(
+        self,
+        *,
+        client: Any,
+        table_id: str,
+        payload_fields: Dict[str, Any],
+        record_id: str,
+        spreadsheet_url: str,
+        report_field_name: str,
+        report_link_ui_type: str,
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None],
+    ) -> str:
+        try:
+            if record_id:
+                client.update_record(table_id=table_id, record_id=record_id, fields=payload_fields)
+                return record_id
+            responses = client.batch_create_records(table_id=table_id, fields_list=[payload_fields], batch_size=1)
+        except Exception as exc:  # noqa: BLE001
+            if not self._is_url_field_conv_fail(exc):
+                raise
+            emit_log(
+                "[交接班][日报多维] URL 字段写入回退重试 "
+                f"field={report_field_name}, ui_type={report_link_ui_type or '-'}, batch={duty_date}|{duty_shift}"
+            )
+            payload_fields[report_field_name] = self._build_report_link_object_payload(spreadsheet_url)
+            try:
+                if record_id:
+                    client.update_record(table_id=table_id, record_id=record_id, fields=payload_fields)
+                    return record_id
+                responses = client.batch_create_records(table_id=table_id, fields_list=[payload_fields], batch_size=1)
+            except Exception as retry_exc:  # noqa: BLE001
+                raise self._build_url_field_error(str(retry_exc)) from retry_exc
+        new_record_id = ""
+        if responses and isinstance(responses[0], dict):
+            records = responses[0].get("data", {}).get("records", []) if isinstance(responses[0].get("data", {}), dict) else []
+            if isinstance(records, list) and records and isinstance(records[0], dict):
+                new_record_id = str(records[0].get("record_id", "") or "").strip()
+        return new_record_id
+
     def _match_existing_record_ids(
         self,
         *,
@@ -280,6 +341,11 @@ class HandoverDailyReportBitableExportService:
             table_id=table_id,
             page_size=int(target.get("page_size", 500) or 500),
             max_records=int(target.get("max_records", 5000) or 5000),
+            filter_formula=self._build_record_filter_formula(
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                cfg=cfg,
+            ),
         )
         matched_ids = self._match_existing_record_ids(
             existing_records=existing_records,
@@ -287,13 +353,7 @@ class HandoverDailyReportBitableExportService:
             duty_shift=duty_shift,
             cfg=cfg,
         )
-        if matched_ids and bool(target.get("replace_existing", True)):
-            client.batch_delete_records(
-                table_id=table_id,
-                record_ids=matched_ids,
-                batch_size=int(target.get("delete_batch_size", 200) or 200),
-            )
-            emit_log(f"[交接班][日报多维] 删除旧记录 count={len(matched_ids)}, batch={duty_date}|{duty_shift}")
+        update_record_id = matched_ids[0] if matched_ids and bool(target.get("replace_existing", True)) else ""
 
         summary_token = client.upload_attachment_bytes(
             file_name=summary_path.name,
@@ -322,26 +382,20 @@ class HandoverDailyReportBitableExportService:
                 {"file_token": external_token},
             ],
         }
-        try:
-            responses = client.batch_create_records(table_id=table_id, fields_list=[payload_fields], batch_size=1)
-        except Exception as exc:  # noqa: BLE001
-            if not self._is_url_field_conv_fail(exc):
-                raise
-            emit_log(
-                "[交接班][日报多维] URL 字段写入回退重试 "
-                f"field={report_field_name}, ui_type={report_link_ui_type or '-'}, batch={duty_date}|{duty_shift}"
-            )
-            payload_fields[fields["report_link"]] = self._build_report_link_object_payload(spreadsheet_url)
-            try:
-                responses = client.batch_create_records(table_id=table_id, fields_list=[payload_fields], batch_size=1)
-            except Exception as retry_exc:  # noqa: BLE001
-                raise self._build_url_field_error(str(retry_exc)) from retry_exc
-        record_id = ""
-        if responses and isinstance(responses[0], dict):
-            records = responses[0].get("data", {}).get("records", []) if isinstance(responses[0].get("data", {}), dict) else []
-            if isinstance(records, list) and records and isinstance(records[0], dict):
-                record_id = str(records[0].get("record_id", "") or "").strip()
-        emit_log(f"[交接班][日报多维] 写入成功 batch={duty_date}|{duty_shift}, record_id={record_id or '-'}")
+        record_id = self._write_record_with_url_fallback(
+            client=client,
+            table_id=table_id,
+            payload_fields=payload_fields,
+            record_id=update_record_id,
+            spreadsheet_url=spreadsheet_url,
+            report_field_name=fields["report_link"],
+            report_link_ui_type=report_link_ui_type,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=emit_log,
+        )
+        action_text = "更新" if update_record_id else "写入"
+        emit_log(f"[交接班][日报多维] {action_text}成功 batch={duty_date}|{duty_shift}, record_id={record_id or '-'}")
         return {
             "status": "success",
             "record_id": record_id,

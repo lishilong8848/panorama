@@ -6,11 +6,23 @@ from handover_log_module.service.handover_daily_report_bitable_export_service im
 
 
 class _FakeClient:
-    def __init__(self, *, report_link_ui_type="15"):
+    def __init__(self, *, report_link_ui_type="15", existing_records=None):
         self.deleted = []
         self.uploaded = []
         self.created = []
+        self.updated = []
+        self.list_calls = []
         self.report_link_ui_type = str(report_link_ui_type)
+        self.existing_records = list(existing_records) if existing_records is not None else [
+            {
+                "record_id": "rec_old",
+                "fields": {
+                    "年度": "2026年度",
+                    "日期": "2026-03-24",
+                    "班次": "夜班",
+                },
+            }
+        ]
 
     def list_fields(self, **_kwargs):
         return [
@@ -21,17 +33,9 @@ class _FakeClient:
             {"field_name": "日报截图", "ui_type": "17"},
         ]
 
-    def list_records(self, **_kwargs):
-        return [
-            {
-                "record_id": "rec_old",
-                "fields": {
-                    "年度": "2026年度",
-                    "日期": "2026-03-24",
-                    "班次": "夜班",
-                },
-            }
-        ]
+    def list_records(self, **kwargs):
+        self.list_calls.append(kwargs)
+        return list(self.existing_records)
 
     def batch_delete_records(self, **kwargs):
         self.deleted.append(kwargs)
@@ -44,10 +48,14 @@ class _FakeClient:
         self.created.append(copy.deepcopy(kwargs))
         return [{"data": {"records": [{"record_id": "rec_new"}]}}]
 
+    def update_record(self, **kwargs):
+        self.updated.append(copy.deepcopy(kwargs))
+        return {"code": 0}
+
 
 class _RetryUrlFieldClient(_FakeClient):
     def __init__(self, *, report_link_ui_type="1"):
-        super().__init__(report_link_ui_type=report_link_ui_type)
+        super().__init__(report_link_ui_type=report_link_ui_type, existing_records=[])
         self._attempt = 0
 
     def batch_create_records(self, **kwargs):
@@ -85,8 +93,10 @@ def test_daily_report_bitable_export_replaces_existing_record(tmp_path, monkeypa
     )
 
     assert result["status"] == "success"
-    assert fake_client.deleted[0]["record_ids"] == ["rec_old"]
-    payload_fields = fake_client.created[0]["fields_list"][0]
+    assert fake_client.deleted == []
+    assert fake_client.created == []
+    assert fake_client.updated[0]["record_id"] == "rec_old"
+    payload_fields = fake_client.updated[0]["fields"]
     assert payload_fields["年度"] == "2026年度"
     assert payload_fields["班次"] == "夜班"
     assert payload_fields["交接班日报"] == {"text": "https://example.com/wiki", "link": "https://example.com/wiki"}
@@ -120,7 +130,7 @@ def test_daily_report_bitable_export_falls_back_to_plain_text_for_text_field(tmp
         emit_log=lambda *_args, **_kwargs: None,
     )
 
-    payload_fields = fake_client.created[0]["fields_list"][0]
+    payload_fields = fake_client.updated[0]["fields"]
     assert payload_fields["交接班日报"] == "https://example.com/wiki"
 
 

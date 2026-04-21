@@ -9,8 +9,18 @@ class _FakeClient:
         self.records = list(records)
         self.deleted_calls = []
         self.created_calls = []
+        self.updated_calls = []
+        self.list_calls = []
 
-    def list_records(self, *, table_id, page_size, max_records):  # noqa: ANN001
+    def list_records(self, *, table_id, page_size, max_records, filter_formula=""):  # noqa: ANN001
+        self.list_calls.append(
+            {
+                "table_id": table_id,
+                "page_size": page_size,
+                "max_records": max_records,
+                "filter_formula": filter_formula,
+            }
+        )
         return list(self.records)
 
     def batch_delete_records(self, *, table_id, record_ids, batch_size):  # noqa: ANN001
@@ -32,6 +42,16 @@ class _FakeClient:
             }
         )
         return {"created": len(fields_list)}
+
+    def batch_update_records(self, *, table_id, records, batch_size):  # noqa: ANN001
+        self.updated_calls.append(
+            {
+                "table_id": table_id,
+                "records": list(records),
+                "batch_size": batch_size,
+            }
+        )
+        return {"updated": len(records)}
 
 
 def _cfg():
@@ -153,7 +173,7 @@ def test_list_existing_records_for_unit_filters_building_date_and_type(monkeypat
     assert [item["record_id"] for item in matched] == ["rec_1"]
 
 
-def test_rewrite_from_output_file_deletes_then_recreates(monkeypatch) -> None:
+def test_rewrite_from_output_file_upserts_existing_records(monkeypatch) -> None:
     service = DayMetricBitableExportService(_cfg())
     target_ms = service._midnight_timestamp_ms("2026-03-24")
     fake_client = _FakeClient(
@@ -187,7 +207,11 @@ def test_rewrite_from_output_file_deletes_then_recreates(monkeypatch) -> None:
     )
 
     assert result["status"] == "ok"
-    assert result["deleted_records"] == 2
-    assert result["created_records"] == 2
-    assert fake_client.deleted_calls[0]["record_ids"] == ["rec_1", "rec_2"]
-    assert len(fake_client.created_calls[0]["fields_list"]) == 2
+    assert result["deleted_records"] == 0
+    assert result["updated_records"] == 2
+    assert result["created_records"] == 0
+    assert fake_client.deleted_calls == []
+    assert fake_client.created_calls == []
+    assert [item["record_id"] for item in fake_client.updated_calls[0]["records"]] == ["rec_1", "rec_2"]
+    assert "CurrentValue.[楼栋]" in fake_client.list_calls[0]["filter_formula"]
+    assert "CurrentValue.[日期]" in fake_client.list_calls[0]["filter_formula"]
