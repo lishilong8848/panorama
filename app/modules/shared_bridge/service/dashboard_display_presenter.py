@@ -22,6 +22,11 @@ def _int(value: Any, fallback: int = 0) -> int:
         return fallback
 
 
+def _short_commit(value: Any) -> str:
+    text = _string(value)
+    return text[:7] if text else ""
+
+
 def _action(
     action_id: str,
     *,
@@ -1097,6 +1102,13 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     branch = _string(updater.get("branch", ""))
     local_commit = _string(updater.get("local_commit", ""))
     remote_commit = _string(updater.get("remote_commit", ""))
+    approved_commit = _string(updater.get("approved_commit", ""))
+    last_published_commit = _string(updater.get("last_published_commit", ""))
+    last_publish_attempt_commit = _string(updater.get("last_publish_attempt_commit", ""))
+    last_publish_deferred_commit = _string(updater.get("last_publish_deferred_commit", ""))
+    last_publish_command_id = _string(updater.get("last_publish_command_id", ""))
+    last_internal_apply_completed_commit = _string(updater.get("last_internal_apply_completed_commit", ""))
+    last_internal_apply_failed_commit = _string(updater.get("last_internal_apply_failed_commit", ""))
     worktree_dirty = bool(updater.get("worktree_dirty", False))
     local_revision = int(updater.get("local_release_revision", 0) or 0)
     last_publish_at = _string(updater.get("last_publish_at", ""))
@@ -1106,12 +1118,15 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     internal_peer_available = bool(internal_peer.get("available", False))
     internal_peer_online = bool(internal_peer.get("online", False))
     internal_peer_version = _string(internal_peer.get("local_version", ""))
+    internal_peer_commit = _string(internal_peer.get("local_commit", ""))
     internal_peer_revision = int(internal_peer.get("local_release_revision", 0) or 0)
     internal_peer_heartbeat_at = _string(internal_peer.get("heartbeat_at", ""))
     internal_peer_check_at = _string(internal_peer.get("last_check_at", ""))
     internal_peer_update_available = bool(internal_peer.get("update_available", False))
     internal_peer_restart_required = bool(internal_peer.get("restart_required", False))
     internal_peer_last_result = _string(internal_peer.get("last_result", "")).lower()
+    internal_peer_last_command_status = _string(internal_peer.get("last_command_status", "")).lower()
+    internal_peer_last_command_action = _string(internal_peer.get("last_command_action", "")).lower()
     internal_peer_command = (
         internal_peer.get("command", {})
         if isinstance(internal_peer.get("command", {}), dict)
@@ -1120,6 +1135,8 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     internal_peer_command_action = _string(internal_peer_command.get("action", "")).lower()
     internal_peer_command_status = _string(internal_peer_command.get("status", "")).lower()
     internal_peer_command_active = bool(internal_peer_command.get("active", False))
+    internal_peer_command_source_commit = _string(internal_peer_command.get("source_commit", ""))
+    internal_peer_last_command_source_commit = _string(internal_peer.get("last_command_source_commit", ""))
     internal_peer_version_text = (
         f"{internal_peer_version or '-'} / r{internal_peer_revision}"
         if internal_peer_revision > 0
@@ -1227,8 +1244,8 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             main_action_id = "restart"
             main_action_label = "立即重启生效"
         elif update_mode == "git_pull":
-            main_action_id = "apply"
-            main_action_label = "拉取代码"
+            main_action_id = "check"
+            main_action_label = "刷新本机代码状态"
         elif update_mode == "shared_approved_source":
             if bool(updater.get("update_available", False)):
                 main_action_id = "apply"
@@ -1246,8 +1263,15 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         main_action_allowed = False
         main_action_disabled_reason = "检测到本地已修改文件，已阻止自动拉取代码。"
         main_action_reason_code = "dirty_worktree"
-    publish_allowed = bool(updater_enabled and update_mode == "git_pull" and source_kind == "git_remote" and not worktree_dirty)
-    publish_label = "发布内网批准版本"
+    publish_allowed = bool(
+        updater_enabled
+        and update_mode == "git_pull"
+        and source_kind == "git_remote"
+        and internal_peer_available
+        and not internal_peer_command_active
+        and not worktree_dirty
+    )
+    publish_label = "手动同步当前代码"
     publish_disabled_reason = ""
     publish_reason_code = ""
     if not updater_enabled:
@@ -1262,16 +1286,21 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         publish_allowed = False
         publish_disabled_reason = "当前更新源不是 Git 仓库。"
         publish_reason_code = "not_git_remote"
-    elif not manifest_path:
+    elif not internal_peer_available:
         publish_allowed = False
-        publish_disabled_reason = "共享目录未配置，无法发布内网批准版本。"
+        publish_disabled_reason = "共享目录未配置，无法同步内网代码。"
         publish_reason_code = "shared_root_missing"
+    elif internal_peer_command_active:
+        publish_allowed = False
+        publish_disabled_reason = "当前已有待执行内网更新命令，暂不覆盖共享源码包。"
+        publish_reason_code = "command_active"
+        publish_label = "等待内网命令完成"
     elif worktree_dirty:
         publish_allowed = False
-        publish_disabled_reason = "存在本地代码改动，无法发布内网批准版本。"
+        publish_disabled_reason = "存在本地代码改动，无法同步内网代码。"
         publish_reason_code = "dirty_worktree"
     internal_peer_check_allowed = bool(updater_enabled and internal_peer_available and not internal_peer_command_active)
-    internal_peer_check_label = "内网端检查更新"
+    internal_peer_check_label = "刷新内网状态"
     internal_peer_check_disabled_reason = ""
     internal_peer_check_reason_code = ""
     if not updater_enabled:
@@ -1295,7 +1324,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         and not internal_peer_command_active
         and internal_peer_update_available
     )
-    internal_peer_apply_label = "内网端开始更新"
+    internal_peer_apply_label = "内网端应用代码"
     internal_peer_apply_disabled_reason = ""
     internal_peer_apply_reason_code = ""
     if not updater_enabled:
@@ -1385,10 +1414,13 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                 "update_available": internal_peer_update_available,
                 "restart_required": internal_peer_restart_required,
                 "status_text": internal_peer_status_text,
+                "local_commit": internal_peer_commit,
+                "last_command_source_commit": internal_peer_last_command_source_commit,
                 "command": {
                     "active": internal_peer_command_active,
                     "action": internal_peer_command_action,
                     "status": internal_peer_command_status,
+                    "source_commit": internal_peer_command_source_commit,
                     "message": _string(internal_peer_command.get("message", "")),
                 },
             },
@@ -1442,55 +1474,117 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             },
         }
     if update_mode == "git_pull":
+        published_commit = approved_commit or last_published_commit
+        published_matches_local = bool(local_commit and published_commit and published_commit == local_commit)
+        deferred_commit = (
+            last_publish_deferred_commit
+            if last_publish_deferred_commit and last_publish_deferred_commit != published_commit
+            else ""
+        )
+        pending_sync_commit = deferred_commit or (
+            local_commit if local_commit and not published_matches_local else ""
+        )
+        command_commit = internal_peer_command_source_commit or internal_peer_last_command_source_commit
+        command_commit_text = _short_commit(command_commit)
+        internal_peer_command_value = internal_peer_command_label
+        if command_commit_text:
+            internal_peer_command_value = f"{internal_peer_command_value} / {command_commit_text}"
+        internal_peer_last_command_value = "-"
+        if internal_peer_last_command_status or internal_peer_last_command_source_commit:
+            last_action_text = "应用代码" if internal_peer_last_command_action == "apply" else (
+                "检查状态" if internal_peer_last_command_action == "check" else (
+                    "重启生效" if internal_peer_last_command_action == "restart" else "远程命令"
+                )
+            )
+            last_status_text = (
+                "成功"
+                if internal_peer_last_command_status == "completed"
+                else ("失败" if internal_peer_last_command_status == "failed" else internal_peer_last_command_status or "-")
+            )
+            internal_peer_last_command_value = f"{last_action_text} {last_status_text}"
+            if internal_peer_last_command_source_commit:
+                internal_peer_last_command_value = (
+                    f"{internal_peer_last_command_value} / {_short_commit(internal_peer_last_command_source_commit)}"
+                )
         tone = "info"
-        status_text = "可手动拉取代码"
-        summary_text = "当前程序通过源码直接运行。启动阶段不会自动拉取代码；如需更新，请点击“拉取代码”，完成后再重启程序。"
-        badge_text = "源码直跑 / Git"
+        status_text = "等待 Git 提交状态"
+        summary_text = "手动 git pull 后，外网端会自动打包 Git 跟踪的 .py 文件并下发内网端应用；内网端不需要 Git。"
+        badge_text = "代码同步 / .py only"
         if not updater_enabled:
             tone = "warning"
             if disabled_reason == "git_not_installed":
                 status_text = "未安装 Git"
-                summary_text = "当前电脑未安装 Git，无法通过页面按钮拉取代码。"
+                summary_text = "外网端未安装 Git，无法检测手动 git pull 后的提交变化。"
             elif disabled_reason == "git_repo_missing":
                 status_text = "当前目录不是 Git 仓库"
-                summary_text = "当前代码目录缺少 .git，无法通过页面按钮拉取代码。"
+                summary_text = "当前代码目录缺少 .git，无法检测提交变化，也不会自动同步内网端。"
             elif disabled_reason == "git_remote_missing":
                 status_text = "未配置 Git 远端"
-                summary_text = "当前 Git 工作区没有可用远端，无法通过页面按钮拉取代码。"
+                summary_text = "当前 Git 工作区没有可用远端，仍可展示本地提交，但不能判断远端状态。"
             else:
-                status_text = "当前运行模式不支持拉取代码"
+                status_text = "当前运行模式不支持代码同步"
                 summary_text = _updater_disabled_reason_text(disabled_reason)
         elif restart_required:
             tone = "warning"
-            status_text = "代码已拉取，等待重启生效"
-            summary_text = "最新代码已经拉取完成，请点击“立即重启生效”使新代码生效。"
+            status_text = "代码已更新，等待重启生效"
+            summary_text = "当前端已应用或发布新代码，但还需要重启后才会运行新代码。"
+        elif internal_peer_command_active and internal_peer_command_action == "apply":
+            tone = "info"
+            status_text = "内网端正在应用代码"
+            summary_text = "已下发内网端应用命令，完成前不会覆盖共享目录源码包。"
         elif last_result == "git_pulling" or dependency_sync_status == "running":
             tone = "info"
-            status_text = "拉取代码中"
-            summary_text = "正在从 Git 仓库拉取代码并同步运行依赖，请保持当前页面打开。"
-        elif last_result == "update_available":
-            tone = "success"
-            status_text = "检测到可拉取更新"
-            summary_text = "检测到远端仓库有新代码。点击“拉取代码”即可开始更新。"
-        elif last_result == "up_to_date":
-            tone = "success"
-            status_text = "当前代码已是最新"
-            summary_text = "当前 Git 工作区已经与远端保持一致。"
+            status_text = "代码更新处理中"
+            summary_text = "正在处理代码更新或依赖同步，请保持当前页面打开。"
         elif worktree_dirty:
             tone = "warning"
             status_text = "检测到本地修改"
-            summary_text = "当前 Git 工作区存在本地已修改文件，已阻止自动拉取代码。"
+            summary_text = "当前 Git 工作区存在本地已修改文件，已阻止自动同步内网端。"
+        elif deferred_commit:
+            tone = "warning"
+            status_text = "等待已有内网命令完成"
+            summary_text = "检测到新的本地提交，但内网端已有待执行命令；完成后会再次尝试同步。"
+        elif published_matches_local and internal_peer_commit and internal_peer_commit == local_commit:
+            tone = "success"
+            status_text = "内外端代码一致"
+            summary_text = "外网当前提交已发布，内网端上报的运行提交也一致。"
+        elif published_matches_local:
+            tone = "success"
+            status_text = "当前提交已发布"
+            summary_text = "外网当前提交已打包到共享目录，并已下发或等待内网端应用。"
+        elif pending_sync_commit:
+            tone = "warning"
+            status_text = "本地提交待同步"
+            summary_text = "当前本地提交还没有发布到共享目录；updater 线程会自动尝试同步。"
+        elif last_result == "up_to_date":
+            tone = "success"
+            status_text = "当前代码已是最新"
+            summary_text = "当前 Git 工作区已经与远端保持一致，未检测到需要同步的提交。"
         items = [
-            {"label": "运行方式", "value": "源码直跑", "tone": "info"},
+            {"label": "同步方式", "value": "Git 跟踪 .py 文件", "tone": "info"},
             {
-                "label": "当前版本",
+                "label": "旧版版本号",
                 "value": f"{local_version} / r{local_revision}" if local_revision > 0 else local_version,
                 "tone": "neutral",
             },
-            {"label": "更新方式", "value": "手动点击“拉取代码”", "tone": "neutral"},
             {"label": "当前分支", "value": branch or "-", "tone": "neutral"},
-            {"label": "本地提交", "value": local_commit[:7] if local_commit else "-", "tone": "neutral"},
-            {"label": "远端提交", "value": remote_commit[:7] if remote_commit else "-", "tone": "neutral"},
+            {"label": "外网当前提交", "value": _short_commit(local_commit) or "-", "tone": "neutral"},
+            {"label": "远端提交", "value": _short_commit(remote_commit) or "-", "tone": "neutral"},
+            {
+                "label": "已发布提交",
+                "value": _short_commit(published_commit) or "-",
+                "tone": "success" if published_matches_local else "neutral",
+            },
+            {
+                "label": "待同步提交",
+                "value": _short_commit(pending_sync_commit) or "-",
+                "tone": "warning" if pending_sync_commit else "neutral",
+            },
+            {
+                "label": "最近发布",
+                "value": last_publish_at or "-",
+                "tone": "info" if last_publish_at else "neutral",
+            },
             {
                 "label": "工作区状态",
                 "value": "存在本地修改" if worktree_dirty else "干净",
@@ -1501,27 +1595,77 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                 "value": internal_peer_status_text,
                 "tone": "warning" if internal_peer_command_active else ("success" if internal_peer_online else "neutral"),
             },
+            {
+                "label": "内网端提交",
+                "value": _short_commit(internal_peer_commit) or ("待内网上报" if internal_peer_available else "-"),
+                "tone": "success" if internal_peer_commit and internal_peer_commit == published_commit else "neutral",
+            },
+            {
+                "label": "远程命令",
+                "value": internal_peer_command_value,
+                "tone": "warning" if internal_peer_command_active else "neutral",
+            },
+            {
+                "label": "内网最近命令",
+                "value": internal_peer_last_command_value,
+                "tone": "danger" if internal_peer_last_command_status == "failed" else (
+                    "success" if internal_peer_last_command_status == "completed" else "neutral"
+                ),
+            },
         ]
+        if last_internal_apply_completed_commit:
+            items.append(
+                {
+                    "label": "本端最近应用",
+                    "value": _short_commit(last_internal_apply_completed_commit),
+                    "tone": "success",
+                }
+            )
+        if last_internal_apply_failed_commit:
+            items.append(
+                {
+                    "label": "本端应用失败",
+                    "value": _short_commit(last_internal_apply_failed_commit),
+                    "tone": "danger",
+                }
+            )
         return {
             "tone": tone,
-            "kicker": "源码更新",
-            "title": "Git 代码拉取",
+            "kicker": "代码同步",
+            "title": "外网到内网 .py 同步",
             "status_text": status_text,
             "badge_text": badge_text,
             "summary_text": summary_text,
-            "manifest_path": "",
+            "manifest_path": manifest_path,
+            "manifest_label": "源码包清单",
             "error_text": error_text,
             "items": items,
+            "sync": {
+                "mode": "git_py_only",
+                "local_commit": local_commit,
+                "remote_commit": remote_commit,
+                "published_commit": published_commit,
+                "pending_sync_commit": pending_sync_commit,
+                "deferred_commit": deferred_commit,
+                "last_publish_attempt_commit": last_publish_attempt_commit,
+                "last_publish_command_id": last_publish_command_id,
+                "internal_peer_commit": internal_peer_commit,
+                "internal_peer_command_source_commit": internal_peer_command_source_commit,
+                "internal_peer_last_command_source_commit": internal_peer_last_command_source_commit,
+            },
             "internal_peer": {
                 "available": internal_peer_available,
                 "online": internal_peer_online,
                 "update_available": internal_peer_update_available,
                 "restart_required": internal_peer_restart_required,
                 "status_text": internal_peer_status_text,
+                "local_commit": internal_peer_commit,
+                "last_command_source_commit": internal_peer_last_command_source_commit,
                 "command": {
                     "active": internal_peer_command_active,
                     "action": internal_peer_command_action,
                     "status": internal_peer_command_status,
+                    "source_commit": internal_peer_command_source_commit,
                     "message": _string(internal_peer_command.get("message", "")),
                 },
             },
@@ -1682,6 +1826,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         "badge_text": status_text,
         "summary_text": summary_text,
         "manifest_path": manifest_path,
+        "manifest_label": "镜像清单",
         "error_text": error_text,
         "items": items,
         "internal_peer": {
@@ -1690,10 +1835,13 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             "update_available": internal_peer_update_available,
             "restart_required": internal_peer_restart_required,
             "status_text": internal_peer_status_text,
+            "local_commit": internal_peer_commit,
+            "last_command_source_commit": internal_peer_last_command_source_commit,
             "command": {
                 "active": internal_peer_command_active,
                 "action": internal_peer_command_action,
                 "status": internal_peer_command_status,
+                "source_commit": internal_peer_command_source_commit,
                 "message": _string(internal_peer_command.get("message", "")),
             },
         },

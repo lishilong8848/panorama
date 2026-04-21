@@ -46,6 +46,7 @@ def empty_internal_peer_snapshot(*, available: bool = False) -> Dict[str, Any]:
         "node_id": "",
         "node_label": "",
         "local_version": "",
+        "local_commit": "",
         "local_release_revision": 0,
         "last_check_at": "",
         "last_result": "",
@@ -62,11 +63,13 @@ def empty_internal_peer_snapshot(*, available: bool = False) -> Dict[str, Any]:
         "last_command_action": "",
         "last_command_status": "",
         "last_command_message": "",
+        "last_command_source_commit": "",
         "command": {
             "exists": False,
             "command_id": "",
             "action": "",
             "status": "",
+            "source_commit": "",
             "requested_at": "",
             "requested_by_node_id": "",
             "requested_by_role": "",
@@ -107,6 +110,7 @@ class UpdaterRemoteControlStore:
             "consumed_at": str(payload.get("consumed_at", "") or "").strip(),
             "finished_at": str(payload.get("finished_at", "") or "").strip(),
             "message": str(payload.get("message", "") or "").strip(),
+            "source_commit": str(payload.get("source_commit", "") or "").strip(),
         }
 
     def is_active_command(self, command: Dict[str, Any] | None) -> bool:
@@ -125,6 +129,7 @@ class UpdaterRemoteControlStore:
             "consumed_at": str(payload.get("consumed_at", "") or "").strip(),
             "finished_at": str(payload.get("finished_at", "") or "").strip(),
             "message": str(payload.get("message", "") or "").strip(),
+            "source_commit": str(payload.get("source_commit", "") or "").strip(),
         }
         self.ensure_ready()
         atomic_write_text(
@@ -143,6 +148,7 @@ class UpdaterRemoteControlStore:
         action: str,
         requested_by_node_id: str,
         requested_by_role: str,
+        source_commit: str = "",
     ) -> Dict[str, Any]:
         with self._lock:
             current = self.load_command()
@@ -162,6 +168,7 @@ class UpdaterRemoteControlStore:
                     "requested_by_role": requested_by_role,
                     "consumed_at": "",
                     "finished_at": "",
+                    "source_commit": str(source_commit or "").strip(),
                     "message": (
                         "等待内网端执行重启生效"
                         if str(action or "").strip().lower() == "restart"
@@ -210,6 +217,7 @@ class UpdaterRemoteControlStore:
                 "node_id": str(payload.get("node_id", "") or "").strip(),
                 "node_label": str(payload.get("node_label", "") or "").strip(),
                 "local_version": str(payload.get("local_version", "") or "").strip(),
+                "local_commit": str(payload.get("local_commit", "") or "").strip(),
                 "local_release_revision": int(payload.get("local_release_revision", 0) or 0),
                 "last_check_at": str(payload.get("last_check_at", "") or "").strip(),
                 "last_result": str(payload.get("last_result", "") or "").strip(),
@@ -221,6 +229,7 @@ class UpdaterRemoteControlStore:
                 "last_command_action": str(payload.get("last_command_action", "") or "").strip().lower(),
                 "last_command_status": str(payload.get("last_command_status", "") or "").strip().lower(),
                 "last_command_message": str(payload.get("last_command_message", "") or "").strip(),
+                "last_command_source_commit": str(payload.get("last_command_source_commit", "") or "").strip(),
             }
         )
         return snapshot
@@ -256,6 +265,7 @@ class UpdaterRemoteControlStore:
             "command_id": str(command.get("command_id", "") or "").strip(),
             "action": str(command.get("action", "") or "").strip().lower(),
             "status": str(command.get("status", "") or "").strip().lower(),
+            "source_commit": str(command.get("source_commit", "") or "").strip(),
             "requested_at": str(command.get("requested_at", "") or "").strip(),
             "requested_by_node_id": str(command.get("requested_by_node_id", "") or "").strip(),
             "requested_by_role": str(command.get("requested_by_role", "") or "").strip(),

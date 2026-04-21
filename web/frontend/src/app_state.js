@@ -971,6 +971,7 @@ export function createAppState(vueApi) {
         || line.includes("页池")
         || line.includes("共享目录更新")
         || line.includes("更新镜像")
+        || line.includes("代码同步")
       ));
   });
 
@@ -1978,13 +1979,24 @@ export function createAppState(vueApi) {
     if (backendOverview) return backendOverview;
     return {
       tone: "neutral",
-      kicker: "更新镜像",
-      title: "共享目录批准版本",
+      kicker: "代码同步",
+      title: "外网到内网 .py 同步",
       statusText: "等待后端更新状态",
-      summaryText: "更新镜像状态由后端聚合后返回。",
+      summaryText: "代码同步状态由后端聚合后返回。",
       manifestPath: "",
+      manifestLabel: "源码包清单",
       errorText: "",
       items: [],
+      sync: {
+        mode: "",
+        localCommit: "",
+        remoteCommit: "",
+        publishedCommit: "",
+        pendingSyncCommit: "",
+        deferredCommit: "",
+        internalPeerCommit: "",
+        internalPeerCommandSourceCommit: "",
+      },
       actions: {},
       businessActions: {
         allowed: false,
@@ -1998,10 +2010,13 @@ export function createAppState(vueApi) {
         updateAvailable: false,
         restartRequired: false,
         statusText: "等待后端状态",
+        localCommit: "",
+        lastCommandSourceCommit: "",
         command: {
           active: false,
           action: "",
           status: "",
+          sourceCommit: "",
           message: "",
         },
       },
@@ -2622,6 +2637,16 @@ export function createAppState(vueApi) {
     if (backendText) return backendText;
     return "等待后端更新状态";
   });
+  const updaterVersionInlineText = computed(() => {
+    const sync = updaterMirrorOverview.value?.sync && typeof updaterMirrorOverview.value.sync === "object"
+      ? updaterMirrorOverview.value.sync
+      : {};
+    const localCommit = String(sync.localCommit || health.updater?.local_commit || "").trim();
+    if (localCommit) return `commit ${localCommit.slice(0, 7)}`;
+    const publishedCommit = String(sync.publishedCommit || health.updater?.approved_commit || "").trim();
+    if (publishedCommit) return `published ${publishedCommit.slice(0, 7)}`;
+    return String(health.updater?.local_version || health.version || "").trim();
+  });
   const dashboardActiveModuleTitle = computed(() => {
     const hit = dashboardModules.value.find((item) => item.id === dashboardActiveModule.value);
     return hit?.title || "业务模块";
@@ -2883,6 +2908,7 @@ export function createAppState(vueApi) {
     hasSelectedHandoverFiles,
     handoverFileStatesByBuilding,
     updaterResultText,
+    updaterVersionInlineText,
     dashboardActiveModuleTitle,
     moduleMeta,
     backendDashboardModuleHeroMap,

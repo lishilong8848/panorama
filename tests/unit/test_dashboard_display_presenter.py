@@ -539,13 +539,15 @@ def test_present_updater_mirror_overview_for_git_pull_source_mode():
         }
     )
 
-    assert payload["title"] == "Git 代码拉取"
-    assert payload["status_text"] == "检测到可拉取更新"
-    assert payload["summary_text"] == "检测到远端仓库有新代码。点击“拉取代码”即可开始更新。"
-    assert payload["items"][0]["value"] == "源码直跑"
-    assert payload["items"][2]["value"] == "手动点击“拉取代码”"
-    assert payload["actions"]["main"]["id"] == "apply"
-    assert payload["actions"]["main"]["label"] == "拉取代码"
+    assert payload["title"] == "外网到内网 .py 同步"
+    assert payload["status_text"] == "本地提交待同步"
+    assert payload["summary_text"] == "当前本地提交还没有发布到共享目录；updater 线程会自动尝试同步。"
+    assert payload["items"][0]["value"] == "Git 跟踪 .py 文件"
+    assert payload["items"][3]["value"] == "abcdef1"
+    assert payload["items"][6]["value"] == "abcdef1"
+    assert payload["sync"]["pending_sync_commit"] == "abcdef123456"
+    assert payload["actions"]["main"]["id"] == "check"
+    assert payload["actions"]["main"]["label"] == "刷新本机代码状态"
     assert payload["actions"]["main"]["allowed"] is True
 
 
@@ -606,11 +608,10 @@ def test_present_updater_mirror_overview_shows_git_mode_items():
         }
     )
 
-    assert payload["items"][0]["value"] == "源码直跑"
-    assert payload["items"][2]["value"] == "手动点击“拉取代码”"
-    assert payload["items"][3]["value"] == "master"
-    assert payload["items"][4]["value"] == "1111111"
-    assert payload["items"][6]["value"] == "存在本地修改"
+    assert payload["items"][0]["value"] == "Git 跟踪 .py 文件"
+    assert payload["items"][2]["value"] == "master"
+    assert payload["items"][3]["value"] == "1111111"
+    assert payload["items"][8]["value"] == "存在本地修改"
 
 
 def test_present_external_module_hero_overviews_prefers_scheduler_summary_items() -> None:

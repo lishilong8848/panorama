@@ -274,8 +274,8 @@ const APP_TEMPLATE_PREFIX = `
             <div class="ops-top-nav-brand">
               <div class="ops-top-nav-title-row">
                 <h1 class="title ops-top-nav-title">{{ appShellTitle }}</h1>
-                <span class="version-inline ops-version" v-if="health.version || health.updater.local_version">
-                  {{ health.updater.local_version || health.version }}
+                <span class="version-inline ops-version" v-if="updaterVersionInlineText">
+                  {{ updaterVersionInlineText }}
                 </span>
               </div>
             </div>

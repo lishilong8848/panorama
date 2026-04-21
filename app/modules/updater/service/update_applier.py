@@ -12,6 +12,7 @@ from app.shared.utils.atomic_file import atomic_write_file
 
 BACKUP_MANIFEST_NAME = "backup_manifest.json"
 SOURCE_SNAPSHOT_META_NAME = "source_manifest.json"
+SOURCE_SNAPSHOT_SCOPE_PY_ONLY = "py_only"
 SOURCE_SNAPSHOT_PROTECTED_DIRS = {
     ".git",
     ".runtime",
@@ -49,6 +50,18 @@ def _is_source_snapshot_protected(rel: Path) -> bool:
     if rel.name.startswith("表格计算配置.json.backup"):
         return True
     return any(rel_text == prefix.rstrip("/") or rel_text.startswith(prefix) for prefix in SOURCE_SNAPSHOT_PROTECTED_PREFIXES)
+
+
+def _is_py_only_snapshot(manifest: Dict[str, Any]) -> bool:
+    return str((manifest or {}).get("scope", "") or "").strip().lower() == SOURCE_SNAPSHOT_SCOPE_PY_ONLY
+
+
+def _is_allowed_snapshot_member(rel: Path, *, py_only: bool) -> bool:
+    if _is_source_snapshot_protected(rel):
+        return False
+    if py_only and rel.suffix.lower() != ".py":
+        return False
+    return True
 
 
 class UpdateApplier:
@@ -248,6 +261,7 @@ class UpdateApplier:
                 manifest = {}
             except Exception:  # noqa: BLE001
                 manifest = {}
+            py_only = _is_py_only_snapshot(manifest)
 
             for info in sorted(archive.infolist(), key=lambda item: item.filename):
                 if info.is_dir():
@@ -258,7 +272,7 @@ class UpdateApplier:
                 rel_text = _rel_text(rel)
                 if rel_text == SOURCE_SNAPSHOT_META_NAME:
                     continue
-                if _is_source_snapshot_protected(rel):
+                if not _is_allowed_snapshot_member(rel, py_only=py_only):
                     continue
                 snapshot_files.add(rel_text)
                 dst = self.app_dir / rel
@@ -281,6 +295,8 @@ class UpdateApplier:
                 continue
             rel_text = _rel_text(rel)
             if rel_text in snapshot_files or _is_source_snapshot_protected(rel):
+                continue
+            if _is_py_only_snapshot(manifest) and rel.suffix.lower() != ".py":
                 continue
             backup_target = snapshot / rel
             backup_target.parent.mkdir(parents=True, exist_ok=True)

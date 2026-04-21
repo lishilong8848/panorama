@@ -18,7 +18,7 @@ export function createUpdaterUiHelpers(options = {}) {
     if (reasonCode === "git_not_installed") return "当前电脑未安装 Git，无法执行代码拉取更新。";
     if (reasonCode === "git_repo_missing") return "当前代码目录不是 Git 工作区，无法执行代码拉取更新。";
     if (reasonCode === "git_remote_missing") return "当前未配置 Git 更新仓库地址。";
-    if (reasonCode === "shared_root_missing") return "共享目录未配置，无法发布或检查内网批准版本。";
+    if (reasonCode === "shared_root_missing") return "共享目录未配置，无法同步内网代码。";
     return String(action?.disabledReason || "").trim() || "当前运行模式已跳过更新。";
   }
 
@@ -34,7 +34,7 @@ export function createUpdaterUiHelpers(options = {}) {
     id: "internal_peer_check",
     allowed: false,
     pending: false,
-    label: "内网端检查更新",
+    label: "刷新内网状态",
     disabledReason: "",
     reasonCode: "",
   });
@@ -42,7 +42,7 @@ export function createUpdaterUiHelpers(options = {}) {
     id: "internal_peer_apply",
     allowed: false,
     pending: false,
-    label: "内网端开始更新",
+    label: "内网端应用代码",
     disabledReason: "",
     reasonCode: "",
   });
@@ -50,7 +50,7 @@ export function createUpdaterUiHelpers(options = {}) {
     id: "publish_approved",
     allowed: false,
     pending: false,
-    label: "发布内网批准版本",
+    label: "手动同步当前代码",
     disabledReason: "",
     reasonCode: "",
   });
@@ -117,15 +117,15 @@ export function createUpdaterUiHelpers(options = {}) {
   );
   const updaterPublishApprovedButtonText = computed(() => {
     if (isActionLocked(actionKeyUpdaterPublishApproved)) return "发布中...";
-    return updaterPublishApprovedAction.value.label || "发布内网批准版本";
+    return updaterPublishApprovedAction.value.label || "手动同步当前代码";
   });
   const updaterInternalPeerCheckButtonText = computed(() => {
     if (isActionLocked(actionKeyUpdaterInternalPeerCheck)) return "下发中...";
-    return updaterInternalPeerCheckAction.value.label || "内网端检查更新";
+    return updaterInternalPeerCheckAction.value.label || "刷新内网状态";
   });
   const updaterInternalPeerApplyButtonText = computed(() => {
     if (isActionLocked(actionKeyUpdaterInternalPeerApply)) return "下发中...";
-    return updaterInternalPeerApplyAction.value.label || "内网端开始更新";
+    return updaterInternalPeerApplyAction.value.label || "内网端应用代码";
   });
   const updaterInternalPeerRestartButtonText = computed(() => {
     if (isActionLocked(actionKeyUpdaterInternalPeerRestart)) return "下发中...";

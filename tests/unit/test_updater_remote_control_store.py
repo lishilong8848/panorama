@@ -50,3 +50,21 @@ def test_remote_control_store_reuses_slot_after_terminal_state(tmp_path: Path) -
     assert next_result["command"]["command_id"] == "cmd-b"
     assert next_result["command"]["status"] == "pending"
     assert next_result["command"]["message"] == "等待内网端执行开始更新"
+
+
+def test_remote_control_store_preserves_optional_source_commit(tmp_path: Path) -> None:
+    store = UpdaterRemoteControlStore(tmp_path / "shared")
+
+    result = store.submit_command(
+        command_id="cmd-source",
+        action="apply",
+        requested_by_node_id="external-1",
+        requested_by_role="external",
+        source_commit="abcdef123456",
+    )
+
+    assert result["accepted"] is True
+    command = store.load_command()
+    assert command["source_commit"] == "abcdef123456"
+    snapshot = store.build_internal_peer_snapshot()
+    assert snapshot["command"]["source_commit"] == "abcdef123456"

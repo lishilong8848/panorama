@@ -47,6 +47,8 @@ _GIT_TRACKED_STATUS_TIMEOUT_SEC = 30
 _SOURCE_SNAPSHOT_ZIP_NAME = "source_snapshot.zip"
 _SOURCE_MANIFEST_NAME = "source_manifest.json"
 _SOURCE_PUBLISH_STATE_NAME = "source_publish_state.json"
+_SOURCE_SNAPSHOT_SCOPE_PY_ONLY = "py_only"
+_SOURCE_GIT_HEAD_WATCH_INTERVAL_SEC = 10
 _SOURCE_SNAPSHOT_EXCLUDED_DIRS = {
     ".git",
     ".hg",
@@ -152,6 +154,14 @@ def _is_source_snapshot_excluded(rel_path: Path, *, is_dir: bool = False) -> boo
     return False
 
 
+def _is_python_source_relpath(rel_path: Path | str) -> bool:
+    rel = Path(str(rel_path).replace("\\", "/"))
+    rel_text = _normalize_zip_relpath(rel)
+    if not rel_text or rel.suffix.lower() != ".py":
+        return False
+    return not _is_source_snapshot_excluded(rel)
+
+
 def _default_node_id(role_mode: Any) -> str:
     role = normalize_role_mode(role_mode)
     machine_id = f"{uuid.getnode():012x}"
@@ -228,6 +238,7 @@ class UpdaterService:
         self.git_repo_url = ""
         self.git_branch = ""
         self.git_remote_name = ""
+        self._last_seen_git_head = ""
         if self.update_mode == "git_pull":
             self.source_kind = "git_remote"
             self.source_label = "Git 仓库更新源"
@@ -296,6 +307,12 @@ class UpdaterService:
         self.state.setdefault("remote_commit", "")
         self.state.setdefault("worktree_dirty", False)
         self.state.setdefault("dirty_files", [])
+        self.state.setdefault("last_published_commit", "")
+        self.state.setdefault("last_publish_attempt_commit", "")
+        self.state.setdefault("last_publish_deferred_commit", "")
+        self.state.setdefault("last_publish_command_id", "")
+        self.state.setdefault("last_internal_apply_completed_commit", "")
+        self.state.setdefault("last_internal_apply_failed_commit", "")
         self.state.setdefault("enabled", bool(self.cfg["enabled"]))
         self.state.setdefault("disabled_reason", self.disabled_reason)
         self.state.setdefault("mirror_ready", mirror_runtime.get("mirror_ready", False))
@@ -343,6 +360,14 @@ class UpdaterService:
             "remote_commit": str(self.state.get("remote_commit", "") or ""),
             "worktree_dirty": bool(self.state.get("worktree_dirty", False)),
             "dirty_files": list(self.state.get("dirty_files", []) or []),
+            "last_published_commit": str(self.state.get("last_published_commit", "") or ""),
+            "last_publish_attempt_commit": str(self.state.get("last_publish_attempt_commit", "") or ""),
+            "last_publish_deferred_commit": str(self.state.get("last_publish_deferred_commit", "") or ""),
+            "last_publish_command_id": str(self.state.get("last_publish_command_id", "") or ""),
+            "last_internal_apply_completed_commit": str(
+                self.state.get("last_internal_apply_completed_commit", "") or ""
+            ),
+            "last_internal_apply_failed_commit": str(self.state.get("last_internal_apply_failed_commit", "") or ""),
             "local_release_revision": int(self.state.get("local_release_revision", 0) or 0),
             "remote_release_revision": int(self.state.get("remote_release_revision", 0) or 0),
             "update_available": bool(self.state.get("update_available", False)),
@@ -463,6 +488,7 @@ class UpdaterService:
             "node_id": self.node_id,
             "node_label": "内网端",
             "local_version": local_version,
+            "local_commit": str(self.state.get("local_commit", "") or self.runtime.get("local_commit", "") or "").strip(),
             "local_release_revision": local_revision,
             "last_check_at": str(self.state.get("last_check_at", "") or ""),
             "last_result": str(self.state.get("last_result", "") or ""),
@@ -478,12 +504,16 @@ class UpdaterService:
                     "last_command_action": str(command.get("action", "") or "").strip().lower(),
                     "last_command_status": str(command.get("status", "") or "").strip().lower(),
                     "last_command_message": str(command.get("message", "") or "").strip(),
+                    "last_command_source_commit": str(command.get("source_commit", "") or "").strip(),
                 }
             )
         self.remote_control_store.write_status(payload)
         self._last_internal_peer_status_sync_monotonic = now_monotonic
 
     def submit_internal_peer_command(self, *, action: str) -> Dict[str, Any]:
+        return self._submit_internal_peer_command(action=action)
+
+    def _submit_internal_peer_command(self, *, action: str, source_commit: str = "") -> Dict[str, Any]:
         action_text = str(action or "").strip().lower()
         if self.role_mode != "external":
             raise RuntimeError("当前仅支持外网端下发内网更新命令。")
@@ -496,6 +526,7 @@ class UpdaterService:
             action=action_text,
             requested_by_node_id=self.node_id,
             requested_by_role=self.role_mode or "external",
+            source_commit=source_commit,
         )
         internal_peer = self._sync_internal_peer_runtime()
         command = result.get("command", {}) if isinstance(result.get("command", {}), dict) else {}
@@ -891,6 +922,30 @@ class UpdaterService:
         )
         return snapshot
 
+    def _git_tracked_python_files(self) -> List[Path]:
+        if self.update_mode != "git_pull" or not self.git_available or not self.git_repo_detected:
+            return []
+        ret = self._run_git("ls-files", "*.py")
+        if ret.returncode != 0:
+            raise RuntimeError((ret.stderr or ret.stdout or "git ls-files 失败").strip())
+        output: List[Path] = []
+        seen: set[str] = set()
+        for raw in (ret.stdout or "").splitlines():
+            normalized = _normalize_git_status_path(raw)
+            if not normalized:
+                continue
+            rel = Path(*Path(normalized).parts)
+            rel_text = _normalize_zip_relpath(rel)
+            if rel_text in seen or not _is_python_source_relpath(rel):
+                continue
+            path = self.app_dir / rel
+            if not path.is_file():
+                continue
+            seen.add(rel_text)
+            output.append(rel)
+        output.sort(key=lambda item: _normalize_zip_relpath(item))
+        return output
+
     def _shared_mirror_watch_signal(self) -> tuple[str, ...]:
         if self.source_kind not in {"shared_mirror", _SOURCE_APPROVED_SOURCE_KIND} or not self.shared_mirror_client:
             return ()
@@ -1167,6 +1222,14 @@ class UpdaterService:
             "remote_commit": str(self.state.get("remote_commit", "") or ""),
             "worktree_dirty": bool(self.state.get("worktree_dirty", False)),
             "dirty_files": list(self.state.get("dirty_files", []) or []),
+            "last_published_commit": str(self.state.get("last_published_commit", "") or ""),
+            "last_publish_attempt_commit": str(self.state.get("last_publish_attempt_commit", "") or ""),
+            "last_publish_deferred_commit": str(self.state.get("last_publish_deferred_commit", "") or ""),
+            "last_publish_command_id": str(self.state.get("last_publish_command_id", "") or ""),
+            "last_internal_apply_completed_commit": str(
+                self.state.get("last_internal_apply_completed_commit", "") or ""
+            ),
+            "last_internal_apply_failed_commit": str(self.state.get("last_internal_apply_failed_commit", "") or ""),
             "local_release_revision": int(self.state.get("local_release_revision", 0) or 0),
             "remote_release_revision": int(self.state.get("remote_release_revision", 0) or 0),
             "dependency_sync_status": str(self.state.get("dependency_sync_status", "idle") or "idle"),
@@ -1204,8 +1267,57 @@ class UpdaterService:
         )
         return {"queued_apply": queue_payload, "message": "当前仍有任务在运行，更新将在任务结束后自动执行。"}
 
+    def _queue_remote_apply(
+        self,
+        *,
+        mode: str,
+        reason: str,
+        command: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        queue_payload = {
+            "queued": True,
+            "mode": mode,
+            "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "reason": reason,
+            "command_id": str(command.get("command_id", "") or "").strip(),
+            "source_commit": str(command.get("source_commit", "") or "").strip(),
+        }
+        self._set_runtime_and_state(
+            queued_apply=queue_payload,
+            last_result="queued_busy",
+            last_error="",
+        )
+        self._log(
+            "远程更新请求已排队: "
+            f"模式={self._apply_mode_text(mode)}, command_id={queue_payload['command_id'] or '-'}"
+        )
+        return {"queued_apply": queue_payload, "message": "当前仍有任务在运行，更新将在任务结束后自动执行。"}
+
     def _clear_queue(self) -> None:
         self._set_runtime_and_state(queued_apply=self._empty_queue_payload())
+
+    def _apply_update_and_restart_if_needed(
+        self,
+        *,
+        mode: str = "normal",
+        queue_if_busy: bool = False,
+        command: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        normalized_mode = "force_remote" if str(mode or "").strip().lower() == "force_remote" else "normal"
+        if queue_if_busy and self.is_busy():
+            if isinstance(command, dict) and str(command.get("command_id", "") or "").strip():
+                return self._build_result_payload(
+                    last_result="queued_busy",
+                    queue_status="queued",
+                    **self._queue_remote_apply(mode=normalized_mode, reason="active_job_running", command=command),
+                )
+            queue_payload = self._queue_apply(mode=normalized_mode, reason="active_job_running")
+            return self._build_result_payload(last_result="queued_busy", queue_status="queued", **queue_payload)
+        result = self._run_check(apply_update=True, force_remote=normalized_mode == "force_remote")
+        result_key = str(result.get("last_result", "") or "").strip().lower()
+        if result_key == "restart_pending" or bool(result.get("restart_required", False)):
+            return self.restart_now()
+        return result
 
     def _resolve_manifest_patch_ref(self, remote_manifest: Dict[str, Any]) -> str:
         zip_relpath = str(remote_manifest.get("zip_relpath", "") or "").strip()
@@ -1283,28 +1395,39 @@ class UpdaterService:
         zip_path.parent.mkdir(parents=True, exist_ok=True)
         if zip_path.exists():
             zip_path.unlink()
-        included = 0
+        source_files = self._git_tracked_python_files()
+        if not source_files:
+            raise RuntimeError("当前 Git 工作区未找到可同步的 .py 文件。")
+        file_entries: List[Dict[str, Any]] = []
+        for rel in source_files:
+            path = self.app_dir / rel
+            file_entries.append(
+                {
+                    "path": _normalize_zip_relpath(rel),
+                    "sha256": _sha256_file(path),
+                    "size": int(path.stat().st_size),
+                }
+            )
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
             embedded_manifest = dict(manifest if isinstance(manifest, dict) else {})
             embedded_manifest.pop("sha256", None)
             embedded_manifest.pop("zip_sha256", None)
             embedded_manifest.pop("zip_size", None)
+            embedded_manifest["scope"] = _SOURCE_SNAPSHOT_SCOPE_PY_ONLY
+            embedded_manifest["files"] = list(file_entries)
+            embedded_manifest["deleted_files"] = []
             archive.writestr(_SOURCE_MANIFEST_NAME, json.dumps(embedded_manifest, ensure_ascii=False, indent=2))
-            for path in sorted(self.app_dir.rglob("*")):
-                if not path.is_file():
-                    continue
-                try:
-                    rel = path.relative_to(self.app_dir)
-                except ValueError:
-                    continue
-                if _is_source_snapshot_excluded(rel):
-                    continue
+            for rel in source_files:
+                path = self.app_dir / rel
                 rel_text = _normalize_zip_relpath(rel)
-                if rel_text == _SOURCE_MANIFEST_NAME:
-                    continue
                 archive.write(path, rel_text)
-                included += 1
-        return {"zip_path": str(zip_path), "included_files": included, "zip_size": int(zip_path.stat().st_size)}
+        return {
+            "zip_path": str(zip_path),
+            "included_files": len(source_files),
+            "zip_size": int(zip_path.stat().st_size),
+            "files": file_entries,
+            "scope": _SOURCE_SNAPSHOT_SCOPE_PY_ONLY,
+        }
 
     def _write_source_publish_error(self, error_text: str) -> None:
         if not self.shared_bridge_root:
@@ -1350,6 +1473,7 @@ class UpdaterService:
             published_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             manifest = {
                 "format": "source_snapshot",
+                "scope": _SOURCE_SNAPSHOT_SCOPE_PY_ONLY,
                 "source_commit": local_commit,
                 "branch": branch,
                 "created_at": published_at,
@@ -1364,6 +1488,8 @@ class UpdaterService:
             }
             staging_zip = self.download_dir / f"source_snapshot_{_short_git_commit(local_commit) or int(time.time())}.zip"
             build_result = self._build_source_snapshot_zip(manifest=manifest, zip_path=staging_zip)
+            manifest["files"] = list(build_result.get("files", []) or [])
+            manifest["deleted_files"] = []
             actual_sha = _sha256_file(staging_zip)
             manifest["sha256"] = actual_sha
             manifest["zip_sha256"] = actual_sha
@@ -1420,6 +1546,103 @@ class UpdaterService:
             self._sync_mirror_runtime()
             self._log(f"内网批准源码版本发布失败: {exc}")
             raise
+
+    def _schedule_external_restart_after_source_publish(self, *, source_commit: str) -> bool:
+        if not callable(self.restart_callback):
+            self._set_runtime_and_state(restart_required=True)
+            self._log("外网端源码已发布，当前未绑定自动重启回调，请手动重启外网端。")
+            return False
+        ok, detail = self.restart_callback(
+            {
+                "reason": "source_git_head_synced",
+                "target_version": _short_git_commit(source_commit),
+                "target_release_revision": int(self.state.get("local_release_revision", 0) or 0),
+            }
+        )
+        if ok:
+            self._set_runtime_and_state(last_result="updated_restart_scheduled", last_error="", restart_required=False)
+            self._log(detail or "外网端源码同步发布完成，已安排当前窗口重启。")
+            return True
+        self._set_runtime_and_state(restart_required=True, last_error=str(detail or "外网端自动重启失败"))
+        self._log(f"外网端源码同步发布完成，但自动重启失败，请手动重启: {detail or '-'}")
+        return False
+
+    def _auto_publish_git_head_to_internal(self) -> Dict[str, Any]:
+        if self.role_mode != "external" or self.update_mode != "git_pull":
+            return {"accepted": False, "reason": "not_external_git_pull"}
+        if not self.shared_bridge_root or not self.remote_control_store:
+            return {"accepted": False, "reason": "shared_bridge_unavailable"}
+        git_snapshot = self._sync_git_runtime(fetch_remote=False)
+        local_commit = str(git_snapshot.get("local_commit", "") or "").strip()
+        if not local_commit:
+            return {"accepted": False, "reason": "missing_local_commit"}
+        if bool(git_snapshot.get("worktree_dirty", False)):
+            dirty_files = list(git_snapshot.get("dirty_files", []) or [])
+            error_text = "检测到本地代码改动，已阻止自动同步内网端。"
+            if dirty_files:
+                error_text += f" 脏文件={','.join(str(item) for item in dirty_files[:5])}"
+            self._set_runtime_and_state(
+                last_result="dirty_worktree",
+                last_error=error_text,
+                update_available=False,
+                local_commit=local_commit,
+            )
+            self._log(error_text)
+            return {"accepted": False, "reason": "dirty_worktree", "error": error_text}
+        last_published_commit = str(self.state.get("last_published_commit", "") or "").strip()
+        if last_published_commit == local_commit:
+            return {"accepted": False, "reason": "already_published", "source_commit": local_commit}
+
+        active_command = self.remote_control_store.load_command()
+        if self.remote_control_store.is_active_command(active_command):
+            self._set_runtime_and_state(
+                last_publish_deferred_commit=local_commit,
+                last_publish_command_id=str(active_command.get("command_id", "") or "").strip(),
+                last_result="source_publishing",
+                last_error="已有内网端更新命令待执行，暂不覆盖共享源码包。",
+            )
+            return {
+                "accepted": False,
+                "reason": "internal_command_active",
+                "source_commit": local_commit,
+                "command": active_command,
+            }
+
+        result = self.publish_approved_source_snapshot()
+        source_commit = str(result.get("source_commit", "") or local_commit).strip()
+        command_result = self._submit_internal_peer_command(action="apply", source_commit=source_commit)
+        command = command_result.get("command", {}) if isinstance(command_result.get("command", {}), dict) else {}
+        command_accepted = bool(command_result.get("accepted", False))
+        state_update = {
+            "last_publish_attempt_commit": source_commit,
+            "last_publish_command_id": str(command.get("command_id", "") or "").strip(),
+            "last_result": "source_publishing",
+            "last_error": "",
+        }
+        if command_accepted:
+            state_update["last_published_commit"] = source_commit
+        self._set_runtime_and_state(**state_update)
+        self._log(
+            "外网端检测到 Git HEAD 变化，已发布 .py 同步包并下发内网应用命令: "
+            f"commit={_short_git_commit(source_commit)}, accepted={command_accepted}"
+        )
+        if command_accepted:
+            self._schedule_external_restart_after_source_publish(source_commit=source_commit)
+        return {
+            "accepted": command_accepted,
+            "reason": "published",
+            "source_commit": source_commit,
+            "publish": result,
+            "command": command_result,
+        }
+
+    def _try_auto_publish_git_head_to_internal(self) -> None:
+        try:
+            result = self._auto_publish_git_head_to_internal()
+            if str(result.get("reason", "") or "").strip() in {"published", "dirty_worktree"}:
+                self._safe_sync_internal_peer_runtime()
+        except Exception as exc:  # noqa: BLE001
+            self._record_failure("自动同步内网端源码失败", exc)
 
     def _persist_local_build_meta_from_remote(self, remote_manifest: Dict[str, Any]) -> None:
         if not isinstance(remote_manifest, dict):
@@ -2122,11 +2345,42 @@ class UpdaterService:
         if self.is_busy():
             return
         mode = "force_remote" if str(queued_apply.get("mode", "")).strip().lower() == "force_remote" else "normal"
+        command_id = str(queued_apply.get("command_id", "") or "").strip()
+        source_commit = str(queued_apply.get("source_commit", "") or "").strip()
         self._log(f"开始处理排队更新: 模式={self._apply_mode_text(mode)}")
         self._clear_queue()
         try:
-            self._run_check(apply_update=True, force_remote=mode == "force_remote")
+            result = self._apply_update_and_restart_if_needed(mode=mode, queue_if_busy=False)
+            result_key = str(result.get("last_result", "") or "").strip().lower()
+            if command_id and self.remote_control_store is not None:
+                command = self.remote_control_store.update_command(
+                    command_id=command_id,
+                    status="completed",
+                    message="内网端排队更新已执行完成",
+                )
+                if source_commit:
+                    self._set_runtime_and_state(last_internal_apply_completed_commit=source_commit)
+                self._write_internal_peer_status(
+                    online=True,
+                    command=command if isinstance(command, dict) else None,
+                    force=True,
+                )
+            if result_key == "failed":
+                raise RuntimeError(str(result.get("last_error", "") or result.get("message", "") or "排队更新失败"))
         except Exception as exc:  # noqa: BLE001
+            if command_id and self.remote_control_store is not None:
+                failed = self.remote_control_store.update_command(
+                    command_id=command_id,
+                    status="failed",
+                    message=str(exc),
+                )
+                if source_commit:
+                    self._set_runtime_and_state(last_internal_apply_failed_commit=source_commit)
+                self._write_internal_peer_status(
+                    online=True,
+                    command=failed if isinstance(failed, dict) else None,
+                    force=True,
+                )
             self._record_failure("排队更新失败", exc)
 
     def _try_process_internal_peer_command(self) -> None:
@@ -2166,7 +2420,11 @@ class UpdaterService:
             if action == "check":
                 result = self.check_now()
             elif action == "apply":
-                result = self.apply_now(mode="normal", queue_if_busy=True)
+                result = self._apply_update_and_restart_if_needed(
+                    mode="normal",
+                    queue_if_busy=True,
+                    command=active_command,
+                )
             elif action == "restart":
                 result = self.restart_now()
             else:
@@ -2177,7 +2435,21 @@ class UpdaterService:
                 raise RuntimeError(str(result.get("last_error", "") or result.get("message", "") or "远程命令执行失败"))
 
             if action == "apply" and result_key == "queued_busy":
-                completion_message = "已加入内网端更新队列，等待当前任务结束后执行"
+                queued = self.remote_control_store.update_command(
+                    command_id=command_id,
+                    status="running",
+                    message="已排队，等待当前任务结束后执行",
+                )
+                self._write_internal_peer_status(
+                    online=True,
+                    command=queued if isinstance(queued, dict) else active_command,
+                    force=True,
+                )
+                self._log(
+                    "内网远程更新命令已排队: "
+                    f"action={action or '-'}, command_id={command_id}"
+                )
+                return
             elif action == "apply" and queue_status == "queued":
                 completion_message = "内网端更新命令已排队执行"
             elif action == "apply":
@@ -2192,6 +2464,9 @@ class UpdaterService:
                 status="completed",
                 message=completion_message,
             )
+            command_source_commit = str(active_command.get("source_commit", "") or "").strip()
+            if action == "apply" and command_source_commit:
+                self._set_runtime_and_state(last_internal_apply_completed_commit=command_source_commit)
             self._write_internal_peer_status(
                 online=True,
                 command=completed if isinstance(completed, dict) else active_command,
@@ -2202,6 +2477,9 @@ class UpdaterService:
                 f"action={action or '-'}, command_id={command_id}, result={result_key or '-'}"
             )
         except Exception as exc:  # noqa: BLE001
+            command_source_commit = str(active_command.get("source_commit", "") or "").strip()
+            if action == "apply" and command_source_commit:
+                self._set_runtime_and_state(last_internal_apply_failed_commit=command_source_commit)
             failed = self.remote_control_store.update_command(
                 command_id=command_id,
                 status="failed",
@@ -2222,7 +2500,8 @@ class UpdaterService:
         self._safe_sync_mirror_runtime()
         self._safe_sync_shared_mirror_watch_signal()
         if self.update_mode == "git_pull":
-            self._safe_sync_git_runtime(fetch_remote=False)
+            git_snapshot = self._safe_sync_git_runtime(fetch_remote=False)
+            self._last_seen_git_head = str(git_snapshot.get("local_commit", "") or "").strip()
         if self.role_mode == "internal":
             self._write_internal_peer_status(online=True, force=True)
         elif self.role_mode == "external":
@@ -2232,6 +2511,7 @@ class UpdaterService:
         else:
             self._log(f"更新线程已启动: interval={self.cfg['check_interval_sec']}s")
         next_check_monotonic = time.monotonic() + int(self.cfg["check_interval_sec"])
+        next_git_head_check_monotonic = time.monotonic() + _SOURCE_GIT_HEAD_WATCH_INTERVAL_SEC
         while not self._stop.wait(1):
             if self.role_mode == "internal":
                 self._write_internal_peer_status(online=True)
@@ -2240,6 +2520,20 @@ class UpdaterService:
                 self._safe_sync_internal_peer_runtime()
             self._try_process_queued_apply()
             if self.update_mode == "git_pull":
+                if (
+                    self.role_mode == "external"
+                    and time.monotonic() >= next_git_head_check_monotonic
+                ):
+                    next_git_head_check_monotonic = time.monotonic() + _SOURCE_GIT_HEAD_WATCH_INTERVAL_SEC
+                    git_snapshot = self._safe_sync_git_runtime(fetch_remote=False)
+                    current_head = str(git_snapshot.get("local_commit", "") or "").strip()
+                    last_published_commit = str(self.state.get("last_published_commit", "") or "").strip()
+                    if current_head and (
+                        current_head != self._last_seen_git_head
+                        or last_published_commit != current_head
+                    ):
+                        self._last_seen_git_head = current_head
+                        self._try_auto_publish_git_head_to_internal()
                 continue
             if self._consume_shared_mirror_watch_trigger():
                 self._log("检测到共享目录批准版本变化，立即检查更新")

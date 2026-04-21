@@ -336,6 +336,7 @@ def test_external_publish_approved_source_snapshot_excludes_user_config(tmp_path
         ("rev-parse", "HEAD"): type("R", (), {"returncode": 0, "stdout": "abcdef123456\n", "stderr": ""})(),
         ("status", "--porcelain", "--untracked-files=no"): type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
         ("rev-parse", "origin/master"): type("R", (), {"returncode": 0, "stdout": "abcdef123456\n", "stderr": ""})(),
+        ("ls-files", "*.py"): type("R", (), {"returncode": 0, "stdout": "main.py\n", "stderr": ""})(),
     }
 
     def fake_run_git(self, *args):  # noqa: ANN001
@@ -355,9 +356,175 @@ def test_external_publish_approved_source_snapshot_excludes_user_config(tmp_path
     assert (shared_root / "updater" / "approved" / "source_manifest.json").exists()
     with zipfile.ZipFile(zip_path, "r") as archive:
         names = set(archive.namelist())
+        embedded_manifest = json.loads(archive.read("source_manifest.json").decode("utf-8"))
     assert "main.py" in names
     assert "表格计算配置.json" not in names
     assert "config_segments/handover.json" not in names
+    assert embedded_manifest["scope"] == updater_service_module._SOURCE_SNAPSHOT_SCOPE_PY_ONLY
+    assert embedded_manifest["files"][0]["path"] == "main.py"
+
+
+def test_external_auto_publish_git_head_syncs_py_only_and_restarts(tmp_path: Path, monkeypatch) -> None:
+    app_dir = tmp_path / "app"
+    shared_root = tmp_path / "share"
+    app_dir.mkdir()
+    (app_dir / ".git").mkdir()
+    (app_dir / "main.py").write_text("print('new')\n", encoding="utf-8")
+    (app_dir / "untracked.py").write_text("print('skip')\n", encoding="utf-8")
+    (app_dir / "readme.md").write_text("skip\n", encoding="utf-8")
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: app_dir)
+    monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")
+    monkeypatch.setattr(updater_service_module.shutil, "which", lambda _name: "C:/Git/bin/git.exe")
+
+    responses = {
+        ("rev-parse", "--abbrev-ref", "HEAD"): type("R", (), {"returncode": 0, "stdout": "master\n", "stderr": ""})(),
+        ("config", "--get", "branch.master.remote"): type("R", (), {"returncode": 0, "stdout": "origin\n", "stderr": ""})(),
+        ("remote", "get-url", "origin"): type("R", (), {"returncode": 0, "stdout": "https://example.invalid/repo.git\n", "stderr": ""})(),
+        ("rev-parse", "HEAD"): type("R", (), {"returncode": 0, "stdout": "1234567890abcdef\n", "stderr": ""})(),
+        ("status", "--porcelain", "--untracked-files=no"): type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+        ("rev-parse", "origin/master"): type("R", (), {"returncode": 0, "stdout": "1234567890abcdef\n", "stderr": ""})(),
+        ("ls-files", "*.py"): type("R", (), {"returncode": 0, "stdout": "main.py\n", "stderr": ""})(),
+    }
+
+    def fake_run_git(self, *args):  # noqa: ANN001
+        return responses[tuple(args)]
+
+    restart_calls: list[dict] = []
+    monkeypatch.setattr(UpdaterService, "_run_git", fake_run_git, raising=False)
+    service = UpdaterService(
+        config=_build_role_config(tmp_path, role_mode="external", shared_root=shared_root),
+        emit_log=lambda _text: None,
+        restart_callback=lambda context: (restart_calls.append(dict(context)) or (True, "restart scheduled")),
+        is_busy=lambda: False,
+    )
+
+    result = service._auto_publish_git_head_to_internal()
+
+    assert result["accepted"] is True
+    assert result["source_commit"] == "1234567890abcdef"
+    assert restart_calls and restart_calls[0]["reason"] == "source_git_head_synced"
+    command = service.remote_control_store.load_command()
+    assert command["action"] == "apply"
+    assert command["status"] == "pending"
+    assert command["source_commit"] == "1234567890abcdef"
+    assert service.get_runtime_snapshot()["last_published_commit"] == "1234567890abcdef"
+    with zipfile.ZipFile(shared_root / "updater" / "approved" / "source_snapshot.zip", "r") as archive:
+        names = set(archive.namelist())
+    assert "main.py" in names
+    assert "untracked.py" not in names
+    assert "readme.md" not in names
+
+
+def test_external_auto_publish_does_not_publish_or_mark_commit_done_when_internal_command_pending(tmp_path: Path, monkeypatch) -> None:
+    app_dir = tmp_path / "app"
+    shared_root = tmp_path / "share"
+    app_dir.mkdir()
+    (app_dir / ".git").mkdir()
+    (app_dir / "main.py").write_text("print('new')\n", encoding="utf-8")
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: app_dir)
+    monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")
+    monkeypatch.setattr(updater_service_module.shutil, "which", lambda _name: "C:/Git/bin/git.exe")
+
+    responses = {
+        ("rev-parse", "--abbrev-ref", "HEAD"): type("R", (), {"returncode": 0, "stdout": "master\n", "stderr": ""})(),
+        ("config", "--get", "branch.master.remote"): type("R", (), {"returncode": 0, "stdout": "origin\n", "stderr": ""})(),
+        ("remote", "get-url", "origin"): type("R", (), {"returncode": 0, "stdout": "https://example.invalid/repo.git\n", "stderr": ""})(),
+        ("rev-parse", "HEAD"): type("R", (), {"returncode": 0, "stdout": "pending123456\n", "stderr": ""})(),
+        ("status", "--porcelain", "--untracked-files=no"): type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+        ("rev-parse", "origin/master"): type("R", (), {"returncode": 0, "stdout": "pending123456\n", "stderr": ""})(),
+        ("ls-files", "*.py"): type("R", (), {"returncode": 0, "stdout": "main.py\n", "stderr": ""})(),
+    }
+
+    def fake_run_git(self, *args):  # noqa: ANN001
+        return responses[tuple(args)]
+
+    monkeypatch.setattr(UpdaterService, "_run_git", fake_run_git, raising=False)
+    service = UpdaterService(
+        config=_build_role_config(tmp_path, role_mode="external", shared_root=shared_root),
+        emit_log=lambda _text: None,
+        restart_callback=lambda _context: (True, "restart scheduled"),
+        is_busy=lambda: False,
+    )
+    service.remote_control_store.submit_command(
+        command_id="existing-command",
+        action="check",
+        requested_by_node_id="external-node",
+        requested_by_role="external",
+    )
+    approved_root = shared_root / "updater" / "approved"
+    approved_root.mkdir(parents=True, exist_ok=True)
+    snapshot_zip = approved_root / "source_snapshot.zip"
+    snapshot_zip.write_bytes(b"old-package")
+    old_mtime = snapshot_zip.stat().st_mtime_ns
+
+    result = service._auto_publish_git_head_to_internal()
+
+    assert result["accepted"] is False
+    assert result["reason"] == "internal_command_active"
+    assert service.get_runtime_snapshot().get("last_published_commit", "") == ""
+    assert service.get_runtime_snapshot()["last_publish_deferred_commit"] == "pending123456"
+    assert snapshot_zip.read_bytes() == b"old-package"
+    assert snapshot_zip.stat().st_mtime_ns == old_mtime
+
+
+def test_internal_apply_py_only_source_snapshot_only_deletes_py_files(tmp_path: Path, monkeypatch) -> None:
+    app_dir = tmp_path / "app"
+    shared_root = tmp_path / "share"
+    approved_root = shared_root / "updater" / "approved"
+    approved_root.mkdir(parents=True)
+    app_dir.mkdir()
+    (app_dir / "keep.txt").write_text("keep\n", encoding="utf-8")
+    (app_dir / "old.py").write_text("old\n", encoding="utf-8")
+    (app_dir / "main.py").write_text("old-main\n", encoding="utf-8")
+    manifest = {
+        "format": "source_snapshot",
+        "scope": updater_service_module._SOURCE_SNAPSHOT_SCOPE_PY_ONLY,
+        "source_commit": "pyonly123",
+        "branch": "master",
+        "created_at": "2026-04-21 12:00:00",
+        "zip_relpath": "source_snapshot.zip",
+        "display_version": "pyonly",
+        "release_revision": 1000,
+        "files": [{"path": "main.py"}],
+    }
+    zip_path = approved_root / "source_snapshot.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("source_manifest.json", json.dumps(manifest, ensure_ascii=False))
+        archive.writestr("main.py", "new-main\n")
+        archive.writestr("keep.txt", "should-not-write\n")
+    manifest["sha256"] = _sha256(zip_path)
+    manifest["zip_size"] = zip_path.stat().st_size
+    (approved_root / "source_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (approved_root / "source_publish_state.json").write_text(
+        json.dumps(
+            {
+                "mirror_ready": True,
+                "mirror_version": "pyonly",
+                "mirror_release_revision": 1000,
+                "last_publish_at": "2026-04-21 12:00:00",
+                "last_publish_error": "",
+                "zip_relpath": "source_snapshot.zip",
+                "approved_commit": "pyonly123",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: app_dir)
+    monkeypatch.setenv(updater_service_module._SOURCE_RUN_GIT_PULL_ENV, "1")
+    monkeypatch.setattr(updater_service_module.shutil, "which", lambda _name: None)
+    service = UpdaterService(
+        config=_build_role_config(tmp_path, role_mode="internal", shared_root=shared_root),
+        emit_log=lambda _text: None,
+        is_busy=lambda: False,
+    )
+
+    result = service.apply_now(mode="normal", queue_if_busy=False)
+
+    assert result["last_result"] == "restart_pending"
+    assert (app_dir / "main.py").read_text(encoding="utf-8") == "new-main\n"
+    assert not (app_dir / "old.py").exists()
+    assert (app_dir / "keep.txt").read_text(encoding="utf-8") == "keep\n"
 
 
 def test_internal_apply_approved_source_snapshot_preserves_user_config(tmp_path: Path, monkeypatch) -> None:

@@ -4180,9 +4180,9 @@ export function createRuntimeHealthConfigActions(ctx) {
       let requestPending = true;
       pauseRuntimeTraffic();
       setUpdaterOverlay(true, {
-        title: isGitPullMode ? "正在拉取代码" : "正在更新程序",
+        title: isGitPullMode ? "正在同步代码状态" : "正在更新程序",
         subtitle: isGitPullMode
-          ? "正在从 Git 仓库拉取最新代码，请保持当前页面打开。"
+          ? "正在确认本地提交并同步代码状态，请保持当前页面打开。"
           : "请保持当前页面打开，更新完成后会自动恢复。",
         stage: "applying",
         kicker: isGitPullMode ? "Git 拉取中" : "",
@@ -4235,7 +4235,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           });
         }
         hideUpdaterOverlay();
-        message.value = `${isGitPullMode ? "拉取代码失败" : "应用更新失败"}: ${err}`;
+        message.value = `${isGitPullMode ? "同步代码失败" : "应用更新失败"}: ${err}`;
       }
     };
     if (typeof runSingleFlight === "function") {
@@ -4302,7 +4302,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         const result = data?.result || {};
         const commit = String(result?.source_commit || "").trim().slice(0, 7);
-        message.value = `已发布内网批准版本${commit ? `: ${commit}` : ""}`;
+        message.value = `已发布内网 .py 同步包${commit ? `: ${commit}` : ""}`;
         try {
           await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
         } catch (_err) {
@@ -4310,7 +4310,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         return data;
       } catch (err) {
-        message.value = `发布内网批准版本失败: ${err}`;
+        message.value = `发布内网 .py 同步包失败: ${err}`;
         return { ok: false, reason: "error", error: String(err) };
       }
     };
@@ -4328,7 +4328,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           Object.assign(health.updater, data.runtime);
         }
         const result = data?.result || {};
-        message.value = String(result?.message || "").trim() || "已下发内网端检查更新命令。";
+        message.value = String(result?.message || "").trim() || "已下发内网端刷新状态命令。";
         try {
           await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
         } catch (_err) {
@@ -4336,7 +4336,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         return data;
       } catch (err) {
-        message.value = `下发内网端检查更新失败: ${err}`;
+        message.value = `下发内网端刷新状态失败: ${err}`;
         return { ok: false, reason: "error", error: String(err) };
       }
     };
@@ -4354,7 +4354,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           Object.assign(health.updater, data.runtime);
         }
         const result = data?.result || {};
-        message.value = String(result?.message || "").trim() || "已下发内网端开始更新命令。";
+        message.value = String(result?.message || "").trim() || "已下发内网端应用代码命令。";
         try {
           await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
         } catch (_err) {
@@ -4362,7 +4362,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         return data;
       } catch (err) {
-        message.value = `下发内网端开始更新失败: ${err}`;
+        message.value = `下发内网端应用代码失败: ${err}`;
         return { ok: false, reason: "error", error: String(err) };
       }
     };

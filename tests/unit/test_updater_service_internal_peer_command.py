@@ -76,7 +76,7 @@ def test_internal_peer_pending_check_command_consumed_and_completed(tmp_path: Pa
     assert "检查更新命令执行完成" in command["message"]
 
 
-def test_internal_peer_pending_apply_command_completed_when_queued(tmp_path: Path, monkeypatch) -> None:
+def test_internal_peer_pending_apply_command_stays_running_when_queued(tmp_path: Path, monkeypatch) -> None:
     app_dir = tmp_path / "app"
     shared_root = tmp_path / "shared"
     _write_build_meta(app_dir)
@@ -84,7 +84,7 @@ def test_internal_peer_pending_apply_command_completed_when_queued(tmp_path: Pat
     service = UpdaterService(
         config=_build_config(tmp_path, shared_root=shared_root),
         emit_log=lambda _text: None,
-        is_busy=lambda: False,
+        is_busy=lambda: True,
     )
 
     service.remote_control_store.submit_command(
@@ -92,15 +92,89 @@ def test_internal_peer_pending_apply_command_completed_when_queued(tmp_path: Pat
         action="apply",
         requested_by_node_id="external-node",
         requested_by_role="external",
+        source_commit="queued123",
     )
-    service.apply_now = lambda **_kwargs: {"last_result": "queued_busy", "queue_status": "queued"}  # type: ignore[method-assign]
 
     service._try_process_internal_peer_command()
 
     command = service.remote_control_store.load_command()
     assert command["command_id"] == "cmd-apply"
+    assert command["status"] == "running"
+    assert "已排队" in command["message"]
+    queued_apply = service.get_runtime_snapshot()["queued_apply"]
+    assert queued_apply["queued"] is True
+    assert queued_apply["command_id"] == "cmd-apply"
+    assert queued_apply["source_commit"] == "queued123"
+
+
+def test_internal_peer_apply_command_restarts_when_apply_requires_restart(tmp_path: Path, monkeypatch) -> None:
+    app_dir = tmp_path / "app"
+    shared_root = tmp_path / "shared"
+    _write_build_meta(app_dir)
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: app_dir)
+    restart_calls: list[str] = []
+    service = UpdaterService(
+        config=_build_config(tmp_path, shared_root=shared_root),
+        emit_log=lambda _text: None,
+        restart_callback=lambda _context: (restart_calls.append("restart") or (True, "restart scheduled")),
+        is_busy=lambda: False,
+    )
+
+    service.remote_control_store.submit_command(
+        command_id="cmd-apply-restart",
+        action="apply",
+        requested_by_node_id="external-node",
+        requested_by_role="external",
+    )
+    service._apply_update_and_restart_if_needed = lambda **_kwargs: service.restart_now()  # type: ignore[method-assign]
+    service.restart_now = lambda: (restart_calls.append("restart_now") or {"last_result": "updated_restart_scheduled", "queue_status": "none"})  # type: ignore[method-assign]
+
+    service._try_process_internal_peer_command()
+
+    command = service.remote_control_store.load_command()
+    assert command["command_id"] == "cmd-apply-restart"
     assert command["status"] == "completed"
-    assert "已加入内网端更新队列" in command["message"]
+    assert "开始更新命令执行完成" in command["message"]
+    assert restart_calls == ["restart_now"]
+
+
+def test_queued_remote_apply_restarts_and_marks_command_completed(tmp_path: Path, monkeypatch) -> None:
+    app_dir = tmp_path / "app"
+    shared_root = tmp_path / "shared"
+    _write_build_meta(app_dir)
+    monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: app_dir)
+    restart_calls: list[str] = []
+    service = UpdaterService(
+        config=_build_config(tmp_path, shared_root=shared_root),
+        emit_log=lambda _text: None,
+        restart_callback=lambda _context: (restart_calls.append("restart") or (True, "restart scheduled")),
+        is_busy=lambda: False,
+    )
+    service.remote_control_store.submit_command(
+        command_id="cmd-queued-apply",
+        action="apply",
+        requested_by_node_id="external-node",
+        requested_by_role="external",
+        source_commit="queued-commit",
+    )
+    service.state["queued_apply"] = {
+        "queued": True,
+        "mode": "normal",
+        "queued_at": "2026-04-21 12:30:00",
+        "reason": "active_job_running",
+        "command_id": "cmd-queued-apply",
+        "source_commit": "queued-commit",
+    }
+    service._run_check = lambda **_kwargs: {"last_result": "restart_pending", "restart_required": True}  # type: ignore[method-assign]
+    service.restart_now = lambda: (restart_calls.append("restart_now") or {"last_result": "updated_restart_scheduled", "queue_status": "none"})  # type: ignore[method-assign]
+
+    service._try_process_queued_apply()
+
+    command = service.remote_control_store.load_command()
+    assert command["status"] == "completed"
+    assert "排队更新已执行完成" in command["message"]
+    assert service.get_runtime_snapshot()["last_internal_apply_completed_commit"] == "queued-commit"
+    assert restart_calls == ["restart_now"]
 
 
 def test_external_runtime_snapshot_does_not_sync_internal_peer_inline(tmp_path: Path, monkeypatch) -> None:

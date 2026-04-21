@@ -97,8 +97,8 @@
         <article v-if="!isInternalDeploymentRole" class="status-card">
           <div class="status-card-head">
             <div>
-              <span class="status-panel-kicker">{{ updaterMirrorOverview.kicker || '更新镜像' }}</span>
-              <h2 class="status-panel-title">{{ updaterMirrorOverview.title || '共享目录批准版本' }}</h2>
+              <span class="status-panel-kicker">{{ updaterMirrorOverview.kicker || '代码同步' }}</span>
+              <h2 class="status-panel-title">{{ updaterMirrorOverview.title || '外网到内网 .py 同步' }}</h2>
             </div>
             <span class="status-badge status-badge-solid" :class="'tone-' + updaterMirrorOverview.tone">
               {{ updaterMirrorOverview.statusText }}
@@ -116,7 +116,7 @@
             </div>
           </div>
           <div class="hint" v-if="updaterMirrorOverview.manifestPath">
-            镜像清单：{{ updaterMirrorOverview.manifestPath }}
+            {{ updaterMirrorOverview.manifestLabel || '源码包清单' }}：{{ updaterMirrorOverview.manifestPath }}
           </div>
           <div class="hint" v-if="updaterMirrorOverview.errorText">
             发布异常：{{ updaterMirrorOverview.errorText }}
