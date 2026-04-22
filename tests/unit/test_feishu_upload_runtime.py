@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
@@ -232,6 +234,45 @@ def test_upload_results_to_feishu_success_flow(tmp_path: Path) -> None:
     assert any("PUE=1.235" in line for line in logs)
     assert any("开始准备按日期 upsert" in line for line in logs)
     assert any("文件上传成功" in line for line in logs)
+
+
+def test_upload_results_to_feishu_does_not_block_on_worker_log_sink(tmp_path: Path) -> None:
+    clients: List[_FakeClient] = []
+    blocker = threading.Event()
+
+    def _blocking_worker_emit_log(_text: str) -> None:
+        blocker.wait(timeout=5)
+
+    _blocking_worker_emit_log.__module__ = "app.worker.entry"
+
+    def _factory(**kwargs: Any) -> _FakeClient:
+        c = _FakeClient(**kwargs)
+        clients.append(c)
+        return c
+
+    source_file = tmp_path / "A楼.xlsx"
+    source_file.write_bytes(b"fake")
+    result = _FakeResult(
+        source_file=str(source_file),
+        building="A楼",
+        month="2026-03-01",
+        values={"PUE": 1.23456},
+        records=[{"楼栋": "A楼", "日期": "2026-03-01", "类型": "用电", "分类": "总览", "项目": "PUE", "值": 1.23}],
+    )
+
+    started = time.perf_counter()
+    upload_results_to_feishu(
+        results=[result],
+        config=_build_config(enable_upload=True),
+        resolve_upload_date_from_runtime=lambda _cfg: "2026-03-01",
+        client_factory=_factory,
+        emit_log=_blocking_worker_emit_log,
+    )
+
+    assert time.perf_counter() - started < 2
+    assert len(clients) == 1
+    assert any(call[0] == "batch_create_records" for call in clients[0].calls)
+    assert any(call[0] == "upload_attachment" for call in clients[0].calls)
 
 
 def test_upload_results_to_feishu_calc_stage_failure() -> None:
