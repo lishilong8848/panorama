@@ -77,6 +77,7 @@ _AIRCON_ZONE_DIRECTION_BY_AREA = {
     "3": ("west", "south"),
     "4": ("west", "north"),
 }
+_CHINESE_DIGIT_MAP = {"一": "1", "二": "2", "三": "3", "四": "4"}
 _DEFAULT_PRIMARY_PUMP_ALIASES = {
     "A楼": ["冷冻水一次泵变频反馈"],
     "B楼": ["冷冻水一次泵变频反馈"],
@@ -204,20 +205,36 @@ def _zone_of_row(row: RawRow) -> str:
     return ""
 
 
-def _unit_from_row(row: RawRow) -> int | None:
+def _unit_from_row(row: RawRow, *, building: str = "") -> int | None:
     text = _text(getattr(row, "c_text", ""))
     lowered = text.casefold()
+    building_text = _text(building)
     if ("150" in text or "西区" in text) and ("101" in text or "一号冷机" in text or "1号冷机" in lowered):
         return 1
     if ("150" in text or "西区" in text) and ("102" in text or "二号冷机" in text or "2号冷机" in lowered):
         return 2
     if ("150" in text or "西区" in text) and ("103" in text or "三号冷机" in text or "3号冷机" in lowered):
         return 3
-    if ("124" in text or "东区" in text) and ("101" in text or "四号冷机" in text or "4号冷机" in lowered):
+    if ("124" in text or "东区" in text) and (
+        "101" in text
+        or "四号冷机" in text
+        or "4号冷机" in lowered
+        or (building_text == "D楼" and ("一号冷机" in text or "1号冷机" in lowered))
+    ):
         return 4
-    if ("124" in text or "东区" in text) and ("102" in text or "五号冷机" in text or "5号冷机" in lowered):
+    if ("124" in text or "东区" in text) and (
+        "102" in text
+        or "五号冷机" in text
+        or "5号冷机" in lowered
+        or (building_text == "D楼" and ("二号冷机" in text or "2号冷机" in lowered))
+    ):
         return 5
-    if ("124" in text or "东区" in text) and ("103" in text or "六号冷机" in text or "6号冷机" in lowered):
+    if ("124" in text or "东区" in text) and (
+        "103" in text
+        or "六号冷机" in text
+        or "6号冷机" in lowered
+        or (building_text == "D楼" and ("三号冷机" in text or "3号冷机" in lowered))
+    ):
         return 6
     if "一号冷机" in text or "1号冷机" in lowered:
         return 1
@@ -244,8 +261,9 @@ def _compile_placeholder_regex(pattern: str) -> re.Pattern[str]:
 
 
 class CapacitySourceQuery:
-    def __init__(self, rows: Iterable[RawRow] | None) -> None:
+    def __init__(self, rows: Iterable[RawRow] | None, *, building: str = "") -> None:
         self.rows: List[RawRow] = [row for row in (rows or []) if isinstance(row, RawRow)]
+        self.building = _text(building)
 
     def _iter_rows(
         self,
@@ -261,7 +279,7 @@ class CapacitySourceQuery:
         target_rows: List[RawRow] = []
         for row in self.rows:
             row_zone = _zone_of_row(row)
-            row_unit = _unit_from_row(row)
+            row_unit = _unit_from_row(row, building=self.building)
             if normalized_zone and row_zone != normalized_zone:
                 continue
             if unit is not None and row_unit != int(unit):
@@ -899,16 +917,19 @@ def _aircon_quadrant(row: RawRow, *, building_code: str) -> tuple[int, str, str]
     combined = f"{b_text} {c_text}"
     if "空调" not in combined:
         return None
-    floor_match = re.search(r"([234])层", combined)
+    floor_match = re.search(r"([234二三四])层", combined)
     code_match = re.search(r"([234](?:11|12|40|41))", combined)
-    area_match = re.search(r"空调区([1-4])", combined)
+    area_match = re.search(r"空调区?\s*([1-4一二三四])", combined)
     floor_token = _text(floor_match.group(1)) if floor_match else ""
+    floor_token = _CHINESE_DIGIT_MAP.get(floor_token, floor_token)
     if not floor_token and code_match:
         floor_token = _text(code_match.group(1))[:1]
     if not floor_token:
         return None
     if area_match:
-        mapping = _AIRCON_ZONE_DIRECTION_BY_AREA.get(_text(area_match.group(1)))
+        area_token = _text(area_match.group(1))
+        area_token = _CHINESE_DIGIT_MAP.get(area_token, area_token)
+        mapping = _AIRCON_ZONE_DIRECTION_BY_AREA.get(area_token)
         if mapping:
             zone, direction = mapping
             return int(floor_token), zone, direction
@@ -950,7 +971,10 @@ def _build_aircon_matrix_values(query: CapacitySourceQuery, snapshot: Dict[str, 
 
 def build_capacity_cells_with_config(context: Dict[str, Any], config: Dict[str, Any] | None = None) -> Dict[str, str]:
     _ = config
-    query = CapacitySourceQuery(context.get("capacity_rows", []) if isinstance(context.get("capacity_rows", []), list) else [])
+    query = CapacitySourceQuery(
+        context.get("capacity_rows", []) if isinstance(context.get("capacity_rows", []), list) else [],
+        building=_text(context.get("building")),
+    )
     running_units = context.get("running_units", {}) if isinstance(context.get("running_units", {}), dict) else {}
     snapshot = context.get("template_snapshot", {}) if isinstance(context.get("template_snapshot", {}), dict) else {}
 

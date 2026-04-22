@@ -96,6 +96,9 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
                   <button class="btn btn-primary" :disabled="!canRun || pendingResumeCount === 0 || isActionLocked(getResumeRunActionKey())" @click="runResumeUpload()">
                     {{ isActionLocked(getResumeRunActionKey()) ? '处理中...' : '继续上传（不重下）' }}
                   </button>
+                  <button class="btn btn-danger" :disabled="pendingResumeCount === 0 || isActionLocked(getResumeDeleteAllActionKey())" @click="deleteAllResumeRuns">
+                    {{ isActionLocked(getResumeDeleteAllActionKey()) ? '删除中...' : '删除全部待续传任务' }}
+                  </button>
                 </div>
               </article>
             </div>

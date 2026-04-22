@@ -783,6 +783,20 @@ export function createAppState(vueApi) {
   const runtimeWarmupReady = ref(false);
   const engineerDirectoryLoaded = ref(false);
   const pendingResumeRuns = ref([]);
+  const resumeDeleteConfirmDialog = reactive({
+    visible: false,
+    mode: "",
+    title: "",
+    summary: "",
+    warning: "",
+    confirmLabel: "确认删除",
+    runId: "",
+    runIds: [],
+    rows: [],
+    totalCount: 0,
+    totalPendingUploadCount: 0,
+    hiddenCount: 0,
+  });
   const schedulerQuickSaving = ref(false);
   const handoverSchedulerQuickSaving = ref(false);
   const wetBulbSchedulerQuickSaving = ref(false);
@@ -2710,6 +2724,7 @@ export function createAppState(vueApi) {
     runtimeWarmupReady,
     engineerDirectoryLoaded,
     pendingResumeRuns,
+    resumeDeleteConfirmDialog,
     schedulerQuickSaving,
     handoverSchedulerQuickSaving,
     wetBulbSchedulerQuickSaving,

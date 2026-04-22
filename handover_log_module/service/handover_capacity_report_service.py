@@ -400,16 +400,19 @@ class HandoverCapacityReportService:
         }
 
     def _extract_specific_oil_value(self, rows: List[Any], aliases: List[str]) -> str:
-        for candidate in aliases:
-            for row in rows:
-                if _text(getattr(row, "c_text", "")) != "燃油自控系统":
-                    continue
-                if _text(getattr(row, "d_name", "")) != candidate:
-                    continue
-                value_text = self._raw_value_text(getattr(row, "e_raw", None))
-                if value_text:
-                    return value_text
-        return ""
+        def _find(*, require_fuel_system: bool) -> str:
+            for candidate in aliases:
+                for row in rows:
+                    if require_fuel_system and _text(getattr(row, "c_text", "")) != "燃油自控系统":
+                        continue
+                    if _text(getattr(row, "d_name", "")) != candidate:
+                        continue
+                    value_text = self._raw_value_text(getattr(row, "e_raw", None))
+                    if value_text:
+                        return value_text
+            return ""
+
+        return _find(require_fuel_system=True) or _find(require_fuel_system=False)
 
     def _load_previous_capacity_display_oil_values(
         self,

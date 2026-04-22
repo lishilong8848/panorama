@@ -16,10 +16,6 @@ export const DASHBOARD_SCHEDULER_OVERVIEW_SECTION = `        <section class="con
                   <strong class="status-metric-value">{{ schedulerOverviewSummary.runningCount }} 项</strong>
                 </div>
                 <div class="status-metric">
-                  <div class="status-metric-label">未启动调度</div>
-                  <strong class="status-metric-value">{{ schedulerOverviewSummary.stoppedCount }} 项</strong>
-                </div>
-                <div class="status-metric">
                   <div class="status-metric-label">最近即将执行</div>
                   <strong class="status-metric-value">{{ schedulerOverviewSummary.nextSchedulerLabel }}</strong>
                 </div>
@@ -29,8 +25,6 @@ export const DASHBOARD_SCHEDULER_OVERVIEW_SECTION = `        <section class="con
                 </div>
               </div>
               <div class="hint">{{ schedulerOverviewSummary.summaryText }}</div>
-              <div class="hint">最近即将执行：{{ schedulerOverviewSummary.nextSchedulerText }}</div>
-              <div class="hint">待关注：{{ schedulerOverviewSummary.attentionText }}</div>
             </article>
 
             <article class="task-block task-block-compact dashboard-shared-root-check-card">

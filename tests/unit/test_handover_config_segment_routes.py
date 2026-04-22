@@ -195,6 +195,36 @@ def test_handover_common_segment_routes_roundtrip(tmp_path: Path, monkeypatch) -
     assert any("交接班公共配置已保存" in item for item in container.logs)
 
 
+def test_handover_common_segment_returns_review_access_snapshot(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "表格计算配置.json"
+    _write_default_config(config_path)
+    container = _make_container(config_path)
+    request = _make_request(container)
+    request.app.state._health_component_cache = {
+        "handover_review_access:2026-04-22:day": {"ready": True, "value": {"review_base_url": "old"}},
+        "other_component": {"ready": True, "value": "keep"},
+    }
+
+    monkeypatch.setattr(routes, "_invalidate_review_base_probe_cache", lambda: None, raising=False)
+
+    current = routes.get_handover_common_config_segment(request)
+    next_payload = copy.deepcopy(current["data"])
+    next_payload.setdefault("review_ui", {})["public_base_url"] = "https://outer.example"
+
+    response = routes.put_handover_common_config_segment(
+        {"base_revision": current["revision"], "data": next_payload},
+        request,
+    )
+
+    snapshot = response["handover_review_access"]
+    assert snapshot["configured"] is True
+    assert snapshot["review_base_url"] == "https://outer.example"
+    assert snapshot["review_base_url_effective"] == "https://outer.example"
+    assert container.config["features"]["handover_log"]["review_ui"]["public_base_url"] == "https://outer.example"
+    assert "handover_review_access:2026-04-22:day" not in request.app.state._health_component_cache
+    assert "other_component" in request.app.state._health_component_cache
+
+
 def test_handover_common_segment_route_rejects_stale_revision(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "表格计算配置.json"
     _write_default_config(config_path)
@@ -240,13 +270,14 @@ def test_put_config_keeps_segment_backed_handover_values(tmp_path: Path, monkeyp
         request,
     )
 
+    route_root = tmp_path / "RouteRoot"
     stale_full_payload = copy.deepcopy(container.config)
-    stale_full_payload["common"]["paths"]["business_root_dir"] = r"D:\RouteRoot"
+    stale_full_payload["common"]["paths"]["business_root_dir"] = str(route_root)
     stale_full_payload["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["A楼"] = "A楼-整表旧值"
 
     response = routes.put_config(stale_full_payload, request)
 
-    assert response["config"]["common"]["paths"]["business_root_dir"] == r"D:\RouteRoot"
+    assert response["config"]["common"]["paths"]["business_root_dir"] == str(route_root)
     assert response["config"]["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-最新段值"
 
 

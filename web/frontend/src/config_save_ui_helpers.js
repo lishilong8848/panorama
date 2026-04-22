@@ -167,30 +167,52 @@ export function createConfigSaveUiHelpers(options = {}) {
     if (!commonDirty && !buildingDirty) {
       return { saved: true, reason: "unchanged" };
     }
+    const saveTasks = [];
     if (commonDirty) {
-      const commonResult = await saveHandoverCommonConfig?.({
-        silentSuccess: true,
-        silentConflictMessage: false,
-        silentErrorMessage: true,
-        skipConfigRefresh: true,
-      });
-      if (!commonResult?.saved) {
-        return commonResult;
-      }
+      saveTasks.push(
+        Promise.resolve(saveHandoverCommonConfig?.({
+          silentSuccess: true,
+          silentConflictMessage: false,
+          silentErrorMessage: true,
+          skipConfigRefresh: true,
+        }))
+          .then((result) => ({ target: "common", result }))
+          .catch((err) => ({
+            target: "common",
+            result: { saved: false, reason: "error", error: String(err || "") },
+          })),
+      );
     }
     if (buildingDirty) {
-      const buildingResult = await saveHandoverBuildingConfig?.(currentBuilding, {
-        silentSuccess: true,
-        silentConflictMessage: false,
-        silentErrorMessage: true,
-        skipConfigRefresh: true,
-      });
-      if (!buildingResult?.saved) {
-        return buildingResult;
-      }
+      saveTasks.push(
+        Promise.resolve(saveHandoverBuildingConfig?.(currentBuilding, {
+          silentSuccess: true,
+          silentConflictMessage: false,
+          silentErrorMessage: true,
+          skipConfigRefresh: true,
+        }))
+          .then((result) => ({ target: "building", result }))
+          .catch((err) => ({
+            target: "building",
+            result: { saved: false, reason: "error", error: String(err || "") },
+          })),
+      );
     }
-    syncSavedHandoverCommonSignature();
-    syncSavedHandoverBuildingSignature(currentBuilding);
+    const saveResults = await Promise.all(saveTasks);
+    if (saveResults.some((item) => item.target === "common" && item.result?.saved)) {
+      syncSavedHandoverCommonSignature();
+    }
+    if (saveResults.some((item) => item.target === "building" && item.result?.saved)) {
+      syncSavedHandoverBuildingSignature(currentBuilding);
+    }
+    const failedResult = saveResults.find((item) => !item.result?.saved);
+    if (failedResult) {
+      return failedResult.result || {
+        saved: false,
+        reason: "missing_save_result",
+        target: failedResult.target,
+      };
+    }
     if (!options?.silentSuccess && message) {
       message.value = "交接班配置已保存";
     }

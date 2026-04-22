@@ -391,6 +391,29 @@ def _health_cached_component_sync_default(
     return copy.deepcopy(value)
 
 
+def _invalidate_health_component_cache(
+    request: Request,
+    *,
+    key_prefixes: tuple[str, ...] = (),
+    keys: tuple[str, ...] = (),
+) -> None:
+    state = request.app.state
+    cache = getattr(state, _HEALTH_COMPONENT_CACHE_ATTR, None)
+    if not isinstance(cache, dict):
+        return
+    cache_lock = getattr(state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, None)
+    if not isinstance(cache_lock, _THREAD_LOCK_TYPE):
+        cache_lock = threading.Lock()
+        setattr(state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, cache_lock)
+    key_set = {str(item) for item in keys if str(item)}
+    prefixes = tuple(str(item) for item in key_prefixes if str(item))
+    with cache_lock:
+        for cache_key in list(cache.keys()):
+            cache_key_text = str(cache_key)
+            if cache_key_text in key_set or any(cache_key_text.startswith(prefix) for prefix in prefixes):
+                cache.pop(cache_key, None)
+
+
 def _empty_job_panel_summary() -> Dict[str, Any]:
     return {
         "jobs": [],
@@ -3359,6 +3382,23 @@ def put_handover_common_config_segment(payload: Dict[str, Any], request: Request
             config_path=container.config_path,
         )
         _apply_container_config_snapshot(container, saved_config, mode="light")
+        review_cfg = (
+            saved_config.get("features", {}).get("handover_log", {}).get("review_ui", {})
+            if isinstance(saved_config.get("features", {}), dict)
+            else {}
+        )
+        configured_base_url = _normalize_review_base_url(
+            review_cfg.get("public_base_url", "") if isinstance(review_cfg, dict) else ""
+        )
+        handover_review_access = (
+            _persist_manual_review_access_snapshot(container)
+            if configured_base_url
+            else _materialize_review_access_snapshot(container)
+        )
+        _invalidate_health_component_cache(
+            request,
+            key_prefixes=("handover_review_access:",),
+        )
         if aggregate_refresh_error:
             container.add_system_log(
                 f"[配置] 交接班公共配置已保存，但聚合配置刷新失败: {aggregate_refresh_error}"
@@ -3369,6 +3409,7 @@ def put_handover_common_config_segment(payload: Dict[str, Any], request: Request
             "revision": int(document.get("revision", 0) or 0),
             "updated_at": str(document.get("updated_at", "") or "").strip(),
             "data": mask_settings(copy.deepcopy(document.get("data", {}))),
+            "handover_review_access": handover_review_access,
             "apply_mode": "business_only",
             "reload_performed": False,
             "applied_services": ["config_snapshot", "runtime_config", "job_service_config"],

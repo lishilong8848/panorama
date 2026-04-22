@@ -1559,30 +1559,14 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             tone = "success"
             status_text = "当前代码已是最新"
             summary_text = "当前 Git 工作区已经与远端保持一致，未检测到需要同步的提交。"
+        sync_status_value = "存在待同步提交" if pending_sync_commit else (
+            "当前提交已发布" if published_matches_local else "等待检测"
+        )
         items = [
-            {"label": "同步方式", "value": "Git 跟踪 .py 文件", "tone": "info"},
             {
-                "label": "旧版版本号",
-                "value": f"{local_version} / r{local_revision}" if local_revision > 0 else local_version,
-                "tone": "neutral",
-            },
-            {"label": "当前分支", "value": branch or "-", "tone": "neutral"},
-            {"label": "外网当前提交", "value": _short_commit(local_commit) or "-", "tone": "neutral"},
-            {"label": "远端提交", "value": _short_commit(remote_commit) or "-", "tone": "neutral"},
-            {
-                "label": "已发布提交",
-                "value": _short_commit(published_commit) or "-",
-                "tone": "success" if published_matches_local else "neutral",
-            },
-            {
-                "label": "待同步提交",
-                "value": _short_commit(pending_sync_commit) or "-",
-                "tone": "warning" if pending_sync_commit else "neutral",
-            },
-            {
-                "label": "最近发布",
-                "value": last_publish_at or "-",
-                "tone": "info" if last_publish_at else "neutral",
+                "label": "同步状态",
+                "value": sync_status_value,
+                "tone": "warning" if pending_sync_commit else ("success" if published_matches_local else "neutral"),
             },
             {
                 "label": "工作区状态",
@@ -1594,37 +1578,36 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                 "value": internal_peer_status_text,
                 "tone": "warning" if internal_peer_command_active else ("success" if internal_peer_online else "neutral"),
             },
-            {
-                "label": "内网端提交",
-                "value": _short_commit(internal_peer_commit) or ("待内网上报" if internal_peer_available else "-"),
-                "tone": "success" if internal_peer_commit and internal_peer_commit == published_commit else "neutral",
-            },
-            {
-                "label": "远程命令",
-                "value": internal_peer_command_value,
-                "tone": "warning" if internal_peer_command_active else "neutral",
-            },
-            {
-                "label": "内网最近命令",
-                "value": internal_peer_last_command_value,
-                "tone": "danger" if internal_peer_last_command_status == "failed" else (
-                    "success" if internal_peer_last_command_status == "completed" else "neutral"
-                ),
-            },
         ]
+        if internal_peer_command_active:
+            items.append(
+                {
+                    "label": "内网命令",
+                    "value": internal_peer_command_label,
+                    "tone": "warning",
+                }
+            )
+        elif internal_peer_last_command_status == "failed":
+            items.append(
+                {
+                    "label": "最近命令",
+                    "value": "执行失败",
+                    "tone": "danger",
+                }
+            )
         if last_internal_apply_completed_commit:
             items.append(
                 {
-                    "label": "本端最近应用",
-                    "value": _short_commit(last_internal_apply_completed_commit),
+                    "label": "本端应用",
+                    "value": "已完成",
                     "tone": "success",
                 }
             )
         if last_internal_apply_failed_commit:
             items.append(
                 {
-                    "label": "本端应用失败",
-                    "value": _short_commit(last_internal_apply_failed_commit),
+                    "label": "本端应用",
+                    "value": "失败",
                     "tone": "danger",
                 }
             )
@@ -1898,8 +1881,6 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
 def present_shared_root_diagnostic_overview(payload: Any) -> Dict[str, Any]:
     diagnostic = payload if isinstance(payload, dict) else {}
     raw_items = _list(diagnostic.get("items", []))
-    raw_paths = _list(diagnostic.get("paths", []))
-    raw_notes = _list(diagnostic.get("notes", []))
     items = [
         {
             "label": _string(item.get("label", "")) or "-",
@@ -1907,22 +1888,11 @@ def present_shared_root_diagnostic_overview(payload: Any) -> Dict[str, Any]:
             "tone": _string(item.get("tone", "")) or "neutral",
         }
         for item in raw_items
-        if isinstance(item, dict)
+        if isinstance(item, dict) and _string(item.get("label", "")) in {"当前角色", "路径一致性", "共享桥接目录"}
     ]
-    paths = [
-        {
-            "label": _string(item.get("label", "")) or "-",
-            "path": _string(item.get("path", "")) or "未配置",
-            "canonical_path": _string(item.get("canonical_path", "")),
-            "show_canonical_path": (
-                bool(_string(item.get("canonical_path", "")))
-                and _string(item.get("canonical_path", "")) != _string(item.get("path", ""))
-            ),
-        }
-        for item in raw_paths
-        if isinstance(item, dict)
-    ]
-    notes = [_string(item) for item in raw_notes if _string(item)]
+    for item in items:
+        if item["label"] == "共享桥接目录":
+            item["label"] = "共享目录"
     tone = _string(diagnostic.get("tone", "")) or "neutral"
     status_text = _string(diagnostic.get("status_text", "")) or "未诊断"
     summary_text = (
@@ -1938,8 +1908,8 @@ def present_shared_root_diagnostic_overview(payload: Any) -> Dict[str, Any]:
         "kicker": "共享目录诊断",
         "title": "共享目录一致性",
         "items": items,
-        "paths": paths,
-        "notes": notes,
+        "paths": [],
+        "notes": [],
         "actions": {},
     }
 
@@ -2565,7 +2535,20 @@ def present_external_scheduler_overview(
         for item in _list(summary.get("items"))
         if isinstance(item, dict)
     ]
+    if items:
+        items_by_label = {item["label"]: item for item in items}
+        preferred_items = [
+            items_by_label[label]
+            for label in ("已启动调度", "待关注项", "最近即将执行")
+            if label in items_by_label
+        ]
+        if preferred_items:
+            items = preferred_items
     if not items:
+        next_scheduler_label = (
+            _string(summary.get("next_scheduler_label", ""))
+            or _string(summary.get("nextSchedulerLabel", ""))
+        )
         items = [
             {
                 "label": "已启动调度",
@@ -2573,16 +2556,13 @@ def present_external_scheduler_overview(
                 "tone": "success" if _int(summary.get("running_count", 0)) > 0 else "neutral",
             },
             {
-                "label": "未启动调度",
-                "value": f"{_int(summary.get('stopped_count', 0))} 项",
-                "tone": "warning" if _int(summary.get("stopped_count", 0)) > 0 else "neutral",
-            },
-            {
                 "label": "待关注项",
                 "value": f"{_int(summary.get('attention_count', 0))} 项",
                 "tone": "warning" if _int(summary.get("attention_count", 0)) > 0 else "neutral",
             },
         ]
+        if next_scheduler_label and next_scheduler_label != "-":
+            items.append({"label": "最近即将执行", "value": next_scheduler_label, "tone": "info"})
     detail_text = _string(summary.get("detail_text", ""))
     if not detail_text and raw_items:
         detail_text = "调度详情已由后端聚合，可进入对应模块查看单项配置与动作。"
@@ -2661,12 +2641,26 @@ def present_external_module_hero_overviews(
         for item in _list(scheduler_summary.get("items", []))
         if isinstance(item, dict)
     ]
+    if scheduler_metrics:
+        metrics_by_label = {item["label"]: item for item in scheduler_metrics}
+        preferred_metrics = [
+            metrics_by_label[label]
+            for label in ("已启动调度", "待关注项", "最近即将执行")
+            if label in metrics_by_label
+        ]
+        if preferred_metrics:
+            scheduler_metrics = preferred_metrics
     if not scheduler_metrics:
+        next_scheduler_label = (
+            _string(scheduler_summary.get("next_scheduler_label", ""))
+            or _string(scheduler_summary.get("nextSchedulerLabel", ""))
+        )
         scheduler_metrics = [
             {"label": "已启动调度", "value": f"{int(scheduler_summary.get('running_count', 0) or 0)} 项"},
-            {"label": "未启动调度", "value": f"{int(scheduler_summary.get('stopped_count', 0) or 0)} 项"},
             {"label": "待关注项", "value": f"{int(scheduler_summary.get('attention_count', 0) or 0)} 项"},
         ]
+        if next_scheduler_label and next_scheduler_label != "-":
+            scheduler_metrics.append({"label": "最近即将执行", "value": next_scheduler_label})
 
     return {
         "scheduler_overview": {

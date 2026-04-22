@@ -300,8 +300,8 @@ def test_d_building_current_oil_values_use_specific_tank_volume_aliases() -> Non
     rows = [
         RawRow(1, "", "燃油自控系统", "1#油罐容积", "10", 10.0),
         RawRow(2, "", "燃油自控系统", "2#油罐容积", "20", 20.0),
-        RawRow(3, "", "燃油自控系统", "1#油罐体积", "31", 31.0),
-        RawRow(4, "", "燃油自控系统", "2#油罐体积", "41", 41.0),
+        RawRow(3, "", "现场采集", "1#油罐体积", "31", 31.0),
+        RawRow(4, "", "现场采集", "2#油罐体积", "41", 41.0),
     ]
 
     values = service._extract_current_oil_display_values(
@@ -663,6 +663,46 @@ def test_d_building_cooling_tower_out_temp_alias_fills_f30() -> None:
     assert values["F30"] == "27.5"
 
 
+def test_d_building_east_first_active_chiller_fills_q31_like_west_block() -> None:
+    rows = [
+        RawRow(1, "", "西区 1号冷机", "冷凝器小温差", "1.8", 1.8),
+        RawRow(2, "", "东区 1号冷机", "冷凝器小温差", "2.8", 2.8),
+    ]
+    context = {
+        "building": "D楼",
+        "duty_shift": "day",
+        "capacity_rows": rows,
+        "running_units": {
+            "west": [{"unit": 1, "mode_text": "制冷"}],
+            "east": [{"unit": 4, "mode_text": "制冷"}],
+        },
+    }
+
+    values = build_capacity_cells_with_config(context)
+
+    assert values["D31"] == "1.8"
+    assert values["Q31"] == "2.8"
+
+
+def test_east_first_chiller_alias_scope_does_not_change_other_buildings() -> None:
+    rows = [
+        RawRow(1, "", "东区 1号冷机", "冷凝器小温差", "2.8", 2.8),
+    ]
+    context = {
+        "building": "A楼",
+        "duty_shift": "day",
+        "capacity_rows": rows,
+        "running_units": {
+            "west": [],
+            "east": [{"unit": 4, "mode_text": "制冷"}],
+        },
+    }
+
+    values = build_capacity_cells_with_config(context)
+
+    assert "Q31" not in values
+
+
 def test_e_building_plate_mode_skips_chiller_fields_but_keeps_fan_and_pump_values() -> None:
     rows = [
         RawRow(1, "", "西区 101 1号冷机", "冷机_电流百分比", "45", 45.0),
@@ -768,6 +808,25 @@ def test_aircon_matrix_mapping_skips_blank_first_hit_and_keeps_later_value_for_e
         RawRow(4, "南通阿里保税A区E楼/E楼/三层/空调区2 E-311", "E-311-CRAHB-A_电量仪", "总_有功功率", "1.42", 1.42),
         RawRow(5, "南通阿里保税A区E楼/E楼/四层/空调区3 E-441", "E-441-CRAHB-A_电量仪", "总_有功功率", "", None),
         RawRow(6, "南通阿里保税A区E楼/E楼/四层/空调区3 E-441", "E-441-CRAHB-A_电量仪", "总_有功功率", "1.52", 1.52),
+    ]
+    context = {
+        "capacity_rows": rows,
+        "running_units": {},
+        "template_snapshot": {"building_code": "E", "template_family": "e_building"},
+    }
+
+    values = build_capacity_cells_with_config(context)
+
+    assert values["AE112"] == "1.12"
+    assert values["AE142"] == "1.42"
+    assert values["AE152"] == "1.52"
+
+
+def test_aircon_matrix_mapping_uses_chinese_floor_and_area_text_for_e_building() -> None:
+    rows = [
+        RawRow(1, "南通阿里保税A区E楼/E楼/三层/空调区三", "E-CRAH-10_电量仪", "总_有功功率", "1.12", 1.12),
+        RawRow(2, "南通阿里保税A区E楼/E楼/三层/空调区二", "E-CRAH-11_电量仪", "总_有功功率", "1.42", 1.42),
+        RawRow(3, "南通阿里保税A区E楼/E楼/四层/空调区三", "E-CRAH-12_电量仪", "总_有功功率", "1.52", 1.52),
     ]
     context = {
         "capacity_rows": rows,

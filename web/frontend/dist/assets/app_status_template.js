@@ -115,9 +115,6 @@
               <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
             </div>
           </div>
-          <div class="hint" v-if="updaterMirrorOverview.manifestPath">
-            镜像清单：{{ updaterMirrorOverview.manifestPath }}
-          </div>
           <div class="hint" v-if="updaterMirrorOverview.errorText">
             发布异常：{{ updaterMirrorOverview.errorText }}
           </div>
@@ -136,9 +133,6 @@
             >
               {{ updaterInternalPeerApplyButtonText }}
             </button>
-          </div>
-          <div class="hint" v-if="updaterMirrorOverview.internalPeer && updaterMirrorOverview.internalPeer.command && updaterMirrorOverview.internalPeer.command.message">
-            内网命令反馈：{{ updaterMirrorOverview.internalPeer.command.message }}
           </div>
         </article>
 
@@ -161,20 +155,6 @@
             >
               <span class="status-list-label">{{ item.label }}</span>
               <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
-            </div>
-          </div>
-          <div class="hint-stack" v-if="sharedRootDiagnosticOverview.paths && sharedRootDiagnosticOverview.paths.length">
-            <div class="hint" v-for="item in sharedRootDiagnosticOverview.paths" :key="'status-shared-root-path-' + item.label">
-              {{ item.label }}：{{ item.path }}
-              <template v-if="item.showCanonicalPath">
-                <br />
-                归一后：{{ item.canonicalPath }}
-              </template>
-            </div>
-          </div>
-          <div class="hint-stack" v-if="sharedRootDiagnosticOverview.notes && sharedRootDiagnosticOverview.notes.length">
-            <div class="hint" v-for="note in sharedRootDiagnosticOverview.notes" :key="'status-shared-root-note-' + note">
-              {{ note }}
             </div>
           </div>
         </article>

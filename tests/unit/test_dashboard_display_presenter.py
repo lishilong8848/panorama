@@ -82,7 +82,7 @@ def test_present_external_dashboard_display_prefers_cache_waiting_state():
     assert payload["handover_review_overview"]["review_board_rows"][0]["cloud_sheet_sync"]["text"] == "云表最终上传失败"
     assert payload["handover_review_overview"]["review_board_rows"][1]["text"] == "待确认"
     assert payload["shared_root_diagnostic_overview"]["status_text"] == "路径写法不同但目录一致"
-    assert payload["shared_root_diagnostic_overview"]["paths"][0]["show_canonical_path"] is True
+    assert payload["shared_root_diagnostic_overview"]["paths"] == []
     assert payload["shared_root_diagnostic_overview"]["actions"] == {}
 
 
@@ -542,9 +542,8 @@ def test_present_updater_mirror_overview_for_git_pull_source_mode():
     assert payload["title"] == "外网到内网 .py 同步"
     assert payload["status_text"] == "本地提交待同步"
     assert payload["summary_text"] == "当前本地提交还没有发布到共享目录；updater 线程会自动尝试同步。"
-    assert payload["items"][0]["value"] == "Git 跟踪 .py 文件"
-    assert payload["items"][3]["value"] == "abcdef1"
-    assert payload["items"][6]["value"] == "abcdef1"
+    assert payload["items"][0] == {"label": "同步状态", "value": "存在待同步提交", "tone": "warning"}
+    assert payload["items"][1] == {"label": "工作区状态", "value": "干净", "tone": "success"}
     assert payload["sync"]["pending_sync_commit"] == "abcdef123456"
     assert payload["actions"]["main"]["id"] == "check"
     assert payload["actions"]["main"]["label"] == "刷新本机代码状态"
@@ -644,10 +643,9 @@ def test_present_updater_mirror_overview_shows_git_mode_items():
         }
     )
 
-    assert payload["items"][0]["value"] == "Git 跟踪 .py 文件"
-    assert payload["items"][2]["value"] == "master"
-    assert payload["items"][3]["value"] == "1111111"
-    assert payload["items"][8]["value"] == "存在本地修改"
+    assert payload["items"][0]["label"] == "同步状态"
+    assert payload["items"][1]["value"] == "存在本地修改"
+    assert payload["items"][2]["label"] == "内网端状态"
 
 
 def test_present_external_module_hero_overviews_prefers_scheduler_summary_items() -> None:
@@ -668,7 +666,8 @@ def test_present_external_module_hero_overviews_prefers_scheduler_summary_items(
     metrics = payload["scheduler_overview"]["metrics"]
     assert metrics[0]["label"] == "已启动调度"
     assert metrics[0]["value"] == "3 项"
-    assert metrics[3]["label"] == "最近即将执行"
+    assert metrics[1]["label"] == "待关注项"
+    assert metrics[2]["label"] == "最近即将执行"
 
 
 def test_present_external_module_hero_overviews_uses_backend_summaries():

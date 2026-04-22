@@ -3734,7 +3734,11 @@ export function createRuntimeHealthConfigActions(ctx) {
           }
           applyHandoverCommonSegmentData(data?.data || {});
         });
+        applyHandoverReviewAccessSnapshot(data?.handover_review_access);
         syncServerConfigSnapshotHandoverSegment();
+        if (!options?.skipRuntimeRefresh) {
+          refreshRoleScopedRuntimeStatus("handover_common_config_saved");
+        }
         if (!options?.silentSuccess) {
           message.value = "交接班公共配置已保存";
         }
@@ -3801,7 +3805,16 @@ export function createRuntimeHealthConfigActions(ctx) {
         const savedBaseUrl = String(data?.data?.review_ui?.public_base_url || normalizedBaseUrl).trim();
         handover.review_ui.public_base_url = savedBaseUrl;
         health.handover.review_base_url = savedBaseUrl;
+        if (data?.handover_review_access && typeof data.handover_review_access === "object") {
+          applyHandoverReviewAccessSnapshot(data.handover_review_access);
+        } else {
+          health.handover.review_base_url_effective = savedBaseUrl;
+          health.handover.review_base_url_effective_source = savedBaseUrl ? "manual" : "";
+        }
         syncServerConfigSnapshotHandoverSegment();
+        if (!options?.skipRuntimeRefresh) {
+          refreshRoleScopedRuntimeStatus("handover_review_base_url_saved");
+        }
         if (!options?.silentSuccess) {
           message.value = savedBaseUrl
             ? `审核访问地址已保存：${savedBaseUrl}`

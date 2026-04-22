@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 7,
-  "updated_at": "2026-04-19T03:05:48+08:00",
+  "revision": 8,
+  "updated_at": "2026-04-23T00:10:29+08:00",
   "data": {
     "enabled": true,
     "scheduler": {
@@ -855,7 +855,7 @@
       "autosave_debounce_ms": 800,
       "poll_interval_sec": 5,
       "bind_latest_session": true,
-      "public_base_url": "http://192.168.224.122:18765",
+      "public_base_url": "http://192.168.224.157:18765",
       "section_hidden_columns": [
         "I"
       ],
