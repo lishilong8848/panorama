@@ -147,7 +147,7 @@
                       </button>
                       <button
                         class="btn btn-danger"
-                        :disabled="isInternalDeploymentRole || !canRun || !getResumeRunId(run) || isActionLocked(getResumeDeleteActionKey(getResumeRunId(run)))"
+                        :disabled="isInternalDeploymentRole || !getResumeRunId(run) || isActionLocked(getResumeDeleteActionKey(getResumeRunId(run)))"
                         @click="deleteResumeRun(getResumeRunId(run))"
                       >
                         {{ isActionLocked(getResumeDeleteActionKey(getResumeRunId(run))) ? '删除中...' : '删除任务' }}

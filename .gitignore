@@ -20,6 +20,7 @@ __pycache__/
 # IDE and test tooling
 /.idea/
 /.vscode/
+/.playwright-cli/
 /.pytest_cache/
 /.pytest_tmp/
 /.dev_instances/
@@ -36,6 +37,7 @@ __pycache__/
 /.tmp_runtime/
 /.tmp_runtime_tests/
 /.tmp_day_metric_sources/
+/.runtime_repair_tmp/
 /.tmp_*/
 /.tmp_*.py
 
@@ -44,11 +46,11 @@ __pycache__/
 *.tmp
 *.bak
 *.tmp_keep
-.npm-cache
-.playwright-cli
+/.npm-cache/
 *.json
 /表格计算配置.json
 表格计算配置.pre_handover_segments.*.json
+
 # Project-specific backup and recovery files
 /表格计算部分代码.cpython-*.py
 /表格计算部分代码.py.corrupted_*.bak

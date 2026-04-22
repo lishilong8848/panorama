@@ -133,7 +133,7 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
                       </button>
                       <button
                         class="btn btn-danger"
-                        :disabled="!canRun || !getResumeRunId(run) || isActionLocked(getResumeDeleteActionKey(getResumeRunId(run)))"
+                        :disabled="!getResumeRunId(run) || isActionLocked(getResumeDeleteActionKey(getResumeRunId(run)))"
                         @click="deleteResumeRun(getResumeRunId(run))"
                       >
                         {{ isActionLocked(getResumeDeleteActionKey(getResumeRunId(run))) ? '删除中...' : '删除任务' }}

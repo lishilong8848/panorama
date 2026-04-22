@@ -551,6 +551,42 @@ def test_present_updater_mirror_overview_for_git_pull_source_mode():
     assert payload["actions"]["main"]["allowed"] is True
 
 
+def test_present_updater_mirror_overview_ignores_stale_restart_last_result():
+    payload = present_updater_mirror_overview(
+        {
+            "enabled": True,
+            "update_mode": "git_pull",
+            "source_kind": "git_remote",
+            "last_result": "updated_restart_scheduled",
+            "restart_required": False,
+            "running": False,
+            "dependency_sync_status": "success",
+            "queued_apply": {"queued": False},
+        }
+    )
+
+    assert payload["business_actions"]["allowed"] is True
+    assert payload["business_actions"]["reason_code"] == ""
+
+
+def test_present_updater_mirror_overview_blocks_running_update_result():
+    payload = present_updater_mirror_overview(
+        {
+            "enabled": True,
+            "update_mode": "git_pull",
+            "source_kind": "git_remote",
+            "last_result": "applying_patch",
+            "running": True,
+            "restart_required": False,
+            "dependency_sync_status": "success",
+            "queued_apply": {"queued": False},
+        }
+    )
+
+    assert payload["business_actions"]["allowed"] is False
+    assert payload["business_actions"]["reason_code"] == "applying_patch"
+
+
 def test_present_updater_mirror_overview_prefers_shared_mirror_waiting_text():
     payload = present_updater_mirror_overview(
         {

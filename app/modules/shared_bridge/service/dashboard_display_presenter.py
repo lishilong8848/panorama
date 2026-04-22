@@ -1206,14 +1206,13 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     dependency_sync_status = _string(updater.get("dependency_sync_status", "")).lower()
     last_result = _string(updater.get("last_result", "")).lower()
     restart_required = bool(updater.get("restart_required", False))
-    active_business_block_results = {
+    updater_running = bool(updater.get("running", False))
+    active_running_business_block_results = {
         "downloading_patch",
         "applying_patch",
         "dependency_checking",
         "dependency_syncing",
         "dependency_rollback",
-        "updated_restart_scheduled",
-        "restart_pending",
     }
     business_actions_allowed = True
     business_actions_reason_code = ""
@@ -1234,7 +1233,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         business_actions_reason_code = "dependency_syncing"
         business_actions_disabled_reason = "运行依赖正在同步，当前请等待完成。"
         business_actions_status_text = "运行依赖同步中"
-    elif last_result in active_business_block_results:
+    elif updater_running and last_result in active_running_business_block_results:
         business_actions_allowed = False
         business_actions_reason_code = last_result
         business_actions_disabled_reason = "更新流程正在执行，当前请等待完成。"

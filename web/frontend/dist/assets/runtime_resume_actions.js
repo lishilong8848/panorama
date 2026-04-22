@@ -174,7 +174,6 @@ export function createRuntimeResumeActions(ctx) {
       message.value = "run_id 无效，无法删除";
       return;
     }
-    if (!canRun.value) return;
     const actionKey = getResumeDeleteActionKey(effectiveRunId);
     const runner = async () => {
       try {
