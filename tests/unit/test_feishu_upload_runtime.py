@@ -114,6 +114,41 @@ def test_date_field_matches_any_timestamp_inside_day() -> None:
     assert not _date_field_matches(start_ms + 86_400_000, date_text="2026-04-21", target_value=start_ms)
 
 
+def test_upload_results_to_feishu_does_not_resolve_source_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    logs: List[str] = []
+    clients: List[_FakeClient] = []
+
+    def _raise_resolve(self: Path, *args: Any, **kwargs: Any) -> Path:
+        raise AssertionError("Path.resolve must not run on source files")
+
+    def _factory(**kwargs: Any) -> _FakeClient:
+        c = _FakeClient(**kwargs)
+        clients.append(c)
+        return c
+
+    monkeypatch.setattr(Path, "resolve", _raise_resolve)
+    source_file = r"\\172.16.1.2\share\全景平台月报源文件\202604\20260421--月报\A楼.xlsx"
+    result = _FakeResult(
+        source_file=source_file,
+        building="A楼",
+        month="2026-03-01",
+        values={"PUE": 1.2},
+        records=[{"楼栋": "A楼", "日期": "2026-03-08", "类型": "用电", "分类": "总览", "项目": "PUE"}],
+    )
+
+    upload_results_to_feishu(
+        results=[result],
+        config=_build_config(enable_upload=True),
+        resolve_upload_date_from_runtime=lambda _cfg: None,
+        client_factory=_factory,
+        date_override_by_source={source_file: "2026-03-08"},
+        emit_log=logs.append,
+    )
+
+    assert len(clients) == 1
+    assert any("日期=2026-03-08" in line for line in logs)
+
+
 def test_upload_results_to_feishu_success_flow(tmp_path: Path) -> None:
     logs: List[str] = []
     clients: List[_FakeClient] = []

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+from app.modules.report_pipeline.service.source_path_identity import source_file_identity_key
 
 
 def _text(value: Any) -> str:
@@ -369,18 +370,19 @@ def upload_results_to_feishu(
     normalized_source_dates: Dict[str, str] = {}
     if date_override_by_source:
         for source, day_text in date_override_by_source.items():
-            source_path = str(Path(source).resolve())
-            normalized_source_dates[source_path] = str(day_text).strip()
+            source_key = source_file_identity_key(source)
+            if source_key:
+                normalized_source_dates[source_key] = str(day_text).strip()
 
     resolved_upload_dates: Dict[str, str] = {}
     for result in results:
-        source_key = str(Path(result.source_file).resolve())
+        source_key = source_file_identity_key(result.source_file)
         upload_date_text = normalized_source_dates.get(source_key, "") or date_override or result.month
         resolved_upload_dates[source_key] = upload_date_text
     emit_log(f"[飞书上传] 开始准备按日期 upsert: results={len(results)}")
 
     for result in results:
-        source_key = str(Path(result.source_file).resolve())
+        source_key = source_file_identity_key(result.source_file)
         upload_date_text = resolved_upload_dates.get(source_key, "") or normalized_source_dates.get(source_key, "") or date_override or result.month
         building_text = str(result.building or "-").strip() or "-"
         file_text = str(result.source_file or "-").strip() or "-"

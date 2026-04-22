@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from app.modules.report_pipeline.service.source_path_identity import source_file_identity_key
+
 
 def run_with_config(
     config: Dict[str, Any],
@@ -107,7 +109,7 @@ def run_with_explicit_file_items(
         if upload_date:
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", upload_date):
                 raise ValueError(f"file_items 第{idx}项 upload_date 格式错误，必须为YYYY-MM-DD")
-            source_date_map[str(path_obj.resolve())] = upload_date
+            source_date_map[source_file_identity_key(path_obj)] = upload_date
 
     results = build_results_from_file_items(normalized_items)
     if not results:
