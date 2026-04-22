@@ -38,7 +38,15 @@ class FeishuBitableClient:
         date_text_to_timestamp_ms_fn: Callable[..., int],
         canonical_metric_name_fn: Callable[[Any], str],
         dimension_mapping: Dict[str, tuple[str, str, str]],
+        emit_log: Callable[[str], None] | None = None,
     ) -> None:
+        log_func = emit_log if callable(emit_log) else None
+        auth_started = time.perf_counter()
+        if log_func is not None:
+            log_func(
+                "[飞书上传][client] 开始解析飞书认证配置: "
+                f"timeout={int(timeout)}, retry={int(request_retry_count)}"
+            )
         auth = resolve_feishu_auth_settings(
             {
                 "app_id": app_id,
@@ -48,6 +56,11 @@ class FeishuBitableClient:
                 "request_retry_interval_sec": request_retry_interval_sec,
             }
         )
+        if log_func is not None:
+            log_func(
+                "[飞书上传][client] 飞书认证配置解析完成: "
+                f"elapsed_ms={int((time.perf_counter() - auth_started) * 1000)}"
+            )
         self.app_id = str(auth.get("app_id", "") or "").strip()
         self.app_secret = str(auth.get("app_secret", "") or "").strip()
         self.app_token = app_token
@@ -65,6 +78,11 @@ class FeishuBitableClient:
         self._dimension_mapping = dict(dimension_mapping)
         if not self.app_id or not self.app_secret:
             raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+        if log_func is not None:
+            log_func(
+                "[飞书上传][client] 客户端字段初始化完成: "
+                f"timeout={self.timeout}, retry={self.request_retry_count}"
+            )
 
     def _to_feishu_date(self, date_text: str) -> Any:
         if self.date_field_mode == "text":

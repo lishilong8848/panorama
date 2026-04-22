@@ -458,6 +458,7 @@ class FeishuBitableClient(FeishuBitableClientRuntime):
         timeout: int = 30,
         request_retry_count: int = 3,
         request_retry_interval_sec: float = 1.0,
+        emit_log: Optional[Callable[[str], None]] = None,
     ) -> None:
         super().__init__(
             app_id=app_id,
@@ -474,6 +475,7 @@ class FeishuBitableClient(FeishuBitableClientRuntime):
             date_text_to_timestamp_ms_fn=date_text_to_timestamp_ms,
             canonical_metric_name_fn=canonical_metric_name,
             dimension_mapping=FEISHU_DIMENSION_MAPPING,
+            emit_log=emit_log,
         )
 
 

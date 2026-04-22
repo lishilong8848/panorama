@@ -353,6 +353,10 @@ def upload_results_to_feishu(
         raise ValueError("配置错误: feishu.request_retry_interval_sec 必须大于等于0")
 
     client_init_started = time.perf_counter()
+    emit_log(
+        "[飞书上传] 准备初始化客户端: "
+        f"timeout={int(feishu_cfg['timeout'])}, retry={request_retry_count}, retry_interval={request_retry_interval_sec}"
+    )
     client = client_factory(
         app_id=app_id,
         app_secret=app_secret,
@@ -365,6 +369,7 @@ def upload_results_to_feishu(
         timeout=int(feishu_cfg["timeout"]),
         request_retry_count=request_retry_count,
         request_retry_interval_sec=request_retry_interval_sec,
+        emit_log=emit_log,
     )
     emit_log(f"[飞书上传] 客户端初始化完成: elapsed_ms={int((time.perf_counter() - client_init_started) * 1000)}")
 
