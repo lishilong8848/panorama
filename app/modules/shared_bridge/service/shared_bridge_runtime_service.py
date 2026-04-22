@@ -804,6 +804,26 @@ class SharedBridgeRuntimeService:
         self._emit_store_issue_log(scope, exc)
         return status
 
+    def _run_internal_source_cache_index_startup_cleanup(self) -> None:
+        if self.role_mode != "internal" or self._store is None:
+            return
+        try:
+            result = self._store.cleanup_source_cache_indexes_once()
+        except Exception as exc:  # noqa: BLE001
+            self._emit_system_log(f"[共享缓存] 启动索引清理失败，已跳过本次清理: {exc}")
+            return
+        if bool(result.get("skipped", False)):
+            return
+        self._emit_system_log(
+            "[共享缓存] 启动索引清理完成: "
+            f"扫描DB={int(result.get('db_scanned', 0) or 0)}, "
+            f"删除无效DB索引={int(result.get('db_deleted_invalid', 0) or 0)}, "
+            f"扫描索引文件={int(result.get('index_scanned', 0) or 0)}, "
+            f"删除损坏索引={int(result.get('index_deleted_invalid_json', 0) or 0)}, "
+            f"删除孤儿索引={int(result.get('index_deleted_orphan', 0) or 0)}, "
+            f"同步索引={int(result.get('index_synced_from_db', 0) or 0)}"
+        )
+
     def _cache_task_list(self, tasks: List[Dict[str, Any]]) -> None:
         self._cached_task_list = copy.deepcopy(tasks if isinstance(tasks, list) else [])
         if self._mirror_store is not None:
@@ -1251,6 +1271,7 @@ class SharedBridgeRuntimeService:
                 return {"started": False, "running": False, "reason": "disabled_or_unselected"}
             self._db_status = "starting"
             if self.role_mode == "internal":
+                self._run_internal_source_cache_index_startup_cleanup()
                 if self._internal_download_pool is None:
                     self._internal_download_pool = InternalDownloadBrowserPool(
                         self.runtime_config,

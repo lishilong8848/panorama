@@ -12,8 +12,10 @@ from typing import Any, Dict, Iterator, List
 
 from app.modules.shared_bridge.service.shared_bridge_mailbox_store import SharedBridgeMailboxStore
 from app.modules.shared_bridge.service.shared_source_cache_index_store import SharedSourceCacheIndexStore
+from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
 
 _TERMINAL_TASK_STATUSES = {"success", "failed", "partial_failed", "cancelled", "stale"}
+_SOURCE_CACHE_INDEX_CLEANUP_VERSION = "source-cache-index-startup-cleanup-v1"
 
 
 def _now_text() -> str:
@@ -2587,6 +2589,215 @@ class SharedBridgeStore:
         if success and isinstance(deleted_entry, dict):
             self._source_cache_index_store.delete_entry(deleted_entry)
         return success
+
+    def cleanup_source_cache_indexes_once(
+        self,
+        *,
+        version: str = _SOURCE_CACHE_INDEX_CLEANUP_VERSION,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """One-shot startup cleanup for source-cache DB rows and JSON index files.
+
+        This only touches index records. It never deletes canonical source files.
+        """
+        self.ensure_ready()
+        version_text = str(version or "").strip() or _SOURCE_CACHE_INDEX_CLEANUP_VERSION
+        state_path = self._source_cache_index_store.root / ".startup_cleanup_state.json"
+        state = self._read_json_file(state_path)
+        if (
+            not force
+            and isinstance(state, dict)
+            and str(state.get("version", "") or "").strip() == version_text
+            and str(state.get("status", "") or "").strip().lower() == "success"
+        ):
+            return {
+                "status": "skipped",
+                "skipped": True,
+                "reason": "already_completed",
+                "version": version_text,
+                "previous": state,
+            }
+
+        started_at = _now_text()
+        try:
+            result = self.cleanup_source_cache_indexes()
+            payload = {
+                "version": version_text,
+                "status": "success",
+                "started_at": started_at,
+                "finished_at": _now_text(),
+                "result": result,
+            }
+            self._write_json_file(state_path, payload)
+            return {
+                **result,
+                "status": "success",
+                "skipped": False,
+                "version": version_text,
+            }
+        except Exception as exc:
+            payload = {
+                "version": version_text,
+                "status": "failed",
+                "started_at": started_at,
+                "finished_at": _now_text(),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            try:
+                self._write_json_file(state_path, payload)
+            except Exception:
+                pass
+            raise
+
+    def cleanup_source_cache_indexes(self) -> Dict[str, int]:
+        """Delete unusable source-cache indexes and align JSON index files with SQLite.
+
+        Invalid ready entries are removed from SQLite and the sidecar index. Valid
+        SQLite rows are then re-written to the JSON index so external reads see the
+        same state as the shared bridge database.
+        """
+        self.ensure_ready()
+        stats = {
+            "db_scanned": 0,
+            "db_deleted_invalid": 0,
+            "index_scanned": 0,
+            "index_deleted_invalid_json": 0,
+            "index_deleted_orphan": 0,
+            "index_synced_from_db": 0,
+        }
+
+        with self.connect(read_only=True) as conn:
+            db_rows = conn.execute(
+                """
+                SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,
+                       downloaded_at, relative_path, status, file_hash, size_bytes, metadata_json, created_at, updated_at
+                FROM source_cache_entries
+                ORDER BY updated_at ASC, downloaded_at ASC, entry_id ASC
+                """
+            ).fetchall()
+        db_entries = [self._row_to_source_cache_entry_dict(row) for row in db_rows]
+        stats["db_scanned"] = len(db_entries)
+
+        invalid_entry_ids: List[str] = []
+        invalid_entries: List[Dict[str, Any]] = []
+        for entry in db_entries:
+            entry_id = str(entry.get("entry_id", "") or "").strip()
+            if not entry_id:
+                continue
+            invalid_reason = self._source_cache_entry_unusable_reason(entry)
+            if invalid_reason:
+                invalid_entry_ids.append(entry_id)
+                invalid_entries.append(entry)
+
+        if invalid_entry_ids:
+            with self.connect() as conn:
+                for offset in range(0, len(invalid_entry_ids), 500):
+                    chunk = invalid_entry_ids[offset : offset + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    conn.execute(
+                        f"DELETE FROM source_cache_entries WHERE entry_id IN ({placeholders})",
+                        chunk,
+                    )
+            for entry in invalid_entries:
+                self._source_cache_index_store.delete_entry(entry)
+            stats["db_deleted_invalid"] = len(invalid_entry_ids)
+
+        with self.connect(read_only=True) as conn:
+            rows_after_cleanup = conn.execute(
+                """
+                SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,
+                       downloaded_at, relative_path, status, file_hash, size_bytes, metadata_json, created_at, updated_at
+                FROM source_cache_entries
+                ORDER BY updated_at ASC, downloaded_at ASC, entry_id ASC
+                """
+            ).fetchall()
+        valid_db_entries = [self._row_to_source_cache_entry_dict(row) for row in rows_after_cleanup]
+        db_by_entry_id = {
+            str(entry.get("entry_id", "") or "").strip(): entry
+            for entry in valid_db_entries
+            if str(entry.get("entry_id", "") or "").strip()
+        }
+
+        index_root = self._source_cache_index_store.root
+        for index_path in sorted(index_root.rglob("*.json")) if index_root.exists() else []:
+            if index_path.name.startswith("."):
+                continue
+            stats["index_scanned"] += 1
+            try:
+                payload = json.loads(index_path.read_text(encoding="utf-8"))
+            except Exception:
+                try:
+                    index_path.unlink(missing_ok=True)
+                    stats["index_deleted_invalid_json"] += 1
+                except Exception:
+                    pass
+                continue
+            if not isinstance(payload, dict):
+                try:
+                    index_path.unlink(missing_ok=True)
+                    stats["index_deleted_invalid_json"] += 1
+                except Exception:
+                    pass
+                continue
+            entry_id = str(payload.get("entry_id", "") or "").strip()
+            if not entry_id or entry_id not in db_by_entry_id:
+                try:
+                    index_path.unlink(missing_ok=True)
+                    stats["index_deleted_orphan"] += 1
+                except Exception:
+                    pass
+
+        for entry in valid_db_entries:
+            self._source_cache_index_store.upsert_entry(entry)
+            stats["index_synced_from_db"] += 1
+        return stats
+
+    def _source_cache_entry_unusable_reason(self, entry: Dict[str, Any]) -> str:
+        relative_path = str(entry.get("relative_path", "") or "").replace("\\", "/").strip()
+        if self._is_unsafe_source_cache_relative_path(relative_path):
+            return "unsafe_relative_path"
+        status_text = str(entry.get("status", "") or "").strip().lower()
+        if status_text == "ready":
+            target_path = self.root_dir / relative_path
+            if not target_path.is_file():
+                return "ready_file_missing"
+        return ""
+
+    @staticmethod
+    def _is_unsafe_source_cache_relative_path(relative_path: str) -> bool:
+        rel = str(relative_path or "").replace("\\", "/").strip()
+        if not rel:
+            return True
+        first_segment = rel.split("/", 1)[0]
+        if ":" in first_segment:
+            return True
+        path = Path(rel)
+        if path.is_absolute():
+            return True
+        if ".." in path.parts or any(part == ".." for part in rel.split("/")):
+            return True
+        lower_rel = rel.lower().lstrip("/")
+        if lower_rel == "tmp/source_cache" or lower_rel.startswith("tmp/source_cache/"):
+            return True
+        return False
+
+    @staticmethod
+    def _read_json_file(path: Path) -> Dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _write_json_file(path: Path, payload: Dict[str, Any]) -> None:
+        atomic_write_text(
+            path,
+            json.dumps(payload or {}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+            validator=validate_json_file,
+            allow_overwrite_fallback=False,
+        )
 
     def list_cleanup_candidate_source_cache_entries(self, *, limit: int = 20000) -> List[Dict[str, Any]]:
         with self.connect(read_only=True) as conn:
