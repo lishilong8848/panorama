@@ -17,7 +17,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from app.modules.network.service.network_stability import get_network_reachability_state
 from app.modules.report_pipeline.service.task_engine_database import TaskEngineDatabase
 from app.modules.report_pipeline.service.task_engine_store import TaskEngineStore
 from app.modules.updater.service.runtime_dependency_sync_service import RuntimeDependencySyncService
@@ -255,6 +254,11 @@ class JobService:
         self._worker_dependency_sync_lock = threading.Lock()
         self._worker_python_probe_cache: Dict[str, tuple[bool, str]] = {}
         self._worker_python_fallback_logged: set[str] = set()
+        self._worker_runtime_ready_cache: Dict[str, str] = {}
+        self._resource_snapshot_dirty = False
+        self._resource_snapshot_last_flushed_monotonic = 0.0
+        self._resource_snapshot_flush_interval_sec = 1.0
+        self._resource_snapshot_flush_timer: threading.Timer | None = None
         self._task_engine_recovery_completed = False
         self._task_engine_last_cleanup_monotonic = 0.0
 
@@ -273,6 +277,8 @@ class JobService:
         worker_app_dir: Path | None = None,
         current_ssid_getter: Callable[[], str | None] | None = None,
     ) -> None:
+        with self._lock:
+            self._cancel_resource_snapshot_flush_timer_locked()
         previous_db = self._task_engine_db
         if previous_db is not None:
             previous_db.close()
@@ -281,6 +287,7 @@ class JobService:
         self._task_engine_db = TaskEngineDatabase(runtime_config=runtime_config, app_dir=app_dir)
         self._config_snapshot_getter = config_snapshot_getter
         self._current_ssid_getter = current_ssid_getter
+        self._worker_runtime_ready_cache.clear()
         self._worker_app_dir = Path(worker_app_dir or app_dir or Path.cwd()).resolve()
         network_runtime_cfg = runtime_config.get("network", {}) if isinstance(runtime_config, dict) else {}
         if not isinstance(network_runtime_cfg, dict):
@@ -312,6 +319,10 @@ class JobService:
         with self._network_status_lock:
             self._network_status_checked_monotonic = 0.0
             self._network_status_snapshot = {}
+        with self._lock:
+            self._resource_snapshot_dirty = False
+            self._resource_snapshot_last_flushed_monotonic = 0.0
+            self._cancel_resource_snapshot_flush_timer_locked()
         execution_cfg = runtime_config.get("execution", {}) if isinstance(runtime_config, dict) else {}
         network_cfg = execution_cfg.get("network", {}) if isinstance(execution_cfg, dict) else {}
         self._network_window_max_duration_sec = max(30, int(network_cfg.get("max_window_duration_sec", 600) or 600))
@@ -319,10 +330,13 @@ class JobService:
         self._network_window_max_opposite_wait_sec = max(5, int(network_cfg.get("max_opposite_wait_sec", 120) or 120))
         self._worker_cancel_timeout_sec = max(1.0, float(execution_cfg.get("graceful_cancel_timeout_sec", 10) or 10))
         self._worker_heartbeat_interval_sec = max(1.0, float(execution_cfg.get("worker_heartbeat_interval_sec", 5) or 5))
-        self._persist_resource_snapshot()
+        self._persist_resource_snapshot(force=True)
         self._restore_incomplete_jobs()
 
     def shutdown_task_engine(self) -> None:
+        self._persist_resource_snapshot(force=True)
+        with self._lock:
+            self._cancel_resource_snapshot_flush_timer_locked()
         db = self._task_engine_db
         self._task_engine_db = None
         if db is not None:
@@ -621,32 +635,60 @@ class JobService:
             return
         self._task_engine_db.upsert_stage(job.job_id, stage.to_dict())
 
+    def _cancel_resource_snapshot_flush_timer_locked(self) -> None:
+        timer = self._resource_snapshot_flush_timer
+        self._resource_snapshot_flush_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _schedule_resource_snapshot_flush_locked(self) -> None:
+        if self._resource_snapshot_flush_timer is not None:
+            return
+        timer = threading.Timer(self._resource_snapshot_flush_interval_sec, self._flush_resource_snapshot_from_timer)
+        timer.daemon = True
+        self._resource_snapshot_flush_timer = timer
+        timer.start()
+
+    def _flush_resource_snapshot_from_timer(self) -> None:
+        with self._lock:
+            self._resource_snapshot_flush_timer = None
+        try:
+            self._persist_resource_snapshot(force=True)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _persist_job_snapshot(self, job: JobState, *, config_snapshot: dict[str, Any] | None = None) -> None:
         if not self._task_engine_db:
             return
+        job.revision = int(job.revision or 0) + 1
+        for stage in job.stages:
+            stage.revision = int(stage.revision or 0) + 1
         payload = job.to_dict()
         self._task_engine_db.upsert_job(payload, config_snapshot=config_snapshot)
-        persisted = self._task_engine_db.get_job(job.job_id)
-        if persisted:
-            job.revision = int(persisted.get("revision") or 0)
-            job.last_event_id = int(persisted.get("last_event_id") or job.last_event_id or 0)
         for stage in job.stages:
-            stage_payload = next(
-                (item for item in list((persisted or {}).get("stages") or []) if str(item.get("stage_id", "")) == stage.stage_id),
-                None,
-            )
             self._persist_stage_snapshot(job, stage)
-            if stage_payload:
-                stage.revision = int(stage_payload.get("revision") or 0)
-                stage.worker_status = str(stage_payload.get("worker_status", "") or "")
-                stage.last_heartbeat_at = str(stage_payload.get("last_heartbeat_at", "") or "")
 
-    def _persist_resource_snapshot(self) -> None:
+    def _persist_resource_snapshot(self, *, force: bool = False) -> None:
         if not self._task_engine_db:
             return
+        with self._lock:
+            self._resource_snapshot_dirty = True
+            if not force:
+                self._schedule_resource_snapshot_flush_locked()
+                return
+            self._cancel_resource_snapshot_flush_timer_locked()
+            self._resource_snapshot_dirty = False
+            self._resource_snapshot_last_flushed_monotonic = time.monotonic()
         snapshot = self._build_resource_snapshot_from_memory()
         snapshot["updated_at"] = self._now_text()
-        self._task_engine_db.persist_resource_snapshot(snapshot)
+        try:
+            self._task_engine_db.persist_resource_snapshot(snapshot)
+        except Exception:
+            with self._lock:
+                self._resource_snapshot_dirty = True
+                if self._task_engine_db is not None:
+                    self._schedule_resource_snapshot_flush_locked()
+            raise
 
     @staticmethod
     def _build_clean_python_env(base_env: Dict[str, str] | None = None) -> Dict[str, str]:
@@ -726,6 +768,29 @@ class JobService:
             if runtime_root in candidate.parents or candidate == runtime_root:
                 runtime_failures.append(f"{candidate}: {detail}")
         raise RuntimeError("未找到可用 Python 运行时")
+
+    @staticmethod
+    def _file_signature(path: Path) -> str:
+        try:
+            stat = path.stat()
+        except OSError:
+            return "missing"
+        return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
+
+    def _worker_runtime_ready_cache_key(self, python_executable: str) -> str:
+        executable_text = str(python_executable or "").strip()
+        worker_entry = self._worker_app_dir / "app" / "worker" / "entry.py"
+        dependency_lock = self._worker_app_dir / "runtime_dependency_lock.json"
+        return "|".join(
+            [
+                executable_text,
+                self._file_signature(worker_entry),
+                self._file_signature(dependency_lock),
+            ]
+        )
+
+    def _invalidate_worker_runtime_ready_cache(self) -> None:
+        self._worker_runtime_ready_cache.clear()
 
     def _build_worker_env(self) -> Dict[str, str]:
         env = self._build_clean_python_env()
@@ -819,6 +884,7 @@ class JobService:
             job,
             f"[依赖同步] 运行依赖自动补齐完成: checked={result.get('checked', 0)}, installed={result.get('installed', 0)}",
         )
+        self._invalidate_worker_runtime_ready_cache()
         return result
 
     def _probe_worker_imports(self, python_executable: str) -> tuple[bool, str]:
@@ -842,8 +908,16 @@ class JobService:
 
     def _ensure_worker_runtime_ready(self, job: JobState, stage: StageState) -> str:
         python_executable = self._resolve_worker_python_executable()
+        cache_key = self._worker_runtime_ready_cache_key(python_executable)
+        if self._worker_runtime_ready_cache.get(cache_key) == python_executable:
+            self._append_log(job, "[worker] 启动预检命中缓存: preflight_ms=0")
+            return python_executable
+        probe_started = time.perf_counter()
         ok, detail = self._probe_worker_imports(python_executable)
+        probe_elapsed_ms = int((time.perf_counter() - probe_started) * 1000)
         if ok:
+            self._worker_runtime_ready_cache[cache_key] = python_executable
+            self._append_log(job, f"[worker] 启动预检完成: preflight_ms={probe_elapsed_ms}, cache=miss")
             return python_executable
         if not self._is_worker_runtime_repairable_detail(detail):
             raise RuntimeError(f"worker 启动预检失败: {detail}")
@@ -854,8 +928,13 @@ class JobService:
             summary="正在自动修复 worker 运行依赖",
         )
         self._sync_worker_dependencies(job, stage, python_executable=python_executable, reason=detail)
+        self._invalidate_worker_runtime_ready_cache()
+        retry_started = time.perf_counter()
         ok, detail_after = self._probe_worker_imports(python_executable)
+        retry_elapsed_ms = int((time.perf_counter() - retry_started) * 1000)
         if ok:
+            self._worker_runtime_ready_cache[self._worker_runtime_ready_cache_key(python_executable)] = python_executable
+            self._append_log(job, f"[worker] 自动修复后预检完成: preflight_ms={retry_elapsed_ms}, cache=repair")
             return python_executable
         raise RuntimeError(f"worker 运行依赖自动修复后仍无法启动: {detail_after or detail}")
 
@@ -1329,36 +1408,20 @@ class JobService:
                 current_ssid = self._normalize_ssid(getter())
             except Exception:  # noqa: BLE001
                 current_ssid = ""
-            snapshot = get_network_reachability_state(
-                network_cfg={
-                    "internal_ssid": self._network_internal_ssid,
-                    "external_ssid": self._network_external_ssid,
-                    "post_switch_probe_external_host": getattr(self, "_network_probe_external_host", ""),
-                    "post_switch_probe_external_port": getattr(self, "_network_probe_external_port", 443),
-                    "post_switch_probe_retries": getattr(self, "_network_probe_retries", 3),
-                    "post_switch_probe_timeout_sec": getattr(self, "_network_probe_timeout_sec", 2),
-                    "post_switch_probe_interval_sec": getattr(self, "_network_probe_interval_sec", 1),
-                    "internal_probe_timeout_ms": getattr(self, "_network_internal_probe_timeout_ms", 1200),
-                    "internal_probe_parallelism": getattr(self, "_network_internal_probe_parallelism", 5),
-                    "post_switch_probe_internal_host": getattr(self, "_network_probe_internal_host", ""),
-                    "post_switch_probe_internal_port": getattr(self, "_network_probe_internal_port", 80),
-                },
-                sites=self._network_probe_sites,
-                current_ssid=current_ssid,
-            )
-        else:
-            # When no SSID getter is configured, do not hard-block the task engine.
-            # Treat the current side as unknown but reachable, so resource sequencing
-            # still works in tests, worker sandboxes, and lightweight runtime contexts.
-            snapshot = {
-                "current_ssid": "",
-                "ssid_side": "none",
-                "internal_reachable": True,
-                "external_reachable": True,
-                "reachable_sides": ["internal", "external"],
-                "mode": "switching_ready",
-                "last_checked_at": self._now_text(),
-            }
+        ssid_side = "none"
+        if self._ssid_matches(current_ssid, self._network_internal_ssid):
+            ssid_side = "internal"
+        elif self._ssid_matches(current_ssid, self._network_external_ssid):
+            ssid_side = "external"
+        snapshot = {
+            "current_ssid": current_ssid,
+            "ssid_side": ssid_side,
+            "internal_reachable": True,
+            "external_reachable": True,
+            "reachable_sides": ["internal", "external"],
+            "mode": "switching_ready",
+            "last_checked_at": self._now_text(),
+        }
         with self._network_status_lock:
             self._network_status_checked_monotonic = now_monotonic
             self._network_status_snapshot = dict(snapshot)
@@ -1466,26 +1529,13 @@ class JobService:
             self._network_window_draining = False
             self._network_window_pending_side = ""
         if not self._network_auto_switch_enabled:
-            current_state = self._get_current_network_state()
-            mode = str(current_state.get("mode", "") or "").strip().lower()
-            if mode == "switching_ready":
-                ssid_side = str(current_state.get("ssid_side", "") or "").strip().lower()
-                if ssid_side in {"internal", "external"}:
-                    current_side = ssid_side
-                else:
-                    if running_internal and not running_external:
-                        current_side = "internal"
-                    elif running_external and not running_internal:
-                        current_side = "external"
-                    elif queued_internal or queued_external:
-                        chosen_side = self._choose_next_network_side_locked()
-                        current_side = chosen_side if chosen_side in {"internal", "external"} else "none"
-                    else:
-                        current_side = "none"
-            elif mode == "internal_only":
+            if running_internal and not running_external:
                 current_side = "internal"
-            elif mode == "external_only":
+            elif running_external and not running_internal:
                 current_side = "external"
+            elif queued_internal or queued_external:
+                chosen_side = self._choose_next_network_side_locked()
+                current_side = chosen_side if chosen_side in {"internal", "external"} else "none"
             else:
                 current_side = "none"
             if current_side == "none":
@@ -1704,7 +1754,7 @@ class JobService:
                         self._network_window_dispatch_count = 1
                         self._network_window_draining = False
                         self._network_window_pending_side = ""
-                    elif self._network_auto_switch_enabled and self._job_network_side(job) in {"internal", "external"}:
+                    elif self._job_network_side(job) in {"internal", "external"}:
                         if self._network_window_current_side == "none":
                             self._network_window_current_side = self._job_network_side(job)
                             self._network_window_started_at = self._now_text()
@@ -1956,25 +2006,6 @@ class JobService:
             with self._lock:
                 stage.last_heartbeat_at = heartbeat_at
                 stage.worker_status = "running"
-                self._persist_worker_snapshot(
-                    job,
-                    stage,
-                    {
-                        "pid": stage.worker_pid,
-                        "status": "running",
-                        "last_heartbeat_at": heartbeat_at,
-                        "updated_at": heartbeat_at,
-                    },
-                )
-                self._record_job_event(
-                    job,
-                    stage_id=stage_id,
-                    stream="stdout",
-                    event_type="heartbeat",
-                    level="debug",
-                    payload={"timestamp": heartbeat_at},
-                )
-                self._persist_job_snapshot(job)
             return
         if event_type == "result":
             result_box.clear()
@@ -2048,8 +2079,6 @@ class JobService:
             ]
             self._jobs[job_id] = job
             config_snapshot = self._capture_config_snapshot()
-            if self._task_engine_store and isinstance(config_snapshot, dict):
-                self._task_engine_store.persist_config_snapshot(job_id, config_snapshot)
             self._persist_job_snapshot(job, config_snapshot=config_snapshot)
         self._persist_resource_snapshot()
 
@@ -2356,8 +2385,6 @@ class JobService:
                 self._json_ready(worker_payload or {}),
             )
             config_snapshot = self._capture_config_snapshot()
-            if isinstance(config_snapshot, dict):
-                self._task_engine_store.persist_config_snapshot(job_id, config_snapshot)
             self._persist_job_snapshot(job, config_snapshot=config_snapshot)
             if job.status == "waiting_resource":
                 job.wait_started_monotonic = time.monotonic()
@@ -2734,7 +2761,8 @@ class JobService:
     def get_resource_snapshot(self) -> Dict[str, Any]:
         with self._lock:
             has_live_jobs = any(job.status in _INCOMPLETE_JOB_STATUSES for job in self._jobs.values())
-        if has_live_jobs or callable(self._current_ssid_getter):
+            resource_snapshot_dirty = bool(self._resource_snapshot_dirty)
+        if has_live_jobs or resource_snapshot_dirty:
             return self._build_resource_snapshot_from_memory()
         if self._task_engine_db:
             try:

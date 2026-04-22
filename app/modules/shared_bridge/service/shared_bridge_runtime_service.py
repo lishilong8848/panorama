@@ -105,6 +105,7 @@ class SharedBridgeRuntimeService:
     BACKGROUND_SELF_HEAL_LOOKBACK_DAYS = 7
     BACKGROUND_SELF_HEAL_SCAN_LIMIT = 5000
     WAITING_JOB_RECONCILE_INTERVAL_SEC = 30
+    MAILBOX_SUMMARY_REFRESH_INTERVAL_SEC = 15
     TASK_RETENTION_DAYS = 14
     NODE_RETENTION_DAYS = 2
     STORE_ERROR_LOG_INTERVAL_SEC = 60
@@ -126,6 +127,7 @@ class SharedBridgeRuntimeService:
         self._request_runtime_status_refresh_callback = request_runtime_status_refresh
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_poll_at = ""
         self._db_status = "disabled"
@@ -1282,6 +1284,7 @@ class SharedBridgeRuntimeService:
                     self._source_cache_service.update_download_browser_pool(None)
                     self._source_cache_service.stop()
             self._stop_event.clear()
+            self._wake_event.clear()
             self._thread = threading.Thread(target=self._loop, name="shared-bridge-runtime", daemon=True)
             self._thread.start()
             return {"started": True, "running": True, "reason": "started"}
@@ -1311,6 +1314,7 @@ class SharedBridgeRuntimeService:
                         pass
                 return {"stopped": False, "running": False, "reason": "not_running"}
             self._stop_event.set()
+            self._wake_event.set()
             self._thread = None
             self._source_cache_start_thread = None
         thread.join(timeout=5)
@@ -2191,7 +2195,7 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        return self._store.create_handover_from_download_task(
+        task = self._store.create_handover_from_download_task(
             buildings=buildings,
             end_time=end_time,
             duty_date=duty_date,
@@ -2202,6 +2206,8 @@ class SharedBridgeRuntimeService:
             created_by_node_id=self.node_id,
             requested_by=requested_by,
         )
+        self._wake_loop(reason=f"bridge_task_created:{task.get('task_id', '')}")
+        return task
 
     def get_or_create_handover_from_download_task(
         self,
@@ -2249,6 +2255,7 @@ class SharedBridgeRuntimeService:
             )
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
+            self._wake_loop(reason=f"bridge_task_existing:{existing.get('task_id', '')}")
             return existing
         return self.create_handover_from_download_task(
             buildings=normalized_buildings,
@@ -2272,7 +2279,7 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        return self._store.create_day_metric_from_download_task(
+        task = self._store.create_day_metric_from_download_task(
             selected_dates=selected_dates,
             building_scope=building_scope,
             building=building,
@@ -2281,6 +2288,8 @@ class SharedBridgeRuntimeService:
             created_by_node_id=self.node_id,
             requested_by=requested_by,
         )
+        self._wake_loop(reason=f"bridge_task_created:{task.get('task_id', '')}")
+        return task
 
     def create_wet_bulb_collection_task(
         self,
@@ -2293,7 +2302,7 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        return self._store.create_wet_bulb_collection_task(
+        task = self._store.create_wet_bulb_collection_task(
             buildings=buildings,
             resume_job_id=resume_job_id,
             target_bucket_key=target_bucket_key,
@@ -2301,6 +2310,8 @@ class SharedBridgeRuntimeService:
             created_by_node_id=self.node_id,
             requested_by=requested_by,
         )
+        self._wake_loop(reason=f"bridge_task_created:{task.get('task_id', '')}")
+        return task
 
     def create_alarm_event_upload_task(
         self,
@@ -2314,7 +2325,7 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        return self._store.create_alarm_event_upload_task(
+        task = self._store.create_alarm_event_upload_task(
             mode=mode,
             building=building,
             resume_job_id=resume_job_id,
@@ -2323,6 +2334,8 @@ class SharedBridgeRuntimeService:
             created_by_node_id=self.node_id,
             requested_by=requested_by,
         )
+        self._wake_loop(reason=f"bridge_task_created:{task.get('task_id', '')}")
+        return task
 
     def get_or_create_day_metric_from_download_task(
         self,
@@ -2351,6 +2364,7 @@ class SharedBridgeRuntimeService:
         )
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
+            self._wake_loop(reason=f"bridge_task_existing:{existing.get('task_id', '')}")
             return existing
         return self.create_day_metric_from_download_task(
             selected_dates=normalized_dates,
@@ -2385,6 +2399,7 @@ class SharedBridgeRuntimeService:
         )
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
+            self._wake_loop(reason=f"bridge_task_existing:{existing.get('task_id', '')}")
             return existing
         return self.create_alarm_event_upload_task(
             mode=normalized_mode,
@@ -2420,6 +2435,7 @@ class SharedBridgeRuntimeService:
         )
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
+            self._wake_loop(reason=f"bridge_task_existing:{existing.get('task_id', '')}")
             return existing
         return self.create_wet_bulb_collection_task(
             buildings=normalized_buildings,
@@ -2439,7 +2455,7 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        return self._store.create_monthly_auto_once_task(
+        task = self._store.create_monthly_auto_once_task(
             target_bucket_key=target_bucket_key,
             resume_job_id=resume_job_id,
             created_by_role=self.role_mode,
@@ -2447,6 +2463,8 @@ class SharedBridgeRuntimeService:
             requested_by=requested_by,
             source=source,
         )
+        self._wake_loop(reason=f"bridge_task_created:{task.get('task_id', '')}")
+        return task
 
     def get_or_create_monthly_auto_once_task(
         self,
@@ -2463,6 +2481,7 @@ class SharedBridgeRuntimeService:
         dedupe_key = "|".join(["monthly_report_pipeline", "auto_once", resolved_bucket_key or _now_text()[:10] or "-"])
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
+            self._wake_loop(reason=f"bridge_task_existing:{existing.get('task_id', '')}")
             return existing
         return self.create_monthly_auto_once_task(
             target_bucket_key=resolved_bucket_key,
@@ -2480,12 +2499,14 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        return self._store.create_monthly_multi_date_task(
+        task = self._store.create_monthly_multi_date_task(
             selected_dates=selected_dates,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
         )
+        self._wake_loop(reason=f"bridge_task_created:{task.get('task_id', '')}")
+        return task
 
     def create_monthly_resume_upload_task(
         self,
@@ -2498,7 +2519,7 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        return self._store.create_monthly_resume_upload_task(
+        task = self._store.create_monthly_resume_upload_task(
             run_id=run_id,
             auto_trigger=auto_trigger,
             resume_job_id=resume_job_id,
@@ -2506,6 +2527,8 @@ class SharedBridgeRuntimeService:
             created_by_node_id=self.node_id,
             requested_by=requested_by,
         )
+        self._wake_loop(reason=f"bridge_task_created:{task.get('task_id', '')}")
+        return task
 
     def get_or_create_monthly_resume_upload_task(
         self,
@@ -2522,6 +2545,7 @@ class SharedBridgeRuntimeService:
         dedupe_key = "|".join(["monthly_report_pipeline", "resume_upload", run_id_text or "latest"])
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
+            self._wake_loop(reason=f"bridge_task_existing:{existing.get('task_id', '')}")
             return existing
         return self.create_monthly_resume_upload_task(
             run_id=run_id,
@@ -2546,7 +2570,7 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        return self._store.create_handover_cache_fill_task(
+        task = self._store.create_handover_cache_fill_task(
             continuation_kind=continuation_kind,
             buildings=buildings,
             duty_date=duty_date,
@@ -2559,6 +2583,8 @@ class SharedBridgeRuntimeService:
             created_by_node_id=self.node_id,
             requested_by=requested_by,
         )
+        self._wake_loop(reason=f"bridge_task_created:{task.get('task_id', '')}")
+        return task
 
     def get_or_create_handover_cache_fill_task(
         self,
@@ -2589,6 +2615,7 @@ class SharedBridgeRuntimeService:
         )
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
+            self._wake_loop(reason=f"bridge_task_existing:{existing.get('task_id', '')}")
             return existing
         return self.create_handover_cache_fill_task(
             continuation_kind=continuation_kind,
@@ -2612,13 +2639,15 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        return self._store.create_monthly_cache_fill_task(
+        task = self._store.create_monthly_cache_fill_task(
             selected_dates=selected_dates,
             resume_job_id=resume_job_id,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
         )
+        self._wake_loop(reason=f"bridge_task_created:{task.get('task_id', '')}")
+        return task
 
     def get_or_create_monthly_cache_fill_task(
         self,
@@ -2634,6 +2663,7 @@ class SharedBridgeRuntimeService:
         dedupe_key = "|".join(["monthly_cache_fill", ",".join(normalized_dates) or "-"])
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
+            self._wake_loop(reason=f"bridge_task_existing:{existing.get('task_id', '')}")
             return existing
         return self.create_monthly_cache_fill_task(
             selected_dates=normalized_dates,
@@ -2845,6 +2875,11 @@ class SharedBridgeRuntimeService:
             callback(str(reason or "").strip() or "shared_bridge_runtime")
         except Exception:
             pass
+
+    def _wake_loop(self, *, reason: str = "") -> None:
+        if reason:
+            self._request_runtime_status_refresh(reason=reason)
+        self._wake_event.set()
 
     def _touch_node(self) -> None:
         if not self._store:
@@ -5760,6 +5795,16 @@ class SharedBridgeRuntimeService:
             status = str(task.get("status", "") or "").strip().lower()
             if status == "success":
                 try:
+                    resume_delay_ms = 0
+                    updated_at = str(task.get("updated_at", "") or task.get("created_at", "")).strip()
+                    if updated_at:
+                        try:
+                            resume_delay_ms = int((datetime.now() - datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")).total_seconds() * 1000)
+                        except ValueError:
+                            resume_delay_ms = 0
+                    self._emit_system_log(
+                        f"[共享桥接] 任务={bridge_task_id} 开始恢复 waiting job: job={job_id}, resume_delay_ms={max(0, resume_delay_ms)}"
+                    )
                     binding = self._build_waiting_job_resume_binding(task)
                     if binding.get("log_text"):
                         self._emit_system_log(str(binding.get("log_text", "")).strip())
@@ -5788,84 +5833,111 @@ class SharedBridgeRuntimeService:
                     summary="等待内网补采同步失败",
                 )
 
-    def _process_one_task_if_needed(self) -> None:
-        if not self._store:
+    def _refresh_runtime_task_cache(self, *, limit: int = 500) -> None:
+        mailbox_tasks = self._list_mailbox_tasks(limit=limit)
+        if mailbox_tasks:
+            self._counts.update(self._task_counts_from_tasks(mailbox_tasks))
+            self._cache_task_list(mailbox_tasks)
             return
+        mirrored_tasks = self._mirror_store.list_tasks(limit=limit) if self._mirror_store is not None else []
+        if mirrored_tasks:
+            self._counts.update(self._task_counts_from_tasks(mirrored_tasks))
+        else:
+            self._counts.update({"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0})
+
+    def _process_claimed_task(self, task: Dict[str, Any]) -> None:
+        feature = str(task.get("feature", "") or "").strip()
+        if feature == "handover_from_download":
+            if self.role_mode == "internal":
+                self._run_handover_internal_download(task)
+                return
+            if self.role_mode == "external":
+                self._run_handover_external_continue(task)
+                return
+        if feature == "day_metric_from_download":
+            if self.role_mode == "internal":
+                self._run_day_metric_internal_download(task)
+                return
+            if self.role_mode == "external":
+                self._run_day_metric_external_continue(task)
+                return
+        if feature == "wet_bulb_collection":
+            if self.role_mode == "internal":
+                self._run_wet_bulb_internal_download(task)
+                return
+            if self.role_mode == "external":
+                self._run_wet_bulb_external_continue(task)
+                return
+        if feature == "alarm_event_upload":
+            if self.role_mode == "internal":
+                self._run_alarm_event_upload_internal_fill(task)
+                return
+            if self.role_mode == "external":
+                self._run_alarm_event_upload_external(task)
+                return
+        if feature == "handover_cache_fill":
+            if self.role_mode == "internal":
+                self._run_handover_cache_fill_internal(task)
+                return
+            if self.role_mode == "external":
+                self._run_handover_cache_fill_external(task)
+                return
+        if feature == "monthly_cache_fill":
+            if self.role_mode == "internal":
+                self._run_monthly_cache_fill_internal(task)
+                return
+            if self.role_mode == "external":
+                self._run_monthly_cache_fill_external(task)
+                return
+        if feature in RETIRED_SHARED_BRIDGE_FEATURES:
+            self._retire_disabled_feature_task(
+                task,
+                feature=feature,
+                error_text=RETIRED_SHARED_BRIDGE_FEATURES[feature],
+            )
+            return
+        if feature == "monthly_report_pipeline":
+            if self.role_mode == "internal":
+                self._run_monthly_internal_download(task)
+                return
+            if self.role_mode == "external":
+                self._run_monthly_external_resume(task)
+                return
+        if feature == self.INTERNAL_BROWSER_ALERT_FEATURE:
+            if self.role_mode == "external":
+                self._run_internal_browser_alert_external(task)
+                return
+        error_text = f"共享桥接未识别或不支持的任务类型: 功能={feature}, 角色={_role_label(self.role_mode)}"
+        self._fail_claimed_task(task, error_text=error_text, event_type="unsupported_feature", level="error")
+        self._emit_system_log(f"[共享桥接] {error_text}")
+
+    def _process_one_task_if_needed(self) -> bool:
+        if not self._store:
+            return False
         task = self._store.claim_next_task(
             role_target=self.role_mode,
             node_id=self.node_id,
             lease_sec=self.claim_lease_sec,
         )
         if not task:
-            return
+            return False
+        task_id = str(task.get("task_id", "") or "").strip()
+        created_at = str(task.get("created_at", "") or "").strip()
+        claim_delay_ms = 0
+        if created_at:
+            try:
+                claim_delay_ms = int((datetime.now() - datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")).total_seconds() * 1000)
+            except ValueError:
+                claim_delay_ms = 0
+        self._emit_system_log(
+            f"[共享桥接] 任务开始处理: task={task_id or '-'}, feature={str(task.get('feature', '') or '').strip() or '-'}, claim_delay_ms={max(0, claim_delay_ms)}"
+        )
         self._business_task_started()
         try:
-            feature = str(task.get("feature", "") or "").strip()
-            if feature == "handover_from_download":
-                if self.role_mode == "internal":
-                    self._run_handover_internal_download(task)
-                    return
-                if self.role_mode == "external":
-                    self._run_handover_external_continue(task)
-                    return
-            if feature == "day_metric_from_download":
-                if self.role_mode == "internal":
-                    self._run_day_metric_internal_download(task)
-                    return
-                if self.role_mode == "external":
-                    self._run_day_metric_external_continue(task)
-                    return
-            if feature == "wet_bulb_collection":
-                if self.role_mode == "internal":
-                    self._run_wet_bulb_internal_download(task)
-                    return
-                if self.role_mode == "external":
-                    self._run_wet_bulb_external_continue(task)
-                    return
-            if feature == "alarm_event_upload":
-                if self.role_mode == "internal":
-                    self._run_alarm_event_upload_internal_fill(task)
-                    return
-                if self.role_mode == "external":
-                    self._run_alarm_event_upload_external(task)
-                    return
-            if feature == "handover_cache_fill":
-                if self.role_mode == "internal":
-                    self._run_handover_cache_fill_internal(task)
-                    return
-                if self.role_mode == "external":
-                    self._run_handover_cache_fill_external(task)
-                    return
-            if feature == "monthly_cache_fill":
-                if self.role_mode == "internal":
-                    self._run_monthly_cache_fill_internal(task)
-                    return
-                if self.role_mode == "external":
-                    self._run_monthly_cache_fill_external(task)
-                    return
-            if feature in RETIRED_SHARED_BRIDGE_FEATURES:
-                self._retire_disabled_feature_task(
-                    task,
-                    feature=feature,
-                    error_text=RETIRED_SHARED_BRIDGE_FEATURES[feature],
-                )
-                return
-            if feature == "monthly_report_pipeline":
-                if self.role_mode == "internal":
-                    self._run_monthly_internal_download(task)
-                    return
-                if self.role_mode == "external":
-                    self._run_monthly_external_resume(task)
-                    return
-            if feature == self.INTERNAL_BROWSER_ALERT_FEATURE:
-                if self.role_mode == "external":
-                    self._run_internal_browser_alert_external(task)
-                    return
-            error_text = f"共享桥接未识别或不支持的任务类型: 功能={feature}, 角色={_role_label(self.role_mode)}"
-            self._fail_claimed_task(task, error_text=error_text, event_type="unsupported_feature", level="error")
-            self._emit_system_log(f"[共享桥接] {error_text}")
+            self._process_claimed_task(task)
         finally:
             self._business_task_finished()
+        return True
 
     def _loop(self) -> None:
         next_heartbeat = 0.0
@@ -5875,8 +5947,12 @@ class SharedBridgeRuntimeService:
         next_artifact_self_heal = 0.0
         next_internal_alert_refresh = 0.0
         next_waiting_job_reconcile = 0.0
+        next_mailbox_summary_refresh = 0.0
         while not self._stop_event.is_set():
             now_monotonic = time.monotonic()
+            woke = self._wake_event.is_set()
+            if woke:
+                self._wake_event.clear()
             try:
                 if not self._store:
                     self._db_status = "misconfigured"
@@ -5915,17 +5991,15 @@ class SharedBridgeRuntimeService:
                         next_waiting_job_reconcile = now_monotonic + self.WAITING_JOB_RECONCILE_INTERVAL_SEC
                     if self.role_mode == "internal":
                         self._process_internal_browser_alerts()
-                    self._process_one_task_if_needed()
-                    mailbox_tasks = self._list_mailbox_tasks(limit=500)
-                    if mailbox_tasks:
-                        self._counts.update(self._task_counts_from_tasks(mailbox_tasks))
-                        self._cache_task_list(mailbox_tasks)
-                    else:
-                        mirrored_tasks = self._mirror_store.list_tasks(limit=500) if self._mirror_store is not None else []
-                        if mirrored_tasks:
-                            self._counts.update(self._task_counts_from_tasks(mirrored_tasks))
-                        else:
-                            self._counts.update({"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0})
+                    processed_any = False
+                    for _ in range(20):
+                        if not self._process_one_task_if_needed():
+                            break
+                        processed_any = True
+                        self._reconcile_waiting_jobs()
+                    if processed_any or woke or now_monotonic >= next_mailbox_summary_refresh:
+                        self._refresh_runtime_task_cache(limit=500)
+                        next_mailbox_summary_refresh = now_monotonic + self.MAILBOX_SUMMARY_REFRESH_INTERVAL_SEC
                     self._db_status = "ok"
                     self._last_error = ""
                     self._last_poll_at = _now_text()
@@ -5936,5 +6010,11 @@ class SharedBridgeRuntimeService:
                         self._startup_logged = True
             except Exception as exc:  # noqa: BLE001
                 self._mark_loop_error(exc)
-            self._stop_event.wait(self.poll_interval_sec)
+            if self._stop_event.is_set():
+                break
+            self._wake_event.wait(self.poll_interval_sec)
+            try:
+                self._stop_event.wait(0)
+            except Exception:
+                pass
 

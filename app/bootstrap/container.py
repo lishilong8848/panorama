@@ -189,7 +189,6 @@ class AppContainer:
             runtime_config=self.runtime_config,
             app_dir=get_app_dir(),
             config_snapshot_getter=lambda: self.runtime_config,
-            current_ssid_getter=lambda: self.wifi_service.current_ssid() if self.wifi_service else "",
         )
         _report_progress("binding_job_log_sink")
         self.job_service.set_global_log_sink(
@@ -2248,7 +2247,6 @@ class AppContainer:
             runtime_config=self.runtime_config,
             app_dir=get_app_dir(),
             config_snapshot_getter=lambda: self.runtime_config,
-            current_ssid_getter=lambda: self.wifi_service.current_ssid() if self.wifi_service else "",
         )
 
     def apply_config_snapshot(self, settings: Dict[str, Any], *, mode: str = "light") -> None:

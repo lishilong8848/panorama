@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import sqlite3
 import socket
 import sys
 import threading
@@ -81,6 +82,30 @@ def _load_json(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_config_snapshot(job_dir: Path) -> Dict[str, Any]:
+    job_id = str(job_dir.name or "").strip()
+    if not job_id:
+        return {}
+    db_path = job_dir.parent.parent / "task_engine.db"
+    if not db_path.exists():
+        return {}
+    conn = sqlite3.connect(str(db_path), timeout=5.0, isolation_level=None, check_same_thread=False)
+    try:
+        row = conn.execute("SELECT config_snapshot_json FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {}
+    raw = str(row[0] or "").strip()
+    if not raw or raw == "null":
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _emit_event(payload: Dict[str, Any]) -> None:
@@ -175,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     job_dir = Path(args.job_dir).resolve()
     payload_file = Path(args.payload_file).resolve()
     stage_id = str(args.stage_id or "").strip() or "main"
-    config_snapshot = _load_json(job_dir / "config_snapshot.json")
+    config_snapshot = _load_config_snapshot(job_dir)
     payload = _load_json(payload_file)
 
     handler_name = str(args.handler or "").strip()

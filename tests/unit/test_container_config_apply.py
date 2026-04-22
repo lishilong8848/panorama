@@ -17,7 +17,7 @@ class _RecordingJobService:
     def update_log_buffer_size(self, value: int) -> None:
         self.log_buffer_sizes.append(value)
 
-    def configure_task_engine(self, *, runtime_config, app_dir, config_snapshot_getter, current_ssid_getter) -> None:
+    def configure_task_engine(self, *, runtime_config, app_dir, config_snapshot_getter, current_ssid_getter=None) -> None:
         self.configured_runtime_configs.append(runtime_config)
 
     def set_global_log_sink(self, sink) -> None:

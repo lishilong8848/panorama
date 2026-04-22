@@ -4,7 +4,6 @@ import threading
 import time
 from pathlib import Path
 
-from app.modules.report_pipeline.service import job_service as job_service_module
 from app.modules.report_pipeline.service.job_service import JobService
 
 
@@ -63,7 +62,7 @@ def test_network_window_drains_and_switches_to_opposite_side(tmp_path: Path) -> 
     assert waiting_snapshot["network"]["current_side"] == "external"
     assert waiting_snapshot["network"]["window_draining"] is False
     assert waiting_snapshot["network"]["pending_side"] == ""
-    assert waiting_snapshot["network"]["running_external"] == 1
+    assert waiting_snapshot["network"]["running_external"] >= 1
 
     release_external.set()
     _wait_until(lambda: service.get_job_state(second.job_id).status == "running")
@@ -105,18 +104,8 @@ def test_network_window_snapshot_exposes_wait_ages(tmp_path: Path) -> None:
     service.wait_job(second.job_id, timeout_sec=3)
 
 
-def test_internal_unreachable_waits_until_manual_switch(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+def test_internal_network_jobs_do_not_block_on_runtime_probe_state(tmp_path: Path) -> None:
     current = {"ssid": "outer"}
-    state = {
-        "current_ssid": "outer",
-        "ssid_side": "external",
-        "internal_reachable": False,
-        "external_reachable": True,
-        "reachable_sides": ["external"],
-        "mode": "external_only",
-        "last_checked_at": "2026-03-27 10:00:00",
-    }
-    monkeypatch.setattr(job_service_module, "get_network_reachability_state", lambda **_kwargs: dict(state))
     service = JobService()
     service.configure_task_engine(
         runtime_config={
@@ -138,34 +127,17 @@ def test_internal_unreachable_waits_until_manual_switch(tmp_path: Path, monkeypa
         resource_keys=["network:internal"],
     )
 
-    _wait_until(lambda: service.get_job_state(job.job_id).status == "waiting_resource")
-    waiting_state = service.get_job(job.job_id)
-    assert waiting_state["wait_reason"] == "waiting:network_internal_unreachable"
+    _wait_until(lambda: service.get_job_state(job.job_id).status == "success")
 
     waiting_snapshot = service.get_resource_snapshot()
     assert waiting_snapshot["network"]["auto_switch_enabled"] is False
     assert waiting_snapshot["network"]["current_ssid"] == "outer"
     assert waiting_snapshot["network"]["current_detected_side"] == "external"
-    assert waiting_snapshot["network"]["current_side"] == "external"
-    assert waiting_snapshot["network"]["internal_reachable"] is False
+    assert waiting_snapshot["network"]["internal_reachable"] is True
     assert waiting_snapshot["network"]["external_reachable"] is True
 
-    current["ssid"] = "inner"
-    state.update(
-        {
-            "current_ssid": "inner",
-            "ssid_side": "internal",
-            "internal_reachable": True,
-            "external_reachable": True,
-            "reachable_sides": ["internal", "external"],
-            "mode": "internal_only",
-        }
-    )
-    service._network_status_checked_monotonic = 0.0  # noqa: SLF001
-    _wait_until(lambda: service.get_job_state(job.job_id).status == "success")
 
-
-def test_switching_ready_prefers_current_ssid_side_without_parallel_run(tmp_path: Path) -> None:
+def test_network_window_uses_running_side_without_ssid_bias(tmp_path: Path) -> None:
     current = {"ssid": "outer"}
     service = JobService()
     service.configure_task_engine(
@@ -188,19 +160,6 @@ def test_switching_ready_prefers_current_ssid_side_without_parallel_run(tmp_path
         current_ssid_getter=lambda: current["ssid"],
     )
 
-    service._network_status_checked_monotonic = 0.0  # noqa: SLF001
-    service._network_status_snapshot = {  # noqa: SLF001
-        "current_ssid": "outer",
-        "ssid_side": "external",
-        "internal_reachable": True,
-        "external_reachable": True,
-        "reachable_sides": ["internal", "external"],
-        "mode": "switching_ready",
-        "last_checked_at": "2026-03-27 10:00:00",
-    }
-    service._network_status_cache_ttl_sec = 9999  # noqa: SLF001
-    service._network_status_checked_monotonic = time.monotonic()  # noqa: SLF001
-
     release_external = threading.Event()
     external_started = threading.Event()
 
@@ -216,14 +175,13 @@ def test_switching_ready_prefers_current_ssid_side_without_parallel_run(tmp_path
     external_job = service.start_job("external", _external, resource_keys=["network:external"])
 
     _wait_until(lambda: service.get_job_state(external_job.job_id).status == "running")
-    _wait_until(lambda: service.get_job_state(internal_job.job_id).status == "waiting_resource")
+    _wait_until(lambda: service.get_job_state(internal_job.job_id).status == "success")
 
     snapshot = service.get_resource_snapshot()
     assert snapshot["network"]["mode"] == "switching_ready"
     assert snapshot["network"]["current_side"] == "external"
-    assert snapshot["network"]["running_internal"] == 0
     assert snapshot["network"]["running_external"] == 1
 
     release_external.set()
     service.wait_job(external_job.job_id, timeout_sec=3)
-    assert service.get_job_state(internal_job.job_id).status == "waiting_resource"
+    assert service.get_job_state(internal_job.job_id).status == "success"

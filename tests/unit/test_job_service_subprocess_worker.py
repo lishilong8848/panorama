@@ -24,7 +24,6 @@ def _seed_worker_job_snapshot(
     db = TaskEngineDatabase(runtime_config={"paths": {}}, app_dir=runtime_app_dir)
     store = TaskEngineStore(runtime_config={"paths": {}}, app_dir=runtime_app_dir)
     store.persist_stage_payload(job_id, "main", payload)
-    store.persist_config_snapshot(job_id, {"paths": {"business_root_dir": "D:/QLDownload"}})
     db.upsert_job(
         {
             "job_id": job_id,
@@ -98,7 +97,12 @@ def test_job_service_runs_worker_stage_in_subprocess(tmp_path: Path) -> None:
     task_engine_root = runtime_app_dir / ".runtime" / "task_engine"
     db_path = task_engine_root / "task_engine.db"
     assert db_path.exists()
+    assert not (task_engine_root / "jobs" / job.job_id / "job.json").exists()
+    assert not (task_engine_root / "jobs" / job.job_id / "config_snapshot.json").exists()
     assert not (task_engine_root / "jobs" / job.job_id / "stages" / "main.result.json").exists()
+    assert not (task_engine_root / "jobs" / job.job_id / "stages" / "main.json").exists()
+    assert not (task_engine_root / "resources" / "resources.json").exists()
+    assert not any((task_engine_root / "workers").glob("*.json"))
 
     logs_payload = service.get_logs(job.job_id, after_event_id=0)
     events = list(logs_payload.get("events") or [])

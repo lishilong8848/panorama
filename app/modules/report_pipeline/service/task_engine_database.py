@@ -4,6 +4,7 @@ import json
 import queue
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -20,6 +21,12 @@ class TaskEngineDatabase:
     WRITE_PUT_TIMEOUT_SEC = 5.0
     WRITE_DONE_TIMEOUT_SEC = 30.0
     WRITER_RECOVERY_DELAY_SEC = 0.5
+    JOB_SELECT_COLUMNS = """
+        job_id, name, feature, dedupe_key, submitted_by, priority,
+        resource_keys_json, wait_reason, bridge_task_id, status,
+        created_at, started_at, finished_at, summary, error,
+        result_json, cancel_requested, revision
+    """
 
     def __init__(
         self,
@@ -37,6 +44,14 @@ class TaskEngineDatabase:
         self._last_cleanup_at = ""
         self._last_writer_error = ""
         self._writer_lock = threading.Lock()
+        self._write_metrics_lock = threading.Lock()
+        self._write_count = 0
+        self._slow_write_count = 0
+        self._last_write_elapsed_ms = 0
+        self._last_write_queue_wait_ms = 0
+        self._last_write_exec_ms = 0
+        self._last_write_queue_depth = 0
+        self._max_write_elapsed_ms = 0
         self._init_db()
         self._writer: threading.Thread | None = None
         self._ensure_writer_alive()
@@ -173,6 +188,14 @@ class TaskEngineDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_jobs_dedupe_key_status_created_at "
                 "ON jobs(dedupe_key, status, created_at DESC, job_id DESC)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_created_at_job_id "
+                "ON jobs(created_at DESC, job_id DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at_job_id "
+                "ON jobs(status, created_at DESC, job_id DESC)"
+            )
             network_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(network_window)").fetchall()}
             for statement, column_name in (
                 ("ALTER TABLE network_window ADD COLUMN auto_switch_enabled INTEGER NOT NULL DEFAULT 1", "auto_switch_enabled"),
@@ -259,10 +282,21 @@ class TaskEngineDatabase:
         if self._closed:
             raise RuntimeError("TaskEngineDatabase 已关闭")
         self._ensure_writer_alive()
+        submitted_at = time.perf_counter()
+        queue_depth = int(self._writes.qsize())
         done = threading.Event()
         holder: dict[str, Any] = {}
+
+        def _timed_callback(conn: sqlite3.Connection) -> Any:
+            holder["queue_wait_ms"] = int((time.perf_counter() - submitted_at) * 1000)
+            exec_started = time.perf_counter()
+            try:
+                return callback(conn)
+            finally:
+                holder["exec_ms"] = int((time.perf_counter() - exec_started) * 1000)
+
         try:
-            self._writes.put((callback, done, holder), timeout=self.WRITE_PUT_TIMEOUT_SEC)
+            self._writes.put((_timed_callback, done, holder), timeout=self.WRITE_PUT_TIMEOUT_SEC)
         except queue.Full as exc:
             raise RuntimeError(
                 f"任务引擎 SQLite 写队列已满，当前长度={self._writes.qsize()}，请检查长时间写入堆积"
@@ -277,7 +311,27 @@ class TaskEngineDatabase:
         error = holder.get("error")
         if error is not None:
             raise error
+        elapsed_ms = int((time.perf_counter() - submitted_at) * 1000)
+        self._record_write_metrics(
+            elapsed_ms=elapsed_ms,
+            queue_wait_ms=int(holder.get("queue_wait_ms") or 0),
+            exec_ms=int(holder.get("exec_ms") or 0),
+            queue_depth=queue_depth,
+        )
         return holder.get("result")
+
+    def _record_write_metrics(self, *, elapsed_ms: int, queue_wait_ms: int, exec_ms: int, queue_depth: int) -> None:
+        elapsed = max(0, int(elapsed_ms or 0))
+        with self._write_metrics_lock:
+            self._write_count += 1
+            self._last_write_elapsed_ms = elapsed
+            self._last_write_queue_wait_ms = max(0, int(queue_wait_ms or 0))
+            self._last_write_exec_ms = max(0, int(exec_ms or 0))
+            self._last_write_queue_depth = max(0, int(queue_depth or 0))
+            if elapsed > self._max_write_elapsed_ms:
+                self._max_write_elapsed_ms = elapsed
+            if elapsed >= 500:
+                self._slow_write_count += 1
 
     @staticmethod
     def _loads(text: str | None, fallback: Any) -> Any:
@@ -555,47 +609,68 @@ class TaskEngineDatabase:
             "last_event_id": int(last_event_id or 0),
         }
 
+    def _stage_payload_from_row(self, item: sqlite3.Row, worker: sqlite3.Row | None) -> dict[str, Any]:
+        return {
+            "stage_id": str(item["stage_id"] or ""),
+            "name": str(item["name"] or ""),
+            "status": str(item["status"] or "pending"),
+            "resource_keys": self._loads(item["resource_keys_json"], []),
+            "resume_policy": str(item["resume_policy"] or "manual_resume"),
+            "worker_handler": str(item["worker_handler"] or ""),
+            "worker_pid": int(item["worker_pid"] or 0),
+            "started_at": str(item["started_at"] or ""),
+            "finished_at": str(item["finished_at"] or ""),
+            "summary": str(item["summary"] or ""),
+            "error": str(item["error"] or ""),
+            "result": self._loads(item["result_json"], None),
+            "cancel_requested": bool(int(item["cancel_requested"] or 0)),
+            "revision": int(item["revision"] or 0),
+            "worker_status": str((worker["status"] if worker else "") or ""),
+            "last_heartbeat_at": str((worker["last_heartbeat_at"] if worker else "") or ""),
+        }
+
+    def _jobs_from_rows(self, conn: sqlite3.Connection, job_rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        if not job_rows:
+            return []
+        job_ids = [str(row["job_id"] or "").strip() for row in job_rows if str(row["job_id"] or "").strip()]
+        if not job_ids:
+            return []
+        placeholders = ", ".join("?" for _ in job_ids)
+        stage_rows = conn.execute(
+            f"SELECT * FROM stages WHERE job_id IN ({placeholders}) ORDER BY job_id ASC, stage_id ASC",
+            job_ids,
+        ).fetchall()
+        worker_rows = conn.execute(
+            f"SELECT * FROM workers WHERE job_id IN ({placeholders})",
+            job_ids,
+        ).fetchall()
+        event_rows = conn.execute(
+            f"SELECT job_id, COALESCE(MAX(event_id), 0) AS last_event_id FROM job_events WHERE job_id IN ({placeholders}) GROUP BY job_id",
+            job_ids,
+        ).fetchall()
+        workers = {
+            (str(item["job_id"]), str(item["stage_id"])): item
+            for item in worker_rows
+        }
+        stages_by_job: dict[str, list[dict[str, Any]]] = {job_id: [] for job_id in job_ids}
+        for item in stage_rows:
+            job_id = str(item["job_id"] or "")
+            worker = workers.get((job_id, str(item["stage_id"] or "")))
+            stages_by_job.setdefault(job_id, []).append(self._stage_payload_from_row(item, worker))
+        last_event_ids = {str(item["job_id"] or ""): int(item["last_event_id"] or 0) for item in event_rows}
+        return [
+            self._row_to_job(row, stages_by_job.get(str(row["job_id"] or ""), []), last_event_ids.get(str(row["job_id"] or ""), 0))
+            for row in job_rows
+        ]
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         conn = self._connect()
         try:
-            row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (str(job_id or "").strip(),)).fetchone()
+            row = conn.execute(f"SELECT {self.JOB_SELECT_COLUMNS} FROM jobs WHERE job_id = ?", (str(job_id or "").strip(),)).fetchone()
             if row is None:
                 return None
-            stage_rows = conn.execute(
-                "SELECT * FROM stages WHERE job_id = ? ORDER BY stage_id ASC",
-                (str(job_id or "").strip(),),
-            ).fetchall()
-            worker_rows = {
-                (str(item["job_id"]), str(item["stage_id"])): item
-                for item in conn.execute("SELECT * FROM workers WHERE job_id = ?", (str(job_id or "").strip(),)).fetchall()
-            }
-            last_event_id = int(
-                conn.execute("SELECT COALESCE(MAX(event_id), 0) FROM job_events WHERE job_id = ?", (str(job_id or "").strip(),)).fetchone()[0] or 0
-            )
-            stages: list[dict[str, Any]] = []
-            for item in stage_rows:
-                worker = worker_rows.get((str(item["job_id"]), str(item["stage_id"])))
-                stages.append(
-                    {
-                        "stage_id": str(item["stage_id"] or ""),
-                        "name": str(item["name"] or ""),
-                        "status": str(item["status"] or "pending"),
-                        "resource_keys": self._loads(item["resource_keys_json"], []),
-                        "resume_policy": str(item["resume_policy"] or "manual_resume"),
-                        "worker_handler": str(item["worker_handler"] or ""),
-                        "worker_pid": int(item["worker_pid"] or 0),
-                        "started_at": str(item["started_at"] or ""),
-                        "finished_at": str(item["finished_at"] or ""),
-                        "summary": str(item["summary"] or ""),
-                        "error": str(item["error"] or ""),
-                        "result": self._loads(item["result_json"], None),
-                        "cancel_requested": bool(int(item["cancel_requested"] or 0)),
-                        "revision": int(item["revision"] or 0),
-                        "worker_status": str((worker["status"] if worker else "") or ""),
-                        "last_heartbeat_at": str((worker["last_heartbeat_at"] if worker else "") or ""),
-                    }
-                )
-            return self._row_to_job(row, stages, last_event_id)
+            jobs = self._jobs_from_rows(conn, [row])
+            return jobs[0] if jobs else None
         finally:
             conn.close()
 
@@ -603,23 +678,18 @@ class TaskEngineDatabase:
         normalized = [str(item or "").strip().lower() for item in (statuses or []) if str(item or "").strip()]
         conn = self._connect()
         try:
-            sql = "SELECT job_id FROM jobs"
+            sql = f"SELECT {self.JOB_SELECT_COLUMNS} FROM jobs"
             params: list[Any] = []
             if normalized:
                 placeholders = ", ".join("?" for _ in normalized)
-                sql += f" WHERE lower(status) IN ({placeholders})"
+                sql += f" WHERE status IN ({placeholders})"
                 params.extend(normalized)
-            sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+            sql += " ORDER BY created_at DESC, job_id DESC LIMIT ?"
             params.append(max(1, int(limit or 1)))
-            job_ids = [str(row[0] or "") for row in conn.execute(sql, params).fetchall()]
+            rows = conn.execute(sql, params).fetchall()
+            return self._jobs_from_rows(conn, rows)
         finally:
             conn.close()
-        items: list[dict[str, Any]] = []
-        for job_id in job_ids:
-            payload = self.get_job(job_id)
-            if payload:
-                items.append(payload)
-        return items
 
     def find_active_job_by_dedupe_key(
         self,
@@ -633,18 +703,18 @@ class TaskEngineDatabase:
         normalized_statuses = [str(item or "").strip().lower() for item in (statuses or []) if str(item or "").strip()]
         conn = self._connect()
         try:
-            sql = "SELECT job_id FROM jobs WHERE dedupe_key = ?"
+            sql = f"SELECT {self.JOB_SELECT_COLUMNS} FROM jobs WHERE dedupe_key = ?"
             params: list[Any] = [normalized_key]
             if normalized_statuses:
                 placeholders = ", ".join("?" for _ in normalized_statuses)
-                sql += f" AND lower(status) IN ({placeholders})"
+                sql += f" AND status IN ({placeholders})"
                 params.extend(normalized_statuses)
-            sql += " ORDER BY created_at DESC, rowid DESC LIMIT 1"
+            sql += " ORDER BY created_at DESC, job_id DESC LIMIT 1"
             row = conn.execute(sql, params).fetchone()
-            job_id = str((row[0] if row else "") or "").strip()
+            jobs = self._jobs_from_rows(conn, [row] if row else [])
+            return jobs[0] if jobs else None
         finally:
             conn.close()
-        return self.get_job(job_id) if job_id else None
 
     def job_counts(self) -> dict[str, int]:
         conn = self._connect()
@@ -749,7 +819,7 @@ class TaskEngineDatabase:
                 f"""
                 SELECT COUNT(1) AS cnt
                 FROM jobs
-                WHERE lower(status) IN ({", ".join("?" for _ in terminal_statuses)})
+                WHERE status IN ({", ".join("?" for _ in terminal_statuses)})
                   AND COALESCE(NULLIF(finished_at, ''), created_at) < ?
                 """,
                 (*terminal_statuses, cutoff_text),
@@ -757,7 +827,7 @@ class TaskEngineDatabase:
             conn.execute(
                 f"""
                 DELETE FROM jobs
-                WHERE lower(status) IN ({", ".join("?" for _ in terminal_statuses)})
+                WHERE status IN ({", ".join("?" for _ in terminal_statuses)})
                   AND COALESCE(NULLIF(finished_at, ''), created_at) < ?
                 """,
                 (*terminal_statuses, cutoff_text),
@@ -769,12 +839,23 @@ class TaskEngineDatabase:
         return deleted
 
     def runtime_snapshot(self) -> dict[str, Any]:
+        with self._write_metrics_lock:
+            write_metrics = {
+                "write_count": int(self._write_count or 0),
+                "slow_write_count": int(self._slow_write_count or 0),
+                "last_write_elapsed_ms": int(self._last_write_elapsed_ms or 0),
+                "last_write_queue_wait_ms": int(self._last_write_queue_wait_ms or 0),
+                "last_write_exec_ms": int(self._last_write_exec_ms or 0),
+                "last_write_queue_depth": int(self._last_write_queue_depth or 0),
+                "max_write_elapsed_ms": int(self._max_write_elapsed_ms or 0),
+            }
         return {
             "write_queue_length": int(self._writes.qsize()),
             "last_cleanup_at": str(self._last_cleanup_at or "").strip(),
             "closed": bool(self._closed),
             "writer_alive": bool(self._writer and self._writer.is_alive()),
             "last_writer_error": str(self._last_writer_error or "").strip(),
+            **write_metrics,
         }
 
     def close(self) -> None:
