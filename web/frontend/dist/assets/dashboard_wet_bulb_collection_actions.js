@@ -86,7 +86,8 @@ export function createDashboardWetBulbCollectionActions(ctx) {
 
   function applyWetBulbSchedulerSnapshotFromAction(data) {
     if (!data || typeof data !== "object" || !health?.wet_bulb_collection?.scheduler) return;
-    Object.assign(health.wet_bulb_collection.scheduler, {
+    const targetScheduler = health.wet_bulb_collection.scheduler;
+    Object.assign(targetScheduler, {
       running: Boolean(data.running),
       status: String(data.status || ""),
       next_run_time: String(data.next_run_time || ""),
@@ -106,7 +107,10 @@ export function createDashboardWetBulbCollectionActions(ctx) {
         : Boolean(health.wet_bulb_collection.scheduler.effective_auto_start_in_gui),
       memory_source: Object.prototype.hasOwnProperty.call(data, "memory_source")
         ? String(data.memory_source || "")
-        : String(health.wet_bulb_collection.scheduler.memory_source || ""),
+        : String(targetScheduler.memory_source || ""),
+      display: data.display && typeof data.display === "object"
+        ? { ...data.display }
+        : (targetScheduler.display && typeof targetScheduler.display === "object" ? { ...targetScheduler.display } : {}),
     });
   }
 

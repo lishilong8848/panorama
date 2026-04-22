@@ -143,15 +143,29 @@ class IntervalSchedulerService:
     def status_text(self) -> str:
         return "运行中" if self.is_running() else "未启动"
 
-    def next_run_time(self, now: datetime | None = None) -> datetime:
-        reference_now = now or datetime.now()
-        interval = timedelta(minutes=int(self.cfg["interval_minutes"]))
+    def _interval_delta(self) -> timedelta:
+        return timedelta(minutes=int(self.cfg["interval_minutes"]))
+
+    def _initial_next_run_time(self) -> datetime:
+        interval = self._interval_delta()
         last_attempt = self._parse_time(str(self.state.get("last_attempt_at", "")))
         if last_attempt is not None:
-            next_run = last_attempt + interval
-            return reference_now if next_run <= reference_now else next_run
-        base_time = self.started_at if self.runtime.get("started_at") else reference_now
-        return base_time + interval
+            return last_attempt + interval
+        return self.started_at + interval
+
+    def due_run_time(self) -> datetime:
+        return self._initial_next_run_time()
+
+    def next_run_time(self, now: datetime | None = None) -> datetime:
+        reference_now = now or datetime.now()
+        interval = self._interval_delta()
+        next_run = self._initial_next_run_time()
+        if next_run <= reference_now:
+            elapsed_seconds = max(0, int((reference_now - next_run).total_seconds()))
+            interval_seconds = max(1, int(interval.total_seconds()))
+            missed_intervals = (elapsed_seconds // interval_seconds) + 1
+            next_run = next_run + (interval * missed_intervals)
+        return next_run
 
     def next_run_text(self) -> str:
         return self.next_run_time().strftime("%Y-%m-%d %H:%M:%S")
@@ -237,7 +251,7 @@ class IntervalSchedulerService:
         while not self._stop.is_set():
             now = datetime.now()
             self.runtime["last_check_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
-            next_run = self.next_run_time(now)
+            next_run = self.due_run_time()
             if now < next_run:
                 self.runtime["last_decision"] = "skip:before_next_run"
                 self._stop.wait(interval_sec)

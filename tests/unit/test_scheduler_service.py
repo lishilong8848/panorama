@@ -44,12 +44,19 @@ def _build_interval_service(tmp_path, *, interval_minutes: int = 60) -> Interval
     )
 
 
-def test_interval_next_run_time_returns_now_when_saved_next_run_is_overdue(tmp_path):
+def test_interval_next_run_time_advances_overdue_time_to_next_interval_boundary(tmp_path):
     svc = _build_interval_service(tmp_path, interval_minutes=60)
     svc.state["last_attempt_at"] = "2026-04-22 15:34:43"
     now = datetime(2026, 4, 23, 2, 0, 0)
 
-    assert svc.next_run_time(now) == now
+    assert svc.next_run_time(now) == datetime(2026, 4, 23, 2, 34, 43)
+
+
+def test_interval_due_run_time_keeps_overdue_target_for_scheduler_loop(tmp_path):
+    svc = _build_interval_service(tmp_path, interval_minutes=60)
+    svc.state["last_attempt_at"] = "2026-04-22 15:34:43"
+
+    assert svc.due_run_time() == datetime(2026, 4, 22, 16, 34, 43)
 
 
 def test_interval_next_run_time_keeps_future_saved_next_run(tmp_path):
@@ -58,6 +65,14 @@ def test_interval_next_run_time_keeps_future_saved_next_run(tmp_path):
     now = datetime(2026, 4, 23, 2, 0, 0)
 
     assert svc.next_run_time(now) == datetime(2026, 4, 23, 2, 34, 43)
+
+
+def test_interval_next_run_time_uses_stable_started_at_without_attempt(tmp_path):
+    svc = _build_interval_service(tmp_path, interval_minutes=60)
+    svc.started_at = datetime(2026, 4, 23, 1, 28, 17)
+    now = datetime(2026, 4, 23, 2, 28, 18)
+
+    assert svc.next_run_time(now) == datetime(2026, 4, 23, 3, 28, 17)
 
 
 def test_should_trigger_due_after_run_time(tmp_path):

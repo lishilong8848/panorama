@@ -62,3 +62,12 @@ def test_auto_flow_scheduler_card_shows_next_run_time() -> None:
 
     assert "下次执行" in source
     assert "getSchedulerDisplayText('scheduler', 'next_run_text', '-')" in source
+
+
+def test_wet_bulb_scheduler_action_merges_display_snapshot() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    source = (
+        project_root / "web" / "frontend" / "src" / "dashboard_wet_bulb_collection_actions.js"
+    ).read_text(encoding="utf-8")
+
+    assert "display: data.display && typeof data.display === \"object\"" in source
