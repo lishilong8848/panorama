@@ -55,6 +55,55 @@ def test_source_cache_entries_dual_write_json_index_and_read_prefer_index(tmp_pa
     assert rows[0]["relative_path"] == source_file.relative_to(shared_root).as_posix()
 
 
+def test_source_cache_entries_merge_sqlite_when_json_index_is_stale(tmp_path) -> None:
+    shared_root = tmp_path / "share"
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+
+    old_file = shared_root / "交接班日志源文件" / "202604" / "20260422--19" / "old.xlsx"
+    new_file = shared_root / "交接班日志源文件" / "202604" / "20260422--20" / "new.xlsx"
+    old_file.parent.mkdir(parents=True, exist_ok=True)
+    new_file.parent.mkdir(parents=True, exist_ok=True)
+    old_file.write_bytes(b"old")
+    new_file.write_bytes(b"new")
+
+    store.upsert_source_cache_entry(
+        source_family="handover_log_family",
+        building="A楼",
+        bucket_kind="latest",
+        bucket_key="2026-04-22 19",
+        downloaded_at="2026-04-22 19:05:00",
+        relative_path=old_file.relative_to(shared_root).as_posix(),
+        status="ready",
+        file_hash="old",
+        size_bytes=3,
+    )
+    store.upsert_source_cache_entry(
+        source_family="handover_log_family",
+        building="A楼",
+        bucket_kind="latest",
+        bucket_key="2026-04-22 20",
+        downloaded_at="2026-04-22 20:05:00",
+        relative_path=new_file.relative_to(shared_root).as_posix(),
+        status="ready",
+        file_hash="new",
+        size_bytes=3,
+    )
+
+    stale_new_index = shared_root / "source_cache_index" / "handover_log_family" / "A楼" / "2026-04-22_20.json"
+    stale_new_index.unlink()
+
+    rows = store.list_source_cache_entries(
+        source_family="handover_log_family",
+        building="A楼",
+        bucket_kind="latest",
+        status="ready",
+        limit=10,
+    )
+
+    assert [row["bucket_key"] for row in rows[:2]] == ["2026-04-22 20", "2026-04-22 19"]
+
+
 def test_source_cache_startup_cleanup_deletes_unusable_indexes_only(tmp_path) -> None:
     shared_root = tmp_path / "share"
     store = SharedBridgeStore(shared_root)

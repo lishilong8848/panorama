@@ -712,14 +712,17 @@ def _build_results_from_mapping(
     )
 
 
-def _build_results_from_file_items(file_items: List[Dict[str, str]]) -> List[CalculationResult]:
+def _build_results_from_file_items(
+    file_items: List[Dict[str, str]],
+    emit_log: Callable[[str], None] = print,
+) -> List[CalculationResult]:
     return build_results_from_file_items_runtime(
         file_items,
         calculate_monthly_report=lambda file_path, building: calculate_monthly_report(
             file_path,
             building_override=building,
         ),
-        emit_log=print,
+        emit_log=emit_log,
     )
 
 
@@ -761,6 +764,7 @@ def run_with_explicit_file_items(
     upload: bool = True,
     save_json: bool = False,
     upload_log_feature: str = "月报上传",
+    emit_log: Callable[[str], None] = print,
 ) -> List[CalculationResult]:
     """
     按显式给定的文件项执行计算与上传。
@@ -776,14 +780,19 @@ def run_with_explicit_file_items(
         upload=upload,
         save_json=save_json,
         upload_log_feature=upload_log_feature,
+        emit_log=emit_log,
     )
 
 
-def save_results(results: List[CalculationResult], config: Dict[str, Any]) -> None:
+def save_results(
+    results: List[CalculationResult],
+    config: Dict[str, Any],
+    emit_log: Callable[[str], None] = print,
+) -> None:
     save_results_runtime(
         results,
         config,
-        emit_log=print,
+        emit_log=emit_log,
     )
 
 
@@ -792,6 +801,7 @@ def upload_results_to_feishu(
     config: Dict[str, Any],
     date_override_by_source: Optional[Dict[str, str]] = None,
     log_feature: str = "月报上传",
+    emit_log: Callable[[str], None] = print,
 ) -> None:
     upload_results_to_feishu_runtime(
         results=results,
@@ -800,7 +810,7 @@ def upload_results_to_feishu(
         client_factory=FeishuBitableClient,
         date_override_by_source=date_override_by_source,
         log_feature=log_feature,
-        emit_log=print,
+        emit_log=emit_log,
     )
 
 def main() -> None:

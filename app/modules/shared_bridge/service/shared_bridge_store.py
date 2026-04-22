@@ -2427,8 +2427,21 @@ class SharedBridgeStore:
             status=status,
             limit=max(1, int(limit or 200)),
         )
-        if index_rows:
-            return index_rows
+        row_limit = max(1, int(limit or 200))
+        rows_by_id: Dict[str, Dict[str, Any]] = {}
+        anonymous_rows: List[Dict[str, Any]] = []
+        for row in index_rows:
+            if not isinstance(row, dict):
+                continue
+            entry_id = str(row.get("entry_id", "") or "").strip()
+            if entry_id:
+                rows_by_id[entry_id] = row
+            else:
+                anonymous_rows.append(row)
+        # Keep SQLite as a correctness fallback. JSON index files are the fast
+        # path, but if they are stale or missed by a previous write, returning
+        # them exclusively hides newer source-cache rows from the external
+        # status page.
         clauses: List[str] = []
         params: List[Any] = []
         if str(source_family or "").strip():
@@ -2463,9 +2476,35 @@ class SharedBridgeStore:
                 ORDER BY downloaded_at DESC, updated_at DESC, entry_id DESC
                 LIMIT ?
                 """,
-                [*params, max(1, int(limit or 200))],
+                [*params, row_limit],
             ).fetchall()
-        return [self._row_to_source_cache_entry_dict(row) for row in rows]
+        db_rows = [self._row_to_source_cache_entry_dict(row) for row in rows]
+        if not index_rows:
+            return db_rows
+        for row in db_rows:
+            entry_id = str(row.get("entry_id", "") or "").strip()
+            if not entry_id:
+                anonymous_rows.append(row)
+                continue
+            existing = rows_by_id.get(entry_id)
+            if existing is None or (
+                str(row.get("updated_at", "") or ""),
+                str(row.get("downloaded_at", "") or ""),
+            ) >= (
+                str(existing.get("updated_at", "") or ""),
+                str(existing.get("downloaded_at", "") or ""),
+            ):
+                rows_by_id[entry_id] = row
+        merged = [*rows_by_id.values(), *anonymous_rows]
+        merged.sort(
+            key=lambda row: (
+                str(row.get("downloaded_at", "") or ""),
+                str(row.get("updated_at", "") or ""),
+                str(row.get("entry_id", "") or ""),
+            ),
+            reverse=True,
+        )
+        return merged[:row_limit]
 
     def list_recent_source_cache_entries(
         self,

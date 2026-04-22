@@ -38,6 +38,7 @@ def run_monthly_from_file_items(
         upload=True,
         save_json=False,
         upload_log_feature=source_label,
+        emit_log=emit_log,
     )
     emit_log(f"[{source_label}] 执行完成: result_count={len(results)}")
     return {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
@@ -316,6 +317,8 @@ def upload_results_to_feishu(
     log_feature: str = "月报上传",
     emit_log: Callable[[str], None] = print,
 ) -> None:
+    upload_started = time.perf_counter()
+    emit_log(f"[飞书上传] 已进入上传函数: results={len(results)}")
     if "feishu" not in config or not isinstance(config["feishu"], dict):
         raise ValueError("配置错误: feishu 缺失，请在JSON中配置。")
     feishu_cfg = config["feishu"]
@@ -349,6 +352,7 @@ def upload_results_to_feishu(
     if request_retry_interval_sec < 0:
         raise ValueError("配置错误: feishu.request_retry_interval_sec 必须大于等于0")
 
+    client_init_started = time.perf_counter()
     client = client_factory(
         app_id=app_id,
         app_secret=app_secret,
@@ -362,6 +366,7 @@ def upload_results_to_feishu(
         request_retry_count=request_retry_count,
         request_retry_interval_sec=request_retry_interval_sec,
     )
+    emit_log(f"[飞书上传] 客户端初始化完成: elapsed_ms={int((time.perf_counter() - client_init_started) * 1000)}")
 
     report_type = feishu_cfg["report_type"]
     skip_zero_records = bool(feishu_cfg["skip_zero_records"])
@@ -379,7 +384,10 @@ def upload_results_to_feishu(
         source_key = source_file_identity_key(result.source_file)
         upload_date_text = normalized_source_dates.get(source_key, "") or date_override or result.month
         resolved_upload_dates[source_key] = upload_date_text
-    emit_log(f"[飞书上传] 开始准备按日期 upsert: results={len(results)}")
+    emit_log(
+        f"[飞书上传] 开始准备按日期 upsert: results={len(results)}, "
+        f"elapsed_ms={int((time.perf_counter() - upload_started) * 1000)}"
+    )
 
     for result in results:
         source_key = source_file_identity_key(result.source_file)

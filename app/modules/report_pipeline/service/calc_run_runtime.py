@@ -2,10 +2,28 @@ from __future__ import annotations
 
 import json
 import re
+from inspect import Parameter, signature
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 from app.modules.report_pipeline.service.source_path_identity import source_file_identity_key
+
+
+def _call_with_optional_emit_log(fn: Callable[..., Any], *args: Any, emit_log: Callable[[str], None], **kwargs: Any) -> Any:
+    try:
+        sig = signature(fn)
+    except (TypeError, ValueError):
+        sig = None
+    if sig is None:
+        return fn(*args, emit_log=emit_log, **kwargs)
+    params = sig.parameters
+    supports_emit_log = "emit_log" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values())
+    if not supports_emit_log:
+        return fn(*args, **kwargs)
+    try:
+        return fn(*args, emit_log=emit_log, **kwargs)
+    except TypeError:
+        raise
 
 
 def run_with_config(
@@ -80,6 +98,7 @@ def run_with_explicit_file_items(
     upload: bool = True,
     save_json: bool = False,
     upload_log_feature: str = "月报上传",
+    emit_log: Callable[[str], None] = print,
 ) -> List[Any]:
     normalized_items: List[Dict[str, str]] = []
     source_date_map: Dict[str, str] = {}
@@ -111,19 +130,29 @@ def run_with_explicit_file_items(
                 raise ValueError(f"file_items 第{idx}项 upload_date 格式错误，必须为YYYY-MM-DD")
             source_date_map[source_file_identity_key(path_obj)] = upload_date
 
-    results = build_results_from_file_items(normalized_items)
+    results = _call_with_optional_emit_log(
+        build_results_from_file_items,
+        normalized_items,
+        emit_log=emit_log,
+    )
     if not results:
+        emit_log(f"[{upload_log_feature}] 计算阶段完成: results=0")
         return []
+    emit_log(f"[{upload_log_feature}] 计算阶段完成: results={len(results)}")
 
     if save_json:
-        save_results_fn(results, config)
+        _call_with_optional_emit_log(save_results_fn, results, config, emit_log=emit_log)
     if upload:
-        upload_results_to_feishu_fn(
+        emit_log(f"[{upload_log_feature}] 准备进入飞书上传")
+        _call_with_optional_emit_log(
+            upload_results_to_feishu_fn,
             results,
             config,
             date_override_by_source=source_date_map if source_date_map else None,
             log_feature=upload_log_feature,
+            emit_log=emit_log,
         )
+        emit_log(f"[{upload_log_feature}] 飞书上传调用完成")
     return results
 
 
