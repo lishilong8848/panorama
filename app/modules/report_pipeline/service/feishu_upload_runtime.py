@@ -1,10 +1,51 @@
 from __future__ import annotations
 
+import queue
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from app.modules.report_pipeline.service.source_path_identity import source_file_identity_key
+
+
+class _NonBlockingEmitLog:
+    def __init__(self, sink: Callable[[str], None], *, maxsize: int = 1000) -> None:
+        self._sink = sink
+        self._queue: queue.Queue[str] = queue.Queue(maxsize=max(10, int(maxsize or 1000)))
+        self._worker = threading.Thread(target=self._loop, daemon=True, name="feishu-upload-log-sink")
+        self._worker.start()
+
+    def _loop(self) -> None:
+        while True:
+            text = self._queue.get()
+            try:
+                self._sink(text)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def __call__(self, text: str) -> None:
+        raw = str(text or "").strip()
+        if not raw:
+            return
+        try:
+            self._queue.put_nowait(raw)
+        except queue.Full:
+            pass
+
+
+def _should_decouple_emit_log(emit_log: Callable[[str], None]) -> bool:
+    module_name = str(getattr(emit_log, "__module__", "") or "")
+    qualname = str(getattr(emit_log, "__qualname__", "") or "")
+    return module_name == "app.worker.entry" or module_name.endswith(".worker.entry") or "WorkerRuntime" in qualname
+
+
+def _prepare_emit_log(emit_log: Callable[[str], None]) -> Callable[[str], None]:
+    if not callable(emit_log):
+        return print
+    if _should_decouple_emit_log(emit_log):
+        return _NonBlockingEmitLog(emit_log)
+    return emit_log
 
 
 def _text(value: Any) -> str:
@@ -317,6 +358,7 @@ def upload_results_to_feishu(
     log_feature: str = "月报上传",
     emit_log: Callable[[str], None] = print,
 ) -> None:
+    emit_log = _prepare_emit_log(emit_log)
     upload_started = time.perf_counter()
     emit_log(f"[飞书上传] 已进入上传函数: results={len(results)}")
     if "feishu" not in config or not isinstance(config["feishu"], dict):
