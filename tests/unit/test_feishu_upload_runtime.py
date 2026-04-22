@@ -107,6 +107,29 @@ def test_upload_results_to_feishu_skip_when_disabled() -> None:
     assert any("上传" in line and "关闭" in line for line in logs)
 
 
+def test_upload_results_to_feishu_logs_missing_target_config() -> None:
+    logs: List[str] = []
+    config = _build_config(enable_upload=True)
+    config["feishu"]["app_token"] = ""
+    config["feishu"]["calc_table_id"] = ""
+    config["feishu"]["attachment_table_id"] = ""
+
+    with pytest.raises(ValueError) as exc:
+        upload_results_to_feishu(
+            results=[],
+            config=config,
+            resolve_upload_date_from_runtime=lambda _cfg: None,
+            client_factory=lambda **_: (_ for _ in ()).throw(RuntimeError("should not init client")),
+            emit_log=logs.append,
+        )
+
+    assert "app_token" in str(exc.value)
+    assert any(
+        "app_token" in line and "calc_table_id" in line and "attachment_table_id" in line
+        for line in logs
+    )
+
+
 def test_date_field_matches_any_timestamp_inside_day() -> None:
     start_ms = 1776700800000
 

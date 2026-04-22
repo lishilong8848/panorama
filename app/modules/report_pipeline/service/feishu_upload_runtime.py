@@ -343,7 +343,11 @@ def upload_results_to_feishu(
     }
     missing_keys = [k for k, v in required_values.items() if not v]
     if missing_keys:
-        raise ValueError(f"飞书配置缺失: {missing_keys}")
+        detail = f"飞书配置缺失: {missing_keys}"
+        emit_log(
+            f"[文件流程失败] 功能={log_feature} 阶段=飞书上传配置校验 楼栋=- 文件=- 日期=- 错误={detail}"
+        )
+        raise ValueError(detail)
 
     request_retry_count = int(feishu_cfg.get("request_retry_count", 3))
     request_retry_interval_sec = float(feishu_cfg.get("request_retry_interval_sec", 1))

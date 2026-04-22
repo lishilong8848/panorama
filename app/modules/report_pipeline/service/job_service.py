@@ -2203,17 +2203,20 @@ class JobService:
                     self._persist_job_snapshot(job)
             finally:
                 emitter.flush()
+                generated_failure_line = ""
                 with self._lock:
                     if job.status == "failed":
                         has_failure_line = any("[文件流程失败]" in line for line in job.logs)
                         if not has_failure_line:
                             detail = unhandled_error_detail or job.error or "未提供错误详情"
                             detail = " ".join(str(detail).split())
-                            self._append_log(
-                                job,
-                                f"[文件流程失败] 功能=任务执行 阶段=未分类 楼栋=- 文件=- 日期=- 错误={detail}",
+                            generated_failure_line = (
+                                f"[文件流程失败] 功能=任务执行 阶段=未分类 楼栋=- 文件=- 日期=- 错误={detail}"
                             )
+                            self._append_log(job, generated_failure_line)
                     self._persist_job_snapshot(job)
+                if generated_failure_line:
+                    self._emit_global_log_sink_async(generated_failure_line)
                 self._release_resources(job.job_id, list(job.acquired_resources))
                 job.acquired_resources = []
                 job.done_event.set()
