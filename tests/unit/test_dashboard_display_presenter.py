@@ -543,7 +543,10 @@ def test_present_updater_mirror_overview_for_git_pull_source_mode():
     assert payload["status_text"] == "本地提交待同步"
     assert payload["summary_text"] == "当前本地提交还没有发布到共享目录；updater 线程会自动尝试同步。"
     assert payload["items"][0] == {"label": "同步状态", "value": "存在待同步提交", "tone": "warning"}
-    assert payload["items"][1] == {"label": "工作区状态", "value": "干净", "tone": "success"}
+    assert payload["items"][1] == {"label": "外网版本号", "value": "web-3.0.0 / r216", "tone": "neutral"}
+    assert payload["items"][2] == {"label": "内网版本号", "value": "未接入", "tone": "neutral"}
+    assert payload["items"][3] == {"label": "更新文件", "value": "否，共享目录未接入", "tone": "warning"}
+    assert payload["items"][4] == {"label": "工作区状态", "value": "干净", "tone": "success"}
     assert payload["sync"]["pending_sync_commit"] == "abcdef123456"
     assert payload["actions"]["main"]["id"] == "check"
     assert payload["actions"]["main"]["label"] == "刷新本机代码状态"
@@ -644,8 +647,50 @@ def test_present_updater_mirror_overview_shows_git_mode_items():
     )
 
     assert payload["items"][0]["label"] == "同步状态"
-    assert payload["items"][1]["value"] == "存在本地修改"
-    assert payload["items"][2]["label"] == "内网端状态"
+    assert payload["items"][1]["label"] == "外网版本号"
+    assert payload["items"][2]["label"] == "内网版本号"
+    assert payload["items"][3]["label"] == "更新文件"
+    assert payload["items"][4]["value"] == "存在本地修改"
+    assert payload["items"][5]["label"] == "内网端状态"
+
+
+def test_present_updater_mirror_overview_shows_versions_and_delivery_state():
+    payload = present_updater_mirror_overview(
+        {
+            "enabled": True,
+            "update_mode": "git_pull",
+            "source_kind": "git_remote",
+            "local_version": "V3.224.20260419",
+            "local_release_revision": 224,
+            "local_commit": "1111111222222333333",
+            "approved_commit": "1111111222222333333",
+            "last_published_commit": "1111111222222333333",
+            "mirror_manifest_path": r"D:\QJPT_Shared\updater\approved\source_manifest.json",
+            "internal_peer": {
+                "available": True,
+                "online": True,
+                "local_version": "V3.224.20260419",
+                "local_release_revision": 224,
+                "local_commit": "1111111222222333333",
+                "update_available": False,
+            },
+        }
+    )
+
+    items_by_label = {item["label"]: item for item in payload["items"]}
+
+    assert payload["status_text"] == "内外端代码一致"
+    assert items_by_label["外网版本号"]["value"] == "V3.224.20260419 / r224"
+    assert items_by_label["内网版本号"] == {
+        "label": "内网版本号",
+        "value": "V3.224.20260419 / r224",
+        "tone": "success",
+    }
+    assert items_by_label["更新文件"] == {
+        "label": "更新文件",
+        "value": "是，内网已应用",
+        "tone": "success",
+    }
 
 
 def test_present_external_module_hero_overviews_prefers_scheduler_summary_items() -> None:

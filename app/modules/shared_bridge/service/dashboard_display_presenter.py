@@ -27,6 +27,18 @@ def _short_commit(value: Any) -> str:
     return text[:7] if text else ""
 
 
+def _format_version_revision(version: Any, revision: Any, *, empty: str = "-") -> str:
+    text = _string(version)
+    rev = _int(revision, 0)
+    if text and rev > 0:
+        return f"{text} / r{rev}"
+    if text:
+        return text
+    if rev > 0:
+        return f"r{rev}"
+    return empty
+
+
 def _action(
     action_id: str,
     *,
@@ -1111,6 +1123,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     last_internal_apply_failed_commit = _string(updater.get("last_internal_apply_failed_commit", ""))
     worktree_dirty = bool(updater.get("worktree_dirty", False))
     local_revision = int(updater.get("local_release_revision", 0) or 0)
+    local_version_text = _format_version_revision(local_version, local_revision)
     last_publish_at = _string(updater.get("last_publish_at", ""))
     manifest_path = _string(updater.get("mirror_manifest_path", ""))
     error_text = _string(updater.get("last_publish_error", ""))
@@ -1138,9 +1151,11 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     internal_peer_command_source_commit = _string(internal_peer_command.get("source_commit", ""))
     internal_peer_last_command_source_commit = _string(internal_peer.get("last_command_source_commit", ""))
     internal_peer_version_text = (
-        f"{internal_peer_version or '-'} / r{internal_peer_revision}"
-        if internal_peer_revision > 0
-        else (internal_peer_version or ("未上报" if internal_peer_available else "-"))
+        _format_version_revision(
+            internal_peer_version,
+            internal_peer_revision,
+            empty="未上报" if internal_peer_available else "-",
+        )
     )
     if not internal_peer_command_active:
         internal_peer_command_label = "无待执行命令"
@@ -1396,7 +1411,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                 {"label": "运行方式", "value": "Python 本地源码运行", "tone": "info"},
                 {
                     "label": "当前版本",
-                    "value": f"{local_version} / r{local_revision}" if local_revision > 0 else local_version,
+                    "value": local_version_text,
                     "tone": "neutral",
                 },
                 {"label": "更新行为", "value": "不自动更新", "tone": "neutral"},
@@ -1562,11 +1577,60 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         sync_status_value = "存在待同步提交" if pending_sync_commit else (
             "当前提交已发布" if published_matches_local else "等待检测"
         )
+        internal_peer_version_tone = (
+            "success"
+            if local_commit and internal_peer_commit and internal_peer_commit == local_commit
+            else ("warning" if internal_peer_update_available or internal_peer_restart_required else "neutral")
+        )
+        package_delivery_value = "等待检测"
+        package_delivery_tone = "neutral"
+        if not internal_peer_available:
+            package_delivery_value = "否，共享目录未接入"
+            package_delivery_tone = "warning"
+        elif error_text:
+            package_delivery_value = "否，投放异常"
+            package_delivery_tone = "danger"
+        elif published_matches_local:
+            package_delivery_tone = "success"
+            if local_commit and internal_peer_commit and internal_peer_commit == local_commit:
+                package_delivery_value = "是，内网已应用"
+            elif internal_peer_command_active and internal_peer_command_action == "apply":
+                package_delivery_value = "是，等待内网应用"
+                package_delivery_tone = "info"
+            elif internal_peer_update_available:
+                package_delivery_value = "是，待内网应用"
+                package_delivery_tone = "warning"
+            else:
+                package_delivery_value = "是，已放入共享目录"
+        elif deferred_commit:
+            package_delivery_value = "否，等待内网命令完成"
+            package_delivery_tone = "warning"
+        elif pending_sync_commit:
+            package_delivery_value = "否，待写入共享目录"
+            package_delivery_tone = "warning"
+        elif published_commit or manifest_path or mirror_ready:
+            package_delivery_value = "是，已有旧版本"
+            package_delivery_tone = "info"
         items = [
             {
                 "label": "同步状态",
                 "value": sync_status_value,
                 "tone": "warning" if pending_sync_commit else ("success" if published_matches_local else "neutral"),
+            },
+            {
+                "label": "外网版本号",
+                "value": local_version_text,
+                "tone": "neutral",
+            },
+            {
+                "label": "内网版本号",
+                "value": internal_peer_version_text if internal_peer_available else "未接入",
+                "tone": internal_peer_version_tone,
+            },
+            {
+                "label": "更新文件",
+                "value": package_delivery_value,
+                "tone": package_delivery_tone,
             },
             {
                 "label": "工作区状态",
@@ -1767,7 +1831,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         {"label": "更新源", "value": source_label, "tone": "warning" if source_kind == "shared_mirror" else "info"},
         {
             "label": "本机版本",
-            "value": f"{local_version} / r{local_revision}" if local_revision > 0 else local_version,
+            "value": local_version_text,
             "tone": "neutral",
         },
         {
