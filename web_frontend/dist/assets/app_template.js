@@ -47,6 +47,81 @@ const APP_TEMPLATE_PREFIX = `
     </div>
 
     <section
+      v-if="resumeDeleteConfirmDialog.visible"
+      class="danger-confirm-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="resume-delete-confirm-title"
+      tabindex="-1"
+      @keydown.esc="closeResumeDeleteConfirmDialog"
+    >
+      <div class="danger-confirm-card">
+        <div class="danger-confirm-head">
+          <div class="danger-confirm-mark" aria-hidden="true">!</div>
+          <div>
+            <div class="danger-confirm-kicker">危险操作</div>
+            <h2 id="resume-delete-confirm-title" class="danger-confirm-title">
+              {{ resumeDeleteConfirmDialog.title }}
+            </h2>
+          </div>
+        </div>
+
+        <p class="danger-confirm-summary">{{ resumeDeleteConfirmDialog.summary }}</p>
+
+        <div class="danger-confirm-metrics" aria-label="待删除任务概览">
+          <div class="danger-confirm-metric">
+            <span>任务数</span>
+            <strong>{{ resumeDeleteConfirmDialog.totalCount }}</strong>
+          </div>
+          <div class="danger-confirm-metric">
+            <span>待上传项</span>
+            <strong>{{ resumeDeleteConfirmDialog.totalPendingUploadCount }}</strong>
+          </div>
+        </div>
+
+        <div class="danger-confirm-warning">
+          {{ resumeDeleteConfirmDialog.warning }}
+        </div>
+
+        <div class="danger-confirm-list" v-if="resumeDeleteConfirmDialog.rows.length">
+          <div
+            class="danger-confirm-row"
+            v-for="row in resumeDeleteConfirmDialog.rows"
+            :key="'resume_delete_confirm_' + row.runId"
+          >
+            <div>
+              <div class="danger-confirm-row-title">{{ row.dateText }}</div>
+              <div class="danger-confirm-row-meta">run_id: {{ row.runId }}</div>
+            </div>
+            <div class="danger-confirm-row-count">{{ row.pendingUploadCount }} 项</div>
+          </div>
+          <div class="danger-confirm-more" v-if="resumeDeleteConfirmDialog.hiddenCount > 0">
+            另有 {{ resumeDeleteConfirmDialog.hiddenCount }} 个任务将在本次操作中删除
+          </div>
+        </div>
+
+        <div class="danger-confirm-actions">
+          <button
+            type="button"
+            class="btn btn-ghost"
+            :disabled="isActionLocked(getResumeDeleteConfirmActionKey())"
+            @click="closeResumeDeleteConfirmDialog"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            class="btn btn-danger"
+            :disabled="isActionLocked(getResumeDeleteConfirmActionKey())"
+            @click="confirmResumeDeleteDialog"
+          >
+            {{ isActionLocked(getResumeDeleteConfirmActionKey()) ? '删除中...' : resumeDeleteConfirmDialog.confirmLabel }}
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <section
       v-if="startupRoleGateVisible"
       class="startup-role-gate"
       aria-live="polite"
@@ -274,8 +349,8 @@ const APP_TEMPLATE_PREFIX = `
             <div class="ops-top-nav-brand">
               <div class="ops-top-nav-title-row">
                 <h1 class="title ops-top-nav-title">{{ appShellTitle }}</h1>
-                <span class="version-inline ops-version" v-if="health.version || health.updater.local_version">
-                  {{ health.updater.local_version || health.version }}
+                <span class="version-inline ops-version" v-if="updaterVersionInlineText">
+                  {{ updaterVersionInlineText }}
                 </span>
               </div>
             </div>

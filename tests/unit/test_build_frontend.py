@@ -39,3 +39,26 @@ def test_build_frontend_assets_copies_all_src_js_and_css(tmp_path: Path) -> None
     assert (dist_assets / "style.css").exists()
     assert (dist_assets / "vue.global.prod.js").exists()
     assert (legacy_assets / "dashboard_wet_bulb_collection_actions.js").exists()
+
+
+def test_scheduler_ui_falls_back_to_raw_runtime_times() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    source = (project_root / "web" / "frontend" / "src" / "scheduler_ui_helpers.js").read_text(encoding="utf-8")
+
+    assert "next_run_text: \"next_run_time\"" in source
+    assert "last_trigger_text: \"last_trigger_at\"" in source
+
+
+def test_auto_flow_scheduler_card_shows_next_run_time() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    source = (
+        project_root
+        / "web"
+        / "frontend"
+        / "src"
+        / "dashboard_template_sections"
+        / "dashboard_auto_flow_section.js"
+    ).read_text(encoding="utf-8")
+
+    assert "下次执行" in source
+    assert "getSchedulerDisplayText('scheduler', 'next_run_text', '-')" in source

@@ -20,6 +20,7 @@ export function createStartupRoleUiHelpers(options = {}) {
     startupRoleLoadingTitle,
     startupRoleLoadingSubtitle,
     startupRoleLoadingStage,
+    startupRoleActivationInFlight,
     startupRoleCurrentMode,
     startupRoleCurrentToken,
     startupRoleCurrentNodeId,
@@ -49,6 +50,8 @@ export function createStartupRoleUiHelpers(options = {}) {
     writeStartupRuntimeRecovery,
     onRuntimeExited,
   } = options || {};
+  const STARTUP_ACTIVATION_LOCK_KEY = "qjpt_startup_activation_lock_v1";
+  const STARTUP_ACTIVATION_LOCK_TTL_MS = 90 * 1000;
 
   function closeStartupRoleSelector({ handled = false } = {}) {
     startupRoleSelectorVisible.value = false;
@@ -75,6 +78,22 @@ export function createStartupRoleUiHelpers(options = {}) {
   }
 
   function showStartupRoleLoading({ title = "", subtitle = "", stage = "" } = {}) {
+    const backendRuntimeReady = Boolean(
+      health?.runtime_activated
+      && health?.startup_role_confirmed
+      && !health?.role_selection_required
+      && !health?.startup_role_user_exited
+    );
+    if (backendRuntimeReady) {
+      startupRoleSelectorVisible.value = false;
+      startupRoleSelectorBusy.value = false;
+      startupRoleLoadingVisible.value = false;
+      startupRoleLoadingTitle.value = "";
+      startupRoleLoadingSubtitle.value = "";
+      startupRoleLoadingStage.value = "";
+      startupRoleFlowState.value = "activated";
+      return;
+    }
     startupRoleSelectorVisible.value = false;
     startupRoleLoadingVisible.value = true;
     startupRoleLoadingTitle.value = String(title || "").trim();
@@ -116,6 +135,119 @@ export function createStartupRoleUiHelpers(options = {}) {
     const nodeId = String(health.deployment?.node_id || startupRoleCurrentNodeId.value || "").trim();
     if (!confirmedRole || !startupToken) return;
     writeStartupRoleSession?.(confirmedRole, startupToken, nodeId);
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, Math.max(0, Number(ms) || 0));
+    });
+  }
+
+  function readStartupActivationLock() {
+    if (typeof window === "undefined" || !window.localStorage) return null;
+    try {
+      const raw = window.localStorage.getItem(STARTUP_ACTIVATION_LOCK_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return null;
+      const expiresAt = Number.parseInt(String(parsed.expires_at || 0), 10) || 0;
+      if (expiresAt && expiresAt < Date.now()) {
+        window.localStorage.removeItem(STARTUP_ACTIVATION_LOCK_KEY);
+        return null;
+      }
+      return parsed;
+    } catch (_) {
+      try {
+        window.localStorage.removeItem(STARTUP_ACTIVATION_LOCK_KEY);
+      } catch (_) {
+        // ignore storage cleanup errors
+      }
+      return null;
+    }
+  }
+
+  function writeStartupActivationLock(lock) {
+    if (typeof window === "undefined" || !window.localStorage) return false;
+    try {
+      window.localStorage.setItem(STARTUP_ACTIVATION_LOCK_KEY, JSON.stringify(lock || {}));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function clearStartupActivationLock(owner = "") {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    try {
+      const current = readStartupActivationLock();
+      const ownerText = String(owner || "").trim();
+      if (ownerText && current && String(current.owner || "").trim() !== ownerText) return;
+      window.localStorage.removeItem(STARTUP_ACTIVATION_LOCK_KEY);
+    } catch (_) {
+      // ignore storage cleanup errors
+    }
+  }
+
+  function buildStartupActivationLockKey(roleMode) {
+    return [
+      String(startupRoleCurrentToken.value || "").trim(),
+      normalizeDeploymentRoleMode(roleMode) || "",
+    ].join("|");
+  }
+
+  function resolveActivationProgressSubtitle(defaultText = "正在连接后台运行时，请稍候。") {
+    const step = String(health.activation_step || "").trim();
+    const phase = String(health.activation_phase || "").trim().toLowerCase();
+    if (phase === "failed") {
+      return String(health.activation_error || "").trim() || "后台运行时激活失败。";
+    }
+    if (step === "queued") {
+      return "后台运行时激活请求已受理，正在排队启动。";
+    }
+    if (step === "starting_runtime_services") {
+      return "正在启动调度、共享桥接和后台运行组件。";
+    }
+    if (step === "initializing_handover_daily_report_auth") {
+      return "正在初始化交接班日报截图登录态。";
+    }
+    if (step === "probing_handover_review_access") {
+      return "正在检查审核页访问地址与审核链接补发状态。";
+    }
+    if (step === "activated") {
+      return "后台运行时已就绪，正在进入页面。";
+    }
+    return defaultText;
+  }
+
+  async function waitForStartupActivationCompletion(targetRole) {
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      await fetchBootstrapHealth?.({ silentMessage: true });
+      const phase = String(health.activation_phase || "").trim().toLowerCase();
+      if (Boolean(health.runtime_activated) && Boolean(health.startup_role_confirmed)) {
+        return true;
+      }
+      if (phase === "failed") {
+        const errorText = String(health.activation_error || "").trim() || "后台运行时激活失败。";
+        hideStartupRoleLoading();
+        startupRoleFlowState.value = "selecting";
+        if (message) message.value = errorText;
+        return false;
+      }
+      showStartupRoleLoading({
+        title: `正在加载${formatDeploymentRoleLabel(targetRole || "internal")}`,
+        subtitle: resolveActivationProgressSubtitle(),
+        stage: "activating",
+      });
+      await sleep(3000);
+    }
+    hideStartupRoleLoading();
+    startupRoleFlowState.value = "selecting";
+    if (message) {
+      const step = String(health.activation_step || "").trim();
+      message.value = `后台运行时启动超时${step ? `（当前阶段：${step}）` : ""}。`;
+    }
+    return false;
   }
 
   function persistRuntimeRecoveryIntent(roleMode = "") {
@@ -237,9 +369,43 @@ export function createStartupRoleUiHelpers(options = {}) {
   }
 
   async function activateStartupRuntimeAfterSelection(source, options = {}) {
+    if (startupRoleActivationInFlight?.value) {
+      return false;
+    }
     const targetRole = normalizeDeploymentRoleMode(
       options?.targetRoleMode || startupRoleSelectorSelection.value || config.value?.deployment?.role_mode || startupRoleCurrentMode.value,
     );
+    const activationLockKey = buildStartupActivationLockKey(targetRole);
+    const existingLock = readStartupActivationLock();
+    const existingLockAgeMs = existingLock
+      ? Math.max(0, Date.now() - (Number.parseInt(String(existingLock.started_at || 0), 10) || Date.now()))
+      : 0;
+    const backendActivationBusy = ["activating", "recovering", "restarting"].includes(
+      String(health.activation_phase || "").trim().toLowerCase(),
+    );
+    if (
+      existingLock
+      && String(existingLock.key || "").trim() === activationLockKey
+      && !Boolean(health.runtime_activated)
+      && (backendActivationBusy || existingLockAgeMs < 8000)
+    ) {
+      showStartupRoleLoading({
+        title: `正在加载${formatDeploymentRoleLabel(targetRole || "internal")}`,
+        subtitle: "已有启动请求正在处理中，正在等待后台运行时就绪。",
+        stage: "activating",
+      });
+      return waitForStartupActivationCompletion(targetRole);
+    }
+    const lockOwner = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    writeStartupActivationLock({
+      key: activationLockKey,
+      owner: lockOwner,
+      role_mode: targetRole,
+      source: String(source || "").trim(),
+      started_at: Date.now(),
+      expires_at: Date.now() + STARTUP_ACTIVATION_LOCK_TTL_MS,
+    });
+    startupRoleActivationInFlight.value = true;
     const bridgeRoot = String(startupRoleBridgeDraft.value?.root_dir || "").trim();
     const roleRootKey = targetRole === "internal" ? "internal_root_dir" : "external_root_dir";
     const sharedBridgePayload = {
@@ -278,53 +444,66 @@ export function createStartupRoleUiHelpers(options = {}) {
       subtitle: "正在连接后台运行时，请稍候。",
       stage: "activating",
     });
-    const activationResult = await activateStartupRuntime?.({
-      source,
-      roleMode: targetRole,
-      sharedBridge: sharedBridgePayload,
-      startupHandoffNonce: String(options?.startupHandoffNonce || "").trim(),
-    });
-    if (activationResult?.ok === false) {
+    try {
+      const activationResult = await activateStartupRuntime?.({
+        source,
+        roleMode: targetRole,
+        sharedBridge: sharedBridgePayload,
+        startupHandoffNonce: String(options?.startupHandoffNonce || "").trim(),
+      });
+      if (activationResult?.ok === false) {
+        hideStartupRoleLoading();
+        startupRoleFlowState.value = "selecting";
+        if (message) message.value = String(activationResult?.error || "").trim() || "后台运行时激活失败。";
+        return false;
+      }
+      if (activationResult?.pending) {
+        health.activation_phase = String(activationResult?.phase || "activating").trim();
+        health.activation_step = String(activationResult?.step || "queued").trim();
+        const completed = await waitForStartupActivationCompletion(targetRole);
+        if (!completed) {
+          return false;
+        }
+      } else {
+        health.runtime_activated = true;
+        health.startup_role_confirmed = true;
+        health.role_selection_required = false;
+        health.startup_role_user_exited = false;
+        if (targetRole) {
+          Object.assign(health.deployment, {
+            ...(health.deployment || {}),
+            role_mode: targetRole,
+            last_started_role_mode: targetRole,
+            node_label: formatDeploymentRoleLabel(targetRole),
+          });
+        }
+        if (activationResult?.savedRole && typeof activationResult.savedRole === "object") {
+          Object.assign(health.deployment, {
+            role_mode: String(activationResult.savedRole.role_mode || targetRole || "").trim(),
+            node_label: String(activationResult.savedRole.node_label || formatDeploymentRoleLabel(targetRole)).trim(),
+          });
+        }
+        await fetchBootstrapHealth?.({ silentMessage: true });
+      }
+      if (health.startup_handoff && typeof health.startup_handoff === "object") {
+        Object.assign(health.startup_handoff, {
+          active: false,
+          mode: "",
+          target_role_mode: "",
+          requested_at: "",
+          reason: "",
+          nonce: "",
+        });
+      }
+      startupRoleSuppressedHandoffNonce.value = "";
+      persistStartupRoleSession(targetRole);
       hideStartupRoleLoading();
-      startupRoleFlowState.value = "selecting";
-      if (message) message.value = String(activationResult?.error || "").trim() || "后台运行时激活失败。";
-      return false;
+      startupRoleFlowState.value = "activated";
+      return true;
+    } finally {
+      startupRoleActivationInFlight.value = false;
+      clearStartupActivationLock(lockOwner);
     }
-    health.runtime_activated = true;
-    health.startup_role_confirmed = true;
-    health.role_selection_required = false;
-    health.startup_role_user_exited = false;
-    if (targetRole) {
-      Object.assign(health.deployment, {
-        ...(health.deployment || {}),
-        role_mode: targetRole,
-        last_started_role_mode: targetRole,
-        node_label: formatDeploymentRoleLabel(targetRole),
-      });
-    }
-    if (activationResult?.savedRole && typeof activationResult.savedRole === "object") {
-      Object.assign(health.deployment, {
-        role_mode: String(activationResult.savedRole.role_mode || targetRole || "").trim(),
-        node_label: String(activationResult.savedRole.node_label || formatDeploymentRoleLabel(targetRole)).trim(),
-      });
-    }
-    if (health.startup_handoff && typeof health.startup_handoff === "object") {
-      Object.assign(health.startup_handoff, {
-        active: false,
-        mode: "",
-        target_role_mode: "",
-        requested_at: "",
-        reason: "",
-        nonce: "",
-      });
-    }
-    startupRoleSuppressedHandoffNonce.value = "";
-    await fetchBootstrapHealth?.({ silentMessage: true });
-    await fetchHealth?.({ silentTransientNetworkError: true, silentMessage: true });
-    persistStartupRoleSession(targetRole);
-    hideStartupRoleLoading();
-    startupRoleFlowState.value = "activated";
-    return true;
   }
 
   async function exitCurrentSystemToRoleSelector() {

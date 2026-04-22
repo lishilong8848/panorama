@@ -11,6 +11,7 @@ from app.modules.scheduler.api._config_persistence import (
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
 )
+from app.modules.scheduler.api._display_payload import with_scheduler_display
 
 
 router = APIRouter(prefix="/api/scheduler/handover", tags=["scheduler-handover"])
@@ -53,7 +54,7 @@ def _build_handover_scheduler_payload(container, action_result: Dict[str, Any] |
     slots = snapshot.get("slots", {}) if isinstance(snapshot.get("slots", {}), dict) else {}
     morning = _slot_payload(slots.get("morning"))
     afternoon = _slot_payload(slots.get("afternoon"))
-    return {
+    payload = {
         "ok": True,
         "action": action_result or {},
         "enabled": bool(snapshot.get("enabled", False)),
@@ -68,6 +69,7 @@ def _build_handover_scheduler_payload(container, action_result: Dict[str, Any] |
         "afternoon": afternoon,
         "state_paths": snapshot.get("state_paths", {}),
     }
+    return with_scheduler_display(payload, container)
 
 
 @router.post("/start")

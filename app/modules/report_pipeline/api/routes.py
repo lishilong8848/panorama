@@ -47,6 +47,7 @@ from app.modules.report_pipeline.service.job_panel_presenter import (
 from app.modules.report_pipeline.service.scheduler_state_presenter import (
     present_scheduler_overview_items,
     present_scheduler_overview_summary,
+    present_scheduler_snapshot_with_display,
     present_scheduler_state,
 )
 from app.modules.report_pipeline.service.job_service import JobBusyError, TaskEngineUnavailableError
@@ -5466,7 +5467,7 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
     }
     for key, snapshot in list(summary.items()):
         if isinstance(snapshot, dict):
-            summary[key] = {**snapshot, "display": present_scheduler_state(snapshot, role_mode=role_mode)}
+            summary[key] = present_scheduler_snapshot_with_display(snapshot, role_mode=role_mode)
     return summary
 
 
@@ -6129,10 +6130,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
 
     for key, snapshot in list(scheduler_status_summary.items()):
         if isinstance(snapshot, dict):
-            scheduler_status_summary[key] = {
-                **snapshot,
-                "display": present_scheduler_state(snapshot, role_mode=role_mode),
-            }
+            scheduler_status_summary[key] = present_scheduler_snapshot_with_display(snapshot, role_mode=role_mode)
 
     scheduler_overview_items = present_scheduler_overview_items(
         container.config,

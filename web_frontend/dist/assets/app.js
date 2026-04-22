@@ -113,6 +113,7 @@ createApp({
       initialLoadingPhase,
       initialLoadingStatusText,
       pendingResumeRuns,
+      resumeDeleteConfirmDialog,
       schedulerQuickSaving,
       handoverSchedulerQuickSaving,
       wetBulbSchedulerQuickSaving,
@@ -259,6 +260,7 @@ createApp({
       hasSelectedHandoverFiles,
       handoverFileStatesByBuilding,
       updaterResultText,
+      updaterVersionInlineText,
       dashboardActiveModuleTitle,
       moduleMeta,
       dashboardActiveModuleHero,
@@ -295,6 +297,7 @@ createApp({
     const startupRoleAutoActivationKey = ref("");
     const startupRoleSuppressedHandoffNonce = ref("");
     const startupRoleFlowState = ref("selecting");
+    const startupRoleActivationInFlight = ref(false);
     const startupRoleBridgeDraft = ref(buildStartupBridgeDraft({}));
     const startupRoleAdvancedVisible = ref(false);
     const startupRoleOptions = Object.freeze([
@@ -386,8 +389,10 @@ createApp({
       actionKeyUpdaterCheck,
       actionKeyUpdaterApply,
       actionKeyUpdaterRestart,
+      actionKeyUpdaterPublishApproved,
       actionKeyUpdaterInternalPeerCheck,
       actionKeyUpdaterInternalPeerApply,
+      actionKeyUpdaterInternalPeerRestart,
       actionKeySourceCacheRefreshCurrentHour,
       actionKeySourceCacheRefreshBuildingLatestPrefix,
       actionKeySourceCacheRefreshAlarmManual,
@@ -414,8 +419,10 @@ createApp({
       checkUpdaterNow,
       applyUpdaterPatch,
       restartUpdaterApp,
+      publishUpdaterApproved,
       triggerInternalPeerUpdaterCheck,
       triggerInternalPeerUpdaterApply,
+      triggerInternalPeerUpdaterRestart,
       refreshCurrentHourSourceCache,
       refreshManualAlarmSourceCache,
       getJobCancelActionKey,
@@ -432,20 +439,26 @@ createApp({
     const {
       getUpdaterDisabledText,
       updaterMainAction,
+      updaterPublishApprovedAction,
       updaterInternalPeerCheckAction,
       updaterInternalPeerApplyAction,
+      updaterInternalPeerRestartAction,
       isUpdaterSourceRunDisabled,
       updaterBadgeToneClass,
       updaterButtonClass,
       isUpdaterActionLocked,
+      isUpdaterPublishApprovedLocked,
       updaterInternalPeerSnapshot,
       updaterInternalPeerCommandActive,
       updaterInternalPeerCommandAction,
       updaterInternalPeerOnline,
       isUpdaterInternalPeerCheckLocked,
       isUpdaterInternalPeerApplyLocked,
+      isUpdaterInternalPeerRestartLocked,
+      updaterPublishApprovedButtonText,
       updaterInternalPeerCheckButtonText,
       updaterInternalPeerApplyButtonText,
+      updaterInternalPeerRestartButtonText,
       updaterMainButtonText,
     } = createUpdaterUiHelpers({
       computed,
@@ -454,8 +467,10 @@ createApp({
       actionKeyUpdaterCheck,
       actionKeyUpdaterApply,
       actionKeyUpdaterRestart,
+      actionKeyUpdaterPublishApproved,
       actionKeyUpdaterInternalPeerCheck,
       actionKeyUpdaterInternalPeerApply,
+      actionKeyUpdaterInternalPeerRestart,
     });
     const externalAlarmUploadBuilding = ref("全部楼栋");
     const monthlyReportTestReceiveIdDraftEvent = ref("");
@@ -711,22 +726,30 @@ createApp({
       clearDashboardSchedulerOverviewFocus,
       openDashboardSchedulerOverviewTarget,
       runUpdaterMainAction,
+      publishUpdaterApprovedNow,
       checkInternalPeerUpdaterNow,
       applyInternalPeerUpdaterNow,
+      restartInternalPeerUpdaterNow,
     } = createAppActionUiHelpers({
       message,
       updaterMainAction,
+      updaterPublishApprovedAction,
       updaterInternalPeerCheckAction,
       updaterInternalPeerApplyAction,
+      updaterInternalPeerRestartAction,
       isUpdaterActionLocked,
+      isUpdaterPublishApprovedLocked,
       isUpdaterInternalPeerCheckLocked,
       isUpdaterInternalPeerApplyLocked,
+      isUpdaterInternalPeerRestartLocked,
       getUpdaterDisabledText,
       restartUpdaterApp,
       applyUpdaterPatch,
       checkUpdaterNow,
+      publishUpdaterApproved,
       triggerInternalPeerUpdaterCheck,
       triggerInternalPeerUpdaterApply,
+      triggerInternalPeerUpdaterRestart,
       setDashboardActiveModule,
       dashboardSchedulerOverviewFocusKey,
       nextTick,
@@ -789,6 +812,7 @@ createApp({
       bridgeTaskDetail,
       resourceSnapshot,
       pendingResumeRuns,
+      resumeDeleteConfirmDialog,
       autoResumeState,
       buildingsText,
       sheetRuleRows,
@@ -833,6 +857,10 @@ createApp({
       updaterUiOverlayStage,
       updaterUiOverlayKicker,
       updaterAwaitingRestartRecovery,
+      startupRoleSelectorHandled,
+      startupRoleSelectorVisible,
+      startupRoleLoadingVisible,
+      startupRoleActivationInFlight,
       markRestartRecoveryIntent,
       clearRestartRecoveryIntent: clearStartupRuntimeRecovery,
       readUpdaterRecoveryIntent,
@@ -840,6 +868,7 @@ createApp({
       clearUpdaterRecoveryIntent,
       nextTick,
       scheduleExternalDashboardRefresh: queueExternalDashboardRefresh,
+      shouldPauseRuntimeRequests: () => shouldPauseRuntimeRequests.value,
       shouldIncludeHandoverHealthContext: () => shouldIncludeHandoverHealthContext.value,
       shouldFetchHandoverDailyReportContext: () => shouldPollHandoverDailyReportContext.value,
       shouldLoadEngineerDirectory: () => shouldLoadEngineerDirectory.value,
@@ -866,6 +895,8 @@ createApp({
       fetchInternalRuntimeBuildingRuntimeStatus,
       fetchAllInternalBuildingRuntimeStatuses,
       scheduleInternalRuntimeStatusRefresh,
+      resetInternalRuntimeRequestState,
+      resetExternalDashboardRequestState,
       fetchConfig,
       fetchHandoverCommonConfigSegment,
       fetchHandoverBuildingConfigSegment,
@@ -907,9 +938,14 @@ createApp({
       fetchPendingResumeRuns,
       runResumeUpload,
       deleteResumeRun,
+      deleteAllResumeRuns,
+      confirmResumeDeleteDialog,
+      closeResumeDeleteConfirmDialog,
       getResumeRunId,
       getResumeRunActionKey,
       getResumeDeleteActionKey,
+      getResumeDeleteAllActionKey,
+      getResumeDeleteConfirmActionKey,
       formatResumeDateSummary,
       formatResumeDateFull,
       tryAutoResume,
@@ -1023,6 +1059,7 @@ createApp({
       startupRoleBridgeDraft,
       startupRoleAdvancedVisible,
       startupRoleAutoActivationKey,
+      startupRoleActivationInFlight,
       browserRouteLastPath,
       browserRouteReady,
       currentView,
@@ -1215,6 +1252,7 @@ createApp({
       startupRoleSuppressedHandoffNonce,
       startupRoleSelectorSelection,
       startupRoleAutoActivationKey,
+      startupRoleActivationInFlight,
       health,
       selectStartupRole,
       syncStartupRoleBridgeDraft,
@@ -1252,6 +1290,7 @@ createApp({
       updaterAwaitingRestartRecovery,
       startupRoleSelectorVisible,
       startupRoleLoadingVisible,
+      startupRoleActivationInFlight,
       bootstrapReady,
       health,
       currentView,
@@ -1281,6 +1320,7 @@ createApp({
       shouldPollInternalRuntimeStatus,
       runtimeWarmupReady,
       deploymentRoleMode,
+      health,
       internalRuntimeSummary,
       internalBuildingRuntimeStatusMap,
       createEmptyInternalBuildingRuntimeStatusMap,
@@ -1318,6 +1358,8 @@ createApp({
       scheduleEngineerDirectoryPrefetch,
       fetchInternalRuntimeSummary,
       fetchAllInternalBuildingRuntimeStatuses,
+      resetInternalRuntimeRequestState,
+      resetExternalDashboardRequestState,
       ensureHandoverEngineerDirectoryLoaded,
       applyDashboardRoleMode,
       dashboardActiveModule,
@@ -1342,8 +1384,8 @@ createApp({
 
     watch(
       () => shouldPollBridgeTasks.value,
-      (enabled) => {
-        if (!enabled || !bootstrapReady.value) return;
+      (enabled, prevEnabled) => {
+        if (!enabled || !bootstrapReady.value || prevEnabled === enabled) return;
         void fetchBridgeTasks({ silentMessage: true });
       },
       { immediate: true },
@@ -1351,15 +1393,19 @@ createApp({
 
     watch(
       () => [currentView.value, dashboardActiveModule.value],
-      ([view]) => {
+      ([view], [prevView, prevModule] = []) => {
         if (!bootstrapReady.value) return;
-        if (String(view || "").trim().toLowerCase() === "dashboard" && shouldPollExternalDashboardSummary.value) {
+        const currentViewText = String(view || "").trim().toLowerCase();
+        const prevViewText = String(prevView || "").trim().toLowerCase();
+        const moduleChanged = String(dashboardActiveModule.value || "").trim() !== String(prevModule || "").trim();
+        const enteredDashboard = currentViewText === "dashboard" && prevViewText !== "dashboard";
+        if ((enteredDashboard || moduleChanged) && currentViewText === "dashboard" && shouldPollExternalDashboardSummary.value) {
           void fetchExternalDashboardSummary({ silentMessage: true });
         }
-        if (shouldFetchHealth.value) {
+        if (enteredDashboard && shouldFetchHealth.value) {
           void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
         }
-        if (shouldPollBridgeTasks.value) {
+        if (enteredDashboard && shouldPollBridgeTasks.value) {
           void fetchBridgeTasks({ silentMessage: true });
         }
       },
@@ -1476,7 +1522,7 @@ createApp({
       setMessage: (text) => {
         message.value = String(text || "");
       },
-      canAttachSystemStream: () => !shouldPauseRuntimeRequests.value,
+      canAttachSystemStream: () => runtimeRequestsReady.value,
       getSystemOffset: () => systemLogOffset.value,
       setSystemOffset: (offset) => {
         const next = Number.parseInt(String(offset), 10);
@@ -1599,6 +1645,7 @@ createApp({
       dayMetricLocalDate,
       dayMetricLocalFile,
       pendingResumeRuns,
+      resumeDeleteConfirmDialog,
       pendingResumeCount,
       jobsList,
       selectedJobId,
@@ -1706,6 +1753,7 @@ createApp({
       handoverDailyReportExternalTestVm,
       canRewriteHandoverDailyReportRecord,
       updaterResultText,
+      updaterVersionInlineText,
       currentTaskOverview,
       taskPanelOverview,
       bridgeTaskPanelOverview,
@@ -1718,10 +1766,14 @@ createApp({
       updaterButtonClass,
       isUpdaterActionLocked,
       exitCurrentSystemToRoleSelector,
+      isUpdaterPublishApprovedLocked,
       isUpdaterInternalPeerCheckLocked,
       isUpdaterInternalPeerApplyLocked,
+      isUpdaterInternalPeerRestartLocked,
+      updaterPublishApprovedButtonText,
       updaterInternalPeerCheckButtonText,
       updaterInternalPeerApplyButtonText,
+      updaterInternalPeerRestartButtonText,
       deploymentRoleMode,
       deploymentNodeIdDisplayText,
       deploymentNodeIdDisplayHint,
@@ -1884,9 +1936,14 @@ createApp({
       runMultiDate,
       runResumeUpload,
       deleteResumeRun,
+      deleteAllResumeRuns,
+      confirmResumeDeleteDialog,
+      closeResumeDeleteConfirmDialog,
       getResumeRunId,
       getResumeRunActionKey,
       getResumeDeleteActionKey,
+      getResumeDeleteAllActionKey,
+      getResumeDeleteConfirmActionKey,
       formatResumeDateSummary,
       formatResumeDateFull,
       runManualUpload,
@@ -1915,8 +1972,10 @@ createApp({
       checkUpdaterNow,
       applyUpdaterPatch,
       restartUpdaterApp,
+      publishUpdaterApprovedNow,
       checkInternalPeerUpdaterNow,
       applyInternalPeerUpdaterNow,
+      restartInternalPeerUpdaterNow,
       confirmAllHandoverReview,
       retryAllFailedHandoverCloudSync,
       continueHandoverFollowupUpload,

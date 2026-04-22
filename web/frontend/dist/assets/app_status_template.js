@@ -73,7 +73,7 @@
           </div>
         </article>
 
-        <article v-if="!isInternalDeploymentRole" class="status-card">
+        <article class="status-card">
           <div class="status-card-head">
             <div>
               <span class="status-panel-kicker">{{ dashboardSystemOverview.kicker || '系统与网络' }}</span>
@@ -97,8 +97,8 @@
         <article v-if="!isInternalDeploymentRole" class="status-card">
           <div class="status-card-head">
             <div>
-              <span class="status-panel-kicker">{{ updaterMirrorOverview.kicker || '更新镜像' }}</span>
-              <h2 class="status-panel-title">{{ updaterMirrorOverview.title || '共享目录批准版本' }}</h2>
+              <span class="status-panel-kicker">{{ updaterMirrorOverview.kicker || '代码同步' }}</span>
+              <h2 class="status-panel-title">{{ updaterMirrorOverview.title || '外网到内网 .py 同步' }}</h2>
             </div>
             <span class="status-badge status-badge-solid" :class="'tone-' + updaterMirrorOverview.tone">
               {{ updaterMirrorOverview.statusText }}
@@ -118,7 +118,24 @@
           <div class="hint" v-if="updaterMirrorOverview.errorText">
             发布异常：{{ updaterMirrorOverview.errorText }}
           </div>
-          <div class="btn-line" style="margin-top:10px;">
+          <div class="btn-line" style="margin-top:10px;" v-if="isInternalDeploymentRole">
+            <button
+              class="btn"
+              :class="updaterButtonClass"
+              @click="runUpdaterMainAction"
+              :disabled="isUpdaterActionLocked"
+            >
+              {{ updaterMainButtonText }}
+            </button>
+          </div>
+          <div class="btn-line" style="margin-top:10px;" v-else>
+            <button
+              class="btn btn-secondary"
+              @click="publishUpdaterApprovedNow"
+              :disabled="isUpdaterPublishApprovedLocked"
+            >
+              {{ updaterPublishApprovedButtonText }}
+            </button>
             <button
               class="btn btn-secondary"
               @click="checkInternalPeerUpdaterNow"
@@ -132,6 +149,13 @@
               :disabled="isUpdaterInternalPeerApplyLocked"
             >
               {{ updaterInternalPeerApplyButtonText }}
+            </button>
+            <button
+              class="btn btn-secondary"
+              @click="restartInternalPeerUpdaterNow"
+              :disabled="isUpdaterInternalPeerRestartLocked"
+            >
+              {{ updaterInternalPeerRestartButtonText }}
             </button>
           </div>
         </article>
@@ -356,7 +380,7 @@
                     <button
                       class="btn btn-ghost source-cache-building-btn"
                       type="button"
-                      @click="refreshBuildingLatestSourceCache(family.key, building.building)"
+                      @click="refreshBuildingLatestSourceCache(family.key || building.sourceFamily || building.source_family, building.building)"
                       :disabled="isInternalSourceCacheRefreshLocked(family, building)"
                       :title="getInternalSourceCacheRefreshDisabledReason(family, building) || ''"
                     >

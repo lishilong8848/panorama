@@ -81,9 +81,21 @@ export function createSchedulerUiHelpers(options = {}) {
   }
 
   function getSchedulerDisplayText(keyOrSnapshot, fieldName, fallback = "-") {
+    const snapshot = keyOrSnapshot && typeof keyOrSnapshot === "object"
+      ? keyOrSnapshot
+      : getSchedulerSnapshotByKey(keyOrSnapshot);
     const display = getSchedulerDisplayState(keyOrSnapshot);
     const explicit = String(display?.[fieldName] || "").trim();
     if (explicit) return explicit;
+    const rawFieldFallbacks = {
+      next_run_text: "next_run_time",
+      last_trigger_text: "last_trigger_at",
+    };
+    const rawField = rawFieldFallbacks[String(fieldName || "").trim()] || "";
+    if (rawField) {
+      const rawText = String(snapshot?.[rawField] || "").trim();
+      if (rawText) return rawText;
+    }
     return String(fallback || "-").trim() || "-";
   }
 

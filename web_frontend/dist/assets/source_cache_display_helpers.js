@@ -12,6 +12,15 @@ function resolveSourceCacheFamilyTitle(key) {
   return "";
 }
 
+function resolveSourceCacheFamilyKeyByTitle(title) {
+  const text = String(title || "").trim();
+  if (text === "交接班日志源文件") return "handover_log_family";
+  if (text === "交接班容量报表源文件") return "handover_capacity_report_family";
+  if (text === "全景平台月报源文件") return "monthly_report_family";
+  if (text === "告警信息源文件") return "alarm_event_family";
+  return "";
+}
+
 function parseOptionalCount(value) {
   if (value === null || value === undefined) return null;
   const text = String(value).trim();
@@ -60,6 +69,7 @@ function normalizeSourceCacheBuildingStatus(raw, fallbackBucket, formatSharedBri
   const row = normalizeSourceCacheBuildingRow(raw, fallbackBucket, formatSharedBridgeRuntimeError, formatInternalDownloadPoolError);
   const building = row.building;
   const bucketKey = row.bucket_key;
+  const sourceFamily = String(raw?.source_family || raw?.sourceFamily || "").trim();
   const downloadedAt = row.downloaded_at;
   const startedAt = row.started_at;
   const lastError = row.last_error;
@@ -133,6 +143,8 @@ function normalizeSourceCacheBuildingStatus(raw, fallbackBucket, formatSharedBri
       return {
         building,
         bucketKey,
+        sourceFamily,
+        source_family: sourceFamily,
         statusKey: blocked ? "blocked" : explicitStatusKey,
         reasonCode: blocked ? "blocked" : explicitStatusKey,
         ready: explicitReady === null ? explicitStatusKey === "ready" : explicitReady,
@@ -152,9 +164,11 @@ function normalizeSourceCacheBuildingStatus(raw, fallbackBucket, formatSharedBri
       };
     }
     return {
-      ...buildSourceCachePlaceholderBuilding(building, bucketKey),
+      ...buildSourceCachePlaceholderBuilding(building, bucketKey, sourceFamily),
       building,
       bucketKey,
+      sourceFamily,
+      source_family: sourceFamily,
       downloadedAt,
       startedAt,
       lastError,
@@ -168,6 +182,8 @@ function normalizeSourceCacheBuildingStatus(raw, fallbackBucket, formatSharedBri
   return {
     building,
     bucketKey,
+    sourceFamily,
+    source_family: sourceFamily,
     statusKey: explicitStatusKey,
     reasonCode: String(raw?.reason_code || raw?.reasonCode || explicitStatusKey || "").trim().toLowerCase() || "unknown",
     ready: explicitReady === null ? explicitStatusKey === "ready" : explicitReady,
@@ -190,6 +206,7 @@ function normalizeSourceCacheBuildingStatus(raw, fallbackBucket, formatSharedBri
 function normalizeAlarmEventReadinessBuilding(raw, fallbackBucket, formatSharedBridgeRuntimeError, formatInternalDownloadPoolError) {
   const building = String(raw?.building || "").trim() || "-";
   const bucketKey = String(raw?.bucket_key || raw?.bucketKey || "").trim() || String(fallbackBucket || "").trim() || "-";
+  const sourceFamily = String(raw?.source_family || raw?.sourceFamily || "").trim();
   const downloadedAt = String(raw?.downloaded_at || raw?.downloadedAt || "").trim();
   const selectedDownloadedAt = String(raw?.selected_downloaded_at || raw?.selectedDownloadedAt || downloadedAt || "").trim();
   const lastError = formatSharedBridgeRuntimeError(raw?.last_error || raw?.lastError);
@@ -249,6 +266,8 @@ function normalizeAlarmEventReadinessBuilding(raw, fallbackBucket, formatSharedB
       return {
         building,
         bucketKey,
+        sourceFamily,
+        source_family: sourceFamily,
         statusKey: blocked ? "blocked" : explicitStatusKey,
         reasonCode: blocked ? "blocked" : explicitStatusKey,
         usingFallback: false,
@@ -276,9 +295,11 @@ function normalizeAlarmEventReadinessBuilding(raw, fallbackBucket, formatSharedB
       };
     }
     return {
-      ...buildSourceCachePlaceholderBuilding(building, bucketKey),
+      ...buildSourceCachePlaceholderBuilding(building, bucketKey, sourceFamily),
       building,
       bucketKey,
+      sourceFamily,
+      source_family: sourceFamily,
       statusKey: "pending_backend",
       reasonCode: "pending_backend",
       downloadedAt,
@@ -302,6 +323,8 @@ function normalizeAlarmEventReadinessBuilding(raw, fallbackBucket, formatSharedB
   return {
     building,
     bucketKey,
+    sourceFamily,
+    source_family: sourceFamily,
     statusKey: explicitStatusKey,
     reasonCode: String(raw?.reason_code || raw?.reasonCode || explicitStatusKey || "").trim().toLowerCase() || "unknown",
     usingFallback: false,
@@ -435,8 +458,20 @@ export function mapPresentedSourceCacheFamilyOverview(
   } = {},
 ) {
   const family = payload && typeof payload === "object" ? payload : {};
-  const key = String(family.key || "").trim();
-  const title = String(family.title || "").trim() || resolveSourceCacheFamilyTitle(key);
+  const rawBuildings = Array.isArray(family.buildings) ? family.buildings : [];
+  const rawTitle = String(family.title || family.display_title || family.displayTitle || "").trim();
+  const inferredBuildingSourceFamily = rawBuildings
+    .map((item) => String(item?.source_family || item?.sourceFamily || "").trim())
+    .find(Boolean) || "";
+  const key = String(
+    family.key
+    || family.source_family
+    || family.sourceFamily
+    || inferredBuildingSourceFamily
+    || resolveSourceCacheFamilyKeyByTitle(rawTitle)
+    || "",
+  ).trim();
+  const title = rawTitle || resolveSourceCacheFamilyTitle(key);
   const currentBucket =
     String(
       family.current_bucket
@@ -460,8 +495,11 @@ export function mapPresentedSourceCacheFamilyOverview(
         : Number.isInteger(item?.versionGap)
           ? item.versionGap
           : Number.parseInt(String(item?.version_gap ?? item?.versionGap ?? base?.versionGap ?? ""), 10);
+    const buildingSourceFamily = String(item?.source_family || item?.sourceFamily || base?.source_family || base?.sourceFamily || key).trim();
     return {
       ...base,
+      sourceFamily: buildingSourceFamily,
+      source_family: buildingSourceFamily,
       usingFallback,
       versionGap: Number.isFinite(rawVersionGap) ? Math.max(0, rawVersionGap) : null,
       backfillRunning: Boolean(item?.backfill_running ?? item?.backfillRunning),
@@ -481,7 +519,7 @@ export function mapPresentedSourceCacheFamilyOverview(
   const buildings = Array.isArray(internalBuildings) && internalBuildings.length > 0
     ? internalBuildings.map((building) =>
       buildingMap.get(building)
-      || buildSourceCachePlaceholderBuilding(building, currentBucket),
+      || buildSourceCachePlaceholderBuilding(building, currentBucket, key),
     )
     : normalizedBuildings;
   const readyCount = parseOptionalCount(family.ready_count ?? family.readyCount);

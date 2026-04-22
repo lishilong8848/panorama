@@ -5,6 +5,8 @@
 } from "./api_client.js";
 import { isTransientNetworkError } from "./config_helpers.js";
 
+const PENDING_RESUME_FETCH_COOLDOWN_MS = 5000;
+
 function isBusyJob(job) {
   const status = String(job?.status || "").trim().toLowerCase();
   return status === "running" || status === "queued";
@@ -41,6 +43,8 @@ function isResumeConflictError(err) {
 
 export function createRuntimeResumeActions(ctx) {
   const {
+    health,
+    bootstrapReady,
     config,
     message,
     currentJob,
@@ -54,7 +58,20 @@ export function createRuntimeResumeActions(ctx) {
     canRun,
     streamController,
     runSingleFlight,
+    shouldPauseRuntimeRequests,
+    resumeDeleteConfirmDialog,
   } = ctx;
+  let lastPendingResumeFetchAt = 0;
+
+  function isRuntimeTrafficPaused() {
+    return Boolean(
+      (typeof shouldPauseRuntimeRequests === "function" && shouldPauseRuntimeRequests())
+      || Boolean(shouldPauseRuntimeRequests?.value)
+      || !Boolean(bootstrapReady?.value)
+      || !Boolean(health?.runtime_activated)
+      || !Boolean(health?.startup_role_confirmed)
+    );
+  }
 
   function getResumeRunId(run) {
     return normalizeRunId(run?.run_id);
@@ -70,6 +87,36 @@ export function createRuntimeResumeActions(ctx) {
     return `resume:delete:${normalized || "invalid"}`;
   }
 
+  function getResumeDeleteAllActionKey() {
+    return "resume:delete:all";
+  }
+
+  function resetResumeDeleteConfirmDialog() {
+    if (!resumeDeleteConfirmDialog) return;
+    Object.assign(resumeDeleteConfirmDialog, {
+      visible: false,
+      mode: "",
+      title: "",
+      summary: "",
+      warning: "",
+      confirmLabel: "确认删除",
+      runId: "",
+      runIds: [],
+      rows: [],
+      totalCount: 0,
+      totalPendingUploadCount: 0,
+      hiddenCount: 0,
+    });
+  }
+
+  function getResumeDeleteConfirmActionKey() {
+    if (!resumeDeleteConfirmDialog?.visible) return getResumeDeleteAllActionKey();
+    if (resumeDeleteConfirmDialog.mode === "single") {
+      return getResumeDeleteActionKey(resumeDeleteConfirmDialog.runId);
+    }
+    return getResumeDeleteAllActionKey();
+  }
+
   function formatResumeDateFull(run) {
     const dates = normalizeDateList(run?.selected_dates);
     if (!dates.length) return "-";
@@ -83,7 +130,73 @@ export function createRuntimeResumeActions(ctx) {
     return `${dates[0]} ~ ${dates[dates.length - 1]}（${dates.length}天）`;
   }
 
+  function collectPendingResumeRows(filterRunIds = null) {
+    const allowed = Array.isArray(filterRunIds) ? new Set(filterRunIds.map((item) => normalizeRunId(item)).filter(Boolean)) : null;
+    const rows = [];
+    const seen = new Set();
+    (Array.isArray(pendingResumeRuns.value) ? pendingResumeRuns.value : []).forEach((run) => {
+      const runId = getResumeRunId(run);
+      if (!runId || seen.has(runId)) return;
+      if (allowed && !allowed.has(runId)) return;
+      seen.add(runId);
+      rows.push({
+        runId,
+        dateText: formatResumeDateSummary(run),
+        pendingUploadCount: Number.parseInt(String(run?.pending_upload_count || 0), 10) || 0,
+        updatedAt: String(run?.updated_at || "").trim() || "-",
+      });
+    });
+    if (allowed) {
+      allowed.forEach((runId) => {
+        if (seen.has(runId)) return;
+        rows.push({
+          runId,
+          dateText: "-",
+          pendingUploadCount: 0,
+          updatedAt: "-",
+        });
+      });
+    }
+    return rows;
+  }
+
+  function openResumeDeleteConfirmDialog(mode, rows) {
+    if (!resumeDeleteConfirmDialog) return false;
+    const cleanRows = Array.isArray(rows) ? rows.filter((row) => normalizeRunId(row?.runId)) : [];
+    if (!cleanRows.length) return false;
+    const runIds = cleanRows.map((row) => row.runId);
+    const totalPendingUploadCount = cleanRows.reduce(
+      (sum, row) => sum + (Number.parseInt(String(row?.pendingUploadCount || 0), 10) || 0),
+      0
+    );
+    const isSingle = mode === "single";
+    Object.assign(resumeDeleteConfirmDialog, {
+      visible: true,
+      mode: isSingle ? "single" : "all",
+      title: isSingle ? "删除该续传任务" : "删除全部待续传任务",
+      summary: isSingle
+        ? `将删除 1 个续传任务，待上传 ${totalPendingUploadCount} 项。`
+        : `将删除 ${cleanRows.length} 个续传任务，合计待上传 ${totalPendingUploadCount} 项。`,
+      warning: "删除后这些断点续传记录不会再继续上传；如需恢复，需要重新执行自动流程生成新任务。",
+      confirmLabel: isSingle ? "删除该任务" : `删除 ${cleanRows.length} 个任务`,
+      runId: isSingle ? runIds[0] : "",
+      runIds,
+      rows: cleanRows.slice(0, 5),
+      totalCount: cleanRows.length,
+      totalPendingUploadCount,
+      hiddenCount: Math.max(0, cleanRows.length - 5),
+    });
+    return true;
+  }
+
   async function fetchPendingResumeRuns(options = {}) {
+    if (isRuntimeTrafficPaused()) return false;
+    const force = Boolean(options?.force);
+    const now = Date.now();
+    if (!force && lastPendingResumeFetchAt > 0 && now - lastPendingResumeFetchAt < PENDING_RESUME_FETCH_COOLDOWN_MS) {
+      return true;
+    }
+    lastPendingResumeFetchAt = now;
     const silentMessage = Boolean(options?.silentMessage);
     try {
       const data = await getPendingResumeRunsApi();
@@ -168,18 +281,17 @@ export function createRuntimeResumeActions(ctx) {
     return runner();
   }
 
-  async function deleteResumeRun(runId) {
+  async function performDeleteResumeRun(runId) {
     const effectiveRunId = normalizeRunId(runId);
     if (!effectiveRunId) {
       message.value = "run_id 无效，无法删除";
       return;
     }
-    if (!canRun.value) return;
     const actionKey = getResumeDeleteActionKey(effectiveRunId);
     const runner = async () => {
       try {
         const data = await deleteResumeRunApi(effectiveRunId);
-        await fetchPendingResumeRuns();
+        await fetchPendingResumeRuns({ force: true, silentMessage: true });
         if (data?.ok && data?.deleted) {
           message.value = data?.message || `已删除续传任务 ${effectiveRunId}`;
           return;
@@ -193,6 +305,81 @@ export function createRuntimeResumeActions(ctx) {
       return runSingleFlight(actionKey, runner, { cooldownMs: 500 });
     }
     return runner();
+  }
+
+  async function deleteResumeRun(runId) {
+    const effectiveRunId = normalizeRunId(runId);
+    if (!effectiveRunId) {
+      message.value = "run_id 无效，无法删除";
+      return;
+    }
+    if (openResumeDeleteConfirmDialog("single", collectPendingResumeRows([effectiveRunId]))) return;
+    return performDeleteResumeRun(effectiveRunId);
+  }
+
+  async function performDeleteAllResumeRuns(runIds) {
+    const normalizedRunIds = [];
+    const seen = new Set();
+    (Array.isArray(runIds) ? runIds : []).forEach((rawRunId) => {
+      const runId = normalizeRunId(rawRunId);
+      if (!runId || seen.has(runId)) return;
+      seen.add(runId);
+      normalizedRunIds.push(runId);
+    });
+    if (!normalizedRunIds.length) {
+      message.value = "没有待删除的续传任务";
+      return;
+    }
+
+    const actionKey = getResumeDeleteAllActionKey();
+    const runner = async () => {
+      let deletedCount = 0;
+      const failed = [];
+      for (const runId of normalizedRunIds) {
+        try {
+          const data = await deleteResumeRunApi(runId);
+          if (data?.ok && data?.deleted) {
+            deletedCount += 1;
+          } else {
+            failed.push(runId);
+          }
+        } catch (err) {
+          failed.push(runId);
+        }
+      }
+      await fetchPendingResumeRuns({ force: true, silentMessage: true });
+      if (failed.length) {
+        message.value = `已删除 ${deletedCount} 个续传任务，${failed.length} 个删除失败`;
+        return;
+      }
+      message.value = `已删除全部 ${deletedCount} 个续传任务`;
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(actionKey, runner, { cooldownMs: 500 });
+    }
+    return runner();
+  }
+
+  async function deleteAllResumeRuns() {
+    const rows = collectPendingResumeRows();
+    if (!rows.length) {
+      message.value = "没有待删除的续传任务";
+      return;
+    }
+    if (openResumeDeleteConfirmDialog("all", rows)) return;
+    return performDeleteAllResumeRuns(rows.map((row) => row.runId));
+  }
+
+  async function confirmResumeDeleteDialog() {
+    if (!resumeDeleteConfirmDialog?.visible) return;
+    const mode = String(resumeDeleteConfirmDialog.mode || "").trim();
+    const runId = normalizeRunId(resumeDeleteConfirmDialog.runId);
+    const runIds = Array.isArray(resumeDeleteConfirmDialog.runIds) ? [...resumeDeleteConfirmDialog.runIds] : [];
+    resetResumeDeleteConfirmDialog();
+    if (mode === "single") {
+      return performDeleteResumeRun(runId);
+    }
+    return performDeleteAllResumeRuns(runIds);
   }
 
   async function tryAutoResume() {
@@ -222,9 +409,14 @@ export function createRuntimeResumeActions(ctx) {
     fetchPendingResumeRuns,
     runResumeUpload,
     deleteResumeRun,
+    deleteAllResumeRuns,
+    confirmResumeDeleteDialog,
+    closeResumeDeleteConfirmDialog: resetResumeDeleteConfirmDialog,
     getResumeRunId,
     getResumeRunActionKey,
     getResumeDeleteActionKey,
+    getResumeDeleteAllActionKey,
+    getResumeDeleteConfirmActionKey,
     formatResumeDateSummary,
     formatResumeDateFull,
     tryAutoResume,

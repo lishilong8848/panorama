@@ -16,6 +16,10 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
                   <strong class="status-metric-value">{{ Number(config.scheduler.interval_minutes || 0) > 0 ? ('每 ' + config.scheduler.interval_minutes + ' 分钟') : '-' }}</strong>
                 </div>
                 <div class="status-metric">
+                  <div class="status-metric-label">下次执行</div>
+                  <strong class="status-metric-value">{{ getSchedulerDisplayText('scheduler', 'next_run_text', '-') }}</strong>
+                </div>
+                <div class="status-metric">
                   <div class="status-metric-label">最近决策</div>
                   <strong class="status-metric-value">{{ schedulerDecisionText || '-' }}</strong>
                 </div>

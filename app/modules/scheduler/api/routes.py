@@ -10,6 +10,7 @@ from app.modules.scheduler.api._config_persistence import (
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
 )
+from app.modules.scheduler.api._display_payload import with_scheduler_display
 
 
 router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
@@ -26,7 +27,7 @@ def _build_scheduler_payload(container, action_result: Dict[str, Any] | None = N
     scheduler = container.scheduler
     runtime = scheduler.get_runtime_snapshot() if scheduler else {}
     effective_runtime = snapshot if isinstance(snapshot, dict) and snapshot else runtime
-    return {
+    payload = {
         "ok": True,
         "action": action_result or {},
         "status": str(effective_runtime.get("status", scheduler.status_text() if scheduler else "未初始化")),
@@ -41,6 +42,7 @@ def _build_scheduler_payload(container, action_result: Dict[str, Any] | None = N
         "effective_auto_start_in_gui": bool(effective_runtime.get("effective_auto_start_in_gui", False)),
         "memory_source": str(effective_runtime.get("memory_source", "") or ""),
     }
+    return with_scheduler_display(payload, container, slot_keys=())
 
 
 @router.post("/start")
@@ -120,6 +122,7 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
     executor_bound = bool(container.is_scheduler_executor_bound())
     message = "调度配置已更新并热重载"
 
+    scheduler_status = _build_scheduler_payload(container)
     return {
         "ok": True,
         "message": message,
@@ -129,6 +132,7 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
         "callback_name": container.scheduler_executor_name(),
         "scheduler_config": {k: new_scheduler_cfg.get(k) for k in sorted(allowed)},
         "runtime": runtime,
+        "scheduler_status": scheduler_status,
     }
 
 

@@ -15,11 +15,13 @@ import {
   activateStartupRuntimeApi,
   exitCurrentRuntimeApi,
   checkUpdaterApi,
+  publishUpdaterApprovedApi,
   getUpdaterStatusApi,
   restartUpdaterApi,
   restartAppApi,
   triggerInternalPeerUpdaterApplyApi,
   triggerInternalPeerUpdaterCheckApi,
+  triggerInternalPeerUpdaterRestartApi,
   getBridgeTaskApi,
   getBridgeTasksApi,
   getInternalRuntimeBuildingStatusApi,
@@ -27,7 +29,15 @@ import {
   buildHandoverDailyReportCaptureAssetUrl,
   getBootstrapHealthApi,
   getConfigApi,
-  getExternalDashboardSummaryApi,
+  getExternalRuntimeBootstrapApi,
+  getExternalRuntimeBridgeTasksApi,
+  getExternalRuntimeConfigGuidanceApi,
+  getExternalRuntimeJobsApi,
+  getExternalRuntimeReviewOverviewApi,
+  getExternalRuntimeSchedulersApi,
+  getExternalRuntimeSourceCacheApi,
+  getExternalRuntimeSystemApi,
+  getExternalRuntimeUpdaterApi,
   getHandoverBuildingConfigSegmentApi,
   getHandoverCommonConfigSegmentApi,
   getHandoverDailyReportContextApi,
@@ -65,8 +75,10 @@ const ACTION_KEY_APP_RESTART = "app:restart";
 const ACTION_KEY_UPDATER_CHECK = "updater:check";
 const ACTION_KEY_UPDATER_APPLY = "updater:apply";
 const ACTION_KEY_UPDATER_RESTART = "updater:restart";
+const ACTION_KEY_UPDATER_PUBLISH_APPROVED = "updater:publish_approved";
 const ACTION_KEY_UPDATER_INTERNAL_PEER_CHECK = "updater:internal_peer_check";
 const ACTION_KEY_UPDATER_INTERNAL_PEER_APPLY = "updater:internal_peer_apply";
+const ACTION_KEY_UPDATER_INTERNAL_PEER_RESTART = "updater:internal_peer_restart";
 const ACTION_KEY_HANDOVER_CONFIRM_ALL = "handover_review:confirm_all";
 const ACTION_KEY_HANDOVER_CLOUD_RETRY_ALL = "handover_review:cloud_retry_all";
 const ACTION_KEY_HANDOVER_DAILY_REPORT_AUTH_OPEN = "handover_daily_report:auth_open";
@@ -157,6 +169,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     updaterUiOverlayStage,
     updaterUiOverlayKicker,
     updaterAwaitingRestartRecovery,
+    startupRoleSelectorHandled,
+    startupRoleSelectorVisible,
+    startupRoleLoadingVisible,
+    startupRoleActivationInFlight,
     markRestartRecoveryIntent,
     clearRestartRecoveryIntent,
     readUpdaterRecoveryIntent,
@@ -164,6 +180,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     clearUpdaterRecoveryIntent,
     nextTick,
     scheduleExternalDashboardRefresh,
+    shouldPauseRuntimeRequests,
     shouldIncludeHandoverHealthContext,
     shouldFetchHandoverDailyReportContext,
     shouldLoadEngineerDirectory,
@@ -183,10 +200,17 @@ export function createRuntimeHealthConfigActions(ctx) {
   let lastBridgeTasksFetchAt = 0;
   let handoverCommonSegmentRequestSeq = 0;
   let handoverBuildingSegmentRequestSeq = 0;
+  let bootstrapHealthRequestInFlight = null;
+  let startupActivationRequestInFlight = null;
+  let lastBootstrapHealthFetchAt = 0;
+  let lastExternalDashboardSummaryFetchAt = 0;
+  let lastDailyReportContextFetchAt = 0;
+  let lastPendingRuntimeRefreshAt = 0;
   let bootstrapRetryTimer = null;
   let updaterReconnectTimer = null;
   let updaterQueueMonitorTimer = null;
   let updaterHealthHydratedOnce = false;
+  let bootstrapRuntimeHydrationQueued = false;
   let handoverReviewStatusBroadcastBound = false;
   let internalRuntimeSummaryRequestInFlight = null;
   let internalRuntimeSummaryRefetchQueued = false;
@@ -198,6 +222,9 @@ export function createRuntimeHealthConfigActions(ctx) {
   let internalRuntimeRefreshAllPending = false;
   const internalRuntimeRefreshBuildingsPending = new Set();
   const BRIDGE_TASKS_FETCH_COOLDOWN_MS = 1200;
+  const BOOTSTRAP_FETCH_COOLDOWN_MS = 2500;
+  const EXTERNAL_DASHBOARD_SUMMARY_COOLDOWN_MS = 4000;
+  const DAILY_REPORT_CONTEXT_COOLDOWN_MS = 5000;
   const INTERNAL_RUNTIME_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"];
 
   function shouldLoadConfigNow() {
@@ -209,7 +236,27 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function canUseInternalRuntimeStatus() {
-    return resolveCurrentRoleMode() === "internal" && Boolean(runtimeWarmupReady?.value);
+    return String(health?.deployment?.role_mode || "").trim().toLowerCase() === "internal"
+      && Boolean(runtimeWarmupReady?.value);
+  }
+
+  function canUseExternalDashboardSummary() {
+    return String(health?.deployment?.role_mode || "").trim().toLowerCase() === "external";
+  }
+
+  function resetExternalDashboardRequestState() {
+    lastExternalDashboardSummaryFetchAt = 0;
+  }
+
+  function resetInternalRuntimeRequestState() {
+    if (internalRuntimeRefreshDebounceTimer) {
+      window.clearTimeout(internalRuntimeRefreshDebounceTimer);
+      internalRuntimeRefreshDebounceTimer = null;
+    }
+    internalRuntimeRefreshAllPending = false;
+    internalRuntimeRefreshBuildingsPending.clear();
+    internalRuntimeSummaryRefetchQueued = false;
+    internalRuntimeBuildingRefetchQueued.clear();
   }
 
   function normalizeInternalRuntimeBuildingName(building) {
@@ -246,7 +293,10 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function scheduleInternalRuntimeStatusRefresh(options = {}) {
-    if (!canUseInternalRuntimeStatus()) return;
+    if (!canUseInternalRuntimeStatus()) {
+      resetInternalRuntimeRequestState();
+      return;
+    }
     const buildingText = String(options?.building || "").trim();
     if (buildingText) {
       internalRuntimeRefreshBuildingsPending.add(normalizeInternalRuntimeBuildingName(buildingText));
@@ -299,8 +349,13 @@ export function createRuntimeHealthConfigActions(ctx) {
     });
   }
 
-  function isUpdaterTrafficPaused() {
-    return Boolean(updaterUiOverlayVisible?.value || updaterAwaitingRestartRecovery?.value);
+  function isRuntimeTrafficPaused() {
+    return Boolean(
+      updaterUiOverlayVisible?.value
+      || updaterAwaitingRestartRecovery?.value
+      || (typeof shouldPauseRuntimeRequests === "function" && shouldPauseRuntimeRequests())
+      || Boolean(shouldPauseRuntimeRequests?.value),
+    );
   }
 
   function isLocallyExitedToRoleSelection() {
@@ -366,14 +421,14 @@ export function createRuntimeHealthConfigActions(ctx) {
       const roleReady = roleMode === "internal" || roleMode === "external";
       const restorable = Boolean(
         health?.runtime_activated
-        || health?.startup_role_confirmed
-        || !health?.role_selection_required,
+        && health?.startup_role_confirmed
+        && !health?.role_selection_required
+        && !health?.startup_role_user_exited,
       );
       if (
         !bootstrapReady?.value
         || !roleReady
         || !restorable
-        || Boolean(health?.startup_role_user_exited)
       ) {
         return false;
       }
@@ -1226,6 +1281,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (!data || typeof data !== "object") return;
     const healthMode = String(data?.health_mode || "").trim().toLowerCase();
     const isLiteHealth = healthMode === "lite";
+    const activationInFlight = Boolean(startupRoleActivationInFlight?.value);
     const shouldPreserveExitedSelectorState = Boolean(
       isLocallyExitedToRoleSelection()
       && !Boolean(data?.startup_role_user_exited)
@@ -1235,23 +1291,60 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (shouldPreserveExitedSelectorState) {
       return;
     }
+    const preserveStartupActivationState = Boolean(
+      activationInFlight
+      && Boolean(health.runtime_activated || health.startup_role_confirmed)
+      && !Boolean(health.role_selection_required)
+      && data?.startup_role_user_exited !== true
+      && String(data?.activation_phase || "").trim().toLowerCase() !== "failed"
+    );
+    const currentRuntimeReady = Boolean(
+      health.runtime_activated
+      && health.startup_role_confirmed
+      && !health.role_selection_required
+      && !health.startup_role_user_exited
+    );
+    const incomingActivationFailed = String(data?.activation_phase || "").trim().toLowerCase() === "failed";
+    const incomingExplicitExit = Boolean(data?.startup_role_user_exited);
+    const incomingAllowsReadyPreserve = Boolean(
+      currentRuntimeReady
+      && !incomingActivationFailed
+      && !incomingExplicitExit
+    );
     health.version = String(data.version || "");
     health.startup_time = String(data.startup_time || health.startup_time || "");
-    health.startup_role_confirmed = Boolean(
-      typeof data.startup_role_confirmed === "boolean"
-        ? data.startup_role_confirmed
-        : health.startup_role_confirmed,
+    if (incomingAllowsReadyPreserve && data?.startup_role_confirmed === false) {
+      health.startup_role_confirmed = true;
+    } else if (!preserveStartupActivationState || data?.startup_role_confirmed === true) {
+      health.startup_role_confirmed = Boolean(
+        typeof data.startup_role_confirmed === "boolean"
+          ? data.startup_role_confirmed
+          : health.startup_role_confirmed,
+      );
+    }
+    health.startup_role_restorable = Boolean(
+      typeof data.startup_role_restorable === "boolean"
+        ? data.startup_role_restorable
+        : health.startup_role_restorable,
     );
-    health.role_selection_required = Boolean(
-      typeof data.role_selection_required === "boolean"
-        ? data.role_selection_required
-        : health.role_selection_required,
-    );
-    health.startup_role_user_exited = Boolean(
-      typeof data.startup_role_user_exited === "boolean"
-        ? data.startup_role_user_exited
-        : health.startup_role_user_exited,
-    );
+    if (incomingAllowsReadyPreserve && data?.role_selection_required === true) {
+      health.role_selection_required = false;
+    } else if (!preserveStartupActivationState || data?.role_selection_required === false) {
+      health.role_selection_required = Boolean(
+        typeof data.role_selection_required === "boolean"
+          ? data.role_selection_required
+          : health.role_selection_required,
+      );
+    }
+    if (incomingAllowsReadyPreserve && data?.startup_role_user_exited === false) {
+      health.startup_role_user_exited = false;
+    } else {
+      health.startup_role_user_exited = Boolean(
+        typeof data.startup_role_user_exited === "boolean"
+          ? data.startup_role_user_exited
+          : health.startup_role_user_exited,
+      );
+    }
     if (data.startup_handoff && typeof data.startup_handoff === "object") {
       Object.assign(health.startup_handoff, {
         active: Boolean(data.startup_handoff.active),
@@ -1285,13 +1378,43 @@ export function createRuntimeHealthConfigActions(ctx) {
         sqlite_busy_timeout_ms: data.startup_shared_bridge.sqlite_busy_timeout_ms,
       });
     }
-    health.runtime_activated = Boolean(
-      typeof data.runtime_activated === "boolean"
-        ? data.runtime_activated
-        : health.runtime_activated,
+    if (incomingAllowsReadyPreserve && data?.runtime_activated === false) {
+      health.runtime_activated = true;
+    } else if (!preserveStartupActivationState || data?.runtime_activated === true) {
+      health.runtime_activated = Boolean(
+        typeof data.runtime_activated === "boolean"
+          ? data.runtime_activated
+          : health.runtime_activated,
+      );
+    }
+    const backendRuntimeReady = Boolean(
+      health.runtime_activated
+      && health.startup_role_confirmed
+      && !health.role_selection_required
+      && !health.startup_role_user_exited
     );
+    if (backendRuntimeReady) {
+      if (startupRoleSelectorHandled) {
+        startupRoleSelectorHandled.value = true;
+      }
+      if (startupRoleSelectorVisible) {
+        startupRoleSelectorVisible.value = false;
+      }
+      if (startupRoleLoadingVisible) {
+        startupRoleLoadingVisible.value = false;
+      }
+      if (startupRoleActivationInFlight) {
+        startupRoleActivationInFlight.value = false;
+      }
+    }
     health.activation_phase = String(data.activation_phase || health.activation_phase || "");
+    health.activation_step = String(data.activation_step || health.activation_step || "");
     health.activation_error = String(data.activation_error || health.activation_error || "");
+    if (backendRuntimeReady && String(health.activation_phase || "").trim().toLowerCase() !== "failed") {
+      health.activation_phase = "activated";
+      health.activation_step = "activated";
+      health.activation_error = "";
+    }
     health.active_job_id = String(data.active_job_id || "");
     health.active_job_ids = Array.isArray(data.active_job_ids) ? data.active_job_ids : [];
     health.job_counts = data.job_counts && typeof data.job_counts === "object" ? { ...data.job_counts } : {};
@@ -1646,63 +1769,8 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
     if (data.shared_bridge && typeof data.shared_bridge === "object") {
       const nextSharedBridge = { ...data.shared_bridge };
-      if (
-        nextSharedBridge.internal_source_cache
-        && typeof nextSharedBridge.internal_source_cache === "object"
-        && health.shared_bridge?.internal_source_cache
-        && typeof health.shared_bridge.internal_source_cache === "object"
-      ) {
-        nextSharedBridge.internal_source_cache = mergeLiteInternalSourceCache(
-          health.shared_bridge.internal_source_cache,
-          nextSharedBridge.internal_source_cache,
-        );
-      }
-      if (
-        nextSharedBridge.internal_download_pool
-        && typeof nextSharedBridge.internal_download_pool === "object"
-        && health.shared_bridge?.internal_download_pool
-        && typeof health.shared_bridge.internal_download_pool === "object"
-      ) {
-        nextSharedBridge.internal_download_pool = mergePresentedPayload(
-          health.shared_bridge.internal_download_pool,
-          nextSharedBridge.internal_download_pool,
-          ["overview"],
-        );
-      }
-      if (
-        nextSharedBridge.internal_alert_status
-        && typeof nextSharedBridge.internal_alert_status === "object"
-        && health.shared_bridge?.internal_alert_status
-        && typeof health.shared_bridge.internal_alert_status === "object"
-      ) {
-        nextSharedBridge.internal_alert_status = mergePresentedPayload(
-          health.shared_bridge.internal_alert_status,
-          nextSharedBridge.internal_alert_status,
-          ["display_overview"],
-        );
-      }
-      if (isLiteHealth) {
-        if (
-          (!nextSharedBridge.internal_source_cache || typeof nextSharedBridge.internal_source_cache !== "object")
-          && health.shared_bridge?.internal_source_cache
-          && typeof health.shared_bridge.internal_source_cache === "object"
-        ) {
-          nextSharedBridge.internal_source_cache = health.shared_bridge.internal_source_cache;
-        }
-        if (
-          (!nextSharedBridge.internal_download_pool || typeof nextSharedBridge.internal_download_pool !== "object")
-          && health.shared_bridge?.internal_download_pool
-          && typeof health.shared_bridge.internal_download_pool === "object"
-        ) {
-          nextSharedBridge.internal_download_pool = health.shared_bridge.internal_download_pool;
-        }
-        if (
-          (!nextSharedBridge.internal_alert_status || typeof nextSharedBridge.internal_alert_status !== "object")
-          && health.shared_bridge?.internal_alert_status
-          && typeof health.shared_bridge.internal_alert_status === "object"
-        ) {
-          nextSharedBridge.internal_alert_status = health.shared_bridge.internal_alert_status;
-        }
+      if (String(health?.deployment?.role_mode || "").trim().toLowerCase() !== "internal") {
+        delete nextSharedBridge.internal_download_pool;
       }
       Object.assign(health.shared_bridge, nextSharedBridge);
     }
@@ -1742,42 +1810,86 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchBootstrapHealth(options = {}) {
-    const silentMessage = Boolean(options?.silentMessage);
-    try {
-      const data = await getBootstrapHealthApi();
-      applyHealthSnapshot(data);
-      clearBootstrapRetryTimer();
-      if (bootstrapReady) {
-        bootstrapReady.value = true;
-      }
-      if (healthLoadError) {
-        healthLoadError.value = "";
-      }
-      return true;
-    } catch (err) {
-      if (isAbortError(err)) {
-        scheduleBootstrapHealthRetry();
-        return false;
-      }
-      if (healthLoadError) {
-        healthLoadError.value = String(err || "").trim();
-      }
-      if (isTransientNetworkError(err)) {
-        scheduleBootstrapHealthRetry();
-        return false;
-      }
-      if (!bootstrapReady?.value) {
-        scheduleBootstrapHealthRetry();
-      }
-      if (!silentMessage) {
-        message.value = `启动状态读取失败: ${err}`;
-      }
-      return false;
+    if (bootstrapHealthRequestInFlight) {
+      return bootstrapHealthRequestInFlight;
     }
+    const force = Boolean(options?.force);
+    const now = Date.now();
+    if (!force && lastBootstrapHealthFetchAt > 0 && now - lastBootstrapHealthFetchAt < BOOTSTRAP_FETCH_COOLDOWN_MS) {
+      return true;
+    }
+    lastBootstrapHealthFetchAt = now;
+    const silentMessage = Boolean(options?.silentMessage);
+    bootstrapHealthRequestInFlight = (async () => {
+      try {
+        const data = await getBootstrapHealthApi();
+        applyHealthSnapshot(data);
+        clearBootstrapRetryTimer();
+        if (bootstrapReady) {
+          bootstrapReady.value = true;
+        }
+        if (healthLoadError) {
+          healthLoadError.value = "";
+        }
+        if (
+          Boolean(data?.runtime_activated)
+          && Boolean(data?.startup_role_confirmed)
+          && !Boolean(data?.role_selection_required)
+          && !Boolean(data?.startup_role_user_exited)
+          && !fullHealthLoaded?.value
+        ) {
+          const roleMode = resolveCurrentRoleMode();
+          if (
+            roleMode === "external"
+            && !isRuntimeTrafficPaused()
+            && !bootstrapRuntimeHydrationQueued
+          ) {
+            bootstrapRuntimeHydrationQueued = true;
+            window.setTimeout(() => {
+              void fetchExternalDashboardSummary({ silentMessage: true });
+            }, 0);
+          } else if (
+            roleMode === "internal"
+            && !isRuntimeTrafficPaused()
+            && !bootstrapRuntimeHydrationQueued
+          ) {
+            bootstrapRuntimeHydrationQueued = true;
+            window.setTimeout(() => {
+              void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+            }, 0);
+          }
+        } else if (!Boolean(data?.runtime_activated) || fullHealthLoaded?.value) {
+          bootstrapRuntimeHydrationQueued = false;
+        }
+        return true;
+      } catch (err) {
+        if (isAbortError(err)) {
+          scheduleBootstrapHealthRetry();
+          return false;
+        }
+        if (healthLoadError) {
+          healthLoadError.value = String(err || "").trim();
+        }
+        if (isTransientNetworkError(err)) {
+          scheduleBootstrapHealthRetry();
+          return false;
+        }
+        if (!bootstrapReady?.value) {
+          scheduleBootstrapHealthRetry();
+        }
+        if (!silentMessage) {
+          message.value = `启动状态读取失败: ${err}`;
+        }
+        return false;
+      } finally {
+        bootstrapHealthRequestInFlight = null;
+      }
+    })();
+    return bootstrapHealthRequestInFlight;
   }
 
   async function fetchHealth(options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady()) return false;
     const silentTransientNetworkError = Boolean(options?.silentTransientNetworkError);
     const silentMessage = Boolean(options?.silentMessage);
     const includeHandoverContext =
@@ -1839,7 +1951,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchJobs(options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady()) return false;
     const silentMessage = Boolean(options?.silentMessage);
     try {
       const data = await getJobsApi({ limit: 60 });
@@ -1892,7 +2004,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchRuntimeResources(options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady()) return false;
     const silentMessage = Boolean(options?.silentMessage);
     try {
       const data = await getRuntimeResourcesApi();
@@ -2213,6 +2325,12 @@ export function createRuntimeHealthConfigActions(ctx) {
       applyHealthSnapshot(healthLite);
     }
     const nextDisplay = data.display && typeof data.display === "object" ? data.display : null;
+    const topLevelSharedSourceOverview = data.shared_source_cache_overview && typeof data.shared_source_cache_overview === "object"
+      ? data.shared_source_cache_overview
+      : null;
+    const topLevelInternalAlertOverview = data.internal_alert_overview && typeof data.internal_alert_overview === "object"
+      ? data.internal_alert_overview
+      : null;
     if (nextDisplay) {
       const previousDisplay = health.dashboard_display && typeof health.dashboard_display === "object"
         ? health.dashboard_display
@@ -2220,9 +2338,24 @@ export function createRuntimeHealthConfigActions(ctx) {
       health.dashboard_display = {
         ...previousDisplay,
         ...nextDisplay,
+        ...(topLevelSharedSourceOverview
+          ? { shared_source_cache_overview: topLevelSharedSourceOverview }
+          : {}),
+        ...(topLevelInternalAlertOverview
+          ? { internal_alert_overview: topLevelInternalAlertOverview }
+          : {}),
       };
     } else if (!health.dashboard_display || typeof health.dashboard_display !== "object") {
-      health.dashboard_display = {};
+      health.dashboard_display = {
+        ...(topLevelSharedSourceOverview ? { shared_source_cache_overview: topLevelSharedSourceOverview } : {}),
+        ...(topLevelInternalAlertOverview ? { internal_alert_overview: topLevelInternalAlertOverview } : {}),
+      };
+    } else {
+      health.dashboard_display = {
+        ...health.dashboard_display,
+        ...(topLevelSharedSourceOverview ? { shared_source_cache_overview: topLevelSharedSourceOverview } : {}),
+        ...(topLevelInternalAlertOverview ? { internal_alert_overview: topLevelInternalAlertOverview } : {}),
+      };
     }
     applyExternalSchedulerSummary(
       data.scheduler_status_summary && typeof data.scheduler_status_summary === "object"
@@ -2251,29 +2384,89 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
   }
 
-  async function fetchExternalDashboardSummary(options = {}) {
-    if (isUpdaterTrafficPaused() || isLocallyExitedToRoleSelection() || !isRuntimeApiReady()) return false;
-    if (resolveCurrentRoleMode() === "internal") return false;
+  async function fetchExternalDashboardModule(label, fetcher, options = {}) {
     const silentMessage = Boolean(options?.silentMessage);
+    try {
+      const data = await fetcher();
+      applyExternalDashboardSummary(data || {});
+      return true;
+    } catch (err) {
+      if (isAbortError(err)) return false;
+      if (isRoleSelectionConflictError(err)) {
+        await tryRecoverFromRoleSelectionConflict();
+        return false;
+      }
+      if (!silentMessage) {
+        message.value = `读取外网${label}失败: ${err}`;
+      }
+      return false;
+    }
+  }
+
+  async function fetchExternalDashboardSummary(options = {}) {
+    if (isRuntimeTrafficPaused() || isLocallyExitedToRoleSelection() || !isRuntimeApiReady()) return false;
+    if (!canUseExternalDashboardSummary()) {
+      resetExternalDashboardRequestState();
+      return false;
+    }
+    const silentMessage = Boolean(options?.silentMessage);
+    const force = Boolean(options?.force);
+    const now = Date.now();
+    if (
+      !force
+      && lastExternalDashboardSummaryFetchAt > 0
+      && now - lastExternalDashboardSummaryFetchAt < EXTERNAL_DASHBOARD_SUMMARY_COOLDOWN_MS
+    ) {
+      return true;
+    }
     if (externalDashboardSummaryRequestInFlight) {
       return externalDashboardSummaryRequestInFlight;
     }
+    lastExternalDashboardSummaryFetchAt = now;
     externalDashboardSummaryRequestInFlight = (async () => {
       try {
-        const data = await getExternalDashboardSummaryApi();
-        applyExternalDashboardSummary(data || {});
+        const bootstrapOk = await fetchExternalDashboardModule(
+          "基础状态",
+          getExternalRuntimeBootstrapApi,
+          options,
+        );
+        if (bootstrapOk === false && !health?.runtime_activated) {
+          return false;
+        }
         if (fullHealthLoaded) {
           fullHealthLoaded.value = true;
         }
         if (healthLoadError) {
           healthLoadError.value = "";
         }
+        const moduleFetches = [
+          ["源文件状态", getExternalRuntimeSourceCacheApi],
+          ["任务状态", getExternalRuntimeJobsApi],
+          ["共享桥接任务", getExternalRuntimeBridgeTasksApi],
+          ["调度状态", getExternalRuntimeSchedulersApi],
+          ["更新状态", getExternalRuntimeUpdaterApi],
+          ["审核概览", getExternalRuntimeReviewOverviewApi],
+          ["配置状态", getExternalRuntimeConfigGuidanceApi],
+          ["系统概览", getExternalRuntimeSystemApi],
+        ].map(([label, fetcher]) => fetchExternalDashboardModule(label, fetcher, { silentMessage: true }));
+        await Promise.allSettled(moduleFetches);
         return true;
       } catch (err) {
         if (isAbortError(err)) return false;
         if (isRoleSelectionConflictError(err)) {
           await tryRecoverFromRoleSelectionConflict();
           return false;
+        }
+        if (healthLoadError) {
+          healthLoadError.value = String(err || "").trim();
+        }
+        if (
+          fullHealthLoaded
+          && !fullHealthLoaded.value
+          && Boolean(bootstrapReady?.value)
+          && Boolean(health?.runtime_activated)
+        ) {
+          fullHealthLoaded.value = true;
         }
         if (!silentMessage) {
           message.value = `读取外网首页状态失败: ${err}`;
@@ -2287,7 +2480,10 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchInternalRuntimeSummary(options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) {
+      resetInternalRuntimeRequestState();
+      return false;
+    }
     const silentMessage = Boolean(options?.silentMessage);
     const force = Boolean(options?.force);
     if (internalRuntimeSummaryRequestInFlight) {
@@ -2319,7 +2515,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         internalRuntimeSummaryRequestInFlight = null;
         if (internalRuntimeSummaryRefetchQueued) {
           internalRuntimeSummaryRefetchQueued = false;
-          if (!isUpdaterTrafficPaused() && isRuntimeApiReady() && canUseInternalRuntimeStatus()) {
+          if (!isRuntimeTrafficPaused() && isRuntimeApiReady() && canUseInternalRuntimeStatus()) {
             void fetchInternalRuntimeSummary({ silentMessage: true });
           }
         }
@@ -2329,7 +2525,10 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchInternalRuntimeBuildingRuntimeStatus(building, options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady() || !canUseInternalRuntimeStatus()) {
+      resetInternalRuntimeRequestState();
+      return false;
+    }
     const buildingText = normalizeInternalRuntimeBuildingName(building);
     const buildingCode = normalizeInternalRuntimeBuildingCode(buildingText);
     const silentMessage = Boolean(options?.silentMessage);
@@ -2371,7 +2570,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         internalRuntimeBuildingRequestsInFlight.delete(buildingCode);
         if (internalRuntimeBuildingRefetchQueued.get(buildingCode)) {
           internalRuntimeBuildingRefetchQueued.delete(buildingCode);
-          if (!isUpdaterTrafficPaused() && isRuntimeApiReady() && canUseInternalRuntimeStatus()) {
+          if (!isRuntimeTrafficPaused() && isRuntimeApiReady() && canUseInternalRuntimeStatus()) {
             void fetchInternalRuntimeBuildingRuntimeStatus(buildingText, { silentMessage: true });
           }
         }
@@ -2382,7 +2581,10 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchAllInternalBuildingRuntimeStatuses(options = {}) {
-    if (isUpdaterTrafficPaused() || !canUseInternalRuntimeStatus()) return false;
+    if (isRuntimeTrafficPaused() || !canUseInternalRuntimeStatus()) {
+      resetInternalRuntimeRequestState();
+      return false;
+    }
     const results = await Promise.all(
       INTERNAL_RUNTIME_BUILDINGS.map((building) =>
         fetchInternalRuntimeBuildingRuntimeStatus(building, options),
@@ -2403,28 +2605,26 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function patchAlarmUploadRunningState(data, fallbackMode, fallbackScope) {
-    const family =
-      health.shared_bridge?.internal_source_cache?.alarm_event_family &&
-      typeof health.shared_bridge.internal_source_cache.alarm_event_family === "object"
-        ? health.shared_bridge.internal_source_cache.alarm_event_family
+    const overview =
+      health.dashboard_display?.shared_source_cache_overview &&
+      typeof health.dashboard_display.shared_source_cache_overview === "object"
+        ? health.dashboard_display.shared_source_cache_overview
         : null;
+    const families = Array.isArray(overview?.families) ? overview.families : [];
+    const family = families.find((item) =>
+      item && typeof item === "object" && String(item.key || "").trim() === "alarm_event_family"
+    );
     if (!family) return;
-    const uploadState =
-      family.external_upload && typeof family.external_upload === "object"
-        ? family.external_upload
-        : {};
-    family.external_upload = {
-      ...uploadState,
-      running: Boolean(data?.running),
-      started_at: String(data?.started_at || uploadState.started_at || "").trim(),
-      current_mode: String(data?.mode || fallbackMode || uploadState.current_mode || "").trim(),
-      current_scope: String(data?.scope || fallbackScope || uploadState.current_scope || "").trim(),
-      last_error: "",
-    };
+    family.upload_running = Boolean(data?.running);
+    family.upload_started_at = String(data?.started_at || family.upload_started_at || family.uploadStartedAt || "").trim();
+    family.upload_current_mode = String(data?.mode || fallbackMode || family.upload_current_mode || family.uploadCurrentMode || "").trim();
+    family.upload_current_scope = String(data?.scope || fallbackScope || family.upload_current_scope || family.uploadCurrentScope || "").trim();
+    family.upload_last_error = "";
+    family.upload_running_text = family.upload_running ? "告警上传进行中" : "";
   }
 
   async function fetchBridgeTaskDetail(taskId, options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (isRuntimeTrafficPaused()) return false;
     const taskIdText = String(taskId || "").trim();
     if (!taskIdText) {
       if (bridgeTaskDetail) bridgeTaskDetail.value = null;
@@ -2452,7 +2652,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchBridgeTasks(options = {}) {
-    if (isUpdaterTrafficPaused() || !isRuntimeApiReady()) return false;
+    if (isRuntimeTrafficPaused() || !isRuntimeApiReady()) return false;
     if (bridgeTasksRequestInFlight) return bridgeTasksRequestInFlight;
     const force = Boolean(options?.force);
     const now = Date.now();
@@ -2836,10 +3036,11 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchHandoverDailyReportContext(options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (isRuntimeTrafficPaused()) return false;
     if (dailyReportContextRequestInFlight) return dailyReportContextRequestInFlight;
     const silentTransientNetworkError = Boolean(options?.silentTransientNetworkError);
     const silentMessage = Boolean(options?.silentMessage);
+    const force = Boolean(options?.force);
     const dutyDate = String(handoverDutyDate?.value || "").trim();
     const dutyShift = String(handoverDutyShift?.value || "").trim().toLowerCase();
     if (!dutyDate || !["day", "night"].includes(dutyShift)) {
@@ -2878,6 +3079,11 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
       return true;
     }
+    const now = Date.now();
+    if (!force && lastDailyReportContextFetchAt > 0 && now - lastDailyReportContextFetchAt < DAILY_REPORT_CONTEXT_COOLDOWN_MS) {
+      return true;
+    }
+    lastDailyReportContextFetchAt = now;
     dailyReportContextRequestInFlight = (async () => {
       try {
         const data = await getHandoverDailyReportContextApi({
@@ -2992,7 +3198,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function fetchHandoverEngineerDirectory(options = {}) {
-    if (isUpdaterTrafficPaused()) return false;
+    if (isRuntimeTrafficPaused()) return false;
     if (!handoverEngineerDirectory || !handoverEngineerLoading) return;
     const silentMessage = Boolean(options?.silentMessage);
     const forceRefresh = Boolean(options?.forceRefresh);
@@ -3973,6 +4179,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function applyUpdaterPatch() {
+    const isGitPullMode = String(health.updater?.update_mode || "").trim().toLowerCase() === "git_pull";
     const requestedMode = String(
       health.updater?.queued_apply?.queued && String(health.updater?.queued_apply?.mode || "").trim()
         ? health.updater.queued_apply.mode
@@ -3986,21 +4193,26 @@ export function createRuntimeHealthConfigActions(ctx) {
       let requestPending = true;
       pauseRuntimeTraffic();
       setUpdaterOverlay(true, {
-        title: "正在更新程序",
-        subtitle: "请保持当前页面打开，更新完成后会自动恢复。",
+        title: isGitPullMode ? "正在同步代码状态" : "正在更新程序",
+        subtitle: isGitPullMode
+          ? "正在确认本地提交并同步代码状态，请保持当前页面打开。"
+          : "请保持当前页面打开，更新完成后会自动恢复。",
         stage: "applying",
+        kicker: isGitPullMode ? "Git 拉取中" : "",
       });
-      persistUpdaterRecoveryIntent("applying", "updater_apply");
       await flushUpdaterOverlayPaint();
-      startUpdaterBootstrapRecoveryWatch({
-        source: "updater_apply",
-        startupToken: String(health?.startup_time || "").trim(),
-      });
-      startUpdaterRuntimeMonitor({
-        queued: false,
-        initialGraceMs: 15000,
-        isRequestPending: () => requestPending,
-      });
+      if (!isGitPullMode) {
+        persistUpdaterRecoveryIntent("applying", "updater_apply");
+        startUpdaterBootstrapRecoveryWatch({
+          source: "updater_apply",
+          startupToken: String(health?.startup_time || "").trim(),
+        });
+        startUpdaterRuntimeMonitor({
+          queued: false,
+          initialGraceMs: 15000,
+          isRequestPending: () => requestPending,
+        });
+      }
       try {
         const data = await applyUpdaterApi({
           mode: requestedMode,
@@ -4014,11 +4226,15 @@ export function createRuntimeHealthConfigActions(ctx) {
         message.value = buildUpdaterApplyMessage(result);
         const finalResult = String(result?.last_result || "").trim();
         if (finalResult === "queued_busy") {
-          startQueuedUpdaterMonitor();
+          if (!isGitPullMode) {
+            startQueuedUpdaterMonitor();
+          }
           return data;
         }
         if (finalResult === "updated_restart_scheduled") {
-          beginUpdaterRestartRecovery({ source: "updater_apply" });
+          if (!isGitPullMode) {
+            beginUpdaterRestartRecovery({ source: "updater_apply" });
+          }
           return data;
         }
         await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
@@ -4026,13 +4242,13 @@ export function createRuntimeHealthConfigActions(ctx) {
         return data;
       } catch (err) {
         requestPending = false;
-        if (isTransientNetworkError(err)) {
+        if (!isGitPullMode && isTransientNetworkError(err)) {
           return handoffUpdaterToRestartRecovery("更新已开始，服务正在重启，正在等待恢复。", {
             source: "updater_apply",
           });
         }
         hideUpdaterOverlay();
-        message.value = `应用更新失败: ${err}`;
+        message.value = `${isGitPullMode ? "同步代码失败" : "应用更新失败"}: ${err}`;
       }
     };
     if (typeof runSingleFlight === "function") {
@@ -4090,6 +4306,33 @@ export function createRuntimeHealthConfigActions(ctx) {
     return runner();
   }
 
+  async function publishUpdaterApproved() {
+    const runner = async () => {
+      try {
+        const data = await publishUpdaterApprovedApi();
+        if (data?.runtime && typeof data.runtime === "object") {
+          Object.assign(health.updater, data.runtime);
+        }
+        const result = data?.result || {};
+        const commit = String(result?.source_commit || "").trim().slice(0, 7);
+        message.value = `已发布内网 .py 同步包${commit ? `: ${commit}` : ""}`;
+        try {
+          await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        } catch (_err) {
+          // publish succeeded; status refresh is best-effort
+        }
+        return data;
+      } catch (err) {
+        message.value = `发布内网 .py 同步包失败: ${err}`;
+        return { ok: false, reason: "error", error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_UPDATER_PUBLISH_APPROVED, runner, { cooldownMs: 500 });
+    }
+    return runner();
+  }
+
   async function triggerInternalPeerUpdaterCheck() {
     const runner = async () => {
       try {
@@ -4098,7 +4341,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           Object.assign(health.updater, data.runtime);
         }
         const result = data?.result || {};
-        message.value = String(result?.message || "").trim() || "已下发内网端检查更新命令。";
+        message.value = String(result?.message || "").trim() || "已下发内网端刷新状态命令。";
         try {
           await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
         } catch (_err) {
@@ -4106,7 +4349,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         return data;
       } catch (err) {
-        message.value = `下发内网端检查更新失败: ${err}`;
+        message.value = `下发内网端刷新状态失败: ${err}`;
         return { ok: false, reason: "error", error: String(err) };
       }
     };
@@ -4124,7 +4367,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           Object.assign(health.updater, data.runtime);
         }
         const result = data?.result || {};
-        message.value = String(result?.message || "").trim() || "已下发内网端开始更新命令。";
+        message.value = String(result?.message || "").trim() || "已下发内网端应用代码命令。";
         try {
           await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
         } catch (_err) {
@@ -4132,12 +4375,38 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         return data;
       } catch (err) {
-        message.value = `下发内网端开始更新失败: ${err}`;
+        message.value = `下发内网端应用代码失败: ${err}`;
         return { ok: false, reason: "error", error: String(err) };
       }
     };
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_UPDATER_INTERNAL_PEER_APPLY, runner, { cooldownMs: 500 });
+    }
+    return runner();
+  }
+
+  async function triggerInternalPeerUpdaterRestart() {
+    const runner = async () => {
+      try {
+        const data = await triggerInternalPeerUpdaterRestartApi();
+        if (data?.runtime && typeof data.runtime === "object") {
+          Object.assign(health.updater, data.runtime);
+        }
+        const result = data?.result || {};
+        message.value = String(result?.message || "").trim() || "已下发内网端重启生效命令。";
+        try {
+          await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        } catch (_err) {
+          // ignore transient fetch failures; command submission already succeeded
+        }
+        return data;
+      } catch (err) {
+        message.value = `下发内网端重启生效失败: ${err}`;
+        return { ok: false, reason: "error", error: String(err) };
+      }
+    };
+    if (typeof runSingleFlight === "function") {
+      return runSingleFlight(ACTION_KEY_UPDATER_INTERNAL_PEER_RESTART, runner, { cooldownMs: 500 });
     }
     return runner();
   }
@@ -4206,40 +4475,52 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   async function activateStartupRuntime(options = {}) {
-    try {
-      const payload = {
-        source: String(options?.source || "").trim() || "启动角色确认",
-        startup_handoff_nonce: String(options?.startupHandoffNonce || "").trim(),
-      };
-      const roleMode = String(options?.roleMode || options?.role_mode || "").trim();
-      if (roleMode) {
-        payload.role_mode = roleMode;
-      }
-      const sharedBridge = options?.sharedBridge || options?.shared_bridge;
-      if (sharedBridge && typeof sharedBridge === "object" && !Array.isArray(sharedBridge)) {
-        payload.shared_bridge = sharedBridge;
-      }
-      const data = await activateStartupRuntimeApi(payload);
-      return {
-        ok: data?.ok !== false,
-        activated: Boolean(data?.activated),
-        alreadyActive: Boolean(data?.already_active),
-        roleMode: String(data?.role_mode || "").trim(),
-        savedRole: data?.saved_role && typeof data.saved_role === "object" ? data.saved_role : null,
-        phase: String(data?.phase || "").trim(),
-        error: String(data?.error || "").trim(),
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        activated: false,
-        alreadyActive: false,
-        roleMode: "",
-        savedRole: null,
-        phase: "failed",
-        error: String(err || "").trim() || "激活后台运行时失败",
-      };
+    if (startupActivationRequestInFlight) {
+      return startupActivationRequestInFlight;
     }
+    startupActivationRequestInFlight = (async () => {
+      try {
+        const payload = {
+          source: String(options?.source || "").trim() || "启动角色确认",
+          startup_handoff_nonce: String(options?.startupHandoffNonce || "").trim(),
+        };
+        const roleMode = String(options?.roleMode || options?.role_mode || "").trim();
+        if (roleMode) {
+          payload.role_mode = roleMode;
+        }
+        const sharedBridge = options?.sharedBridge || options?.shared_bridge;
+        if (sharedBridge && typeof sharedBridge === "object" && !Array.isArray(sharedBridge)) {
+          payload.shared_bridge = sharedBridge;
+        }
+        const data = await activateStartupRuntimeApi(payload);
+        return {
+          ok: data?.ok !== false,
+          activated: Boolean(data?.activated),
+          alreadyActive: Boolean(data?.already_active),
+          pending: Boolean(data?.pending),
+          roleMode: String(data?.role_mode || "").trim(),
+          savedRole: data?.saved_role && typeof data.saved_role === "object" ? data.saved_role : null,
+          phase: String(data?.phase || "").trim(),
+          step: String(data?.step || "").trim(),
+          error: String(data?.error || "").trim(),
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          activated: false,
+          alreadyActive: false,
+          pending: false,
+          roleMode: "",
+          savedRole: null,
+          phase: "failed",
+          step: "",
+          error: String(err || "").trim() || "激活后台运行时失败",
+        };
+      } finally {
+        startupActivationRequestInFlight = null;
+      }
+    })();
+    return startupActivationRequestInFlight;
   }
 
   async function exitCurrentRuntime(options = {}) {
@@ -4684,6 +4965,8 @@ export function createRuntimeHealthConfigActions(ctx) {
     fetchInternalRuntimeBuildingRuntimeStatus,
     fetchAllInternalBuildingRuntimeStatuses,
     scheduleInternalRuntimeStatusRefresh,
+    resetInternalRuntimeRequestState,
+    resetExternalDashboardRequestState,
     fetchHandoverDailyReportContext,
     fetchConfig,
     fetchHandoverCommonConfigSegment,
@@ -4705,8 +4988,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     applyUpdaterPatch,
     restartUpdaterApp,
     resumeUpdaterRecoveryIfNeeded,
+    publishUpdaterApproved,
     triggerInternalPeerUpdaterCheck,
     triggerInternalPeerUpdaterApply,
+    triggerInternalPeerUpdaterRestart,
     confirmAllHandoverReview,
     retryAllFailedHandoverCloudSync,
     openHandoverDailyReportScreenshotAuth,
@@ -4740,8 +5025,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     ACTION_KEY_DAY_METRIC_CONFIG_REPAIR,
     ACTION_KEY_HANDOVER_REVIEW_BASE_URL_SAVE,
     ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX,
+    ACTION_KEY_UPDATER_PUBLISH_APPROVED,
     ACTION_KEY_UPDATER_INTERNAL_PEER_CHECK,
     ACTION_KEY_UPDATER_INTERNAL_PEER_APPLY,
+    ACTION_KEY_UPDATER_INTERNAL_PEER_RESTART,
     ACTION_KEY_HANDOVER_DAILY_REPORT_SCREENSHOT_TEST,
     ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE,
     ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,

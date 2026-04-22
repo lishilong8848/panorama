@@ -315,6 +315,9 @@ export function createDashboardSchedulerActions(ctx) {
       memory_source: Object.prototype.hasOwnProperty.call(data, "memory_source")
         ? String(data.memory_source || "")
         : String(targetScheduler.memory_source || ""),
+      display: data.display && typeof data.display === "object"
+        ? { ...data.display }
+        : (targetScheduler.display && typeof targetScheduler.display === "object" ? { ...targetScheduler.display } : {}),
     });
   }
 
@@ -339,6 +342,9 @@ export function createDashboardSchedulerActions(ctx) {
       memory_source: Object.prototype.hasOwnProperty.call(data, "memory_source")
         ? String(data.memory_source || "")
         : String(targetScheduler.memory_source || ""),
+      display: data.display && typeof data.display === "object"
+        ? { ...data.display }
+        : (targetScheduler.display && typeof targetScheduler.display === "object" ? { ...targetScheduler.display } : {}),
       state_paths: data.state_paths && typeof data.state_paths === "object"
         ? { ...data.state_paths }
         : (targetScheduler.state_paths && typeof targetScheduler.state_paths === "object" ? { ...targetScheduler.state_paths } : {}),

@@ -527,19 +527,33 @@ export function mapBackendUpdaterMirrorOverview(raw) {
   const internalPeerCommand = internalPeerRaw.command && typeof internalPeerRaw.command === "object"
     ? internalPeerRaw.command
     : {};
+  const syncRaw = overview.sync && typeof overview.sync === "object" ? overview.sync : {};
   const businessActionsRaw = overview.business_actions && typeof overview.business_actions === "object"
     ? overview.business_actions
     : (overview.businessActions && typeof overview.businessActions === "object" ? overview.businessActions : {});
   return {
     tone: String(overview.tone || "").trim() || "neutral",
-    kicker: String(overview.kicker || "").trim() || "更新镜像",
-    title: String(overview.title || "").trim() || "共享目录批准版本",
+    kicker: String(overview.kicker || "").trim() || "代码同步",
+    title: String(overview.title || "").trim() || "外网到内网 .py 同步",
     statusText: statusText || "尚未发布到共享目录",
     badgeText: String(overview.badge_text || overview.badgeText || statusText || "").trim() || "等待后端更新状态",
     summaryText: String(overview.summary_text || overview.summaryText || "").trim() || "",
     manifestPath: String(overview.manifest_path || overview.manifestPath || "").trim(),
+    manifestLabel: String(overview.manifest_label || overview.manifestLabel || "").trim() || "源码包清单",
     errorText: String(overview.error_text || overview.errorText || "").trim(),
     items,
+    sync: {
+      mode: String(syncRaw.mode || "").trim(),
+      localCommit: String(syncRaw.local_commit || syncRaw.localCommit || "").trim(),
+      remoteCommit: String(syncRaw.remote_commit || syncRaw.remoteCommit || "").trim(),
+      publishedCommit: String(syncRaw.published_commit || syncRaw.publishedCommit || "").trim(),
+      pendingSyncCommit: String(syncRaw.pending_sync_commit || syncRaw.pendingSyncCommit || "").trim(),
+      deferredCommit: String(syncRaw.deferred_commit || syncRaw.deferredCommit || "").trim(),
+      internalPeerCommit: String(syncRaw.internal_peer_commit || syncRaw.internalPeerCommit || "").trim(),
+      internalPeerCommandSourceCommit: String(
+        syncRaw.internal_peer_command_source_commit || syncRaw.internalPeerCommandSourceCommit || "",
+      ).trim(),
+    },
     actions: mapBackendActionsState(overview.actions),
     businessActions: {
       allowed: businessActionsRaw.allowed !== false,
@@ -551,11 +565,17 @@ export function mapBackendUpdaterMirrorOverview(raw) {
       available: Boolean(internalPeerRaw.available),
       online: Boolean(internalPeerRaw.online),
       updateAvailable: Boolean(internalPeerRaw.update_available ?? internalPeerRaw.updateAvailable),
+      restartRequired: Boolean(internalPeerRaw.restart_required ?? internalPeerRaw.restartRequired),
       statusText: String(internalPeerRaw.status_text || internalPeerRaw.statusText || "").trim(),
+      localCommit: String(internalPeerRaw.local_commit || internalPeerRaw.localCommit || "").trim(),
+      lastCommandSourceCommit: String(
+        internalPeerRaw.last_command_source_commit || internalPeerRaw.lastCommandSourceCommit || "",
+      ).trim(),
       command: {
         active: Boolean(internalPeerCommand.active),
         action: String(internalPeerCommand.action || "").trim().toLowerCase(),
         status: String(internalPeerCommand.status || "").trim().toLowerCase(),
+        sourceCommit: String(internalPeerCommand.source_commit || internalPeerCommand.sourceCommit || "").trim(),
         message: String(internalPeerCommand.message || "").trim(),
       },
     },

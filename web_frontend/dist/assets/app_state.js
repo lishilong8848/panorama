@@ -246,6 +246,7 @@ export function createAppState(vueApi) {
     version: "",
     startup_time: "",
     startup_role_confirmed: false,
+    startup_role_restorable: false,
     role_selection_required: false,
     startup_role_user_exited: false,
     startup_handoff: {
@@ -270,6 +271,7 @@ export function createAppState(vueApi) {
     },
     runtime_activated: false,
     activation_phase: "",
+    activation_step: "",
     activation_error: "",
     active_job_id: "",
     active_job_ids: [],
@@ -582,6 +584,7 @@ export function createAppState(vueApi) {
       node_id: "",
       node_label: "",
     },
+    dashboard_display: {},
     shared_root_diagnostic: {
       role_mode: "",
       role_label: "",
@@ -783,6 +786,20 @@ export function createAppState(vueApi) {
   const runtimeWarmupReady = ref(false);
   const engineerDirectoryLoaded = ref(false);
   const pendingResumeRuns = ref([]);
+  const resumeDeleteConfirmDialog = reactive({
+    visible: false,
+    mode: "",
+    title: "",
+    summary: "",
+    warning: "",
+    confirmLabel: "确认删除",
+    runId: "",
+    runIds: [],
+    rows: [],
+    totalCount: 0,
+    totalPendingUploadCount: 0,
+    hiddenCount: 0,
+  });
   const schedulerQuickSaving = ref(false);
   const handoverSchedulerQuickSaving = ref(false);
   const wetBulbSchedulerQuickSaving = ref(false);
@@ -968,11 +985,20 @@ export function createAppState(vueApi) {
         || line.includes("页池")
         || line.includes("共享目录更新")
         || line.includes("更新镜像")
+        || line.includes("代码同步")
       ));
   });
 
   const canRun = computed(() => {
-    return updaterMirrorOverview.value?.businessActions?.allowed === true;
+    const businessActions = updaterMirrorOverview.value?.businessActions;
+    if (!businessActions || typeof businessActions !== "object") {
+      return true;
+    }
+    const reasonCode = String(businessActions.reasonCode || "").trim().toLowerCase();
+    if (reasonCode === "pending_backend") {
+      return true;
+    }
+    return businessActions.allowed !== false;
   });
   const isStatusView = computed(() => currentView.value === "status");
   const isDashboardView = computed(() => currentView.value === "dashboard");
@@ -1119,7 +1145,7 @@ export function createAppState(vueApi) {
   const internalRuntimeBridgeSnapshot = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
     if (roleMode !== "internal" || !internalRuntimeSummary.value || typeof internalRuntimeSummary.value !== "object") {
-      return health.shared_bridge || {};
+      return {};
     }
     const summary = internalRuntimeSummary.value;
     const buildingMap = internalBuildingRuntimeStatusMap.value && typeof internalBuildingRuntimeStatusMap.value === "object"
@@ -1173,7 +1199,9 @@ export function createAppState(vueApi) {
     const currentHourBucket = String(sourceCacheSummary.current_hour_bucket || "").trim();
     const alarmBucket = String(sourceCacheSummary.alarm_event_family?.current_bucket || "").trim() || currentHourBucket;
     return {
-      ...health.shared_bridge,
+      enabled: Boolean(summary.enabled ?? health.shared_bridge?.enabled),
+      role_mode: "internal",
+      root_dir: String(summary.root_dir || health.shared_bridge?.root_dir || "").trim(),
       internal_download_pool: {
         enabled: Boolean(poolSummary.enabled),
         browser_ready: Boolean(poolSummary.browser_ready),
@@ -1479,7 +1507,10 @@ export function createAppState(vueApi) {
       };
     }
     const rawPool = internalRuntimeBridgeSnapshot.value?.internal_download_pool || {};
-    const backendOverview = rawPool.overview && typeof rawPool.overview === "object" ? rawPool.overview : null;
+    const backendOverview =
+      rawPool.overview && typeof rawPool.overview === "object" && Object.keys(rawPool.overview).length > 0
+        ? rawPool.overview
+        : null;
     if (backendOverview) {
       return {
         tone: String(backendOverview.tone || "").trim() || "neutral",
@@ -1513,7 +1544,10 @@ export function createAppState(vueApi) {
       };
     }
     const rawCache = internalRuntimeBridgeSnapshot.value?.internal_source_cache || {};
-    const backendOverview = rawCache.overview && typeof rawCache.overview === "object" ? rawCache.overview : null;
+    const backendOverview =
+      rawCache.overview && typeof rawCache.overview === "object" && Object.keys(rawCache.overview).length > 0
+        ? rawCache.overview
+        : null;
     if (backendOverview) {
       const backendFamilies = Array.isArray(backendOverview.families) ? backendOverview.families : [];
       return {
@@ -1633,7 +1667,13 @@ export function createAppState(vueApi) {
         internalBuildings: INTERNAL_BUILDINGS,
       });
     }
-    return buildLegacyExternalInternalAlertOverview(health.shared_bridge?.internal_alert_status || {});
+    return {
+      tone: "neutral",
+      statusText: "等待后端内网告警状态",
+      summaryText: "内网告警状态由外网聚合接口返回，当前等待首轮状态快照。",
+      items: [],
+      buildings: [],
+    };
   });
   const currentHourRefreshOverview = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
@@ -1911,9 +1951,6 @@ export function createAppState(vueApi) {
         actions: mapBackendActionsState(backendOverview.actions),
       };
     }
-    if (roleMode === "external") {
-      return buildLegacyExternalSharedSourceCacheOverview(health.shared_bridge?.internal_source_cache || {});
-    }
     if (roleMode !== "external") {
       return {
         reasonCode: "role_mismatch",
@@ -1948,19 +1985,40 @@ export function createAppState(vueApi) {
     };
   });
   const updaterMirrorOverview = computed(() => {
-    const backendOverview = mapBackendUpdaterMirrorOverview(
-      health.updater?.display_overview || health.dashboard_display?.updater_mirror_overview,
-    );
+    const dashboardOverview = (
+      health.dashboard_display?.updater_mirror_overview
+      && typeof health.dashboard_display.updater_mirror_overview === "object"
+    )
+      ? health.dashboard_display.updater_mirror_overview
+      : null;
+    const updaterOverview = (
+      health.updater?.display_overview
+      && typeof health.updater.display_overview === "object"
+    )
+      ? health.updater.display_overview
+      : null;
+    const backendOverview = mapBackendUpdaterMirrorOverview(dashboardOverview || updaterOverview);
     if (backendOverview) return backendOverview;
     return {
       tone: "neutral",
-      kicker: "更新镜像",
-      title: "共享目录批准版本",
+      kicker: "代码同步",
+      title: "外网到内网 .py 同步",
       statusText: "等待后端更新状态",
-      summaryText: "更新镜像状态由后端聚合后返回。",
+      summaryText: "代码同步状态由后端聚合后返回。",
       manifestPath: "",
+      manifestLabel: "源码包清单",
       errorText: "",
       items: [],
+      sync: {
+        mode: "",
+        localCommit: "",
+        remoteCommit: "",
+        publishedCommit: "",
+        pendingSyncCommit: "",
+        deferredCommit: "",
+        internalPeerCommit: "",
+        internalPeerCommandSourceCommit: "",
+      },
       actions: {},
       businessActions: {
         allowed: false,
@@ -1972,11 +2030,15 @@ export function createAppState(vueApi) {
         available: false,
         online: false,
         updateAvailable: false,
+        restartRequired: false,
         statusText: "等待后端状态",
+        localCommit: "",
+        lastCommandSourceCommit: "",
         command: {
           active: false,
           action: "",
           status: "",
+          sourceCommit: "",
           message: "",
         },
       },
@@ -2597,6 +2659,16 @@ export function createAppState(vueApi) {
     if (backendText) return backendText;
     return "等待后端更新状态";
   });
+  const updaterVersionInlineText = computed(() => {
+    const sync = updaterMirrorOverview.value?.sync && typeof updaterMirrorOverview.value.sync === "object"
+      ? updaterMirrorOverview.value.sync
+      : {};
+    const localCommit = String(sync.localCommit || health.updater?.local_commit || "").trim();
+    if (localCommit) return `commit ${localCommit.slice(0, 7)}`;
+    const publishedCommit = String(sync.publishedCommit || health.updater?.approved_commit || "").trim();
+    if (publishedCommit) return `published ${publishedCommit.slice(0, 7)}`;
+    return String(health.updater?.local_version || health.version || "").trim();
+  });
   const dashboardActiveModuleTitle = computed(() => {
     const hit = dashboardModules.value.find((item) => item.id === dashboardActiveModule.value);
     return hit?.title || "业务模块";
@@ -2710,6 +2782,7 @@ export function createAppState(vueApi) {
     runtimeWarmupReady,
     engineerDirectoryLoaded,
     pendingResumeRuns,
+    resumeDeleteConfirmDialog,
     schedulerQuickSaving,
     handoverSchedulerQuickSaving,
     wetBulbSchedulerQuickSaving,
@@ -2858,6 +2931,7 @@ export function createAppState(vueApi) {
     hasSelectedHandoverFiles,
     handoverFileStatesByBuilding,
     updaterResultText,
+    updaterVersionInlineText,
     dashboardActiveModuleTitle,
     moduleMeta,
     backendDashboardModuleHeroMap,

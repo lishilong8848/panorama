@@ -144,11 +144,14 @@ class IntervalSchedulerService:
         return "运行中" if self.is_running() else "未启动"
 
     def next_run_time(self, now: datetime | None = None) -> datetime:
+        reference_now = now or datetime.now()
         interval = timedelta(minutes=int(self.cfg["interval_minutes"]))
         last_attempt = self._parse_time(str(self.state.get("last_attempt_at", "")))
         if last_attempt is not None:
-            return last_attempt + interval
-        return (now or self.started_at) + interval if not self.runtime.get("started_at") else self.started_at + interval
+            next_run = last_attempt + interval
+            return reference_now if next_run <= reference_now else next_run
+        base_time = self.started_at if self.runtime.get("started_at") else reference_now
+        return base_time + interval
 
     def next_run_text(self) -> str:
         return self.next_run_time().strftime("%Y-%m-%d %H:%M:%S")

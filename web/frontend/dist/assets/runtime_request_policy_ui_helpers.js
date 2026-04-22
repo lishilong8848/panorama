@@ -6,6 +6,7 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
     updaterAwaitingRestartRecovery,
     startupRoleSelectorVisible,
     startupRoleLoadingVisible,
+    startupRoleActivationInFlight,
     bootstrapReady,
     health,
     currentView,
@@ -17,12 +18,21 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
   } = options;
 
   const shouldPauseRuntimeRequests = computed(() => {
+    const activationPhase = String(health.activation_phase || "").trim().toLowerCase();
+    const backendRuntimeReady = Boolean(
+      health.runtime_activated
+      && health.startup_role_confirmed
+      && !health.role_selection_required
+      && !health.startup_role_user_exited
+    );
     return Boolean(
       !startupRoleSelectorHandled.value
       || updaterUiOverlayVisible.value
       || updaterAwaitingRestartRecovery.value
       || startupRoleSelectorVisible.value
-      || startupRoleLoadingVisible.value
+      || (!backendRuntimeReady && startupRoleLoadingVisible.value)
+      || (!backendRuntimeReady && Boolean(startupRoleActivationInFlight?.value))
+      || (!backendRuntimeReady && ["activating", "recovering", "restarting"].includes(activationPhase))
       || (Boolean(health.startup_role_user_exited) && !Boolean(health.runtime_activated))
     );
   });
@@ -36,6 +46,10 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
     && !Boolean(health.role_selection_required)
   ));
 
+  const runningRoleMode = computed(() =>
+    String(health?.deployment?.role_mode || "").trim().toLowerCase(),
+  );
+
   const shouldFetchHealth = computed(() => {
     if (!runtimeRequestsReady.value) return false;
     const view = String(currentView.value || "").trim().toLowerCase();
@@ -44,9 +58,9 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
 
   const shouldPollExternalDashboardSummary = computed(() => {
     if (!runtimeRequestsReady.value) return false;
-    if (deploymentRoleMode.value === "internal") return false;
+    if (runningRoleMode.value !== "external") return false;
     const view = String(currentView.value || "").trim().toLowerCase();
-    return view === "dashboard";
+    return view === "dashboard" || view === "status";
   });
 
   const shouldPollJobPanel = computed(() => false);
@@ -54,7 +68,7 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
   const shouldFetchPendingResumeRuns = computed(() => {
     if (!runtimeRequestsReady.value) return false;
     if (!fullHealthLoaded.value) return false;
-    if (deploymentRoleMode.value === "internal") return false;
+    if (runningRoleMode.value !== "external") return false;
     const view = String(currentView.value || "").trim().toLowerCase();
     return view === "dashboard";
   });
@@ -73,14 +87,14 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
 
   const shouldPollInternalRuntimeStatus = computed(() => {
     if (!runtimeRequestsReady.value) return false;
-    if (deploymentRoleMode.value !== "internal") return false;
+    if (runningRoleMode.value !== "internal") return false;
     const view = String(currentView.value || "").trim().toLowerCase();
     return view === "dashboard" || view === "status";
   });
 
   const shouldIncludeHandoverHealthContext = computed(() => {
     if (!runtimeRequestsReady.value) return false;
-    if (deploymentRoleMode.value === "internal") return false;
+    if (runningRoleMode.value !== "external") return false;
     const view = String(currentView.value || "").trim().toLowerCase();
     const moduleId = String(dashboardActiveModule.value || "").trim();
     if (view === "status") return true;
@@ -92,7 +106,7 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
 
   const shouldPollHandoverDailyReportContext = computed(() => {
     if (!runtimeRequestsReady.value) return false;
-    if (deploymentRoleMode.value === "internal") return false;
+    if (runningRoleMode.value !== "external") return false;
     const view = String(currentView.value || "").trim().toLowerCase();
     const moduleId = String(dashboardActiveModule.value || "").trim();
     const configTab = String(activeConfigTab.value || "").trim();
@@ -107,7 +121,7 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
 
   const shouldLoadEngineerDirectory = computed(() => {
     if (!runtimeRequestsReady.value) return false;
-    if (deploymentRoleMode.value === "internal") return false;
+    if (runningRoleMode.value !== "external") return false;
     const view = String(currentView.value || "").trim().toLowerCase();
     const moduleId = String(dashboardActiveModule.value || "").trim();
     const configTab = String(activeConfigTab.value || "").trim();

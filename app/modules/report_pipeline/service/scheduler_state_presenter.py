@@ -201,6 +201,33 @@ def present_scheduler_state(
     }
 
 
+def present_scheduler_snapshot_with_display(
+    snapshot: Any,
+    *,
+    role_mode: str = "",
+    slot_keys: Iterable[str] = ("morning", "afternoon"),
+) -> Dict[str, Any]:
+    payload = dict(snapshot) if isinstance(snapshot, dict) else {}
+    payload["display"] = present_scheduler_state(payload, role_mode=role_mode)
+    slots = dict(payload.get("slots")) if isinstance(payload.get("slots"), dict) else {}
+    for slot_key in slot_keys:
+        slot = payload.get(slot_key)
+        if not isinstance(slot, dict):
+            slot = slots.get(slot_key)
+        if not isinstance(slot, dict):
+            continue
+        slot_with_display = {
+            **slot,
+            "display": present_scheduler_state(slot, role_mode=role_mode),
+        }
+        payload[slot_key] = slot_with_display
+        if slots:
+            slots[slot_key] = slot_with_display
+    if slots:
+        payload["slots"] = slots
+    return payload
+
+
 def present_scheduler_overview_items(
     config: Any,
     scheduler_status_summary: Any,

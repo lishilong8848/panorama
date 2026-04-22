@@ -10,6 +10,7 @@ from app.modules.scheduler.api._config_persistence import (
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
 )
+from app.modules.scheduler.api._display_payload import with_scheduler_display
 
 
 router = APIRouter(prefix="/api/scheduler/monthly-change-report", tags=["scheduler-monthly-change-report"])
@@ -43,7 +44,7 @@ def _scheduler_cfg_from_v3(config: Dict[str, Any]) -> Dict[str, Any]:
 
 def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Dict[str, Any]:
     snapshot = container.monthly_change_report_scheduler_status()
-    return {
+    payload = {
         "ok": True,
         "action": action_result or {},
         "enabled": bool(snapshot.get("enabled", False)),
@@ -62,6 +63,7 @@ def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Di
         "effective_auto_start_in_gui": bool(snapshot.get("effective_auto_start_in_gui", False)),
         "memory_source": str(snapshot.get("memory_source", "") or ""),
     }
+    return with_scheduler_display(payload, container, slot_keys=())
 
 
 @router.post("/start")

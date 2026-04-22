@@ -159,6 +159,155 @@ a {
   animation: runtime-overlay-progress 1.2s ease-in-out infinite;
 }
 
+.danger-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(18, 24, 31, 0.38);
+  backdrop-filter: blur(12px);
+}
+
+.danger-confirm-card {
+  width: min(560px, 100%);
+  max-height: min(720px, 92vh);
+  overflow: auto;
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  border-radius: 8px;
+  border: 1px solid rgba(191, 61, 48, 0.22);
+  background: var(--surface-1);
+  box-shadow: 0 24px 72px rgba(14, 23, 34, 0.28);
+}
+
+.danger-confirm-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.danger-confirm-mark {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--tone-danger-bg);
+  color: var(--tone-danger);
+  font-weight: 900;
+  font-size: 20px;
+}
+
+.danger-confirm-kicker {
+  margin-bottom: 4px;
+  color: var(--tone-danger);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.danger-confirm-title {
+  margin: 0;
+  color: var(--text-1);
+  font-size: 22px;
+  line-height: 1.25;
+}
+
+.danger-confirm-summary {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.danger-confirm-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.danger-confirm-metric {
+  min-height: 74px;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fbfcfd;
+}
+
+.danger-confirm-metric span {
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.danger-confirm-metric strong {
+  color: var(--text-1);
+  font-size: 24px;
+  line-height: 1.15;
+}
+
+.danger-confirm-warning {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(191, 61, 48, 0.18);
+  background: var(--tone-danger-bg);
+  color: var(--tone-danger);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.danger-confirm-list {
+  display: grid;
+  gap: 8px;
+}
+
+.danger-confirm-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.danger-confirm-row-title {
+  color: var(--text-1);
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.danger-confirm-row-meta,
+.danger-confirm-more {
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.danger-confirm-row-count {
+  min-width: 64px;
+  text-align: right;
+  color: var(--tone-danger);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.danger-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .startup-role-gate {
   min-height: 100vh;
   padding: 28px;
@@ -1072,8 +1221,9 @@ a {
 
 .source-cache-building-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
   gap: 10px;
+  min-width: 0;
 }
 
 .internal-download-slot {
@@ -1117,6 +1267,7 @@ a {
   display: grid;
   gap: 8px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .status-building-card,
@@ -1136,6 +1287,7 @@ a {
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .status-building-card-head .status-badge,
@@ -1145,6 +1297,9 @@ a {
 .source-cache-family-card-meta .status-badge,
 .source-cache-building-card-head .status-badge {
   align-self: flex-start;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .status-building-card-title,
@@ -1154,25 +1309,36 @@ a {
   font-size: 14px;
   font-weight: 800;
   color: var(--text-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .status-building-card .hint,
 .source-cache-family-card .hint,
 .source-cache-building-card .hint {
   margin: 0;
+  min-width: 0;
   word-break: break-word;
+  overflow-wrap: anywhere;
+  max-width: 100%;
 }
 
 .source-cache-building-actions {
   display: flex;
   justify-content: flex-end;
+  min-width: 0;
   margin-top: 4px;
 }
 
 .source-cache-building-btn {
   min-height: 34px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding: 0 12px;
   box-shadow: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .status-subsection-head {
