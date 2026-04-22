@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import queue
 import signal
 import sqlite3
 import socket
@@ -214,6 +215,13 @@ class JobService:
         self._jobs: Dict[str, JobState] = {}
         self._job_sequence = 0
         self._global_log_sink: Callable[[str], None] | None = None
+        self._global_log_sink_queue: queue.Queue[str] = queue.Queue(maxsize=10000)
+        self._global_log_sink_worker = threading.Thread(
+            target=self._global_log_sink_loop,
+            daemon=True,
+            name="job-global-log-sink",
+        )
+        self._global_log_sink_worker.start()
         self._resource_holders: Dict[str, List[str]] = {}
         self._task_engine_store: TaskEngineStore | None = None
         self._task_engine_db: TaskEngineDatabase | None = None
@@ -267,6 +275,17 @@ class JobService:
 
     def set_global_log_sink(self, sink: Callable[[str], None] | None) -> None:
         self._global_log_sink = sink
+
+    def _global_log_sink_loop(self) -> None:
+        while True:
+            text = self._global_log_sink_queue.get()
+            sink = self._global_log_sink
+            if not callable(sink):
+                continue
+            try:
+                sink(text)
+            except Exception:  # noqa: BLE001
+                pass
 
     def configure_task_engine(
         self,
@@ -412,7 +431,7 @@ class JobService:
         overflow = len(job.logs) - self.log_buffer_size
         if overflow > 0:
             del job.logs[:overflow]
-        self._record_job_event(
+        self._record_job_event_async(
             job,
             stage_id=self._get_primary_stage(job).stage_id,
             stream="job",
@@ -420,7 +439,6 @@ class JobService:
             level="info",
             payload={"line": line, "message": raw, "timestamp": timestamp},
         )
-        self._persist_job_snapshot(job)
 
     @staticmethod
     def _write_console_line(text: str) -> None:
@@ -629,6 +647,43 @@ class JobService:
         )
         job.last_event_id = max(job.last_event_id, event_id)
         return event_id
+
+    def _record_job_event_async(
+        self,
+        job: JobState,
+        *,
+        stage_id: str = "",
+        stream: str = "job",
+        event_type: str = "log",
+        level: str = "info",
+        payload: Dict[str, Any] | None = None,
+    ) -> None:
+        if not self._task_engine_db:
+            return
+        append_async = getattr(self._task_engine_db, "append_job_event_async", None)
+        if not callable(append_async):
+            self._record_job_event(
+                job,
+                stage_id=stage_id,
+                stream=stream,
+                event_type=event_type,
+                level=level,
+                payload=payload,
+            )
+            return
+        ok = bool(
+            append_async(
+                job_id=job.job_id,
+                stage_id=stage_id,
+                stream=stream,
+                event_type=event_type,
+                level=level,
+                payload=payload or {},
+                created_at=self._now_text(),
+            )
+        )
+        if not ok:
+            self._write_console_line(f"[任务日志] SQLite 日志队列繁忙，已跳过一条后台日志: job={job.job_id}")
 
     def _persist_stage_snapshot(self, job: JobState, stage: StageState) -> None:
         if not self._task_engine_db:
@@ -1926,7 +1981,7 @@ class JobService:
             overflow = len(job.logs) - self.log_buffer_size
             if overflow > 0:
                 del job.logs[:overflow]
-            self._record_job_event(
+            self._record_job_event_async(
                 job,
                 stage_id=stage.stage_id,
                 stream=stream,
@@ -1934,7 +1989,6 @@ class JobService:
                 level=level,
                 payload={"line": line, "message": text, "timestamp": timestamp},
             )
-            self._persist_job_snapshot(job)
         self._write_console_line(text)
 
     def _handle_worker_event(
@@ -1958,7 +2012,7 @@ class JobService:
                 overflow = len(job.logs) - self.log_buffer_size
                 if overflow > 0:
                     del job.logs[:overflow]
-                self._record_job_event(
+                self._record_job_event_async(
                     job,
                     stage_id=stage_id,
                     stream="stdout",
@@ -1966,7 +2020,6 @@ class JobService:
                     level=level,
                     payload={"line": line, "message": message, "timestamp": timestamp},
                 )
-                self._persist_job_snapshot(job)
             self._write_console_line(message)
             return
         if event_type == "stage_status":
@@ -1998,8 +2051,14 @@ class JobService:
                 "timestamp": timestamp,
             }
             with self._lock:
-                self._record_job_event(job, stage_id=stage_id, stream="stdout", event_type="progress", level="info", payload=payload)
-                self._persist_job_snapshot(job)
+                self._record_job_event_async(
+                    job,
+                    stage_id=stage_id,
+                    stream="stdout",
+                    event_type="progress",
+                    level="info",
+                    payload=payload,
+                )
             return
         if event_type == "heartbeat":
             heartbeat_at = timestamp
@@ -2043,15 +2102,22 @@ class JobService:
         dedupe_key: str = "",
         submitted_by: str = "",
     ) -> JobState:
+        submit_started = time.perf_counter()
         normalized_resources = self._normalize_resource_keys(resource_keys)
         normalized_priority = str(priority or "manual").strip().lower() or "manual"
         normalized_submitted_by = str(submitted_by or normalized_priority).strip().lower() or "manual"
         normalized_dedupe_key = self._normalize_dedupe_key(dedupe_key)
         if normalized_dedupe_key and self._task_engine_db:
+            dedupe_started = time.perf_counter()
             snapshot = self._task_engine_db.find_active_job_by_dedupe_key(
                 normalized_dedupe_key,
                 statuses=sorted(_INCOMPLETE_JOB_STATUSES),
             )
+            dedupe_elapsed_ms = int((time.perf_counter() - dedupe_started) * 1000)
+            if dedupe_elapsed_ms >= 1000:
+                self._write_console_line(
+                    f"[任务热路径] dedupe DB 查询耗时: feature={feature or name}, elapsed_ms={dedupe_elapsed_ms}"
+                )
             if isinstance(snapshot, dict):
                 return self._job_from_snapshot(snapshot)
         with self._lock:
@@ -2078,9 +2144,30 @@ class JobService:
                 )
             ]
             self._jobs[job_id] = job
-            config_snapshot = self._capture_config_snapshot()
-            self._persist_job_snapshot(job, config_snapshot=config_snapshot)
+            persist_started = time.perf_counter()
+            self._persist_job_snapshot(job, config_snapshot=None)
+            persist_elapsed_ms = int((time.perf_counter() - persist_started) * 1000)
+            if persist_elapsed_ms >= 1000:
+                self._write_console_line(
+                    f"[任务热路径] job 主记录写入耗时: job={job_id}, feature={feature or name}, elapsed_ms={persist_elapsed_ms}"
+                )
         self._persist_resource_snapshot()
+
+        def _persist_config_snapshot_async() -> None:
+            try:
+                snapshot_started = time.perf_counter()
+                config_snapshot = self._capture_config_snapshot()
+                if isinstance(config_snapshot, dict):
+                    self._persist_job_snapshot(job, config_snapshot=config_snapshot)
+                snapshot_elapsed_ms = int((time.perf_counter() - snapshot_started) * 1000)
+                if snapshot_elapsed_ms >= 1000:
+                    self._write_console_line(
+                        f"[任务热路径] config snapshot 异步写入耗时: job={job_id}, feature={feature or name}, elapsed_ms={snapshot_elapsed_ms}"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._write_console_line(
+                    f"[任务热路径] config snapshot 异步写入失败: job={job_id}, feature={feature or name}, error={exc}"
+                )
 
         def _run() -> None:
             unhandled_error_detail = ""
@@ -2134,6 +2221,16 @@ class JobService:
         thread = threading.Thread(target=_run, daemon=True, name=f"job-{job_id[:8]}")
         job.thread = thread
         thread.start()
+        threading.Thread(
+            target=_persist_config_snapshot_async,
+            daemon=True,
+            name=f"job-config-snapshot-{job_id[:8]}",
+        ).start()
+        submit_elapsed_ms = int((time.perf_counter() - submit_started) * 1000)
+        if submit_elapsed_ms >= 1000:
+            self._write_console_line(
+                f"[任务热路径] start_job 提交耗时: job={job_id}, feature={feature or name}, elapsed_ms={submit_elapsed_ms}"
+            )
         return job
 
     def _restore_incomplete_jobs(self) -> None:
@@ -2429,8 +2526,12 @@ class JobService:
         worker_payload: Dict[str, Any] | None = None,
         summary: str = "共享文件已到位，正在继续处理",
     ) -> JobState:
+        resume_started = time.perf_counter()
         if not self._task_engine_store:
             raise RuntimeError("task engine not configured")
+        job: JobState
+        stage: StageState
+        payload_path: Path
         with self._lock:
             normalized_job_id = str(job_id or "").strip()
             job = self._jobs.get(normalized_job_id)
@@ -2443,7 +2544,13 @@ class JobService:
             stage = self._get_primary_stage(job)
             payload_path = self._task_engine_store.resolve_stage_payload_path(job.job_id, stage.stage_id)
             if isinstance(worker_payload, dict):
+                payload_started = time.perf_counter()
                 self._task_engine_store.persist_stage_payload(job.job_id, stage.stage_id, self._json_ready(worker_payload))
+                payload_elapsed_ms = int((time.perf_counter() - payload_started) * 1000)
+                if payload_elapsed_ms >= 1000:
+                    self._write_console_line(
+                        f"[共享桥接] waiting job payload 写入耗时: job={job.job_id}, elapsed_ms={payload_elapsed_ms}"
+                    )
             job.status = "queued"
             job.wait_reason = ""
             job.summary = str(summary or "").strip()
@@ -2458,18 +2565,40 @@ class JobService:
             stage.finished_at = ""
             stage.result = None
             stage.cancel_requested = False
-            self._append_log(job, "[共享桥接] 共享文件已到位，正在继续处理")
-            self._persist_job_snapshot(job)
-            self._record_job_event(
-                job,
-                stage_id=stage.stage_id,
-                stream="job",
-                event_type="shared_bridge_resume",
-                level="info",
-                payload={"summary": job.summary, "bridge_task_id": job.bridge_task_id, "timestamp": self._now_text()},
-            )
-        self._persist_resource_snapshot()
         self._launch_existing_worker_job(job, stage, payload_path=payload_path, worker_handler=stage.worker_handler)
+
+        def _persist_resume_state() -> None:
+            try:
+                persist_started = time.perf_counter()
+                self._append_log(job, "[共享桥接] 共享文件已到位，正在继续处理")
+                self._persist_job_snapshot(job)
+                self._record_job_event(
+                    job,
+                    stage_id=stage.stage_id,
+                    stream="job",
+                    event_type="shared_bridge_resume",
+                    level="info",
+                    payload={"summary": job.summary, "bridge_task_id": job.bridge_task_id, "timestamp": self._now_text()},
+                )
+                self._persist_resource_snapshot()
+                persist_elapsed_ms = int((time.perf_counter() - persist_started) * 1000)
+                if persist_elapsed_ms >= 1000:
+                    self._write_console_line(
+                        f"[共享桥接] waiting job 恢复状态持久化耗时: job={job.job_id}, elapsed_ms={persist_elapsed_ms}"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._write_console_line(f"[共享桥接] waiting job 恢复状态持久化失败: job={job.job_id}, error={exc}")
+
+        threading.Thread(
+            target=_persist_resume_state,
+            daemon=True,
+            name=f"bridge-resume-persist-{job.job_id[:8]}",
+        ).start()
+        resume_elapsed_ms = int((time.perf_counter() - resume_started) * 1000)
+        if resume_elapsed_ms >= 1000:
+            self._write_console_line(
+                f"[共享桥接] waiting job 唤醒耗时: job={job.job_id}, elapsed_ms={resume_elapsed_ms}"
+            )
         return job
 
     def fail_waiting_job(self, job_id: str, *, error_text: str, summary: str = "") -> JobState:
@@ -2785,10 +2914,18 @@ class JobService:
             self._write_console_line(text)
             self._append_log(job, text)
         if has_job and callable(sink):
-            try:
-                sink(text)
-            except Exception:  # noqa: BLE001
-                pass
+            self._emit_global_log_sink_async(str(text or ""))
+
+    def _emit_global_log_sink_async(self, text: str) -> None:
+        raw = str(text or "").strip()
+        if not raw:
+            return
+        if not callable(self._global_log_sink):
+            return
+        try:
+            self._global_log_sink_queue.put_nowait(raw)
+        except queue.Full:
+            self._write_console_line("[任务日志] 全局日志队列繁忙，已跳过一条系统日志")
 
     def get_logs(self, job_id: str, offset: int = 0, *, after_event_id: int | None = None, limit: int = 1000) -> Dict[str, Any]:
         if self._task_engine_db:

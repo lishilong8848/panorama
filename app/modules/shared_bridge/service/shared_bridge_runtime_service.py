@@ -213,10 +213,18 @@ class SharedBridgeRuntimeService:
             return
         if self._job_service is None:
             raise RuntimeError("共享桥接缺少任务服务，无法恢复原任务")
-        self._job_service.resume_waiting_worker_job(
+        task_id = str(task.get("task_id", "") or "").strip()
+        started = time.perf_counter()
+        self._emit_system_log(f"[共享桥接] 任务={task_id or '-'} 开始唤醒 waiting job: job={job_id}")
+        resumed = self._job_service.resume_waiting_worker_job(
             job_id,
             worker_payload=worker_payload,
             summary=summary,
+        )
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        self._emit_system_log(
+            f"[共享桥接] 任务={task_id or '-'} 唤醒 waiting job 调用已返回: "
+            f"job={job_id}, status={getattr(resumed, 'status', '-')}, elapsed_ms={elapsed_ms}"
         )
 
     def _fail_bound_job(self, task: Dict[str, Any], *, error_text: str, summary: str = "") -> None:
@@ -2898,9 +2906,9 @@ class SharedBridgeRuntimeService:
             pass
 
     def _wake_loop(self, *, reason: str = "") -> None:
+        self._wake_event.set()
         if reason:
             self._request_runtime_status_refresh(reason=reason)
-        self._wake_event.set()
 
     def _touch_node(self) -> None:
         if not self._store:
@@ -5983,6 +5991,15 @@ class SharedBridgeRuntimeService:
                     if now_monotonic >= next_heartbeat:
                         self._touch_node()
                         next_heartbeat = now_monotonic + self.heartbeat_interval_sec
+                    processed_any = False
+                    if woke:
+                        for _ in range(20):
+                            if not self._process_one_task_if_needed():
+                                break
+                            processed_any = True
+                            self._reconcile_waiting_jobs()
+                        if processed_any:
+                            next_waiting_job_reconcile = now_monotonic + self.WAITING_JOB_RECONCILE_INTERVAL_SEC
                     if now_monotonic >= next_cleanup:
                         self._run_housekeeping()
                         next_cleanup = now_monotonic + self.CLEANUP_INTERVAL_SEC
@@ -6012,7 +6029,6 @@ class SharedBridgeRuntimeService:
                         next_waiting_job_reconcile = now_monotonic + self.WAITING_JOB_RECONCILE_INTERVAL_SEC
                     if self.role_mode == "internal":
                         self._process_internal_browser_alerts()
-                    processed_any = False
                     for _ in range(20):
                         if not self._process_one_task_if_needed():
                             break

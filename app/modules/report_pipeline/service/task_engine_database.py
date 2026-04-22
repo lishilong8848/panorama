@@ -263,9 +263,9 @@ class TaskEngineDatabase:
                         holder["result"] = callback(conn)
                     except Exception as exc:  # noqa: BLE001
                         holder["error"] = exc
+                        self._last_writer_error = f"{type(exc).__name__}: {exc}"
                         if self._should_reconnect_writer(exc):
                             reconnect_requested = True
-                            self._last_writer_error = f"{type(exc).__name__}: {exc}"
                     finally:
                         done.set()
                     if reconnect_requested:
@@ -319,6 +319,42 @@ class TaskEngineDatabase:
             queue_depth=queue_depth,
         )
         return holder.get("result")
+
+    def _write_async(self, callback: Callable[[sqlite3.Connection], Any]) -> bool:
+        if self._closed:
+            return False
+        try:
+            self._ensure_writer_alive()
+        except Exception as exc:  # noqa: BLE001
+            self._last_writer_error = f"{type(exc).__name__}: {exc}"
+            return False
+
+        submitted_at = time.perf_counter()
+        queue_depth = int(self._writes.qsize())
+        done = threading.Event()
+        holder: dict[str, Any] = {"async": True}
+
+        def _timed_callback(conn: sqlite3.Connection) -> Any:
+            holder["queue_wait_ms"] = int((time.perf_counter() - submitted_at) * 1000)
+            exec_started = time.perf_counter()
+            try:
+                return callback(conn)
+            finally:
+                holder["exec_ms"] = int((time.perf_counter() - exec_started) * 1000)
+
+        try:
+            self._writes.put_nowait((_timed_callback, done, holder))
+        except queue.Full:
+            self._last_writer_error = f"write queue full, depth={self._writes.qsize()}"
+            return False
+
+        self._record_write_metrics(
+            elapsed_ms=0,
+            queue_wait_ms=0,
+            exec_ms=0,
+            queue_depth=queue_depth,
+        )
+        return True
 
     def _record_write_metrics(self, *, elapsed_ms: int, queue_wait_ms: int, exec_ms: int, queue_depth: int) -> None:
         elapsed = max(0, int(elapsed_ms or 0))
@@ -484,6 +520,38 @@ class TaskEngineDatabase:
             return int(cursor.lastrowid or 0)
 
         return int(self._write(_op) or 0)
+
+    def append_job_event_async(
+        self,
+        *,
+        job_id: str,
+        stage_id: str = "",
+        stream: str = "job",
+        event_type: str = "log",
+        level: str = "info",
+        payload: dict[str, Any] | None = None,
+        created_at: str = "",
+    ) -> bool:
+        event_payload = _json_ready(payload or {})
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO job_events(job_id, stage_id, stream, event_type, level, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(job_id or "").strip(),
+                    str(stage_id or "").strip(),
+                    str(stream or "job").strip(),
+                    str(event_type or "log").strip(),
+                    str(level or "info").strip(),
+                    json.dumps(event_payload, ensure_ascii=False, default=str),
+                    str(created_at or "").strip(),
+                ),
+            )
+
+        return self._write_async(_op)
 
     def upsert_worker(self, *, job_id: str, stage_id: str, snapshot: dict[str, Any]) -> None:
         payload = _json_ready(snapshot)
