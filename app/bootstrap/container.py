@@ -55,6 +55,15 @@ _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS: tuple[tuple[str, str, tuple[str, ...]], ...
 _EXTERNAL_SCHEDULER_AUTOSTART_PATHS = {
     key: path for key, _label, path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS
 }
+_EXTERNAL_SCHEDULER_RUNTIME_PATHS = {
+    "auto_flow": ("scheduler",),
+    "handover": ("handover_log", "scheduler"),
+    "wet_bulb_collection": ("wet_bulb_collection", "scheduler"),
+    "day_metric_upload": ("day_metric_upload", "scheduler"),
+    "alarm_event_upload": ("alarm_export", "scheduler"),
+    "monthly_change_report": ("handover_log", "monthly_change_report", "scheduler"),
+    "monthly_event_report": ("handover_log", "monthly_event_report", "scheduler"),
+}
 _EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
     "auto_flow": "scheduler",
     "handover": "handover_scheduler_manager",
@@ -402,12 +411,16 @@ class AppContainer:
         wet_cfg = self.runtime_config.get("wet_bulb_collection", {})
         if not isinstance(wet_cfg, dict):
             wet_cfg = {}
+        paths_cfg = self.runtime_config.get("paths", {})
+        if not isinstance(paths_cfg, dict):
+            paths_cfg = {}
+        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
         scheduler_cfg = wet_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
         return IntervalSchedulerService(
             scheduler_cfg=scheduler_cfg,
-            runtime_state_root="runtime_state",
+            runtime_state_root=runtime_state_root or "runtime_state",
             emit_log=self.add_system_log,
             run_callback=self.wet_bulb_collection_scheduler_callback or self._wet_bulb_collection_scheduler_run_callback,
             is_busy=lambda: False,
@@ -904,7 +917,13 @@ class AppContainer:
             return {"ok": False, "error": str(exc)}
 
     def _effective_external_scheduler_auto_start(self, key: str, fallback: bool = False) -> bool:
-        path = _EXTERNAL_SCHEDULER_AUTOSTART_PATHS.get(str(key or "").strip())
+        normalized_key = str(key or "").strip()
+        runtime_path = _EXTERNAL_SCHEDULER_RUNTIME_PATHS.get(normalized_key)
+        if runtime_path:
+            cfg = self._dict_path(self.runtime_config, runtime_path)
+            if isinstance(cfg, dict) and "auto_start_in_gui" in cfg:
+                return bool(cfg.get("auto_start_in_gui", False))
+        path = _EXTERNAL_SCHEDULER_AUTOSTART_PATHS.get(normalized_key)
         if not path:
             return bool(fallback)
         cfg = self._dict_path(self.runtime_config, path)
@@ -977,17 +996,19 @@ class AppContainer:
         return changed
 
     def _apply_single_external_scheduler_memory(self, key: str, desired: bool) -> bool:
-        path = _EXTERNAL_SCHEDULER_AUTOSTART_PATHS.get(str(key or "").strip())
+        normalized_key = str(key or "").strip()
+        path = _EXTERNAL_SCHEDULER_AUTOSTART_PATHS.get(normalized_key)
         changed = False
-        if path:
-            scheduler_cfg = self._ensure_config_dict_path(self.runtime_config, path)
+        target_paths = [item for item in (path, _EXTERNAL_SCHEDULER_RUNTIME_PATHS.get(normalized_key)) if item]
+        for target_path in target_paths:
+            scheduler_cfg = self._ensure_config_dict_path(self.runtime_config, target_path)
             if scheduler_cfg.get("auto_start_in_gui") is not desired:
                 scheduler_cfg["auto_start_in_gui"] = desired
                 changed = True
             if desired and scheduler_cfg.get("enabled") is not True:
                 scheduler_cfg["enabled"] = True
                 changed = True
-        if self._apply_scheduler_memory_to_runtime_object(str(key or "").strip(), desired):
+        if self._apply_scheduler_memory_to_runtime_object(normalized_key, desired):
             changed = True
         return changed
 
@@ -2352,6 +2373,8 @@ class AppContainer:
                 write_console=False,
             )
         )
+        if self.runtime_services_armed and normalize_role_mode(self._configured_deployment_snapshot().get("role_mode")) == "external":
+            self.apply_external_scheduler_autostart_state(source="配置热重载")
 
         auto_start = bool(self.runtime_config.get("scheduler", {}).get("auto_start_in_gui", False))
         handover_cfg = self.runtime_config.get("handover_log", {})

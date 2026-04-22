@@ -164,3 +164,25 @@ def test_record_external_scheduler_toggle_updates_target_key_only(tmp_path: Path
     assert resolved["states"]["day_metric_upload"] is True
     assert resolved["states"]["auto_flow"] is True
     assert resolved["states"]["handover"] is False
+
+
+def test_external_scheduler_memory_updates_runtime_scheduler_paths(tmp_path: Path) -> None:
+    container = _build_container(tmp_path)
+    container.persist_external_scheduler_autostart_state(
+        source="调度开关",
+        states={
+            "auto_flow": False,
+            "handover": True,
+            "wet_bulb_collection": True,
+            "day_metric_upload": False,
+            "alarm_event_upload": False,
+            "monthly_change_report": False,
+            "monthly_event_report": False,
+        },
+    )
+
+    result = container.apply_external_scheduler_autostart_state(source="test")
+
+    assert result["ok"] is True
+    assert container.runtime_config["handover_log"]["scheduler"]["auto_start_in_gui"] is True
+    assert container.runtime_config["wet_bulb_collection"]["scheduler"]["auto_start_in_gui"] is True

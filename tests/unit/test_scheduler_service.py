@@ -86,6 +86,14 @@ def test_should_trigger_due_after_run_time(tmp_path):
     assert reason == "due"
 
 
+def test_daily_next_run_time_is_stable_when_not_started_and_overdue(tmp_path):
+    svc = _build_service(tmp_path)
+    now = datetime(2026, 3, 8, 0, 10, 30)
+    svc.started_at = datetime(2026, 3, 8, 0, 0, 0)
+
+    assert svc.next_run_time(now) == datetime(2026, 3, 8, 0, 10, 0)
+
+
 def test_should_skip_when_success_today(tmp_path):
     svc = _build_service(tmp_path)
     now = datetime(2026, 3, 8, 0, 10, 30)
