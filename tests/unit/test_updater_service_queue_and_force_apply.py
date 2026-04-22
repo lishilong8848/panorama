@@ -322,6 +322,8 @@ def test_external_publish_approved_source_snapshot_excludes_user_config(tmp_path
     app_dir.mkdir()
     (app_dir / ".git").mkdir()
     (app_dir / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (app_dir / "下载动环表格.py").write_text("download runtime\n", encoding="utf-8")
+    (app_dir / "表格计算部分代码.py").write_text("calc runtime\n", encoding="utf-8")
     (app_dir / "表格计算配置.json").write_text('{"secret": "keep"}', encoding="utf-8")
     (app_dir / "config_segments").mkdir()
     (app_dir / "config_segments" / "handover.json").write_text('{"keep": true}', encoding="utf-8")
@@ -358,10 +360,16 @@ def test_external_publish_approved_source_snapshot_excludes_user_config(tmp_path
         names = set(archive.namelist())
         embedded_manifest = json.loads(archive.read("source_manifest.json").decode("utf-8"))
     assert "main.py" in names
+    assert "下载动环表格.py" in names
+    assert "表格计算部分代码.py" in names
     assert "表格计算配置.json" not in names
     assert "config_segments/handover.json" not in names
     assert embedded_manifest["scope"] == updater_service_module._SOURCE_SNAPSHOT_SCOPE_PY_ONLY
-    assert embedded_manifest["files"][0]["path"] == "main.py"
+    assert {item["path"] for item in embedded_manifest["files"]} >= {
+        "main.py",
+        "下载动环表格.py",
+        "表格计算部分代码.py",
+    }
 
 
 def test_external_auto_publish_git_head_syncs_py_only_and_restarts(tmp_path: Path, monkeypatch) -> None:
@@ -370,6 +378,8 @@ def test_external_auto_publish_git_head_syncs_py_only_and_restarts(tmp_path: Pat
     app_dir.mkdir()
     (app_dir / ".git").mkdir()
     (app_dir / "main.py").write_text("print('new')\n", encoding="utf-8")
+    (app_dir / "下载动环表格.py").write_text("download runtime\n", encoding="utf-8")
+    (app_dir / "表格计算部分代码.py").write_text("calc runtime\n", encoding="utf-8")
     (app_dir / "untracked.py").write_text("print('skip')\n", encoding="utf-8")
     (app_dir / "readme.md").write_text("skip\n", encoding="utf-8")
     monkeypatch.setattr(updater_service_module, "get_app_dir", lambda: app_dir)
@@ -411,6 +421,8 @@ def test_external_auto_publish_git_head_syncs_py_only_and_restarts(tmp_path: Pat
     with zipfile.ZipFile(shared_root / "updater" / "approved" / "source_snapshot.zip", "r") as archive:
         names = set(archive.namelist())
     assert "main.py" in names
+    assert "下载动环表格.py" in names
+    assert "表格计算部分代码.py" in names
     assert "untracked.py" not in names
     assert "readme.md" not in names
 
@@ -476,6 +488,7 @@ def test_internal_apply_py_only_source_snapshot_only_deletes_py_files(tmp_path: 
     (app_dir / "keep.txt").write_text("keep\n", encoding="utf-8")
     (app_dir / "old.py").write_text("old\n", encoding="utf-8")
     (app_dir / "main.py").write_text("old-main\n", encoding="utf-8")
+    (app_dir / "下载动环表格.py").write_text("download runtime\n", encoding="utf-8")
     manifest = {
         "format": "source_snapshot",
         "scope": updater_service_module._SOURCE_SNAPSHOT_SCOPE_PY_ONLY,
@@ -524,6 +537,7 @@ def test_internal_apply_py_only_source_snapshot_only_deletes_py_files(tmp_path: 
     assert result["last_result"] == "restart_pending"
     assert (app_dir / "main.py").read_text(encoding="utf-8") == "new-main\n"
     assert not (app_dir / "old.py").exists()
+    assert (app_dir / "下载动环表格.py").exists()
     assert (app_dir / "keep.txt").read_text(encoding="utf-8") == "keep\n"
 
 

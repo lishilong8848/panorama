@@ -14,7 +14,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple
 
-from pipeline_utils import DEFAULT_CONFIG_FILENAME, get_app_dir, get_app_root_dir, get_persistent_user_data_dir
+from pipeline_utils import (
+    DEFAULT_CALC_FILENAME,
+    DEFAULT_CONFIG_FILENAME,
+    DEFAULT_DOWNLOAD_FILENAME,
+    get_app_dir,
+    get_app_root_dir,
+    get_persistent_user_data_dir,
+)
 
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.modules.updater.core.versioning import (
@@ -77,6 +84,10 @@ _SOURCE_SNAPSHOT_EXCLUDED_FILES = {
     DEFAULT_CONFIG_FILENAME,
     ".env",
 }
+_SOURCE_SNAPSHOT_REQUIRED_ROOT_PY_FILES = (
+    DEFAULT_CALC_FILENAME,
+    DEFAULT_DOWNLOAD_FILENAME,
+)
 _GIT_DIRTY_ALLOWLIST = {
     DEFAULT_CONFIG_FILENAME,
     "runtime_dependency_lock.json",
@@ -935,6 +946,20 @@ class UpdaterService:
             if not normalized:
                 continue
             rel = Path(*Path(normalized).parts)
+            rel_text = _normalize_zip_relpath(rel)
+            if rel_text in seen or not _is_python_source_relpath(rel):
+                continue
+            path = self.app_dir / rel
+            if not path.is_file():
+                continue
+            seen.add(rel_text)
+            output.append(rel)
+        # These root scripts are runtime entry modules loaded dynamically by
+        # pipeline_utils. They may be untracked in older deployments, but a
+        # py-only snapshot must still carry them or the internal side cannot
+        # even finish bootstrapping.
+        for filename in _SOURCE_SNAPSHOT_REQUIRED_ROOT_PY_FILES:
+            rel = Path(filename)
             rel_text = _normalize_zip_relpath(rel)
             if rel_text in seen or not _is_python_source_relpath(rel):
                 continue
