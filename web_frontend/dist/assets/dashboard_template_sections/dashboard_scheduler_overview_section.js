@@ -12,7 +12,7 @@ export const DASHBOARD_SCHEDULER_OVERVIEW_SECTION = `        <section class="con
               </div>
               <div class="status-metric-grid status-metric-grid-compact">
                 <div class="status-metric">
-                  <div class="status-metric-label">已启动调度</div>
+                  <div class="status-metric-label">已记住开启</div>
                   <strong class="status-metric-value">{{ schedulerOverviewSummary.runningCount }} 项</strong>
                 </div>
                 <div class="status-metric">
@@ -135,3 +135,4 @@ export const DASHBOARD_SCHEDULER_OVERVIEW_SECTION = `        <section class="con
         </section>
 
 `;
+

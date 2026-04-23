@@ -1,7 +1,6 @@
 ﻿from __future__ import annotations
 
 import copy
-import re
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
@@ -12,13 +11,10 @@ from app.modules.scheduler.api._config_persistence import (
     record_scheduler_config_autostart,
 )
 from app.modules.scheduler.api._display_payload import with_scheduler_display
+from app.modules.scheduler.api._time_normalization import normalize_scheduler_time
 
 
 router = APIRouter(prefix="/api/scheduler/handover", tags=["scheduler-handover"])
-
-
-def _valid_time(value: str) -> bool:
-    return bool(re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(value or "").strip()))
 
 
 def _handover_scheduler_cfg_from_v3(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -134,10 +130,7 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
             continue
         value = payload.get(key)
         if key in {"morning_time", "afternoon_time"}:
-            text = str(value or "").strip()
-            if not _valid_time(text):
-                raise HTTPException(status_code=400, detail=f"{key} 必须是 HH:MM:SS")
-            scheduler_cfg[key] = text
+            scheduler_cfg[key] = normalize_scheduler_time(value, field_name=key)
         elif key == "check_interval_sec":
             try:
                 number = int(value)

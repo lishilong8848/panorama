@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+import copy
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+
+from app.modules.scheduler.api import (
+    alarm_event_upload_routes,
+    handover_routes,
+    monthly_change_report_routes,
+    monthly_event_report_routes,
+)
+from app.modules.scheduler.api._time_normalization import normalize_scheduler_time
+
+
+class _FakeContainer:
+    def __init__(self, config: dict):
+        self.config = config
+        self.config_path = "settings.yaml"
+        self.handover_scheduler_manager = None
+        self.runtime_config = {}
+
+    def reload_config(self, config: dict) -> None:
+        self.config = config
+
+    def record_external_scheduler_toggle(self, **_kwargs) -> None:
+        return None
+
+    def handover_scheduler_status(self) -> dict:
+        return {"enabled": False, "running": False, "slots": {}}
+
+    def is_handover_scheduler_executor_bound(self) -> bool:
+        return True
+
+    def handover_scheduler_executor_name(self) -> str:
+        return "handover_callback"
+
+    def alarm_event_upload_scheduler_status(self) -> dict:
+        return {"enabled": False, "running": False}
+
+    def is_alarm_event_upload_scheduler_executor_bound(self) -> bool:
+        return True
+
+    def alarm_event_upload_scheduler_executor_name(self) -> str:
+        return "alarm_callback"
+
+    def monthly_event_report_scheduler_status(self) -> dict:
+        return {"enabled": False, "running": False}
+
+    def is_monthly_event_report_scheduler_executor_bound(self) -> bool:
+        return True
+
+    def monthly_event_report_scheduler_executor_name(self) -> str:
+        return "monthly_event_callback"
+
+    def monthly_change_report_scheduler_status(self) -> dict:
+        return {"enabled": False, "running": False}
+
+    def is_monthly_change_report_scheduler_executor_bound(self) -> bool:
+        return True
+
+    def monthly_change_report_scheduler_executor_name(self) -> str:
+        return "monthly_change_callback"
+
+
+def _request(container: _FakeContainer) -> SimpleNamespace:
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
+
+
+def _save_settings(config: dict, _path: str) -> dict:
+    return copy.deepcopy(config)
+
+
+def test_normalize_scheduler_time_accepts_browser_time_without_seconds() -> None:
+    assert normalize_scheduler_time("7:05") == "07:05:00"
+    assert normalize_scheduler_time("07:05") == "07:05:00"
+    assert normalize_scheduler_time("07:05:09") == "07:05:09"
+
+
+@pytest.mark.parametrize("value", ["", "24:00", "08:60", "08:00:60", "not-a-time"])
+def test_normalize_scheduler_time_rejects_invalid_values(value: str) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        normalize_scheduler_time(value)
+
+    assert exc_info.value.status_code == 400
+
+
+def test_handover_config_accepts_browser_time_without_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(handover_routes, "save_settings", _save_settings)
+    container = _FakeContainer(
+        {
+            "features": {
+                "handover_log": {
+                    "scheduler": {
+                        "morning_time": "07:00:00",
+                        "afternoon_time": "16:00:00",
+                    }
+                }
+            }
+        }
+    )
+
+    data = handover_routes.handover_scheduler_config(
+        {"morning_time": "7:05", "afternoon_time": "16:30"},
+        _request(container),
+    )
+
+    scheduler = container.config["features"]["handover_log"]["scheduler"]
+    assert scheduler["morning_time"] == "07:05:00"
+    assert scheduler["afternoon_time"] == "16:30:00"
+    assert data["scheduler_config"]["morning_time"] == "07:05:00"
+    assert data["scheduler_config"]["afternoon_time"] == "16:30:00"
+
+
+@pytest.mark.parametrize(
+    ("route_module", "handler", "config", "path"),
+    [
+        (
+            alarm_event_upload_routes,
+            alarm_event_upload_routes.alarm_event_upload_scheduler_config,
+            {"features": {"alarm_export": {"scheduler": {"run_time": "08:10:00"}}}},
+            ("features", "alarm_export", "scheduler"),
+        ),
+        (
+            monthly_event_report_routes,
+            monthly_event_report_routes.monthly_event_report_scheduler_config,
+            {
+                "features": {
+                    "handover_log": {
+                        "monthly_event_report": {"scheduler": {"run_time": "01:00:00"}}
+                    }
+                }
+            },
+            ("features", "handover_log", "monthly_event_report", "scheduler"),
+        ),
+        (
+            monthly_change_report_routes,
+            monthly_change_report_routes.monthly_change_report_scheduler_config,
+            {
+                "features": {
+                    "handover_log": {
+                        "monthly_change_report": {"scheduler": {"run_time": "01:00:00"}}
+                    }
+                }
+            },
+            ("features", "handover_log", "monthly_change_report", "scheduler"),
+        ),
+    ],
+)
+def test_single_time_scheduler_config_accepts_browser_time_without_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+    route_module,
+    handler,
+    config: dict,
+    path: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(route_module, "save_settings", _save_settings)
+    container = _FakeContainer(config)
+
+    data = handler({"run_time": "9:15"}, _request(container))
+
+    scheduler = container.config
+    for key in path:
+        scheduler = scheduler[key]
+    assert scheduler["run_time"] == "09:15:00"
+    assert data["scheduler_config"]["run_time"] == "09:15:00"

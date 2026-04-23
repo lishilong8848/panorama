@@ -10,6 +10,7 @@
   stopMonthlyChangeReportSchedulerApi,
   stopMonthlyEventReportSchedulerApi,
 } from "./api_client.js";
+import { normalizeRunTimeText } from "./config_helpers.js";
 
 const ACTION_KEYS = {
   runAll: "job:monthly_event_report:all",
@@ -349,7 +350,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     );
   }
 
-  async function saveMonthlyEventReportSchedulerQuickConfig() {
+  async function saveMonthlyEventReportSchedulerQuickConfig(overrides = {}) {
     if (isInternalRole()) {
       message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
       return;
@@ -357,18 +358,25 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     if (!config.value) return;
     const monthly = config.value.handover_log?.monthly_event_report || {};
     const scheduler = monthly.scheduler || {};
+    const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
+    const runTime = normalizeRunTimeText(
+      Object.prototype.hasOwnProperty.call(overrideValues, "run_time")
+        ? overrideValues.run_time
+        : scheduler.run_time,
+    );
     const payload = {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       day_of_month: Number.parseInt(String(scheduler.day_of_month ?? 1), 10) || 1,
-      run_time: String(scheduler.run_time || "").trim(),
+      run_time: runTime,
       check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
       state_file: String(scheduler.state_file || "").trim(),
     };
     if (!payload.run_time) {
-      message.value = "月度事件统计表调度时间不能为空。";
+      message.value = "月度事件统计表调度时间格式错误，必须是 HH:MM 或 HH:MM:SS。";
       return;
     }
+    scheduler.run_time = runTime;
     if (!payload.state_file) {
       message.value = "月度事件统计表调度状态文件名不能为空。";
       return;
@@ -452,7 +460,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     );
   }
 
-  async function saveMonthlyChangeReportSchedulerQuickConfig() {
+  async function saveMonthlyChangeReportSchedulerQuickConfig(overrides = {}) {
     if (isInternalRole()) {
       message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
       return;
@@ -460,18 +468,25 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     if (!config.value) return;
     const monthly = config.value.handover_log?.monthly_change_report || {};
     const scheduler = monthly.scheduler || {};
+    const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
+    const runTime = normalizeRunTimeText(
+      Object.prototype.hasOwnProperty.call(overrideValues, "run_time")
+        ? overrideValues.run_time
+        : scheduler.run_time,
+    );
     const payload = {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       day_of_month: Number.parseInt(String(scheduler.day_of_month ?? 1), 10) || 1,
-      run_time: String(scheduler.run_time || "").trim(),
+      run_time: runTime,
       check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
       state_file: String(scheduler.state_file || "").trim(),
     };
     if (!payload.run_time) {
-      message.value = "月度变更统计表调度时间不能为空。";
+      message.value = "月度变更统计表调度时间格式错误，必须是 HH:MM 或 HH:MM:SS。";
       return;
     }
+    scheduler.run_time = runTime;
     if (!payload.state_file) {
       message.value = "月度变更统计表调度状态文件名不能为空。";
       return;

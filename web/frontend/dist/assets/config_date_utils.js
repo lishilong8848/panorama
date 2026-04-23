@@ -33,9 +33,13 @@ export function isValidHms(text) {
 
 export function normalizeRunTimeText(text) {
   const raw = String(text || "").trim();
-  if (/^\d{2}:\d{2}:\d{2}$/.test(raw)) return raw;
-  if (/^\d{2}:\d{2}$/.test(raw)) return `${raw}:00`;
-  return "";
+  const match = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return "";
+  const hour = Number.parseInt(match[1], 10);
+  const minute = Number.parseInt(match[2], 10);
+  const second = Number.parseInt(match[3] || "0", 10);
+  if (hour > 23 || minute > 59 || second > 59) return "";
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}`;
 }
 
 export function normalizeDatetimeLocalToApi(text) {

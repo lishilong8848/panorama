@@ -222,15 +222,26 @@ export function createDashboardSchedulerActions(ctx) {
     );
   }
 
-  async function saveHandoverSchedulerQuickConfig() {
+  async function saveHandoverSchedulerQuickConfig(overrides = {}) {
     if (!config.value) return;
     const handoverScheduler = config.value?.handover_log?.scheduler || {};
-    const morningTime = normalizeRunTimeText(handoverScheduler.morning_time);
-    const afternoonTime = normalizeRunTimeText(handoverScheduler.afternoon_time);
+    const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
+    const morningTime = normalizeRunTimeText(
+      Object.prototype.hasOwnProperty.call(overrideValues, "morning_time")
+        ? overrideValues.morning_time
+        : handoverScheduler.morning_time,
+    );
+    const afternoonTime = normalizeRunTimeText(
+      Object.prototype.hasOwnProperty.call(overrideValues, "afternoon_time")
+        ? overrideValues.afternoon_time
+        : handoverScheduler.afternoon_time,
+    );
     if (!morningTime || !afternoonTime) {
       message.value = "交接班调度时间格式错误，必须是 HH:MM 或 HH:MM:SS";
       return;
     }
+    handoverScheduler.morning_time = morningTime;
+    handoverScheduler.afternoon_time = afternoonTime;
     const payload = {
       enabled: true,
       auto_start_in_gui: Boolean(handoverScheduler.auto_start_in_gui),
@@ -478,10 +489,15 @@ export function createDashboardSchedulerActions(ctx) {
     );
   }
 
-  async function saveAlarmEventUploadSchedulerQuickConfig() {
+  async function saveAlarmEventUploadSchedulerQuickConfig(overrides = {}) {
     if (!config.value) return;
     const scheduler = config.value?.alarm_export?.scheduler || {};
-    const runTime = normalizeRunTimeText(scheduler.run_time);
+    const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
+    const runTime = normalizeRunTimeText(
+      Object.prototype.hasOwnProperty.call(overrideValues, "run_time")
+        ? overrideValues.run_time
+        : scheduler.run_time,
+    );
     const payload = {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
@@ -492,6 +508,7 @@ export function createDashboardSchedulerActions(ctx) {
       message.value = "告警信息上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS";
       return;
     }
+    scheduler.run_time = runTime;
     if (!payload.state_file) {
       message.value = "告警信息上传调度状态文件不能为空";
       return;

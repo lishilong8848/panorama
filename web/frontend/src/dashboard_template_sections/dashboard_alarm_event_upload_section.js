@@ -28,7 +28,7 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
                         <div class="task-grid two-col">
                           <div class="form-row">
                             <label class="label">每日执行时间</label>
-                            <input type="time" step="1" v-model="config.alarm_export.scheduler.run_time" @change="saveAlarmEventUploadSchedulerQuickConfig" />
+                            <input type="time" step="1" v-model="config.alarm_export.scheduler.run_time" @change="saveAlarmEventUploadSchedulerQuickConfig({ run_time: $event.target.value })" />
                           </div>
                           <div class="form-row">
                             <label class="label">最近决策</label>

@@ -1506,17 +1506,18 @@ createApp({
     } = dashboardActions;
 
     const saveSchedulerQuickConfig = () => runSchedulerConfigQuickSave(saveSchedulerQuickConfigImmediate);
-    const saveHandoverSchedulerQuickConfig = () => runSchedulerConfigQuickSave(saveHandoverSchedulerQuickConfigImmediate);
+    const saveHandoverSchedulerQuickConfig = (overrides = {}) =>
+      runSchedulerConfigQuickSave(() => saveHandoverSchedulerQuickConfigImmediate(overrides));
     const saveWetBulbCollectionSchedulerQuickConfig = () =>
       runSchedulerConfigQuickSave(saveWetBulbCollectionSchedulerQuickConfigImmediate);
     const saveDayMetricUploadSchedulerQuickConfig = () =>
       runSchedulerConfigQuickSave(saveDayMetricUploadSchedulerQuickConfigImmediate);
-    const saveAlarmEventUploadSchedulerQuickConfig = () =>
-      runSchedulerConfigQuickSave(saveAlarmEventUploadSchedulerQuickConfigImmediate);
-    const saveMonthlyEventReportSchedulerQuickConfig = () =>
-      runSchedulerConfigQuickSave(saveMonthlyEventReportSchedulerQuickConfigImmediate);
-    const saveMonthlyChangeReportSchedulerQuickConfig = () =>
-      runSchedulerConfigQuickSave(saveMonthlyChangeReportSchedulerQuickConfigImmediate);
+    const saveAlarmEventUploadSchedulerQuickConfig = (overrides = {}) =>
+      runSchedulerConfigQuickSave(() => saveAlarmEventUploadSchedulerQuickConfigImmediate(overrides));
+    const saveMonthlyEventReportSchedulerQuickConfig = (overrides = {}) =>
+      runSchedulerConfigQuickSave(() => saveMonthlyEventReportSchedulerQuickConfigImmediate(overrides));
+    const saveMonthlyChangeReportSchedulerQuickConfig = (overrides = {}) =>
+      runSchedulerConfigQuickSave(() => saveMonthlyChangeReportSchedulerQuickConfigImmediate(overrides));
     const realStreamController = createLogStreamController({
       appendLog,
       setMessage: (text) => {

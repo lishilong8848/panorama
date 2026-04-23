@@ -31,14 +31,21 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
             <div class="task-grid two-col">
               <div class="form-row">
                 <label class="label">上午时间</label>
-                <input type="time" step="1" v-model="config.handover_log.scheduler.morning_time" @change="saveHandoverSchedulerQuickConfig" />
+                <input type="text" inputmode="numeric" placeholder="HH:MM:SS" v-model.trim="config.handover_log.scheduler.morning_time" />
               </div>
               <div class="form-row">
                 <label class="label">下午时间</label>
-                <input type="time" step="1" v-model="config.handover_log.scheduler.afternoon_time" @change="saveHandoverSchedulerQuickConfig" />
+                <input type="text" inputmode="numeric" placeholder="HH:MM:SS" v-model.trim="config.handover_log.scheduler.afternoon_time" />
               </div>
             </div>
             <div class="btn-line" style="margin-top:10px;">
+              <button
+                class="btn btn-secondary"
+                :disabled="handoverSchedulerQuickSaving"
+                @click="saveHandoverSchedulerQuickConfig()"
+              >
+                {{ handoverSchedulerQuickSaving ? '保存中...' : '保存时间' }}
+              </button>
               <button
                 class="btn btn-success"
                 :disabled="isSchedulerStartDisabled('handover', actionKeyHandoverSchedulerStart, actionKeyHandoverSchedulerStop)"
@@ -54,7 +61,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                 {{ getSchedulerStopButtonText('handover') }}
               </button>
             </div>
-            <div class="hint">{{ handoverSchedulerQuickSaving ? '交接班调度配置同步中...' : '修改上午或下午时间后立即生效。' }}</div>
+            <div class="hint" v-if="handoverSchedulerQuickSaving">交接班调度配置同步中...</div>
           </article>
           <div class="handover-task-shell-redesign">
             <div class="handover-top-grid dashboard-module-primary-grid">

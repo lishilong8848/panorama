@@ -6,8 +6,8 @@ export const DASHBOARD_WET_BULB_COLLECTION_SECTION = `        <section class="co
                 <div class="task-block-kicker">调度卡</div>
                 <h3 class="card-title">湿球温度定时采集调度</h3>
               </div>
-              <span class="status-badge status-badge-soft" :class="health.wet_bulb_collection.scheduler.running ? 'tone-success' : 'tone-neutral'">
-                {{ health.wet_bulb_collection.scheduler.status || '-' }}
+              <span class="status-badge status-badge-soft" :class="'tone-' + getSchedulerStatusTone('wet_bulb')">
+                {{ getSchedulerStatusText('wet_bulb') || '-' }}
               </span>
             </div>
             <div class="status-metric-grid status-metric-grid-compact">
@@ -17,7 +17,7 @@ export const DASHBOARD_WET_BULB_COLLECTION_SECTION = `        <section class="co
               </div>
               <div class="status-metric">
                 <div class="status-metric-label">下次执行</div>
-                <strong class="status-metric-value">{{ health.wet_bulb_collection.scheduler.next_run_time || '-' }}</strong>
+                <strong class="status-metric-value">{{ getSchedulerDisplayText('wet_bulb', 'next_run_text', '-') }}</strong>
               </div>
               <div class="status-metric">
                 <div class="status-metric-label">最近结果</div>
@@ -37,24 +37,20 @@ export const DASHBOARD_WET_BULB_COLLECTION_SECTION = `        <section class="co
             <div class="btn-line">
               <button
                 class="btn btn-success"
-                :disabled="getSchedulerEffectiveRunning('wet_bulb', health.wet_bulb_collection.scheduler.remembered_enabled) || isActionLocked(actionKeyWetBulbSchedulerStart) || isActionLocked(actionKeyWetBulbSchedulerStop) || isSchedulerTogglePending('wet_bulb')"
+                :disabled="isSchedulerStartDisabled('wet_bulb', actionKeyWetBulbSchedulerStart, actionKeyWetBulbSchedulerStop)"
                 @click="startWetBulbCollectionScheduler"
               >
-                {{
-                  getSchedulerToggleMode('wet_bulb') === 'starting'
-                    ? '启动中...'
-                    : (getSchedulerToggleMode('wet_bulb') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('wet_bulb', health.wet_bulb_collection.scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
-                }}
+                {{ getSchedulerStartButtonText('wet_bulb') }}
               </button>
               <button
                 class="btn btn-danger"
-                :disabled="!getSchedulerEffectiveRunning('wet_bulb', health.wet_bulb_collection.scheduler.remembered_enabled) || isActionLocked(actionKeyWetBulbSchedulerStop) || isActionLocked(actionKeyWetBulbSchedulerStart) || isSchedulerTogglePending('wet_bulb')"
+                :disabled="isSchedulerStopDisabled('wet_bulb', actionKeyWetBulbSchedulerStart, actionKeyWetBulbSchedulerStop)"
                 @click="stopWetBulbCollectionScheduler"
               >
-                {{ getSchedulerToggleMode('wet_bulb') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('wet_bulb') === 'starting' ? '处理中...' : '停止调度') }}
+                {{ getSchedulerStopButtonText('wet_bulb') }}
               </button>
             </div>
-            <div class="hint">{{ wetBulbSchedulerQuickSaving ? '湿球温度定时采集调度配置保存中...' : '修改执行间隔后自动保存。' }}</div>
+            <div class="hint">{{ wetBulbSchedulerQuickSaving ? '湿球温度定时采集调度配置同步中...' : '修改执行间隔后立即生效。' }}</div>
           </article>
           <div class="module-section-grid dashboard-module-primary-grid">
             <article class="task-block task-block-accent">
@@ -70,11 +66,11 @@ export const DASHBOARD_WET_BULB_COLLECTION_SECTION = `        <section class="co
               <div class="status-metric-grid status-metric-grid-compact">
                 <div class="status-metric">
                   <div class="status-metric-label">调度状态</div>
-                  <strong class="status-metric-value">{{ health.wet_bulb_collection.scheduler.status || '-' }}</strong>
+                  <strong class="status-metric-value">{{ getSchedulerStatusText('wet_bulb') || '-' }}</strong>
                 </div>
                 <div class="status-metric">
                   <div class="status-metric-label">下次执行</div>
-                  <strong class="status-metric-value">{{ health.wet_bulb_collection.scheduler.next_run_time || '-' }}</strong>
+                  <strong class="status-metric-value">{{ getSchedulerDisplayText('wet_bulb', 'next_run_text', '-') }}</strong>
                 </div>
                 <div class="status-metric">
                   <div class="status-metric-label">目标类型</div>
@@ -143,14 +139,14 @@ export const DASHBOARD_WET_BULB_COLLECTION_SECTION = `        <section class="co
                     <div class="task-block-kicker">调度状态</div>
                     <h3 class="card-title">当前调度反馈</h3>
                   </div>
-                  <span class="status-badge status-badge-soft" :class="health.wet_bulb_collection.scheduler.running ? 'tone-success' : 'tone-neutral'">
-                    {{ health.wet_bulb_collection.scheduler.running ? '运行中' : '未运行' }}
+                  <span class="status-badge status-badge-soft" :class="'tone-' + getSchedulerStatusTone('wet_bulb')">
+                    {{ getSchedulerStatusText('wet_bulb') }}
                   </span>
                 </div>
                 <div class="status-metric-grid status-metric-grid-compact">
                   <div class="status-metric">
                     <div class="status-metric-label">最近触发</div>
-                    <strong class="status-metric-value">{{ health.wet_bulb_collection.scheduler.last_trigger_at || '-' }}</strong>
+                    <strong class="status-metric-value">{{ getSchedulerDisplayText('wet_bulb', 'last_trigger_text', '-') }}</strong>
                   </div>
                   <div class="status-metric">
                     <div class="status-metric-label">触发结果</div>

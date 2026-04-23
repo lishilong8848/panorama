@@ -111,15 +111,16 @@ def test_source_mode_root_and_assets_are_no_cache(monkeypatch, tmp_path):
     assert asset_resp.headers["expires"] == "0"
 
 
-def test_non_source_mode_does_not_force_no_cache(monkeypatch, tmp_path):
+def test_non_source_mode_frontend_assets_are_no_cache(monkeypatch, tmp_path):
     app = _build_app(monkeypatch, tmp_path, frontend_mode="dist")
     client = TestClient(app)
 
     root_resp = client.get("/")
     asset_resp = client.get("/assets/config_helpers.js")
 
-    assert root_resp.headers.get("cache-control", "") != "no-store, no-cache, must-revalidate, max-age=0"
-    assert asset_resp.headers.get("cache-control", "") != "no-store, no-cache, must-revalidate, max-age=0"
+    expected = "no-store, no-cache, must-revalidate, max-age=0"
+    assert root_resp.headers.get("cache-control", "") == expected
+    assert asset_resp.headers.get("cache-control", "") == expected
     assert "/assets-src/" not in root_resp.text
 
 

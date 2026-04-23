@@ -18,18 +18,18 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                                   <div class="task-block-kicker">调度卡</div>
                                   <h3 class="card-title">月度事件统计调度</h3>
                                 </div>
-                                <span class="status-badge status-badge-soft" :class="'tone-' + (health.monthly_event_report.scheduler.running ? 'success' : 'neutral')">
-                                  {{ health.monthly_event_report.scheduler.status || '-' }}
+                                <span class="status-badge status-badge-soft" :class="'tone-' + getSchedulerStatusTone('monthly_event_report')">
+                                  {{ getSchedulerStatusText('monthly_event_report') || '-' }}
                                 </span>
                               </div>
                               <div class="status-metric-grid status-metric-grid-compact">
-                                <div class="status-metric">
+                              <div class="status-metric">
                                   <div class="status-metric-label">下次执行</div>
-                                  <strong class="status-metric-value">{{ health.monthly_event_report.scheduler.next_run_time || '-' }}</strong>
-                                </div>
+                                  <strong class="status-metric-value">{{ getSchedulerDisplayText('monthly_event_report', 'next_run_text', '-') }}</strong>
+                              </div>
                                 <div class="status-metric">
                                   <div class="status-metric-label">最近触发</div>
-                                  <strong class="status-metric-value">{{ health.monthly_event_report.scheduler.last_trigger_at || '-' }}</strong>
+                                  <strong class="status-metric-value">{{ getSchedulerDisplayText('monthly_event_report', 'last_trigger_text', '-') }}</strong>
                                 </div>
                                 <div class="status-metric">
                                   <div class="status-metric-label">最近决策</div>
@@ -41,8 +41,8 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                                 <div class="ops-focus-card-title">固定读取上一个自然月，适合月初统一生成统计表</div>
                                 <div class="ops-focus-card-meta">触发结果：{{ monthlyEventReportSchedulerTriggerText || '-' }}</div>
                               </div>
-                              <div class="hint">下次执行：{{ health.monthly_event_report.scheduler.next_run_time || '-' }}</div>
-                              <div class="hint">最近触发：{{ health.monthly_event_report.scheduler.last_trigger_at || '-' }} / {{ monthlyEventReportSchedulerTriggerText || '-' }}</div>
+                              <div class="hint">下次执行：{{ getSchedulerDisplayText('monthly_event_report', 'next_run_text', '-') }}</div>
+                              <div class="hint">最近触发：{{ getSchedulerDisplayText('monthly_event_report', 'last_trigger_text', '-') }} / {{ monthlyEventReportSchedulerTriggerText || '-' }}</div>
                               <div class="task-grid two-col">
                                 <div class="form-row">
                                   <label class="label">每月几号</label>
@@ -50,7 +50,7 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                                 </div>
                                 <div class="form-row">
                                   <label class="label">时间（HH:mm:ss）</label>
-                                  <input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" @change="saveMonthlyEventReportSchedulerQuickConfig" />
+                                  <input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" @change="saveMonthlyEventReportSchedulerQuickConfig({ run_time: $event.target.value })" />
                                 </div>
                               </div>
                               <div class="form-row">
@@ -60,24 +60,20 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                               <div class="btn-line">
                                 <button
                                   class="btn btn-success"
-                                  :disabled="getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.remembered_enabled) || isActionLocked(actionKeyMonthlyEventReportSchedulerStart) || isActionLocked(actionKeyMonthlyEventReportSchedulerStop) || isSchedulerTogglePending('monthly_event_report')"
+                                  :disabled="isSchedulerStartDisabled('monthly_event_report', actionKeyMonthlyEventReportSchedulerStart, actionKeyMonthlyEventReportSchedulerStop)"
                                   @click="startMonthlyEventReportScheduler"
                                 >
-                                  {{
-                                    getSchedulerToggleMode('monthly_event_report') === 'starting'
-                                      ? '启动中...'
-                                      : (getSchedulerToggleMode('monthly_event_report') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
-                                  }}
+                                  {{ getSchedulerStartButtonText('monthly_event_report') }}
                                 </button>
                                 <button
                                   class="btn btn-danger"
-                                  :disabled="!getSchedulerEffectiveRunning('monthly_event_report', health.monthly_event_report.scheduler.remembered_enabled) || isActionLocked(actionKeyMonthlyEventReportSchedulerStop) || isActionLocked(actionKeyMonthlyEventReportSchedulerStart) || isSchedulerTogglePending('monthly_event_report')"
+                                  :disabled="isSchedulerStopDisabled('monthly_event_report', actionKeyMonthlyEventReportSchedulerStart, actionKeyMonthlyEventReportSchedulerStop)"
                                   @click="stopMonthlyEventReportScheduler"
                                 >
-                                  {{ getSchedulerToggleMode('monthly_event_report') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('monthly_event_report') === 'starting' ? '处理中...' : '停止调度') }}
+                                  {{ getSchedulerStopButtonText('monthly_event_report') }}
                                 </button>
                               </div>
-                              <div class="hint">{{ monthlyEventReportSchedulerQuickSaving ? '事件月报调度配置保存中...' : '修改日期、时间或检查间隔后自动保存。' }}</div>
+                              <div class="hint">{{ monthlyEventReportSchedulerQuickSaving ? '事件月报调度配置同步中...' : '修改日期、时间或检查间隔后立即生效。' }}</div>
                             </article>
 
                             <article class="task-block task-block-accent">
@@ -160,8 +156,8 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                       <div class="task-block-kicker">状态概览</div>
                       <h3 class="card-title">当前事件月报状态</h3>
                     </div>
-                    <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyEventReportLastRun.status === 'ok' ? 'success' : monthlyEventReportLastRun.status === 'partial_failed' ? 'warning' : monthlyEventReportLastRun.status === 'failed' ? 'danger' : 'neutral')">
-                      {{ monthlyEventReportLastRun.status || '尚未执行' }}
+                    <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyEventReportLastRun.tone || 'neutral')">
+                      {{ monthlyEventReportLastRun.statusText || monthlyEventReportLastRun.status || '尚未执行' }}
                     </span>
                   </div>
                   <div class="status-metric-grid status-metric-grid-compact">
@@ -342,8 +338,8 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                                 <div class="task-block-kicker">最近结果卡</div>
                                 <h3 class="card-title">最近一次事件体系月度统计表</h3>
                               </div>
-                              <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyEventReportLastRun.status === 'ok' ? 'success' : monthlyEventReportLastRun.status === 'partial_failed' ? 'warning' : monthlyEventReportLastRun.status === 'failed' ? 'danger' : 'neutral')">
-                                {{ monthlyEventReportLastRun.status || '尚未执行' }}
+                              <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyEventReportLastRun.tone || 'neutral')">
+                                {{ monthlyEventReportLastRun.statusText || monthlyEventReportLastRun.status || '尚未执行' }}
                               </span>
                             </div>
                             <div class="status-metric-grid status-metric-grid-compact">
@@ -404,18 +400,18 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                                   <div class="task-block-kicker">调度卡</div>
                                   <h3 class="card-title">月度变更统计调度</h3>
                                 </div>
-                                <span class="status-badge status-badge-soft" :class="'tone-' + (health.monthly_change_report.scheduler.running ? 'success' : 'neutral')">
-                                  {{ health.monthly_change_report.scheduler.status || '-' }}
+                                <span class="status-badge status-badge-soft" :class="'tone-' + getSchedulerStatusTone('monthly_change_report')">
+                                  {{ getSchedulerStatusText('monthly_change_report') || '-' }}
                                 </span>
                               </div>
                               <div class="status-metric-grid status-metric-grid-compact">
-                                <div class="status-metric">
+                              <div class="status-metric">
                                   <div class="status-metric-label">下次执行</div>
-                                  <strong class="status-metric-value">{{ health.monthly_change_report.scheduler.next_run_time || '-' }}</strong>
-                                </div>
+                                  <strong class="status-metric-value">{{ getSchedulerDisplayText('monthly_change_report', 'next_run_text', '-') }}</strong>
+                              </div>
                                 <div class="status-metric">
                                   <div class="status-metric-label">最近触发</div>
-                                  <strong class="status-metric-value">{{ health.monthly_change_report.scheduler.last_trigger_at || '-' }}</strong>
+                                  <strong class="status-metric-value">{{ getSchedulerDisplayText('monthly_change_report', 'last_trigger_text', '-') }}</strong>
                                 </div>
                                 <div class="status-metric">
                                   <div class="status-metric-label">最近决策</div>
@@ -427,8 +423,8 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                                 <div class="ops-focus-card-title">按变更开始时间统计上一个自然月，适合月初统一归档</div>
                                 <div class="ops-focus-card-meta">触发结果：{{ monthlyChangeReportSchedulerTriggerText || '-' }}</div>
                               </div>
-                              <div class="hint">下次执行：{{ health.monthly_change_report.scheduler.next_run_time || '-' }}</div>
-                              <div class="hint">最近触发：{{ health.monthly_change_report.scheduler.last_trigger_at || '-' }} / {{ monthlyChangeReportSchedulerTriggerText || '-' }}</div>
+                              <div class="hint">下次执行：{{ getSchedulerDisplayText('monthly_change_report', 'next_run_text', '-') }}</div>
+                              <div class="hint">最近触发：{{ getSchedulerDisplayText('monthly_change_report', 'last_trigger_text', '-') }} / {{ monthlyChangeReportSchedulerTriggerText || '-' }}</div>
                               <div class="task-grid two-col">
                                 <div class="form-row">
                                   <label class="label">每月几号</label>
@@ -436,7 +432,7 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                                 </div>
                                 <div class="form-row">
                                   <label class="label">时间（HH:mm:ss）</label>
-                                  <input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" @change="saveMonthlyChangeReportSchedulerQuickConfig" />
+                                  <input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" @change="saveMonthlyChangeReportSchedulerQuickConfig({ run_time: $event.target.value })" />
                                 </div>
                               </div>
                               <div class="form-row">
@@ -446,24 +442,20 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                               <div class="btn-line">
                                 <button
                                   class="btn btn-success"
-                                  :disabled="getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.remembered_enabled) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStart) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) || isSchedulerTogglePending('monthly_change_report')"
+                                  :disabled="isSchedulerStartDisabled('monthly_change_report', actionKeyMonthlyChangeReportSchedulerStart, actionKeyMonthlyChangeReportSchedulerStop)"
                                   @click="startMonthlyChangeReportScheduler"
                                 >
-                                  {{
-                                    getSchedulerToggleMode('monthly_change_report') === 'starting'
-                                      ? '启动中...'
-                                      : (getSchedulerToggleMode('monthly_change_report') === 'stopping' ? '处理中...' : (getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.remembered_enabled) ? '已记住开启' : '启动调度'))
-                                  }}
+                                  {{ getSchedulerStartButtonText('monthly_change_report') }}
                                 </button>
                                 <button
                                   class="btn btn-danger"
-                                  :disabled="!getSchedulerEffectiveRunning('monthly_change_report', health.monthly_change_report.scheduler.remembered_enabled) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStop) || isActionLocked(actionKeyMonthlyChangeReportSchedulerStart) || isSchedulerTogglePending('monthly_change_report')"
+                                  :disabled="isSchedulerStopDisabled('monthly_change_report', actionKeyMonthlyChangeReportSchedulerStart, actionKeyMonthlyChangeReportSchedulerStop)"
                                   @click="stopMonthlyChangeReportScheduler"
                                 >
-                                  {{ getSchedulerToggleMode('monthly_change_report') === 'stopping' ? '停止中...' : (getSchedulerToggleMode('monthly_change_report') === 'starting' ? '处理中...' : '停止调度') }}
+                                  {{ getSchedulerStopButtonText('monthly_change_report') }}
                                 </button>
                               </div>
-                              <div class="hint">{{ monthlyChangeReportSchedulerQuickSaving ? '变更月报调度配置保存中...' : '修改日期、时间或检查间隔后自动保存。' }}</div>
+                              <div class="hint">{{ monthlyChangeReportSchedulerQuickSaving ? '变更月报调度配置同步中...' : '修改日期、时间或检查间隔后立即生效。' }}</div>
                             </article>
 
                             <article class="task-block task-block-accent">
@@ -546,8 +538,8 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                       <div class="task-block-kicker">状态概览</div>
                       <h3 class="card-title">当前变更月报状态</h3>
                     </div>
-                    <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyChangeReportLastRun.status === 'ok' ? 'success' : monthlyChangeReportLastRun.status === 'partial_failed' ? 'warning' : monthlyChangeReportLastRun.status === 'failed' ? 'danger' : 'neutral')">
-                      {{ monthlyChangeReportLastRun.status || '尚未执行' }}
+                    <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyChangeReportLastRun.tone || 'neutral')">
+                      {{ monthlyChangeReportLastRun.statusText || monthlyChangeReportLastRun.status || '尚未执行' }}
                     </span>
                   </div>
                   <div class="status-metric-grid status-metric-grid-compact">
@@ -728,8 +720,8 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                                 <div class="task-block-kicker">最近结果卡</div>
                                 <h3 class="card-title">最近一次变更体系月度统计表</h3>
                               </div>
-                              <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyChangeReportLastRun.status === 'ok' ? 'success' : monthlyChangeReportLastRun.status === 'partial_failed' ? 'warning' : monthlyChangeReportLastRun.status === 'failed' ? 'danger' : 'neutral')">
-                                {{ monthlyChangeReportLastRun.status || '尚未执行' }}
+                              <span class="status-badge status-badge-soft" :class="'tone-' + (monthlyChangeReportLastRun.tone || 'neutral')">
+                                {{ monthlyChangeReportLastRun.statusText || monthlyChangeReportLastRun.status || '尚未执行' }}
                               </span>
                             </div>
                             <div class="status-metric-grid status-metric-grid-compact">

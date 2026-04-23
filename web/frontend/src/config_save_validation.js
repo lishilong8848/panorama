@@ -1376,7 +1376,7 @@ function validateAndNormalizeMonthlyEventReport(payload) {
   monthly.scheduler.enabled = true;
   monthly.scheduler.auto_start_in_gui = Boolean(monthly.scheduler.auto_start_in_gui);
   monthly.scheduler.day_of_month = Number.parseInt(monthly.scheduler.day_of_month ?? 1, 10);
-  monthly.scheduler.run_time = String(monthly.scheduler.run_time || "").trim();
+  monthly.scheduler.run_time = normalizeRunTimeText(monthly.scheduler.run_time);
   monthly.scheduler.check_interval_sec = Number.parseInt(monthly.scheduler.check_interval_sec ?? 30, 10);
   monthly.scheduler.state_file = String(monthly.scheduler.state_file || "").trim();
   monthly.test_delivery.receive_id_type = String(monthly.test_delivery.receive_id_type || "open_id").trim() || "open_id";
@@ -1400,8 +1400,8 @@ function validateAndNormalizeMonthlyEventReport(payload) {
   if (!Number.isInteger(monthly.scheduler.day_of_month) || monthly.scheduler.day_of_month < 1 || monthly.scheduler.day_of_month > 31) {
     return { ok: false, error: "月度事件统计表调度日期必须在 1 到 31 之间" };
   }
-  if (!/^\d{2}:\d{2}:\d{2}$/.test(monthly.scheduler.run_time)) {
-    return { ok: false, error: "月度事件统计表调度时间必须是 HH:MM:SS" };
+  if (!monthly.scheduler.run_time) {
+    return { ok: false, error: "月度事件统计表调度时间必须是 HH:MM 或 HH:MM:SS" };
   }
   if (!Number.isInteger(monthly.scheduler.check_interval_sec) || monthly.scheduler.check_interval_sec <= 0) {
     return { ok: false, error: "月度事件统计表调度检查间隔必须大于 0 秒" };
@@ -1433,7 +1433,7 @@ function validateAndNormalizeMonthlyChangeReport(payload) {
   monthly.scheduler.enabled = true;
   monthly.scheduler.auto_start_in_gui = Boolean(monthly.scheduler.auto_start_in_gui);
   monthly.scheduler.day_of_month = Number.parseInt(monthly.scheduler.day_of_month ?? 1, 10);
-  monthly.scheduler.run_time = String(monthly.scheduler.run_time || "").trim();
+  monthly.scheduler.run_time = normalizeRunTimeText(monthly.scheduler.run_time);
   monthly.scheduler.check_interval_sec = Number.parseInt(monthly.scheduler.check_interval_sec ?? 30, 10);
   monthly.scheduler.state_file = String(monthly.scheduler.state_file || "").trim();
 
@@ -1450,8 +1450,8 @@ function validateAndNormalizeMonthlyChangeReport(payload) {
   if (!Number.isInteger(monthly.scheduler.day_of_month) || monthly.scheduler.day_of_month < 1 || monthly.scheduler.day_of_month > 31) {
     return { ok: false, error: "月度变更统计表调度日期必须在 1 到 31 之间" };
   }
-  if (!/^\d{2}:\d{2}:\d{2}$/.test(monthly.scheduler.run_time)) {
-    return { ok: false, error: "月度变更统计表调度时间必须是 HH:MM:SS" };
+  if (!monthly.scheduler.run_time) {
+    return { ok: false, error: "月度变更统计表调度时间必须是 HH:MM 或 HH:MM:SS" };
   }
   if (!Number.isInteger(monthly.scheduler.check_interval_sec) || monthly.scheduler.check_interval_sec <= 0) {
     return { ok: false, error: "月度变更统计表调度检查间隔必须大于 0 秒" };

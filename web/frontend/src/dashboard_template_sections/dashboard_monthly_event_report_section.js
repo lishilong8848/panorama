@@ -50,7 +50,7 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                                 </div>
                                 <div class="form-row">
                                   <label class="label">时间（HH:mm:ss）</label>
-                                  <input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" @change="saveMonthlyEventReportSchedulerQuickConfig" />
+                                  <input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" @change="saveMonthlyEventReportSchedulerQuickConfig({ run_time: $event.target.value })" />
                                 </div>
                               </div>
                               <div class="form-row">
@@ -432,7 +432,7 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                                 </div>
                                 <div class="form-row">
                                   <label class="label">时间（HH:mm:ss）</label>
-                                  <input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" @change="saveMonthlyChangeReportSchedulerQuickConfig" />
+                                  <input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" @change="saveMonthlyChangeReportSchedulerQuickConfig({ run_time: $event.target.value })" />
                                 </div>
                               </div>
                               <div class="form-row">

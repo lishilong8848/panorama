@@ -11,6 +11,7 @@ from app.modules.scheduler.api._config_persistence import (
     record_scheduler_config_autostart,
 )
 from app.modules.scheduler.api._display_payload import with_scheduler_display
+from app.modules.scheduler.api._time_normalization import normalize_scheduler_time
 
 
 router = APIRouter(prefix="/api/scheduler/monthly-event-report", tags=["scheduler-monthly-event-report"])
@@ -129,10 +130,7 @@ def monthly_event_report_scheduler_config(payload: Dict[str, Any], request: Requ
                 raise HTTPException(status_code=400, detail="check_interval_sec 必须大于 0")
             scheduler_cfg[key] = number
         elif key == "run_time":
-            text = str(value or "").strip()
-            if not text:
-                raise HTTPException(status_code=400, detail="run_time 不能为空")
-            scheduler_cfg[key] = text
+            scheduler_cfg[key] = normalize_scheduler_time(value)
         elif key == "state_file":
             text = str(value or "").strip()
             if not text:
