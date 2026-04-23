@@ -34,9 +34,28 @@ class _SchedulerConfigContainer:
         self.config = copy.deepcopy(config)
         self.logs: list[str] = []
         self.toggles: list[dict] = []
+        self.reloaded: list[dict] = []
+        self.refresh_calls: list[dict] = []
 
     def reload_config(self, config: dict) -> None:
         self.config = copy.deepcopy(config)
+        self.reloaded.append(copy.deepcopy(config))
+
+    def refresh_single_scheduler_runtime(
+        self,
+        scheduler_key: str,
+        config: dict,
+        *,
+        restart_running: bool = False,
+    ) -> dict:
+        self.config = copy.deepcopy(config)
+        self.refresh_calls.append(
+            {
+                "scheduler_key": scheduler_key,
+                "restart_running": restart_running,
+            }
+        )
+        return {"ok": True, "scheduler_key": scheduler_key, "running": False, "restarted": False}
 
     def add_system_log(self, message: str) -> None:
         self.logs.append(str(message))
@@ -190,6 +209,13 @@ def test_scheduler_config_snapshot_updates_handover_common_segment(tmp_path: Pat
     assert common_doc["data"]["scheduler"]["afternoon_time"] == "16:35:00"
     assert saved["features"]["handover_log"]["scheduler"]["morning_time"] == "08:05:00"
     assert load_settings(config_path)["features"]["handover_log"]["scheduler"]["afternoon_time"] == "16:35:00"
+    assert container.reloaded == []
+    assert container.refresh_calls == [
+        {
+            "scheduler_key": "handover",
+            "restart_running": False,
+        }
+    ]
 
 
 def test_scheduler_toggle_updates_handover_common_segment(tmp_path: Path) -> None:
@@ -208,6 +234,13 @@ def test_scheduler_toggle_updates_handover_common_segment(tmp_path: Path) -> Non
     assert common_doc["data"]["scheduler"]["auto_start_in_gui"] is True
     assert common_doc["data"]["scheduler"]["enabled"] is True
     assert container.config["features"]["handover_log"]["scheduler"]["auto_start_in_gui"] is True
+    assert container.reloaded == []
+    assert container.refresh_calls == [
+        {
+            "scheduler_key": "handover",
+            "restart_running": False,
+        }
+    ]
 
 
 def test_monthly_report_scheduler_config_snapshot_updates_handover_common_segment(tmp_path: Path) -> None:
@@ -232,6 +265,13 @@ def test_monthly_report_scheduler_config_snapshot_updates_handover_common_segmen
         load_settings(config_path)["features"]["handover_log"]["monthly_event_report"]["scheduler"]["run_time"]
         == "09:15:00"
     )
+    assert container.reloaded == []
+    assert container.refresh_calls == [
+        {
+            "scheduler_key": "monthly_event_report",
+            "restart_running": False,
+        }
+    ]
 
 
 def test_save_settings_does_not_rewrite_existing_user_filled_values(tmp_path: Path) -> None:

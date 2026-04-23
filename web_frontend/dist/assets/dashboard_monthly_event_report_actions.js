@@ -406,7 +406,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           monthlyEventReportSchedulerQuickSaving.value = false;
         }
       },
-      { cooldownMs: 500 },
+      { cooldownMs: 0, queueLatest: true },
     );
   }
 
@@ -516,7 +516,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           monthlyChangeReportSchedulerQuickSaving.value = false;
         }
       },
-      { cooldownMs: 500 },
+      { cooldownMs: 0, queueLatest: true },
     );
   }
 

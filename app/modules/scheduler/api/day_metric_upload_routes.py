@@ -5,10 +5,10 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.config.settings_loader import save_settings
 from app.modules.scheduler.api._config_persistence import (
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
+    save_scheduler_config_snapshot,
 )
 from app.modules.scheduler.api._display_payload import with_scheduler_display
 
@@ -66,7 +66,12 @@ def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Di
 @router.post("/start")
 def day_metric_upload_scheduler_start(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    persist_scheduler_toggle(container, path=("features", "day_metric_upload", "scheduler"), auto_start_in_gui=True)
+    persist_scheduler_toggle(
+        container,
+        path=("features", "day_metric_upload", "scheduler"),
+        scheduler_key="day_metric_upload",
+        auto_start_in_gui=True,
+    )
     action = container.start_day_metric_upload_scheduler()
     return _build_payload(container, action_result=action)
 
@@ -74,7 +79,12 @@ def day_metric_upload_scheduler_start(request: Request) -> Dict[str, Any]:
 @router.post("/stop")
 def day_metric_upload_scheduler_stop(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    persist_scheduler_toggle(container, path=("features", "day_metric_upload", "scheduler"), auto_start_in_gui=False)
+    persist_scheduler_toggle(
+        container,
+        path=("features", "day_metric_upload", "scheduler"),
+        scheduler_key="day_metric_upload",
+        auto_start_in_gui=False,
+    )
     action = container.stop_day_metric_upload_scheduler()
     return _build_payload(container, action_result=action)
 
@@ -124,9 +134,15 @@ def day_metric_upload_scheduler_config(payload: Dict[str, Any], request: Request
             if not text:
                 raise HTTPException(status_code=400, detail="state_file 不能为空")
             scheduler_cfg[key] = text
+    restart_running = bool(container.day_metric_upload_scheduler.is_running()) if container.day_metric_upload_scheduler else False
     try:
-        saved = save_settings(merged, container.config_path)
-        container.reload_config(saved)
+        save_scheduler_config_snapshot(
+            container,
+            merged,
+            path=("features", "day_metric_upload", "scheduler"),
+            scheduler_key="day_metric_upload",
+            restart_running=restart_running,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -139,7 +155,7 @@ def day_metric_upload_scheduler_config(payload: Dict[str, Any], request: Request
     data = _build_payload(container)
     data.update(
         {
-            "message": "12项独立上传调度配置已更新并热重载",
+            "message": "12项独立上传调度配置已更新并立即生效" if restart_running else "12项独立上传调度配置已保存",
             "scheduler_config": {key: new_cfg.get(key) for key in sorted(ALLOWED_KEYS)},
         }
     )

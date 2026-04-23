@@ -27,25 +27,28 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                 <strong class="status-metric-value">{{ handoverMorningDecisionText || handoverAfternoonDecisionText || '-' }}</strong>
               </div>
             </div>
-            <div class="hint">上午时间点用于补跑前一天夜班，下午时间点用于执行当天白班。</div>
+            <div class="hint">上午时间点用于补跑前一天夜班，下午时间点用于执行当天白班。修改后立即生效。</div>
             <div class="task-grid two-col">
               <div class="form-row">
                 <label class="label">上午时间</label>
-                <input type="time" step="1" v-model="config.handover_log.scheduler.morning_time" />
+                <input
+                  type="time"
+                  step="1"
+                  v-model="config.handover_log.scheduler.morning_time"
+                  @change="saveHandoverSchedulerQuickConfig({ morning_time: $event.target.value })"
+                />
               </div>
               <div class="form-row">
                 <label class="label">下午时间</label>
-                <input type="time" step="1" v-model="config.handover_log.scheduler.afternoon_time" />
+                <input
+                  type="time"
+                  step="1"
+                  v-model="config.handover_log.scheduler.afternoon_time"
+                  @change="saveHandoverSchedulerQuickConfig({ afternoon_time: $event.target.value })"
+                />
               </div>
             </div>
             <div class="btn-line" style="margin-top:10px;">
-              <button
-                class="btn btn-secondary"
-                :disabled="handoverSchedulerQuickSaving"
-                @click="saveHandoverSchedulerQuickConfig()"
-              >
-                {{ handoverSchedulerQuickSaving ? '保存中...' : '保存时间' }}
-              </button>
               <button
                 class="btn btn-success"
                 :disabled="isSchedulerStartDisabled('handover', actionKeyHandoverSchedulerStart, actionKeyHandoverSchedulerStop)"

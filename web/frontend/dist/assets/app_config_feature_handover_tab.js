@@ -511,7 +511,7 @@
           <div class="hint">当前楼栋支持配置多位收件人；系统会按 open_id 发送审核链接文本消息。</div>
           <div class="form-row">
             <label class="label">当前楼栋</label>
-            <select :value="handoverConfigBuilding" @change="onHandoverConfigBuildingChange($event.target.value)">
+            <select :value="handoverConfigBuilding" @change="onHandoverReviewRecipientBuildingChange($event.target.value)">
               <option v-for="opt in handoverConfigBuildingOptions" :key="'handover-review-recipient-' + opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </div>

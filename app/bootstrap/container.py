@@ -73,6 +73,9 @@ _EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
     "monthly_change_report": "monthly_change_report_scheduler",
     "monthly_event_report": "monthly_event_report_scheduler",
 }
+_EXTERNAL_SCHEDULER_LABELS = {
+    key: label for key, label, _path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS
+}
 _EXTERNAL_SCHEDULER_LEGACY_EXIT_SOURCE_HINTS = (
     "退出快照",
     "退出当前系统",
@@ -1035,6 +1038,125 @@ class AppContainer:
         except Exception as exc:  # noqa: BLE001
             self.add_system_log(f"[调度] {source}: 应用外网端调度记忆失败，继续按当前运行态: {exc}")
             return {"ok": False, "error": str(exc)}
+
+    def _normalize_single_scheduler_key(self, scheduler_key: str) -> str:
+        normalized_key = str(scheduler_key or "").strip().lower()
+        if normalized_key not in _EXTERNAL_SCHEDULER_OBJECT_ATTRS:
+            raise ValueError(f"unsupported scheduler key: {scheduler_key}")
+        return normalized_key
+
+    def _single_scheduler_object(self, scheduler_key: str) -> Any | None:
+        attr_name = _EXTERNAL_SCHEDULER_OBJECT_ATTRS[self._normalize_single_scheduler_key(scheduler_key)]
+        return getattr(self, attr_name, None)
+
+    def _single_scheduler_is_running(self, scheduler_key: str) -> bool:
+        scheduler_obj = self._single_scheduler_object(scheduler_key)
+        if scheduler_obj is None or not hasattr(scheduler_obj, "is_running"):
+            return False
+        try:
+            return bool(scheduler_obj.is_running())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _build_single_scheduler_object(self, scheduler_key: str) -> Any:
+        normalized_key = self._normalize_single_scheduler_key(scheduler_key)
+        if normalized_key == "auto_flow":
+            return self._build_scheduler()
+        if normalized_key == "handover":
+            return self._build_handover_scheduler_manager()
+        if normalized_key == "wet_bulb_collection":
+            return self._build_wet_bulb_collection_scheduler()
+        if normalized_key == "day_metric_upload":
+            return self._build_day_metric_upload_scheduler()
+        if normalized_key == "alarm_event_upload":
+            return self._build_alarm_event_upload_scheduler()
+        if normalized_key == "monthly_change_report":
+            return self._build_monthly_change_report_scheduler()
+        if normalized_key == "monthly_event_report":
+            return self._build_monthly_event_report_scheduler()
+        raise ValueError(f"unsupported scheduler key: {scheduler_key}")
+
+    def _bind_single_scheduler_callback(self, scheduler_key: str, scheduler_obj: Any) -> None:
+        normalized_key = self._normalize_single_scheduler_key(scheduler_key)
+        if normalized_key == "auto_flow":
+            if self.scheduler_callback:
+                scheduler_obj.run_callback = self.scheduler_callback
+            return
+        if normalized_key == "handover":
+            if self.handover_scheduler_callback:
+                scheduler_obj.set_run_callback(self.handover_scheduler_callback)
+            return
+        callback_attr = {
+            "wet_bulb_collection": "wet_bulb_collection_scheduler_callback",
+            "day_metric_upload": "day_metric_upload_scheduler_callback",
+            "alarm_event_upload": "alarm_event_upload_scheduler_callback",
+            "monthly_change_report": "monthly_change_report_scheduler_callback",
+            "monthly_event_report": "monthly_event_report_scheduler_callback",
+        }.get(normalized_key, "")
+        callback = getattr(self, callback_attr, None) if callback_attr else None
+        if callback is not None:
+            scheduler_obj.run_callback = callback
+
+    def _single_scheduler_enabled(self, scheduler_obj: Any) -> bool:
+        if isinstance(getattr(scheduler_obj, "_cfg", None), dict):
+            return bool(scheduler_obj._cfg.get("enabled", True))
+        if isinstance(getattr(scheduler_obj, "cfg", None), dict):
+            return bool(scheduler_obj.cfg.get("enabled", True))
+        if hasattr(scheduler_obj, "enabled"):
+            try:
+                return bool(getattr(scheduler_obj, "enabled"))
+            except Exception:  # noqa: BLE001
+                return True
+        return True
+
+    def refresh_single_scheduler_runtime(
+        self,
+        scheduler_key: str,
+        settings: Dict[str, Any],
+        *,
+        restart_running: bool = False,
+    ) -> Dict[str, Any]:
+        normalized_key = self._normalize_single_scheduler_key(scheduler_key)
+        attr_name = _EXTERNAL_SCHEDULER_OBJECT_ATTRS[normalized_key]
+        previous_config = copy.deepcopy(self.config)
+        previous_obj = getattr(self, attr_name, None)
+        was_running = self._single_scheduler_is_running(normalized_key)
+        self.apply_config_snapshot(settings, mode="light")
+        try:
+            scheduler_obj = self._build_single_scheduler_object(normalized_key)
+            self._bind_single_scheduler_callback(normalized_key, scheduler_obj)
+        except Exception:  # noqa: BLE001
+            self._apply_runtime_config_snapshot(previous_config)
+            raise
+
+        if previous_obj is not None and hasattr(previous_obj, "stop"):
+            previous_obj.stop()
+        setattr(self, attr_name, scheduler_obj)
+
+        restarted = False
+        if restart_running and was_running and self._single_scheduler_enabled(scheduler_obj) and hasattr(scheduler_obj, "start"):
+            try:
+                start_result = scheduler_obj.start()
+                restarted = bool(start_result.get("running", False)) if isinstance(start_result, dict) else bool(
+                    self._single_scheduler_is_running(normalized_key)
+                )
+            except Exception:  # noqa: BLE001
+                self._apply_runtime_config_snapshot(previous_config)
+                setattr(self, attr_name, previous_obj)
+                if previous_obj is not None and was_running and hasattr(previous_obj, "start"):
+                    try:
+                        previous_obj.start()
+                    except Exception:  # noqa: BLE001
+                        pass
+                raise
+        return {
+            "ok": True,
+            "scheduler_key": normalized_key,
+            "label": _EXTERNAL_SCHEDULER_LABELS.get(normalized_key, normalized_key),
+            "was_running": was_running,
+            "running": self._single_scheduler_is_running(normalized_key),
+            "restarted": restarted,
+        }
 
     @staticmethod
     def _inactive_startup_role_handoff() -> Dict[str, Any]:

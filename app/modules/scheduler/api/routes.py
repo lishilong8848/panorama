@@ -5,10 +5,10 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.config.settings_loader import save_settings
 from app.modules.scheduler.api._config_persistence import (
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
+    save_scheduler_config_snapshot,
 )
 from app.modules.scheduler.api._display_payload import with_scheduler_display
 
@@ -48,7 +48,12 @@ def _build_scheduler_payload(container, action_result: Dict[str, Any] | None = N
 @router.post("/start")
 def scheduler_start(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    persist_scheduler_toggle(container, path=("common", "scheduler"), auto_start_in_gui=True)
+    persist_scheduler_toggle(
+        container,
+        path=("common", "scheduler"),
+        scheduler_key="auto_flow",
+        auto_start_in_gui=True,
+    )
     action = container.start_scheduler()
     return _build_scheduler_payload(container, action_result=action)
 
@@ -56,7 +61,12 @@ def scheduler_start(request: Request) -> Dict[str, Any]:
 @router.post("/stop")
 def scheduler_stop(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    persist_scheduler_toggle(container, path=("common", "scheduler"), auto_start_in_gui=False)
+    persist_scheduler_toggle(
+        container,
+        path=("common", "scheduler"),
+        scheduler_key="auto_flow",
+        auto_start_in_gui=False,
+    )
     action = container.stop_scheduler()
     return _build_scheduler_payload(container, action_result=action)
 
@@ -106,9 +116,15 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
         else:
             scheduler_cfg[key] = bool(value)
 
+    restart_running = bool(container.scheduler.is_running()) if container.scheduler else False
     try:
-        saved = save_settings(merged, container.config_path)
-        container.reload_config(saved)
+        save_scheduler_config_snapshot(
+            container,
+            merged,
+            path=("common", "scheduler"),
+            scheduler_key="auto_flow",
+            restart_running=restart_running,
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -120,7 +136,7 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
     )
     runtime = container.scheduler.get_runtime_snapshot() if container.scheduler else {}
     executor_bound = bool(container.is_scheduler_executor_bound())
-    message = "调度配置已更新并热重载"
+    message = "调度配置已更新并立即生效" if restart_running else "调度配置已保存"
 
     scheduler_status = _build_scheduler_payload(container)
     return {

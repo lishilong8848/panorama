@@ -155,7 +155,7 @@ export function createDashboardSchedulerActions(ctx) {
           schedulerQuickSaving.value = false;
         }
       },
-      { cooldownMs: 500 },
+      { cooldownMs: 0, queueLatest: true },
     );
   }
 
@@ -282,7 +282,7 @@ export function createDashboardSchedulerActions(ctx) {
           handoverSchedulerQuickSaving.value = false;
         }
       },
-      { cooldownMs: 500 },
+      { cooldownMs: 0, queueLatest: true },
     );
   }
 
@@ -443,7 +443,7 @@ export function createDashboardSchedulerActions(ctx) {
           dayMetricUploadSchedulerQuickSaving.value = false;
         }
       },
-      { cooldownMs: 500 },
+      { cooldownMs: 0, queueLatest: true },
     );
   }
 
@@ -531,7 +531,7 @@ export function createDashboardSchedulerActions(ctx) {
           alarmEventUploadSchedulerQuickSaving.value = false;
         }
       },
-      { cooldownMs: 500 },
+      { cooldownMs: 0, queueLatest: true },
     );
   }
 

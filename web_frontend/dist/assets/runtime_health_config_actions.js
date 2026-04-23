@@ -200,6 +200,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   let lastBridgeTasksFetchAt = 0;
   let handoverCommonSegmentRequestSeq = 0;
   let handoverBuildingSegmentRequestSeq = 0;
+  const handoverBuildingSegmentRevisions = Object.create(null);
   let bootstrapHealthRequestInFlight = null;
   let startupActivationRequestInFlight = null;
   let lastBootstrapHealthFetchAt = 0;
@@ -3643,12 +3644,14 @@ export function createRuntimeHealthConfigActions(ctx) {
       if (requestSeq !== handoverBuildingSegmentRequestSeq) {
         return null;
       }
+      const nextRevision = Number.parseInt(String(data?.revision || 0), 10) || 0;
+      handoverBuildingSegmentRevisions[buildingText] = nextRevision;
       withConfigSaveSuspended(() => {
         if (handoverConfigBuilding) {
           handoverConfigBuilding.value = buildingText;
         }
         if (handoverConfigBuildingRevision) {
-          handoverConfigBuildingRevision.value = Number.parseInt(String(data?.revision || 0), 10) || 0;
+          handoverConfigBuildingRevision.value = nextRevision;
         }
         if (handoverConfigBuildingUpdatedAt) {
           handoverConfigBuildingUpdatedAt.value = String(data?.updated_at || "").trim();
@@ -3854,18 +3857,27 @@ export function createRuntimeHealthConfigActions(ctx) {
         return { saved: false, reason: "invalid_recipient_draft", error: errorText };
       }
       try {
+        const baseRevision = Object.prototype.hasOwnProperty.call(options || {}, "baseRevision")
+          ? Number.parseInt(String(options.baseRevision || 0), 10) || 0
+          : (Object.prototype.hasOwnProperty.call(handoverBuildingSegmentRevisions, buildingText)
+            ? handoverBuildingSegmentRevisions[buildingText]
+            : Number.parseInt(String(handoverConfigBuildingRevision?.value || 0), 10) || 0);
         const data = await putHandoverBuildingConfigSegmentApi(buildingCode, {
-          base_revision: Number.parseInt(String(handoverConfigBuildingRevision?.value || 0), 10) || 0,
+          base_revision: baseRevision,
           data: buildHandoverBuildingSegmentPayload(buildingText),
         });
+        const nextRevision = Number.parseInt(String(data?.revision || 0), 10) || 0;
+        handoverBuildingSegmentRevisions[buildingText] = nextRevision;
         withConfigSaveSuspended(() => {
-          if (handoverConfigBuilding) {
+          const keepCurrentSelection = Boolean(options?.preserveSelection)
+            && String(handoverConfigBuilding?.value || "").trim() !== buildingText;
+          if (!keepCurrentSelection && handoverConfigBuilding) {
             handoverConfigBuilding.value = buildingText;
           }
-          if (handoverConfigBuildingRevision) {
-            handoverConfigBuildingRevision.value = Number.parseInt(String(data?.revision || 0), 10) || 0;
+          if (!keepCurrentSelection && handoverConfigBuildingRevision) {
+            handoverConfigBuildingRevision.value = nextRevision;
           }
-          if (handoverConfigBuildingUpdatedAt) {
+          if (!keepCurrentSelection && handoverConfigBuildingUpdatedAt) {
             handoverConfigBuildingUpdatedAt.value = String(data?.updated_at || "").trim();
           }
           applyHandoverBuildingSegmentData(buildingText, data?.data || {});
@@ -3877,7 +3889,9 @@ export function createRuntimeHealthConfigActions(ctx) {
         return { saved: true, reason: "saved", data };
       } catch (err) {
         if (Number.parseInt(String(err?.httpStatus || 0), 10) === 409) {
-          await fetchHandoverBuildingConfigSegment(buildingText, { silentMessage: true });
+          if (!options?.preserveDraftOnConflict) {
+            await fetchHandoverBuildingConfigSegment(buildingText, { silentMessage: true });
+          }
           if (!options?.silentConflictMessage) {
             message.value = "当前楼配置已被其他人修改，请刷新后重试";
           }
@@ -3889,7 +3903,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         return { saved: false, reason: "error", error: String(err || "") };
       }
     };
-    if (typeof runSingleFlight === "function") {
+    if (!options?.skipSingleFlight && typeof runSingleFlight === "function") {
       return runSingleFlight(ACTION_KEY_HANDOVER_CONFIG_BUILDING_SAVE, runner, { cooldownMs: 300 });
     }
     return runner();

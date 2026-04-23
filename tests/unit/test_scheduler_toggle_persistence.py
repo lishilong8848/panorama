@@ -11,10 +11,21 @@ class _FakeContainer:
         self.config_path = config_path
         self.reloaded = None
         self.recorded_toggles = []
+        self.refresh_calls = []
 
     def reload_config(self, saved: dict) -> None:
         self.config = saved
         self.reloaded = saved
+
+    def refresh_single_scheduler_runtime(self, scheduler_key: str, saved: dict, *, restart_running: bool = False) -> dict:
+        self.config = saved
+        self.refresh_calls.append(
+            {
+                "scheduler_key": scheduler_key,
+                "restart_running": restart_running,
+            }
+        )
+        return {"ok": True, "scheduler_key": scheduler_key, "running": False, "restarted": False}
 
     def record_external_scheduler_toggle(self, *, path, auto_start_in_gui, source="") -> None:  # noqa: ANN001
         self.recorded_toggles.append(
@@ -46,7 +57,13 @@ def test_persist_scheduler_toggle_start_enables_auto_start_and_enabled(monkeypat
     scheduler_cfg = saved_payload["config"]["features"]["day_metric_upload"]["scheduler"]
     assert scheduler_cfg["enabled"] is True
     assert scheduler_cfg["auto_start_in_gui"] is True
-    assert container.reloaded is not None
+    assert container.reloaded is None
+    assert container.refresh_calls == [
+        {
+            "scheduler_key": "day_metric_upload",
+            "restart_running": False,
+        }
+    ]
     assert container.recorded_toggles == [
         {
             "path": ("features", "day_metric_upload", "scheduler"),
@@ -76,7 +93,13 @@ def test_persist_scheduler_toggle_stop_disables_auto_start_without_forcing_enabl
     scheduler_cfg = saved_payload["config"]["common"]["scheduler"]
     assert scheduler_cfg["enabled"] is True
     assert scheduler_cfg["auto_start_in_gui"] is False
-    assert container.reloaded is not None
+    assert container.reloaded is None
+    assert container.refresh_calls == [
+        {
+            "scheduler_key": "auto_flow",
+            "restart_running": False,
+        }
+    ]
     assert container.recorded_toggles == [
         {
             "path": ("common", "scheduler"),

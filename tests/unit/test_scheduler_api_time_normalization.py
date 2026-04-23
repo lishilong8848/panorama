@@ -8,9 +8,12 @@ from fastapi import HTTPException
 
 from app.modules.scheduler.api import (
     alarm_event_upload_routes,
+    day_metric_upload_routes,
     handover_routes,
     monthly_change_report_routes,
     monthly_event_report_routes,
+    routes,
+    wet_bulb_collection_routes,
 )
 from app.modules.scheduler.api._time_normalization import normalize_scheduler_time
 
@@ -20,6 +23,9 @@ class _FakeContainer:
         self.config = config
         self.config_path = "settings.yaml"
         self.handover_scheduler_manager = None
+        self.alarm_event_upload_scheduler = None
+        self.monthly_event_report_scheduler = None
+        self.monthly_change_report_scheduler = None
         self.runtime_config = {}
 
     def reload_config(self, config: dict) -> None:
@@ -69,12 +75,17 @@ def _request(container: _FakeContainer) -> SimpleNamespace:
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
 
 
-def _save_settings(config: dict, _path: str) -> dict:
-    return copy.deepcopy(config)
-
-
-def _save_scheduler_config_snapshot(container: _FakeContainer, config: dict, *, path: tuple[str, ...]) -> dict:
+def _save_scheduler_config_snapshot(
+    container: _FakeContainer,
+    config: dict,
+    *,
+    path: tuple[str, ...],
+    scheduler_key: str | None = None,
+    restart_running: bool = False,
+) -> dict:
     _ = path
+    _ = scheduler_key
+    _ = restart_running
     saved = copy.deepcopy(config)
     container.reload_config(saved)
     return saved
@@ -163,10 +174,7 @@ def test_single_time_scheduler_config_accepts_browser_time_without_seconds(
     config: dict,
     path: tuple[str, ...],
 ) -> None:
-    if route_module is alarm_event_upload_routes:
-        monkeypatch.setattr(route_module, "save_settings", _save_settings)
-    else:
-        monkeypatch.setattr(route_module, "save_scheduler_config_snapshot", _save_scheduler_config_snapshot)
+    monkeypatch.setattr(route_module, "save_scheduler_config_snapshot", _save_scheduler_config_snapshot)
     container = _FakeContainer(config)
 
     data = handler({"run_time": "9:15"}, _request(container))
@@ -176,3 +184,48 @@ def test_single_time_scheduler_config_accepts_browser_time_without_seconds(
         scheduler = scheduler[key]
     assert scheduler["run_time"] == "09:15:00"
     assert data["scheduler_config"]["run_time"] == "09:15:00"
+
+
+@pytest.mark.parametrize(
+    ("route_module", "handler_name", "stop_method_name"),
+    [
+        (routes, "scheduler_stop", "stop_scheduler"),
+        (handover_routes, "handover_scheduler_stop", "stop_handover_scheduler"),
+        (wet_bulb_collection_routes, "wet_bulb_scheduler_stop", "stop_wet_bulb_collection_scheduler"),
+        (day_metric_upload_routes, "day_metric_upload_scheduler_stop", "stop_day_metric_upload_scheduler"),
+        (alarm_event_upload_routes, "alarm_event_upload_scheduler_stop", "stop_alarm_event_upload_scheduler"),
+        (monthly_event_report_routes, "monthly_event_report_scheduler_stop", "stop_monthly_event_report_scheduler"),
+        (monthly_change_report_routes, "monthly_change_report_scheduler_stop", "stop_monthly_change_report_scheduler"),
+    ],
+)
+def test_scheduler_stop_routes_do_not_stop_before_persist_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    route_module,
+    handler_name: str,
+    stop_method_name: str,
+) -> None:
+    class _StopContainer:
+        config = {}
+        config_path = "settings.yaml"
+
+        def __init__(self) -> None:
+            self.stop_called = False
+
+    container = _StopContainer()
+
+    def _stop_method():
+        container.stop_called = True
+        return {"stopped": True, "running": False, "reason": "stopped"}
+
+    setattr(container, stop_method_name, _stop_method)
+
+    def _raise_persist(*_args, **_kwargs):
+        raise HTTPException(status_code=400, detail="persist failed")
+
+    monkeypatch.setattr(route_module, "persist_scheduler_toggle", _raise_persist)
+
+    handler = getattr(route_module, handler_name)
+    with pytest.raises(HTTPException, match="persist failed"):
+        handler(_request(container))
+
+    assert container.stop_called is False

@@ -80,7 +80,7 @@ def test_wet_bulb_scheduler_action_merges_display_snapshot() -> None:
     assert "display: data.display && typeof data.display === \"object\"" in source
 
 
-def test_handover_scheduler_time_inputs_use_explicit_save() -> None:
+def test_handover_scheduler_time_inputs_auto_save_on_change() -> None:
     project_root = Path(__file__).resolve().parents[2]
     handover_section = (
         project_root
@@ -91,12 +91,16 @@ def test_handover_scheduler_time_inputs_use_explicit_save() -> None:
         / "dashboard_handover_log_section.js"
     ).read_text(encoding="utf-8")
 
-    assert 'type="time" step="1" v-model="config.handover_log.scheduler.morning_time"' in handover_section
-    assert 'type="time" step="1" v-model="config.handover_log.scheduler.afternoon_time"' in handover_section
+    assert 'type="time"' in handover_section
+    assert 'step="1"' in handover_section
+    assert 'v-model="config.handover_log.scheduler.morning_time"' in handover_section
+    assert 'v-model="config.handover_log.scheduler.afternoon_time"' in handover_section
     assert 'type="text" inputmode="numeric" placeholder="HH:MM:SS"' not in handover_section
-    assert '@change="saveHandoverSchedulerQuickConfig' not in handover_section
-    assert '@click="saveHandoverSchedulerQuickConfig()"' in handover_section
-    assert "保存时间" in handover_section
+    assert 'saveHandoverSchedulerQuickConfig({ morning_time: $event.target.value })' in handover_section
+    assert 'saveHandoverSchedulerQuickConfig({ afternoon_time: $event.target.value })' in handover_section
+    assert '@click="saveHandoverSchedulerQuickConfig()"' not in handover_section
+    assert "保存时间" not in handover_section
+    assert "修改后立即生效" in handover_section
 
 
 def test_scheduler_time_inputs_pass_current_dom_value_to_quick_save() -> None:
@@ -121,6 +125,50 @@ def test_scheduler_time_inputs_pass_current_dom_value_to_quick_save() -> None:
     assert "saveAlarmEventUploadSchedulerQuickConfig({ run_time: $event.target.value })" in alarm_section
     assert "saveMonthlyEventReportSchedulerQuickConfig({ run_time: $event.target.value })" in monthly_section
     assert "saveMonthlyChangeReportSchedulerQuickConfig({ run_time: $event.target.value })" in monthly_section
+
+
+def test_scheduler_quick_saves_queue_latest_payload() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    action_guard_source = (project_root / "web" / "frontend" / "src" / "action_guard.js").read_text(encoding="utf-8")
+    scheduler_actions = (
+        project_root / "web" / "frontend" / "src" / "dashboard_scheduler_actions.js"
+    ).read_text(encoding="utf-8")
+    wet_bulb_actions = (
+        project_root / "web" / "frontend" / "src" / "dashboard_wet_bulb_collection_actions.js"
+    ).read_text(encoding="utf-8")
+    monthly_actions = (
+        project_root / "web" / "frontend" / "src" / "dashboard_monthly_event_report_actions.js"
+    ).read_text(encoding="utf-8")
+
+    assert "if (options.queueLatest)" in action_guard_source
+    assert "queuedTaskMap" in action_guard_source
+    assert "{ cooldownMs: 0, queueLatest: true }" in scheduler_actions
+    assert "{ cooldownMs: 0, queueLatest: true }" in wet_bulb_actions
+    assert "{ cooldownMs: 0, queueLatest: true }" in monthly_actions
+
+
+def test_handover_review_recipients_use_local_draft_building_switch() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    handover_tab = (
+        project_root / "web" / "frontend" / "src" / "app_config_feature_handover_tab.js"
+    ).read_text(encoding="utf-8")
+    save_helpers = (
+        project_root / "web" / "frontend" / "src" / "config_save_ui_helpers.js"
+    ).read_text(encoding="utf-8")
+    runtime_actions = (
+        project_root / "web" / "frontend" / "src" / "runtime_health_config_actions.js"
+    ).read_text(encoding="utf-8")
+
+    assert "onHandoverReviewRecipientBuildingChange($event.target.value)" in handover_tab
+    assert "onHandoverReviewRecipientBuildingChange(nextBuilding)" in save_helpers
+    assert "collectDirtyHandoverReviewRecipientBuildings()" in save_helpers
+    assert "lastSavedHandoverReviewRecipientSignatures, buildingText" in save_helpers
+    assert "lastSavedHandoverBuildingMetaSignatures, buildingText" in save_helpers
+    assert "allowSkip: false" in save_helpers
+    assert "preserveDraftOnConflict: true" in save_helpers
+    assert "skipSingleFlight: true" in save_helpers
+    assert "baseRevision" in runtime_actions
+    assert "handoverBuildingSegmentRevisions" in runtime_actions
 
 
 def test_runtime_time_normalizer_accepts_single_digit_hour() -> None:

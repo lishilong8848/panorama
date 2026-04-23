@@ -291,7 +291,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
           wetBulbSchedulerQuickSaving.value = false;
         }
       },
-      { cooldownMs: 500 },
+      { cooldownMs: 0, queueLatest: true },
     );
   }
 

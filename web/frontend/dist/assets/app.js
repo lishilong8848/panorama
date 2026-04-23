@@ -1204,6 +1204,7 @@ createApp({
       saveActiveConfig,
       sendHandoverReviewLink,
       onHandoverConfigBuildingChange,
+      onHandoverReviewRecipientBuildingChange,
       runSchedulerConfigQuickSave,
     } = createConfigSaveUiHelpers({
       computed,
@@ -1213,6 +1214,7 @@ createApp({
       currentView,
       activeConfigTab,
       handoverConfigBuilding,
+      handoverConfigBuildingRevision,
       configSaveStatus,
       configSaveSuspendDepth,
       message,
@@ -1969,6 +1971,7 @@ createApp({
       saveHandoverReviewBaseUrlQuickConfig,
       saveHandoverBuildingConfig,
       onHandoverConfigBuildingChange,
+      onHandoverReviewRecipientBuildingChange,
       confirmStartupRoleSelection,
       checkUpdaterNow,
       applyUpdaterPatch,

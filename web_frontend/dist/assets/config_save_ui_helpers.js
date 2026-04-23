@@ -7,6 +7,7 @@ export function createConfigSaveUiHelpers(options = {}) {
     currentView,
     activeConfigTab,
     handoverConfigBuilding,
+    handoverConfigBuildingRevision,
     configSaveStatus,
     configSaveSuspendDepth,
     message,
@@ -24,6 +25,12 @@ export function createConfigSaveUiHelpers(options = {}) {
 
   let lastSavedHandoverCommonSignature = "";
   const lastSavedHandoverBuildingSignatures = Object.create(null);
+  const lastSavedHandoverBuildingMetaSignatures = Object.create(null);
+  const lastSavedHandoverReviewRecipientSignatures = Object.create(null);
+  const handoverBuildingRevisionByBuilding = Object.create(null);
+  const skipNextHandoverBuildingSignatureSync = Object.create(null);
+
+  const HANDOVER_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"];
 
   function updateConfigSaveStatus(patch = {}) {
     if (!configSaveStatus || typeof configSaveStatus !== "object") return;
@@ -72,7 +79,7 @@ export function createConfigSaveUiHelpers(options = {}) {
       handover.review_ui.review_link_recipients_by_building && typeof handover.review_ui.review_link_recipients_by_building === "object"
         ? handover.review_ui.review_link_recipients_by_building
         : {};
-    for (const building of ["A楼", "B楼", "C楼", "D楼", "E楼"]) {
+    for (const building of HANDOVER_BUILDINGS) {
       delete handover.cell_rules.building_rows[building];
       delete handover.cloud_sheet_sync.sheet_names[building];
       delete handover.review_ui.cabinet_power_defaults_by_building[building];
@@ -100,12 +107,50 @@ export function createConfigSaveUiHelpers(options = {}) {
     });
   }
 
+  function serializeCurrentHandoverBuildingMetaDraft(building = handoverConfigBuilding?.value) {
+    const buildingText = String(building || "").trim() || "A楼";
+    const handover = config?.value?.handover_log && typeof config.value.handover_log === "object"
+      ? config.value.handover_log
+      : {};
+    const cellRules = handover.cell_rules && typeof handover.cell_rules === "object" ? handover.cell_rules : {};
+    const cloudSheetSync = handover.cloud_sheet_sync && typeof handover.cloud_sheet_sync === "object" ? handover.cloud_sheet_sync : {};
+    const reviewUi = handover.review_ui && typeof handover.review_ui === "object" ? handover.review_ui : {};
+    return JSON.stringify({
+      building: buildingText,
+      building_rows: cellRules.building_rows?.[buildingText] || [],
+      sheet_name: String(cloudSheetSync.sheet_names?.[buildingText] || "").trim(),
+      cabinet_defaults: reviewUi.cabinet_power_defaults_by_building?.[buildingText] || null,
+      footer_defaults: reviewUi.footer_inventory_defaults_by_building?.[buildingText] || null,
+    });
+  }
+
+  function serializeCurrentHandoverReviewRecipientDraft(building = handoverConfigBuilding?.value) {
+    const buildingText = String(building || "").trim() || "A楼";
+    const handover = config?.value?.handover_log && typeof config.value.handover_log === "object"
+      ? config.value.handover_log
+      : {};
+    const reviewUi = handover.review_ui && typeof handover.review_ui === "object" ? handover.review_ui : {};
+    return JSON.stringify({
+      building: buildingText,
+      review_link_recipients: reviewUi.review_link_recipients_by_building?.[buildingText] || [],
+    });
+  }
+
+  function serializeAllHandoverReviewRecipientDrafts() {
+    const payload = {};
+    for (const building of HANDOVER_BUILDINGS) {
+      payload[building] = serializeCurrentHandoverReviewRecipientDraft(building);
+    }
+    return JSON.stringify(payload);
+  }
+
   function buildHandoverConfigDraftSignature(building = handoverConfigBuilding?.value) {
     const buildingText = String(building || "").trim() || "A楼";
     return JSON.stringify({
       common: serializeCurrentHandoverCommonDraft(),
       building: buildingText,
       buildingDraft: serializeCurrentHandoverBuildingDraft(buildingText),
+      reviewRecipientDrafts: serializeAllHandoverReviewRecipientDrafts(),
     });
   }
 
@@ -138,18 +183,53 @@ export function createConfigSaveUiHelpers(options = {}) {
     lastSavedHandoverCommonSignature = serializeCurrentHandoverCommonDraft();
   }
 
-  function syncSavedHandoverBuildingSignature(building = handoverConfigBuilding?.value) {
+  function syncSavedHandoverBuildingSignature(building = handoverConfigBuilding?.value, options = {}) {
     const buildingText = String(building || "").trim() || "A楼";
+    const allowSkip = options?.allowSkip !== false;
+    if (allowSkip && skipNextHandoverBuildingSignatureSync[buildingText]) {
+      delete skipNextHandoverBuildingSignatureSync[buildingText];
+      return;
+    }
     lastSavedHandoverBuildingSignatures[buildingText] = serializeCurrentHandoverBuildingDraft(buildingText);
+    lastSavedHandoverBuildingMetaSignatures[buildingText] = serializeCurrentHandoverBuildingMetaDraft(buildingText);
+    lastSavedHandoverReviewRecipientSignatures[buildingText] = serializeCurrentHandoverReviewRecipientDraft(buildingText);
+    if (String(handoverConfigBuilding?.value || "").trim() === buildingText && handoverConfigBuildingRevision) {
+      handoverBuildingRevisionByBuilding[buildingText] =
+        Number.parseInt(String(handoverConfigBuildingRevision.value || 0), 10) || 0;
+    }
+  }
+
+  function hasPendingHandoverCommonChanges() {
+    return serializeCurrentHandoverCommonDraft() !== lastSavedHandoverCommonSignature;
+  }
+
+  function hasPendingHandoverBuildingMetaChanges(building = handoverConfigBuilding?.value) {
+    const buildingText = String(building || "").trim() || "A楼";
+    if (!Object.prototype.hasOwnProperty.call(lastSavedHandoverBuildingMetaSignatures, buildingText)) {
+      return false;
+    }
+    return serializeCurrentHandoverBuildingMetaDraft(buildingText)
+      !== String(lastSavedHandoverBuildingMetaSignatures[buildingText] || "");
+  }
+
+  function hasPendingHandoverReviewRecipientChanges(building = handoverConfigBuilding?.value) {
+    const buildingText = String(building || "").trim() || "A楼";
+    if (!Object.prototype.hasOwnProperty.call(lastSavedHandoverReviewRecipientSignatures, buildingText)) {
+      return false;
+    }
+    return serializeCurrentHandoverReviewRecipientDraft(buildingText)
+      !== String(lastSavedHandoverReviewRecipientSignatures[buildingText] || "");
+  }
+
+  function collectDirtyHandoverReviewRecipientBuildings() {
+    return HANDOVER_BUILDINGS.filter((building) => hasPendingHandoverReviewRecipientChanges(building));
   }
 
   function hasPendingHandoverConfigChanges(building = handoverConfigBuilding?.value) {
     const currentBuilding = String(building || "").trim() || "A楼";
-    const currentCommonSignature = serializeCurrentHandoverCommonDraft();
-    const currentBuildingSignature = serializeCurrentHandoverBuildingDraft(currentBuilding);
-    const savedBuildingSignature = String(lastSavedHandoverBuildingSignatures[currentBuilding] || "");
-    return currentCommonSignature !== lastSavedHandoverCommonSignature
-      || currentBuildingSignature !== savedBuildingSignature;
+    return hasPendingHandoverCommonChanges()
+      || hasPendingHandoverBuildingMetaChanges(currentBuilding)
+      || hasPendingHandoverReviewRecipientChanges(currentBuilding);
   }
 
   async function savePendingHandoverConfigChanges(options = {}) {
@@ -159,12 +239,14 @@ export function createConfigSaveUiHelpers(options = {}) {
     if (!options?.force && String(activeConfigTab?.value || "").trim() !== "feature_handover") return null;
     if ((configSaveSuspendDepth?.value || 0) > 0) return null;
     const currentBuilding = String(handoverConfigBuilding?.value || "").trim() || "A楼";
-    const currentCommonSignature = serializeCurrentHandoverCommonDraft();
-    const currentBuildingSignature = serializeCurrentHandoverBuildingDraft(currentBuilding);
-    const commonDirty = currentCommonSignature !== lastSavedHandoverCommonSignature;
-    const buildingDirty =
-      currentBuildingSignature !== String(lastSavedHandoverBuildingSignatures[currentBuilding] || "");
-    if (!commonDirty && !buildingDirty) {
+    const commonDirty = hasPendingHandoverCommonChanges();
+    const buildingMetaDirty = hasPendingHandoverBuildingMetaChanges(currentBuilding);
+    const dirtyRecipientBuildings = collectDirtyHandoverReviewRecipientBuildings();
+    const buildingSaveSet = new Set(dirtyRecipientBuildings);
+    if (buildingMetaDirty) {
+      buildingSaveSet.add(currentBuilding);
+    }
+    if (!commonDirty && !buildingSaveSet.size) {
       return { saved: true, reason: "unchanged" };
     }
     const saveTasks = [];
@@ -183,17 +265,27 @@ export function createConfigSaveUiHelpers(options = {}) {
           })),
       );
     }
-    if (buildingDirty) {
+    for (const building of buildingSaveSet) {
+      const baseRevision = Object.prototype.hasOwnProperty.call(handoverBuildingRevisionByBuilding, building)
+        ? handoverBuildingRevisionByBuilding[building]
+        : (building === currentBuilding
+          ? Number.parseInt(String(handoverConfigBuildingRevision?.value || 0), 10) || 0
+          : 0);
       saveTasks.push(
-        Promise.resolve(saveHandoverBuildingConfig?.(currentBuilding, {
+        Promise.resolve(saveHandoverBuildingConfig?.(building, {
           silentSuccess: true,
           silentConflictMessage: false,
           silentErrorMessage: true,
           skipConfigRefresh: true,
+          preserveSelection: building !== currentBuilding,
+          preserveDraftOnConflict: true,
+          skipSingleFlight: true,
+          baseRevision,
         }))
-          .then((result) => ({ target: "building", result }))
+          .then((result) => ({ target: "building", building, result }))
           .catch((err) => ({
             target: "building",
+            building,
             result: { saved: false, reason: "error", error: String(err || "") },
           })),
       );
@@ -202,16 +294,25 @@ export function createConfigSaveUiHelpers(options = {}) {
     if (saveResults.some((item) => item.target === "common" && item.result?.saved)) {
       syncSavedHandoverCommonSignature();
     }
-    if (saveResults.some((item) => item.target === "building" && item.result?.saved)) {
-      syncSavedHandoverBuildingSignature(currentBuilding);
+    for (const item of saveResults.filter((entry) => entry.target === "building" && entry.result?.saved)) {
+      if (item.result?.data?.revision !== undefined) {
+        handoverBuildingRevisionByBuilding[item.building] =
+          Number.parseInt(String(item.result.data.revision || 0), 10) || 0;
+      }
+      syncSavedHandoverBuildingSignature(item.building, { allowSkip: false });
     }
     const failedResult = saveResults.find((item) => !item.result?.saved);
     if (failedResult) {
-      return failedResult.result || {
+      const failedPayload = failedResult.result || {
         saved: false,
         reason: "missing_save_result",
         target: failedResult.target,
       };
+      if (failedResult.building && failedPayload && typeof failedPayload === "object") {
+        failedPayload.building = failedResult.building;
+        failedPayload.error = `${failedResult.building}保存失败：${String(failedPayload.error || failedPayload.reason || "未知错误")}`;
+      }
+      return failedPayload;
     }
     if (!options?.silentSuccess && message) {
       message.value = "交接班配置已保存";
@@ -220,7 +321,9 @@ export function createConfigSaveUiHelpers(options = {}) {
       saved: true,
       reason: "saved",
       commonDirty,
-      buildingDirty,
+      buildingDirty: Boolean(buildingSaveSet.size),
+      buildingMetaDirty,
+      recipientDirtyBuildings: dirtyRecipientBuildings,
       building: currentBuilding,
     };
   }
@@ -354,6 +457,35 @@ export function createConfigSaveUiHelpers(options = {}) {
     await fetchHandoverBuildingConfigSegment?.(targetBuilding);
   }
 
+  async function onHandoverReviewRecipientBuildingChange(nextBuilding) {
+    const currentBuilding = String(handoverConfigBuilding?.value || "").trim() || "A楼";
+    const targetBuilding = String(nextBuilding || "").trim() || currentBuilding;
+    if (targetBuilding === currentBuilding) return;
+    if (hasPendingHandoverCommonChanges() || hasPendingHandoverBuildingMetaChanges(currentBuilding)) {
+      if (message) message.value = "当前交接班配置有未保存修改，请先点击保存配置";
+      return;
+    }
+    if (hasPendingHandoverReviewRecipientChanges(targetBuilding)) {
+      skipNextHandoverBuildingSignatureSync[targetBuilding] = true;
+      if (handoverConfigBuilding) {
+        handoverConfigBuilding.value = targetBuilding;
+      }
+      setTimeout(() => {
+        delete skipNextHandoverBuildingSignatureSync[targetBuilding];
+      }, 0);
+      if (handoverConfigBuildingRevision && Object.prototype.hasOwnProperty.call(handoverBuildingRevisionByBuilding, targetBuilding)) {
+        handoverConfigBuildingRevision.value = handoverBuildingRevisionByBuilding[targetBuilding];
+      }
+      return;
+    }
+    const data = await fetchHandoverBuildingConfigSegment?.(targetBuilding);
+    if (data?.revision !== undefined) {
+      handoverBuildingRevisionByBuilding[targetBuilding] =
+        Number.parseInt(String(data.revision || 0), 10) || 0;
+      syncSavedHandoverBuildingSignature(targetBuilding, { allowSkip: false });
+    }
+  }
+
   async function runSchedulerConfigQuickSave(taskFn) {
     if (typeof taskFn !== "function") return;
     if (configSaveSuspendDepth) {
@@ -378,6 +510,8 @@ export function createConfigSaveUiHelpers(options = {}) {
     markCurrentConfigDraftDirty,
     serializeCurrentHandoverCommonDraft,
     serializeCurrentHandoverBuildingDraft,
+    serializeCurrentHandoverBuildingMetaDraft,
+    serializeCurrentHandoverReviewRecipientDraft,
     syncSavedHandoverCommonSignature,
     syncSavedHandoverBuildingSignature,
     hasPendingHandoverConfigChanges,
@@ -391,6 +525,7 @@ export function createConfigSaveUiHelpers(options = {}) {
     saveActiveConfig,
     sendHandoverReviewLink,
     onHandoverConfigBuildingChange,
+    onHandoverReviewRecipientBuildingChange,
     runSchedulerConfigQuickSave,
   };
 }
