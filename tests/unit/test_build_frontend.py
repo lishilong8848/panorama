@@ -91,7 +91,9 @@ def test_handover_scheduler_time_inputs_use_explicit_save() -> None:
         / "dashboard_handover_log_section.js"
     ).read_text(encoding="utf-8")
 
-    assert 'type="text" inputmode="numeric" placeholder="HH:MM:SS"' in handover_section
+    assert 'type="time" step="1" v-model="config.handover_log.scheduler.morning_time"' in handover_section
+    assert 'type="time" step="1" v-model="config.handover_log.scheduler.afternoon_time"' in handover_section
+    assert 'type="text" inputmode="numeric" placeholder="HH:MM:SS"' not in handover_section
     assert '@change="saveHandoverSchedulerQuickConfig' not in handover_section
     assert '@click="saveHandoverSchedulerQuickConfig()"' in handover_section
     assert "保存时间" in handover_section

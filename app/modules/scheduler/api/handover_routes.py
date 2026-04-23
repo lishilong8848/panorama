@@ -5,10 +5,10 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.config.settings_loader import save_settings
 from app.modules.scheduler.api._config_persistence import (
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
+    save_scheduler_config_snapshot,
 )
 from app.modules.scheduler.api._display_payload import with_scheduler_display
 from app.modules.scheduler.api._time_normalization import normalize_scheduler_time
@@ -148,8 +148,11 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
             scheduler_cfg[key] = bool(value)
 
     try:
-        saved = save_settings(merged, container.config_path)
-        container.reload_config(saved)
+        save_scheduler_config_snapshot(
+            container,
+            merged,
+            path=("features", "handover_log", "scheduler"),
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

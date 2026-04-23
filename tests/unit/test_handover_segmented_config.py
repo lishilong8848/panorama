@@ -22,6 +22,27 @@ from app.config.settings_loader import (
     save_handover_building_segment,
     save_settings,
 )
+from app.modules.scheduler.api._config_persistence import (
+    persist_scheduler_toggle,
+    save_scheduler_config_snapshot,
+)
+
+
+class _SchedulerConfigContainer:
+    def __init__(self, config_path: Path, config: dict) -> None:
+        self.config_path = config_path
+        self.config = copy.deepcopy(config)
+        self.logs: list[str] = []
+        self.toggles: list[dict] = []
+
+    def reload_config(self, config: dict) -> None:
+        self.config = copy.deepcopy(config)
+
+    def add_system_log(self, message: str) -> None:
+        self.logs.append(str(message))
+
+    def record_external_scheduler_toggle(self, **kwargs) -> None:
+        self.toggles.append(dict(kwargs))
 
 
 def _write_default_config(path: Path) -> None:
@@ -145,6 +166,72 @@ def test_save_settings_preserves_segment_backed_handover_values(tmp_path: Path) 
 
     assert saved["common"]["paths"]["business_root_dir"] == r"D:\SegmentedRoot"
     assert saved["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-段配置真值"
+
+
+def test_scheduler_config_snapshot_updates_handover_common_segment(tmp_path: Path) -> None:
+    config_path = tmp_path / "表格计算配置.json"
+    _write_default_config(config_path)
+    current = load_settings(config_path)
+    container = _SchedulerConfigContainer(config_path, current)
+
+    merged = copy.deepcopy(current)
+    scheduler = merged["features"]["handover_log"]["scheduler"]
+    scheduler["morning_time"] = "08:05:00"
+    scheduler["afternoon_time"] = "16:35:00"
+
+    saved = save_scheduler_config_snapshot(
+        container,
+        merged,
+        path=("features", "handover_log", "scheduler"),
+    )
+
+    common_doc = get_handover_common_segment(config_path)
+    assert common_doc["data"]["scheduler"]["morning_time"] == "08:05:00"
+    assert common_doc["data"]["scheduler"]["afternoon_time"] == "16:35:00"
+    assert saved["features"]["handover_log"]["scheduler"]["morning_time"] == "08:05:00"
+    assert load_settings(config_path)["features"]["handover_log"]["scheduler"]["afternoon_time"] == "16:35:00"
+
+
+def test_scheduler_toggle_updates_handover_common_segment(tmp_path: Path) -> None:
+    config_path = tmp_path / "表格计算配置.json"
+    _write_default_config(config_path)
+    current = load_settings(config_path)
+    container = _SchedulerConfigContainer(config_path, current)
+
+    persist_scheduler_toggle(
+        container,
+        path=("features", "handover_log", "scheduler"),
+        auto_start_in_gui=True,
+    )
+
+    common_doc = get_handover_common_segment(config_path)
+    assert common_doc["data"]["scheduler"]["auto_start_in_gui"] is True
+    assert common_doc["data"]["scheduler"]["enabled"] is True
+    assert container.config["features"]["handover_log"]["scheduler"]["auto_start_in_gui"] is True
+
+
+def test_monthly_report_scheduler_config_snapshot_updates_handover_common_segment(tmp_path: Path) -> None:
+    config_path = tmp_path / "表格计算配置.json"
+    _write_default_config(config_path)
+    current = load_settings(config_path)
+    container = _SchedulerConfigContainer(config_path, current)
+
+    merged = copy.deepcopy(current)
+    scheduler = merged["features"]["handover_log"]["monthly_event_report"]["scheduler"]
+    scheduler["run_time"] = "09:15:00"
+
+    save_scheduler_config_snapshot(
+        container,
+        merged,
+        path=("features", "handover_log", "monthly_event_report", "scheduler"),
+    )
+
+    common_doc = get_handover_common_segment(config_path)
+    assert common_doc["data"]["monthly_event_report"]["scheduler"]["run_time"] == "09:15:00"
+    assert (
+        load_settings(config_path)["features"]["handover_log"]["monthly_event_report"]["scheduler"]["run_time"]
+        == "09:15:00"
+    )
 
 
 def test_save_settings_does_not_rewrite_existing_user_filled_values(tmp_path: Path) -> None:

@@ -5,7 +5,15 @@ from typing import Any, Dict, Sequence
 
 from fastapi import HTTPException
 
-from app.config.settings_loader import save_settings
+from app.config.settings_loader import (
+    get_handover_common_segment,
+    load_settings,
+    save_handover_common_segment,
+    save_settings,
+)
+
+
+_HANDOVER_PREFIX: tuple[str, str] = ("features", "handover_log")
 
 
 def _ensure_dict_path(root: Dict[str, Any], path: Sequence[str]) -> Dict[str, Any]:
@@ -19,6 +27,53 @@ def _ensure_dict_path(root: Dict[str, Any], path: Sequence[str]) -> Dict[str, An
     return current
 
 
+def _get_dict_path(root: Dict[str, Any], path: Sequence[str]) -> Dict[str, Any]:
+    current: Any = root
+    for key in path:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return copy.deepcopy(current) if isinstance(current, dict) else {}
+
+
+def _is_handover_common_scheduler_path(path: Sequence[str]) -> bool:
+    normalized = tuple(str(item) for item in path)
+    return len(normalized) >= 3 and normalized[:2] == _HANDOVER_PREFIX and normalized[-1] == "scheduler"
+
+
+def save_scheduler_config_snapshot(container: Any, merged: Dict[str, Any], *, path: Sequence[str]) -> Dict[str, Any]:
+    """Persist scheduler config, respecting handover segmented config as the source of truth."""
+    if _is_handover_common_scheduler_path(path):
+        relative_path = tuple(str(item) for item in path[2:])
+        scheduler_cfg = _get_dict_path(merged, path)
+        common_doc = get_handover_common_segment(container.config_path)
+        if int(common_doc.get("revision", 0) or 0) <= 0:
+            # Ensure first-run segment files are materialized before optimistic revision writes.
+            load_settings(container.config_path)
+            common_doc = get_handover_common_segment(container.config_path)
+        common_data = copy.deepcopy(common_doc.get("data", {}) if isinstance(common_doc.get("data"), dict) else {})
+        target = _ensure_dict_path(common_data, relative_path[:-1])
+        target[relative_path[-1]] = scheduler_cfg
+        saved, _doc, aggregate_error = save_handover_common_segment(
+            common_data,
+            base_revision=int(common_doc.get("revision", 0) or 0),
+            config_path=container.config_path,
+        )
+        if aggregate_error:
+            logger = getattr(container, "add_system_log", None)
+            if callable(logger):
+                try:
+                    logger(f"[调度配置] 交接班分段配置已保存，但聚合配置刷新失败: {aggregate_error}")
+                except Exception:  # noqa: BLE001
+                    pass
+        container.reload_config(saved)
+        return saved
+
+    saved = save_settings(merged, container.config_path)
+    container.reload_config(saved)
+    return saved
+
+
 def persist_scheduler_toggle(container: Any, *, path: Sequence[str], auto_start_in_gui: bool) -> None:
     try:
         merged = copy.deepcopy(container.config if isinstance(container.config, dict) else {})
@@ -27,8 +82,7 @@ def persist_scheduler_toggle(container: Any, *, path: Sequence[str], auto_start_
         scheduler_cfg["auto_start_in_gui"] = desired_auto_start
         if desired_auto_start:
             scheduler_cfg["enabled"] = True
-        saved = save_settings(merged, container.config_path)
-        container.reload_config(saved)
+        save_scheduler_config_snapshot(container, merged, path=path)
         recorder = getattr(container, "record_external_scheduler_toggle", None)
         if callable(recorder):
             try:

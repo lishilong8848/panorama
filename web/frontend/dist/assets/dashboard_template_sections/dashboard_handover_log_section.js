@@ -31,11 +31,11 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
             <div class="task-grid two-col">
               <div class="form-row">
                 <label class="label">上午时间</label>
-                <input type="text" inputmode="numeric" placeholder="HH:MM:SS" v-model.trim="config.handover_log.scheduler.morning_time" />
+                <input type="time" step="1" v-model="config.handover_log.scheduler.morning_time" />
               </div>
               <div class="form-row">
                 <label class="label">下午时间</label>
-                <input type="text" inputmode="numeric" placeholder="HH:MM:SS" v-model.trim="config.handover_log.scheduler.afternoon_time" />
+                <input type="time" step="1" v-model="config.handover_log.scheduler.afternoon_time" />
               </div>
             </div>
             <div class="btn-line" style="margin-top:10px;">

@@ -73,6 +73,13 @@ def _save_settings(config: dict, _path: str) -> dict:
     return copy.deepcopy(config)
 
 
+def _save_scheduler_config_snapshot(container: _FakeContainer, config: dict, *, path: tuple[str, ...]) -> dict:
+    _ = path
+    saved = copy.deepcopy(config)
+    container.reload_config(saved)
+    return saved
+
+
 def test_normalize_scheduler_time_accepts_browser_time_without_seconds() -> None:
     assert normalize_scheduler_time("7:05") == "07:05:00"
     assert normalize_scheduler_time("07:05") == "07:05:00"
@@ -88,7 +95,7 @@ def test_normalize_scheduler_time_rejects_invalid_values(value: str) -> None:
 
 
 def test_handover_config_accepts_browser_time_without_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(handover_routes, "save_settings", _save_settings)
+    monkeypatch.setattr(handover_routes, "save_scheduler_config_snapshot", _save_scheduler_config_snapshot)
     container = _FakeContainer(
         {
             "features": {
@@ -156,7 +163,10 @@ def test_single_time_scheduler_config_accepts_browser_time_without_seconds(
     config: dict,
     path: tuple[str, ...],
 ) -> None:
-    monkeypatch.setattr(route_module, "save_settings", _save_settings)
+    if route_module is alarm_event_upload_routes:
+        monkeypatch.setattr(route_module, "save_settings", _save_settings)
+    else:
+        monkeypatch.setattr(route_module, "save_scheduler_config_snapshot", _save_scheduler_config_snapshot)
     container = _FakeContainer(config)
 
     data = handler({"run_time": "9:15"}, _request(container))
