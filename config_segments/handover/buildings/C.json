@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 17,
-  "updated_at": "2026-04-23T14:37:18+08:00",
+  "revision": 18,
+  "updated_at": "2026-04-24T08:59:28+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -75,7 +75,7 @@
           {
             "note": "C",
             "open_id": "ou_99391b00c1406917930483d8500af400",
-            "enabled": false
+            "enabled": true
           },
           {
             "note": "m",
