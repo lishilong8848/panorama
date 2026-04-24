@@ -7,6 +7,7 @@
 *.zip
 *.exe
 *.exe.manifest
+.git
 
 # Environment and caches
 /.env
@@ -16,7 +17,7 @@
 __pycache__/
 *.py[cod]
 *.pyo
-
+QLDownload
 # IDE and test tooling
 /.idea/
 /.vscode/
