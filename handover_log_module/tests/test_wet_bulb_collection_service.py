@@ -125,7 +125,7 @@ def test_resolve_wet_bulb_value_falls_back_to_source_rows() -> None:
             row_index=1,
             b_text="",
             c_text="",
-            d_name="E-124-DDC-100_室外温度1",
+            d_name="E-124-DDC-100_室外湿度1",
             e_raw=14.11,
             value=14.11,
             b_norm="",
