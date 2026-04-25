@@ -27,6 +27,8 @@ _CAPACITY_IMAGE_EXCEL_COPY_LOCK = threading.RLock()
 _CAPACITY_IMAGE_DELIVERY_RUNNING_STATUSES = {"sending"}
 _CAPACITY_IMAGE_EXCEL_LOCK_TIMEOUT_SEC = 120.0
 _CAPACITY_IMAGE_LOCK_TIMEOUT_ERROR = "容量图片截图繁忙，请稍后重试"
+_EXCEL_COM_PROGID = "Excel.Application"
+_WPS_EXCEL_COM_PROGIDS = ("KET.Application", "KET.Application.9")
 
 
 def _now_text() -> str:
@@ -65,6 +67,63 @@ class CapacityReportImageRenderer:
         if not isinstance(template_cfg, dict):
             return ""
         return _text(template_cfg.get("sheet_name"))
+
+    @staticmethod
+    def _registry_default_value(path: str) -> str:
+        if os.name != "nt":
+            return ""
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, path) as key:
+                value, _ = winreg.QueryValueEx(key, "")
+        except Exception:
+            return ""
+        return str(value or "").strip()
+
+    @classmethod
+    def _registered_com_clsid(cls, progid: str) -> str:
+        return cls._registry_default_value(f"{str(progid or '').strip()}\\CLSID")
+
+    @classmethod
+    def _registered_com_local_server(cls, clsid: str) -> str:
+        normalized = str(clsid or "").strip()
+        if not normalized:
+            return ""
+        return cls._registry_default_value(f"CLSID\\{normalized}\\LocalServer32")
+
+    @classmethod
+    def _excel_dispatch_progids(cls) -> List[str]:
+        candidates = [_EXCEL_COM_PROGID, *_WPS_EXCEL_COM_PROGIDS]
+        excel_clsid = cls._registered_com_clsid(_EXCEL_COM_PROGID)
+        wps_registered = any(cls._registered_com_clsid(progid) for progid in _WPS_EXCEL_COM_PROGIDS)
+        if wps_registered and excel_clsid and not cls._registered_com_local_server(excel_clsid):
+            candidates = [*_WPS_EXCEL_COM_PROGIDS, _EXCEL_COM_PROGID]
+        unique: List[str] = []
+        for progid in candidates:
+            text = str(progid or "").strip()
+            if text and text not in unique:
+                unique.append(text)
+        return unique
+
+    @classmethod
+    def _dispatch_excel_application(cls, win32com_client: Any, *, emit_log: Callable[[str], None] | None = None) -> Tuple[Any, str]:
+        errors: List[str] = []
+        for progid in cls._excel_dispatch_progids():
+            try:
+                excel = win32com_client.DispatchEx(progid)
+                if emit_log and progid != _EXCEL_COM_PROGID:
+                    emit_log(f"[交接班][容量表图片发送] 已使用兼容表格COM启动 progid={progid}")
+                return excel, progid
+            except Exception as exc:  # noqa: BLE001
+                detail = f"{progid}: {exc}"
+                errors.append(detail)
+                if emit_log:
+                    emit_log(
+                        "[交接班][容量表图片发送] 表格COM启动失败，尝试下一个兼容ProgID "
+                        f"progid={progid}, error={exc}"
+                    )
+        raise RuntimeError("Excel/WPS COM启动失败: " + "; ".join(errors))
 
     def _cache_path(
         self,
@@ -299,6 +358,7 @@ class CapacityReportImageRenderer:
         workbook = None
         co_initialized = False
         excel_pid = 0
+        excel_progid = _EXCEL_COM_PROGID
         quit_ok = False
         try:
             import pythoncom
@@ -312,7 +372,7 @@ class CapacityReportImageRenderer:
                 )
             pythoncom.CoInitialize()
             co_initialized = True
-            excel = win32com.client.DispatchEx("Excel.Application")
+            excel, excel_progid = self._dispatch_excel_application(win32com.client, emit_log=emit_log)
             try:
                 import win32process
 
@@ -322,7 +382,7 @@ class CapacityReportImageRenderer:
             if emit_log:
                 emit_log(
                     "[交接班][容量表图片发送] Excel已启动 "
-                    f"source={source_path}, excel_pid={excel_pid or '-'}"
+                    f"source={source_path}, progid={excel_progid}, excel_pid={excel_pid or '-'}"
                 )
             excel.Visible = False
             excel.DisplayAlerts = False
@@ -352,7 +412,7 @@ class CapacityReportImageRenderer:
             if emit_log:
                 emit_log(
                     "[交接班][容量表图片发送] Excel截图Sheet已选中 "
-                    f"sheet={sheet_name}, excel_pid={excel_pid or '-'}"
+                    f"sheet={sheet_name}, progid={excel_progid}, excel_pid={excel_pid or '-'}"
                 )
             try:
                 workbook.Activate()
@@ -422,8 +482,8 @@ class CapacityReportImageRenderer:
                 hint = ""
                 if "-2146959355" in detail or "服务器运行失败" in detail:
                     hint = (
-                        "；pywin32已导入，但 Excel COM 启动失败，请用当前运行账号手动打开一次 Excel，"
-                        "处理首次启动/激活/弹窗后再重试"
+                        "；pywin32已导入，但 Excel/WPS COM 启动失败，请用当前运行账号手动打开一次 Excel 或 WPS表格，"
+                        "处理首次启动/激活/弹窗后再重试；如使用WPS，请确认 KET.Application 可用"
                     )
                 emit_log(f"[交接班][容量表图片发送] Excel截图异常: error={exc}{hint}")
             return False

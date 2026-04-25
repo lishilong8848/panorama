@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import copy
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook
@@ -50,6 +51,54 @@ def _fake_excel_copy_picture(monkeypatch) -> None:
         return True
 
     monkeypatch.setattr(module.CapacityReportImageRenderer, "_render_with_excel_copy_picture", _fake_copy)
+
+
+def test_capacity_report_renderer_prefers_wps_when_excel_local_server_missing(monkeypatch) -> None:
+    def fake_clsid(progid: str) -> str:
+        return {
+            "Excel.Application": "{excel}",
+            "KET.Application": "{ket}",
+            "KET.Application.9": "{ket}",
+        }.get(progid, "")
+
+    def fake_local_server(clsid: str) -> str:
+        return "" if clsid == "{excel}" else ""
+
+    monkeypatch.setattr(module.CapacityReportImageRenderer, "_registered_com_clsid", classmethod(lambda cls, progid: fake_clsid(progid)))
+    monkeypatch.setattr(module.CapacityReportImageRenderer, "_registered_com_local_server", classmethod(lambda cls, clsid: fake_local_server(clsid)))
+
+    assert module.CapacityReportImageRenderer._excel_dispatch_progids() == [
+        "KET.Application",
+        "KET.Application.9",
+        "Excel.Application",
+    ]
+
+
+def test_capacity_report_renderer_dispatches_next_compatible_progid(monkeypatch) -> None:
+    calls = []
+    logs = []
+
+    class _FakeComClient:
+        @staticmethod
+        def DispatchEx(progid: str):
+            calls.append(progid)
+            if progid == "Excel.Application":
+                raise RuntimeError("server failed")
+            return SimpleNamespace(name="spreadsheet")
+
+    monkeypatch.setattr(
+        module.CapacityReportImageRenderer,
+        "_excel_dispatch_progids",
+        classmethod(lambda cls: ["Excel.Application", "KET.Application"]),
+    )
+
+    excel, progid = module.CapacityReportImageRenderer._dispatch_excel_application(_FakeComClient(), emit_log=logs.append)
+
+    assert excel.name == "spreadsheet"
+    assert progid == "KET.Application"
+    assert calls == ["Excel.Application", "KET.Application"]
+    assert any("表格COM启动失败" in line and "Excel.Application" in line for line in logs)
+    assert any("已使用兼容表格COM启动" in line and "KET.Application" in line for line in logs)
 
 
 def test_capacity_report_renderer_outputs_valid_png(tmp_path: Path, monkeypatch) -> None:

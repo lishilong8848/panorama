@@ -1,13 +1,13 @@
 ﻿{
-  "revision": 21,
-  "updated_at": "2026-04-25T19:59:49+08:00",
+  "revision": 26,
+  "updated_at": "2026-04-25T20:38:03+08:00",
   "data": {
     "enabled": true,
     "scheduler": {
       "enabled": true,
       "auto_start_in_gui": true,
-      "morning_time": "08:52:00",
-      "afternoon_time": "16:00:00",
+      "morning_time": "08:04:00",
+      "afternoon_time": "17:00:00",
       "check_interval_sec": 30,
       "catch_up_if_missed": false,
       "retry_failed_in_same_period": false,
@@ -855,7 +855,7 @@
       "autosave_debounce_ms": 800,
       "poll_interval_sec": 5,
       "bind_latest_session": true,
-      "public_base_url": "http://192.168.31.10:18765",
+      "public_base_url": "http://192.168.224.157:18765",
       "section_hidden_columns": [
         "I"
       ],
