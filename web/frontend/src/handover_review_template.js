@@ -37,6 +37,15 @@
           >
             {{ capacityDownloadActionVm.text }}
           </button>
+          <button
+            v-if="showCapacityImageSendAction"
+            class="btn btn-secondary btn-mini"
+            @click="sendCurrentCapacityImage"
+            :disabled="capacityImageSendActionVm.disabled"
+            :title="capacityImageSendActionVm.disabledReason || ''"
+          >
+            {{ capacityImageSendActionVm.text }}
+          </button>
           <a
             v-if="reviewCloudSheetUrl"
             class="btn btn-secondary btn-mini"

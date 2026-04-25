@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import pytest
+from openpyxl import Workbook
 
+from handover_log_module.core.models import RawRow
 from handover_log_module.service import review_link_delivery_service as review_module
+from handover_log_module.service import handover_summary_message_service as summary_module
 
 
 class _FakeReviewSessionService:
@@ -146,6 +149,182 @@ def test_send_for_batch_manual_success_uses_open_id(monkeypatch):
     assert _FakeReviewSessionService.updated_states["session-a"]["status"] == "success"
     assert any("发送成功" in line and "receive_id_type=open_id" in line for line in logs)
     assert any("批次完成" in line for line in logs)
+
+
+def test_send_for_batch_appends_handover_summary(monkeypatch, tmp_path):
+    output_file = tmp_path / "handover.xlsx"
+    workbook = Workbook()
+    ws = workbook.active
+    ws.title = "交接班日志"
+    ws["A1"] = "EA118-E栋世纪互联 夜班"
+    ws["C3"] = "张三、李四"
+    ws["G3"] = "王五"
+    ws["B6"] = 1.43
+    ws["D6"] = 2480
+    ws["F6"] = 1734.06
+    ws["B13"] = 1272
+    ws["D13"] = 330
+    ws["A20"] = "日常工作"
+    ws["A21"] = "序号"
+    ws["B21"] = "工作内容"
+    ws["C21"] = "完成情况"
+    ws["B22"] = "值班巡检"
+    ws["B23"] = "HVDC电池均充维护"
+    ws["C23"] = "未完成"
+    ws["A25"] = "新事件处理"
+    ws["A26"] = "序号"
+    ws["B27"] = "不应出现在摘要中"
+    workbook.save(output_file)
+    workbook.close()
+
+    capacity_file = tmp_path / "capacity.xlsx"
+    workbook = Workbook()
+    ws = workbook.active
+    ws["D23"] = "1号制冷单元→预冷"
+    ws["D33"] = "2号制冷单元→预冷"
+    ws["Q23"] = "4号制冷单元→制冷"
+    ws["Q33"] = "5号制冷单元→板换"
+    ws["AC27"] = 27.3
+    ws["AC28"] = 27.9
+    workbook.save(capacity_file)
+    workbook.close()
+
+    service = _make_service(
+        monkeypatch,
+        recipients_by_building={"E楼": [{"open_id": "ou_e", "note": "E楼"}]},
+        review_links=[{"building": "E楼", "url": "http://example.com/review/E"}],
+    )
+    _FakeReviewSessionService.sessions = [
+        {
+            "session_id": "session-e",
+            "building": "E楼",
+            "duty_date": "2026-04-24",
+            "duty_shift": "night",
+            "output_file": str(output_file),
+            "capacity_output_file": str(capacity_file),
+            "review_link_delivery": {},
+        }
+    ]
+
+    monkeypatch.setattr(
+        summary_module,
+        "require_feishu_auth_settings",
+        lambda _cfg, config_path=None: {"app_id": "app-id", "app_secret": "secret"},
+    )
+
+    phone_by_name = {"张三": "111", "李四": "222", "王五": "333"}
+
+    class _FakeBitableClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def list_records(self, *, filter_formula: str, **kwargs):
+            match = None
+            for name in phone_by_name:
+                if f'"{name}"' in filter_formula:
+                    match = name
+                    break
+            phone = phone_by_name.get(match or "")
+            return [{"fields": {"联系方式": phone}}] if phone else []
+
+    monkeypatch.setattr(summary_module, "FeishuBitableClient", _FakeBitableClient)
+
+    calls = []
+
+    class _FakeClient:
+        def send_text_message(self, *, receive_id: str, receive_id_type: str, text: str):
+            calls.append({"receive_id": receive_id, "receive_id_type": receive_id_type, "text": text})
+            return {"message_id": "msg-e"}
+
+    service._build_feishu_client = lambda: _FakeClient()
+
+    result = service.send_for_batch(
+        batch_key="2026-04-24|night",
+        building="E楼",
+        source="manual",
+        emit_log=lambda _msg: None,
+    )
+
+    assert result["results"][0]["delivery"]["status"] == "success"
+    message = calls[0]["text"]
+    assert "审核链接：http://example.com/review/E" in message
+    assert "【EA118-E栋世纪互联 夜班】" in message
+    assert "【交班人员】张三、李四" in message
+    assert "【联系方式】111、222" in message
+    assert "【接班人员】王五" in message
+    assert "【联系方式】333" in message
+    assert "【值班手机】18100640527" in message
+    assert "E-144、E-120变电所" in message
+    assert "冷冻站A区3套制冷单元2用1备" in message
+    assert "1#制冷单元预冷模式运行正常" in message
+    assert "1#、2#二次泵运行正常" in message
+    assert "液位27.3m正常" in message
+    assert "值班巡检" in message
+    assert "HVDC电池均充维护，未完成" in message
+    assert "不应出现在摘要中" not in message
+    assert "E楼IT负载功率:1734.06KW" in message
+
+
+def test_summary_chiller_zone_line_uses_source_level_and_tank_values():
+    service = summary_module.HandoverSummaryMessageService({})
+    source = {
+        "building": "A楼",
+        "running_units": {"west": [{"unit": 1, "mode_text": "预冷"}, {"unit": 2, "mode_text": "预冷"}]},
+        "rows": [
+            RawRow(1, "西区", "西区一号冷机", "冷却塔液位", 0.34, 0.34),
+            RawRow(2, "西区", "西区二号冷机", "冷却塔液位", "0.36m", 0.36),
+            RawRow(3, "西区蓄冷罐", "西区蓄冷罐", "蓄冷罐温度", 17.3, 17.3),
+            RawRow(4, "西区蓄冷罐", "西区蓄冷罐", "蓄冷罐液位", 27.3, 27.3),
+        ],
+    }
+
+    line = service._build_chiller_zone_line("A", "west", source["running_units"], source, {})
+
+    assert "冷冻站A区3套制冷单元2用1备" in line
+    assert "1#制冷单元预冷模式运行正常，1#冷却塔液位0.34m正常" in line
+    assert "2#制冷单元预冷模式运行正常，2#冷却塔液位0.36m正常" in line
+    assert "1#、2#二次泵运行正常" in line
+    assert "蓄冷罐后备温度17.3℃正常、液位27.3m正常" in line
+
+
+def test_send_for_session_summary_failure_does_not_block_message(monkeypatch):
+    service = _make_service(
+        monkeypatch,
+        recipients_by_building={"A楼": [{"open_id": "ou_abc", "note": "本人"}]},
+        review_links=[{"building": "A楼", "url": "http://example.com/review/A"}],
+    )
+    calls = []
+
+    class _BrokenSummary:
+        def build_for_session(self, *_args, **_kwargs):
+            raise RuntimeError("summary broken")
+
+    class _FakeClient:
+        def send_text_message(self, *, receive_id: str, receive_id_type: str, text: str):
+            calls.append(text)
+            return {"message_id": "msg-1"}
+
+    service._summary_message_service = _BrokenSummary()
+    service._build_feishu_client = lambda: _FakeClient()
+    logs = []
+
+    result = service.send_for_session(
+        dict(_FakeReviewSessionService.sessions[0]),
+        source="manual",
+        emit_log=logs.append,
+    )
+
+    assert result["status"] == "success"
+    assert calls == [
+        (
+            "这是一条交接班审核访问链接，请在办公电脑的浏览器中打开。\n"
+            "楼栋：A楼\n"
+            "日期：2026-04-10\n"
+            "班次：夜班\n"
+            "审核链接：http://example.com/review/A"
+        )
+    ]
+    assert any("摘要" in line and "不阻断发送" in line for line in logs)
 
 
 def test_send_for_batch_old_recipients_without_enabled_still_send(monkeypatch):

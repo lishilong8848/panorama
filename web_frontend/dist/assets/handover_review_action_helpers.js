@@ -12,6 +12,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     staleRevisionConflict,
     downloading,
     capacityDownloading,
+    capacityImageSending,
     retryingCloudSync,
     updatingHistoryCloudSync,
     activeRouteSelection,
@@ -32,6 +33,8 @@ export function createHandoverReviewActionHelpers(options = {}) {
     downloadActionVm,
     capacityDownloadActionBase,
     capacityDownloadActionVm,
+    capacityImageSendActionBase,
+    capacityImageSendActionVm,
     refreshActionBase,
     refreshActionVm,
     clearSaveTimers,
@@ -49,6 +52,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     unconfirmHandoverReviewApi,
     retryHandoverReviewCloudSyncApi,
     updateHandoverReviewCloudSyncApi,
+    sendHandoverReviewCapacityImageApi,
     buildHandoverReviewDownloadUrl,
     buildHandoverReviewCapacityDownloadUrl,
     triggerBrowserDownload,
@@ -332,6 +336,79 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
   }
 
+  async function sendCurrentCapacityImage(getJobApi) {
+    if (!capacityImageSendActionBase.value.allowed) {
+      statusText.value = capacityImageSendActionVm.value.disabledReason || "";
+      return;
+    }
+    if (saving.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
+      statusText.value = "请先等待当前保存、同步或下载完成后再发送。";
+      return;
+    }
+    if (dirty.value) {
+      const saved = await saveDocument({ reason: "capacity_image_send" });
+      if (!saved) return;
+    }
+    const sessionId = String(session.value?.session_id || "").trim();
+    if (!buildingCode || !sessionId) {
+      statusText.value = capacityImageSendActionVm.value.disabledReason || "";
+      return;
+    }
+    capacityImageSending.value = true;
+    errorText.value = "";
+    statusText.value = "正在提交容量表图片发送任务...";
+    try {
+      const response = await sendHandoverReviewCapacityImageApi(buildingCode, {
+        session_id: sessionId,
+        client_id: reviewClientId,
+      });
+      const jobId = String(response?.job?.job_id || response?.job_id || "").trim();
+      if (!jobId) {
+        throw new Error("容量表图片发送任务提交失败");
+      }
+      statusText.value = "已提交容量表图片发送任务，正在处理中...";
+      void (async () => {
+        const job = await waitForBackgroundJob(jobId, getJobApi, { timeoutMs: 10 * 60 * 1000 });
+        try {
+          await loadReviewData({ background: true });
+        } catch (_error) {
+          // Ignore refresh failures; job status still drives the visible result.
+        }
+        if (!job) {
+          statusText.value = "容量表图片发送仍在处理中，请稍后刷新查看结果。";
+          capacityImageSending.value = false;
+          return;
+        }
+        if (job.status !== "success") {
+          errorText.value = String(job?.error || "容量表图片发送失败");
+          statusText.value = "容量表图片发送失败";
+          capacityImageSending.value = false;
+          return;
+        }
+        const result = job?.result && typeof job.result === "object" ? job.result : {};
+        const delivery = result?.capacity_image_delivery && typeof result.capacity_image_delivery === "object"
+          ? result.capacity_image_delivery
+          : {};
+        const deliveryStatus = String(delivery.status || result.status || "").trim().toLowerCase();
+        if (deliveryStatus === "success") {
+          statusText.value = "容量表图片发送成功";
+          errorText.value = "";
+        } else if (deliveryStatus === "partial_failed") {
+          statusText.value = "容量表图片部分发送成功";
+          errorText.value = String(delivery.error || "部分收件人发送失败");
+        } else {
+          errorText.value = String(delivery.error || result.error || "容量表图片发送失败");
+          statusText.value = "容量表图片发送失败";
+        }
+        capacityImageSending.value = false;
+      })();
+    } catch (error) {
+      errorText.value = String(error?.message || error || "容量表图片发送失败");
+      statusText.value = "容量表图片发送失败";
+      capacityImageSending.value = false;
+    }
+  }
+
   async function refreshData() {
     if (!refreshActionBase.value.allowed) {
       statusText.value = refreshActionVm.value.disabledReason || "";
@@ -366,6 +443,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     updateHistoryCloudSync,
     downloadCurrentReviewFile,
     downloadCurrentCapacityReviewFile,
+    sendCurrentCapacityImage,
     refreshData,
     saveCurrentReview,
   };

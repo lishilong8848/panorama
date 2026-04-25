@@ -12,6 +12,7 @@ import {
   releaseHandoverReviewLockApi,
   retryHandoverReviewCloudSyncApi,
   saveHandoverReviewApi,
+  sendHandoverReviewCapacityImageApi,
   updateHandoverReviewCloudSyncApi,
   unconfirmHandoverReviewApi,
 } from "./api_client.js";
@@ -706,6 +707,7 @@ function normalizeReviewDisplayState(raw = {}) {
       save: normalizeDisplayAction(actions.save, { allowed: false, visible: false, label: "保存", tone: "primary", variant: "primary" }),
       download: normalizeDisplayAction(actions.download, { allowed: false, visible: false, label: "下载交接班日志", tone: "neutral", variant: "secondary" }),
       capacity_download: normalizeDisplayAction(actions.capacity_download, { allowed: false, visible: false, label: "下载交接班容量报表", tone: "neutral", variant: "secondary" }),
+      capacity_image_send: normalizeDisplayAction(actions.capacity_image_send, { allowed: false, visible: false, label: "发送容量表图片", tone: "neutral", variant: "secondary" }),
       confirm: normalizeDisplayAction(actions.confirm, { allowed: false, visible: false, label: "确认当前楼栋", tone: "warning", variant: "warning" }),
       retry_cloud_sync: normalizeDisplayAction(actions.retry_cloud_sync, { allowed: false, visible: false, label: "重试云表上传", tone: "warning", variant: "warning" }),
       update_history_cloud_sync: normalizeDisplayAction(actions.update_history_cloud_sync, { allowed: false, visible: false, label: "更新云文档", tone: "warning", variant: "warning" }),
@@ -794,6 +796,7 @@ export function mountHandoverReviewApp(Vue) {
       const saving = ref(false);
       const downloading = ref(false);
       const capacityDownloading = ref(false);
+      const capacityImageSending = ref(false);
       const confirming = ref(false);
       const retryingCloudSync = ref(false);
       const updatingHistoryCloudSync = ref(false);
@@ -868,6 +871,7 @@ export function mountHandoverReviewApp(Vue) {
         saveActionBase,
         downloadActionBase,
         capacityDownloadActionBase,
+        capacityImageSendActionBase,
         confirmActionBase,
         retryCloudSyncActionBase,
         updateHistoryCloudSyncActionBase,
@@ -876,6 +880,7 @@ export function mountHandoverReviewApp(Vue) {
         showSaveAction,
         showDownloadAction,
         showCapacityDownloadAction,
+        showCapacityImageSendAction,
         showConfirmAction,
         showReturnToLatestAction,
         reviewSaveBadge,
@@ -885,6 +890,7 @@ export function mountHandoverReviewApp(Vue) {
         refreshActionVm,
         downloadActionVm,
         capacityDownloadActionVm,
+        capacityImageSendActionVm,
         capacityDownloadDisabled,
         reviewStatusBanners,
         confirmActionVm,
@@ -905,6 +911,7 @@ export function mountHandoverReviewApp(Vue) {
         saving,
         downloading,
         capacityDownloading,
+        capacityImageSending,
         confirming,
         retryingCloudSync,
         updatingHistoryCloudSync,
@@ -1369,7 +1376,7 @@ export function mountHandoverReviewApp(Vue) {
           errorText.value = "无效的楼栋审核页面地址";
           return;
         }
-        if (background && (saving.value || loading.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || downloading.value || capacityDownloading.value)) {
+        if (background && (saving.value || loading.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || downloading.value || capacityDownloading.value || capacityImageSending.value)) {
           return;
         }
         const resolvedMode = background ? "status" : (mode === "bootstrap" ? "bootstrap" : "full");
@@ -1575,6 +1582,7 @@ export function mountHandoverReviewApp(Vue) {
         updateHistoryCloudSync,
         downloadCurrentReviewFile,
         downloadCurrentCapacityReviewFile,
+        sendCurrentCapacityImage,
         refreshData,
         saveCurrentReview,
       } = createHandoverReviewActionHelpers({
@@ -1590,6 +1598,7 @@ export function mountHandoverReviewApp(Vue) {
         staleRevisionConflict,
         downloading,
         capacityDownloading,
+        capacityImageSending,
         retryingCloudSync,
         updatingHistoryCloudSync,
         activeRouteSelection,
@@ -1610,6 +1619,8 @@ export function mountHandoverReviewApp(Vue) {
         downloadActionVm,
         capacityDownloadActionBase,
         capacityDownloadActionVm,
+        capacityImageSendActionBase,
+        capacityImageSendActionVm,
         refreshActionBase,
         refreshActionVm,
         clearSaveTimers,
@@ -1627,6 +1638,7 @@ export function mountHandoverReviewApp(Vue) {
         unconfirmHandoverReviewApi,
         retryHandoverReviewCloudSyncApi,
         updateHandoverReviewCloudSyncApi,
+        sendHandoverReviewCapacityImageApi,
         buildHandoverReviewDownloadUrl,
         buildHandoverReviewCapacityDownloadUrl,
         triggerBrowserDownload,
@@ -1667,6 +1679,7 @@ export function mountHandoverReviewApp(Vue) {
         saving,
         downloading,
         capacityDownloading,
+        capacityImageSending,
         confirming,
         retryingCloudSync,
         updatingHistoryCloudSync,
@@ -1695,6 +1708,7 @@ export function mountHandoverReviewApp(Vue) {
         showSaveAction,
         showDownloadAction,
         showCapacityDownloadAction,
+        showCapacityImageSendAction,
         showConfirmAction,
         showRetryCloudSyncAction,
         showUpdateHistoryCloudSyncAction,
@@ -1704,6 +1718,7 @@ export function mountHandoverReviewApp(Vue) {
         saveActionVm,
         downloadActionVm,
         capacityDownloadActionVm,
+        capacityImageSendActionVm,
         retryCloudSyncActionVm,
         updateHistoryCloudSyncActionVm,
         returnToLatestActionVm,
@@ -1731,6 +1746,7 @@ export function mountHandoverReviewApp(Vue) {
         retryCloudSheetSync: () => retryCloudSheetSync(getJobApi),
         downloadCurrentReviewFile,
         downloadCurrentCapacityReviewFile,
+        sendCurrentCapacityImage: () => sendCurrentCapacityImage(getJobApi),
         refreshData,
       };
     },

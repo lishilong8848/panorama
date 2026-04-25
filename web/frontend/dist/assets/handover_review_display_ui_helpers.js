@@ -10,6 +10,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     saving,
     downloading,
     capacityDownloading,
+    capacityImageSending,
     confirming,
     retryingCloudSync,
     updatingHistoryCloudSync,
@@ -62,6 +63,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
   const saveActionBase = computed(() => reviewDisplayState.value.actions.save);
   const downloadActionBase = computed(() => reviewDisplayState.value.actions.download);
   const capacityDownloadActionBase = computed(() => reviewDisplayState.value.actions.capacity_download);
+  const capacityImageSendActionBase = computed(() => reviewDisplayState.value.actions.capacity_image_send);
   const confirmActionBase = computed(() => reviewDisplayState.value.actions.confirm);
   const retryCloudSyncActionBase = computed(() => reviewDisplayState.value.actions.retry_cloud_sync);
   const updateHistoryCloudSyncActionBase = computed(() => reviewDisplayState.value.actions.update_history_cloud_sync);
@@ -70,6 +72,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
   const showSaveAction = computed(() => Boolean(saveActionBase.value.visible));
   const showDownloadAction = computed(() => Boolean(downloadActionBase.value.visible));
   const showCapacityDownloadAction = computed(() => Boolean(capacityDownloadActionBase.value.visible));
+  const showCapacityImageSendAction = computed(() => Boolean(capacityImageSendActionBase.value.visible));
   const showConfirmAction = computed(() => Boolean(confirmActionBase.value.visible));
   const showReturnToLatestAction = computed(() => Boolean(returnToLatestActionBase.value.visible));
 
@@ -186,6 +189,24 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
         || !capacityDownloadActionBase.value.allowed,
     });
   });
+  const capacityImageSendActionVm = computed(() => {
+    return buildReviewActionVmBase({
+      baseAction: capacityImageSendActionBase.value,
+      fallbackLabel: "发送容量表图片",
+      inFlight: capacityImageSending.value,
+      inFlightText: "发送中...",
+      disabled:
+        loading.value
+        || saving.value
+        || confirming.value
+        || cloudSyncBusy.value
+        || syncingRemoteRevision.value
+        || capacityDownloading.value
+        || capacityImageSending.value
+        || capacityImageSendActionBase.value.pending
+        || !capacityImageSendActionBase.value.allowed,
+    });
+  });
   const capacityDownloadDisabled = computed(() => Boolean(capacityDownloadActionVm.value.disabled));
 
   const reviewStatusBanners = computed(() => {
@@ -208,6 +229,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       || saving.value
       || downloading.value
       || capacityDownloading.value
+      || capacityImageSending.value
       || confirming.value
       || retryingCloudSync.value
       || updatingHistoryCloudSync.value
@@ -338,6 +360,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     saveActionBase,
     downloadActionBase,
     capacityDownloadActionBase,
+    capacityImageSendActionBase,
     confirmActionBase,
     retryCloudSyncActionBase,
     updateHistoryCloudSyncActionBase,
@@ -346,6 +369,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     showSaveAction,
     showDownloadAction,
     showCapacityDownloadAction,
+    showCapacityImageSendAction,
     showConfirmAction,
     showReturnToLatestAction,
     reviewSaveBadge,
@@ -355,6 +379,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     refreshActionVm,
     downloadActionVm,
     capacityDownloadActionVm,
+    capacityImageSendActionVm,
     capacityDownloadDisabled,
     reviewStatusBanners,
     confirmActionVm,

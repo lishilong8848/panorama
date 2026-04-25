@@ -531,6 +531,13 @@ export function buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId) 
   return `/api/handover/review/${encodeURIComponent(buildingCode)}/capacity-download?session_id=${encodeURIComponent(sessionId)}`;
 }
 
+export async function sendHandoverReviewCapacityImageApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/capacity-image/send`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export async function getHandoverReviewBatchStatusApi(batchKey) {
   return apiJson(`/api/handover/review/batch/${encodeURIComponent(batchKey)}/status`);
 }

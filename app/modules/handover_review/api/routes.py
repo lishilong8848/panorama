@@ -29,6 +29,9 @@ from handover_log_module.service.handover_daily_report_screenshot_service import
     HandoverDailyReportScreenshotService,
 )
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
+from handover_log_module.service.capacity_report_image_delivery_service import (
+    CapacityReportImageDeliveryService,
+)
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateConflictError,
@@ -1697,10 +1700,12 @@ def _review_action(
     visible: bool = True,
     tone: str = "neutral",
     variant: str = "secondary",
+    pending: bool = False,
 ) -> Dict[str, Any]:
     return {
         "allowed": bool(allowed),
         "visible": bool(visible),
+        "pending": bool(pending),
         "label": str(label or "").strip() or "-",
         "disabled_reason": str(disabled_reason or "").strip(),
         "tone": str(tone or "neutral").strip() or "neutral",
@@ -2099,6 +2104,16 @@ def _build_review_display_state(
         capacity_disabled_reason = "当前没有可下载的交接班容量报表"
     elif str(capacity_state["status"]) != "ready":
         capacity_disabled_reason = capacity_state["error"] or "容量报表待补写完成后才能下载"
+    capacity_image_delivery = (
+        session_payload.get("capacity_image_delivery", {})
+        if isinstance(session_payload, dict) and isinstance(session_payload.get("capacity_image_delivery", {}), dict)
+        else {}
+    )
+    capacity_image_sending = str(capacity_image_delivery.get("status", "") or "").strip().lower() == "sending"
+    capacity_image_send_allowed = capacity_allowed and not capacity_image_sending
+    capacity_image_send_disabled_reason = capacity_disabled_reason
+    if capacity_image_sending:
+        capacity_image_send_disabled_reason = "容量表图片正在发送中，请等待发送完成"
     history_limit = max(1, int(history_payload.get("history_limit", HISTORY_CLOUD_SUCCESS_LIMIT) or HISTORY_CLOUD_SUCCESS_LIMIT))
     history_hint_rows = [f"仅显示最近 {history_limit} 条已成功上云的交接班日志。"]
     if session_payload and not bool(history_payload.get("selected_in_history_list", False)):
@@ -2258,6 +2273,15 @@ def _build_review_display_state(
                 disabled_reason=capacity_disabled_reason,
                 tone="neutral",
                 variant="secondary",
+            ),
+            "capacity_image_send": _review_action(
+                allowed=capacity_image_send_allowed,
+                visible=bool(session_payload),
+                label="发送容量表图片",
+                disabled_reason=capacity_image_send_disabled_reason,
+                tone="neutral",
+                variant="secondary",
+                pending=capacity_image_sending,
             ),
             "confirm": _review_action(
                 allowed=confirm_allowed,
@@ -3151,6 +3175,67 @@ def handover_review_capacity_download(building_code: str, request: Request, sess
         filename=output_file.name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+@router.post("/api/handover/review/{building_code}/capacity-image/send")
+def handover_review_capacity_image_send(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service, _, _, _ = _build_review_services(container)
+    building = _resolve_building_or_404(service, building_code)
+
+    payload_dict = payload if isinstance(payload, dict) else {}
+    session_id_text = str(payload_dict.get("session_id", "") or "").strip()
+    if not session_id_text:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    delivery_service = CapacityReportImageDeliveryService(
+        _handover_cfg(container),
+        config_path=getattr(container, "config_path", None),
+    )
+    try:
+        delivery_service.begin_delivery(target, building=building, source="manual")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def _run(emit_log) -> Dict[str, Any]:
+        runtime_service = CapacityReportImageDeliveryService(
+            _handover_cfg(container),
+            config_path=getattr(container, "config_path", None),
+        )
+        latest_session = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+        return runtime_service.send_for_session(
+            latest_session,
+            building=building,
+            source="manual",
+            emit_log=emit_log,
+        )
+
+    try:
+        job = _start_handover_background_job(
+            container,
+            name=f"交接班容量表图片发送 {building}",
+            run_func=_run,
+            resource_keys=_handover_resource_keys("network:external", "handover:capacity_image_delivery", building=building),
+            priority="manual",
+            feature="handover_capacity_image_delivery",
+            submitted_by="manual",
+        )
+    except Exception as exc:  # noqa: BLE001
+        try:
+            delivery_service.mark_failed(session_id=session_id_text, error=f"提交发送任务失败: {exc}", source="manual")
+        except Exception:
+            pass
+        raise
+    container.add_system_log(
+        f"[任务] 已提交: 交接班容量表图片发送 {building} session={session_id_text} ({job.job_id})"
+    )
+    return _accepted_job_response(job)
 
 
 @router.put("/api/handover/review/{building_code}")

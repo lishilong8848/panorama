@@ -105,6 +105,41 @@ def _normalize_review_link_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any
     }
 
 
+def _normalize_capacity_image_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    return {
+        "status": str(payload.get("status", "") or "").strip().lower(),
+        "last_attempt_at": str(payload.get("last_attempt_at", "") or "").strip(),
+        "last_sent_at": str(payload.get("last_sent_at", "") or "").strip(),
+        "error": str(payload.get("error", "") or "").strip(),
+        "image_path": str(payload.get("image_path", "") or "").strip(),
+        "image_key": str(payload.get("image_key", "") or "").strip(),
+        "successful_recipients": [
+            str(item or "").strip()
+            for item in (
+                payload.get("successful_recipients", [])
+                if isinstance(payload.get("successful_recipients", []), list)
+                else []
+            )
+            if str(item or "").strip()
+        ],
+        "failed_recipients": [
+            {
+                "open_id": str(item.get("open_id", "") or "").strip(),
+                "note": str(item.get("note", "") or "").strip(),
+                "error": str(item.get("error", "") or "").strip(),
+            }
+            for item in (
+                payload.get("failed_recipients", [])
+                if isinstance(payload.get("failed_recipients", []), list)
+                else []
+            )
+            if isinstance(item, dict)
+        ],
+        "source": str(payload.get("source", "") or "").strip().lower(),
+    }
+
+
 _CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13"]
 
 
@@ -720,6 +755,7 @@ class ReviewSessionService:
                 raw.get("source_data_attachment_export", {})
             ),
             "review_link_delivery": _normalize_review_link_delivery(raw.get("review_link_delivery", {})),
+            "capacity_image_delivery": _normalize_capacity_image_delivery(raw.get("capacity_image_delivery", {})),
         }
 
     def _managed_source_file_references(self, state: Dict[str, Any]) -> set[str]:
@@ -1727,6 +1763,28 @@ class ReviewSessionService:
             raise ReviewSessionNotFoundError("review session not found")
         session = self._normalize_session(raw_session)
         session["review_link_delivery"] = _normalize_review_link_delivery(review_link_delivery)
+        session["updated_at"] = _now_text()
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
+        return dict(session)
+
+    def update_capacity_image_delivery(
+        self,
+        *,
+        session_id: str,
+        capacity_image_delivery: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        target_session_id = str(session_id or "").strip()
+        if not target_session_id:
+            raise ReviewSessionNotFoundError("review session not found")
+        state = self._load_state()
+        sessions = state.get("review_sessions", {})
+        if not isinstance(sessions, dict) or target_session_id not in sessions:
+            raise ReviewSessionNotFoundError("review session not found")
+        raw_session = sessions.get(target_session_id, {})
+        if not isinstance(raw_session, dict):
+            raise ReviewSessionNotFoundError("review session not found")
+        session = self._normalize_session(raw_session)
+        session["capacity_image_delivery"] = _normalize_capacity_image_delivery(capacity_image_delivery)
         session["updated_at"] = _now_text()
         self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)

@@ -19,6 +19,7 @@ from handover_log_module.service.review_access_snapshot_service import (
     normalize_review_base_url,
 )
 from handover_log_module.service.review_session_service import ReviewSessionService
+from handover_log_module.service.handover_summary_message_service import HandoverSummaryMessageService
 
 
 def _now_text() -> str:
@@ -96,6 +97,10 @@ class ReviewLinkDeliveryService:
         self.config_path = Path(config_path) if config_path else None
         self.handover_cfg = _resolve_handover_config(self.runtime_config)
         self._review_service = ReviewSessionService(self.handover_cfg)
+        self._summary_message_service = HandoverSummaryMessageService(
+            self.handover_cfg,
+            config_path=self.config_path,
+        )
 
     def _review_cfg(self) -> Dict[str, Any]:
         review_ui = self.handover_cfg.get("review_ui", {})
@@ -498,6 +503,18 @@ class ReviewLinkDeliveryService:
             return next_state
 
         message_text = self._build_message(normalized_session, url)
+        try:
+            summary_text = self._summary_message_service.build_for_session(
+                normalized_session,
+                emit_log=emit_log,
+            )
+            if summary_text:
+                message_text = f"{message_text}\n\n{summary_text}"
+        except Exception as exc:  # noqa: BLE001
+            emit_log(
+                "[交接班][审核链接摘要] 生成失败但不阻断发送 "
+                f"building={building}, session_id={session_id}, error={exc}"
+            )
         attempt_at = _now_text()
         successful_recipients: List[str] = []
         failed_recipients: List[Dict[str, str]] = []
