@@ -223,7 +223,9 @@ class CapacityReportImageRenderer:
         if not allow_fallback:
             raise RuntimeError(
                 "Excel截图失败，未生成容量表图片；为避免发送错误格式图片，本次不使用内置渲染兜底。"
-                "请确认服务运行的 Python 已安装 pywin32，并且服务器可启动 Excel COM。"
+                "如果日志提示缺少 pythoncom/win32com，请等待启动依赖自动安装 pywin32 后重启；"
+                "如果日志提示“服务器运行失败”，说明 pywin32 已导入但 Excel COM 未能启动，"
+                "请确认当前账号可正常打开 Excel，且没有首次启动、激活或弹窗卡住。"
             )
 
         workbook = load_workbook(source_path, data_only=False)
@@ -416,7 +418,14 @@ class CapacityReportImageRenderer:
             return False
         except Exception as exc:
             if emit_log:
-                emit_log(f"[交接班][容量表图片发送] Excel截图异常: error={exc}")
+                detail = str(exc)
+                hint = ""
+                if "-2146959355" in detail or "服务器运行失败" in detail:
+                    hint = (
+                        "；pywin32已导入，但 Excel COM 启动失败，请用当前运行账号手动打开一次 Excel，"
+                        "处理首次启动/激活/弹窗后再重试"
+                    )
+                emit_log(f"[交接班][容量表图片发送] Excel截图异常: error={exc}{hint}")
             return False
         finally:
             if workbook is not None:
