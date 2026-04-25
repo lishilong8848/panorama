@@ -10,8 +10,6 @@ RUNTIME_DEPENDENCY_SPECS: List[Dict[str, str]] = [
     {"package": "starlette", "import_name": "starlette"},
     {"package": "openpyxl", "import_name": "openpyxl"},
     {"package": "Pillow", "import_name": "PIL"},
-    {"package": "pywin32", "import_name": "pythoncom"},
-    {"package": "pywin32", "import_name": "win32com"},
     {"package": "requests", "import_name": "requests"},
     {"package": "pymysql", "import_name": "pymysql"},
     {"package": "playwright", "import_name": "playwright"},

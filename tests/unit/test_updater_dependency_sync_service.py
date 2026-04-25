@@ -108,8 +108,8 @@ def test_sync_from_lock_file_falls_back_for_builtin_deps_missing_from_old_lock(m
         "_fallback_required_packages",
         lambda: [
             {"package": "fastapi", "import_name": "fastapi", "version": ""},
-            {"package": "pywin32", "import_name": "pythoncom", "version": ""},
-            {"package": "pywin32", "import_name": "win32com", "version": ""},
+            {"package": "requests", "import_name": "requests", "version": ""},
+            {"package": "pymysql", "import_name": "pymysql", "version": ""},
         ],
     )
     calls: list[tuple[list[dict], bool]] = []
@@ -126,14 +126,14 @@ def test_sync_from_lock_file_falls_back_for_builtin_deps_missing_from_old_lock(m
     assert calls[0][0] == [{"package": "fastapi", "version": "0.116.0", "import_name": "fastapi"}]
     assert calls[1][1] is False
     assert calls[1][0] == [
-        {"package": "pywin32", "import_name": "pythoncom", "version": ""},
-        {"package": "pywin32", "import_name": "win32com", "version": ""},
+        {"package": "requests", "import_name": "requests", "version": ""},
+        {"package": "pymysql", "import_name": "pymysql", "version": ""},
     ]
     assert result["checked"] == 3
     assert result["exact_versions"] is False
 
 
-def test_ensure_startup_dependencies_falls_back_for_pywin32_when_lock_is_old(monkeypatch, tmp_path: Path) -> None:
+def test_ensure_startup_dependencies_falls_back_for_builtin_deps_when_lock_is_old(monkeypatch, tmp_path: Path) -> None:
     lock_path = tmp_path / "runtime_dependency_lock.json"
     lock_path.write_text(
         (
@@ -152,8 +152,8 @@ def test_ensure_startup_dependencies_falls_back_for_pywin32_when_lock_is_old(mon
         "_fallback_required_packages",
         lambda: [
             {"package": "fastapi", "import_name": "fastapi", "version": ""},
-            {"package": "pywin32", "import_name": "pythoncom", "version": ""},
-            {"package": "pywin32", "import_name": "win32com", "version": ""},
+            {"package": "requests", "import_name": "requests", "version": ""},
+            {"package": "pymysql", "import_name": "pymysql", "version": ""},
         ],
     )
     calls: list[tuple[list[dict], bool]] = []
@@ -169,8 +169,8 @@ def test_ensure_startup_dependencies_falls_back_for_pywin32_when_lock_is_old(mon
     assert calls[0][1] is True
     assert calls[1] == (
         [
-            {"package": "pywin32", "import_name": "pythoncom", "version": ""},
-            {"package": "pywin32", "import_name": "win32com", "version": ""},
+            {"package": "requests", "import_name": "requests", "version": ""},
+            {"package": "pymysql", "import_name": "pymysql", "version": ""},
         ],
         False,
     )

@@ -11,7 +11,6 @@ def test_runtime_dependency_spec_entries_are_complete() -> None:
 
     assert specs
     assert {"package": "fastapi", "import_name": "fastapi"} in specs
-    assert {"package": "pywin32", "import_name": "pythoncom"} in specs
     assert {"package": "python-multipart", "import_name": "multipart"} in specs
 
 
