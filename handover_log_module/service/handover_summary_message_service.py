@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Tuple
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
@@ -37,6 +39,8 @@ TOWER_LEVEL_ALIASES = ["冷却塔液位", "冷塔液位", "冷却塔水位", "�
 TANK_TEMP_ALIASES = ["蓄冷罐温度", "蓄水罐温度", "补水罐温度", "蓄冷罐后备温度"]
 TANK_LEVEL_ALIASES = ["水池液位", "蓄水罐液位", "补水罐液位", "蓄冷罐液位"]
 DEFAULT_EVENT_SECTION_NAMES = {"新事件处理", "历史事件跟进"}
+CONTACT_CACHE_SUCCESS_TTL_SEC = 24 * 60 * 60
+CONTACT_CACHE_FAILURE_TTL_SEC = 10 * 60
 
 
 def _text(value: Any) -> str:
@@ -143,6 +147,9 @@ def _cell(ws: Any, cell_name: str) -> str:
 
 
 class HandoverSummaryMessageService:
+    _contact_cache_lock = threading.Lock()
+    _contact_cache_by_name: Dict[str, Tuple[str, float]] = {}
+
     def __init__(self, handover_cfg: Dict[str, Any], *, config_path: str | Path | None = None) -> None:
         self.handover_cfg = handover_cfg if isinstance(handover_cfg, dict) else {}
         self.config_path = Path(config_path) if config_path else None
@@ -521,9 +528,43 @@ class HandoverSummaryMessageService:
             dimension_mapping={},
         )
 
+    @classmethod
+    def _get_contact_cache(cls, name: str) -> Tuple[bool, str]:
+        key = _text(name)
+        if not key:
+            return True, ""
+        now = time.time()
+        with cls._contact_cache_lock:
+            cached = cls._contact_cache_by_name.get(key)
+            if cached is None:
+                return False, ""
+            phone, expires_at = cached
+            if expires_at > now:
+                return True, phone
+            cls._contact_cache_by_name.pop(key, None)
+        return False, ""
+
+    @classmethod
+    def _set_contact_cache(cls, name: str, phone: str) -> None:
+        key = _text(name)
+        if not key:
+            return
+        ttl = CONTACT_CACHE_SUCCESS_TTL_SEC if _text(phone) else CONTACT_CACHE_FAILURE_TTL_SEC
+        with cls._contact_cache_lock:
+            cls._contact_cache_by_name[key] = (_text(phone), time.time() + ttl)
+
     def _lookup_contact_phones(self, names: List[str], *, emit_log: Callable[[str], None]) -> Dict[str, str]:
         output: Dict[str, str] = {}
-        missing_names = [name for name in names if name and name not in self._contact_cache]
+        missing_names: List[str] = []
+        for name in names:
+            if not name:
+                continue
+            cached, phone = self._get_contact_cache(name)
+            if cached:
+                output[name] = phone
+                continue
+            if name not in missing_names:
+                missing_names.append(name)
         client: FeishuBitableClient | None = None
         for name in missing_names:
             try:
@@ -544,14 +585,18 @@ class HandoverSummaryMessageService:
                     phone = _field_text(fields.get(CONTACT_PHONE_FIELD))
                     if phone:
                         break
-                self._contact_cache[name] = phone
+                self._set_contact_cache(name, phone)
+                output[name] = phone
                 if not phone:
                     emit_log(f"[交接班][审核链接摘要] 未找到联系方式 name={name}")
             except Exception as exc:  # noqa: BLE001
-                self._contact_cache[name] = ""
+                self._set_contact_cache(name, "")
+                output[name] = ""
                 emit_log(f"[交接班][审核链接摘要] 联系方式查询失败 name={name}, error={exc}")
         for name in names:
-            output[name] = self._contact_cache.get(name, "")
+            if name not in output:
+                cached, phone = self._get_contact_cache(name)
+                output[name] = phone if cached else ""
         return output
 
     @staticmethod

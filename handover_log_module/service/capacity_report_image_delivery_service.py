@@ -25,6 +25,8 @@ from handover_log_module.service.review_session_service import ReviewSessionServ
 _CAPACITY_IMAGE_DELIVERY_LOCK = threading.RLock()
 _CAPACITY_IMAGE_EXCEL_COPY_LOCK = threading.RLock()
 _CAPACITY_IMAGE_DELIVERY_RUNNING_STATUSES = {"sending"}
+_CAPACITY_IMAGE_EXCEL_LOCK_TIMEOUT_SEC = 120.0
+_CAPACITY_IMAGE_LOCK_TIMEOUT_ERROR = "容量图片截图繁忙，请稍后重试"
 
 
 def _now_text() -> str:
@@ -72,11 +74,18 @@ class CapacityReportImageRenderer:
         duty_date: str,
         duty_shift: str,
         session_id: str,
+        cache_signature: str = "",
     ) -> Path:
         stat = source_path.stat()
-        source_sig = hashlib.sha1(
-            f"v6|{source_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8", errors="ignore")
-        ).hexdigest()[:12]
+        signature_text = str(cache_signature or "").strip()
+        if signature_text:
+            source_sig = hashlib.sha1(
+                f"v7|{signature_text}".encode("utf-8", errors="ignore")
+            ).hexdigest()[:16]
+        else:
+            source_sig = hashlib.sha1(
+                f"v6|{source_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8", errors="ignore")
+            ).hexdigest()[:12]
         session_sig = hashlib.sha1(str(session_id or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
         batch_dir = self._runtime_root() / "handover" / "capacity_report_images" / _safe_name(f"{duty_date}--{duty_shift}")
         return batch_dir / f"{_safe_name(building)}_{session_sig}_{source_sig}.png"
@@ -91,54 +100,113 @@ class CapacityReportImageRenderer:
         session_id: str,
         force_refresh: bool = False,
         allow_fallback: bool = True,
+        cache_signature: str = "",
+        render_metadata: Dict[str, Any] | None = None,
         emit_log: Callable[[str], None] | None = None,
     ) -> Path:
         source_path = Path(str(source_file or "").strip())
         if not source_path.exists() or not source_path.is_file():
             raise FileNotFoundError(f"交接班容量报表文件不存在: {source_path}")
+        metadata = render_metadata if isinstance(render_metadata, dict) else None
+        if metadata is not None:
+            metadata.update(
+                {
+                    "cache_hit": False,
+                    "cache_signature": str(cache_signature or "").strip(),
+                    "generated_at": "",
+                    "image_size": 0,
+                }
+            )
         output_path = self._cache_path(
             source_path=source_path,
             building=building,
             duty_date=duty_date,
             duty_shift=duty_shift,
             session_id=session_id,
+            cache_signature=cache_signature,
         )
+        if metadata is not None:
+            metadata["image_path"] = str(output_path)
         if force_refresh:
             attempt_sig = datetime.now().strftime("%Y%m%d%H%M%S%f")
             output_path = output_path.with_name(f"{output_path.stem}_{attempt_sig}{output_path.suffix}")
+            if metadata is not None:
+                metadata["image_path"] = str(output_path)
         if output_path.exists() and output_path.is_file():
             if not force_refresh:
-                if emit_log:
-                    emit_log(
-                        "[交接班][容量表图片发送] 命中容量表图片缓存 "
-                        f"building={building}, session_id={session_id}, image={output_path}"
-                    )
-                return output_path
+                try:
+                    validate_image_file(output_path)
+                except Exception as exc:
+                    if emit_log:
+                        emit_log(
+                            "[交接班][容量表图片发送] 容量表图片缓存校验失败，准备重新截图 "
+                            f"building={building}, session_id={session_id}, image={output_path}, error={exc}"
+                        )
+                    try:
+                        output_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                else:
+                    if metadata is not None:
+                        metadata.update(
+                            {
+                                "cache_hit": True,
+                                "image_path": str(output_path),
+                                "image_size": output_path.stat().st_size,
+                            }
+                        )
+                    if emit_log:
+                        emit_log(
+                            "[交接班][容量表图片发送] 命中容量表图片缓存 "
+                            f"building={building}, session_id={session_id}, image={output_path}, "
+                            f"size={output_path.stat().st_size}, cache_signature={str(cache_signature or '').strip() or '-'}"
+                        )
+                    return output_path
+            else:
+                try:
+                    output_path.unlink()
+                    if emit_log:
+                        emit_log(
+                            "[交接班][容量表图片发送] 已清理旧容量表图片缓存，准备重新截图 "
+                            f"building={building}, session_id={session_id}, image={output_path}"
+                        )
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:
+                    if emit_log:
+                        emit_log(
+                            "[交接班][容量表图片发送] 旧容量表图片缓存清理失败，将覆盖写入 "
+                            f"building={building}, session_id={session_id}, image={output_path}, error={exc}"
+                        )
+        if output_path.exists() and output_path.is_file() and force_refresh:
             try:
                 output_path.unlink()
-                if emit_log:
-                    emit_log(
-                        "[交接班][容量表图片发送] 已清理旧容量表图片缓存，准备重新截图 "
-                        f"building={building}, session_id={session_id}, image={output_path}"
-                    )
             except FileNotFoundError:
                 pass
-            except Exception as exc:
-                if emit_log:
-                    emit_log(
-                        "[交接班][容量表图片发送] 旧容量表图片缓存清理失败，将覆盖写入 "
-                        f"building={building}, session_id={session_id}, image={output_path}, error={exc}"
-                    )
+        if output_path.exists() and output_path.is_file():
+            # Cache file was invalid and could not be removed; continue and overwrite.
+            pass
         if emit_log:
             emit_log(
                 "[交接班][容量表图片发送] 开始生成容量表图片 "
-                f"building={building}, session_id={session_id}, source={source_path}, target={output_path}"
+                f"building={building}, session_id={session_id}, source={source_path}, target={output_path}, "
+                f"cache_signature={str(cache_signature or '').strip() or '-'}"
             )
         if self._render_with_excel_copy_picture(source_path=source_path, output_path=output_path, emit_log=emit_log):
+            if metadata is not None:
+                metadata.update(
+                    {
+                        "cache_hit": False,
+                        "image_path": str(output_path),
+                        "generated_at": _now_text(),
+                        "image_size": output_path.stat().st_size if output_path.exists() else 0,
+                    }
+                )
             if emit_log:
                 emit_log(
                     "[交接班][容量表图片发送] Excel截图生成成功 "
-                    f"building={building}, session_id={session_id}, image={output_path}"
+                    f"building={building}, session_id={session_id}, image={output_path}, "
+                    f"size={output_path.stat().st_size if output_path.exists() else 0}"
                 )
             return output_path
         if emit_log:
@@ -153,7 +221,10 @@ class CapacityReportImageRenderer:
                     f"building={building}, session_id={session_id}, source={source_path}"
                 )
         if not allow_fallback:
-            raise RuntimeError("Excel截图失败，未生成容量表图片；为避免发送错误格式图片，本次不使用内置渲染兜底")
+            raise RuntimeError(
+                "Excel截图失败，未生成容量表图片；为避免发送错误格式图片，本次不使用内置渲染兜底。"
+                "请确认服务运行的 Python 已安装 pywin32，并且服务器可启动 Excel COM。"
+            )
 
         workbook = load_workbook(source_path, data_only=False)
         try:
@@ -168,6 +239,15 @@ class CapacityReportImageRenderer:
                     "[交接班][容量表图片发送] 内置渲染生成成功 "
                     f"building={building}, session_id={session_id}, image={output_path}"
                 )
+            if metadata is not None:
+                metadata.update(
+                    {
+                        "cache_hit": False,
+                        "image_path": str(output_path),
+                        "generated_at": _now_text(),
+                        "image_size": output_path.stat().st_size if output_path.exists() else 0,
+                    }
+                )
             return output_path
         finally:
             workbook.close()
@@ -181,8 +261,30 @@ class CapacityReportImageRenderer:
     ) -> bool:
         # Excel CopyPicture and the clipboard are process-global resources; serialize
         # this path so concurrent review-page sends cannot steal each other's image.
-        with _CAPACITY_IMAGE_EXCEL_COPY_LOCK:
+        wait_started = time.perf_counter()
+        if emit_log:
+            emit_log(
+                "[交接班][容量表图片发送] 等待Excel截图锁 "
+                f"source={source_path}, timeout_sec={_CAPACITY_IMAGE_EXCEL_LOCK_TIMEOUT_SEC:g}"
+            )
+        acquired = _CAPACITY_IMAGE_EXCEL_COPY_LOCK.acquire(timeout=_CAPACITY_IMAGE_EXCEL_LOCK_TIMEOUT_SEC)
+        wait_ms = int((time.perf_counter() - wait_started) * 1000)
+        if not acquired:
+            if emit_log:
+                emit_log(
+                    "[交接班][容量表图片发送] Excel截图锁等待超时 "
+                    f"source={source_path}, wait_ms={wait_ms}"
+                )
+            raise TimeoutError(_CAPACITY_IMAGE_LOCK_TIMEOUT_ERROR)
+        try:
+            if emit_log:
+                emit_log(
+                    "[交接班][容量表图片发送] 已获取Excel截图锁 "
+                    f"source={source_path}, wait_ms={wait_ms}"
+                )
             return self._render_with_excel_copy_picture_locked(source_path=source_path, output_path=output_path, emit_log=emit_log)
+        finally:
+            _CAPACITY_IMAGE_EXCEL_COPY_LOCK.release()
 
     def _render_with_excel_copy_picture_locked(
         self,
@@ -305,6 +407,13 @@ class CapacityReportImageRenderer:
                     f"image={output_path}, size={output_path.stat().st_size if output_path.exists() else 0}"
                 )
             return True
+        except ModuleNotFoundError as exc:
+            if emit_log:
+                emit_log(
+                    "[交接班][容量表图片发送] Excel截图依赖缺失 "
+                    f"missing={exc.name or '-'}, error={exc}; 请在服务运行的Python环境安装 pywin32"
+                )
+            return False
         except Exception as exc:
             if emit_log:
                 emit_log(f"[交接班][容量表图片发送] Excel截图异常: error={exc}")
@@ -771,6 +880,10 @@ class CapacityReportImageDeliveryService:
         self._link_service = ReviewLinkDeliveryService(self.handover_cfg, config_path=self.config_path)
         self._renderer = CapacityReportImageRenderer(self.handover_cfg)
 
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        return int((time.perf_counter() - started_at) * 1000)
+
     def validate_preflight(self, session: Dict[str, Any], *, building: str) -> None:
         self._validate_session(session, building=building)
         self._validate_not_running(session)
@@ -797,6 +910,33 @@ class CapacityReportImageDeliveryService:
         if not message_text:
             raise ValueError("审核文本为空，无法发送")
         return message_text, url
+
+    @staticmethod
+    def _capacity_image_cache_signature(
+        session: Dict[str, Any],
+        *,
+        source_file: str,
+    ) -> Tuple[str, bool, str]:
+        source_path = Path(str(source_file or "").strip())
+        try:
+            stat = source_path.stat()
+            resolved = str(source_path.resolve())
+        except Exception as exc:  # noqa: BLE001
+            return "", False, f"file_stat_failed:{exc}"
+        capacity_sync = session.get("capacity_sync", {}) if isinstance(session.get("capacity_sync", {}), dict) else {}
+        parts = {
+            "source_path": resolved,
+            "source_size": str(stat.st_size),
+            "source_mtime_ns": str(stat.st_mtime_ns),
+            "session_id": str(session.get("session_id", "") or "").strip(),
+            "capacity_input_signature": str(capacity_sync.get("input_signature", "") or "").strip(),
+            "capacity_sync_updated_at": str(capacity_sync.get("updated_at", "") or "").strip(),
+        }
+        missing = [key for key, value in parts.items() if not value]
+        if missing:
+            return "", False, "missing:" + ",".join(missing)
+        raw = "|".join(f"{key}={parts[key]}" for key in sorted(parts))
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest(), True, ""
 
     def _save_review_link_delivery(
         self,
@@ -867,6 +1007,9 @@ class CapacityReportImageDeliveryService:
                 "error": "",
                 "image_path": "",
                 "image_key": "",
+                "image_signature": "",
+                "cache_hit": False,
+                "generated_at": "",
                 "successful_recipients": [],
                 "failed_recipients": [],
                 "source": str(source or "manual").strip().lower() or "manual",
@@ -885,6 +1028,9 @@ class CapacityReportImageDeliveryService:
             "error": str(error or "容量表图片发送失败").strip() or "容量表图片发送失败",
             "image_path": "",
             "image_key": "",
+            "image_signature": "",
+            "cache_hit": False,
+            "generated_at": "",
             "successful_recipients": [],
             "failed_recipients": [],
             "source": str(source or "manual").strip().lower() or "manual",
@@ -906,7 +1052,9 @@ class CapacityReportImageDeliveryService:
         normalized_session = dict(session) if isinstance(session, dict) else {}
         building_text = str(building or normalized_session.get("building", "") or "").strip()
         session_id = str(normalized_session.get("session_id", "") or "").strip()
+        total_started = time.perf_counter()
         self._validate_session(normalized_session, building=building_text)
+        recipient_started = time.perf_counter()
         recipient_snapshot = self._link_service._recipient_snapshot_for_building(building_text)
         recipients = list(recipient_snapshot.get("recipients", []))
         if not recipients:
@@ -925,6 +1073,11 @@ class CapacityReportImageDeliveryService:
             f"disabled_open_ids={recipient_snapshot.get('disabled_open_ids', [])}, "
             f"invalid_recipients={recipient_snapshot.get('invalid_recipients', [])}"
         )
+        emit_log(
+            "[交接班][容量表图片发送] 阶段耗时 "
+            f"stage=recipient_snapshot, building={building_text}, session_id={session_id}, "
+            f"elapsed_ms={self._elapsed_ms(recipient_started)}"
+        )
         self._review_service.update_capacity_image_delivery(
             session_id=session_id,
             capacity_image_delivery={
@@ -934,6 +1087,9 @@ class CapacityReportImageDeliveryService:
                 "error": "",
                 "image_path": "",
                 "image_key": "",
+                "image_signature": "",
+                "cache_hit": False,
+                "generated_at": "",
                 "successful_recipients": [],
                 "failed_recipients": [],
                 "source": str(source or "manual").strip().lower() or "manual",
@@ -941,10 +1097,15 @@ class CapacityReportImageDeliveryService:
         )
         image_path: Path | None = None
         image_key = ""
+        image_signature = ""
+        image_cache_hit = False
+        image_generated_at = ""
+        render_metadata: Dict[str, Any] = {}
         review_url = ""
         successful_recipients: List[str] = []
         failed_recipients: List[Dict[str, str]] = []
         try:
+            text_started = time.perf_counter()
             message_text, review_url = self._build_review_text_message(
                 normalized_session,
                 building=building_text,
@@ -958,22 +1119,53 @@ class CapacityReportImageDeliveryService:
                 "[交接班][容量表图片发送] 本次将发送审核文本内容如下:\n"
                 f"{message_text}"
             )
+            emit_log(
+                "[交接班][容量表图片发送] 阶段耗时 "
+                f"stage=build_review_text, building={building_text}, session_id={session_id}, "
+                f"elapsed_ms={self._elapsed_ms(text_started)}"
+            )
+            image_signature, image_cache_reusable, image_signature_reason = self._capacity_image_cache_signature(
+                normalized_session,
+                source_file=str(normalized_session.get("capacity_output_file", "") or "").strip(),
+            )
+            if image_cache_reusable:
+                emit_log(
+                    "[交接班][容量表图片发送] 容量表图片缓存签名已生成 "
+                    f"building={building_text}, session_id={session_id}, image_signature={image_signature}"
+                )
+            else:
+                emit_log(
+                    "[交接班][容量表图片发送] 容量表图片缓存不可复用，强制重新截图 "
+                    f"building={building_text}, session_id={session_id}, reason={image_signature_reason or '-'}"
+                )
+            render_started = time.perf_counter()
             image_path = self._renderer.render_to_image(
                 source_file=str(normalized_session.get("capacity_output_file", "") or "").strip(),
                 building=building_text,
                 duty_date=str(normalized_session.get("duty_date", "") or "").strip(),
                 duty_shift=str(normalized_session.get("duty_shift", "") or "").strip(),
                 session_id=session_id,
-                force_refresh=True,
+                force_refresh=not image_cache_reusable,
                 allow_fallback=False,
+                cache_signature=image_signature if image_cache_reusable else "",
+                render_metadata=render_metadata,
                 emit_log=emit_log,
             )
+            image_cache_hit = bool(render_metadata.get("cache_hit", False))
+            image_generated_at = str(render_metadata.get("generated_at", "") or "").strip()
             emit_log(
                 "[交接班][容量表图片发送] 图片已生成 "
-                f"building={building_text}, session_id={session_id}, image={image_path}"
+                f"building={building_text}, session_id={session_id}, image={image_path}, "
+                f"cache_hit={image_cache_hit}, size={int(render_metadata.get('image_size', 0) or 0)}"
+            )
+            emit_log(
+                "[交接班][容量表图片发送] 阶段耗时 "
+                f"stage=render_capacity_image, building={building_text}, session_id={session_id}, "
+                f"elapsed_ms={self._elapsed_ms(render_started)}, cache_hit={image_cache_hit}"
             )
 
             client = self._link_service._build_feishu_client()
+            upload_started = time.perf_counter()
             emit_log(
                 "[交接班][容量表图片发送] 开始上传飞书图片 "
                 f"building={building_text}, session_id={session_id}, image={image_path}"
@@ -986,12 +1178,18 @@ class CapacityReportImageDeliveryService:
                 "[交接班][容量表图片发送] 飞书图片上传成功 "
                 f"building={building_text}, session_id={session_id}, image_key={image_key}"
             )
+            emit_log(
+                "[交接班][容量表图片发送] 阶段耗时 "
+                f"stage=upload_image, building={building_text}, session_id={session_id}, "
+                f"elapsed_ms={self._elapsed_ms(upload_started)}"
+            )
             for recipient in recipients:
                 open_id = str(recipient.get("open_id", "") or "").strip()
                 note = str(recipient.get("note", "") or "").strip()
                 receive_id_type = self._link_service._resolve_effective_receive_id_type(open_id, "open_id")
                 text_sent = False
                 try:
+                    recipient_started = time.perf_counter()
                     emit_log(
                         "[交接班][容量表图片发送] 准备发送审核文本 "
                         f"building={building_text}, session_id={session_id}, open_id={open_id}, "
@@ -1008,6 +1206,12 @@ class CapacityReportImageDeliveryService:
                         f"building={building_text}, session_id={session_id}, open_id={open_id}, note={note or '-'}"
                     )
                     emit_log(
+                        "[交接班][容量表图片发送] 阶段耗时 "
+                        f"stage=send_text, building={building_text}, session_id={session_id}, "
+                        f"open_id={open_id}, elapsed_ms={self._elapsed_ms(recipient_started)}"
+                    )
+                    image_send_started = time.perf_counter()
+                    emit_log(
                         "[交接班][容量表图片发送] 准备发送容量图片 "
                         f"building={building_text}, session_id={session_id}, open_id={open_id}, "
                         f"receive_id_type={receive_id_type}, note={note or '-'}"
@@ -1021,6 +1225,11 @@ class CapacityReportImageDeliveryService:
                     emit_log(
                         "[交接班][容量表图片发送] 容量图片发送成功 "
                         f"building={building_text}, session_id={session_id}, open_id={open_id}, note={note or '-'}"
+                    )
+                    emit_log(
+                        "[交接班][容量表图片发送] 阶段耗时 "
+                        f"stage=send_image, building={building_text}, session_id={session_id}, "
+                        f"open_id={open_id}, elapsed_ms={self._elapsed_ms(image_send_started)}"
                     )
                 except Exception as exc:  # noqa: BLE001
                     step = "image" if text_sent else "text"
@@ -1045,6 +1254,9 @@ class CapacityReportImageDeliveryService:
                 "error": str(exc),
                 "image_path": str(image_path or ""),
                 "image_key": image_key,
+                "image_signature": image_signature,
+                "cache_hit": image_cache_hit,
+                "generated_at": image_generated_at,
                 "successful_recipients": successful_recipients,
                 "failed_recipients": failed_recipients,
                 "source": str(source or "manual").strip().lower() or "manual",
@@ -1062,7 +1274,7 @@ class CapacityReportImageDeliveryService:
             emit_log(
                 "[交接班][容量表图片发送] 失败 "
                 f"building={building_text}, session_id={session_id}, error={exc}, "
-                f"failed_recipients={failed_recipients}"
+                f"failed_recipients={failed_recipients}, elapsed_ms={self._elapsed_ms(total_started)}"
             )
             review_delivery = {
                 "status": "failed",
@@ -1115,6 +1327,9 @@ class CapacityReportImageDeliveryService:
             "error": error,
             "image_path": str(image_path or ""),
             "image_key": image_key,
+            "image_signature": image_signature,
+            "cache_hit": image_cache_hit,
+            "generated_at": image_generated_at,
             "successful_recipients": successful_recipients,
             "failed_recipients": failed_recipients,
             "source": str(source or "manual").strip().lower() or "manual",
@@ -1150,7 +1365,7 @@ class CapacityReportImageDeliveryService:
             "[交接班][容量表图片发送] 完成 "
             f"building={building_text}, session_id={session_id}, status={status}, "
             f"successful={len(successful_recipients)}, failed={len(failed_recipients)}, "
-            f"failed_recipients={failed_recipients}"
+            f"failed_recipients={failed_recipients}, elapsed_ms={self._elapsed_ms(total_started)}"
         )
         return {
             "ok": status == "success",

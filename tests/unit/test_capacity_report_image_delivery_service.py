@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
+import os
 from pathlib import Path
 
 import pytest
@@ -258,6 +259,304 @@ def test_capacity_image_delivery_uploads_once_and_sends_to_all_recipients(tmp_pa
     assert any("本次将发送审核文本内容如下" in line and "摘要" in line for line in logs)
     assert any("准备发送审核文本" in line and "open_id=ou_1" in line for line in logs)
     assert any("容量图片发送成功" in line and "open_id=ou_2" in line for line in logs)
+
+
+def test_capacity_image_delivery_reuses_image_when_capacity_signature_unchanged(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "capacity.xlsx"
+    _write_capacity_workbook(source)
+    excel_calls = []
+    uploaded = []
+
+    def _fake_copy(self, *, source_path: Path, output_path: Path, emit_log=None) -> bool:
+        excel_calls.append(str(source_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (240, 120), "white").save(output_path, format="PNG")
+        return True
+
+    monkeypatch.setattr(module.CapacityReportImageRenderer, "_render_with_excel_copy_picture", _fake_copy)
+
+    class _FakeClient:
+        def upload_image(self, image_path: str):
+            uploaded.append(image_path)
+            return {"image_key": "img-key"}
+
+        def send_text_message(self, *, receive_id: str, receive_id_type: str, text: str):
+            return {"message_id": f"text-{receive_id}"}
+
+        def send_image_message(self, *, receive_id: str, receive_id_type: str, image_key: str):
+            return {"message_id": f"image-{receive_id}"}
+
+    class _FakeLinkService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def _recipients_for_building(self, _building):
+            return [{"open_id": "ou_1", "note": "甲"}]
+
+        @staticmethod
+        def _recipient_snapshot_for_building(_building):
+            return {
+                "recipients": [{"open_id": "ou_1", "note": "甲"}],
+                "raw_count": 1,
+                "enabled_count": 1,
+                "disabled_count": 0,
+                "invalid_count": 0,
+                "open_ids": ["ou_1"],
+            }
+
+        @staticmethod
+        def _review_url_for_building(_snapshot, _building):
+            return "http://example.com/review/a"
+
+        @staticmethod
+        def _manual_test_review_url_for_building(_snapshot, _building):
+            return "http://example.com/review/a"
+
+        @staticmethod
+        def _resolve_effective_receive_id_type(_recipient_id, _configured_receive_id_type="open_id"):
+            return "open_id"
+
+        class _summary_message_service:
+            @staticmethod
+            def build_for_session(_session, emit_log):
+                return "交接班日志全文"
+
+        def _build_feishu_client(self):
+            return _FakeClient()
+
+    class _FakeReviewSessionService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def update_capacity_image_delivery(self, *, session_id: str, capacity_image_delivery):
+            return {"session_id": session_id, "capacity_image_delivery": dict(capacity_image_delivery)}
+
+        def update_review_link_delivery(self, *, session_id: str, review_link_delivery):
+            return {"session_id": session_id, "review_link_delivery": dict(review_link_delivery)}
+
+    monkeypatch.setattr(module, "ReviewLinkDeliveryService", _FakeLinkService)
+    monkeypatch.setattr(module, "ReviewSessionService", _FakeReviewSessionService)
+    service = module.CapacityReportImageDeliveryService(
+        {"_global_paths": {"runtime_state_root": str(tmp_path / "runtime")}, "capacity_report": {"template": {"sheet_name": "本班组"}}}
+    )
+    session = {
+        "session_id": "session-a",
+        "building": "A楼",
+        "duty_date": "2026-04-24",
+        "duty_shift": "day",
+        "revision": 1,
+        "capacity_output_file": str(source),
+        "capacity_sync": {"status": "ready", "input_signature": "cap-v1", "updated_at": "2026-04-24 08:00:00"},
+    }
+
+    first = service.send_for_session(session, building="A楼", emit_log=lambda _line: None)
+    second = service.send_for_session({**session, "revision": 2}, building="A楼", emit_log=lambda _line: None)
+
+    assert first["status"] == "success"
+    assert second["status"] == "success"
+    assert len(uploaded) == 2
+    assert excel_calls == [str(source)]
+    assert first["capacity_image_delivery"]["cache_hit"] is False
+    assert second["capacity_image_delivery"]["cache_hit"] is True
+    assert first["capacity_image_delivery"]["image_signature"] == second["capacity_image_delivery"]["image_signature"]
+
+
+def test_capacity_image_delivery_rerenders_when_capacity_signature_or_file_changes(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "capacity.xlsx"
+    _write_capacity_workbook(source)
+    excel_calls = []
+
+    def _fake_copy(self, *, source_path: Path, output_path: Path, emit_log=None) -> bool:
+        excel_calls.append(str(source_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (240, 120), "white").save(output_path, format="PNG")
+        return True
+
+    monkeypatch.setattr(module.CapacityReportImageRenderer, "_render_with_excel_copy_picture", _fake_copy)
+
+    class _FakeClient:
+        def upload_image(self, _image_path: str):
+            return {"image_key": "img-key"}
+
+        def send_text_message(self, *, receive_id: str, receive_id_type: str, text: str):
+            return {"message_id": f"text-{receive_id}"}
+
+        def send_image_message(self, *, receive_id: str, receive_id_type: str, image_key: str):
+            return {"message_id": f"image-{receive_id}"}
+
+    class _FakeLinkService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def _recipients_for_building(self, _building):
+            return [{"open_id": "ou_1"}]
+
+        @staticmethod
+        def _recipient_snapshot_for_building(_building):
+            return {
+                "recipients": [{"open_id": "ou_1", "note": ""}],
+                "raw_count": 1,
+                "enabled_count": 1,
+                "disabled_count": 0,
+                "invalid_count": 0,
+                "open_ids": ["ou_1"],
+            }
+
+        @staticmethod
+        def _review_url_for_building(_snapshot, _building):
+            return "http://example.com/review/a"
+
+        @staticmethod
+        def _manual_test_review_url_for_building(_snapshot, _building):
+            return "http://example.com/review/a"
+
+        @staticmethod
+        def _resolve_effective_receive_id_type(_recipient_id, _configured_receive_id_type="open_id"):
+            return "open_id"
+
+        class _summary_message_service:
+            @staticmethod
+            def build_for_session(_session, emit_log):
+                return "交接班日志全文"
+
+        def _build_feishu_client(self):
+            return _FakeClient()
+
+    class _FakeReviewSessionService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def update_capacity_image_delivery(self, *, session_id: str, capacity_image_delivery):
+            return {"session_id": session_id, "capacity_image_delivery": dict(capacity_image_delivery)}
+
+        def update_review_link_delivery(self, *, session_id: str, review_link_delivery):
+            return {"session_id": session_id, "review_link_delivery": dict(review_link_delivery)}
+
+    monkeypatch.setattr(module, "ReviewLinkDeliveryService", _FakeLinkService)
+    monkeypatch.setattr(module, "ReviewSessionService", _FakeReviewSessionService)
+    service = module.CapacityReportImageDeliveryService(
+        {"_global_paths": {"runtime_state_root": str(tmp_path / "runtime")}, "capacity_report": {"template": {"sheet_name": "本班组"}}}
+    )
+    base_session = {
+        "session_id": "session-a",
+        "building": "A楼",
+        "duty_date": "2026-04-24",
+        "duty_shift": "day",
+        "capacity_output_file": str(source),
+        "capacity_sync": {"status": "ready", "input_signature": "cap-v1", "updated_at": "2026-04-24 08:00:00"},
+    }
+
+    first = service.send_for_session(base_session, building="A楼", emit_log=lambda _line: None)
+    changed_capacity = service.send_for_session(
+        {
+            **base_session,
+            "capacity_sync": {"status": "ready", "input_signature": "cap-v2", "updated_at": "2026-04-24 08:05:00"},
+        },
+        building="A楼",
+        emit_log=lambda _line: None,
+    )
+    next_mtime = source.stat().st_mtime + 10
+    os.utime(source, (next_mtime, next_mtime))
+    changed_file = service.send_for_session(
+        {
+            **base_session,
+            "capacity_sync": {"status": "ready", "input_signature": "cap-v1", "updated_at": "2026-04-24 08:00:00"},
+        },
+        building="A楼",
+        emit_log=lambda _line: None,
+    )
+    missing_signature = service.send_for_session(
+        {**base_session, "capacity_sync": {"status": "ready"}},
+        building="A楼",
+        emit_log=lambda _line: None,
+    )
+
+    assert first["capacity_image_delivery"]["cache_hit"] is False
+    assert changed_capacity["capacity_image_delivery"]["cache_hit"] is False
+    assert changed_file["capacity_image_delivery"]["cache_hit"] is False
+    assert missing_signature["capacity_image_delivery"]["cache_hit"] is False
+    assert len(excel_calls) == 4
+
+
+def test_capacity_image_delivery_lock_timeout_fails_without_upload_or_send(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "capacity.xlsx"
+    _write_capacity_workbook(source)
+
+    class _NeverAcquireLock:
+        def acquire(self, timeout=None):
+            return False
+
+        def release(self):
+            raise AssertionError("release should not be called when acquire failed")
+
+    class _FakeLinkService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def _recipients_for_building(self, _building):
+            return [{"open_id": "ou_1"}]
+
+        @staticmethod
+        def _recipient_snapshot_for_building(_building):
+            return {
+                "recipients": [{"open_id": "ou_1", "note": ""}],
+                "raw_count": 1,
+                "enabled_count": 1,
+                "disabled_count": 0,
+                "invalid_count": 0,
+                "open_ids": ["ou_1"],
+            }
+
+        @staticmethod
+        def _review_url_for_building(_snapshot, _building):
+            return "http://example.com/review/a"
+
+        @staticmethod
+        def _manual_test_review_url_for_building(_snapshot, _building):
+            return "http://example.com/review/a"
+
+        class _summary_message_service:
+            @staticmethod
+            def build_for_session(_session, emit_log):
+                return "交接班日志全文"
+
+        def _build_feishu_client(self):
+            raise AssertionError("Excel截图锁超时时不应构建飞书客户端")
+
+    class _FakeReviewSessionService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def update_capacity_image_delivery(self, *, session_id: str, capacity_image_delivery):
+            return {"session_id": session_id, "capacity_image_delivery": dict(capacity_image_delivery)}
+
+        def update_review_link_delivery(self, *, session_id: str, review_link_delivery):
+            return {"session_id": session_id, "review_link_delivery": dict(review_link_delivery)}
+
+    monkeypatch.setattr(module, "_CAPACITY_IMAGE_EXCEL_COPY_LOCK", _NeverAcquireLock())
+    monkeypatch.setattr(module, "_CAPACITY_IMAGE_EXCEL_LOCK_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(module, "ReviewLinkDeliveryService", _FakeLinkService)
+    monkeypatch.setattr(module, "ReviewSessionService", _FakeReviewSessionService)
+    service = module.CapacityReportImageDeliveryService(
+        {"_global_paths": {"runtime_state_root": str(tmp_path / "runtime")}, "capacity_report": {"template": {"sheet_name": "本班组"}}}
+    )
+
+    result = service.send_for_session(
+        {
+            "session_id": "session-a",
+            "building": "A楼",
+            "duty_date": "2026-04-24",
+            "duty_shift": "day",
+            "capacity_output_file": str(source),
+            "capacity_sync": {"status": "ready", "input_signature": "cap-v1", "updated_at": "2026-04-24 08:00:00"},
+        },
+        building="A楼",
+        emit_log=lambda _line: None,
+    )
+
+    assert result["status"] == "failed"
+    assert "容量图片截图繁忙，请稍后重试" in result["error"]
+    assert result["failed_recipients"] == []
 
 
 def test_capacity_image_delivery_rejects_duplicate_running_session(tmp_path: Path, monkeypatch) -> None:

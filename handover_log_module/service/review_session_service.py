@@ -127,6 +127,9 @@ def _normalize_capacity_image_delivery(raw: Dict[str, Any] | None) -> Dict[str, 
         "error": error,
         "image_path": str(payload.get("image_path", "") or "").strip(),
         "image_key": str(payload.get("image_key", "") or "").strip(),
+        "image_signature": str(payload.get("image_signature", "") or "").strip(),
+        "cache_hit": bool(payload.get("cache_hit", False)),
+        "generated_at": str(payload.get("generated_at", "") or "").strip(),
         "successful_recipients": [
             str(item or "").strip()
             for item in (

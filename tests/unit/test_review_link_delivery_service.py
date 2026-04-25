@@ -285,6 +285,58 @@ def test_summary_chiller_zone_line_uses_source_level_and_tank_values():
     assert "蓄冷罐后备温度17.3℃正常、液位27.3m正常" in line
 
 
+def test_summary_contact_phone_lookup_uses_process_ttl_cache(monkeypatch):
+    with summary_module.HandoverSummaryMessageService._contact_cache_lock:
+        summary_module.HandoverSummaryMessageService._contact_cache_by_name.clear()
+    calls = []
+
+    class _FakeClient:
+        def list_records(self, **_kwargs):
+            calls.append("query")
+            return [{"fields": {summary_module.CONTACT_PHONE_FIELD: "13900000000"}}]
+
+    first = summary_module.HandoverSummaryMessageService({})
+    second = summary_module.HandoverSummaryMessageService({})
+    first._build_contact_client = lambda: _FakeClient()
+    second._build_contact_client = lambda: (_ for _ in ()).throw(AssertionError("cache should avoid contact query"))
+
+    assert first._lookup_contact_phones(["张三"], emit_log=lambda _msg: None) == {"张三": "13900000000"}
+    assert second._lookup_contact_phones(["张三"], emit_log=lambda _msg: None) == {"张三": "13900000000"}
+    assert calls == ["query"]
+
+    with summary_module.HandoverSummaryMessageService._contact_cache_lock:
+        summary_module.HandoverSummaryMessageService._contact_cache_by_name.clear()
+
+
+def test_summary_contact_phone_failure_cache_expires_quickly(monkeypatch):
+    with summary_module.HandoverSummaryMessageService._contact_cache_lock:
+        summary_module.HandoverSummaryMessageService._contact_cache_by_name.clear()
+    monkeypatch.setattr(summary_module, "CONTACT_CACHE_FAILURE_TTL_SEC", 0)
+    calls = []
+
+    class _BrokenClient:
+        def list_records(self, **_kwargs):
+            calls.append("fail")
+            raise RuntimeError("temporary failure")
+
+    class _RecoveredClient:
+        def list_records(self, **_kwargs):
+            calls.append("ok")
+            return [{"fields": {summary_module.CONTACT_PHONE_FIELD: "13900000000"}}]
+
+    first = summary_module.HandoverSummaryMessageService({})
+    second = summary_module.HandoverSummaryMessageService({})
+    first._build_contact_client = lambda: _BrokenClient()
+    second._build_contact_client = lambda: _RecoveredClient()
+
+    assert first._lookup_contact_phones(["张三"], emit_log=lambda _msg: None) == {"张三": ""}
+    assert second._lookup_contact_phones(["张三"], emit_log=lambda _msg: None) == {"张三": "13900000000"}
+    assert calls == ["fail", "ok"]
+
+    with summary_module.HandoverSummaryMessageService._contact_cache_lock:
+        summary_module.HandoverSummaryMessageService._contact_cache_by_name.clear()
+
+
 def test_send_for_session_summary_failure_does_not_block_message(monkeypatch):
     service = _make_service(
         monkeypatch,

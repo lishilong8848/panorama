@@ -124,6 +124,42 @@ class RuntimeDependencySyncService:
             for spec in normalized_runtime_dependency_specs()
         ]
 
+    def _fallback_packages_missing_from(self, packages: List[Dict[str, Any]] | None) -> List[Dict[str, str]]:
+        existing = {
+            (
+                str(item.get("package", "") or "").strip(),
+                str(item.get("import_name", "") or "").strip(),
+            )
+            for item in packages or []
+            if isinstance(item, dict)
+        }
+        return [
+            item
+            for item in self._fallback_required_packages()
+            if (item["package"], item["import_name"]) not in existing
+        ]
+
+    @staticmethod
+    def _merge_sync_results(*results: Dict[str, Any]) -> Dict[str, Any]:
+        output: Dict[str, Any] = {
+            "status": "success",
+            "installed": 0,
+            "checked": 0,
+            "packages": [],
+            "exact_versions": True,
+        }
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            output["installed"] = int(output.get("installed", 0) or 0) + int(item.get("installed", 0) or 0)
+            output["checked"] = int(output.get("checked", 0) or 0) + int(item.get("checked", 0) or 0)
+            packages = item.get("packages", [])
+            if isinstance(packages, list):
+                output["packages"].extend(packages)
+            if not bool(item.get("exact_versions", False)):
+                output["exact_versions"] = False
+        return output
+
     def _run_python_probe(self, code: str, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [self.python_executable, "-c", code, *args],
@@ -365,7 +401,15 @@ class RuntimeDependencySyncService:
     def sync_from_lock_file(self, lock_path: Path | str | None = None) -> Dict[str, Any]:
         payload = self.load_lock_file(lock_path)
         packages = payload.get("packages", []) if isinstance(payload, dict) else []
-        result = self.sync_required_packages(packages if isinstance(packages, list) else [], exact_versions=True)
+        locked_packages = packages if isinstance(packages, list) else []
+        result = self.sync_required_packages(locked_packages, exact_versions=True)
+        missing_fallback = self._fallback_packages_missing_from(locked_packages)
+        if missing_fallback:
+            self._log(f"依赖锁文件缺少内置必需依赖，按启动兜底补齐: checked={len(missing_fallback)}")
+            result = self._merge_sync_results(
+                result,
+                self.sync_required_packages(missing_fallback, exact_versions=False),
+            )
         result["lock_path"] = str(Path(lock_path) if lock_path else self.default_lock_path())
         return result
 
@@ -373,5 +417,13 @@ class RuntimeDependencySyncService:
         payload = self.load_lock_file(lock_path)
         packages = payload.get("packages", []) if isinstance(payload, dict) else []
         if isinstance(packages, list) and packages:
-            return self.sync_required_packages(packages, exact_versions=True)
+            result = self.sync_required_packages(packages, exact_versions=True)
+            missing_fallback = self._fallback_packages_missing_from(packages)
+            if missing_fallback:
+                self._log(f"启动依赖锁缺少内置必需依赖，按兜底清单补齐: checked={len(missing_fallback)}")
+                result = self._merge_sync_results(
+                    result,
+                    self.sync_required_packages(missing_fallback, exact_versions=False),
+                )
+            return result
         return self.sync_required_packages(self._fallback_required_packages(), exact_versions=False)
