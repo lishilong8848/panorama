@@ -356,55 +356,41 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
     capacityImageSending.value = true;
     errorText.value = "";
-    statusText.value = "正在提交容量表图片发送任务...";
+    statusText.value = "正在生成并发送容量表图片...";
     try {
       const response = await sendHandoverReviewCapacityImageApi(buildingCode, {
         session_id: sessionId,
         client_id: reviewClientId,
       });
-      const jobId = String(response?.job?.job_id || response?.job_id || "").trim();
-      if (!jobId) {
-        throw new Error("容量表图片发送任务提交失败");
+      try {
+        await loadReviewData({ background: true });
+      } catch (_error) {
+        // Sending result is authoritative; refresh failures should not hide it.
       }
-      statusText.value = "已提交容量表图片发送任务，正在处理中...";
-      void (async () => {
-        const job = await waitForBackgroundJob(jobId, getJobApi, { timeoutMs: 10 * 60 * 1000 });
-        try {
-          await loadReviewData({ background: true });
-        } catch (_error) {
-          // Ignore refresh failures; job status still drives the visible result.
+      const delivery = response?.capacity_image_delivery && typeof response.capacity_image_delivery === "object"
+        ? response.capacity_image_delivery
+        : {};
+      const failedRecipients = Array.isArray(response?.failed_recipients)
+        ? response.failed_recipients
+        : (Array.isArray(delivery.failed_recipients) ? delivery.failed_recipients : []);
+      if (response?.ok === true && String(response?.status || delivery.status || "").trim().toLowerCase() === "success") {
+        statusText.value = "审核文本和容量表图片发送成功";
+        errorText.value = "";
+      } else {
+        const detail = failedRecipients
+          .map((item) => `${item.note || item.open_id || "-"}(${item.step || "-"}): ${item.error || "发送失败"}`)
+          .join("；");
+        let baseError = String(response?.error || delivery.error || "").trim();
+        if (baseError.includes("部分收件人") || baseError.includes("存在收件人") || baseError === "发送失败，详见收件人明细") {
+          baseError = detail ? "" : "审核文本和容量表图片发送失败";
         }
-        if (!job) {
-          statusText.value = "容量表图片发送仍在处理中，请稍后刷新查看结果。";
-          capacityImageSending.value = false;
-          return;
-        }
-        if (job.status !== "success") {
-          errorText.value = String(job?.error || "容量表图片发送失败");
-          statusText.value = "容量表图片发送失败";
-          capacityImageSending.value = false;
-          return;
-        }
-        const result = job?.result && typeof job.result === "object" ? job.result : {};
-        const delivery = result?.capacity_image_delivery && typeof result.capacity_image_delivery === "object"
-          ? result.capacity_image_delivery
-          : {};
-        const deliveryStatus = String(delivery.status || result.status || "").trim().toLowerCase();
-        if (deliveryStatus === "success") {
-          statusText.value = "容量表图片发送成功";
-          errorText.value = "";
-        } else if (deliveryStatus === "partial_failed") {
-          statusText.value = "容量表图片部分发送成功";
-          errorText.value = String(delivery.error || "部分收件人发送失败");
-        } else {
-          errorText.value = String(delivery.error || result.error || "容量表图片发送失败");
-          statusText.value = "容量表图片发送失败";
-        }
-        capacityImageSending.value = false;
-      })();
+        errorText.value = [baseError, detail].filter(Boolean).join("；") || "审核文本和容量表图片发送失败";
+        statusText.value = "审核文本和容量表图片发送失败";
+      }
+      capacityImageSending.value = false;
     } catch (error) {
       errorText.value = String(error?.message || error || "容量表图片发送失败");
-      statusText.value = "容量表图片发送失败";
+      statusText.value = "审核文本和容量表图片发送失败";
       capacityImageSending.value = false;
     }
   }

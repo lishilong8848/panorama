@@ -18,6 +18,9 @@ class _FakeReviewSessionService:
     def list_batch_sessions(self, _batch_key):
         return [dict(item) for item in self.sessions]
 
+    def list_sessions(self):
+        return [dict(item) for item in self.sessions]
+
     def update_review_link_delivery(self, *, session_id: str, review_link_delivery):
         self.updated_states[session_id] = dict(review_link_delivery)
         return {"session_id": session_id, "review_link_delivery": dict(review_link_delivery)}
@@ -248,20 +251,15 @@ def test_send_for_batch_appends_handover_summary(monkeypatch, tmp_path):
     assert result["results"][0]["delivery"]["status"] == "success"
     message = calls[0]["text"]
     assert "审核链接：http://example.com/review/E" in message
-    assert "【EA118-E栋世纪互联 夜班】" in message
-    assert "【交班人员】张三、李四" in message
-    assert "【联系方式】111、222" in message
-    assert "【接班人员】王五" in message
-    assert "【联系方式】333" in message
-    assert "【值班手机】18100640527" in message
-    assert "E-144、E-120变电所" in message
-    assert "冷冻站A区3套制冷单元2用1备" in message
-    assert "1#制冷单元预冷模式运行正常" in message
-    assert "1#、2#二次泵运行正常" in message
-    assert "液位27.3m正常" in message
+    assert "【EA118-E栋世纪互联 夜班】" not in message
+    assert "【交班人员】张三、李四" not in message
+    assert "【交接内容】" not in message
+    assert "E-144、E-120变电所" not in message
+    assert "【本班完成工作】" in message
     assert "值班巡检" in message
     assert "HVDC电池均充维护，未完成" in message
     assert "不应出现在摘要中" not in message
+    assert "【重点关注项】" in message
     assert "E楼IT负载功率:1734.06KW" in message
 
 
@@ -296,7 +294,7 @@ def test_send_for_session_summary_failure_does_not_block_message(monkeypatch):
     calls = []
 
     class _BrokenSummary:
-        def build_for_session(self, *_args, **_kwargs):
+        def build_review_link_summary_for_session(self, *_args, **_kwargs):
             raise RuntimeError("summary broken")
 
     class _FakeClient:
@@ -390,6 +388,97 @@ def test_send_for_batch_skips_disabled_recipients(monkeypatch):
     assert calls == ["ou_enabled"]
 
 
+def test_recipient_normalization_skips_string_false_enabled(monkeypatch):
+    service = _make_service(
+        monkeypatch,
+        recipients_by_building={
+            "A楼": [
+                {"open_id": "ou_enabled", "note": "启用", "enabled": "true"},
+                {"open_id": "ou_disabled_bool", "note": "停用1", "enabled": False},
+                {"open_id": "ou_disabled_text", "note": "停用2", "enabled": "false"},
+                {"open_id": "ou_disabled_cn", "note": "停用3", "enabled": "停用"},
+            ]
+        },
+        review_links=[{"building": "A楼", "url": "http://example.com/review/A"}],
+    )
+
+    snapshot = service._recipient_snapshot_for_building("A楼")
+
+    assert snapshot["open_ids"] == ["ou_enabled"]
+    assert snapshot["disabled_open_ids"] == ["ou_disabled_bool", "ou_disabled_text", "ou_disabled_cn"]
+    assert snapshot["enabled_count"] == 1
+    assert snapshot["disabled_count"] == 3
+
+
+def test_send_for_session_mixed_recipient_failure_is_failed(monkeypatch):
+    service = _make_service(
+        monkeypatch,
+        recipients_by_building={
+            "A楼": [
+                {"open_id": "ou_ok", "note": "成功"},
+                {"open_id": "ou_fail", "note": "失败"},
+            ]
+        },
+        review_links=[{"building": "A楼", "url": "http://example.com/review/A"}],
+    )
+
+    class _FakeClient:
+        def send_text_message(self, *, receive_id: str, receive_id_type: str, text: str):
+            if receive_id == "ou_fail":
+                raise RuntimeError("send failed")
+            return {"message_id": "msg-ok"}
+
+    service._build_feishu_client = lambda: _FakeClient()
+
+    result = service.send_for_session(
+        dict(_FakeReviewSessionService.sessions[0]),
+        source="manual",
+        emit_log=lambda _msg: None,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"] == "发送失败，详见收件人明细"
+    assert result["successful_recipients"] == ["ou_ok"]
+    assert result["failed_recipients"] == [
+        {"open_id": "ou_fail", "note": "失败", "step": "text", "error": "send failed"}
+    ]
+    assert "partial_failed" not in {result["status"], _FakeReviewSessionService.updated_states["session-a"]["status"]}
+
+
+def test_send_manual_test_mixed_recipient_failure_is_failed(monkeypatch):
+    service = _make_service(
+        monkeypatch,
+        recipients_by_building={
+            "A楼": [
+                {"open_id": "ou_ok", "note": "成功"},
+                {"open_id": "ou_fail", "note": "失败"},
+            ]
+        },
+        review_links=[{"building": "A楼", "url": "http://example.com/review/A"}],
+    )
+
+    class _FakeClient:
+        def send_text_message(self, *, receive_id: str, receive_id_type: str, text: str):
+            if receive_id == "ou_fail":
+                raise RuntimeError("test failed")
+            return {"message_id": "msg-ok"}
+
+    service._build_feishu_client = lambda: _FakeClient()
+
+    result = service.send_manual_test(
+        building="A楼",
+        batch_key="2026-04-10|night",
+        emit_log=lambda _msg: None,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"] == "发送失败，详见收件人明细"
+    assert result["successful_recipients"] == ["ou_ok"]
+    assert result["failed_recipients"] == [
+        {"open_id": "ou_fail", "note": "失败", "step": "text", "error": "test failed"}
+    ]
+
+
 def test_send_manual_test_all_recipients_disabled_raises(monkeypatch):
     service = _make_service(
         monkeypatch,
@@ -403,6 +492,45 @@ def test_send_manual_test_all_recipients_disabled_raises(monkeypatch):
             batch_key="2026-04-10|night",
             emit_log=lambda _msg: None,
         )
+
+
+def test_dispatch_pending_review_links_sends_pending_link_only(monkeypatch):
+    service = _make_service(
+        monkeypatch,
+        recipients_by_building={"A楼": [{"open_id": "ou_abc", "note": "本人"}]},
+        review_links=[],
+        review_base_url_effective="http://192.168.224.157:18765",
+    )
+    _FakeReviewSessionService.sessions = [
+        {
+            "session_id": "session-a",
+            "building": "A楼",
+            "duty_date": "2026-04-10",
+            "duty_shift": "night",
+            "review_link_delivery": {"status": "pending_access", "auto_attempted": False},
+        }
+    ]
+    calls = []
+
+    class _FakeClient:
+        def send_text_message(self, *, receive_id: str, receive_id_type: str, text: str):
+            calls.append(text)
+            return {"message_id": "msg-1"}
+
+    service._build_feishu_client = lambda: _FakeClient()
+
+    results = service.dispatch_pending_review_links(emit_log=lambda _msg: None)
+
+    assert results[0]["delivery"]["status"] == "success"
+    assert calls == [
+        (
+            "这是一条交接班审核访问链接，请在办公电脑的浏览器中打开。\n"
+            "楼栋：A楼\n"
+            "日期：2026-04-10\n"
+            "班次：夜班\n"
+            "审核链接：http://192.168.224.157:18765/handover/review/a"
+        )
+    ]
 
 
 def test_send_for_batch_auto_uses_effective_base_url_fallback(monkeypatch):

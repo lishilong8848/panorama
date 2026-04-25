@@ -171,6 +171,20 @@ def test_handover_review_recipients_use_local_draft_building_switch() -> None:
     assert "handoverBuildingSegmentRevisions" in runtime_actions
 
 
+def test_handover_review_capacity_image_send_is_sync_without_job_polling() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    source = (
+        project_root / "web" / "frontend" / "src" / "handover_review_action_helpers.js"
+    ).read_text(encoding="utf-8")
+
+    send_body = source[source.index("async function sendCurrentCapacityImage") :]
+    assert "正在生成并发送容量表图片..." in send_body
+    assert "审核文本和容量表图片发送成功" in send_body
+    assert "job_id" not in send_body
+    assert "waitForBackgroundJob" not in send_body
+    assert "部分收件人发送失败" not in send_body
+
+
 def test_runtime_time_normalizer_accepts_single_digit_hour() -> None:
     project_root = Path(__file__).resolve().parents[2]
     source = (project_root / "web" / "frontend" / "src" / "config_date_utils.js").read_text(encoding="utf-8")

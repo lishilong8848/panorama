@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
@@ -15,11 +17,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app.shared.utils.atomic_file import atomic_write_bytes, validate_image_file
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
+from handover_log_module.service.review_access_snapshot_service import materialize_review_access_snapshot
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.review_session_service import ReviewSessionService
 
 
 _CAPACITY_IMAGE_DELIVERY_LOCK = threading.RLock()
+_CAPACITY_IMAGE_EXCEL_COPY_LOCK = threading.RLock()
 _CAPACITY_IMAGE_DELIVERY_RUNNING_STATUSES = {"sending"}
 
 
@@ -71,7 +75,7 @@ class CapacityReportImageRenderer:
     ) -> Path:
         stat = source_path.stat()
         source_sig = hashlib.sha1(
-            f"{source_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8", errors="ignore")
+            f"v6|{source_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8", errors="ignore")
         ).hexdigest()[:12]
         session_sig = hashlib.sha1(str(session_id or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
         batch_dir = self._runtime_root() / "handover" / "capacity_report_images" / _safe_name(f"{duty_date}--{duty_shift}")
@@ -85,6 +89,9 @@ class CapacityReportImageRenderer:
         duty_date: str,
         duty_shift: str,
         session_id: str,
+        force_refresh: bool = False,
+        allow_fallback: bool = True,
+        emit_log: Callable[[str], None] | None = None,
     ) -> Path:
         source_path = Path(str(source_file or "").strip())
         if not source_path.exists() or not source_path.is_file():
@@ -96,20 +103,374 @@ class CapacityReportImageRenderer:
             duty_shift=duty_shift,
             session_id=session_id,
         )
+        if force_refresh:
+            attempt_sig = datetime.now().strftime("%Y%m%d%H%M%S%f")
+            output_path = output_path.with_name(f"{output_path.stem}_{attempt_sig}{output_path.suffix}")
         if output_path.exists() and output_path.is_file():
+            if not force_refresh:
+                if emit_log:
+                    emit_log(
+                        "[交接班][容量表图片发送] 命中容量表图片缓存 "
+                        f"building={building}, session_id={session_id}, image={output_path}"
+                    )
+                return output_path
+            try:
+                output_path.unlink()
+                if emit_log:
+                    emit_log(
+                        "[交接班][容量表图片发送] 已清理旧容量表图片缓存，准备重新截图 "
+                        f"building={building}, session_id={session_id}, image={output_path}"
+                    )
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                if emit_log:
+                    emit_log(
+                        "[交接班][容量表图片发送] 旧容量表图片缓存清理失败，将覆盖写入 "
+                        f"building={building}, session_id={session_id}, image={output_path}, error={exc}"
+                    )
+        if emit_log:
+            emit_log(
+                "[交接班][容量表图片发送] 开始生成容量表图片 "
+                f"building={building}, session_id={session_id}, source={source_path}, target={output_path}"
+            )
+        if self._render_with_excel_copy_picture(source_path=source_path, output_path=output_path, emit_log=emit_log):
+            if emit_log:
+                emit_log(
+                    "[交接班][容量表图片发送] Excel截图生成成功 "
+                    f"building={building}, session_id={session_id}, image={output_path}"
+                )
             return output_path
+        if emit_log:
+            if allow_fallback:
+                emit_log(
+                    "[交接班][容量表图片发送] Excel截图不可用，已切换到内置渲染兜底 "
+                    f"building={building}, session_id={session_id}, source={source_path}"
+                )
+            else:
+                emit_log(
+                    "[交接班][容量表图片发送] Excel截图不可用，已停止发送，避免发送旧格式图片 "
+                    f"building={building}, session_id={session_id}, source={source_path}"
+                )
+        if not allow_fallback:
+            raise RuntimeError("Excel截图失败，未生成容量表图片；为避免发送错误格式图片，本次不使用内置渲染兜底")
 
-        workbook = load_workbook(source_path, data_only=True)
+        workbook = load_workbook(source_path, data_only=False)
         try:
             configured_sheet = self._configured_sheet_name()
             sheet = workbook[configured_sheet] if configured_sheet and configured_sheet in workbook.sheetnames else workbook[workbook.sheetnames[0]]
-            image = self._render_sheet(sheet)
+            image = self._render_sheet(sheet, display_values=self._formula_display_values(sheet))
             output_path.parent.mkdir(parents=True, exist_ok=True)
             buffer = self._image_bytes(image)
             atomic_write_bytes(output_path, buffer, validator=validate_image_file, temp_suffix=".tmp")
+            if emit_log:
+                emit_log(
+                    "[交接班][容量表图片发送] 内置渲染生成成功 "
+                    f"building={building}, session_id={session_id}, image={output_path}"
+                )
             return output_path
         finally:
             workbook.close()
+
+    def _render_with_excel_copy_picture(
+        self,
+        *,
+        source_path: Path,
+        output_path: Path,
+        emit_log: Callable[[str], None] | None = None,
+    ) -> bool:
+        # Excel CopyPicture and the clipboard are process-global resources; serialize
+        # this path so concurrent review-page sends cannot steal each other's image.
+        with _CAPACITY_IMAGE_EXCEL_COPY_LOCK:
+            return self._render_with_excel_copy_picture_locked(source_path=source_path, output_path=output_path, emit_log=emit_log)
+
+    def _render_with_excel_copy_picture_locked(
+        self,
+        *,
+        source_path: Path,
+        output_path: Path,
+        emit_log: Callable[[str], None] | None = None,
+    ) -> bool:
+        excel = None
+        workbook = None
+        co_initialized = False
+        excel_pid = 0
+        quit_ok = False
+        try:
+            import pythoncom
+            import win32com.client
+            from PIL import ImageGrab
+
+            if emit_log:
+                emit_log(
+                    "[交接班][容量表图片发送] Excel截图开始 "
+                    f"source={source_path}, target={output_path}"
+                )
+            pythoncom.CoInitialize()
+            co_initialized = True
+            excel = win32com.client.DispatchEx("Excel.Application")
+            try:
+                import win32process
+
+                _, excel_pid = win32process.GetWindowThreadProcessId(int(excel.Hwnd))
+            except Exception:
+                excel_pid = 0
+            if emit_log:
+                emit_log(
+                    "[交接班][容量表图片发送] Excel已启动 "
+                    f"source={source_path}, excel_pid={excel_pid or '-'}"
+                )
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            excel.ScreenUpdating = False
+            try:
+                excel.EnableEvents = False
+            except Exception:
+                pass
+            workbook = excel.Workbooks.Open(os.path.abspath(str(source_path)), UpdateLinks=0, ReadOnly=True, AddToMru=False)
+            configured_sheet = self._configured_sheet_name()
+            if configured_sheet:
+                try:
+                    sheet = workbook.Sheets(configured_sheet)
+                except Exception:
+                    sheet = workbook.Sheets(1)
+                    if emit_log:
+                        emit_log(
+                            "[交接班][容量表图片发送] 配置Sheet不存在，已使用首个Sheet "
+                            f"configured_sheet={configured_sheet}"
+                        )
+            else:
+                sheet = workbook.Sheets(1)
+            try:
+                sheet_name = str(sheet.Name)
+            except Exception:
+                sheet_name = configured_sheet or "1"
+            if emit_log:
+                emit_log(
+                    "[交接班][容量表图片发送] Excel截图Sheet已选中 "
+                    f"sheet={sheet_name}, excel_pid={excel_pid or '-'}"
+                )
+            try:
+                workbook.Activate()
+                sheet.Activate()
+                sheet.DisplayPageBreaks = False
+                excel.ActiveWindow.View = 1
+                excel.ActiveWindow.DisplayGridlines = False
+            except Exception:
+                pass
+            try:
+                sheet.PageSetup.LeftHeader = ""
+                sheet.PageSetup.CenterHeader = ""
+                sheet.PageSetup.RightHeader = ""
+                sheet.PageSetup.LeftFooter = ""
+                sheet.PageSetup.CenterFooter = ""
+                sheet.PageSetup.RightFooter = ""
+            except Exception:
+                pass
+            try:
+                excel.CalculateFullRebuild()
+            except Exception:
+                try:
+                    excel.Calculate()
+                except Exception:
+                    pass
+
+            used_range = sheet.UsedRange
+            try:
+                address = str(used_range.Address)
+            except Exception:
+                address = "UsedRange"
+            if emit_log:
+                emit_log(
+                    "[交接班][容量表图片发送] Excel复制区域到剪贴板 "
+                    f"sheet={sheet_name}, range={address}"
+                )
+            used_range.CopyPicture(Format=2)
+            time.sleep(1)
+            image = None
+            for _ in range(10):
+                image = ImageGrab.grabclipboard()
+                if isinstance(image, Image.Image):
+                    break
+                time.sleep(0.2)
+            if not isinstance(image, Image.Image):
+                if emit_log:
+                    emit_log("[交接班][容量表图片发送] Excel截图失败: 剪贴板未返回图片")
+                return False
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_bytes(output_path, self._image_bytes(image.convert("RGB")), validator=validate_image_file, temp_suffix=".tmp")
+            if emit_log:
+                emit_log(
+                    "[交接班][容量表图片发送] Excel截图图片保存成功 "
+                    f"image={output_path}, size={output_path.stat().st_size if output_path.exists() else 0}"
+                )
+            return True
+        except Exception as exc:
+            if emit_log:
+                emit_log(f"[交接班][容量表图片发送] Excel截图异常: error={exc}")
+            return False
+        finally:
+            if workbook is not None:
+                try:
+                    workbook.Close(SaveChanges=False)
+                except Exception:
+                    pass
+            if excel is not None:
+                try:
+                    excel.Quit()
+                    quit_ok = True
+                except Exception:
+                    pass
+            if excel_pid and not quit_ok:
+                try:
+                    import psutil
+
+                    process = psutil.Process(excel_pid)
+                    if process.is_running():
+                        process.terminate()
+                        if emit_log:
+                            emit_log(f"[交接班][容量表图片发送] 已终止本次创建的Excel进程 pid={excel_pid}")
+                except Exception:
+                    pass
+            if co_initialized:
+                try:
+                    import pythoncom
+
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _number_value(value: Any) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        if isinstance(value, (int, float)):
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                return 0.0
+            return float(value)
+        text = str(value).strip().replace(",", "")
+        if not text:
+            return 0.0
+        percent = text.endswith("%")
+        if percent:
+            text = text[:-1].strip()
+        try:
+            number = float(text)
+        except Exception:
+            return 0.0
+        return number / 100 if percent else number
+
+    @classmethod
+    def _formula_display_values(cls, sheet) -> Dict[str, str]:
+        min_col, min_row, max_col, max_row = cls._render_bounds(sheet)
+        cache: Dict[str, Any] = {}
+        visiting: set[str] = set()
+
+        def eval_cell(coord: str) -> Any:
+            normalized = coord.replace("$", "").upper()
+            if normalized in cache:
+                return cache[normalized]
+            if normalized in visiting:
+                return ""
+            visiting.add(normalized)
+            try:
+                cell = sheet[normalized]
+                value = cell.value
+                if isinstance(value, str) and value.startswith("="):
+                    result = eval_formula(value)
+                else:
+                    result = value
+                cache[normalized] = result
+                return result
+            finally:
+                visiting.discard(normalized)
+
+        def range_values(ref: str) -> List[Any]:
+            try:
+                min_c, min_r, max_c, max_r = range_boundaries(ref.replace("$", ""))
+            except Exception:
+                return []
+            values: List[Any] = []
+            for row_index in range(min_r, max_r + 1):
+                for col_index in range(min_c, max_c + 1):
+                    values.append(eval_cell(f"{get_column_letter(col_index)}{row_index}"))
+            return values
+
+        def replace_sum(match: re.Match[str]) -> str:
+            args = str(match.group(1) or "")
+            total = 0.0
+            for part in [item.strip() for item in args.split(",") if item.strip()]:
+                if ":" in part:
+                    total += sum(cls._number_value(item) for item in range_values(part))
+                else:
+                    total += cls._number_value(eval_expr(part))
+            return str(total)
+
+        cell_ref_pattern = re.compile(r"(?<![A-Za-z0-9_])\$?([A-Z]{1,3})\$?([0-9]{1,7})(?![A-Za-z0-9_])")
+
+        def eval_expr(expr: str) -> Any:
+            text = str(expr or "").strip()
+            if not text:
+                return 0.0
+            if "#REF!" in text.upper():
+                return ""
+            while re.search(r"\bSUM\s*\(([^()]*)\)", text, flags=re.IGNORECASE):
+                text = re.sub(r"\bSUM\s*\(([^()]*)\)", replace_sum, text, flags=re.IGNORECASE)
+            if ":" in text:
+                return ""
+            text = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", text)
+
+            def repl_ref(match: re.Match[str]) -> str:
+                value = eval_cell(f"{match.group(1)}{match.group(2)}")
+                return str(cls._number_value(value))
+
+            text = cell_ref_pattern.sub(repl_ref, text)
+            if not re.fullmatch(r"[0-9eE+\-*/().\s]+", text):
+                return ""
+            try:
+                result = eval(text, {"__builtins__": {}}, {})  # noqa: S307 - sanitized arithmetic only
+            except Exception:
+                return ""
+            if isinstance(result, (int, float)) and not (isinstance(result, float) and (math.isnan(result) or math.isinf(result))):
+                return result
+            return ""
+
+        def eval_formula(formula: str) -> Any:
+            return eval_expr(str(formula or "")[1:])
+
+        display_values: Dict[str, str] = {}
+        for row_index in range(min_row, max_row + 1):
+            for col_index in range(min_col, max_col + 1):
+                coord = f"{get_column_letter(col_index)}{row_index}"
+                cell = sheet.cell(row=row_index, column=col_index)
+                value = eval_cell(coord)
+                display_values[coord] = cls._format_display_value(value, cell)
+        return display_values
+
+    @staticmethod
+    def _format_display_value(value: Any, cell) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (int, float)):
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                return ""
+            fmt = str(getattr(cell, "number_format", "") or "")
+            if "%" in fmt:
+                decimals = 0
+                match = re.search(r"\.([0#]+)%", fmt)
+                if match:
+                    decimals = len(match.group(1))
+                return f"{float(value) * 100:.{decimals}f}%"
+            match = re.search(r"\.([0#]+)", fmt)
+            if match and fmt != "@":
+                decimals = len(match.group(1))
+                return f"{float(value):.{decimals}f}"
+            if float(value).is_integer():
+                return str(int(value))
+            return f"{float(value):.6f}".rstrip("0").rstrip(".")
+        return _text(value)
 
     @staticmethod
     def _image_bytes(image: Image.Image) -> bytes:
@@ -318,7 +679,8 @@ class CapacityReportImageRenderer:
             draw.line((left, bottom, right, bottom), fill=cls._border_color(border.bottom), width=1)
 
     @classmethod
-    def _render_sheet(cls, sheet) -> Image.Image:
+    def _render_sheet(cls, sheet, *, display_values: Dict[str, str] | None = None) -> Image.Image:
+        display_map = display_values if isinstance(display_values, dict) else {}
         min_col, min_row, max_col, max_row = cls._render_bounds(sheet)
         col_widths = {col: cls._column_width_px(sheet, col) for col in range(min_col, max_col + 1)}
         row_heights = {row: cls._row_height_px(sheet, row) for row in range(min_row, max_row + 1)}
@@ -361,7 +723,7 @@ class CapacityReportImageRenderer:
                 rect = (left, top, max(left + 1, right), max(top + 1, bottom))
                 draw.rectangle(rect, fill=cls._fill_color(cell))
                 cls._draw_border(draw, rect, cell)
-                value = _text(cell.value)
+                value = _text(display_map.get(cell.coordinate, cls._format_display_value(cell.value, cell)))
                 if not value:
                     continue
                 font = cls._font(cell)
@@ -415,6 +777,54 @@ class CapacityReportImageDeliveryService:
         recipients = self._link_service._recipients_for_building(building)
         if not recipients:
             raise ValueError("当前楼未配置启用的审核链接接收人")
+
+    def _build_review_text_message(
+        self,
+        session: Dict[str, Any],
+        *,
+        building: str,
+        emit_log: Callable[[str], None],
+    ) -> Tuple[str, str]:
+        snapshot = materialize_review_access_snapshot(self.handover_cfg)
+        url = self._link_service._review_url_for_building(snapshot, building) or self._link_service._manual_test_review_url_for_building(snapshot, building)
+        try:
+            message_text = str(self._link_service._summary_message_service.build_for_session(
+                session,
+                emit_log=emit_log,
+            ) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"审核文本生成失败: {exc}") from exc
+        if not message_text:
+            raise ValueError("审核文本为空，无法发送")
+        return message_text, url
+
+    def _save_review_link_delivery(
+        self,
+        *,
+        session_id: str,
+        status: str,
+        attempt_at: str,
+        url: str,
+        successful_recipients: List[str],
+        failed_recipients: List[Dict[str, str]],
+        source: str,
+        error: str = "",
+    ) -> None:
+        self._review_service.update_review_link_delivery(
+            session_id=session_id,
+            review_link_delivery={
+                "status": status,
+                "last_attempt_at": attempt_at,
+                "last_sent_at": attempt_at if status == "success" else "",
+                "error": str(error or "").strip(),
+                "url": url,
+                "successful_recipients": successful_recipients,
+                "failed_recipients": failed_recipients,
+                "source": str(source or "manual").strip().lower() or "manual",
+                "auto_attempted": False,
+                "auto_attempted_at": "",
+            },
+        )
 
     @staticmethod
     def _validate_not_running(session: Dict[str, Any]) -> None:
@@ -497,11 +907,24 @@ class CapacityReportImageDeliveryService:
         building_text = str(building or normalized_session.get("building", "") or "").strip()
         session_id = str(normalized_session.get("session_id", "") or "").strip()
         self._validate_session(normalized_session, building=building_text)
-        recipients = self._link_service._recipients_for_building(building_text)
+        recipient_snapshot = self._link_service._recipient_snapshot_for_building(building_text)
+        recipients = list(recipient_snapshot.get("recipients", []))
         if not recipients:
             raise ValueError("当前楼未配置启用的审核链接接收人")
 
         attempt_at = _now_text()
+        emit_log(
+            "[交接班][容量表图片发送] 开始 "
+            f"building={building_text}, session_id={session_id}, "
+            f"source_file={normalized_session.get('capacity_output_file', '')}, recipients={len(recipients)}, "
+            f"raw={int(recipient_snapshot.get('raw_count', 0) or 0)}, "
+            f"enabled={int(recipient_snapshot.get('enabled_count', 0) or 0)}, "
+            f"disabled={int(recipient_snapshot.get('disabled_count', 0) or 0)}, "
+            f"invalid={int(recipient_snapshot.get('invalid_count', 0) or 0)}, "
+            f"open_ids={recipient_snapshot.get('open_ids', [])}, "
+            f"disabled_open_ids={recipient_snapshot.get('disabled_open_ids', [])}, "
+            f"invalid_recipients={recipient_snapshot.get('invalid_recipients', [])}"
+        )
         self._review_service.update_capacity_image_delivery(
             session_id=session_id,
             capacity_image_delivery={
@@ -518,15 +941,32 @@ class CapacityReportImageDeliveryService:
         )
         image_path: Path | None = None
         image_key = ""
+        review_url = ""
         successful_recipients: List[str] = []
         failed_recipients: List[Dict[str, str]] = []
         try:
+            message_text, review_url = self._build_review_text_message(
+                normalized_session,
+                building=building_text,
+                emit_log=emit_log,
+            )
+            emit_log(
+                "[交接班][容量表图片发送] 审核文本已生成 "
+                f"building={building_text}, session_id={session_id}, length={len(message_text)}, review_url={review_url or '-'}"
+            )
+            emit_log(
+                "[交接班][容量表图片发送] 本次将发送审核文本内容如下:\n"
+                f"{message_text}"
+            )
             image_path = self._renderer.render_to_image(
                 source_file=str(normalized_session.get("capacity_output_file", "") or "").strip(),
                 building=building_text,
                 duty_date=str(normalized_session.get("duty_date", "") or "").strip(),
                 duty_shift=str(normalized_session.get("duty_shift", "") or "").strip(),
                 session_id=session_id,
+                force_refresh=True,
+                allow_fallback=False,
+                emit_log=emit_log,
             )
             emit_log(
                 "[交接班][容量表图片发送] 图片已生成 "
@@ -534,13 +974,44 @@ class CapacityReportImageDeliveryService:
             )
 
             client = self._link_service._build_feishu_client()
+            emit_log(
+                "[交接班][容量表图片发送] 开始上传飞书图片 "
+                f"building={building_text}, session_id={session_id}, image={image_path}"
+            )
             image_upload = client.upload_image(str(image_path))
             image_key = str(image_upload.get("image_key", "") or "").strip()
+            if not image_key:
+                raise RuntimeError(f"飞书图片上传未返回 image_key: {image_upload}")
+            emit_log(
+                "[交接班][容量表图片发送] 飞书图片上传成功 "
+                f"building={building_text}, session_id={session_id}, image_key={image_key}"
+            )
             for recipient in recipients:
                 open_id = str(recipient.get("open_id", "") or "").strip()
                 note = str(recipient.get("note", "") or "").strip()
                 receive_id_type = self._link_service._resolve_effective_receive_id_type(open_id, "open_id")
+                text_sent = False
                 try:
+                    emit_log(
+                        "[交接班][容量表图片发送] 准备发送审核文本 "
+                        f"building={building_text}, session_id={session_id}, open_id={open_id}, "
+                        f"receive_id_type={receive_id_type}, note={note or '-'}"
+                    )
+                    client.send_text_message(
+                        receive_id=open_id,
+                        receive_id_type=receive_id_type,
+                        text=message_text,
+                    )
+                    text_sent = True
+                    emit_log(
+                        "[交接班][容量表图片发送] 审核文本发送成功 "
+                        f"building={building_text}, session_id={session_id}, open_id={open_id}, note={note or '-'}"
+                    )
+                    emit_log(
+                        "[交接班][容量表图片发送] 准备发送容量图片 "
+                        f"building={building_text}, session_id={session_id}, open_id={open_id}, "
+                        f"receive_id_type={receive_id_type}, note={note or '-'}"
+                    )
                     client.send_image_message(
                         receive_id=open_id,
                         receive_id_type=receive_id_type,
@@ -548,15 +1019,24 @@ class CapacityReportImageDeliveryService:
                     )
                     successful_recipients.append(open_id)
                     emit_log(
-                        "[交接班][容量表图片发送] 发送成功 "
+                        "[交接班][容量表图片发送] 容量图片发送成功 "
                         f"building={building_text}, session_id={session_id}, open_id={open_id}, note={note or '-'}"
                     )
                 except Exception as exc:  # noqa: BLE001
-                    failed_recipients.append({"open_id": open_id, "note": note, "error": str(exc)})
-                    emit_log(
-                        "[交接班][容量表图片发送] 发送失败 "
-                        f"building={building_text}, session_id={session_id}, open_id={open_id}, note={note or '-'}, error={exc}"
-                    )
+                    step = "image" if text_sent else "text"
+                    failed_recipients.append({"open_id": open_id, "note": note, "step": step, "error": str(exc)})
+                    if step == "image":
+                        emit_log(
+                            "[交接班][容量表图片发送] 容量图片发送失败 "
+                            f"building={building_text}, session_id={session_id}, open_id={open_id}, "
+                            f"receive_id_type={receive_id_type}, note={note or '-'}, error={exc}"
+                        )
+                    else:
+                        emit_log(
+                            "[交接班][容量表图片发送] 审核文本发送失败 "
+                            f"building={building_text}, session_id={session_id}, open_id={open_id}, "
+                            f"receive_id_type={receive_id_type}, note={note or '-'}, error={exc}"
+                        )
         except Exception as exc:  # noqa: BLE001
             delivery = {
                 "status": "failed",
@@ -581,23 +1061,57 @@ class CapacityReportImageDeliveryService:
                 )
             emit_log(
                 "[交接班][容量表图片发送] 失败 "
-                f"building={building_text}, session_id={session_id}, error={exc}"
+                f"building={building_text}, session_id={session_id}, error={exc}, "
+                f"failed_recipients={failed_recipients}"
             )
-            raise
+            review_delivery = {
+                "status": "failed",
+                "last_attempt_at": attempt_at,
+                "last_sent_at": "",
+                "error": str(exc),
+                "url": review_url,
+                "successful_recipients": successful_recipients,
+                "failed_recipients": failed_recipients,
+                "source": str(source or "manual").strip().lower() or "manual",
+            }
+            try:
+                self._save_review_link_delivery(
+                    session_id=session_id,
+                    status="failed",
+                    attempt_at=attempt_at,
+                    url=review_url,
+                    successful_recipients=successful_recipients,
+                    failed_recipients=failed_recipients,
+                    source=source,
+                    error=str(exc),
+                )
+            except Exception as save_exc:  # noqa: BLE001
+                emit_log(
+                    "[交接班][容量表图片发送] 审核文本失败状态保存失败 "
+                    f"building={building_text}, session_id={session_id}, error={save_exc}"
+                )
+            return {
+                "ok": False,
+                "status": "failed",
+                "error": str(exc),
+                "building": building_text,
+                "session_id": session_id,
+                "successful_recipients": successful_recipients,
+                "failed_recipients": failed_recipients,
+                "capacity_image_delivery": delivery,
+                "review_link_delivery": review_delivery,
+            }
 
-        if successful_recipients and failed_recipients:
-            status = "partial_failed"
-            error = "部分收件人发送失败"
-        elif successful_recipients:
+        if not failed_recipients and len(successful_recipients) == len(recipients):
             status = "success"
             error = ""
         else:
             status = "failed"
-            error = "全部收件人发送失败"
+            error = "发送失败，详见收件人明细"
         delivery = {
             "status": status,
             "last_attempt_at": attempt_at,
-            "last_sent_at": attempt_at if successful_recipients else "",
+            "last_sent_at": attempt_at if status == "success" else "",
             "error": error,
             "image_path": str(image_path or ""),
             "image_key": image_key,
@@ -616,15 +1130,45 @@ class CapacityReportImageDeliveryService:
                 "[交接班][容量表图片发送] 状态保存失败但不影响发送结果 "
                 f"building={building_text}, session_id={session_id}, error={exc}"
             )
+        try:
+            self._save_review_link_delivery(
+                session_id=session_id,
+                status=status,
+                attempt_at=attempt_at,
+                url=review_url,
+                successful_recipients=successful_recipients,
+                failed_recipients=failed_recipients,
+                source=source,
+                error=error,
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(
+                "[交接班][容量表图片发送] 审核文本发送状态保存失败但不影响发送结果 "
+                f"building={building_text}, session_id={session_id}, error={exc}"
+            )
         emit_log(
             "[交接班][容量表图片发送] 完成 "
             f"building={building_text}, session_id={session_id}, status={status}, "
-            f"successful={len(successful_recipients)}, failed={len(failed_recipients)}"
+            f"successful={len(successful_recipients)}, failed={len(failed_recipients)}, "
+            f"failed_recipients={failed_recipients}"
         )
         return {
-            "ok": status in {"success", "partial_failed"},
+            "ok": status == "success",
             "status": status,
+            "error": error,
             "building": building_text,
             "session_id": session_id,
+            "successful_recipients": successful_recipients,
+            "failed_recipients": failed_recipients,
             "capacity_image_delivery": delivery,
+            "review_link_delivery": {
+                "status": status,
+                "last_attempt_at": attempt_at,
+                "last_sent_at": attempt_at if status == "success" else "",
+                "error": error,
+                "url": review_url,
+                "successful_recipients": successful_recipients,
+                "failed_recipients": failed_recipients,
+                "source": str(source or "manual").strip().lower() or "manual",
+            },
         }

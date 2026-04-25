@@ -90,6 +90,7 @@ def _normalize_review_link_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any
             {
                 "open_id": str(item.get("open_id", "") or "").strip(),
                 "note": str(item.get("note", "") or "").strip(),
+                "step": str(item.get("step", "") or "").strip(),
                 "error": str(item.get("error", "") or "").strip(),
             }
             for item in (
@@ -127,6 +128,7 @@ def _normalize_capacity_image_delivery(raw: Dict[str, Any] | None) -> Dict[str, 
             {
                 "open_id": str(item.get("open_id", "") or "").strip(),
                 "note": str(item.get("note", "") or "").strip(),
+                "step": str(item.get("step", "") or "").strip(),
                 "error": str(item.get("error", "") or "").strip(),
             }
             for item in (

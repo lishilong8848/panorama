@@ -141,7 +141,7 @@ def test_handover_review_capacity_download_rejects_when_sync_not_ready(monkeypat
     assert "待补写" in str(exc_info.value.detail)
 
 
-def test_handover_review_capacity_image_send_accepts_background_job(monkeypatch, tmp_path):
+def test_handover_review_capacity_image_send_returns_sync_result(monkeypatch, tmp_path):
     output_file = tmp_path / "A楼交接班容量报表.xlsx"
     output_file.write_bytes(b"demo")
     container = _FakeContainer()
@@ -171,6 +171,16 @@ def test_handover_review_capacity_image_send_accepts_background_job(monkeypatch,
         def mark_failed(self, *, session_id: str, error: str, source: str = "manual"):
             raise AssertionError("mark_failed should not be called")
 
+        def send_for_session(self, session, *, building: str, source: str = "manual", emit_log):
+            emit_log("[交接班][容量表图片发送] fake done")
+            return {
+                "ok": True,
+                "status": "success",
+                "building": building,
+                "session_id": session["session_id"],
+                "capacity_image_delivery": {"status": "success"},
+            }
+
     monkeypatch.setattr(routes, "CapacityReportImageDeliveryService", _FakeDeliveryService)
 
     response = routes.handover_review_capacity_image_send(
@@ -179,9 +189,9 @@ def test_handover_review_capacity_image_send_accepts_background_job(monkeypatch,
         payload={"session_id": "sess-1"},
     )
 
-    assert response["accepted"] is True
-    assert response["job"]["job_id"] == "job-1"
-    assert any("交接班容量表图片发送" in message for message in container.logs)
+    assert response["ok"] is True
+    assert response["status"] == "success"
+    assert any("fake done" in message for message in container.logs)
 
 
 def test_handover_review_capacity_image_send_rejects_when_already_sending(monkeypatch, tmp_path):

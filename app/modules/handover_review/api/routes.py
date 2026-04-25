@@ -3203,39 +3203,24 @@ def handover_review_capacity_image_send(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    def _run(emit_log) -> Dict[str, Any]:
-        runtime_service = CapacityReportImageDeliveryService(
-            _handover_cfg(container),
-            config_path=getattr(container, "config_path", None),
-        )
+    try:
         latest_session = _load_target_session_or_404(service, building=building, session_id=session_id_text)
-        return runtime_service.send_for_session(
+        result = delivery_service.send_for_session(
             latest_session,
             building=building,
             source="manual",
-            emit_log=emit_log,
-        )
-
-    try:
-        job = _start_handover_background_job(
-            container,
-            name=f"交接班容量表图片发送 {building}",
-            run_func=_run,
-            resource_keys=_handover_resource_keys("network:external", "handover:capacity_image_delivery", building=building),
-            priority="manual",
-            feature="handover_capacity_image_delivery",
-            submitted_by="manual",
+            emit_log=container.add_system_log,
         )
     except Exception as exc:  # noqa: BLE001
         try:
-            delivery_service.mark_failed(session_id=session_id_text, error=f"提交发送任务失败: {exc}", source="manual")
+            delivery_service.mark_failed(session_id=session_id_text, error=f"发送容量表图片失败: {exc}", source="manual")
         except Exception:
             pass
-        raise
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     container.add_system_log(
-        f"[任务] 已提交: 交接班容量表图片发送 {building} session={session_id_text} ({job.job_id})"
+        f"[交接班][容量表图片发送] 同步发送完成 building={building}, session={session_id_text}, status={result.get('status', '-')}"
     )
-    return _accepted_job_response(job)
+    return result
 
 
 @router.put("/api/handover/review/{building_code}")

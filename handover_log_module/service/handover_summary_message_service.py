@@ -223,6 +223,19 @@ class HandoverSummaryMessageService:
             lines.append(f"PUE:{pue}")
         return "\n".join(lines)
 
+    def build_review_link_summary_for_session(
+        self,
+        session: Dict[str, Any],
+        *,
+        emit_log: Callable[[str], None] = print,
+    ) -> str:
+        summary_text = self.build_for_session(session, emit_log=emit_log)
+        lines = summary_text.splitlines()
+        for index, line in enumerate(lines):
+            if _text(line) == "【本班完成工作】":
+                return "\n".join(lines[index:]).strip()
+        return ""
+
     @staticmethod
     def _fallback_title(building: str, duty_shift: str) -> str:
         shift_text = "白班" if duty_shift == "day" else "夜班" if duty_shift == "night" else duty_shift
