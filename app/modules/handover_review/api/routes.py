@@ -3192,6 +3192,11 @@ def handover_review_capacity_image_send(
     if not session_id_text:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    container.add_system_log(
+        "[交接班][容量表图片发送] 同步接口已命中 "
+        f"building={building}, session={session_id_text}, "
+        f"source_file={str(target.get('capacity_output_file', '') or '').strip() or '-'}"
+    )
     delivery_service = CapacityReportImageDeliveryService(
         _handover_cfg(container),
         config_path=getattr(container, "config_path", None),
@@ -3199,8 +3204,16 @@ def handover_review_capacity_image_send(
     try:
         delivery_service.begin_delivery(target, building=building, source="manual")
     except FileNotFoundError as exc:
+        container.add_system_log(
+            "[交接班][容量表图片发送] 同步接口预检失败 "
+            f"building={building}, session={session_id_text}, error={exc}"
+        )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
+        container.add_system_log(
+            "[交接班][容量表图片发送] 同步接口预检失败 "
+            f"building={building}, session={session_id_text}, error={exc}"
+        )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     try:
@@ -3216,6 +3229,10 @@ def handover_review_capacity_image_send(
             delivery_service.mark_failed(session_id=session_id_text, error=f"发送容量表图片失败: {exc}", source="manual")
         except Exception:
             pass
+        container.add_system_log(
+            "[交接班][容量表图片发送] 同步接口发送异常 "
+            f"building={building}, session={session_id_text}, error={exc}"
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     container.add_system_log(
         f"[交接班][容量表图片发送] 同步发送完成 building={building}, session={session_id_text}, status={result.get('status', '-')}"

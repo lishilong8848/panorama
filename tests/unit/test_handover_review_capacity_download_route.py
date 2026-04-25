@@ -3,7 +3,9 @@ from types import SimpleNamespace
 from urllib.parse import unquote
 
 import pytest
+from fastapi import FastAPI
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app.modules.handover_review.api import routes
 
@@ -191,7 +193,70 @@ def test_handover_review_capacity_image_send_returns_sync_result(monkeypatch, tm
 
     assert response["ok"] is True
     assert response["status"] == "success"
+    assert any("同步接口已命中" in message for message in container.logs)
     assert any("fake done" in message for message in container.logs)
+
+
+def test_handover_review_capacity_image_send_http_route_does_not_return_job(monkeypatch, tmp_path):
+    output_file = tmp_path / "A楼交接班容量报表.xlsx"
+    output_file.write_bytes(b"demo")
+    container = _FakeContainer()
+
+    monkeypatch.setattr(routes, "_build_review_services", lambda _container: (object(), None, None, None))
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(
+        routes,
+        "_load_target_session_or_404",
+        lambda _service, **kwargs: {
+            "session_id": "sess-1",
+            "capacity_output_file": str(output_file),
+            "capacity_sync": {"status": "ready"},
+            "building": "A楼",
+        },
+    )
+
+    class _FakeDeliveryService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def begin_delivery(self, _session, *, building: str, source: str = "manual"):
+            return {"status": "sending"}
+
+        def mark_failed(self, *, session_id: str, error: str, source: str = "manual"):
+            raise AssertionError("mark_failed should not be called")
+
+        def send_for_session(self, session, *, building: str, source: str = "manual", emit_log):
+            emit_log("[交接班][容量表图片发送] fake http done")
+            return {
+                "ok": True,
+                "status": "success",
+                "building": building,
+                "session_id": session["session_id"],
+                "successful_recipients": ["ou_1"],
+                "failed_recipients": [],
+                "capacity_image_delivery": {"status": "success"},
+                "review_link_delivery": {"status": "success"},
+            }
+
+    monkeypatch.setattr(routes, "CapacityReportImageDeliveryService", _FakeDeliveryService)
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.state.container = container
+
+    response = TestClient(app).post(
+        "/api/handover/review/a/capacity-image/send",
+        json={"session_id": "sess-1", "client_id": "client-1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["status"] == "success"
+    assert "accepted" not in payload
+    assert "job" not in payload
+    assert "job_id" not in payload
+    assert any("同步接口已命中" in message for message in container.logs)
+    assert any("fake http done" in message for message in container.logs)
 
 
 def test_handover_review_capacity_image_send_rejects_when_already_sending(monkeypatch, tmp_path):

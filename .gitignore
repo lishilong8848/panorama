@@ -76,3 +76,4 @@ config_segments/handover/buildings/B.json
 config_segments/handover/buildings/C.json
 config_segments/handover/buildings/D.json
 config_segments/handover/buildings/E.json
+config_segments/handover/common.json

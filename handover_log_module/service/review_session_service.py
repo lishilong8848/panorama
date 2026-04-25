@@ -71,11 +71,17 @@ def _reraise_review_store_error(exc: Exception) -> None:
 
 def _normalize_review_link_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
+    status = str(payload.get("status", "") or "").strip().lower()
+    if status == "partial_failed":
+        status = "failed"
+    error = str(payload.get("error", "") or "").strip()
+    if error == "部分收件人发送失败":
+        error = "发送失败，详见收件人明细"
     return {
-        "status": str(payload.get("status", "") or "").strip().lower(),
+        "status": status,
         "last_attempt_at": str(payload.get("last_attempt_at", "") or "").strip(),
         "last_sent_at": str(payload.get("last_sent_at", "") or "").strip(),
-        "error": str(payload.get("error", "") or "").strip(),
+        "error": error,
         "url": str(payload.get("url", "") or "").strip(),
         "successful_recipients": [
             str(item or "").strip()
@@ -108,11 +114,17 @@ def _normalize_review_link_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any
 
 def _normalize_capacity_image_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
+    status = str(payload.get("status", "") or "").strip().lower()
+    if status == "partial_failed":
+        status = "failed"
+    error = str(payload.get("error", "") or "").strip()
+    if error == "部分收件人发送失败":
+        error = "发送失败，详见收件人明细"
     return {
-        "status": str(payload.get("status", "") or "").strip().lower(),
+        "status": status,
         "last_attempt_at": str(payload.get("last_attempt_at", "") or "").strip(),
         "last_sent_at": str(payload.get("last_sent_at", "") or "").strip(),
-        "error": str(payload.get("error", "") or "").strip(),
+        "error": error,
         "image_path": str(payload.get("image_path", "") or "").strip(),
         "image_key": str(payload.get("image_key", "") or "").strip(),
         "successful_recipients": [

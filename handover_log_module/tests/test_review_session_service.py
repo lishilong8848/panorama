@@ -192,6 +192,48 @@ def test_load_state_filters_pytest_legacy_handover_outputs(tmp_path: Path) -> No
     assert reloaded["review_latest_by_building"] == {}
 
 
+def test_delivery_state_normalizes_legacy_partial_failed(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    state = service._review_state_store.load_state()
+    state["review_sessions"] = {
+        "A楼|2026-04-25|day": {
+            "session_id": "A楼|2026-04-25|day",
+            "building": "A楼",
+            "building_code": "a",
+            "duty_date": "2026-04-25",
+            "duty_shift": "day",
+            "batch_key": "2026-04-25|day",
+            "output_file": r"D:\handover\A楼交接班.xlsx",
+            "data_file": r"D:\handover\A楼源数据.xlsx",
+            "source_mode": "from_file",
+            "revision": 1,
+            "confirmed": False,
+            "confirmed_at": "",
+            "confirmed_by": "",
+            "updated_at": "2026-04-25 17:30:00",
+            "day_metric_export": {},
+            "cloud_sheet_sync": {},
+            "source_data_attachment_export": {},
+            "review_link_delivery": {
+                "status": "partial_failed",
+                "error": "部分收件人发送失败",
+            },
+            "capacity_image_delivery": {
+                "status": "partial_failed",
+                "error": "部分收件人发送失败",
+            },
+        }
+    }
+    service._review_state_store.save_state(state)
+
+    session = service.get_session_by_id("A楼|2026-04-25|day")
+
+    assert session["review_link_delivery"]["status"] == "failed"
+    assert session["review_link_delivery"]["error"] == "发送失败，详见收件人明细"
+    assert session["capacity_image_delivery"]["status"] == "failed"
+    assert session["capacity_image_delivery"]["error"] == "发送失败，详见收件人明细"
+
+
 def test_load_state_rebuilds_latest_by_building_from_valid_sessions(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     state = service._review_state_store.load_state()
