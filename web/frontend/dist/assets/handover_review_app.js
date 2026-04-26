@@ -37,6 +37,7 @@ const DEFAULT_FOOTER_INVENTORY_COLUMNS = [
 const REVIEW_PATH_RE = /^\/handover\/review\/([a-e])\/?$/i;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 const REVIEW_LOCK_HEARTBEAT_MS = 15000;
+const SUBSTATION_110KV_AUTO_SAVE_DEBOUNCE_MS = 350;
 const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
 const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
 const HANDOVER_REVIEW_STATUS_BROADCAST_KEY = "handover_review_status_broadcast_v1";
@@ -939,6 +940,7 @@ export function mountHandoverReviewApp(Vue) {
       });
       const substation110kvDirty = ref(false);
       const substation110kvHeartbeatTimer = ref(null);
+      const substation110kvAutoSaveTimer = ref(null);
       const historyLoading = ref(false);
       const historyLoaded = ref(false);
       const historyCacheKey = ref("");
@@ -946,6 +948,9 @@ export function mountHandoverReviewApp(Vue) {
       const syncingRemoteRevision = ref(false);
       const heldLockSessionId = ref("");
       let latestLoadRequestSeq = 0;
+      let latestSubstation110kvSaveSeq = 0;
+      let substation110kvLocalVersion = 0;
+      let substation110kvAutoSavePromise = null;
       let activeLoadController = null;
       let activeMetaControllers = [];
 
@@ -986,6 +991,18 @@ export function mountHandoverReviewApp(Vue) {
         }
         return "";
       });
+      function hasReviewDocumentDirty() {
+        return Boolean(
+          dirtyRegions.value.fixed_blocks
+          || dirtyRegions.value.sections
+          || dirtyRegions.value.footer_inventory
+          || dirtyRegions.value.cooling_pump_pressures,
+        );
+      }
+
+      function refreshDirtyFlagFromRegions() {
+        dirty.value = hasReviewDocumentDirty() || substation110kvDirty.value;
+      }
       const coolingPumpPressureRows = computed(() => documentRef.value?.cooling_pump_pressures?.rows || []);
       const {
         selectedSessionId,
@@ -1207,6 +1224,21 @@ export function mountHandoverReviewApp(Vue) {
         return undefined;
       }
 
+      function handleReviewStatusBroadcast(event) {
+        if (!event || event.key !== HANDOVER_REVIEW_STATUS_BROADCAST_KEY) return;
+        if (saving.value || loading.value || syncingRemoteRevision.value) return;
+        let payload = {};
+        try {
+          payload = JSON.parse(String(event.newValue || "{}"));
+        } catch (_error) {
+          return;
+        }
+        const incomingBatchKey = String(payload?.batch_key || "").trim();
+        const currentBatchKey = String(session.value?.batch_key || batchStatus.value?.batch_key || "").trim();
+        if (incomingBatchKey && currentBatchKey && incomingBatchKey !== currentBatchKey) return;
+        void loadReviewData({ background: true });
+      }
+
       function buildLoadParams() {
         const params = {
           client_id: reviewClientId,
@@ -1393,21 +1425,46 @@ export function mountHandoverReviewApp(Vue) {
       function applySharedBlockPayload(payload = {}) {
         const shared = payload?.shared_blocks && typeof payload.shared_blocks === "object" ? payload.shared_blocks : {};
         const locks = payload?.shared_block_locks && typeof payload.shared_block_locks === "object" ? payload.shared_block_locks : {};
-        const incomingBlock = normalizeSubstation110kvBlock(shared.substation_110kv || sharedBlocks.value.substation_110kv);
+        const hasIncomingSubstation = Object.prototype.hasOwnProperty.call(shared, "substation_110kv");
+        const incomingBlock = normalizeSubstation110kvBlock(hasIncomingSubstation ? shared.substation_110kv : sharedBlocks.value.substation_110kv);
+        const incomingLock = normalizeSharedLockPayload(
+          locks.substation_110kv || sharedBlockLocks.value.substation_110kv,
+          incomingBlock.revision,
+        );
         const currentRevision = Number(sharedBlocks.value?.substation_110kv?.revision || 0);
-        if (!substation110kvDirty.value || incomingBlock.revision !== currentRevision) {
+        const incomingRevision = Number(incomingBlock.revision || 0);
+        const serverRevisionChanged = hasIncomingSubstation && incomingRevision !== currentRevision;
+        const preserveLocalRows = Boolean(substation110kvDirty.value && incomingLock.client_holds_lock);
+        if (preserveLocalRows && serverRevisionChanged) {
+          const currentBlock = normalizeSubstation110kvBlock(sharedBlocks.value.substation_110kv || {});
+          sharedBlocks.value = {
+            ...sharedBlocks.value,
+            substation_110kv: {
+              ...incomingBlock,
+              rows: currentBlock.rows,
+            },
+          };
+        } else if (!substation110kvDirty.value || serverRevisionChanged) {
           sharedBlocks.value = {
             ...sharedBlocks.value,
             substation_110kv: incomingBlock,
           };
+          if (serverRevisionChanged && substation110kvDirty.value) {
+            substation110kvDirty.value = false;
+            refreshDirtyFlagFromRegions();
+            if (!dirty.value && !saving.value) {
+              statusText.value = "110KV变电站已同步最新内容";
+            }
+          }
         }
         sharedBlockLocks.value = {
           ...sharedBlockLocks.value,
-          substation_110kv: normalizeSharedLockPayload(
-            locks.substation_110kv || sharedBlockLocks.value.substation_110kv,
-            incomingBlock.revision,
-          ),
+          substation_110kv: incomingLock,
         };
+        if (sharedBlockLocks.value.substation_110kv?.is_editing_elsewhere && pollIntervalMs.value > 1000) {
+          pollIntervalMs.value = 1000;
+          restartPollTimer();
+        }
         if (sharedBlockLocks.value.substation_110kv?.client_holds_lock) {
           restartSubstation110kvHeartbeat();
         } else {
@@ -1421,6 +1478,103 @@ export function mountHandoverReviewApp(Vue) {
           client_id: reviewClientId,
           holder_label: reviewHolderLabel,
         };
+      }
+
+      function clearSubstation110kvAutoSaveTimer() {
+        if (substation110kvAutoSaveTimer.value) {
+          window.clearTimeout(substation110kvAutoSaveTimer.value);
+          substation110kvAutoSaveTimer.value = null;
+        }
+      }
+
+      async function flushSubstation110kvAutoSave() {
+        clearSubstation110kvAutoSaveTimer();
+        if (!buildingCode || !session.value || !reviewClientId) return true;
+        if (!substation110kvDirty.value) return true;
+        if (!sharedBlockLocks.value.substation_110kv?.client_holds_lock) {
+          const locked = await ensureSubstation110kvLock();
+          if (!locked) return false;
+        }
+        if (substation110kvAutoSavePromise) {
+          try {
+            await substation110kvAutoSavePromise;
+          } catch (_error) {
+            // The in-flight save path already surfaced the error state.
+          }
+          if (!substation110kvDirty.value) return true;
+        }
+        const requestSeq = ++latestSubstation110kvSaveSeq;
+        const saveVersion = substation110kvLocalVersion;
+        const block = cloneDeep(substation110kvBlock.value);
+        substation110kvAutoSavePromise = (async () => {
+          try {
+            const response = await saveHandoverReview110kvApi(buildingCode, {
+              session_id: session.value.session_id,
+              client_id: reviewClientId,
+              base_revision: block.revision,
+              rows: block.rows,
+            });
+            if (requestSeq !== latestSubstation110kvSaveSeq) return !substation110kvDirty.value;
+            const savedBlock = normalizeSubstation110kvBlock(response?.shared_blocks?.substation_110kv || block);
+            if (saveVersion === substation110kvLocalVersion) {
+              applySharedBlockPayload(response || {});
+              substation110kvDirty.value = false;
+              refreshDirtyFlagFromRegions();
+              statusText.value = dirty.value ? "110KV变电站已自动保存" : "已保存";
+            } else {
+              const currentBlock = normalizeSubstation110kvBlock(sharedBlocks.value.substation_110kv || {});
+              sharedBlocks.value = {
+                ...sharedBlocks.value,
+                substation_110kv: {
+                  ...savedBlock,
+                  rows: currentBlock.rows,
+                },
+              };
+              sharedBlockLocks.value = {
+                ...sharedBlockLocks.value,
+                substation_110kv: normalizeSharedLockPayload(
+                  response?.shared_block_locks?.substation_110kv || sharedBlockLocks.value.substation_110kv,
+                  savedBlock.revision,
+                ),
+              };
+              scheduleSubstation110kvAutoSave();
+            }
+            broadcastHandoverReviewStatusChange(response || {});
+            return saveVersion === substation110kvLocalVersion;
+          } finally {
+            if (requestSeq === latestSubstation110kvSaveSeq) {
+              substation110kvAutoSavePromise = null;
+            }
+          }
+        })();
+        try {
+          return await substation110kvAutoSavePromise;
+        } catch (error) {
+          if (isRevisionConflictError(error)) {
+            const message = String(error?.message || "110KV变电站内容已被其他楼栋更新，请刷新后重试");
+            if (message.includes("正在其他楼栋") || message.includes("正在其他")) {
+              statusText.value = message;
+              void loadReviewData({ background: true });
+              return;
+            }
+            beginRemoteSaveRefresh(message);
+            void loadReviewData({ background: true });
+            return false;
+          }
+          errorText.value = String(error?.message || error || "110KV变电站自动保存失败");
+          statusText.value = "110KV变电站自动保存失败，请处理后重试。";
+          return false;
+        } finally {
+          substation110kvAutoSavePromise = null;
+        }
+      }
+
+      function scheduleSubstation110kvAutoSave() {
+        clearSubstation110kvAutoSaveTimer();
+        if (!sharedBlockLocks.value.substation_110kv?.client_holds_lock) return;
+        substation110kvAutoSaveTimer.value = window.setTimeout(() => {
+          void flushSubstation110kvAutoSave();
+        }, SUBSTATION_110KV_AUTO_SAVE_DEBOUNCE_MS);
       }
 
       function clearSubstation110kvHeartbeat() {
@@ -1469,6 +1623,7 @@ export function mountHandoverReviewApp(Vue) {
 
       async function releaseSubstation110kvLock({ keepalive = false } = {}) {
         clearSubstation110kvHeartbeat();
+        clearSubstation110kvAutoSaveTimer();
         if (!buildingCode || !session.value || !reviewClientId) return;
         const body = JSON.stringify({
           session_id: session.value.session_id,
@@ -1728,9 +1883,11 @@ export function mountHandoverReviewApp(Vue) {
 
       function markSubstation110kvDirty() {
         if (!session.value) return;
+        substation110kvLocalVersion += 1;
         substation110kvDirty.value = true;
         dirty.value = true;
-        statusText.value = "待保存";
+        statusText.value = "110KV变电站待自动保存";
+        scheduleSubstation110kvAutoSave();
       }
 
       async function updateSubstation110kvCell(rowIndex, key, value) {
@@ -1808,22 +1965,15 @@ export function mountHandoverReviewApp(Vue) {
         if (!substation110kvDirty.value) return true;
         const locked = await ensureSubstation110kvLock();
         if (!locked) return false;
+        const saved = await flushSubstation110kvAutoSave();
+        if (!saved || substation110kvDirty.value) {
+          return false;
+        }
         try {
-          const block = substation110kvBlock.value;
-          const response = await saveHandoverReview110kvApi(buildingCode, {
-            session_id: session.value.session_id,
-            client_id: reviewClientId,
-            base_revision: block.revision,
-            rows: block.rows,
-          });
-          applySharedBlockPayload(response || {});
-          if (response?.session) {
-            applyPayloadMeta(response || {});
-          }
-          substation110kvDirty.value = false;
+          await releaseSubstation110kvLock();
           return true;
         } catch (error) {
-          errorText.value = String(error?.message || error || "110KV变电站保存失败");
+          errorText.value = String(error?.message || error || "110KV变电站锁释放失败");
           statusText.value = "保存失败，请处理后重试。";
           return false;
         }
@@ -1836,12 +1986,7 @@ export function mountHandoverReviewApp(Vue) {
           beginRemoteSaveRefresh();
           return false;
         }
-        const hasDocumentDirty = Boolean(
-          dirtyRegions.value.fixed_blocks
-          || dirtyRegions.value.sections
-          || dirtyRegions.value.footer_inventory
-          || dirtyRegions.value.cooling_pump_pressures,
-        );
+        const hasDocumentDirty = hasReviewDocumentDirty();
         if (!dirty.value && !substation110kvDirty.value) {
           clearSaveTimers();
           dirty.value = false;
@@ -2018,6 +2163,7 @@ export function mountHandoverReviewApp(Vue) {
       onMounted(async () => {
         if (typeof window !== "undefined") {
           window.addEventListener("beforeunload", handleWindowBeforeUnload);
+          window.addEventListener("storage", handleReviewStatusBroadcast);
         }
         syncReviewSelectionToUrl({
           sessionId: activeRouteSelection.value.sessionId,
@@ -2030,6 +2176,7 @@ export function mountHandoverReviewApp(Vue) {
       onBeforeUnmount(() => {
         clearSaveTimers();
         clearHeartbeatTimer();
+        clearSubstation110kvAutoSaveTimer();
         clearMetaControllers();
         if (activeLoadController && typeof activeLoadController.abort === "function") {
           activeLoadController.abort();
@@ -2041,6 +2188,7 @@ export function mountHandoverReviewApp(Vue) {
         }
         if (typeof window !== "undefined") {
           window.removeEventListener("beforeunload", handleWindowBeforeUnload);
+          window.removeEventListener("storage", handleReviewStatusBroadcast);
         }
         void releaseCurrentLock();
         void releaseSubstation110kvLock();

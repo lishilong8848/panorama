@@ -219,6 +219,48 @@ def test_handover_review_110kv_dirty_only_marks_actual_changes() -> None:
     assert 'statusText.value = recognized ? "110KV变电站内容无变化" : "未识别到110KV变电站表格行";' in paste_body
 
 
+def test_handover_review_110kv_remote_revision_refreshes_local_block() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    source = (
+        project_root / "web" / "frontend" / "src" / "handover_review_app.js"
+    ).read_text(encoding="utf-8")
+
+    shared_body = source[source.index("function applySharedBlockPayload") :]
+    shared_body = shared_body[: shared_body.index("function buildSubstation110kvPayload")]
+    save_body = source[source.index("async function saveSubstation110kvIfNeeded") :]
+    save_body = save_body[: save_body.index("async function saveDocument")]
+    mounted_body = source[source.index("onMounted(async () =>") :]
+    mounted_body = mounted_body[: mounted_body.index("return {")]
+
+    assert "const serverRevisionChanged = hasIncomingSubstation && incomingRevision !== currentRevision;" in shared_body
+    assert "const preserveLocalRows = Boolean(substation110kvDirty.value && incomingLock.client_holds_lock);" in shared_body
+    assert "rows: currentBlock.rows," in shared_body
+    assert "if (!substation110kvDirty.value || serverRevisionChanged)" in shared_body
+    assert "substation110kvDirty.value = false;" in shared_body
+    assert "pollIntervalMs.value = 1000;" in shared_body
+    assert "const saved = await flushSubstation110kvAutoSave();" in save_body
+    assert "await releaseSubstation110kvLock();" in save_body
+    assert 'window.addEventListener("storage", handleReviewStatusBroadcast);' in mounted_body
+    assert 'window.removeEventListener("storage", handleReviewStatusBroadcast);' in mounted_body
+
+
+def test_handover_review_110kv_auto_saves_as_official_data() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    source = (
+        project_root / "web" / "frontend" / "src" / "handover_review_app.js"
+    ).read_text(encoding="utf-8")
+    api_source = (project_root / "web" / "frontend" / "src" / "api_client.js").read_text(encoding="utf-8")
+
+    assert "saveHandoverReview110kvDraftApi" not in source
+    assert "/shared-blocks/110kv/draft" not in api_source
+    assert "function scheduleSubstation110kvAutoSave()" in source
+    assert "async function flushSubstation110kvAutoSave()" in source
+    assert "saveHandoverReview110kvApi(buildingCode" in source
+    assert "scheduleSubstation110kvAutoSave();" in source[source.index("function markSubstation110kvDirty") :]
+    assert "await flushSubstation110kvAutoSave();" in source[source.index("async function saveSubstation110kvIfNeeded") :]
+    assert "shared_block_drafts" not in source
+
+
 def test_runtime_time_normalizer_accepts_single_digit_hour() -> None:
     project_root = Path(__file__).resolve().parents[2]
     source = (project_root / "web" / "frontend" / "src" / "config_date_utils.js").read_text(encoding="utf-8")
