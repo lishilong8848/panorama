@@ -1730,6 +1730,25 @@ def _migrate_shift_roster_people_text_fields(cfg: Dict[str, Any]) -> None:
         _migrate_fields(long_day.get("fields", {}))
 
 
+def _normalize_handover_cloud_sheet_sync_sheet_names(cfg: Dict[str, Any]) -> None:
+    features = cfg.get("features", {})
+    if not isinstance(features, dict):
+        return
+    handover = features.get("handover_log", {})
+    if not isinstance(handover, dict):
+        return
+    sync_cfg = handover.get("cloud_sheet_sync", {})
+    if not isinstance(sync_cfg, dict):
+        return
+    sheet_names = sync_cfg.get("sheet_names", {})
+    if not isinstance(sheet_names, dict):
+        sheet_names = {}
+        sync_cfg["sheet_names"] = sheet_names
+    for building in ("A楼", "B楼", "C楼", "D楼", "E楼"):
+        if not str(sheet_names.get(building, "") or "").strip():
+            sheet_names[building] = building
+
+
 def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     normalized_v3 = ensure_v3_config(cfg)
 
@@ -1744,6 +1763,7 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     normalized_v3 = ensure_v3_config(normalized_v3)
     _migrate_shift_roster_people_text_fields(normalized_v3)
     _normalize_handover_template_title_config(normalized_v3)
+    _normalize_handover_cloud_sheet_sync_sheet_names(normalized_v3)
 
     _validate_scheduler(normalized_v3)
     _validate_updater(normalized_v3)
