@@ -261,6 +261,38 @@ def test_handover_review_110kv_auto_saves_as_official_data() -> None:
     assert "shared_block_drafts" not in source
 
 
+def test_handover_review_110kv_auto_save_releases_lock_after_idle() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    source = (
+        project_root / "web" / "frontend" / "src" / "handover_review_app.js"
+    ).read_text(encoding="utf-8")
+
+    assert "const SUBSTATION_110KV_LOCK_RELEASE_IDLE_MS = 10000;" in source
+    assert "function scheduleSubstation110kvIdleRelease()" in source
+    assert "void releaseSubstation110kvLock();" in source[source.index("function scheduleSubstation110kvIdleRelease") :]
+    assert "scheduleSubstation110kvIdleRelease();" in source[source.index('statusText.value = dirty.value ? "110KV变电站已自动保存"') :]
+    assert "clearSubstation110kvIdleReleaseTimer();" in source[source.index("function markSubstation110kvDirty") :]
+
+
+def test_handover_review_110kv_beforeunload_preserves_pending_auto_save() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    source = (
+        project_root / "web" / "frontend" / "src" / "handover_review_app.js"
+    ).read_text(encoding="utf-8")
+
+    beforeunload_body = source[source.index("function handleWindowBeforeUnload") :]
+    beforeunload_body = beforeunload_body[: beforeunload_body.index("function handleReviewStatusBroadcast")]
+    dirty_branch = beforeunload_body[beforeunload_body.index("if (dirty.value || saving.value)") :]
+    dirty_branch = dirty_branch[: dirty_branch.index("void releaseCurrentLock")]
+    unmount_body = source[source.index("onBeforeUnmount(() =>") :]
+    unmount_body = unmount_body[: unmount_body.index("return {")]
+
+    assert "releaseSubstation110kvLock" not in dirty_branch
+    assert "clearSubstation110kvAutoSaveTimer" not in dirty_branch
+    assert "if (!substation110kvDirty.value) {" in unmount_body
+    assert "void releaseSubstation110kvLock();" in unmount_body
+
+
 def test_runtime_time_normalizer_accepts_single_digit_hour() -> None:
     project_root = Path(__file__).resolve().parents[2]
     source = (project_root / "web" / "frontend" / "src" / "config_date_utils.js").read_text(encoding="utf-8")
