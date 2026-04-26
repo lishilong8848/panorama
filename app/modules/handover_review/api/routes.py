@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import inspect
 import threading
@@ -22,6 +23,7 @@ from app.shared.utils.frontend_cache import render_frontend_index_html, source_f
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
+from handover_log_module.service.cooling_pump_pressure_defaults_service import CoolingPumpPressureDefaultsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from handover_log_module.service.handover_daily_report_asset_service import HandoverDailyReportAssetService
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
@@ -29,6 +31,10 @@ from handover_log_module.service.handover_daily_report_screenshot_service import
     HandoverDailyReportScreenshotService,
 )
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
+from handover_log_module.service.handover_xlsx_write_queue_service import (
+    HandoverXlsxWriteQueueService,
+    HandoverXlsxWriteQueueTimeoutError,
+)
 from handover_log_module.service.capacity_report_image_delivery_service import (
     CapacityReportImageDeliveryService,
 )
@@ -298,6 +304,12 @@ def _load_review_document_cached(
     if isinstance(cached_document, dict):
         session_with_sync = document_state.attach_excel_sync(dict(session))
         session_with_sync["revision"] = int(signature.get("revision", 0) or 0)
+        attach_pump = getattr(document_state, "attach_cooling_pump_pressures", None)
+        if callable(attach_pump):
+            try:
+                cached_document = attach_pump(document=cached_document, session=session_with_sync)
+            except Exception:  # noqa: BLE001
+                pass
         return cached_document, session_with_sync
     document, session_with_sync = document_state.load_document(session)
     resolved_signature = _review_document_signature(
@@ -332,6 +344,15 @@ def _build_review_bootstrap_payload(
     signature = _review_bootstrap_signature(session)
     cached = _review_bootstrap_cache_get(building=building, signature=signature)
     if isinstance(cached, dict) and bool(cached):
+        attach_pump = getattr(document_state, "attach_cooling_pump_pressures", None)
+        if callable(attach_pump) and isinstance(cached.get("document", {}), dict):
+            try:
+                cached["document"] = attach_pump(
+                    document=cached.get("document", {}),
+                    session=cached.get("session", session) if isinstance(cached.get("session", {}), dict) else session,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return cached, True
     document, session_with_sync = _load_review_document_cached(document_state, session)
     resolved_signature = _review_bootstrap_signature(
@@ -563,6 +584,29 @@ def _build_review_document_state_service(
         writer=writer,
         emit_log=getattr(container, "add_system_log", print),
     )
+
+
+def _build_xlsx_write_queue_service(
+    container,
+    *,
+    parser: ReviewDocumentParser | None = None,
+    writer: ReviewDocumentWriter | None = None,
+) -> HandoverXlsxWriteQueueService:
+    return HandoverXlsxWriteQueueService(
+        _handover_cfg(container),
+        emit_log=getattr(container, "add_system_log", print),
+        job_service=getattr(container, "job_service", None),
+        parser=parser,
+        writer=writer,
+    )
+
+
+def _resource_guard_or_null(container, *, name: str, resource_keys: list[str]):
+    job_service = getattr(container, "job_service", None)
+    guard = getattr(job_service, "resource_guard", None)
+    if callable(guard):
+        return guard(name=name, resource_keys=resource_keys)
+    return contextlib.nullcontext()
 
 
 def _attach_excel_sync_safe(document_state, session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -978,11 +1022,13 @@ def _normalize_review_dirty_regions(raw: Any) -> Dict[str, bool]:
             "fixed_blocks": True,
             "sections": True,
             "footer_inventory": True,
+            "cooling_pump_pressures": True,
         }
     return {
         "fixed_blocks": bool(raw.get("fixed_blocks")),
         "sections": bool(raw.get("sections")),
         "footer_inventory": bool(raw.get("footer_inventory")),
+        "cooling_pump_pressures": bool(raw.get("cooling_pump_pressures")),
     }
 
 
@@ -1017,40 +1063,55 @@ def _should_sync_capacity_after_review_save(
     previous_session: Dict[str, Any] | None,
     dirty_regions: Dict[str, bool],
     tracked_cells: Dict[str, str],
+    shared_110kv: Dict[str, Any] | None = None,
+    cooling_pump_pressures: Dict[str, Any] | None = None,
 ) -> bool:
-    if not bool((dirty_regions or {}).get("fixed_blocks")):
+    dirty = dirty_regions or {}
+    if not bool(dirty.get("fixed_blocks")) and not bool(dirty.get("cooling_pump_pressures")):
         return False
     previous = previous_session if isinstance(previous_session, dict) else {}
     previous_sync = previous.get("capacity_sync", {}) if isinstance(previous.get("capacity_sync", {}), dict) else {}
     previous_signature = str(previous_sync.get("input_signature", "") or "").strip()
-    next_signature = HandoverCapacityReportService.capacity_input_signature(tracked_cells)
+    next_signature = _capacity_input_signature_for_review(
+        tracked_cells=tracked_cells,
+        shared_110kv=shared_110kv,
+        cooling_pump_pressures=cooling_pump_pressures,
+    )
     if previous_signature != next_signature:
         return True
     status = str(previous_sync.get("status", "") or "").strip().lower()
     return status in {"pending_input", "missing_file", "failed"}
 
 
-def _sync_capacity_overlay_after_review_save(
+def _capacity_input_signature_for_review(
     *,
-    container,
-    review_service: ReviewSessionService,
-    previous_session: Dict[str, Any],
-    saved_session: Dict[str, Any],
-    document: Dict[str, Any],
-    dirty_regions: Dict[str, bool],
-) -> Dict[str, Any]:
-    tracked_cells = _extract_capacity_tracked_cells(document)
-    if not _should_sync_capacity_after_review_save(
-        previous_session=previous_session,
-        dirty_regions=dirty_regions,
-        tracked_cells=tracked_cells,
-    ):
-        return saved_session
-    return _sync_capacity_overlay_for_saved_session(
-        container=container,
-        review_service=review_service,
-        saved_session=saved_session,
-        tracked_cells=tracked_cells,
+    tracked_cells: Dict[str, str],
+    shared_110kv: Dict[str, Any] | None = None,
+    cooling_pump_pressures: Dict[str, Any] | None = None,
+) -> str:
+    shared_signature = ""
+    if isinstance(shared_110kv, dict):
+        shared_payload = ReviewSessionService.normalize_substation_110kv_payload(shared_110kv)
+        parts = []
+        for row in shared_payload.get("rows", []):
+            if not isinstance(row, dict):
+                continue
+            parts.append(
+                "{row_id}:{line_voltage},{current},{power_kw},{power_factor},{load_rate}".format(
+                    row_id=str(row.get("row_id", "") or "").strip(),
+                    line_voltage=str(row.get("line_voltage", "") or "").strip(),
+                    current=str(row.get("current", "") or "").strip(),
+                    power_kw=str(row.get("power_kw", "") or "").strip(),
+                    power_factor=str(row.get("power_factor", "") or "").strip(),
+                    load_rate=str(row.get("load_rate", "") or "").strip(),
+                )
+            )
+        shared_signature = f"rev={int(shared_payload.get('revision', 0) or 0)};" + "|".join(parts)
+    cooling_signature = CoolingPumpPressureDefaultsService.signature(cooling_pump_pressures or {})
+    return HandoverCapacityReportService.capacity_input_signature(
+        tracked_cells,
+        shared_110kv_signature=shared_signature,
+        cooling_pump_signature=cooling_signature,
     )
 
 
@@ -1069,111 +1130,19 @@ def _build_pending_capacity_sync_payload(tracked_cells: Dict[str, str]) -> Dict[
     }
 
 
-def _sync_capacity_overlay_for_saved_session(
+def _build_pending_capacity_sync_payload_for_review(
     *,
-    container,
-    review_service: ReviewSessionService,
-    saved_session: Dict[str, Any],
     tracked_cells: Dict[str, str],
+    shared_110kv: Dict[str, Any] | None = None,
+    cooling_pump_pressures: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    if not callable(getattr(review_service, "update_capacity_sync", None)):
-        return saved_session
-    runtime_cfg = getattr(container, "runtime_config", None)
-    if not isinstance(runtime_cfg, dict):
-        return saved_session
-
-    building = str(saved_session.get("building", "")).strip()
-    duty_date = str(saved_session.get("duty_date", "")).strip()
-    duty_shift = str(saved_session.get("duty_shift", "")).strip().lower()
-    if not building or not duty_date or duty_shift not in {"day", "night"}:
-        return saved_session
-
-    handover_cfg = _handover_cfg(container)
-    capacity_service = HandoverCapacityReportService(handover_cfg)
-    sync_payload = capacity_service.sync_overlay_for_existing_report_from_cells(
-        building=building,
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-        handover_cells=tracked_cells,
-        capacity_output_file=str(saved_session.get("capacity_output_file", "")).strip(),
-        emit_log=container.add_system_log,
+    payload = _build_pending_capacity_sync_payload(tracked_cells)
+    payload["input_signature"] = _capacity_input_signature_for_review(
+        tracked_cells=tracked_cells,
+        shared_110kv=shared_110kv,
+        cooling_pump_pressures=cooling_pump_pressures,
     )
-    sync_status = str(sync_payload.get("status", "")).strip().lower()
-    if sync_status == "ready":
-        capacity_status = "success"
-        capacity_error = ""
-    elif sync_status == "pending_input":
-        capacity_status = "pending_input"
-        capacity_error = str(sync_payload.get("error", "")).strip()
-    elif sync_status == "missing_file":
-        capacity_status = "missing_file"
-        capacity_error = str(sync_payload.get("error", "")).strip()
-    else:
-        capacity_status = "failed"
-        capacity_error = str(sync_payload.get("error", "")).strip()
-
-    updated_session = review_service.update_capacity_sync(
-        session_id=str(saved_session.get("session_id", "")).strip(),
-        capacity_sync=sync_payload if isinstance(sync_payload, dict) else {},
-        capacity_status=capacity_status,
-        capacity_error=capacity_error,
-    )
-    container.add_system_log(
-        "[交接班][容量报表][审核联动] 保存后补写状态 "
-        f"building={updated_session.get('building', '-')}, "
-        f"session_id={updated_session.get('session_id', '-')}, "
-        f"status={sync_status or '-'}"
-    )
-    return updated_session
-
-
-def _run_capacity_overlay_after_review_save(
-    *,
-    container,
-    building: str,
-    session_id: str,
-    tracked_cells: Dict[str, str],
-) -> None:
-    building_name = str(building or "").strip()
-    session_id_text = str(session_id or "").strip()
-    if not building_name or not session_id_text:
-        return
-    review_service = ReviewSessionService(_handover_cfg(container))
-    try:
-        session = review_service.get_or_recover_session_by_id(session_id_text)
-        if not isinstance(session, dict):
-            container.add_system_log(
-                f"[交接班][容量报表][审核联动] 后台补写已跳过: building={building_name}, session_id={session_id_text}, reason=session_missing"
-            )
-            return
-        with container.job_service.resource_guard(
-            name=f"handover_capacity_overlay:{building_name}:{session_id_text}",
-            resource_keys=_handover_resource_keys(building=building_name),
-        ):
-            session = _sync_capacity_overlay_for_saved_session(
-                container=container,
-                review_service=review_service,
-                saved_session=session,
-                tracked_cells=tracked_cells,
-            )
-        bootstrap_signature = _review_bootstrap_signature(session)
-        cached_bootstrap = _review_bootstrap_cache_get(
-            building=building_name,
-            signature=bootstrap_signature,
-        )
-        if isinstance(cached_bootstrap, dict):
-            cached_bootstrap["session"] = copy.deepcopy(session)
-            cached_bootstrap["prepared_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            cached_bootstrap["snapshot_revision"] = int(session.get("revision", 0) or 0)
-            _review_bootstrap_cache_put(
-                building=building_name,
-                signature=bootstrap_signature,
-                payload=cached_bootstrap,
-            )
-    except Exception as exc:  # noqa: BLE001
-        container.add_system_log(
-            f"[交接班][容量报表][审核联动] 后台补写失败: building={building_name}, session_id={session_id_text}, error={exc}"
-        )
+    return payload
 
 
 def _queue_capacity_overlay_after_review_save(
@@ -1189,27 +1158,109 @@ def _queue_capacity_overlay_after_review_save(
     if not callable(getattr(review_service, "update_capacity_sync", None)):
         return saved_session, False
     tracked_cells = _extract_capacity_tracked_cells(document)
+    shared_110kv = {}
+    try:
+        shared_110kv = review_service.get_substation_110kv(str(saved_session.get("batch_key", "")).strip())
+    except Exception:
+        shared_110kv = {}
+    cooling_pump_pressures = (
+        document.get("cooling_pump_pressures", {}) if isinstance(document.get("cooling_pump_pressures", {}), dict) else {}
+    )
     if not _should_sync_capacity_after_review_save(
         previous_session=previous_session,
         dirty_regions=dirty_regions,
         tracked_cells=tracked_cells,
+        shared_110kv=shared_110kv,
+        cooling_pump_pressures=cooling_pump_pressures,
     ):
         return saved_session, False
-    pending_payload = _build_pending_capacity_sync_payload(tracked_cells)
+    pending_payload = _build_pending_capacity_sync_payload_for_review(
+        tracked_cells=tracked_cells,
+        shared_110kv=shared_110kv,
+        cooling_pump_pressures=cooling_pump_pressures,
+    )
     updated_session = review_service.update_capacity_sync(
         session_id=str(saved_session.get("session_id", "")).strip(),
         capacity_sync=pending_payload,
         capacity_status="pending",
         capacity_error="",
     )
-    background_tasks.add_task(
-        _run_capacity_overlay_after_review_save,
-        container=container,
+    del background_tasks
+    _build_xlsx_write_queue_service(container).enqueue_capacity_overlay_sync(
         building=str(updated_session.get("building", "")).strip() or str(saved_session.get("building", "")).strip(),
         session_id=str(updated_session.get("session_id", "")).strip() or str(saved_session.get("session_id", "")).strip(),
         tracked_cells=copy.deepcopy(tracked_cells),
+        shared_110kv=copy.deepcopy(shared_110kv),
+        cooling_pump_pressures=copy.deepcopy(cooling_pump_pressures),
+        capacity_output_file=str(updated_session.get("capacity_output_file", "") or saved_session.get("capacity_output_file", "") or "").strip(),
     )
     return updated_session, True
+
+
+def _ensure_capacity_overlay_queue_drained_for_session(
+    *,
+    container,
+    review_service: ReviewSessionService,
+    building: str,
+    session_id: str,
+    timeout_sec: float = 120.0,
+) -> Dict[str, Any]:
+    target = _load_target_session_or_404(review_service, building=building, session_id=session_id)
+    queue_service = _build_xlsx_write_queue_service(container)
+    output_file_text = str(target.get("output_file", "") or "").strip()
+    capacity_output_file_text = str(target.get("capacity_output_file", "") or "").strip()
+    output_file_exists = False
+    if output_file_text:
+        try:
+            output_file_exists = Path(output_file_text).exists()
+        except Exception:
+            output_file_exists = False
+    if output_file_exists and capacity_output_file_text:
+        service, parser, writer, _ = _build_review_services(container)
+        del service
+        document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
+        document, session_with_sync = document_state.load_document(target)
+        tracked_cells = _extract_capacity_tracked_cells(document)
+        try:
+            shared_110kv = review_service.get_substation_110kv(str(target.get("batch_key", "")).strip())
+        except Exception:
+            shared_110kv = {}
+        cooling_pump_pressures = (
+            document.get("cooling_pump_pressures", {})
+            if isinstance(document.get("cooling_pump_pressures", {}), dict)
+            else {}
+        )
+        next_signature = _capacity_input_signature_for_review(
+            tracked_cells=tracked_cells,
+            shared_110kv=shared_110kv,
+            cooling_pump_pressures=cooling_pump_pressures,
+        )
+        capacity_sync = target.get("capacity_sync", {}) if isinstance(target.get("capacity_sync", {}), dict) else {}
+        current_signature = str(capacity_sync.get("input_signature", "") or "").strip()
+        current_status = str(capacity_sync.get("status", "") or "").strip().lower()
+        queue_service = _build_xlsx_write_queue_service(container, parser=parser, writer=writer)
+        if current_signature != next_signature or current_status in {"", "failed", "missing_file", "pending_input"}:
+            pending_payload = _build_pending_capacity_sync_payload_for_review(
+                tracked_cells=tracked_cells,
+                shared_110kv=shared_110kv,
+                cooling_pump_pressures=cooling_pump_pressures,
+            )
+            updated_session = review_service.update_capacity_sync(
+                session_id=session_id,
+                capacity_sync=pending_payload,
+                capacity_status="pending",
+                capacity_error="",
+            )
+            queue_service.enqueue_capacity_overlay_sync(
+                building=building,
+                session_id=session_id,
+                tracked_cells=tracked_cells,
+                shared_110kv=shared_110kv,
+                cooling_pump_pressures=cooling_pump_pressures,
+                capacity_output_file=str(updated_session.get("capacity_output_file", "") or target.get("capacity_output_file", "") or "").strip(),
+            )
+    queue_service.wait_for_barrier(building=building, timeout_sec=timeout_sec)
+    return _load_target_session_or_404(review_service, building=building, session_id=session_id)
 
 
 def _normalized_review_defaults_snapshot(
@@ -1244,6 +1295,7 @@ def _persist_review_defaults(
     result: Dict[str, int | bool | str] = {
         "footer_inventory_rows": int(persisted.get("footer_inventory_rows", 0) or 0),
         "cabinet_power_fields": int(persisted.get("cabinet_power_fields", 0) or 0),
+        "cooling_pump_pressure_fields": int(persisted.get("cooling_pump_pressure_fields", 0) or 0),
         "defaults_updated": bool(persisted.get("defaults_updated", False)),
         "config_updated": False,
         "aggregate_refresh_error": "",
@@ -2367,6 +2419,34 @@ def _attach_review_display_state(
         latest_session_id = _safe_latest_session_id(service, building=building, emit_log=emit_log)
     if latest_session_id:
         response["latest_session_id"] = latest_session_id
+    batch_key = str(session.get("batch_key", "") or "").strip()
+    if batch_key:
+        try:
+            shared_110kv = service.get_substation_110kv(batch_key)
+            response["shared_blocks"] = {
+                **(
+                    response.get("shared_blocks", {})
+                    if isinstance(response.get("shared_blocks", {}), dict)
+                    else {}
+                ),
+                "substation_110kv": shared_110kv,
+            }
+            response["shared_block_locks"] = {
+                **(
+                    response.get("shared_block_locks", {})
+                    if isinstance(response.get("shared_block_locks", {}), dict)
+                    else {}
+                ),
+                "substation_110kv": service.get_substation_110kv_lock(
+                    batch_key=batch_key,
+                    client_id=str(client_id or "").strip(),
+                ),
+            }
+        except Exception as exc:  # noqa: BLE001
+            if callable(emit_log):
+                emit_log(
+                    f"[交接班][110KV共享] 状态附加失败 building={building}, batch={batch_key}, error={exc}"
+                )
     if include_concurrency:
         response["concurrency"] = concurrency
     response["display_state"] = _build_review_display_state(
@@ -2987,6 +3067,7 @@ def handover_review_bootstrap(
     duty_date: str = "",
     duty_shift: str = "",
     session_id: str = "",
+    client_id: str = "",
 ) -> Dict[str, Any]:
     container = request.app.state.container
     service, parser, writer, _ = _build_review_services(container)
@@ -3012,6 +3093,7 @@ def handover_review_bootstrap(
         payload,
         service=service,
         building=building,
+        client_id=str(client_id or "").strip(),
         emit_log=container.add_system_log,
         include_concurrency=False,
     )
@@ -3130,7 +3212,17 @@ def handover_review_download(building_code: str, request: Request, session_id: s
     if not output_file.exists() or not output_file.is_file():
         raise HTTPException(status_code=409, detail="交接班文件不存在，无法同步最新审核内容")
     try:
-        document_state.force_sync_session_dict(target, reason="download")
+        queue_service = _build_xlsx_write_queue_service(container, parser=parser, writer=writer)
+        queue_service.enqueue_review_excel_sync(
+            target,
+            target_revision=int(target.get("revision", 0) or 0),
+        )
+        queue_service.wait_for_barrier(building=building, timeout_sec=120.0)
+        sync_state = _attach_excel_sync_safe(document_state, target).get("excel_sync", {})
+        if str(sync_state.get("status", "") or "").strip().lower() == "failed":
+            raise ReviewDocumentStateError(str(sync_state.get("error", "") or "").strip() or "交接班Excel同步失败")
+    except HandoverXlsxWriteQueueTimeoutError as exc:
+        raise HTTPException(status_code=409, detail="交接班文件写入队列繁忙，请稍后重试") from exc
     except ReviewDocumentStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -3197,47 +3289,88 @@ def handover_review_capacity_image_send(
         f"building={building}, session={session_id_text}, "
         f"source_file={str(target.get('capacity_output_file', '') or '').strip() or '-'}"
     )
+    try:
+        target = _ensure_capacity_overlay_queue_drained_for_session(
+            container=container,
+            review_service=service,
+            building=building,
+            session_id=session_id_text,
+            timeout_sec=120.0,
+        )
+    except HandoverXlsxWriteQueueTimeoutError as exc:
+        container.add_system_log(
+            "[交接班][容量表图片发送] 等待xlsx写入队列超时 "
+            f"building={building}, session={session_id_text}, error={exc}"
+        )
+        raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试") from exc
+    except ReviewDocumentStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     delivery_service = CapacityReportImageDeliveryService(
         _handover_cfg(container),
         config_path=getattr(container, "config_path", None),
     )
-    try:
-        delivery_service.begin_delivery(target, building=building, source="manual")
-    except FileNotFoundError as exc:
-        container.add_system_log(
-            "[交接班][容量表图片发送] 同步接口预检失败 "
-            f"building={building}, session={session_id_text}, error={exc}"
-        )
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        container.add_system_log(
-            "[交接班][容量表图片发送] 同步接口预检失败 "
-            f"building={building}, session={session_id_text}, error={exc}"
-        )
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    queue_service = _build_xlsx_write_queue_service(container)
+    for attempt in range(3):
+        needs_queue_wait = False
+        with _resource_guard_or_null(
+            container,
+            name=f"handover_capacity_image_send:{building}:{session_id_text}",
+            resource_keys=_handover_resource_keys(building=building),
+        ):
+            if queue_service.has_active_write_jobs(building=building):
+                needs_queue_wait = True
+                container.add_system_log(
+                    "[交接班][容量表图片发送] 获取发送锁后发现xlsx队列仍有写入任务，继续等待 "
+                    f"building={building}, session={session_id_text}, attempt={attempt + 1}"
+                )
+            else:
+                try:
+                    delivery_service.begin_delivery(target, building=building, source="manual")
+                except FileNotFoundError as exc:
+                    container.add_system_log(
+                        "[交接班][容量表图片发送] 同步接口预检失败 "
+                        f"building={building}, session={session_id_text}, error={exc}"
+                    )
+                    raise HTTPException(status_code=404, detail=str(exc)) from exc
+                except ValueError as exc:
+                    container.add_system_log(
+                        "[交接班][容量表图片发送] 同步接口预检失败 "
+                        f"building={building}, session={session_id_text}, error={exc}"
+                    )
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    try:
-        latest_session = _load_target_session_or_404(service, building=building, session_id=session_id_text)
-        result = delivery_service.send_for_session(
-            latest_session,
-            building=building,
-            source="manual",
-            emit_log=container.add_system_log,
-        )
-    except Exception as exc:  # noqa: BLE001
-        try:
-            delivery_service.mark_failed(session_id=session_id_text, error=f"发送容量表图片失败: {exc}", source="manual")
-        except Exception:
-            pass
-        container.add_system_log(
-            "[交接班][容量表图片发送] 同步接口发送异常 "
-            f"building={building}, session={session_id_text}, error={exc}"
-        )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    container.add_system_log(
-        f"[交接班][容量表图片发送] 同步发送完成 building={building}, session={session_id_text}, status={result.get('status', '-')}"
-    )
-    return result
+                try:
+                    latest_session = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+                    result = delivery_service.send_for_session(
+                        latest_session,
+                        building=building,
+                        source="manual",
+                        emit_log=container.add_system_log,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        delivery_service.mark_failed(session_id=session_id_text, error=f"发送容量表图片失败: {exc}", source="manual")
+                    except Exception:
+                        pass
+                    container.add_system_log(
+                        "[交接班][容量表图片发送] 同步接口发送异常 "
+                        f"building={building}, session={session_id_text}, error={exc}"
+                    )
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                container.add_system_log(
+                    f"[交接班][容量表图片发送] 同步发送完成 building={building}, session={session_id_text}, status={result.get('status', '-')}"
+                )
+                return result
+        if needs_queue_wait:
+            try:
+                queue_service.wait_for_barrier(building=building, timeout_sec=120.0)
+            except HandoverXlsxWriteQueueTimeoutError as exc:
+                container.add_system_log(
+                    "[交接班][容量表图片发送] 发送锁复查后等待xlsx队列超时 "
+                    f"building={building}, session={session_id_text}, error={exc}"
+                )
+                raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试") from exc
+    raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试")
 
 
 @router.put("/api/handover/review/{building_code}")
@@ -3296,6 +3429,8 @@ def handover_review_save(
                 ensure_ready=False,
             )
             if isinstance(_saved_document_state, dict):
+                if isinstance(_saved_document_state.get("document", {}), dict):
+                    document = _saved_document_state.get("document", {})
                 _review_document_cache_put(
                     building=building,
                     signature=_review_document_signature(
@@ -3444,13 +3579,15 @@ def handover_review_save(
             container.add_system_log(
                 f"[交接班][审核模板默认] 已写入楼栋SQLite默认值: building={building}, "
                 f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0)}, "
-                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0)}"
+                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0)}, "
+                f"cooling_pump_pressure_fields={persisted_defaults.get('cooling_pump_pressure_fields', 0)}"
             )
         else:
             container.add_system_log(
                 f"[交接班][审核模板默认] 楼栋SQLite默认值无变化，已跳过写入: building={building}, "
                 f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0) if isinstance(persisted_defaults, dict) else 0}, "
-                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}"
+                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}, "
+                f"cooling_pump_pressure_fields={persisted_defaults.get('cooling_pump_pressure_fields', 0) if isinstance(persisted_defaults, dict) else 0}"
             )
         if defaults_config_status == "queued":
             container.add_system_log(
@@ -3802,6 +3939,242 @@ def handover_review_lock_release(
     except ReviewSessionStoreUnavailableError as exc:
         _raise_review_store_http_error(exc)
     return {"ok": True, "concurrency": concurrency, "released": bool(concurrency.get("released", False))}
+
+
+def _sync_substation_110kv_to_batch_capacity_reports(
+    *,
+    container,
+    review_service: ReviewSessionService,
+    parser: ReviewDocumentParser,
+    writer: ReviewDocumentWriter,
+    shared_110kv: Dict[str, Any],
+    emit_log,
+) -> Dict[str, Any]:
+    batch_key = str(shared_110kv.get("batch_key", "") or "").strip()
+    if not batch_key:
+        return {"updated": 0, "failed": 0, "errors": []}
+    document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
+    queue_service = _build_xlsx_write_queue_service(container, parser=parser, writer=writer)
+    sessions = review_service.list_batch_sessions(batch_key)
+    updated = 0
+    failed = 0
+    errors: list[dict[str, str]] = []
+    for session in sessions:
+        building = str(session.get("building", "") or "").strip()
+        session_id = str(session.get("session_id", "") or "").strip()
+        capacity_file = str(session.get("capacity_output_file", "") or "").strip()
+        if not capacity_file:
+            continue
+        try:
+            document, session_with_sync = document_state.load_document(session)
+            tracked_cells = _extract_capacity_tracked_cells(document)
+            cooling_pump_pressures = (
+                document.get("cooling_pump_pressures", {})
+                if isinstance(document.get("cooling_pump_pressures", {}), dict)
+                else {}
+            )
+            pending_payload = _build_pending_capacity_sync_payload_for_review(
+                tracked_cells=tracked_cells,
+                shared_110kv=shared_110kv,
+                cooling_pump_pressures=cooling_pump_pressures,
+            )
+            updated_session = review_service.update_capacity_sync(
+                session_id=session_id,
+                capacity_sync=pending_payload,
+                capacity_status="pending",
+                capacity_error="",
+            )
+            queue_service.enqueue_capacity_overlay_sync(
+                building=building,
+                session_id=session_id,
+                tracked_cells=tracked_cells,
+                shared_110kv=shared_110kv,
+                cooling_pump_pressures=cooling_pump_pressures,
+                capacity_output_file=str(updated_session.get("capacity_output_file", "") or capacity_file).strip(),
+            )
+            updated += 1
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            errors.append({"building": building, "session_id": session_id, "error": str(exc)})
+            if callable(emit_log):
+                emit_log(
+                    f"[交接班][110KV共享] 容量表补写失败 building={building}, session_id={session_id}, error={exc}"
+                )
+    if callable(emit_log):
+        emit_log(
+            f"[交接班][110KV共享] 本班容量表补写已入队 batch={batch_key}, queued={updated}, failed={failed}"
+        )
+    return {"updated": updated, "failed": failed, "errors": errors}
+
+
+def _shared_110kv_lock_response(
+    *,
+    service: ReviewSessionService,
+    building: str,
+    session_id: str,
+    client_id: str,
+    operation,
+) -> Dict[str, Any]:
+    target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    batch_key = str(target.get("batch_key", "") or "").strip()
+    try:
+        lock_state = operation(batch_key)
+        block = service.get_substation_110kv(batch_key)
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    return {
+        "ok": True,
+        "shared_blocks": {"substation_110kv": block},
+        "shared_block_locks": {"substation_110kv": lock_state},
+        "accepted": bool(lock_state.get("acquired", lock_state.get("renewed", True))),
+    }
+
+
+@router.post("/api/handover/review/{building_code}/shared-blocks/110kv/lock/claim")
+def handover_review_shared_110kv_lock_claim(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service = _build_review_session_service(container)
+    building = _resolve_building_or_404(service, building_code)
+    session_id = str(payload.get("session_id", "") or "").strip()
+    client_id = str(payload.get("client_id", "") or "").strip()
+    holder_label = str(payload.get("holder_label", "") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id 不能为空")
+    return _shared_110kv_lock_response(
+        service=service,
+        building=building,
+        session_id=session_id,
+        client_id=client_id,
+        operation=lambda batch_key: service.claim_substation_110kv_lock(
+            batch_key=batch_key,
+            building=building,
+            client_id=client_id,
+            holder_label=holder_label,
+        ),
+    )
+
+
+@router.post("/api/handover/review/{building_code}/shared-blocks/110kv/lock/heartbeat")
+def handover_review_shared_110kv_lock_heartbeat(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service = _build_review_session_service(container)
+    building = _resolve_building_or_404(service, building_code)
+    session_id = str(payload.get("session_id", "") or "").strip()
+    client_id = str(payload.get("client_id", "") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id 不能为空")
+    return _shared_110kv_lock_response(
+        service=service,
+        building=building,
+        session_id=session_id,
+        client_id=client_id,
+        operation=lambda batch_key: service.heartbeat_substation_110kv_lock(
+            batch_key=batch_key,
+            client_id=client_id,
+        ),
+    )
+
+
+@router.post("/api/handover/review/{building_code}/shared-blocks/110kv/lock/release")
+def handover_review_shared_110kv_lock_release(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service = _build_review_session_service(container)
+    building = _resolve_building_or_404(service, building_code)
+    session_id = str(payload.get("session_id", "") or "").strip()
+    client_id = str(payload.get("client_id", "") or "").strip()
+    if not session_id or not client_id:
+        return {
+            "ok": True,
+            "shared_block_locks": {"substation_110kv": _empty_concurrency()},
+            "released": False,
+        }
+    response = _shared_110kv_lock_response(
+        service=service,
+        building=building,
+        session_id=session_id,
+        client_id=client_id,
+        operation=lambda batch_key: service.release_substation_110kv_lock(
+            batch_key=batch_key,
+            client_id=client_id,
+        ),
+    )
+    response["released"] = bool(response.get("shared_block_locks", {}).get("substation_110kv", {}).get("released", False))
+    return response
+
+
+@router.put("/api/handover/review/{building_code}/shared-blocks/110kv")
+def handover_review_shared_110kv_save(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service, parser, writer, _ = _build_review_services(container)
+    building = _resolve_building_or_404(service, building_code)
+    session_id = str(payload.get("session_id", "") or "").strip()
+    client_id = str(payload.get("client_id", "") or "").strip()
+    base_revision = int(payload.get("base_revision", 0) or 0)
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id 不能为空")
+    target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    batch_key = str(target.get("batch_key", "") or "").strip()
+    rows = payload.get("rows", [])
+    try:
+        shared_110kv = service.save_substation_110kv(
+            batch_key=batch_key,
+            building=building,
+            client_id=client_id,
+            base_revision=base_revision,
+            rows=rows if isinstance(rows, list) else [],
+        )
+    except ValueError as exc:
+        reason = str(exc)
+        if reason == "shared_block_revision_conflict":
+            raise HTTPException(status_code=409, detail="110KV变电站内容已被其他楼栋更新，请刷新后重试") from exc
+        if reason == "shared_block_lock_required":
+            raise HTTPException(status_code=409, detail="110KV变电站正在其他楼栋或终端编辑，请稍后重试") from exc
+        raise HTTPException(status_code=400, detail=reason or "110KV变电站保存失败") from exc
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    sync_result = _sync_substation_110kv_to_batch_capacity_reports(
+        container=container,
+        review_service=service,
+        parser=parser,
+        writer=writer,
+        shared_110kv=shared_110kv,
+        emit_log=container.add_system_log,
+    )
+    lock_state = service.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id)
+    container.add_system_log(
+        f"[交接班][110KV共享] 保存完成 building={building}, batch={batch_key}, "
+        f"revision={shared_110kv.get('revision', 0)}, 容量补写={sync_result.get('updated', 0)}/{sync_result.get('failed', 0)}"
+    )
+    return {
+        "ok": True,
+        "building": building,
+        "session": _attach_excel_sync_from_store(container, service.get_session_by_id(session_id) or target),
+        "shared_blocks": {"substation_110kv": shared_110kv},
+        "shared_block_locks": {"substation_110kv": lock_state},
+        "capacity_sync_result": sync_result,
+    }
 
 
 @router.post("/api/handover/review/{building_code}/cloud-sync/retry")

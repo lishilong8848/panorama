@@ -2585,6 +2585,58 @@ button:disabled,
   gap: 0;
 }
 
+.review-shared-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(360px, 0.7fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.review-substation-card,
+.review-pump-card {
+  overflow: hidden;
+}
+
+.review-substation-table {
+  min-width: 820px;
+}
+
+.review-substation-table th,
+.review-substation-table td {
+  padding: 8px;
+  vertical-align: middle;
+}
+
+.review-substation-table tbody th {
+  width: 96px;
+  white-space: nowrap;
+  background: #f7fafc;
+}
+
+.review-compact-input {
+  min-height: 36px;
+  padding: 7px 9px;
+}
+
+.review-pump-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.review-pump-field {
+  grid-template-columns: minmax(96px, 0.9fr) minmax(90px, 1fr);
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.review-empty-inline {
+  border: 1px dashed var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  color: var(--text-2);
+  background: #f8fafc;
+  font-size: 13px;
+}
+
 .review-card-subtitle {
   margin: 4px 0 0;
 }
@@ -3107,6 +3159,7 @@ button:disabled,
   .task-grid.two-col,
   .day-metric-local-grid,
   .day-metric-summary-grid,
+  .review-shared-grid,
   .review-fixed-grid,
   .review-fixed-fields {
     grid-template-columns: 1fr;

@@ -63,6 +63,132 @@ def test_mark_confirmed_does_not_use_full_state_rewrite(tmp_path, monkeypatch) -
     assert batch_status["batch_key"] == "2026-04-15|day"
 
 
+def test_substation_110kv_shared_save_and_lock_by_batch(tmp_path) -> None:
+    service = _service(tmp_path)
+    session = service.register_generated_output(
+        building="A楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        data_file="demo.xlsx",
+        output_file="output.xlsx",
+        source_mode="generated",
+    )
+    batch_key = session["batch_key"]
+
+    lock = service.claim_substation_110kv_lock(
+        batch_key=batch_key,
+        building="A楼",
+        client_id="client-a",
+        holder_label="A端",
+    )
+    assert lock["client_holds_lock"] is True
+
+    blocked = service.claim_substation_110kv_lock(
+        batch_key=batch_key,
+        building="B楼",
+        client_id="client-b",
+        holder_label="B端",
+    )
+    assert blocked["client_holds_lock"] is False
+    assert blocked["is_editing_elsewhere"] is True
+    assert blocked["active_editor"]["holder_building"] == "A楼"
+
+    saved = service.save_substation_110kv(
+        batch_key=batch_key,
+        building="A楼",
+        client_id="client-a",
+        base_revision=0,
+        rows=[
+            {
+                "row_id": "incoming_akai",
+                "line_voltage": "115.82",
+                "current": "105.05",
+                "power_kw": "21180",
+                "power_factor": "1",
+                "load_rate": "0.2118",
+            }
+        ],
+    )
+
+    assert saved["revision"] == 1
+    assert saved["updated_by_building"] == "A楼"
+    assert saved["rows"][0]["line_voltage"] == "115.82"
+    assert service.get_substation_110kv(batch_key)["rows"][0]["power_kw"] == "21180"
+
+    service.register_generated_output(
+        building="E楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        data_file="demo-e.xlsx",
+        output_file="output-e.xlsx",
+        source_mode="generated",
+    )
+    shared_for_e = service.get_substation_110kv("2026-04-15|day")
+    assert shared_for_e["rows"][0]["power_kw"] == "21180"
+    assert shared_for_e["updated_by_building"] == "A楼"
+
+
+def test_substation_110kv_lock_expiry_allows_next_editor(tmp_path) -> None:
+    service = _service(tmp_path)
+    session = service.register_generated_output(
+        building="C楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        data_file="demo.xlsx",
+        output_file="output.xlsx",
+        source_mode="generated",
+    )
+    batch_key = session["batch_key"]
+
+    first = service.claim_substation_110kv_lock(
+        batch_key=batch_key,
+        building="C楼",
+        client_id="client-c",
+        holder_label="C端",
+        lease_ttl_sec=-1,
+    )
+    assert first["client_holds_lock"] is True
+
+    second = service.claim_substation_110kv_lock(
+        batch_key=batch_key,
+        building="D楼",
+        client_id="client-d",
+        holder_label="D端",
+    )
+    assert second["client_holds_lock"] is True
+    assert second["active_editor"]["holder_building"] == "D楼"
+
+
+def test_substation_110kv_stale_revision_rejected(tmp_path) -> None:
+    service = _service(tmp_path)
+    session = service.register_generated_output(
+        building="C楼",
+        duty_date="2026-04-15",
+        duty_shift="night",
+        data_file="demo.xlsx",
+        output_file="output.xlsx",
+        source_mode="generated",
+    )
+    batch_key = session["batch_key"]
+    service.claim_substation_110kv_lock(batch_key=batch_key, building="C楼", client_id="client-c")
+    service.save_substation_110kv(
+        batch_key=batch_key,
+        building="C楼",
+        client_id="client-c",
+        base_revision=0,
+        rows=[],
+    )
+
+    with pytest.raises(ValueError, match="shared_block_revision_conflict"):
+        service.save_substation_110kv(
+            batch_key=batch_key,
+            building="C楼",
+            client_id="client-c",
+            base_revision=0,
+            rows=[],
+        )
+
+
 def test_load_state_repairs_missing_source_cache_without_full_state_rewrite(tmp_path, monkeypatch) -> None:
     service = _service(tmp_path)
     state = service._review_state_store.load_state()

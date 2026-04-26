@@ -17,6 +17,10 @@ from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateError,
     ReviewDocumentStateService,
 )
+from handover_log_module.service.handover_xlsx_write_queue_service import (
+    HandoverXlsxWriteQueueService,
+    HandoverXlsxWriteQueueTimeoutError,
+)
 from handover_log_module.service.review_session_service import ReviewSessionNotFoundError, ReviewSessionService
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
@@ -756,11 +760,21 @@ class ReviewFollowupTriggerService:
                 continue
             if force_excel_sync:
                 try:
-                    self._review_document_state_service.force_sync_session_dict(
-                        session,
-                        reason="cloud_upload",
+                    queue_service = HandoverXlsxWriteQueueService(
+                        self.config,
+                        emit_log=emit_log,
                     )
-                except ReviewDocumentStateError as exc:
+                    queue_service.enqueue_review_excel_sync(session, target_revision=revision)
+                    queue_service.wait_for_barrier(building=building, timeout_sec=120.0)
+                    attach_sync = getattr(self._review_document_state_service, "attach_excel_sync", None)
+                    if callable(attach_sync):
+                        sync_state = attach_sync(session).get("excel_sync", {})
+                        status = str(sync_state.get("status", "") or "").strip().lower()
+                        if status == "failed":
+                            raise ReviewDocumentStateError(
+                                str(sync_state.get("error", "") or "").strip() or "交接班Excel同步失败"
+                            )
+                except (ReviewDocumentStateError, HandoverXlsxWriteQueueTimeoutError) as exc:
                     emit_log(
                         "[交接班][云表最终上传] 同步最新审核内容失败 "
                         f"building={building}, session_id={session.get('session_id', '-')}, error={exc}"

@@ -523,6 +523,34 @@ export async function releaseHandoverReviewLockApi(buildingCode, payload = {}) {
   });
 }
 
+export async function claimHandoverReview110kvLockApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/shared-blocks/110kv/lock/claim`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function heartbeatHandoverReview110kvLockApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/shared-blocks/110kv/lock/heartbeat`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function releaseHandoverReview110kvLockApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/shared-blocks/110kv/lock/release`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function saveHandoverReview110kvApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/shared-blocks/110kv`, {
+    method: "PUT",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export function buildHandoverReviewDownloadUrl(buildingCode, sessionId) {
   return `/api/handover/review/${encodeURIComponent(buildingCode)}/download?session_id=${encodeURIComponent(sessionId)}`;
 }

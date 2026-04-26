@@ -178,6 +178,84 @@
     </section>
 
     <template v-else>
+      <section class="review-shared-grid">
+        <article class="review-card review-substation-card">
+          <div class="review-card-head">
+            <div>
+              <h2>110KV变电站</h2>
+              <p class="review-card-subtitle">{{ substation110kvMetaText }}</p>
+            </div>
+            <span
+              v-if="substation110kvLockText"
+              class="status-badge status-badge-outline"
+              :class="substation110kvLockedByOther ? 'tone-warning' : 'tone-info'"
+            >
+              {{ substation110kvLockText }}
+            </span>
+          </div>
+          <div class="review-table-wrap">
+            <table class="review-table review-substation-table" @paste.prevent="pasteSubstation110kvTable">
+              <thead>
+                <tr>
+                  <th>进线/主变</th>
+                  <th>线电压</th>
+                  <th>电流/输出电流</th>
+                  <th>当前功率KW</th>
+                  <th>功率因数</th>
+                  <th>负载率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, rowIndex) in substation110kvBlock.rows" :key="row.row_id">
+                  <th>{{ row.label }}</th>
+                  <td v-for="column in substation110kvBlock.columns" :key="row.row_id + ':' + column.key">
+                    <input
+                      class="review-input review-compact-input"
+                      :value="row[column.key]"
+                      :disabled="substation110kvReadonly"
+                      @focus="ensureSubstation110kvLock"
+                      @input="updateSubstation110kvCell(rowIndex, column.key, $event.target.value)"
+                    />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="review-card review-pump-card">
+          <div class="review-card-head">
+            <div>
+              <h2>冷却水泵压力</h2>
+              <p class="review-card-subtitle">按当前运行制冷单元填写，下次同楼同区同单元自动带出。</p>
+            </div>
+          </div>
+          <div v-if="!coolingPumpPressureRows.length" class="review-empty-inline">
+            当前容量表未识别到运行制冷单元
+          </div>
+          <div v-else class="review-fixed-fields review-pump-fields">
+            <label
+              v-for="(row, rowIndex) in coolingPumpPressureRows"
+              :key="row.row_id || (row.zone + ':' + row.unit)"
+              class="review-field review-pump-field"
+            >
+              <span class="review-field-label">{{ row.zone_label }} {{ row.unit_label }} 进水压力</span>
+              <input
+                class="review-input"
+                :value="row.inlet_pressure"
+                @input="updateCoolingPumpPressure(rowIndex, 'inlet_pressure', $event.target.value)"
+              />
+              <span class="review-field-label">{{ row.zone_label }} {{ row.unit_label }} 出水压力</span>
+              <input
+                class="review-input"
+                :value="row.outlet_pressure"
+                @input="updateCoolingPumpPressure(rowIndex, 'outlet_pressure', $event.target.value)"
+              />
+            </label>
+          </div>
+        </article>
+      </section>
+
       <section class="review-fixed-grid">
         <article v-for="(block, blockIndex) in document.fixed_blocks" :key="block.id || blockIndex" class="review-card">
           <div class="review-card-head">

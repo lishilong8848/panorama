@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 import json
 import sqlite3
 import threading
@@ -170,6 +171,25 @@ class ReviewBuildingDocumentStore:
             );
             CREATE INDEX IF NOT EXISTS idx_sync_jobs_status
                 ON sync_jobs(status, updated_at);
+
+            CREATE TABLE IF NOT EXISTS xlsx_write_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL UNIQUE,
+                building TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_xlsx_write_jobs_status
+                ON xlsx_write_jobs(status, id);
+            CREATE INDEX IF NOT EXISTS idx_xlsx_write_jobs_dedupe
+                ON xlsx_write_jobs(task_type, dedupe_key, status);
             """
         )
         columns = {
@@ -425,6 +445,231 @@ class ReviewBuildingDocumentStore:
         self.ensure_ready()
         with self.connect(read_only=True) as conn:
             return self.get_sync_state_from_conn(conn, session_id)
+
+    @staticmethod
+    def _row_to_xlsx_write_job(row: sqlite3.Row | None) -> Dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"] or 0),
+            "job_id": str(row["job_id"] or "").strip(),
+            "building": str(row["building"] or "").strip(),
+            "task_type": str(row["task_type"] or "").strip(),
+            "dedupe_key": str(row["dedupe_key"] or "").strip(),
+            "payload": _json_loads(row["payload_json"], {}),
+            "status": str(row["status"] or "").strip().lower(),
+            "attempts": int(row["attempts"] or 0),
+            "error": str(row["error"] or ""),
+            "created_at": str(row["created_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+            "finished_at": str(row["finished_at"] or ""),
+        }
+
+    def enqueue_xlsx_write_job(
+        self,
+        *,
+        task_type: str,
+        dedupe_key: str,
+        payload: Dict[str, Any],
+        dedupe_pending: bool = True,
+    ) -> Dict[str, Any]:
+        self.ensure_ready()
+        normalized_type = str(task_type or "").strip()
+        normalized_key = str(dedupe_key or "").strip()
+        if not normalized_type:
+            raise ValueError("task_type required")
+        if not normalized_key:
+            raise ValueError("dedupe_key required")
+        now = _now_text()
+        payload_json = _json_dumps(payload if isinstance(payload, dict) else {})
+        with self.connect() as conn:
+            row = None
+            if dedupe_pending:
+                row = conn.execute(
+                    """
+                    SELECT *
+                      FROM xlsx_write_jobs
+                     WHERE task_type=?
+                       AND dedupe_key=?
+                       AND status='pending'
+                     ORDER BY id ASC
+                     LIMIT 1
+                    """,
+                    (normalized_type, normalized_key),
+                ).fetchone()
+            if row is not None:
+                conn.execute(
+                    """
+                    UPDATE xlsx_write_jobs
+                       SET payload_json=?,
+                           attempts=0,
+                           error='',
+                           updated_at=?,
+                           finished_at=''
+                     WHERE job_id=?
+                    """,
+                    (payload_json, now, str(row["job_id"] or "")),
+                )
+                refreshed = conn.execute(
+                    "SELECT * FROM xlsx_write_jobs WHERE job_id=?",
+                    (str(row["job_id"] or ""),),
+                ).fetchone()
+                return self._row_to_xlsx_write_job(refreshed) or {}
+
+            job_id = uuid.uuid4().hex
+            conn.execute(
+                """
+                INSERT INTO xlsx_write_jobs(
+                    job_id, building, task_type, dedupe_key, payload_json,
+                    status, attempts, error, created_at, updated_at, finished_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    job_id,
+                    self.building,
+                    normalized_type,
+                    normalized_key,
+                    payload_json,
+                    "pending",
+                    0,
+                    "",
+                    now,
+                    now,
+                    "",
+                ),
+            )
+            row = conn.execute("SELECT * FROM xlsx_write_jobs WHERE job_id=?", (job_id,)).fetchone()
+        return self._row_to_xlsx_write_job(row) or {}
+
+    def claim_next_xlsx_write_job(self) -> Dict[str, Any] | None:
+        self.ensure_ready()
+        with self.connect() as conn:
+            while True:
+                now = _now_text()
+                row = conn.execute(
+                    """
+                    SELECT *
+                      FROM xlsx_write_jobs
+                     WHERE status='pending'
+                     ORDER BY id ASC
+                     LIMIT 1
+                    """
+                ).fetchone()
+                if row is None:
+                    return None
+                cursor = conn.execute(
+                    """
+                    UPDATE xlsx_write_jobs
+                       SET status='running',
+                           attempts=attempts+1,
+                           error='',
+                           updated_at=?,
+                           finished_at=''
+                     WHERE job_id=?
+                       AND status='pending'
+                    """,
+                    (now, str(row["job_id"] or "")),
+                )
+                if cursor.rowcount <= 0:
+                    continue
+                claimed = conn.execute(
+                    "SELECT * FROM xlsx_write_jobs WHERE job_id=?",
+                    (str(row["job_id"] or ""),),
+                ).fetchone()
+                break
+        return self._row_to_xlsx_write_job(claimed)
+
+    def finish_xlsx_write_job(self, *, job_id: str, success: bool, error: str = "") -> Dict[str, Any] | None:
+        self.ensure_ready()
+        now = _now_text()
+        status = "success" if success else "failed"
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE xlsx_write_jobs
+                   SET status=?,
+                       error=?,
+                       updated_at=?,
+                       finished_at=?
+                 WHERE job_id=?
+                """,
+                (status, "" if success else str(error or "").strip(), now, now, str(job_id or "").strip()),
+            )
+            row = conn.execute(
+                "SELECT * FROM xlsx_write_jobs WHERE job_id=?",
+                (str(job_id or "").strip(),),
+            ).fetchone()
+        return self._row_to_xlsx_write_job(row)
+
+    def get_xlsx_write_job(self, job_id: str) -> Dict[str, Any] | None:
+        self.ensure_ready()
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                "SELECT * FROM xlsx_write_jobs WHERE job_id=?",
+                (str(job_id or "").strip(),),
+            ).fetchone()
+        return self._row_to_xlsx_write_job(row)
+
+    def has_pending_xlsx_write_jobs(self) -> bool:
+        self.ensure_ready()
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM xlsx_write_jobs WHERE status='pending' LIMIT 1",
+            ).fetchone()
+        return row is not None
+
+    def has_active_xlsx_write_jobs(self) -> bool:
+        self.ensure_ready()
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                  FROM xlsx_write_jobs
+                 WHERE status IN ('pending', 'running')
+                   AND task_type IN ('review_excel_sync', 'capacity_overlay_sync')
+                 LIMIT 1
+                """
+            ).fetchone()
+        return row is not None
+
+    def recover_xlsx_write_jobs_for_startup(self) -> Dict[str, int]:
+        self.ensure_ready()
+        now = _now_text()
+        with self.connect() as conn:
+            running_count = int(
+                conn.execute("SELECT COUNT(*) FROM xlsx_write_jobs WHERE status='running'").fetchone()[0] or 0
+            )
+            if running_count:
+                conn.execute(
+                    """
+                    UPDATE xlsx_write_jobs
+                       SET status='pending',
+                           error='服务重启后重新排队',
+                           updated_at=?,
+                           finished_at=''
+                     WHERE status='running'
+                    """,
+                    (now,),
+                )
+            pending_count = int(
+                conn.execute("SELECT COUNT(*) FROM xlsx_write_jobs WHERE status='pending'").fetchone()[0] or 0
+            )
+            active_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                      FROM xlsx_write_jobs
+                     WHERE status IN ('pending', 'running')
+                       AND task_type IN ('review_excel_sync', 'capacity_overlay_sync')
+                    """
+                ).fetchone()[0]
+                or 0
+            )
+        return {
+            "reset_running": running_count,
+            "pending": pending_count,
+            "active_writes": active_count,
+        }
 
     @staticmethod
     def _upsert_sync_state_conn(

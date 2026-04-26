@@ -283,7 +283,14 @@ def test_handover_review_save_latest_passes_dirty_regions_and_returns_save_profi
         },
     )
 
-    assert persisted_defaults_calls == [{"fixed_blocks": True, "sections": False, "footer_inventory": False}]
+    assert persisted_defaults_calls == [
+        {
+            "fixed_blocks": True,
+            "sections": False,
+            "footer_inventory": False,
+            "cooling_pump_pressures": False,
+        }
+    ]
     assert touched_latest_calls == [("A楼", "A楼|2026-03-23|night", 7)]
     assert "history" not in payload
     assert {"write_ms", "defaults_ms", "session_ms", "total_ms"}.issubset(payload["save_profile"].keys())
@@ -404,7 +411,12 @@ def test_persist_review_defaults_writes_back_building_segment_for_latest_session
     class _DocumentState:
         def persist_defaults_from_document(self, *, building, document, dirty_regions):
             assert building == "A楼"
-            assert dirty_regions == {"fixed_blocks": True, "sections": False, "footer_inventory": True}
+            assert dirty_regions == {
+                "fixed_blocks": True,
+                "sections": False,
+                "footer_inventory": True,
+                "cooling_pump_pressures": False,
+            }
             return {
                 "footer_inventory_rows": 1,
                 "cabinet_power_fields": 4,
@@ -487,7 +499,12 @@ def test_persist_review_defaults_skips_building_segment_write_when_only_sections
     class _DocumentState:
         def persist_defaults_from_document(self, *, building, document, dirty_regions):
             assert building == "A楼"
-            assert dirty_regions == {"fixed_blocks": False, "sections": True, "footer_inventory": False}
+            assert dirty_regions == {
+                "fixed_blocks": False,
+                "sections": True,
+                "footer_inventory": False,
+                "cooling_pump_pressures": False,
+            }
             return {
                 "footer_inventory_rows": 0,
                 "cabinet_power_fields": 0,

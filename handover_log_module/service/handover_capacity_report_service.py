@@ -25,11 +25,13 @@ from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.shift_window import parse_duty_date
 from handover_log_module.core.normalizers import format_number
 from handover_log_module.repository.excel_reader import load_rows, load_workbook_quietly
+from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
 from handover_log_module.service.capacity_report_common import (
     build_aircon_matrix_missing_warnings,
     build_capacity_template_snapshot,
 )
+from handover_log_module.service.cooling_pump_pressure_defaults_service import CoolingPumpPressureDefaultsService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from pipeline_utils import get_app_dir
 
@@ -55,6 +57,20 @@ _CAPACITY_WATER_SOURCE = {
 }
 _CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13")
 _CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
+_SUBSTATION_110KV_VALUE_CELLS = {
+    "incoming_akai": {"line_voltage": "C57", "current": "E57", "power_kw": "G57", "power_factor": "I57", "load_rate": "K57"},
+    "incoming_ajia": {"line_voltage": "C58", "current": "E58", "power_kw": "G58", "power_factor": "I58", "load_rate": "K58"},
+    "transformer_1": {"line_voltage": "C60", "current": "E60", "power_kw": "G60", "power_factor": "I60", "load_rate": "K60"},
+    "transformer_2": {"line_voltage": "C61", "current": "E61", "power_kw": "G61", "power_factor": "I61", "load_rate": "K61"},
+    "transformer_3": {"line_voltage": "C62", "current": "E62", "power_kw": "G62", "power_factor": "I62", "load_rate": "K62"},
+    "transformer_4": {"line_voltage": "C63", "current": "E63", "power_kw": "G63", "power_factor": "I63", "load_rate": "K63"},
+}
+_COOLING_PUMP_PRESSURE_CELLS = {
+    ("west", 0): {"inlet_pressure": "I28", "outlet_pressure": "I29"},
+    ("west", 1): {"inlet_pressure": "I38", "outlet_pressure": "I39"},
+    ("east", 0): {"inlet_pressure": "V28", "outlet_pressure": "V29"},
+    ("east", 1): {"inlet_pressure": "V38", "outlet_pressure": "V39"},
+}
 _WEATHER_PHENOMENON_PRIORITY = (
     "暴雨",
     "大雨",
@@ -211,6 +227,7 @@ class HandoverCapacityReportService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
         self._review_session_service = ReviewSessionService(self.config)
+        self._cooling_pump_defaults = CoolingPumpPressureDefaultsService()
         self._weather_payload_cache: Dict[str, Dict[str, str]] = {}
         self._water_summary_cache: Dict[tuple[str, str], Dict[str, str]] = {}
 
@@ -660,6 +677,81 @@ class HandoverCapacityReportService:
         return list(_CAPACITY_TRACKED_CELLS)
 
     @staticmethod
+    def _substation_110kv_signature(shared_110kv: Dict[str, Any] | None) -> str:
+        payload = ReviewSessionService.normalize_substation_110kv_payload(shared_110kv or {})
+        revision = int(payload.get("revision", 0) or 0)
+        row_parts = []
+        for row in payload.get("rows", []):
+            if not isinstance(row, dict):
+                continue
+            row_parts.append(
+                "{row_id}:{line_voltage},{current},{power_kw},{power_factor},{load_rate}".format(
+                    row_id=_text(row.get("row_id")),
+                    line_voltage=_text(row.get("line_voltage")),
+                    current=_text(row.get("current")),
+                    power_kw=_text(row.get("power_kw")),
+                    power_factor=_text(row.get("power_factor")),
+                    load_rate=_text(row.get("load_rate")),
+                )
+            )
+        return f"rev={revision};" + "|".join(row_parts)
+
+    @staticmethod
+    def _substation_110kv_cell_values(shared_110kv: Dict[str, Any] | None) -> Dict[str, str]:
+        payload = ReviewSessionService.normalize_substation_110kv_payload(shared_110kv or {})
+        output: Dict[str, str] = {}
+        for row in payload.get("rows", []):
+            if not isinstance(row, dict):
+                continue
+            cell_map = _SUBSTATION_110KV_VALUE_CELLS.get(_text(row.get("row_id")))
+            if not cell_map:
+                continue
+            for key, cell in cell_map.items():
+                output[cell] = _text(row.get(key))
+        return output
+
+    def _load_shared_110kv_for_duty(self, *, duty_date: str, duty_shift: str) -> Dict[str, Any]:
+        batch_key = self._review_session_service.build_batch_key(_text(duty_date), _text(duty_shift).lower())
+        if not batch_key:
+            return ReviewSessionService.normalize_substation_110kv_payload({})
+        try:
+            return self._review_session_service.get_substation_110kv(batch_key)
+        except Exception:  # noqa: BLE001
+            return ReviewSessionService.normalize_substation_110kv_payload({"batch_key": batch_key})
+
+    def _load_cooling_pump_defaults(self, building: str) -> Dict[str, Dict[str, str]]:
+        try:
+            payload = ReviewBuildingDocumentStore(config=self.config, building=building).get_default(
+                self._cooling_pump_defaults.DEFAULTS_KEY
+            )
+        except Exception:  # noqa: BLE001
+            payload = {}
+        return self._cooling_pump_defaults.normalize_defaults(payload)
+
+    def _cooling_pump_pressure_values_from_payload(self, payload: Any) -> Dict[str, str]:
+        output: Dict[str, str] = {}
+        for row in self._cooling_pump_defaults.normalize_rows(payload):
+            zone = _text(row.get("zone")).lower()
+            position = int(row.get("position", 0) or 0)
+            cell_map = _COOLING_PUMP_PRESSURE_CELLS.get((zone, position))
+            if not cell_map:
+                continue
+            output[cell_map["inlet_pressure"]] = _text(row.get("inlet_pressure"))
+            output[cell_map["outlet_pressure"]] = _text(row.get("outlet_pressure"))
+        return output
+
+    def _cooling_pump_pressure_payload_from_running(
+        self,
+        *,
+        running_units: Dict[str, List[Dict[str, Any]]],
+        defaults: Any,
+    ) -> Dict[str, Any]:
+        return self._cooling_pump_defaults.document_payload(
+            running_units=running_units,
+            defaults=defaults,
+        )
+
+    @staticmethod
     def _extract_fixed_cells_from_document(document: Dict[str, Any]) -> Dict[str, str]:
         output: Dict[str, str] = {}
         fixed_blocks = document.get("fixed_blocks", []) if isinstance(document, dict) else []
@@ -683,9 +775,19 @@ class HandoverCapacityReportService:
         return {cell: _text(fixed_cells.get(cell)) for cell in _CAPACITY_TRACKED_CELLS}
 
     @staticmethod
-    def capacity_input_signature(cells: Dict[str, Any] | None) -> str:
+    def capacity_input_signature(
+        cells: Dict[str, Any] | None,
+        *,
+        shared_110kv_signature: str = "",
+        cooling_pump_signature: str = "",
+    ) -> str:
         payload = cells if isinstance(cells, dict) else {}
-        return "|".join(f"{cell}={_text(payload.get(cell))}" for cell in _CAPACITY_TRACKED_CELLS)
+        parts = [f"{cell}={_text(payload.get(cell))}" for cell in _CAPACITY_TRACKED_CELLS]
+        if _text(shared_110kv_signature):
+            parts.append(f"110kv={_text(shared_110kv_signature)}")
+        if _text(cooling_pump_signature):
+            parts.append(f"cooling_pump={_text(cooling_pump_signature)}")
+        return "|".join(parts)
 
     @staticmethod
     def _normalize_capacity_sync_payload(raw: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -1210,9 +1312,21 @@ class HandoverCapacityReportService:
         duty_shift: str,
         handover_cells: Dict[str, Any],
         capacity_output_file: str,
+        shared_110kv: Dict[str, Any] | None = None,
+        cooling_pump_pressures: Dict[str, Any] | None = None,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
-        input_signature = self.capacity_input_signature(handover_cells)
+        shared_payload = (
+            ReviewSessionService.normalize_substation_110kv_payload(shared_110kv)
+            if isinstance(shared_110kv, dict)
+            else self._load_shared_110kv_for_duty(duty_date=duty_date, duty_shift=duty_shift)
+        )
+        cooling_payload = cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {}
+        input_signature = self.capacity_input_signature(
+            handover_cells,
+            shared_110kv_signature=self._substation_110kv_signature(shared_payload),
+            cooling_pump_signature=self._cooling_pump_defaults.signature(cooling_payload),
+        )
         capacity_output_path = Path(_text(capacity_output_file))
         if not _text(capacity_output_file) or not capacity_output_path.exists():
             return self._build_capacity_sync_payload(
@@ -1239,6 +1353,8 @@ class HandoverCapacityReportService:
                     handover_cells=handover_cells,
                     emit_log=emit_log,
                 )
+                overlay_values.update(self._substation_110kv_cell_values(shared_payload))
+                overlay_values.update(self._cooling_pump_pressure_values_from_payload(cooling_payload))
                 _write_cells_with_merged_support(sheet, overlay_values)
                 atomic_save_workbook(workbook, capacity_output_path)
             finally:
@@ -1382,6 +1498,14 @@ class HandoverCapacityReportService:
             template_snapshot = build_capacity_template_snapshot(sheet, building_text)
             template_snapshot["template_family"] = _text(template_selection.get("template_family"))
             running_units = self._resolve_running_units(resolved_values_by_id)
+            shared_110kv = self._load_shared_110kv_for_duty(
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+            )
+            cooling_pump_pressures = self._cooling_pump_pressure_payload_from_running(
+                running_units=running_units,
+                defaults=self._load_cooling_pump_defaults(building_text),
+            )
             context = {
                 "building": building_text,
                 "duty_date": duty_date_text,
@@ -1402,6 +1526,7 @@ class HandoverCapacityReportService:
                 "hvdc_text": hvdc_debug.get("formatted", ""),
                 "capacity_rows": capacity_rows,
                 "running_units": running_units,
+                "cooling_pump_pressures": cooling_pump_pressures,
                 "resolved_values_by_id": resolved_values_by_id if isinstance(resolved_values_by_id, dict) else {},
                 "template_snapshot": template_snapshot,
             }
@@ -1419,6 +1544,8 @@ class HandoverCapacityReportService:
                     emit_log=emit_log,
                 )
             )
+            cell_values.update(self._substation_110kv_cell_values(shared_110kv))
+            cell_values.update(self._cooling_pump_pressure_values_from_payload(cooling_pump_pressures))
             _write_cells_with_merged_support(sheet, cell_values)
             atomic_save_workbook(workbook, output_file)
         finally:
@@ -1428,7 +1555,11 @@ class HandoverCapacityReportService:
             "[交接班][容量报表] 生成完成 "
             f"building={building_text}, duty_date={duty_date_text}, duty_shift={duty_shift_text}, output={output_file}"
         )
-        input_signature = self.capacity_input_signature({cell: handover_cells.get(cell, "") for cell in _CAPACITY_TRACKED_CELLS})
+        input_signature = self.capacity_input_signature(
+            {cell: handover_cells.get(cell, "") for cell in _CAPACITY_TRACKED_CELLS},
+            shared_110kv_signature=self._substation_110kv_signature(shared_110kv),
+            cooling_pump_signature=self._cooling_pump_defaults.signature(cooling_pump_pressures),
+        )
         valid, validation_error = self._validate_capacity_overlay_inputs(handover_cells)
         if valid:
             capacity_sync = self._build_capacity_sync_payload(

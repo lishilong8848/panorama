@@ -18,6 +18,7 @@ from handover_log_module.service.handover_capacity_report_service import (
     HandoverCapacityReportService,
     _build_fixed_header_cells,
 )
+from handover_log_module.service.cooling_pump_pressure_defaults_service import CoolingPumpPressureDefaultsService
 
 
 def test_build_fixed_header_cells_for_a_building() -> None:
@@ -106,6 +107,128 @@ def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
     assert values["AC24"] == "9.8"
     assert values["X2"] == "96%"
     assert "D8" in service.tracked_cells()
+
+
+def test_capacity_overlay_writes_substation_110kv_and_cooling_pump_pressures(tmp_path, monkeypatch) -> None:
+    output_file = tmp_path / "capacity.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "本班组"
+    sheet.merge_cells("A55:L55")
+    for row in range(57, 64):
+        sheet.merge_cells(start_row=row, start_column=11, end_row=row, end_column=12)
+    workbook.save(output_file)
+    workbook.close()
+
+    service = HandoverCapacityReportService({"capacity_report": {"template": {"sheet_name": "本班组"}}})
+    monkeypatch.setattr(
+        service,
+        "_query_capacity_water_summary",
+        lambda **kwargs: {"month_total": "0", "latest_daily_total": "0"},
+    )
+    monkeypatch.setattr(
+        service,
+        "_fetch_weather_payload_for_duty_date",
+        lambda **kwargs: {"text": "晴", "humidity": "50%"},
+    )
+
+    result = service.sync_overlay_for_existing_report_from_cells(
+        building="A楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        handover_cells={
+            "H6": "10",
+            "F8": "西区30/东区40",
+            "B6": "1.2",
+            "D6": "2000",
+            "F6": "1200",
+            "D8": "8",
+            "B13": "100",
+            "D13": "80",
+        },
+        capacity_output_file=str(output_file),
+        shared_110kv={
+            "revision": 2,
+            "rows": [
+                {
+                    "row_id": "incoming_akai",
+                    "line_voltage": "115.82",
+                    "current": "105.05",
+                    "power_kw": "21180",
+                    "power_factor": "1",
+                    "load_rate": "0.2118",
+                },
+                {
+                    "row_id": "transformer_4",
+                    "line_voltage": "10.39",
+                    "current": "738.64",
+                    "power_kw": "13270",
+                    "power_factor": "1",
+                    "load_rate": "0.2654",
+                },
+            ],
+        },
+        cooling_pump_pressures={
+            "rows": [
+                {"zone": "west", "unit": 2, "position": 0, "inlet_pressure": "0.31", "outlet_pressure": "0.27"},
+                {"zone": "east", "unit": 5, "position": 1, "inlet_pressure": "0.42", "outlet_pressure": "0.36"},
+            ]
+        },
+        emit_log=lambda _msg: None,
+    )
+
+    assert result["status"] == "ready"
+    saved = openpyxl.load_workbook(output_file, data_only=False)
+    try:
+        ws = saved["本班组"]
+        assert ws["C57"].value == "115.82"
+        assert ws["E57"].value == "105.05"
+        assert ws["G57"].value == "21180"
+        assert ws["K57"].value == "0.2118"
+        assert ws["C63"].value == "10.39"
+        assert ws["I28"].value == "0.31"
+        assert ws["I29"].value == "0.27"
+        assert ws["V38"].value == "0.42"
+        assert ws["V39"].value == "0.36"
+        assert "A55:L55" in {str(item) for item in ws.merged_cells.ranges}
+    finally:
+        saved.close()
+
+
+def test_cooling_pump_pressure_defaults_match_building_zone_unit() -> None:
+    service = CoolingPumpPressureDefaultsService()
+    defaults = service.merge_document_rows_into_defaults(
+        existing_defaults={},
+        document_payload={
+            "rows": [
+                {"zone": "west", "unit": 2, "inlet_pressure": "0.31", "outlet_pressure": "0.27"},
+            ]
+        },
+    )
+
+    payload = service.document_payload(
+        running_units={
+            "west": [{"unit": 2, "mode_text": "制冷"}, {"unit": 3, "mode_text": "板换"}],
+            "east": [{"unit": 5, "mode_text": "制冷"}],
+        },
+        defaults=defaults,
+    )
+
+    rows = payload["rows"]
+    assert rows[0]["zone"] == "west"
+    assert rows[0]["unit"] == 2
+    assert rows[0]["inlet_pressure"] == "0.31"
+    assert rows[0]["outlet_pressure"] == "0.27"
+    assert rows[1]["unit"] == 3
+    assert rows[1]["inlet_pressure"] == ""
+    assert rows[2]["zone"] == "east"
+    assert rows[2]["inlet_pressure"] == ""
+
+    cleared = service.merge_document_rows_into_defaults(
+        existing_defaults=defaults,
+        document_payload={"rows": [{"zone": "west", "unit": 2, "inlet_pressure": "", "outlet_pressure": ""}]},
+    )
+    assert "west:2" not in cleared
 
 
 def test_weather_payload_uses_seniverse_for_today_and_caches(monkeypatch) -> None:

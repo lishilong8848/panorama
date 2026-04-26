@@ -1,6 +1,7 @@
 import {
   buildHandoverReviewCapacityDownloadUrl,
   buildHandoverReviewDownloadUrl,
+  claimHandoverReview110kvLockApi,
   claimHandoverReviewLockApi,
   confirmHandoverReviewApi,
   getJobApi,
@@ -8,10 +9,13 @@ import {
   getHandoverReviewBootstrapApi,
   getHandoverReviewHistoryApi,
   getHandoverReviewStatusApi,
+  heartbeatHandoverReview110kvLockApi,
   heartbeatHandoverReviewLockApi,
+  releaseHandoverReview110kvLockApi,
   releaseHandoverReviewLockApi,
   retryHandoverReviewCloudSyncApi,
   saveHandoverReviewApi,
+  saveHandoverReview110kvApi,
   sendHandoverReviewCapacityImageApi,
   updateHandoverReviewCloudSyncApi,
   unconfirmHandoverReviewApi,
@@ -37,6 +41,15 @@ const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
 const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
 const HANDOVER_REVIEW_STATUS_BROADCAST_KEY = "handover_review_status_broadcast_v1";
 const CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13"];
+const SUBSTATION_110KV_ROWS = [
+  { row_id: "incoming_akai", label: "阿开", group: "incoming" },
+  { row_id: "incoming_ajia", label: "阿家", group: "incoming" },
+  { row_id: "transformer_1", label: "1#主变", group: "transformer" },
+  { row_id: "transformer_2", label: "2#主变", group: "transformer" },
+  { row_id: "transformer_3", label: "3#主变", group: "transformer" },
+  { row_id: "transformer_4", label: "4#主变", group: "transformer" },
+];
+const SUBSTATION_110KV_VALUE_KEYS = ["line_voltage", "current", "power_kw", "power_factor", "load_rate"];
 
 function shiftTextFromCode(shift) {
   const normalized = String(shift || "").trim().toLowerCase();
@@ -191,6 +204,66 @@ function normalizeFixedBlock(block, index) {
   return { id: blockId, title, fields };
 }
 
+function normalizeCoolingPumpPressures(raw = {}) {
+  const rows = Array.isArray(raw?.rows)
+    ? raw.rows
+        .filter((row) => row && typeof row === "object")
+        .map((row) => {
+          const zone = String(row.zone || "").trim().toLowerCase();
+          const unit = Number.parseInt(String(row.unit || 0), 10) || 0;
+          return {
+            row_id: String(row.row_id || `${zone}:${unit}`).trim(),
+            zone,
+            zone_label: String(row.zone_label || (zone === "east" ? "东区" : "西区")).trim(),
+            unit,
+            unit_label: String(row.unit_label || (unit ? `${unit}#制冷单元` : "制冷单元")).trim(),
+            position: Number.parseInt(String(row.position || 0), 10) || 0,
+            mode_text: String(row.mode_text || "").trim(),
+            inlet_pressure: String(row.inlet_pressure ?? ""),
+            outlet_pressure: String(row.outlet_pressure ?? ""),
+          };
+        })
+        .filter((row) => row.zone && row.unit > 0)
+    : [];
+  return { rows };
+}
+
+function normalizeSubstation110kvBlock(raw = {}) {
+  const sourceRows = Array.isArray(raw?.rows) ? raw.rows : [];
+  const byId = new Map();
+  const byLabel = new Map();
+  sourceRows.forEach((row) => {
+    if (!row || typeof row !== "object") return;
+    const rowId = String(row.row_id || "").trim();
+    const label = String(row.label || "").trim();
+    if (rowId) byId.set(rowId, row);
+    if (label) byLabel.set(label, row);
+  });
+  return {
+    block_id: "substation_110kv",
+    batch_key: String(raw?.batch_key || "").trim(),
+    revision: Number.parseInt(String(raw?.revision || 0), 10) || 0,
+    updated_at: String(raw?.updated_at || "").trim(),
+    updated_by_building: String(raw?.updated_by_building || "").trim(),
+    updated_by_client: String(raw?.updated_by_client || "").trim(),
+    columns: [
+      { key: "line_voltage", label: "线电压" },
+      { key: "current", label: "电流/输出电流" },
+      { key: "power_kw", label: "当前功率KW" },
+      { key: "power_factor", label: "功率因数" },
+      { key: "load_rate", label: "负载率" },
+    ],
+    rows: SUBSTATION_110KV_ROWS.map((base) => {
+      const source = byId.get(base.row_id) || byLabel.get(base.label) || {};
+      const row = { ...base };
+      SUBSTATION_110KV_VALUE_KEYS.forEach((key) => {
+        row[key] = String(source[key] ?? "");
+      });
+      return row;
+    }),
+  };
+}
+
 function normalizeSectionColumn(column, index, fallbackHeader = "") {
   const key = String(column?.key || "").trim().toUpperCase() || FALLBACK_COLUMN_LETTERS[index] || `COL_${index}`;
   const sourceCols = Array.isArray(column?.source_cols)
@@ -261,12 +334,31 @@ function normalizeSectionRow(row, columns) {
 function normalizeSection(section) {
   const columns = resolveSectionColumns(section);
   const rows = Array.isArray(section?.rows) ? section.rows.map((row) => normalizeSectionRow(row, columns)) : [];
+  const contentRows = rows.filter((row) => hasSectionRowContent(row, columns));
   return {
     name: String(section?.name || "未命名分类"),
     columns,
     header: columns.map((column) => column.label || column.key),
-    rows: rows.length ? rows : [blankRow(columns)],
+    rows: contentRows.length ? contentRows : [blankRow(columns)],
   };
+}
+
+function compactDocumentSectionRows(document) {
+  if (!document || typeof document !== "object" || !Array.isArray(document.sections)) {
+    return document;
+  }
+  document.sections.forEach((section) => {
+    if (!section || typeof section !== "object") return;
+    const columns = resolveSectionColumns(section);
+    const rows = Array.isArray(section.rows)
+      ? section.rows.map((row) => normalizeSectionRow(row, columns))
+      : [];
+    const contentRows = rows.filter((row) => hasSectionRowContent(row, columns));
+    section.columns = columns;
+    section.header = columns.map((column) => column.label || column.key);
+    section.rows = contentRows.length ? contentRows : [blankRow(columns)];
+  });
+  return document;
 }
 
 function normalizeFooterInventoryColumn(column, index) {
@@ -404,6 +496,7 @@ function normalizeDocument(document) {
     fixed_blocks: fixedBlocks,
     sections,
     footer_blocks: footerBlocks,
+    cooling_pump_pressures: normalizeCoolingPumpPressures(document?.cooling_pump_pressures || {}),
   };
 }
 
@@ -412,6 +505,7 @@ function emptyDirtyRegions() {
     fixed_blocks: false,
     sections: false,
     footer_inventory: false,
+    cooling_pump_pressures: false,
   };
 }
 
@@ -420,6 +514,7 @@ function cloneDirtyRegions(dirtyRegions) {
     fixed_blocks: Boolean(dirtyRegions?.fixed_blocks),
     sections: Boolean(dirtyRegions?.sections),
     footer_inventory: Boolean(dirtyRegions?.footer_inventory),
+    cooling_pump_pressures: Boolean(dirtyRegions?.cooling_pump_pressures),
   };
 }
 
@@ -553,6 +648,14 @@ function normalizeConcurrencyPayload(raw, fallbackRevision = 0) {
     is_editing_elsewhere: Boolean(raw?.is_editing_elsewhere),
     client_holds_lock: Boolean(raw?.client_holds_lock),
   };
+}
+
+function normalizeSharedLockPayload(raw, fallbackRevision = 0) {
+  const base = normalizeConcurrencyPayload(raw, fallbackRevision);
+  if (base.active_editor && raw?.active_editor?.holder_building) {
+    base.active_editor.holder_building = String(raw.active_editor.holder_building || "").trim();
+  }
+  return base;
 }
 
 function normalizeDisplayBadge(raw, fallback = {}) {
@@ -828,6 +931,14 @@ export function mountHandoverReviewApp(Vue) {
       const reviewClientId = String(reviewClientIdentity.clientId || "").trim();
       const reviewHolderLabel = String(reviewClientIdentity.holderLabel || "").trim();
       const concurrency = ref(emptyConcurrencyState(0));
+      const sharedBlocks = ref({
+        substation_110kv: normalizeSubstation110kvBlock({}),
+      });
+      const sharedBlockLocks = ref({
+        substation_110kv: normalizeSharedLockPayload({}, 0),
+      });
+      const substation110kvDirty = ref(false);
+      const substation110kvHeartbeatTimer = ref(null);
       const historyLoading = ref(false);
       const historyLoaded = ref(false);
       const historyCacheKey = ref("");
@@ -855,6 +966,27 @@ export function mountHandoverReviewApp(Vue) {
         return normalizeCapacitySync(session.value?.capacity_sync || {});
       });
       const capacityTrackedCellSet = computed(() => new Set(capacitySync.value.tracked_cells || CAPACITY_SYNC_TRACKED_CELLS));
+      const substation110kvBlock = computed(() => sharedBlocks.value.substation_110kv || normalizeSubstation110kvBlock({}));
+      const substation110kvLock = computed(() => sharedBlockLocks.value.substation_110kv || normalizeSharedLockPayload({}, substation110kvBlock.value.revision));
+      const substation110kvLockedByOther = computed(() => Boolean(substation110kvLock.value?.is_editing_elsewhere));
+      const substation110kvReadonly = computed(() => loading.value || saving.value || substation110kvLockedByOther.value);
+      const substation110kvMetaText = computed(() => {
+        const block = substation110kvBlock.value;
+        const updatedAt = String(block.updated_at || "").trim();
+        const updatedBy = String(block.updated_by_building || "").trim();
+        if (!updatedAt && !updatedBy) return "本班尚未填写";
+        return `最新修改：${updatedAt || "-"} ${updatedBy || ""}`.trim();
+      });
+      const substation110kvLockText = computed(() => {
+        const lock = substation110kvLock.value;
+        if (lock?.client_holds_lock) return "本端编辑中";
+        const active = lock?.active_editor || {};
+        if (lock?.is_editing_elsewhere) {
+          return `${active.holder_building || "其他楼栋"} ${active.holder_label || ""} 正在编辑`;
+        }
+        return "";
+      });
+      const coolingPumpPressureRows = computed(() => documentRef.value?.cooling_pump_pressures?.rows || []);
       const {
         selectedSessionId,
         latestSessionId,
@@ -1061,6 +1193,7 @@ export function mountHandoverReviewApp(Vue) {
 
       function handleWindowBeforeUnload(event) {
         if (dirty.value || saving.value) {
+          void releaseSubstation110kvLock({ keepalive: true });
           if (event && typeof event.preventDefault === "function") {
             event.preventDefault();
           }
@@ -1070,6 +1203,7 @@ export function mountHandoverReviewApp(Vue) {
           return "";
         }
         void releaseCurrentLock({ keepalive: true });
+        void releaseSubstation110kvLock({ keepalive: true });
         return undefined;
       }
 
@@ -1135,6 +1269,7 @@ export function mountHandoverReviewApp(Vue) {
         if (nextSession) {
           session.value = nextSession;
         }
+        applySharedBlockPayload(payload || {});
         reviewDisplayState.value = normalizeReviewDisplayState(payload?.display_state || reviewDisplayState.value);
         batchStatus.value = payload?.batch_status && typeof payload.batch_status === "object"
           ? cloneDeep(payload.batch_status)
@@ -1255,11 +1390,123 @@ export function mountHandoverReviewApp(Vue) {
         }
       }
 
+      function applySharedBlockPayload(payload = {}) {
+        const shared = payload?.shared_blocks && typeof payload.shared_blocks === "object" ? payload.shared_blocks : {};
+        const locks = payload?.shared_block_locks && typeof payload.shared_block_locks === "object" ? payload.shared_block_locks : {};
+        const incomingBlock = normalizeSubstation110kvBlock(shared.substation_110kv || sharedBlocks.value.substation_110kv);
+        const currentRevision = Number(sharedBlocks.value?.substation_110kv?.revision || 0);
+        if (!substation110kvDirty.value || incomingBlock.revision !== currentRevision) {
+          sharedBlocks.value = {
+            ...sharedBlocks.value,
+            substation_110kv: incomingBlock,
+          };
+        }
+        sharedBlockLocks.value = {
+          ...sharedBlockLocks.value,
+          substation_110kv: normalizeSharedLockPayload(
+            locks.substation_110kv || sharedBlockLocks.value.substation_110kv,
+            incomingBlock.revision,
+          ),
+        };
+        if (sharedBlockLocks.value.substation_110kv?.client_holds_lock) {
+          restartSubstation110kvHeartbeat();
+        } else {
+          clearSubstation110kvHeartbeat();
+        }
+      }
+
+      function buildSubstation110kvPayload() {
+        return {
+          session_id: String(session.value?.session_id || "").trim(),
+          client_id: reviewClientId,
+          holder_label: reviewHolderLabel,
+        };
+      }
+
+      function clearSubstation110kvHeartbeat() {
+        if (substation110kvHeartbeatTimer.value) {
+          window.clearInterval(substation110kvHeartbeatTimer.value);
+          substation110kvHeartbeatTimer.value = null;
+        }
+      }
+
+      async function sendSubstation110kvHeartbeat() {
+        if (!buildingCode || !session.value || !reviewClientId) return;
+        try {
+          const response = await heartbeatHandoverReview110kvLockApi(buildingCode, {
+            session_id: session.value.session_id,
+            client_id: reviewClientId,
+          });
+          applySharedBlockPayload(response || {});
+        } catch (_error) {
+          clearSubstation110kvHeartbeat();
+        }
+      }
+
+      function restartSubstation110kvHeartbeat() {
+        clearSubstation110kvHeartbeat();
+        if (!sharedBlockLocks.value.substation_110kv?.client_holds_lock) return;
+        substation110kvHeartbeatTimer.value = window.setInterval(() => {
+          void sendSubstation110kvHeartbeat();
+        }, REVIEW_LOCK_HEARTBEAT_MS);
+      }
+
+      async function ensureSubstation110kvLock() {
+        if (!buildingCode || !session.value || !reviewClientId) return false;
+        if (sharedBlockLocks.value.substation_110kv?.client_holds_lock) {
+          restartSubstation110kvHeartbeat();
+          return true;
+        }
+        try {
+          const response = await claimHandoverReview110kvLockApi(buildingCode, buildSubstation110kvPayload());
+          applySharedBlockPayload(response || {});
+          return Boolean(sharedBlockLocks.value.substation_110kv?.client_holds_lock);
+        } catch (error) {
+          errorText.value = String(error?.message || error || "110KV变电站锁定失败");
+          return false;
+        }
+      }
+
+      async function releaseSubstation110kvLock({ keepalive = false } = {}) {
+        clearSubstation110kvHeartbeat();
+        if (!buildingCode || !session.value || !reviewClientId) return;
+        const body = JSON.stringify({
+          session_id: session.value.session_id,
+          client_id: reviewClientId,
+        });
+        if (keepalive && typeof window !== "undefined" && typeof window.fetch === "function") {
+          try {
+            void window.fetch(`/api/handover/review/${buildingCode}/shared-blocks/110kv/lock/release`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body,
+              keepalive: true,
+            }).catch(() => {});
+          } catch (_error) {
+            // Ignore best-effort release failures during unload.
+          }
+          return;
+        }
+        try {
+          const response = await releaseHandoverReview110kvLockApi(buildingCode, {
+            session_id: session.value.session_id,
+            client_id: reviewClientId,
+          });
+          applySharedBlockPayload(response || {});
+        } catch (_error) {
+          sharedBlockLocks.value = {
+            ...sharedBlockLocks.value,
+            substation_110kv: normalizeSharedLockPayload({}, sharedBlocks.value.substation_110kv?.revision || 0),
+          };
+        }
+      }
+
       async function applyStatusPayload(payload = {}, { background = false } = {}) {
         const reviewUi = payload?.review_ui && typeof payload.review_ui === "object" ? payload.review_ui : {};
         pollIntervalMs.value = resolvePollInterval(reviewUi);
         restartPollTimer();
         const nextDisplayState = normalizeReviewDisplayState(payload?.display_state || reviewDisplayState.value);
+        applySharedBlockPayload(payload || {});
         reviewDisplayState.value = nextDisplayState;
 
         const incomingSession = payload?.session && typeof payload.session === "object" ? cloneDeep(payload.session) : {};
@@ -1479,6 +1726,96 @@ export function mountHandoverReviewApp(Vue) {
         }
       }
 
+      function markSubstation110kvDirty() {
+        if (!session.value) return;
+        substation110kvDirty.value = true;
+        dirty.value = true;
+        statusText.value = "待保存";
+      }
+
+      async function updateSubstation110kvCell(rowIndex, key, value) {
+        if (substation110kvReadonly.value) return;
+        const locked = await ensureSubstation110kvLock();
+        if (!locked) return;
+        const block = cloneDeep(substation110kvBlock.value);
+        const row = block.rows?.[rowIndex];
+        if (!row || !SUBSTATION_110KV_VALUE_KEYS.includes(String(key || ""))) return;
+        row[key] = String(value ?? "");
+        sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: block };
+        markSubstation110kvDirty();
+      }
+
+      function valuesAfterRowLabel(cells, label) {
+        const labelIndex = cells.findIndex((cell) => String(cell || "").trim() === label);
+        if (labelIndex < 0) return [];
+        return cells
+          .slice(labelIndex + 1)
+          .map((cell) => String(cell ?? "").trim())
+          .filter((cell) => cell !== "");
+      }
+
+      async function pasteSubstation110kvTable(event) {
+        if (substation110kvReadonly.value) return;
+        const text = String(event?.clipboardData?.getData("text/plain") || "").trim();
+        if (!text) return;
+        const locked = await ensureSubstation110kvLock();
+        if (!locked) return;
+        const lines = text.split(/\r?\n/).map((line) => line.split("\t"));
+        const nextBlock = cloneDeep(substation110kvBlock.value);
+        let changed = false;
+        nextBlock.rows = nextBlock.rows.map((row) => {
+          const matchedLine = lines.find((cells) => cells.some((cell) => String(cell || "").trim() === row.label));
+          if (!matchedLine) return row;
+          const values = valuesAfterRowLabel(matchedLine, row.label);
+          if (!values.length) return row;
+          const nextRow = { ...row };
+          SUBSTATION_110KV_VALUE_KEYS.forEach((key, index) => {
+            nextRow[key] = values[index] ?? "";
+          });
+          changed = true;
+          return nextRow;
+        });
+        if (!changed) {
+          statusText.value = "未识别到110KV变电站表格行";
+          return;
+        }
+        sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: nextBlock };
+        markSubstation110kvDirty();
+      }
+
+      function updateCoolingPumpPressure(rowIndex, key, value) {
+        const rows = documentRef.value?.cooling_pump_pressures?.rows;
+        if (!Array.isArray(rows) || !rows[rowIndex]) return;
+        if (!["inlet_pressure", "outlet_pressure"].includes(String(key || ""))) return;
+        markDocumentDirty({ region: "cooling_pump_pressures" });
+        rows[rowIndex][key] = String(value ?? "");
+      }
+
+      async function saveSubstation110kvIfNeeded() {
+        if (!substation110kvDirty.value) return true;
+        const locked = await ensureSubstation110kvLock();
+        if (!locked) return false;
+        try {
+          const block = substation110kvBlock.value;
+          const response = await saveHandoverReview110kvApi(buildingCode, {
+            session_id: session.value.session_id,
+            client_id: reviewClientId,
+            base_revision: block.revision,
+            rows: block.rows,
+          });
+          applySharedBlockPayload(response || {});
+          if (response?.session) {
+            applyPayloadMeta(response || {});
+          }
+          substation110kvDirty.value = false;
+          return true;
+        } catch (error) {
+          errorText.value = String(error?.message || error || "110KV变电站保存失败");
+          statusText.value = "保存失败，请处理后重试。";
+          return false;
+        }
+      }
+
       async function saveDocument(options = {}) {
         const { reason = "manual" } = options || {};
         if (saving.value || confirming.value || cloudSyncBusy.value || documentHydrating.value || syncingRemoteRevision.value || !session.value) return false;
@@ -1486,7 +1823,13 @@ export function mountHandoverReviewApp(Vue) {
           beginRemoteSaveRefresh();
           return false;
         }
-        if (!dirty.value) {
+        const hasDocumentDirty = Boolean(
+          dirtyRegions.value.fixed_blocks
+          || dirtyRegions.value.sections
+          || dirtyRegions.value.footer_inventory
+          || dirtyRegions.value.cooling_pump_pressures,
+        );
+        if (!dirty.value && !substation110kvDirty.value) {
           clearSaveTimers();
           dirty.value = false;
           statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已保存";
@@ -1496,10 +1839,25 @@ export function mountHandoverReviewApp(Vue) {
         clearSaveTimers();
         saving.value = true;
         errorText.value = "";
-        await ensureEditingLock();
+        if (hasDocumentDirty) {
+          await ensureEditingLock();
+        }
         const payloadDirtyRegions = cloneDirtyRegions(dirtyRegions.value);
         statusText.value = "正在保存审核内容...";
         try {
+          const sharedSaved = await saveSubstation110kvIfNeeded();
+          if (!sharedSaved) {
+            return false;
+          }
+          if (!hasDocumentDirty) {
+            if (documentMutationVersion.value === payloadVersion) {
+              dirty.value = false;
+              dirtyRegions.value = emptyDirtyRegions();
+            }
+            statusText.value = "审核内容已保存";
+            return true;
+          }
+          compactDocumentSectionRows(documentRef.value);
           const response = await saveHandoverReviewApi(buildingCode, {
             session_id: session.value.session_id,
             base_revision: session.value.revision,
@@ -1672,6 +2030,7 @@ export function mountHandoverReviewApp(Vue) {
           window.removeEventListener("beforeunload", handleWindowBeforeUnload);
         }
         void releaseCurrentLock();
+        void releaseSubstation110kvLock();
       });
 
       return {
@@ -1726,6 +2085,12 @@ export function mountHandoverReviewApp(Vue) {
         reviewCloudSheetUrl,
         capacitySync,
         capacityDownloadDisabled,
+        substation110kvBlock,
+        substation110kvReadonly,
+        substation110kvLockedByOther,
+        substation110kvMetaText,
+        substation110kvLockText,
+        coolingPumpPressureRows,
         reviewHeaderBadges,
         reviewStatusBanners,
         confirmActionVm,
@@ -1741,6 +2106,10 @@ export function mountHandoverReviewApp(Vue) {
         updateFooterCell,
         addFooterRow,
         removeFooterRow,
+        ensureSubstation110kvLock,
+        updateSubstation110kvCell,
+        pasteSubstation110kvTable,
+        updateCoolingPumpPressure,
         saveCurrentReview,
         toggleConfirm,
         retryCloudSheetSync: () => retryCloudSheetSync(getJobApi),

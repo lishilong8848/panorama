@@ -158,6 +158,16 @@ def _normalize_capacity_image_delivery(raw: Dict[str, Any] | None) -> Dict[str, 
 
 
 _CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13"]
+_SUBSTATION_110KV_BLOCK_ID = "substation_110kv"
+_SUBSTATION_110KV_ROWS = (
+    ("incoming_akai", "阿开", "incoming"),
+    ("incoming_ajia", "阿家", "incoming"),
+    ("transformer_1", "1#主变", "transformer"),
+    ("transformer_2", "2#主变", "transformer"),
+    ("transformer_3", "3#主变", "transformer"),
+    ("transformer_4", "4#主变", "transformer"),
+)
+_SUBSTATION_110KV_VALUE_KEYS = ("line_voltage", "current", "power_kw", "power_factor", "load_rate")
 
 
 class ReviewSessionService:
@@ -183,6 +193,180 @@ class ReviewSessionService:
     def _review_cfg(self) -> Dict[str, Any]:
         review_ui = self.config.get("review_ui", {})
         return review_ui if isinstance(review_ui, dict) else {}
+
+    @staticmethod
+    def substation_110kv_block_id() -> str:
+        return _SUBSTATION_110KV_BLOCK_ID
+
+    @staticmethod
+    def _default_substation_110kv_payload(batch_key: str = "") -> Dict[str, Any]:
+        return {
+            "block_id": _SUBSTATION_110KV_BLOCK_ID,
+            "batch_key": str(batch_key or "").strip(),
+            "revision": 0,
+            "updated_at": "",
+            "updated_by_building": "",
+            "updated_by_client": "",
+            "columns": [
+                {"key": "line_voltage", "label": "线电压"},
+                {"key": "current", "label": "电流/输出电流"},
+                {"key": "power_kw", "label": "当前功率KW"},
+                {"key": "power_factor", "label": "功率因数"},
+                {"key": "load_rate", "label": "负载率"},
+            ],
+            "rows": [
+                {
+                    "row_id": row_id,
+                    "label": label,
+                    "group": group,
+                    **{key: "" for key in _SUBSTATION_110KV_VALUE_KEYS},
+                }
+                for row_id, label, group in _SUBSTATION_110KV_ROWS
+            ],
+        }
+
+    @classmethod
+    def normalize_substation_110kv_payload(cls, raw: Dict[str, Any] | None, *, batch_key: str = "") -> Dict[str, Any]:
+        payload = raw if isinstance(raw, dict) else {}
+        row_by_id: Dict[str, Dict[str, Any]] = {}
+        row_by_label: Dict[str, Dict[str, Any]] = {}
+        for item in payload.get("rows", []) if isinstance(payload.get("rows", []), list) else []:
+            if not isinstance(item, dict):
+                continue
+            row_id = str(item.get("row_id", "") or "").strip()
+            label = str(item.get("label", "") or "").strip()
+            if row_id:
+                row_by_id[row_id] = item
+            if label:
+                row_by_label[label] = item
+        rows: List[Dict[str, Any]] = []
+        for row_id, label, group in _SUBSTATION_110KV_ROWS:
+            source = row_by_id.get(row_id) or row_by_label.get(label) or {}
+            row = {
+                "row_id": row_id,
+                "label": label,
+                "group": group,
+            }
+            for key in _SUBSTATION_110KV_VALUE_KEYS:
+                row[key] = str(source.get(key, "") or "").strip()
+            rows.append(row)
+        default_payload = cls._default_substation_110kv_payload(batch_key=batch_key)
+        default_payload.update(
+            {
+                "batch_key": str(payload.get("batch_key", "") or batch_key or "").strip(),
+                "revision": int(payload.get("revision", 0) or 0),
+                "updated_at": str(payload.get("updated_at", "") or "").strip(),
+                "updated_by_building": str(payload.get("updated_by_building", "") or "").strip(),
+                "updated_by_client": str(payload.get("updated_by_client", "") or "").strip(),
+                "rows": rows,
+            }
+        )
+        return default_payload
+
+    def get_substation_110kv(self, batch_key: str) -> Dict[str, Any]:
+        target_batch = str(batch_key or "").strip()
+        try:
+            raw = self._review_state_store.get_shared_block(
+                batch_key=target_batch,
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                fallback=self._default_substation_110kv_payload(batch_key=target_batch),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        return self.normalize_substation_110kv_payload(raw, batch_key=target_batch)
+
+    def get_substation_110kv_lock(self, *, batch_key: str, client_id: str = "") -> Dict[str, Any]:
+        block = self.get_substation_110kv(batch_key)
+        try:
+            return self._review_state_store.get_shared_block_lock(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                revision=int(block.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+
+    def claim_substation_110kv_lock(
+        self,
+        *,
+        batch_key: str,
+        building: str,
+        client_id: str,
+        holder_label: str = "",
+        lease_ttl_sec: int = 60,
+    ) -> Dict[str, Any]:
+        block = self.get_substation_110kv(batch_key)
+        try:
+            return self._review_state_store.claim_shared_block_lock(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                revision=int(block.get("revision", 0) or 0),
+                building=str(building or "").strip(),
+                client_id=str(client_id or "").strip(),
+                holder_label=str(holder_label or "").strip(),
+                lease_ttl_sec=lease_ttl_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+
+    def heartbeat_substation_110kv_lock(
+        self,
+        *,
+        batch_key: str,
+        client_id: str,
+        lease_ttl_sec: int = 60,
+    ) -> Dict[str, Any]:
+        block = self.get_substation_110kv(batch_key)
+        try:
+            return self._review_state_store.heartbeat_shared_block_lock(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                revision=int(block.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+                lease_ttl_sec=lease_ttl_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+
+    def release_substation_110kv_lock(self, *, batch_key: str, client_id: str) -> Dict[str, Any]:
+        block = self.get_substation_110kv(batch_key)
+        try:
+            return self._review_state_store.release_shared_block_lock(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                revision=int(block.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+
+    def save_substation_110kv(
+        self,
+        *,
+        batch_key: str,
+        building: str,
+        client_id: str,
+        base_revision: int,
+        rows: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        target_batch = str(batch_key or "").strip()
+        payload = self.normalize_substation_110kv_payload(
+            {"batch_key": target_batch, "rows": rows if isinstance(rows, list) else []},
+            batch_key=target_batch,
+        )
+        try:
+            saved = self._review_state_store.save_shared_block(
+                batch_key=target_batch,
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                payload=payload,
+                base_revision=int(base_revision or 0),
+                updated_by_building=str(building or "").strip(),
+                updated_by_client=str(client_id or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        return self.normalize_substation_110kv_payload(saved, batch_key=target_batch)
 
     def _template_output_dir(self) -> Path | None:
         template_cfg = self.config.get("template", {})

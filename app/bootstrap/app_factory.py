@@ -239,6 +239,27 @@ def _initialize_handover_daily_report_auth(container) -> None:
     container.add_system_log("[交接班][日报截图登录] 启动自动初始化已转入后台，不阻塞外网页面进入")
 
 
+def _recover_handover_xlsx_write_queues(container) -> None:
+    try:
+        from handover_log_module.service.handover_xlsx_write_queue_service import HandoverXlsxWriteQueueService
+
+        handover_cfg = (
+            load_handover_config(container.runtime_config)
+            if isinstance(getattr(container, "runtime_config", None), dict)
+            else {}
+        )
+        HandoverXlsxWriteQueueService(
+            handover_cfg,
+            emit_log=getattr(container, "add_system_log", print),
+            job_service=getattr(container, "job_service", None),
+        ).recover_startup_jobs()
+    except Exception as exc:  # noqa: BLE001
+        try:
+            container.add_system_log(f"[交接班][xlsx队列] 启动恢复异常：{exc}")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     container = build_container()
     startup_runtime_activation_lock = threading.Lock()
@@ -559,6 +580,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(
                 "[访问控制] 已启用局域网页面隔离：仅对外开放 /handover/review/*、/api/handover/review/* 与 /assets/*"
             )
+            app.state.runtime_activation_step = "recovering_handover_xlsx_write_queues"
+            _recover_handover_xlsx_write_queues(container)
             if role_mode != "internal":
                 app.state.runtime_activation_step = "initializing_handover_daily_report_auth"
                 _initialize_handover_daily_report_auth(container)
