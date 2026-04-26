@@ -71,12 +71,5 @@ tests/
 !tests/unit/
 !tests/unit/test_handover_shift_interval_filters.py
 !tests/unit/test_settings_loader_handover_shift_fields.py
-config_segments/handover/buildings/A.json
-config_segments/handover/buildings/B.json
-config_segments/handover/buildings/C.json
-config_segments/handover/buildings/D.json
-config_segments/handover/buildings/E.json
-config_segments/handover/common.json
-config_segments/handover/buildings/D.json
 QLDownload/
 runtime/
