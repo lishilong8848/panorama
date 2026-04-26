@@ -379,44 +379,44 @@
         "export_button_text": "原样导出",
         "sites": [
           {
-            "url": null,
-            "enabled": true,
             "building": "A楼",
-            "username": "admin",
+            "enabled": true,
             "host": "192.168.210.50",
-            "password": "BMS@123456"
+            "username": "admin",
+            "password": "BMS@123456",
+            "url": null
           },
           {
-            "url": null,
-            "enabled": true,
             "building": "B楼",
-            "username": "admin",
+            "enabled": true,
             "host": "192.168.220.50",
-            "password": "BMS123456"
+            "username": "admin",
+            "password": "BMS123456",
+            "url": null
           },
           {
-            "url": null,
-            "enabled": true,
             "building": "C楼",
-            "username": "admin",
+            "enabled": true,
             "host": "192.168.231.53",
-            "password": "BMS@123456"
+            "username": "admin",
+            "password": "BMS@123456",
+            "url": null
           },
           {
-            "url": null,
-            "enabled": true,
             "building": "D楼",
-            "username": "admin",
+            "enabled": true,
             "host": "192.168.232.53",
-            "password": "123456"
+            "username": "admin",
+            "password": "123456",
+            "url": null
           },
           {
-            "url": null,
-            "enabled": true,
             "building": "E楼",
-            "username": "admin",
+            "enabled": true,
             "host": "192.168.233.57",
-            "password": "BMS@123456"
+            "username": "admin",
+            "password": "BMS@123456",
+            "url": null
           }
         ]
       },
@@ -1074,24 +1074,24 @@
         "enabled": true,
         "buildings": [
           {
-            "code": "a",
-            "name": "A楼"
+            "name": "A楼",
+            "code": "a"
           },
           {
-            "code": "b",
-            "name": "B楼"
+            "name": "B楼",
+            "code": "b"
           },
           {
-            "code": "c",
-            "name": "C楼"
+            "name": "C楼",
+            "code": "c"
           },
           {
-            "code": "d",
-            "name": "D楼"
+            "name": "D楼",
+            "code": "d"
           },
           {
-            "code": "e",
-            "name": "E楼"
+            "name": "E楼",
+            "code": "e"
           }
         ],
         "fixed_cells": {
@@ -4548,44 +4548,44 @@
       },
       "sites": [
         {
-          "url": null,
-          "enabled": true,
           "building": "A楼",
-          "username": "admin",
+          "enabled": true,
           "host": "192.168.210.50",
-          "password": "BMS@123456"
+          "username": "admin",
+          "password": "BMS@123456",
+          "url": null
         },
         {
-          "url": null,
-          "enabled": true,
           "building": "B楼",
-          "username": "admin",
+          "enabled": true,
           "host": "192.168.220.50",
-          "password": "BMS123456"
+          "username": "admin",
+          "password": "BMS123456",
+          "url": null
         },
         {
-          "url": null,
-          "enabled": true,
           "building": "C楼",
-          "username": "admin",
+          "enabled": true,
           "host": "192.168.231.53",
-          "password": "BMS@123456"
+          "username": "admin",
+          "password": "BMS@123456",
+          "url": null
         },
         {
-          "url": null,
-          "enabled": true,
           "building": "D楼",
-          "username": "admin",
+          "enabled": true,
           "host": "192.168.232.53",
-          "password": "123456"
+          "username": "admin",
+          "password": "123456",
+          "url": null
         },
         {
-          "url": null,
-          "enabled": true,
           "building": "E楼",
-          "username": "admin",
+          "enabled": true,
           "host": "192.168.233.57",
-          "password": "BMS@123456"
+          "username": "admin",
+          "password": "BMS@123456",
+          "url": null
         }
       ]
     },
