@@ -39,6 +39,7 @@ const REVIEW_PATH_RE = /^\/handover\/review\/([a-e])\/?$/i;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 const REVIEW_LOCK_HEARTBEAT_MS = 15000;
 const SUBSTATION_110KV_AUTO_SAVE_DEBOUNCE_MS = 350;
+const SUBSTATION_110KV_PREVIEW_SYNC_DEBOUNCE_MS = 150;
 const SUBSTATION_110KV_LOCK_RELEASE_IDLE_MS = 10000;
 const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
 const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
@@ -976,6 +977,7 @@ export function mountHandoverReviewApp(Vue) {
       const substation110kvDirty = ref(false);
       const substation110kvHeartbeatTimer = ref(null);
       const substation110kvAutoSaveTimer = ref(null);
+      const substation110kvPreviewSyncTimer = ref(null);
       const substation110kvIdleReleaseTimer = ref(null);
       const substation110kvDirtyMarked = ref(false);
       const historyLoading = ref(false);
@@ -1531,6 +1533,13 @@ export function mountHandoverReviewApp(Vue) {
         }
       }
 
+      function clearSubstation110kvPreviewSyncTimer() {
+        if (substation110kvPreviewSyncTimer.value) {
+          window.clearTimeout(substation110kvPreviewSyncTimer.value);
+          substation110kvPreviewSyncTimer.value = null;
+        }
+      }
+
       function clearSubstation110kvIdleReleaseTimer() {
         if (substation110kvIdleReleaseTimer.value) {
           window.clearTimeout(substation110kvIdleReleaseTimer.value);
@@ -1556,6 +1565,7 @@ export function mountHandoverReviewApp(Vue) {
           const locked = await ensureSubstation110kvLock();
           if (!locked) return false;
         }
+        clearSubstation110kvPreviewSyncTimer();
         const marked = await markSubstation110kvServerDirty();
         if (!marked) return false;
         if (substation110kvAutoSavePromise) {
@@ -1644,6 +1654,33 @@ export function mountHandoverReviewApp(Vue) {
         }, SUBSTATION_110KV_AUTO_SAVE_DEBOUNCE_MS);
       }
 
+      async function flushSubstation110kvPreviewSync() {
+        clearSubstation110kvPreviewSyncTimer();
+        if (!buildingCode || !session.value || !reviewClientId || !substation110kvDirty.value) return true;
+        const locked = await ensureSubstation110kvLock();
+        if (!locked) {
+          statusText.value = "110KV变电站锁定失败，请刷新后重试。";
+          void loadReviewData({ background: true });
+          return false;
+        }
+        const marked = await markSubstation110kvServerDirty(
+          cloneDeep(substation110kvBlock.value),
+          { force: true },
+        );
+        if (marked && substation110kvDirty.value) {
+          scheduleSubstation110kvAutoSave();
+        }
+        return marked;
+      }
+
+      function scheduleSubstation110kvPreviewSync() {
+        clearSubstation110kvPreviewSyncTimer();
+        if (!substation110kvDirty.value) return;
+        substation110kvPreviewSyncTimer.value = window.setTimeout(() => {
+          void flushSubstation110kvPreviewSync();
+        }, SUBSTATION_110KV_PREVIEW_SYNC_DEBOUNCE_MS);
+      }
+
       function clearSubstation110kvHeartbeat() {
         if (substation110kvHeartbeatTimer.value) {
           window.clearInterval(substation110kvHeartbeatTimer.value);
@@ -1719,6 +1756,7 @@ export function mountHandoverReviewApp(Vue) {
         clearSubstation110kvHeartbeat();
         clearSubstation110kvIdleReleaseTimer();
         clearSubstation110kvAutoSaveTimer();
+        clearSubstation110kvPreviewSyncTimer();
         if (!buildingCode || !session.value || !reviewClientId) return;
         const body = JSON.stringify({
           session_id: session.value.session_id,
@@ -1986,23 +2024,20 @@ export function mountHandoverReviewApp(Vue) {
         scheduleSubstation110kvAutoSave();
       }
 
-      async function updateSubstation110kvCell(rowIndex, key, value) {
+      function updateSubstation110kvCell(rowIndex, key, value) {
         if (substation110kvReadonly.value) return;
         const fieldKey = String(key || "");
         if (!SUBSTATION_110KV_VALUE_KEYS.includes(fieldKey)) return;
         const currentRow = substation110kvBlock.value?.rows?.[rowIndex];
         const nextValue = String(value ?? "");
         if (!currentRow || String(currentRow[fieldKey] ?? "") === nextValue) return;
-        const locked = await ensureSubstation110kvLock();
-        if (!locked) return;
         const block = cloneDeep(substation110kvBlock.value);
         const row = block.rows?.[rowIndex];
         if (!row || String(row[fieldKey] ?? "") === nextValue) return;
         row[fieldKey] = nextValue;
-        const marked = await markSubstation110kvServerDirty(block, { force: true });
-        if (!marked) return;
         sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: block };
         markSubstation110kvDirty();
+        scheduleSubstation110kvPreviewSync();
       }
 
       function valuesAfterRowLabel(cells, label) {
@@ -2014,12 +2049,10 @@ export function mountHandoverReviewApp(Vue) {
           .filter((cell) => cell !== "");
       }
 
-      async function pasteSubstation110kvTable(event) {
+      function pasteSubstation110kvTable(event) {
         if (substation110kvReadonly.value) return;
         const text = String(event?.clipboardData?.getData("text/plain") || "").trim();
         if (!text) return;
-        const locked = await ensureSubstation110kvLock();
-        if (!locked) return;
         const lines = text.split(/\r?\n/).map((line) => line.split("\t"));
         const nextBlock = cloneDeep(substation110kvBlock.value);
         let changed = false;
@@ -2047,10 +2080,9 @@ export function mountHandoverReviewApp(Vue) {
           statusText.value = recognized ? "110KV变电站内容无变化" : "未识别到110KV变电站表格行";
           return;
         }
-        const marked = await markSubstation110kvServerDirty(nextBlock, { force: true });
-        if (!marked) return;
         sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: nextBlock };
         markSubstation110kvDirty();
+        scheduleSubstation110kvPreviewSync();
       }
 
       function updateCoolingPumpPressure(rowIndex, key, value) {

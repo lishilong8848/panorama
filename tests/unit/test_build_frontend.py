@@ -231,19 +231,23 @@ def test_handover_review_110kv_dirty_only_marks_actual_changes() -> None:
         project_root / "web" / "frontend" / "src" / "handover_review_app.js"
     ).read_text(encoding="utf-8")
 
-    update_body = source[source.index("async function updateSubstation110kvCell") :]
+    update_body = source[source.index("function updateSubstation110kvCell") :]
     update_body = update_body[: update_body.index("function valuesAfterRowLabel")]
-    paste_body = source[source.index("async function pasteSubstation110kvTable") :]
+    paste_body = source[source.index("function pasteSubstation110kvTable") :]
     paste_body = paste_body[: paste_body.index("function updateCoolingPumpPressure")]
 
     assert 'if (!currentRow || String(currentRow[fieldKey] ?? "") === nextValue) return;' in update_body
     assert 'if (!row || String(row[fieldKey] ?? "") === nextValue) return;' in update_body
     assert "row[fieldKey] = nextValue;" in update_body
-    assert "const marked = await markSubstation110kvServerDirty(block, { force: true });" in update_body
+    assert "sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: block };" in update_body
+    assert "scheduleSubstation110kvPreviewSync();" in update_body
+    assert "await markSubstation110kvServerDirty(block" not in update_body
     assert "let recognized = false;" in paste_body
     assert "let rowChanged = false;" in paste_body
     assert "if (!rowChanged) return row;" in paste_body
-    assert "const marked = await markSubstation110kvServerDirty(nextBlock, { force: true });" in paste_body
+    assert "sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: nextBlock };" in paste_body
+    assert "scheduleSubstation110kvPreviewSync();" in paste_body
+    assert "await markSubstation110kvServerDirty(nextBlock" not in paste_body
     assert 'statusText.value = recognized ? "110KV变电站内容无变化" : "未识别到110KV变电站表格行";' in paste_body
 
 

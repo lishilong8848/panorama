@@ -4177,6 +4177,7 @@ def _shared_110kv_lock_response(
     try:
         lock_state = operation(batch_key)
         block = service.get_substation_110kv(batch_key)
+        block = _substation_110kv_with_dirty_preview(block, lock_state)
     except ReviewSessionStoreUnavailableError as exc:
         _raise_review_store_http_error(exc)
     return {
