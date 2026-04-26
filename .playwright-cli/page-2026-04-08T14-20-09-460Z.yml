@@ -1,6 +1,0 @@
-- generic [active] [ref=e1]:
-  - status:
-    - generic:
-      - generic: 启动中
-      - generic: 正在打开中
-      - generic: 前端资源加载完成后将自动进入对应角色页面。
