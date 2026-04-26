@@ -2498,6 +2498,117 @@ class SharedSourceCacheService:
                 inferred["duty_shift"] = "all"
         return inferred
 
+    def _find_source_file_in_latest_bucket(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+    ) -> tuple[Path, Path] | None:
+        if self.shared_root is None:
+            return None
+        normalized_family = self._normalize_source_family(source_family)
+        building_name = str(building or "").strip()
+        if not building_name:
+            return None
+
+        info = build_source_artifact_path(
+            source_family=normalized_family,
+            building=building_name,
+            suffix=".xlsx",
+            bucket_kind="latest",
+            bucket_key=bucket_key,
+        )
+        expected_path = self.shared_root / info.relative_path
+        if _is_accessible_cached_file(expected_path):
+            return expected_path, info.relative_path
+
+        bucket_dir = self.shared_root / info.type_folder / info.month_segment / info.bucket_segment
+        if not bucket_dir.exists() or not bucket_dir.is_dir():
+            return None
+        type_folder = FAMILY_LABELS.get(normalized_family, info.type_folder)
+        patterns = (
+            f"{info.bucket_segment}--{type_folder}--{building_name}.xlsx",
+            f"{info.bucket_segment}--*--{building_name}.xlsx",
+            f"*--{building_name}.xlsx",
+        )
+        for pattern in patterns:
+            try:
+                matches = sorted(bucket_dir.glob(pattern))
+            except OSError:
+                matches = []
+            for candidate in matches:
+                if _is_accessible_cached_file(candidate):
+                    try:
+                        return candidate, candidate.relative_to(self.shared_root)
+                    except ValueError:
+                        continue
+        return None
+
+    def _scan_latest_ready_entry_from_shared_root(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        lookback_hours: int = 72,
+    ) -> Dict[str, Any] | None:
+        normalized_family = self._normalize_source_family(source_family)
+        if normalized_family not in {
+            FAMILY_HANDOVER_LOG,
+            FAMILY_HANDOVER_CAPACITY_REPORT,
+            FAMILY_MONTHLY_REPORT,
+        }:
+            return None
+        if self.shared_root is None:
+            return None
+
+        now_hour = _now_dt().replace(minute=0, second=0, microsecond=0)
+        building_name = str(building or "").strip()
+        if not building_name:
+            return None
+
+        for offset in range(max(1, int(lookback_hours or 1))):
+            bucket_dt = now_hour - timedelta(hours=offset)
+            bucket_key = bucket_dt.strftime("%Y-%m-%d %H")
+            found = self._find_source_file_in_latest_bucket(
+                source_family=normalized_family,
+                building=building_name,
+                bucket_key=bucket_key,
+            )
+            if found is None:
+                continue
+            file_path, relative_path = found
+            try:
+                stat = file_path.stat()
+            except OSError:
+                continue
+            if normalized_family in {FAMILY_HANDOVER_LOG, FAMILY_HANDOVER_CAPACITY_REPORT}:
+                duty_context = self._resolve_handover_entry_duty_context({"bucket_key": bucket_key})
+            else:
+                duty_context = {"duty_date": bucket_dt.strftime("%Y-%m-%d"), "duty_shift": ""}
+            downloaded_at = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            return {
+                "entry_id": f"shared_dir_scan|{normalized_family}|latest|{bucket_key}|{building_name}",
+                "source_family": normalized_family,
+                "building": building_name,
+                "bucket_kind": "latest",
+                "bucket_key": bucket_key,
+                "duty_date": duty_context.get("duty_date", ""),
+                "duty_shift": duty_context.get("duty_shift", ""),
+                "downloaded_at": downloaded_at,
+                "relative_path": relative_path.as_posix(),
+                "status": "ready",
+                "file_hash": "",
+                "size_bytes": int(stat.st_size),
+                "metadata": {
+                    "family": normalized_family,
+                    "building": building_name,
+                    "resolution_source": "shared_directory_scan",
+                    "scanned_from_shared_root": True,
+                },
+            }
+        return None
+
     def get_latest_ready_selection(
         self,
         *,
@@ -2522,9 +2633,15 @@ class SharedSourceCacheService:
                 source_family=source_family,
                 building=building,
             )
+            file_path = self._resolve_entry_file_path(entry)
+            if entry is None or file_path is None:
+                entry = self._scan_latest_ready_entry_from_shared_root(
+                    source_family=source_family,
+                    building=building,
+                )
+                file_path = self._resolve_entry_file_path(entry)
             if not entry:
                 continue
-            file_path = self._resolve_entry_file_path(entry)
             bucket_key = str(entry.get("bucket_key", "") or "").strip()
             bucket_dt = _parse_hour_bucket(bucket_key)
             if file_path is None or bucket_dt is None:

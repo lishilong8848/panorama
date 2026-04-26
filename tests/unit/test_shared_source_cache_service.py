@@ -1357,6 +1357,51 @@ def test_get_latest_ready_selection_allows_fallback_within_three_buckets(
     assert building_rows['B楼']['version_gap'] == 1
 
 
+def test_get_latest_ready_selection_scans_hourly_shared_files_when_index_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+) -> None:
+    shared_root = work_dir / 'shared'
+    store = SharedBridgeStore(shared_root)
+    store.ensure_ready()
+    service = SharedSourceCacheService(
+        runtime_config=_build_runtime_config(role_mode='external', shared_root=shared_root),
+        store=store,
+        emit_log=lambda *_args, **_kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        cache_module,
+        '_now_dt',
+        lambda: cache_module.datetime(2026, 4, 27, 1, 48, 0),
+    )
+    for building in ('A楼', 'B楼'):
+        source_file = (
+            shared_root
+            / '交接班日志源文件'
+            / '202604'
+            / '20260427--01'
+            / f'20260427--01--交接班日志源文件--{building}.xlsx'
+        )
+        _write_minimal_handover_workbook(source_file)
+
+    selection = service.get_latest_ready_selection(
+        source_family=FAMILY_HANDOVER_LOG,
+        buildings=['A楼', 'B楼'],
+        max_version_gap=3,
+        max_selection_age_hours=3.0,
+    )
+
+    assert selection['can_proceed'] is True
+    assert selection['best_bucket_key'] == '2026-04-27 01'
+    assert selection['missing_buildings'] == []
+    assert [item['building'] for item in selection['selected_entries']] == ['A楼', 'B楼']
+    assert all(
+        item['metadata']['resolution_source'] == 'shared_directory_scan'
+        for item in selection['selected_entries']
+    )
+
+
 def test_get_latest_ready_selection_blocks_stale_building_over_three_buckets(work_dir: Path) -> None:
     shared_root = work_dir / 'shared'
     store = SharedBridgeStore(shared_root)

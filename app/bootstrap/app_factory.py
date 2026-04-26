@@ -1355,67 +1355,73 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             return False, detail
 
         try:
-            cached_entries = [
-                item
-                for item in bridge_service.get_day_metric_by_date_cache_entries(
-                    selected_dates=[target_date],
-                    buildings=target_buildings,
-                )
-                if str(item.get("file_path", "") or "").strip()
-                and os.path.exists(str(item.get("file_path", "") or "").strip())
-            ]
             expected_count = len(target_buildings)
-            if len(cached_entries) < expected_count:
-                try:
-                    container.add_system_log("[12项独立上传调度] 按日缓存未齐全，先尝试直接复用现有交接班日志源文件")
-                    bridge_service.fill_day_metric_history(
-                        selected_dates=[target_date],
-                        building_scope="all_enabled",
-                        building=None,
-                        emit_log=container.add_system_log,
-                    )
-                    cached_entries = [
-                        item
-                        for item in bridge_service.get_day_metric_by_date_cache_entries(
-                            selected_dates=[target_date],
-                            buildings=target_buildings,
-                        )
-                        if str(item.get("file_path", "") or "").strip()
-                        and os.path.exists(str(item.get("file_path", "") or "").strip())
-                    ]
-                except Exception as exc:  # noqa: BLE001
-                    container.add_system_log(f"[12项独立上传调度] 直接复用交接班日志源文件失败，继续等待内网补采同步: {exc}")
-            if len(cached_entries) < expected_count:
-                dedupe_key = f"day_metric_upload:scheduler:{target_date}:{'|'.join(sorted(target_buildings))}"
-                job, bridge_task = start_waiting_bridge_job(
-                    job_service=container.job_service,
-                    bridge_service=bridge_service,
-                    name=source,
-                    worker_handler="day_metric_from_download",
-                    worker_payload={"selected_dates": [target_date], "building_scope": "all_enabled", "building": None},
-                    resource_keys=["shared_bridge:day_metric"],
-                    priority="scheduler",
-                    feature="day_metric_from_download",
-                    dedupe_key=dedupe_key,
-                    submitted_by="scheduler",
-                    bridge_get_or_create_name="get_or_create_day_metric_from_download_task",
-                    bridge_create_name="create_day_metric_from_download_task",
-                    bridge_kwargs={
-                        "selected_dates": [target_date],
-                        "building_scope": "all_enabled",
-                        "building": None,
-                        "requested_by": "scheduler",
-                    },
-                )
-                accepted_detail = (
-                    "等待内网补采同步：12项当日源文件尚未全部到位。"
-                    f" 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'},"
-                    f" date={target_date}, job_id={job.job_id}"
-                )
-                container.add_system_log(f"[12项独立上传调度] {accepted_detail}")
-                return True, accepted_detail
 
             def _run_from_cache(emit_log):
+                cached_entries = [
+                    item
+                    for item in bridge_service.get_day_metric_by_date_cache_entries(
+                        selected_dates=[target_date],
+                        buildings=target_buildings,
+                    )
+                    if str(item.get("file_path", "") or "").strip()
+                    and os.path.exists(str(item.get("file_path", "") or "").strip())
+                ]
+                if len(cached_entries) < expected_count:
+                    try:
+                        emit_log("[12项独立上传调度] 按日缓存未齐全，先尝试直接复用现有交接班日志源文件")
+                        bridge_service.fill_day_metric_history(
+                            selected_dates=[target_date],
+                            building_scope="all_enabled",
+                            building=None,
+                            emit_log=emit_log,
+                        )
+                        cached_entries = [
+                            item
+                            for item in bridge_service.get_day_metric_by_date_cache_entries(
+                                selected_dates=[target_date],
+                                buildings=target_buildings,
+                            )
+                            if str(item.get("file_path", "") or "").strip()
+                            and os.path.exists(str(item.get("file_path", "") or "").strip())
+                        ]
+                    except Exception as exc:  # noqa: BLE001
+                        emit_log(f"[12项独立上传调度] 直接复用交接班日志源文件失败，继续等待内网补采同步: {exc}")
+                if len(cached_entries) < expected_count:
+                    wait_dedupe_key = f"day_metric_upload:scheduler:{target_date}:{'|'.join(sorted(target_buildings))}"
+                    waiting_job, bridge_task = start_waiting_bridge_job(
+                        job_service=container.job_service,
+                        bridge_service=bridge_service,
+                        name=source,
+                        worker_handler="day_metric_from_download",
+                        worker_payload={"selected_dates": [target_date], "building_scope": "all_enabled", "building": None},
+                        resource_keys=["shared_bridge:day_metric"],
+                        priority="scheduler",
+                        feature="day_metric_from_download",
+                        dedupe_key=wait_dedupe_key,
+                        submitted_by="scheduler",
+                        bridge_get_or_create_name="get_or_create_day_metric_from_download_task",
+                        bridge_create_name="create_day_metric_from_download_task",
+                        bridge_kwargs={
+                            "selected_dates": [target_date],
+                            "building_scope": "all_enabled",
+                            "building": None,
+                            "requested_by": "scheduler",
+                        },
+                    )
+                    accepted_detail = (
+                        "等待内网补采同步：12项当日源文件尚未全部到位。"
+                        f" 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'},"
+                        f" date={target_date}, job_id={waiting_job.job_id}"
+                    )
+                    emit_log(f"[12项独立上传调度] {accepted_detail}")
+                    return {
+                        "ok": True,
+                        "mode": "waiting_shared_bridge",
+                        "date": target_date,
+                        "job_id": waiting_job.job_id,
+                        "bridge_task_id": str(bridge_task.get("task_id", "") or "").strip(),
+                    }
                 source_units = [
                     {
                         "duty_date": str(item.get("duty_date", "") or "").strip(),

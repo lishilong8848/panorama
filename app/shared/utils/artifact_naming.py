@@ -113,9 +113,6 @@ def source_bucket_segment(
     normalized_family = str(source_family or "").strip()
     normalized_kind = str(bucket_kind or "").strip().lower() or "latest"
     duty_digits = "".join(ch for ch in str(duty_date or "").strip() if ch.isdigit())[:8]
-    if normalized_family == FAMILY_MONTHLY_REPORT and len(duty_digits) == 8:
-        # 月报源文件按“业务日期”统一落盘，latest 与历史补采共用同一套日期目录和文件名。
-        return f"{duty_digits}--月报"
     if normalized_kind == "manual" and normalized_family == FAMILY_ALARM_EVENT:
         return manual_alarm_bucket_segment(bucket_key, now=now)
     if normalized_kind == "latest":
