@@ -102,6 +102,15 @@ def test_handover_scheduler_time_inputs_auto_save_on_change() -> None:
     assert "保存时间" not in handover_section
     assert "修改后立即生效" in handover_section
 
+    actions_source = (
+        project_root / "web" / "frontend" / "src" / "dashboard_scheduler_actions.js"
+    ).read_text(encoding="utf-8")
+    assert "const hasExplicitOverrides = overrideKeys.length > 0;" in actions_source
+    assert "payload.morning_time = morningTime;" in actions_source
+    assert "payload.afternoon_time = afternoonTime;" in actions_source
+    assert "morning_time: morningTime," not in actions_source
+    assert "afternoon_time: afternoonTime," not in actions_source
+
 
 def test_scheduler_time_inputs_pass_current_dom_value_to_quick_save() -> None:
     project_root = Path(__file__).resolve().parents[2]

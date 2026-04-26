@@ -160,8 +160,8 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "scheduler": {
                 "enabled": True,
                 "auto_start_in_gui": False,
-                "morning_time": "07:00:00",
-                "afternoon_time": "16:00:00",
+                "morning_time": "08:00:00",
+                "afternoon_time": "17:00:00",
                 "check_interval_sec": 30,
                 "catch_up_if_missed": False,
                 "retry_failed_in_same_period": False,

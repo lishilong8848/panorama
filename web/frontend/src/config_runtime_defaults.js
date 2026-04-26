@@ -919,8 +919,8 @@ function applyHandoverDefaults(cfg) {
 
   setBooleanDefault(scheduler, "enabled", true);
   setBooleanDefault(scheduler, "auto_start_in_gui", false);
-  setStringDefault(scheduler, "morning_time", "07:00:00");
-  setStringDefault(scheduler, "afternoon_time", "16:00:00");
+  setStringDefault(scheduler, "morning_time", "08:00:00");
+  setStringDefault(scheduler, "afternoon_time", "17:00:00");
   setNumberDefault(scheduler, "check_interval_sec", 30);
   setBooleanDefault(scheduler, "catch_up_if_missed", false);
   setBooleanDefault(scheduler, "retry_failed_in_same_period", false);

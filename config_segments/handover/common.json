@@ -1,12 +1,12 @@
 ﻿{
-  "revision": 3,
-  "updated_at": "2026-04-27T01:44:06+08:00",
+  "revision": 9,
+  "updated_at": "2026-04-27T03:12:37+08:00",
   "data": {
     "enabled": true,
     "scheduler": {
       "enabled": true,
       "auto_start_in_gui": true,
-      "morning_time": "08:00:00",
+      "morning_time": "08:00:01",
       "afternoon_time": "17:00:00",
       "check_interval_sec": 30,
       "catch_up_if_missed": false,

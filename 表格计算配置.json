@@ -340,7 +340,7 @@
       "scheduler": {
         "enabled": true,
         "auto_start_in_gui": true,
-        "morning_time": "08:00:00",
+        "morning_time": "08:00:01",
         "afternoon_time": "17:00:00",
         "check_interval_sec": 30,
         "catch_up_if_missed": false,
