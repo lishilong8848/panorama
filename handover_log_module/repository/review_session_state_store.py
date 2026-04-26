@@ -178,12 +178,28 @@ class ReviewSessionStateStore:
                 holder_label TEXT NOT NULL,
                 claimed_at TEXT NOT NULL,
                 last_heartbeat_at TEXT NOT NULL,
-                lease_expires_at TEXT NOT NULL
+                lease_expires_at TEXT NOT NULL,
+                dirty INTEGER NOT NULL DEFAULT 0,
+                dirty_at TEXT NOT NULL DEFAULT '',
+                dirty_by_building TEXT NOT NULL DEFAULT '',
+                dirty_by_client TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_review_shared_block_locks_target
                 ON review_shared_block_locks(batch_key, block_id);
             """
         )
+        columns = {
+            str(row["name"] or "").strip()
+            for row in conn.execute("PRAGMA table_info(review_shared_block_locks)").fetchall()
+        }
+        for column, definition in {
+            "dirty": "INTEGER NOT NULL DEFAULT 0",
+            "dirty_at": "TEXT NOT NULL DEFAULT ''",
+            "dirty_by_building": "TEXT NOT NULL DEFAULT ''",
+            "dirty_by_client": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE review_shared_block_locks ADD COLUMN {column} {definition}")
 
     def _migrate_from_legacy_if_needed(self, conn: sqlite3.Connection) -> None:
         existing_sessions = int(
@@ -860,6 +876,18 @@ class ReviewSessionStateStore:
                     json.dumps(stored_payload, ensure_ascii=False),
                 ),
             )
+            cursor = conn.execute(
+                """
+                UPDATE review_shared_block_locks
+                   SET dirty=0,
+                       dirty_at='',
+                       dirty_by_building='',
+                       dirty_by_client=''
+                 WHERE lock_key=?
+                   AND holder_client_id=?
+                """,
+                (block_key, normalized_client_id),
+            )
             row = conn.execute(
                 "SELECT * FROM review_shared_blocks WHERE block_key=?",
                 (block_key,),
@@ -879,7 +907,12 @@ class ReviewSessionStateStore:
         lease_expires_at = str(row["lease_expires_at"] or "").strip() if row is not None else ""
         claimed_at = str(row["claimed_at"] or "").strip() if row is not None else ""
         last_heartbeat_at = str(row["last_heartbeat_at"] or "").strip() if row is not None else ""
-        client_holds_lock = bool(client_id and holder_client_id and holder_client_id == client_id)
+        lock_active = bool(row is not None and lease_expires_at and lease_expires_at > _now_text())
+        dirty = bool(lock_active and row is not None and int(row["dirty"] or 0))
+        dirty_at = str(row["dirty_at"] or "").strip() if row is not None else ""
+        dirty_by_building = str(row["dirty_by_building"] or "").strip() if row is not None else ""
+        dirty_by_client = str(row["dirty_by_client"] or "").strip() if row is not None else ""
+        client_holds_lock = bool(lock_active and client_id and holder_client_id and holder_client_id == client_id)
         active_editor = (
             {
                 "holder_label": holder_label,
@@ -887,15 +920,19 @@ class ReviewSessionStateStore:
                 "claimed_at": claimed_at,
                 "last_heartbeat_at": last_heartbeat_at,
             }
-            if holder_label or holder_building
+            if lock_active and (holder_label or holder_building)
             else None
         )
         return {
             "current_revision": int(revision or 0),
             "active_editor": active_editor,
-            "lease_expires_at": lease_expires_at,
+            "lease_expires_at": lease_expires_at if lock_active else "",
             "is_editing_elsewhere": bool(active_editor and not client_holds_lock),
             "client_holds_lock": client_holds_lock,
+            "dirty": dirty,
+            "dirty_at": dirty_at if dirty else "",
+            "dirty_by_building": dirty_by_building if dirty else "",
+            "dirty_by_client": dirty_by_client if dirty else "",
         }
 
     def get_shared_block_lock(
@@ -913,11 +950,124 @@ class ReviewSessionStateStore:
                 SELECT *
                   FROM review_shared_block_locks
                  WHERE lock_key = ?
-                   AND lease_expires_at > ?
                 """,
-                (self._shared_block_key(batch_key, block_id), _now_text()),
+                (self._shared_block_key(batch_key, block_id),),
             ).fetchone()
         return self._row_to_shared_lock(row, revision=revision, client_id=str(client_id or "").strip())
+
+    def mark_shared_block_dirty(
+        self,
+        *,
+        batch_key: str,
+        block_id: str,
+        revision: int,
+        building: str,
+        client_id: str,
+    ) -> Dict[str, Any]:
+        normalized_client_id = str(client_id or "").strip()
+        if not normalized_client_id:
+            raise ValueError("client_id 不能为空")
+        now_text = _now_text()
+        lock_key = self._shared_block_key(batch_key, block_id)
+        self.ensure_ready()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?", (now_text,))
+            current = conn.execute(
+                "SELECT * FROM review_shared_block_locks WHERE lock_key=? AND lease_expires_at > ?",
+                (lock_key, now_text),
+            ).fetchone()
+            if current is None or str(current["holder_client_id"] or "").strip() != normalized_client_id:
+                raise ValueError("shared_block_lock_required")
+            conn.execute(
+                """
+                UPDATE review_shared_block_locks
+                   SET dirty=1,
+                       dirty_at=CASE WHEN dirty=1 AND dirty_at<>'' THEN dirty_at ELSE ? END,
+                       dirty_by_building=?,
+                       dirty_by_client=?
+                 WHERE lock_key=?
+                   AND holder_client_id=?
+                """,
+                (
+                    now_text,
+                    str(building or "").strip(),
+                    normalized_client_id,
+                    lock_key,
+                    normalized_client_id,
+                ),
+            )
+            row = conn.execute("SELECT * FROM review_shared_block_locks WHERE lock_key=?", (lock_key,)).fetchone()
+        return self._row_to_shared_lock(row, revision=revision, client_id=normalized_client_id) | {"dirty_marked": True}
+
+    def clear_expired_shared_block_dirty(
+        self,
+        *,
+        batch_key: str,
+        block_id: str,
+        revision: int,
+        client_id: str = "",
+    ) -> Dict[str, Any]:
+        now_text = _now_text()
+        lock_key = self._shared_block_key(batch_key, block_id)
+        self.ensure_ready()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE review_shared_block_locks
+                   SET dirty=0,
+                       dirty_at='',
+                       dirty_by_building='',
+                       dirty_by_client=''
+                 WHERE lock_key=?
+                   AND lease_expires_at <= ?
+                   AND dirty=1
+                """,
+                (lock_key, now_text),
+            )
+            cleared = cursor.rowcount > 0
+            conn.execute("DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?", (now_text,))
+            row = conn.execute("SELECT * FROM review_shared_block_locks WHERE lock_key=?", (lock_key,)).fetchone()
+        return self._row_to_shared_lock(row, revision=revision, client_id=str(client_id or "").strip()) | {"expired_dirty_cleared": cleared}
+
+    def clear_shared_block_dirty(
+        self,
+        *,
+        batch_key: str,
+        block_id: str,
+        revision: int,
+        client_id: str,
+    ) -> Dict[str, Any]:
+        normalized_client_id = str(client_id or "").strip()
+        if not normalized_client_id:
+            raise ValueError("client_id 不能为空")
+        now_text = _now_text()
+        lock_key = self._shared_block_key(batch_key, block_id)
+        self.ensure_ready()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?", (now_text,))
+            current = conn.execute(
+                "SELECT * FROM review_shared_block_locks WHERE lock_key=? AND lease_expires_at > ?",
+                (lock_key, now_text),
+            ).fetchone()
+            if current is None or str(current["holder_client_id"] or "").strip() != normalized_client_id:
+                raise ValueError("shared_block_lock_required")
+            cursor = conn.execute(
+                """
+                UPDATE review_shared_block_locks
+                   SET dirty=0,
+                       dirty_at='',
+                       dirty_by_building='',
+                       dirty_by_client=''
+                 WHERE lock_key=?
+                   AND holder_client_id=?
+                """,
+                (lock_key, normalized_client_id),
+            )
+            row = conn.execute("SELECT * FROM review_shared_block_locks WHERE lock_key=?", (lock_key,)).fetchone()
+        return self._row_to_shared_lock(row, revision=revision, client_id=normalized_client_id) | {"dirty_cleared": cursor.rowcount > 0}
 
     def claim_shared_block_lock(
         self,

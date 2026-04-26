@@ -544,6 +544,13 @@ export async function releaseHandoverReview110kvLockApi(buildingCode, payload = 
   });
 }
 
+export async function markHandoverReview110kvDirtyApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/shared-blocks/110kv/dirty`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export async function saveHandoverReview110kvApi(buildingCode, payload = {}) {
   return apiJson(`/api/handover/review/${buildingCode}/shared-blocks/110kv`, {
     method: "PUT",
@@ -551,12 +558,18 @@ export async function saveHandoverReview110kvApi(buildingCode, payload = {}) {
   });
 }
 
-export function buildHandoverReviewDownloadUrl(buildingCode, sessionId) {
-  return `/api/handover/review/${encodeURIComponent(buildingCode)}/download?session_id=${encodeURIComponent(sessionId)}`;
+export function buildHandoverReviewDownloadUrl(buildingCode, sessionId, params = {}) {
+  return appendQuery(`/api/handover/review/${encodeURIComponent(buildingCode)}/download`, {
+    session_id: sessionId,
+    ...params,
+  });
 }
 
-export function buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId) {
-  return `/api/handover/review/${encodeURIComponent(buildingCode)}/capacity-download?session_id=${encodeURIComponent(sessionId)}`;
+export function buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, params = {}) {
+  return appendQuery(`/api/handover/review/${encodeURIComponent(buildingCode)}/capacity-download`, {
+    session_id: sessionId,
+    ...params,
+  });
 }
 
 export async function sendHandoverReviewCapacityImageApi(buildingCode, payload = {}) {

@@ -1198,15 +1198,69 @@ def _queue_capacity_overlay_after_review_save(
     return updated_session, True
 
 
+def _ensure_substation_110kv_clean_or_409(
+    review_service: ReviewSessionService,
+    *,
+    batch_key: str,
+    client_id: str = "",
+    emit_log=print,
+    wait_sec: float = 5.0,
+) -> None:
+    batch_text = str(batch_key or "").strip()
+    if not batch_text:
+        return
+    try:
+        cleared = review_service.clear_expired_substation_110kv_dirty(
+            batch_key=batch_text,
+            client_id=str(client_id or "").strip(),
+        )
+        if isinstance(cleared, dict) and bool(cleared.get("expired_dirty_cleared", False)) and callable(emit_log):
+            emit_log(f"[交接班][110KV共享] 已清理过期dirty状态 batch={batch_text}")
+    except Exception as exc:  # noqa: BLE001
+        if callable(emit_log):
+            emit_log(f"[交接班][110KV共享] dirty状态清理失败 batch={batch_text}, error={exc}")
+    deadline = time.monotonic() + max(0.1, float(wait_sec or 5.0))
+    last_lock: Dict[str, Any] = {}
+    while True:
+        try:
+            last_lock = review_service.get_substation_110kv_lock(
+                batch_key=batch_text,
+                client_id=str(client_id or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            if callable(emit_log):
+                emit_log(f"[交接班][110KV共享] dirty状态检查失败 batch={batch_text}, error={exc}")
+            return
+        if not bool(last_lock.get("dirty", False)):
+            return
+        if time.monotonic() >= deadline:
+            active_editor = last_lock.get("active_editor", {}) if isinstance(last_lock.get("active_editor", {}), dict) else {}
+            if callable(emit_log):
+                emit_log(
+                    "[交接班][110KV共享] 等待dirty状态清除超时 "
+                    f"batch={batch_text}, dirty_by={last_lock.get('dirty_by_building', '') or active_editor.get('holder_building', '') or '-'}, "
+                    f"dirty_at={last_lock.get('dirty_at', '') or '-'}"
+                )
+            raise HTTPException(status_code=409, detail="110KV变电站正在自动保存，请稍后重试")
+        time.sleep(0.2)
+
+
 def _ensure_capacity_overlay_queue_drained_for_session(
     *,
     container,
     review_service: ReviewSessionService,
     building: str,
     session_id: str,
+    client_id: str = "",
     timeout_sec: float = 120.0,
 ) -> Dict[str, Any]:
     target = _load_target_session_or_404(review_service, building=building, session_id=session_id)
+    _ensure_substation_110kv_clean_or_409(
+        review_service,
+        batch_key=str(target.get("batch_key", "") or "").strip(),
+        client_id=client_id,
+        emit_log=getattr(container, "add_system_log", print),
+    )
     queue_service = _build_xlsx_write_queue_service(container)
     output_file_text = str(target.get("output_file", "") or "").strip()
     capacity_output_file_text = str(target.get("capacity_output_file", "") or "").strip()
@@ -3238,7 +3292,12 @@ def handover_review_download(building_code: str, request: Request, session_id: s
 
 
 @router.get("/api/handover/review/{building_code}/capacity-download")
-def handover_review_capacity_download(building_code: str, request: Request, session_id: str = "") -> FileResponse:
+def handover_review_capacity_download(
+    building_code: str,
+    request: Request,
+    session_id: str = "",
+    client_id: str = "",
+) -> FileResponse:
     container = request.app.state.container
     service, _, _, _ = _build_review_services(container)
     building = _resolve_building_or_404(service, building_code)
@@ -3257,6 +3316,7 @@ def handover_review_capacity_download(building_code: str, request: Request, sess
             review_service=service,
             building=building,
             session_id=session_id_text,
+            client_id=str(client_id or "").strip(),
             timeout_sec=120.0,
         )
     except HandoverXlsxWriteQueueTimeoutError as exc:
@@ -3341,6 +3401,7 @@ def handover_review_capacity_image_send(
             review_service=service,
             building=building,
             session_id=session_id_text,
+            client_id=str(payload_dict.get("client_id", "") or "").strip(),
             timeout_sec=120.0,
         )
     except HandoverXlsxWriteQueueTimeoutError as exc:
@@ -3462,7 +3523,7 @@ def handover_review_save(
     defaults_config_status = "skipped"
     with container.job_service.resource_guard(
         name=f"handover_save:{batch_key or building}:{session_id}",
-        resource_keys=_handover_resource_keys(building=building),
+        resource_keys=_handover_resource_keys(building=building, batch_key=batch_key),
     ):
         write_started = time.perf_counter()
         previous_document_state: Dict[str, Any] | None = None
@@ -3503,6 +3564,30 @@ def handover_review_save(
             _raise_review_store_http_error(exc, saved_document=True)
         is_latest_session = bool(latest_session_id and latest_session_id == session_id)
         persisted_defaults = {"footer_inventory_rows": 0, "cabinet_power_fields": 0, "config_updated": False}
+        try:
+            session_started = time.perf_counter()
+            if is_latest_session:
+                session, batch_status = service.touch_session_after_save(
+                    building=building,
+                    session_id=session_id,
+                    base_revision=base_revision,
+                )
+            else:
+                session, batch_status = service.touch_session_after_history_save(
+                    building=building,
+                    session_id=session_id,
+                    base_revision=base_revision,
+                )
+            session_elapsed_ms = int((time.perf_counter() - session_started) * 1000)
+        except ReviewSessionConflictError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ReviewSessionNotFoundError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ReviewSessionStoreUnavailableError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
+            _raise_review_store_http_error(exc, saved_document=True)
         if is_latest_session:
             defaults_started = time.perf_counter()
             try:
@@ -3539,30 +3624,6 @@ def handover_review_save(
                         else {}
                     ),
                 )
-        try:
-            session_started = time.perf_counter()
-            if is_latest_session:
-                session, batch_status = service.touch_session_after_save(
-                    building=building,
-                    session_id=session_id,
-                    base_revision=base_revision,
-                )
-            else:
-                session, batch_status = service.touch_session_after_history_save(
-                    building=building,
-                    session_id=session_id,
-                    base_revision=base_revision,
-                )
-            session_elapsed_ms = int((time.perf_counter() - session_started) * 1000)
-        except ReviewSessionConflictError as exc:
-            document_state.restore_document(building=building, previous=previous_document_state)
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except ReviewSessionNotFoundError as exc:
-            document_state.restore_document(building=building, previous=previous_document_state)
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ReviewSessionStoreUnavailableError as exc:
-            document_state.restore_document(building=building, previous=previous_document_state)
-            _raise_review_store_http_error(exc, saved_document=True)
         try:
             capacity_started = time.perf_counter()
             session, queued_capacity_sync = _queue_capacity_overlay_after_review_save(
@@ -3767,6 +3828,17 @@ def handover_review_confirm(
         resource_keys=_handover_resource_keys(batch_key=target_batch_key),
     ):
         try:
+            _build_xlsx_write_queue_service(container).wait_for_barrier(building=building, timeout_sec=120.0)
+            sync_state = _attach_excel_sync_from_store(container, target_session).get("excel_sync", {})
+            if str(sync_state.get("status", "") or "").strip().lower() == "failed":
+                raise ReviewDocumentStateError(
+                    str(sync_state.get("error", "") or "").strip() or "交接班Excel同步失败"
+                )
+        except HandoverXlsxWriteQueueTimeoutError as exc:
+            raise HTTPException(status_code=409, detail="交接班文件写入队列繁忙，请稍后重试") from exc
+        except ReviewDocumentStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
             session, batch_status = service.mark_confirmed(
                 building=building,
                 session_id=session_id,
@@ -3860,7 +3932,7 @@ def handover_review_unconfirm(
     target_batch_key = str(target_session.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
         name=f"handover_unconfirm:{target_batch_key}:{building}",
-        resource_keys=_handover_resource_keys(building=building),
+        resource_keys=_handover_resource_keys(building=building, batch_key=target_batch_key),
     ):
         try:
             session, batch_status = service.mark_confirmed(
@@ -4180,6 +4252,47 @@ def handover_review_shared_110kv_lock_release(
     return response
 
 
+@router.post("/api/handover/review/{building_code}/shared-blocks/110kv/dirty")
+def handover_review_shared_110kv_dirty(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service, _, _, _ = _build_review_services(container)
+    building = _resolve_building_or_404(service, building_code)
+    session_id = str(payload.get("session_id", "") or "").strip()
+    client_id = str(payload.get("client_id", "") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id 不能为空")
+    target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    batch_key = str(target.get("batch_key", "") or "").strip()
+    try:
+        lock_state = service.mark_substation_110kv_dirty(
+            batch_key=batch_key,
+            building=building,
+            client_id=client_id,
+        )
+    except ValueError as exc:
+        reason = str(exc)
+        if reason == "shared_block_lock_required":
+            raise HTTPException(status_code=409, detail="110KV变电站正在其他楼栋或终端编辑，请稍后重试") from exc
+        raise HTTPException(status_code=400, detail=reason or "110KV变电站dirty状态标记失败") from exc
+    shared_110kv = service.get_substation_110kv(batch_key)
+    container.add_system_log(
+        f"[交接班][110KV共享] 已标记dirty building={building}, batch={batch_key}, client={client_id}"
+    )
+    return {
+        "ok": True,
+        "building": building,
+        "session": _attach_excel_sync_from_store(container, service.get_session_by_id(session_id) or target),
+        "shared_blocks": {"substation_110kv": shared_110kv},
+        "shared_block_locks": {"substation_110kv": lock_state},
+    }
+
+
 @router.put("/api/handover/review/{building_code}/shared-blocks/110kv")
 def handover_review_shared_110kv_save(
     building_code: str,
@@ -4211,6 +4324,13 @@ def handover_review_shared_110kv_save(
         ):
             sync_result = {"updated": 0, "failed": 0, "errors": [], "no_change": True}
             lock_state = service.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id)
+            if bool(lock_state.get("client_holds_lock", False)) and bool(lock_state.get("dirty", False)):
+                try:
+                    lock_state = service.clear_substation_110kv_dirty(batch_key=batch_key, client_id=client_id)
+                except Exception as exc:  # noqa: BLE001
+                    container.add_system_log(
+                        f"[交接班][110KV共享] 内容无变化但dirty清理失败 building={building}, batch={batch_key}, error={exc}"
+                    )
             container.add_system_log(
                 f"[交接班][110KV共享] 内容无变化，跳过保存和容量补写 building={building}, "
                 f"batch={batch_key}, revision={current_110kv.get('revision', 0)}"

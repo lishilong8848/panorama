@@ -200,6 +200,31 @@ def test_handover_review_capacity_image_send_is_sync_without_job_polling() -> No
     assert "部分收件人发送失败" not in send_body
 
 
+def test_handover_review_download_uses_fetch_and_surfaces_backend_errors() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    app_source = (
+        project_root / "web" / "frontend" / "src" / "handover_review_app.js"
+    ).read_text(encoding="utf-8")
+    helper_source = (
+        project_root / "web" / "frontend" / "src" / "handover_review_action_helpers.js"
+    ).read_text(encoding="utf-8")
+    api_source = (project_root / "web" / "frontend" / "src" / "api_client.js").read_text(encoding="utf-8")
+
+    assert "async function readDownloadError(response)" in app_source
+    assert "const response = await window.fetch(String(url || \"\")" in app_source
+    assert "if (!response.ok)" in app_source
+    assert "await response.blob()" in app_source
+    assert "parseDownloadFilename(response.headers.get(\"content-disposition\"), fallbackName)" in app_source
+    assert "await triggerBrowserDownload(url, session.value?.output_file || \"交接班日志.xlsx\");" in helper_source
+    assert "await triggerBrowserDownload(url, capacityOutputFile || \"交接班容量报表.xlsx\");" in helper_source
+    assert "downloading.value = false;" in helper_source
+    assert "capacityDownloading.value = false;" in helper_source
+    assert "window.setTimeout(() => {\n        downloading.value = false;" not in helper_source
+    assert "window.setTimeout(() => {\n        capacityDownloading.value = false;" not in helper_source
+    assert "client_id: reviewClientId" in helper_source
+    assert "export function buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, params = {})" in api_source
+
+
 def test_handover_review_110kv_dirty_only_marks_actual_changes() -> None:
     project_root = Path(__file__).resolve().parents[2]
     source = (
@@ -255,6 +280,9 @@ def test_handover_review_110kv_auto_saves_as_official_data() -> None:
     assert "/shared-blocks/110kv/draft" not in api_source
     assert "function scheduleSubstation110kvAutoSave()" in source
     assert "async function flushSubstation110kvAutoSave()" in source
+    assert "async function markSubstation110kvServerDirty()" in source
+    assert "markHandoverReview110kvDirtyApi(buildingCode" in source
+    assert "export async function markHandoverReview110kvDirtyApi" in api_source
     assert "saveHandoverReview110kvApi(buildingCode" in source
     assert "scheduleSubstation110kvAutoSave();" in source[source.index("function markSubstation110kvDirty") :]
     assert "await flushSubstation110kvAutoSave();" in source[source.index("async function saveSubstation110kvIfNeeded") :]

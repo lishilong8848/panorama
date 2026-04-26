@@ -285,15 +285,16 @@ export function createHandoverReviewActionHelpers(options = {}) {
     errorText.value = "";
     statusText.value = "正在同步交接班文件...";
     try {
-      const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId);
-      triggerBrowserDownload(`${url}&ts=${Date.now()}`, session.value?.output_file || "交接班日志.xlsx");
-      statusText.value = "交接班文件已同步，正在开始下载...";
+      const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId, {
+        client_id: reviewClientId,
+        ts: Date.now(),
+      });
+      await triggerBrowserDownload(url, session.value?.output_file || "交接班日志.xlsx");
+      statusText.value = "交接班文件已下载";
     } catch (error) {
       errorText.value = String(error?.message || error || "下载失败");
     } finally {
-      window.setTimeout(() => {
-        downloading.value = false;
-      }, 1500);
+      downloading.value = false;
     }
   }
 
@@ -324,15 +325,16 @@ export function createHandoverReviewActionHelpers(options = {}) {
     errorText.value = "";
     statusText.value = "容量报表已就绪，正在开始下载...";
     try {
-      const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId);
-      triggerBrowserDownload(`${url}&ts=${Date.now()}`, capacityOutputFile || "交接班容量报表.xlsx");
-      statusText.value = "容量报表已就绪，正在开始下载...";
+      const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, {
+        client_id: reviewClientId,
+        ts: Date.now(),
+      });
+      await triggerBrowserDownload(url, capacityOutputFile || "交接班容量报表.xlsx");
+      statusText.value = "容量报表已下载";
     } catch (error) {
       errorText.value = String(error?.message || error || "下载失败");
     } finally {
-      window.setTimeout(() => {
-        capacityDownloading.value = false;
-      }, 1500);
+      capacityDownloading.value = false;
     }
   }
 

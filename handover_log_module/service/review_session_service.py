@@ -329,6 +329,43 @@ class ReviewSessionService:
         except Exception as exc:  # noqa: BLE001
             _reraise_review_store_error(exc)
 
+    def mark_substation_110kv_dirty(self, *, batch_key: str, building: str, client_id: str) -> Dict[str, Any]:
+        block = self.get_substation_110kv(batch_key)
+        try:
+            return self._review_state_store.mark_shared_block_dirty(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                revision=int(block.get("revision", 0) or 0),
+                building=str(building or "").strip(),
+                client_id=str(client_id or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+
+    def clear_expired_substation_110kv_dirty(self, *, batch_key: str, client_id: str = "") -> Dict[str, Any]:
+        block = self.get_substation_110kv(batch_key)
+        try:
+            return self._review_state_store.clear_expired_shared_block_dirty(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                revision=int(block.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+
+    def clear_substation_110kv_dirty(self, *, batch_key: str, client_id: str) -> Dict[str, Any]:
+        block = self.get_substation_110kv(batch_key)
+        try:
+            return self._review_state_store.clear_shared_block_dirty(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                revision=int(block.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+
     def release_substation_110kv_lock(self, *, batch_key: str, client_id: str) -> Dict[str, Any]:
         block = self.get_substation_110kv(batch_key)
         try:

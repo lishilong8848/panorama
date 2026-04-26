@@ -186,6 +186,61 @@ def test_handover_review_capacity_download_rejects_when_sync_not_ready(monkeypat
     assert "待补写" in str(exc_info.value.detail)
 
 
+def test_capacity_overlay_clean_fence_rejects_active_110kv_dirty(monkeypatch):
+    class _FakeReviewService:
+        def __init__(self):
+            self.cleared_calls = 0
+            self.lock_checks = 0
+
+        def clear_expired_substation_110kv_dirty(self, *, batch_key: str, client_id: str = "") -> dict:
+            self.cleared_calls += 1
+            return {"expired_dirty_cleared": False}
+
+        def get_substation_110kv_lock(self, *, batch_key: str, client_id: str = "") -> dict:
+            self.lock_checks += 1
+            return {
+                "dirty": True,
+                "dirty_at": "2026-04-26 21:00:00",
+                "dirty_by_building": "B楼",
+                "active_editor": {"holder_building": "B楼"},
+            }
+
+    logs: list[str] = []
+    service = _FakeReviewService()
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes._ensure_substation_110kv_clean_or_409(
+            service,
+            batch_key="2026-04-26|day",
+            client_id="client-a",
+            emit_log=logs.append,
+            wait_sec=0.01,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "110KV变电站正在自动保存，请稍后重试"
+    assert service.cleared_calls == 1
+    assert service.lock_checks >= 1
+    assert any("等待dirty状态清除超时" in line for line in logs)
+
+
+def test_capacity_overlay_clean_fence_allows_clean_lock() -> None:
+    class _FakeReviewService:
+        def clear_expired_substation_110kv_dirty(self, *, batch_key: str, client_id: str = "") -> dict:
+            return {"expired_dirty_cleared": False}
+
+        def get_substation_110kv_lock(self, *, batch_key: str, client_id: str = "") -> dict:
+            return {"dirty": False, "client_holds_lock": False}
+
+    routes._ensure_substation_110kv_clean_or_409(
+        _FakeReviewService(),
+        batch_key="2026-04-26|day",
+        client_id="client-a",
+        emit_log=lambda _message: None,
+        wait_sec=0.01,
+    )
+
+
 def test_handover_review_capacity_image_send_returns_sync_result(monkeypatch, tmp_path):
     output_file = tmp_path / "A楼交接班容量报表.xlsx"
     output_file.write_bytes(b"demo")

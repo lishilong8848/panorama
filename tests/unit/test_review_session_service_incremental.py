@@ -147,7 +147,8 @@ def test_substation_110kv_lock_expiry_allows_next_editor(tmp_path) -> None:
         holder_label="C端",
         lease_ttl_sec=-1,
     )
-    assert first["client_holds_lock"] is True
+    assert first["client_holds_lock"] is False
+    assert first["lease_expires_at"] == ""
 
     second = service.claim_substation_110kv_lock(
         batch_key=batch_key,
@@ -157,6 +158,49 @@ def test_substation_110kv_lock_expiry_allows_next_editor(tmp_path) -> None:
     )
     assert second["client_holds_lock"] is True
     assert second["active_editor"]["holder_building"] == "D楼"
+
+
+def test_substation_110kv_dirty_is_visible_and_cleared_after_save(tmp_path) -> None:
+    service = _service(tmp_path)
+    session = service.register_generated_output(
+        building="A楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        data_file="demo.xlsx",
+        output_file="output.xlsx",
+        source_mode="generated",
+    )
+    batch_key = session["batch_key"]
+    service.claim_substation_110kv_lock(
+        batch_key=batch_key,
+        building="A楼",
+        client_id="client-a",
+        holder_label="A端",
+    )
+
+    dirty = service.mark_substation_110kv_dirty(
+        batch_key=batch_key,
+        building="A楼",
+        client_id="client-a",
+    )
+
+    assert dirty["dirty"] is True
+    assert dirty["dirty_by_building"] == "A楼"
+    visible_for_other = service.get_substation_110kv_lock(batch_key=batch_key, client_id="client-b")
+    assert visible_for_other["dirty"] is True
+    assert visible_for_other["is_editing_elsewhere"] is True
+
+    service.save_substation_110kv(
+        batch_key=batch_key,
+        building="A楼",
+        client_id="client-a",
+        base_revision=0,
+        rows=[{"row_id": "incoming_akai", "power_kw": "100"}],
+    )
+
+    clean = service.get_substation_110kv_lock(batch_key=batch_key, client_id="client-a")
+    assert clean["dirty"] is False
+    assert clean["dirty_at"] == ""
 
 
 def test_substation_110kv_stale_revision_rejected(tmp_path) -> None:

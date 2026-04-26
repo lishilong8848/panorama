@@ -11,6 +11,7 @@ import {
   getHandoverReviewStatusApi,
   heartbeatHandoverReview110kvLockApi,
   heartbeatHandoverReviewLockApi,
+  markHandoverReview110kvDirtyApi,
   releaseHandoverReview110kvLockApi,
   releaseHandoverReviewLockApi,
   retryHandoverReviewCloudSyncApi,
@@ -98,10 +99,38 @@ function parseDownloadFilename(contentDisposition = "", fallbackName = "") {
   return basenameFromPath(fallbackName) || "download.xlsx";
 }
 
-function triggerBrowserDownload(url, fallbackName = "") {
+async function readDownloadError(response) {
+  const fallback = `下载失败（HTTP ${response?.status || "?"}）`;
+  const contentType = String(response?.headers?.get("content-type") || "").toLowerCase();
+  try {
+    if (contentType.includes("application/json")) {
+      const payload = await response.json();
+      if (payload && typeof payload === "object") {
+        const detail = payload.detail || payload.error || payload.message;
+        if (typeof detail === "string" && detail.trim()) return detail.trim();
+        if (detail && typeof detail === "object") return JSON.stringify(detail);
+      }
+    }
+    const text = await response.text();
+    return String(text || "").trim() || fallback;
+  } catch (_error) {
+    return fallback;
+  }
+}
+
+async function triggerBrowserDownload(url, fallbackName = "") {
+  const response = await window.fetch(String(url || ""), {
+    method: "GET",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await readDownloadError(response));
+  }
+  const blob = await response.blob();
+  const objectUrl = window.URL.createObjectURL(blob);
   const anchor = document.createElement("a");
-  anchor.href = String(url || "");
-  const downloadName = basenameFromPath(fallbackName);
+  anchor.href = objectUrl;
+  const downloadName = parseDownloadFilename(response.headers.get("content-disposition"), fallbackName);
   if (downloadName) {
     anchor.download = downloadName;
   }
@@ -110,6 +139,7 @@ function triggerBrowserDownload(url, fallbackName = "") {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
+  window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1000);
 }
 
 function badgeVm(text, tone = "neutral", emphasis = "soft", icon = "dot") {
@@ -657,6 +687,10 @@ function normalizeSharedLockPayload(raw, fallbackRevision = 0) {
   if (base.active_editor && raw?.active_editor?.holder_building) {
     base.active_editor.holder_building = String(raw.active_editor.holder_building || "").trim();
   }
+  base.dirty = Boolean(raw?.dirty);
+  base.dirty_at = String(raw?.dirty_at || "").trim();
+  base.dirty_by_building = String(raw?.dirty_by_building || "").trim();
+  base.dirty_by_client = String(raw?.dirty_by_client || "").trim();
   return base;
 }
 
@@ -943,6 +977,7 @@ export function mountHandoverReviewApp(Vue) {
       const substation110kvHeartbeatTimer = ref(null);
       const substation110kvAutoSaveTimer = ref(null);
       const substation110kvIdleReleaseTimer = ref(null);
+      const substation110kvDirtyMarked = ref(false);
       const historyLoading = ref(false);
       const historyLoaded = ref(false);
       const historyCacheKey = ref("");
@@ -986,10 +1021,14 @@ export function mountHandoverReviewApp(Vue) {
       });
       const substation110kvLockText = computed(() => {
         const lock = substation110kvLock.value;
+        if (lock?.dirty) {
+          const owner = lock.dirty_by_building || lock?.active_editor?.holder_building || "其他楼栋";
+          return `${owner} 正在编辑并自动保存中`;
+        }
         if (lock?.client_holds_lock) return "本端编辑中";
         const active = lock?.active_editor || {};
         if (lock?.is_editing_elsewhere) {
-          return `${active.holder_building || "其他楼栋"} ${active.holder_label || ""} 正在编辑`;
+          return `${active.holder_building || "其他楼栋"} ${active.holder_label || ""} 正在查看/编辑`;
         }
         return "";
       });
@@ -1452,6 +1491,7 @@ export function mountHandoverReviewApp(Vue) {
           };
           if (serverRevisionChanged && substation110kvDirty.value) {
             substation110kvDirty.value = false;
+            substation110kvDirtyMarked.value = false;
             refreshDirtyFlagFromRegions();
             if (!dirty.value && !saving.value) {
               statusText.value = "110KV变电站已同步最新内容";
@@ -1515,6 +1555,8 @@ export function mountHandoverReviewApp(Vue) {
           const locked = await ensureSubstation110kvLock();
           if (!locked) return false;
         }
+        const marked = await markSubstation110kvServerDirty();
+        if (!marked) return false;
         if (substation110kvAutoSavePromise) {
           try {
             await substation110kvAutoSavePromise;
@@ -1540,6 +1582,7 @@ export function mountHandoverReviewApp(Vue) {
             if (saveVersion === substation110kvLocalVersion) {
               applySharedBlockPayload(response || {});
               substation110kvDirty.value = false;
+              substation110kvDirtyMarked.value = false;
               refreshDirtyFlagFromRegions();
               statusText.value = dirty.value ? "110KV变电站已自动保存" : "已保存";
               scheduleSubstation110kvIdleRelease();
@@ -1559,6 +1602,7 @@ export function mountHandoverReviewApp(Vue) {
                   savedBlock.revision,
                 ),
               };
+              substation110kvDirtyMarked.value = false;
               scheduleSubstation110kvAutoSave();
             }
             broadcastHandoverReviewStatusChange(response || {});
@@ -1639,6 +1683,26 @@ export function mountHandoverReviewApp(Vue) {
           return Boolean(sharedBlockLocks.value.substation_110kv?.client_holds_lock);
         } catch (error) {
           errorText.value = String(error?.message || error || "110KV变电站锁定失败");
+          return false;
+        }
+      }
+
+      async function markSubstation110kvServerDirty() {
+        if (!buildingCode || !session.value || !reviewClientId) return false;
+        if (substation110kvDirtyMarked.value && sharedBlockLocks.value.substation_110kv?.dirty) {
+          return true;
+        }
+        try {
+          const response = await markHandoverReview110kvDirtyApi(buildingCode, {
+            session_id: session.value.session_id,
+            client_id: reviewClientId,
+          });
+          applySharedBlockPayload(response || {});
+          substation110kvDirtyMarked.value = true;
+          return true;
+        } catch (error) {
+          errorText.value = String(error?.message || error || "110KV变电站dirty状态标记失败");
+          statusText.value = "110KV变电站锁定或标记失败，请重试。";
           return false;
         }
       }
@@ -1923,6 +1987,8 @@ export function mountHandoverReviewApp(Vue) {
         if (!currentRow || String(currentRow[fieldKey] ?? "") === nextValue) return;
         const locked = await ensureSubstation110kvLock();
         if (!locked) return;
+        const marked = await markSubstation110kvServerDirty();
+        if (!marked) return;
         const block = cloneDeep(substation110kvBlock.value);
         const row = block.rows?.[rowIndex];
         if (!row || String(row[fieldKey] ?? "") === nextValue) return;
@@ -1973,6 +2039,8 @@ export function mountHandoverReviewApp(Vue) {
           statusText.value = recognized ? "110KV变电站内容无变化" : "未识别到110KV变电站表格行";
           return;
         }
+        const marked = await markSubstation110kvServerDirty();
+        if (!marked) return;
         sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: nextBlock };
         markSubstation110kvDirty();
       }
