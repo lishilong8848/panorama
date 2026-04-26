@@ -988,6 +988,7 @@ export function mountHandoverReviewApp(Vue) {
       let latestSubstation110kvSaveSeq = 0;
       let substation110kvLocalVersion = 0;
       let substation110kvAutoSavePromise = null;
+      let substation110kvDirtyMarkPromise = Promise.resolve(true);
       let activeLoadController = null;
       let activeMetaControllers = [];
 
@@ -1687,19 +1688,26 @@ export function mountHandoverReviewApp(Vue) {
         }
       }
 
-      async function markSubstation110kvServerDirty() {
+      async function markSubstation110kvServerDirty(blockOverride = null, { force = false } = {}) {
         if (!buildingCode || !session.value || !reviewClientId) return false;
-        if (substation110kvDirtyMarked.value && sharedBlockLocks.value.substation_110kv?.dirty) {
+        if (!force && substation110kvDirtyMarked.value && sharedBlockLocks.value.substation_110kv?.dirty) {
           return true;
         }
-        try {
+        const block = normalizeSubstation110kvBlock(blockOverride || substation110kvBlock.value);
+        const markRequest = async () => {
           const response = await markHandoverReview110kvDirtyApi(buildingCode, {
             session_id: session.value.session_id,
             client_id: reviewClientId,
+            rows: block.rows,
           });
           applySharedBlockPayload(response || {});
           substation110kvDirtyMarked.value = true;
           return true;
+        };
+        try {
+          const nextMarkPromise = substation110kvDirtyMarkPromise.catch(() => true).then(markRequest);
+          substation110kvDirtyMarkPromise = nextMarkPromise.catch(() => true);
+          return await nextMarkPromise;
         } catch (error) {
           errorText.value = String(error?.message || error || "110KV变电站dirty状态标记失败");
           statusText.value = "110KV变电站锁定或标记失败，请重试。";
@@ -1987,12 +1995,12 @@ export function mountHandoverReviewApp(Vue) {
         if (!currentRow || String(currentRow[fieldKey] ?? "") === nextValue) return;
         const locked = await ensureSubstation110kvLock();
         if (!locked) return;
-        const marked = await markSubstation110kvServerDirty();
-        if (!marked) return;
         const block = cloneDeep(substation110kvBlock.value);
         const row = block.rows?.[rowIndex];
         if (!row || String(row[fieldKey] ?? "") === nextValue) return;
         row[fieldKey] = nextValue;
+        const marked = await markSubstation110kvServerDirty(block, { force: true });
+        if (!marked) return;
         sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: block };
         markSubstation110kvDirty();
       }
@@ -2039,7 +2047,7 @@ export function mountHandoverReviewApp(Vue) {
           statusText.value = recognized ? "110KV变电站内容无变化" : "未识别到110KV变电站表格行";
           return;
         }
-        const marked = await markSubstation110kvServerDirty();
+        const marked = await markSubstation110kvServerDirty(nextBlock, { force: true });
         if (!marked) return;
         sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: nextBlock };
         markSubstation110kvDirty();

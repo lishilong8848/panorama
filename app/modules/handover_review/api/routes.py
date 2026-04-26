@@ -2478,6 +2478,11 @@ def _attach_review_display_state(
     if batch_key:
         try:
             shared_110kv = service.get_substation_110kv(batch_key)
+            lock_state = service.get_substation_110kv_lock(
+                batch_key=batch_key,
+                client_id=str(client_id or "").strip(),
+            )
+            shared_110kv = _substation_110kv_with_dirty_preview(shared_110kv, lock_state)
             response["shared_blocks"] = {
                 **(
                     response.get("shared_blocks", {})
@@ -2492,10 +2497,7 @@ def _attach_review_display_state(
                     if isinstance(response.get("shared_block_locks", {}), dict)
                     else {}
                 ),
-                "substation_110kv": service.get_substation_110kv_lock(
-                    batch_key=batch_key,
-                    client_id=str(client_id or "").strip(),
-                ),
+                "substation_110kv": lock_state,
             }
         except Exception as exc:  # noqa: BLE001
             if callable(emit_log):
@@ -2517,6 +2519,27 @@ def _attach_review_display_state(
         client_revision=client_revision,
     )
     return response
+
+
+def _substation_110kv_with_dirty_preview(shared_110kv: Dict[str, Any], lock_state: Dict[str, Any]) -> Dict[str, Any]:
+    if not bool((lock_state or {}).get("dirty", False)):
+        return shared_110kv
+    dirty_payload = (lock_state or {}).get("dirty_payload", {})
+    if not isinstance(dirty_payload, dict) or not isinstance(dirty_payload.get("rows", []), list):
+        return shared_110kv
+    preview = ReviewSessionService.normalize_substation_110kv_payload(
+        dirty_payload,
+        batch_key=str(shared_110kv.get("batch_key", "") or "").strip(),
+    )
+    preview["revision"] = int(shared_110kv.get("revision", 0) or 0)
+    preview["updated_at"] = str(shared_110kv.get("updated_at", "") or "").strip()
+    preview["updated_by_building"] = str(shared_110kv.get("updated_by_building", "") or "").strip()
+    preview["updated_by_client"] = str(shared_110kv.get("updated_by_client", "") or "").strip()
+    preview["dirty_preview"] = True
+    preview["dirty_at"] = str(lock_state.get("dirty_at", "") or "").strip()
+    preview["dirty_by_building"] = str(lock_state.get("dirty_by_building", "") or "").strip()
+    preview["dirty_by_client"] = str(lock_state.get("dirty_by_client", "") or "").strip()
+    return preview
 
 
 def _ensure_latest_session_actionable_or_400(service: ReviewSessionService, *, building: str, session_id: str) -> None:
@@ -4274,13 +4297,14 @@ def handover_review_shared_110kv_dirty(
             batch_key=batch_key,
             building=building,
             client_id=client_id,
+            rows=payload.get("rows") if isinstance(payload.get("rows"), list) else None,
         )
     except ValueError as exc:
         reason = str(exc)
         if reason == "shared_block_lock_required":
             raise HTTPException(status_code=409, detail="110KV变电站正在其他楼栋或终端编辑，请稍后重试") from exc
         raise HTTPException(status_code=400, detail=reason or "110KV变电站dirty状态标记失败") from exc
-    shared_110kv = service.get_substation_110kv(batch_key)
+    shared_110kv = _substation_110kv_with_dirty_preview(service.get_substation_110kv(batch_key), lock_state)
     container.add_system_log(
         f"[交接班][110KV共享] 已标记dirty building={building}, batch={batch_key}, client={client_id}"
     )

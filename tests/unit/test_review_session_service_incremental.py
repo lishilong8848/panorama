@@ -182,13 +182,16 @@ def test_substation_110kv_dirty_is_visible_and_cleared_after_save(tmp_path) -> N
         batch_key=batch_key,
         building="A楼",
         client_id="client-a",
+        rows=[{"row_id": "incoming_akai", "power_kw": "100"}],
     )
 
     assert dirty["dirty"] is True
     assert dirty["dirty_by_building"] == "A楼"
+    assert dirty["dirty_payload"]["rows"][0]["power_kw"] == "100"
     visible_for_other = service.get_substation_110kv_lock(batch_key=batch_key, client_id="client-b")
     assert visible_for_other["dirty"] is True
     assert visible_for_other["is_editing_elsewhere"] is True
+    assert visible_for_other["dirty_payload"]["rows"][0]["power_kw"] == "100"
 
     service.save_substation_110kv(
         batch_key=batch_key,

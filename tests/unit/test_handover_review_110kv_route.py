@@ -49,6 +49,7 @@ class _FakeReviewService:
         self.save_error = save_error
         self.saved_calls: list[dict] = []
         self.dirty = False
+        self.dirty_payload: dict = {}
 
     def get_substation_110kv(self, batch_key: str) -> dict:
         assert batch_key == "2026-04-25|day"
@@ -76,6 +77,7 @@ class _FakeReviewService:
             "dirty_at": "2026-04-25 17:01:00" if self.dirty else "",
             "dirty_by_building": "A楼" if self.dirty else "",
             "dirty_by_client": client_id if self.dirty else "",
+            "dirty_payload": self.dirty_payload if self.dirty else {},
         }
 
     def get_session_by_id(self, session_id: str) -> dict:
@@ -86,17 +88,23 @@ class _FakeReviewService:
             "revision": 9,
         }
 
-    def mark_substation_110kv_dirty(self, *, batch_key: str, building: str, client_id: str) -> dict:
+    def mark_substation_110kv_dirty(self, *, batch_key: str, building: str, client_id: str, rows=None) -> dict:
         assert batch_key == "2026-04-25|day"
         assert building == "A楼"
         assert client_id
         self.dirty = True
+        if rows is not None:
+            self.dirty_payload = ReviewSessionService.normalize_substation_110kv_payload(
+                {"batch_key": batch_key, "revision": int(self.current.get("revision", 0)), "rows": rows},
+                batch_key=batch_key,
+            )
         return self.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id) | {"dirty_marked": True}
 
     def clear_substation_110kv_dirty(self, *, batch_key: str, client_id: str) -> dict:
         assert batch_key == "2026-04-25|day"
         assert client_id
         self.dirty = False
+        self.dirty_payload = {}
         return self.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id) | {"dirty_cleared": True}
 
 
@@ -169,6 +177,33 @@ def test_shared_110kv_dirty_endpoint_marks_current_lock(monkeypatch) -> None:
     assert response["shared_block_locks"]["substation_110kv"]["dirty_by_building"] == "A楼"
     assert sync_calls == []
     assert any("已标记dirty" in line for line in logs)
+
+
+def test_shared_110kv_dirty_endpoint_returns_live_preview_rows(monkeypatch) -> None:
+    current = _block(revision=7, power_kw="100")
+    changed = _block(revision=7, power_kw="130")
+    service = _FakeReviewService(current)
+    sync_calls: list[dict] = []
+    _patch_route_services(monkeypatch, service, sync_calls)
+    request, _logs = _fake_request()
+
+    response = routes.handover_review_shared_110kv_dirty(
+        "a",
+        request,
+        {
+            "session_id": "A楼|2026-04-25|day",
+            "client_id": "client-a",
+            "rows": changed["rows"],
+        },
+    )
+
+    block = response["shared_blocks"]["substation_110kv"]
+    assert block["dirty_preview"] is True
+    assert block["revision"] == 7
+    assert block["rows"][0]["power_kw"] == "130"
+    assert response["shared_block_locks"]["substation_110kv"]["dirty_payload"]["rows"][0]["power_kw"] == "130"
+    assert service.saved_calls == []
+    assert sync_calls == []
 
 
 def test_shared_110kv_no_change_save_clears_dirty_without_capacity_sync(monkeypatch) -> None:

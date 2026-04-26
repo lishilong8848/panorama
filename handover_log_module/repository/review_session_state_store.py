@@ -182,7 +182,8 @@ class ReviewSessionStateStore:
                 dirty INTEGER NOT NULL DEFAULT 0,
                 dirty_at TEXT NOT NULL DEFAULT '',
                 dirty_by_building TEXT NOT NULL DEFAULT '',
-                dirty_by_client TEXT NOT NULL DEFAULT ''
+                dirty_by_client TEXT NOT NULL DEFAULT '',
+                dirty_payload_json TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_review_shared_block_locks_target
                 ON review_shared_block_locks(batch_key, block_id);
@@ -197,6 +198,7 @@ class ReviewSessionStateStore:
             "dirty_at": "TEXT NOT NULL DEFAULT ''",
             "dirty_by_building": "TEXT NOT NULL DEFAULT ''",
             "dirty_by_client": "TEXT NOT NULL DEFAULT ''",
+            "dirty_payload_json": "TEXT NOT NULL DEFAULT ''",
         }.items():
             if column not in columns:
                 conn.execute(f"ALTER TABLE review_shared_block_locks ADD COLUMN {column} {definition}")
@@ -882,7 +884,8 @@ class ReviewSessionStateStore:
                    SET dirty=0,
                        dirty_at='',
                        dirty_by_building='',
-                       dirty_by_client=''
+                       dirty_by_client='',
+                       dirty_payload_json=''
                  WHERE lock_key=?
                    AND holder_client_id=?
                 """,
@@ -912,6 +915,15 @@ class ReviewSessionStateStore:
         dirty_at = str(row["dirty_at"] or "").strip() if row is not None else ""
         dirty_by_building = str(row["dirty_by_building"] or "").strip() if row is not None else ""
         dirty_by_client = str(row["dirty_by_client"] or "").strip() if row is not None else ""
+        dirty_payload: Dict[str, Any] = {}
+        dirty_payload_json = str(row["dirty_payload_json"] or "").strip() if row is not None else ""
+        if dirty and dirty_payload_json:
+            try:
+                parsed_payload = json.loads(dirty_payload_json)
+                if isinstance(parsed_payload, dict):
+                    dirty_payload = parsed_payload
+            except Exception:
+                dirty_payload = {}
         client_holds_lock = bool(lock_active and client_id and holder_client_id and holder_client_id == client_id)
         active_editor = (
             {
@@ -933,6 +945,7 @@ class ReviewSessionStateStore:
             "dirty_at": dirty_at if dirty else "",
             "dirty_by_building": dirty_by_building if dirty else "",
             "dirty_by_client": dirty_by_client if dirty else "",
+            "dirty_payload": dirty_payload if dirty else {},
         }
 
     def get_shared_block_lock(
@@ -963,6 +976,7 @@ class ReviewSessionStateStore:
         revision: int,
         building: str,
         client_id: str,
+        dirty_payload: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         normalized_client_id = str(client_id or "").strip()
         if not normalized_client_id:
@@ -985,7 +999,8 @@ class ReviewSessionStateStore:
                    SET dirty=1,
                        dirty_at=CASE WHEN dirty=1 AND dirty_at<>'' THEN dirty_at ELSE ? END,
                        dirty_by_building=?,
-                       dirty_by_client=?
+                       dirty_by_client=?,
+                       dirty_payload_json=?
                  WHERE lock_key=?
                    AND holder_client_id=?
                 """,
@@ -993,6 +1008,7 @@ class ReviewSessionStateStore:
                     now_text,
                     str(building or "").strip(),
                     normalized_client_id,
+                    json.dumps(dirty_payload if isinstance(dirty_payload, dict) else {}, ensure_ascii=False),
                     lock_key,
                     normalized_client_id,
                 ),
@@ -1019,7 +1035,8 @@ class ReviewSessionStateStore:
                    SET dirty=0,
                        dirty_at='',
                        dirty_by_building='',
-                       dirty_by_client=''
+                       dirty_by_client='',
+                       dirty_payload_json=''
                  WHERE lock_key=?
                    AND lease_expires_at <= ?
                    AND dirty=1
@@ -1060,7 +1077,8 @@ class ReviewSessionStateStore:
                    SET dirty=0,
                        dirty_at='',
                        dirty_by_building='',
-                       dirty_by_client=''
+                       dirty_by_client='',
+                       dirty_payload_json=''
                  WHERE lock_key=?
                    AND holder_client_id=?
                 """,

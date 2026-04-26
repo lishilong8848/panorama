@@ -238,9 +238,12 @@ def test_handover_review_110kv_dirty_only_marks_actual_changes() -> None:
 
     assert 'if (!currentRow || String(currentRow[fieldKey] ?? "") === nextValue) return;' in update_body
     assert 'if (!row || String(row[fieldKey] ?? "") === nextValue) return;' in update_body
+    assert "row[fieldKey] = nextValue;" in update_body
+    assert "const marked = await markSubstation110kvServerDirty(block, { force: true });" in update_body
     assert "let recognized = false;" in paste_body
     assert "let rowChanged = false;" in paste_body
     assert "if (!rowChanged) return row;" in paste_body
+    assert "const marked = await markSubstation110kvServerDirty(nextBlock, { force: true });" in paste_body
     assert 'statusText.value = recognized ? "110KV变电站内容无变化" : "未识别到110KV变电站表格行";' in paste_body
 
 
@@ -280,8 +283,10 @@ def test_handover_review_110kv_auto_saves_as_official_data() -> None:
     assert "/shared-blocks/110kv/draft" not in api_source
     assert "function scheduleSubstation110kvAutoSave()" in source
     assert "async function flushSubstation110kvAutoSave()" in source
-    assert "async function markSubstation110kvServerDirty()" in source
+    assert "async function markSubstation110kvServerDirty(blockOverride = null, { force = false } = {})" in source
     assert "markHandoverReview110kvDirtyApi(buildingCode" in source
+    assert "rows: block.rows" in source
+    assert "let substation110kvDirtyMarkPromise = Promise.resolve(true);" in source
     assert "export async function markHandoverReview110kvDirtyApi" in api_source
     assert "saveHandoverReview110kvApi(buildingCode" in source
     assert "scheduleSubstation110kvAutoSave();" in source[source.index("function markSubstation110kvDirty") :]

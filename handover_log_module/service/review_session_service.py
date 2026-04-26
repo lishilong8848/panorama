@@ -329,15 +329,37 @@ class ReviewSessionService:
         except Exception as exc:  # noqa: BLE001
             _reraise_review_store_error(exc)
 
-    def mark_substation_110kv_dirty(self, *, batch_key: str, building: str, client_id: str) -> Dict[str, Any]:
-        block = self.get_substation_110kv(batch_key)
+    def mark_substation_110kv_dirty(
+        self,
+        *,
+        batch_key: str,
+        building: str,
+        client_id: str,
+        rows: List[Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
+        target_batch = str(batch_key or "").strip()
+        block = self.get_substation_110kv(target_batch)
+        dirty_payload: Dict[str, Any] = {}
+        if rows is not None:
+            dirty_payload = self.normalize_substation_110kv_payload(
+                {
+                    "batch_key": target_batch,
+                    "revision": int(block.get("revision", 0) or 0),
+                    "updated_at": str(block.get("updated_at", "") or "").strip(),
+                    "updated_by_building": str(block.get("updated_by_building", "") or "").strip(),
+                    "updated_by_client": str(block.get("updated_by_client", "") or "").strip(),
+                    "rows": rows if isinstance(rows, list) else [],
+                },
+                batch_key=target_batch,
+            )
         try:
             return self._review_state_store.mark_shared_block_dirty(
-                batch_key=str(batch_key or "").strip(),
+                batch_key=target_batch,
                 block_id=_SUBSTATION_110KV_BLOCK_ID,
                 revision=int(block.get("revision", 0) or 0),
                 building=str(building or "").strip(),
                 client_id=str(client_id or "").strip(),
+                dirty_payload=dirty_payload,
             )
         except Exception as exc:  # noqa: BLE001
             _reraise_review_store_error(exc)
