@@ -10,6 +10,7 @@ from handover_log_module.core.models import RawRow
 from handover_log_module.service.capacity_report_common import (
     _hvdc_search_tokens,
     _tr_replacement_search_tokens,
+    build_aircon_matrix_missing_warnings,
     build_capacity_cells_with_config,
     build_capacity_template_snapshot,
 )
@@ -839,3 +840,61 @@ def test_aircon_matrix_mapping_uses_chinese_floor_and_area_text_for_e_building()
     assert values["AE112"] == "1.12"
     assert values["AE142"] == "1.42"
     assert values["AE152"] == "1.52"
+
+
+def test_aircon_matrix_mapping_uses_crah_equipment_code_when_aircon_path_is_missing() -> None:
+    rows = [
+        RawRow(1, "", "C-212-CRAHB-B_电量仪", "总_有功功率_KW", "20.99", 20.99),
+        RawRow(2, "", "C-211-CRAHB-B_电量仪", "总_有功功率_KW", "21.76", 21.76),
+    ]
+    context = {
+        "building": "C楼",
+        "capacity_rows": rows,
+        "running_units": {},
+        "template_snapshot": {"building_code": "C", "template_family": "other_buildings"},
+    }
+
+    values = build_capacity_cells_with_config(context)
+
+    assert values["AE80"] == "20.99"
+    assert values["AE85"] == "21.76"
+
+
+def test_aircon_matrix_mapping_preserves_numeric_zero_values() -> None:
+    rows = [
+        RawRow(1, "南通阿里保税A区E楼/E楼/三层/空调区3 E-341", "E-341-CRAHB-B_电量仪", "总_有功功率", 0.0, 0.0),
+        RawRow(2, "南通阿里保税A区E楼/E楼/三层/空调区2 E-311", "E-311-CRAHB-B_电量仪", "总_有功功率", 0.0, 0.0),
+        RawRow(3, "南通阿里保税A区E楼/E楼/四层/空调区3 E-441", "E-441-CRAHB-B_电量仪", "总_有功功率", 0.0, 0.0),
+    ]
+    context = {
+        "building": "E楼",
+        "capacity_rows": rows,
+        "running_units": {},
+        "template_snapshot": {"building_code": "E", "template_family": "e_building"},
+    }
+
+    values = build_capacity_cells_with_config(context)
+
+    assert values["AE112"] == "0"
+    assert values["AE142"] == "0"
+    assert values["AE152"] == "0"
+
+
+def test_aircon_matrix_missing_warnings_report_missing_row_without_substituting_neighbor() -> None:
+    rows = [
+        RawRow(1, "南通阿里保税A区D楼/D楼/二层/空调区2 D-211", "D-211-CRAHB-A_电量仪", "总_有功功率", "5.12", 5.12),
+    ]
+    context = {
+        "building": "D楼",
+        "capacity_rows": rows,
+        "running_units": {},
+        "template_snapshot": {"building_code": "D", "template_family": "other_buildings"},
+    }
+
+    values = build_capacity_cells_with_config(context)
+    warnings = build_aircon_matrix_missing_warnings(context, values)
+
+    assert values["AE85"] == "5.12"
+    assert "AE80" not in values
+    assert any("missing_row" in item and "D楼 AE80" in item and "D-212-CRAH" in item for item in warnings)
+    assert not any("AE85" in item for item in warnings)

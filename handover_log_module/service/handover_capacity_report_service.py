@@ -26,7 +26,10 @@ from handover_log_module.core.shift_window import parse_duty_date
 from handover_log_module.core.normalizers import format_number
 from handover_log_module.repository.excel_reader import load_rows, load_workbook_quietly
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
-from handover_log_module.service.capacity_report_common import build_capacity_template_snapshot
+from handover_log_module.service.capacity_report_common import (
+    build_aircon_matrix_missing_warnings,
+    build_capacity_template_snapshot,
+)
 from handover_log_module.service.review_session_service import ReviewSessionService
 from pipeline_utils import get_app_dir
 
@@ -1403,6 +1406,10 @@ class HandoverCapacityReportService:
                 "template_snapshot": template_snapshot,
             }
             cell_values = builder(context)
+            aircon_warnings = build_aircon_matrix_missing_warnings(context, cell_values)
+            for warning in aircon_warnings:
+                warnings.append(warning)
+                emit_log(f"[交接班][容量报表][空调功率] {warning}")
             cell_values.update(_build_fixed_header_cells(building_text))
             cell_values.update(
                 self._build_capacity_overlay_values(

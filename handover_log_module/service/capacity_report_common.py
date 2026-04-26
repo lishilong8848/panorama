@@ -77,6 +77,12 @@ _AIRCON_ZONE_DIRECTION_BY_AREA = {
     "3": ("west", "south"),
     "4": ("west", "north"),
 }
+_AIRCON_ROOM_SUFFIX_BY_ZONE_DIRECTION = {
+    ("east", "south"): "12",
+    ("east", "north"): "11",
+    ("west", "south"): "41",
+    ("west", "north"): "40",
+}
 _CHINESE_DIGIT_MAP = {"一": "1", "二": "2", "三": "3", "四": "4"}
 _DEFAULT_PRIMARY_PUMP_ALIASES = {
     "A楼": ["冷冻水一次泵变频反馈"],
@@ -910,15 +916,25 @@ def _build_rpp_values(snapshot: Dict[str, Any]) -> Dict[str, str]:
     return values
 
 
+def _aircon_equipment_room_code(row: RawRow, *, building_code: str) -> str:
+    b_text = _text(getattr(row, "b_text", ""))
+    c_text = _text(getattr(row, "c_text", ""))
+    combined = f"{b_text} {c_text}".upper()
+    code = _text(building_code).upper()
+    prefix_pattern = re.escape(code) if code else r"[A-Z]"
+    match = re.search(rf"(?<![A-Z0-9]){prefix_pattern}-(?P<room>[234](?:11|12|40|41))[-_]?CRAH", combined)
+    return _text(match.group("room")) if match else ""
+
+
 def _aircon_quadrant(row: RawRow, *, building_code: str) -> tuple[int, str, str] | None:
-    _ = building_code
     b_text = _text(getattr(row, "b_text", ""))
     c_text = _text(getattr(row, "c_text", ""))
     combined = f"{b_text} {c_text}"
-    if "空调" not in combined:
+    equipment_room_code = _aircon_equipment_room_code(row, building_code=building_code)
+    if "空调" not in combined and not equipment_room_code:
         return None
     floor_match = re.search(r"([234二三四])层", combined)
-    code_match = re.search(r"([234](?:11|12|40|41))", combined)
+    code_match = re.search(r"([234](?:11|12|40|41))", equipment_room_code or combined)
     area_match = re.search(r"空调区?\s*([1-4一二三四])", combined)
     floor_token = _text(floor_match.group(1)) if floor_match else ""
     floor_token = _CHINESE_DIGIT_MAP.get(floor_token, floor_token)
@@ -947,6 +963,16 @@ def _aircon_quadrant(row: RawRow, *, building_code: str) -> tuple[int, str, str]
     return None
 
 
+def _aircon_value_text(row: RawRow) -> str:
+    raw_value = getattr(row, "e_raw", None)
+    if raw_value is None:
+        return ""
+    number = getattr(row, "value", None)
+    if number is not None:
+        return format_number(number)
+    return str(raw_value).strip()
+
+
 def _build_aircon_matrix_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> Dict[str, str]:
     building_code = _text(snapshot.get("building_code")).upper()
     template_family = _text(snapshot.get("template_family")) or _TEMPLATE_FAMILY_OTHER_BUILDINGS
@@ -960,13 +986,70 @@ def _build_aircon_matrix_values(query: CapacitySourceQuery, snapshot: Dict[str, 
         if key is None:
             continue
         target_cell = target_cells.get(key)
-        value_text = _text(getattr(row, "e_raw", None))
+        value_text = _aircon_value_text(row)
         if not target_cell or not value_text:
             continue
         if target_cell in values and _text(values.get(target_cell)):
             continue
         values[target_cell] = value_text
     return {cell: value for cell, value in values.items() if value != ""}
+
+
+def _aircon_expected_room_code(building_code: str, key: tuple[int, str, str]) -> str:
+    floor, zone, direction = key
+    suffix = _AIRCON_ROOM_SUFFIX_BY_ZONE_DIRECTION.get((zone, direction), "")
+    return f"{_text(building_code).upper()}-{int(floor)}{suffix}" if suffix and _text(building_code) else ""
+
+
+def _aircon_rows_by_room_code(query: CapacitySourceQuery, room_code: str) -> List[RawRow]:
+    token = _text(room_code).upper()
+    if not token:
+        return []
+    rows: List[RawRow] = []
+    for row in query.rows:
+        combined = f"{_text(getattr(row, 'b_text', ''))} {_text(getattr(row, 'c_text', ''))}".upper()
+        d_name = _casefold(getattr(row, "d_name", ""))
+        if token not in combined:
+            continue
+        if "crah" not in combined.casefold():
+            continue
+        if "总_有功功率" not in d_name and "总有功功率" not in d_name:
+            continue
+        rows.append(row)
+    return rows
+
+
+def _has_aircon_output_value(value: Any) -> bool:
+    if value is None:
+        return False
+    return str(value).strip() != ""
+
+
+def build_aircon_matrix_missing_warnings(context: Dict[str, Any], cell_values: Dict[str, Any]) -> List[str]:
+    query = CapacitySourceQuery(
+        context.get("capacity_rows", []) if isinstance(context.get("capacity_rows", []), list) else [],
+        building=_text(context.get("building")),
+    )
+    snapshot = context.get("template_snapshot", {}) if isinstance(context.get("template_snapshot", {}), dict) else {}
+    building = _text(context.get("building"))
+    building_code = _text(snapshot.get("building_code")).upper() or _extract_building_code(building)
+    template_family = _text(snapshot.get("template_family")) or _TEMPLATE_FAMILY_OTHER_BUILDINGS
+    target_cells = _AIRCON_TARGET_CELLS_BY_TEMPLATE_FAMILY.get(
+        template_family,
+        _AIRCON_TARGET_CELLS_BY_TEMPLATE_FAMILY[_TEMPLATE_FAMILY_OTHER_BUILDINGS],
+    )
+    warnings: List[str] = []
+    normalized_values = {str(cell).upper(): value for cell, value in (cell_values or {}).items()}
+    for key, target_cell in target_cells.items():
+        if _has_aircon_output_value(normalized_values.get(target_cell)):
+            continue
+        room_code = _aircon_expected_room_code(building_code, key)
+        matched_rows = _aircon_rows_by_room_code(query, room_code)
+        if not matched_rows:
+            warnings.append(f"missing_row: {building} {target_cell} 缺少 {room_code}-CRAH... 总_有功功率")
+            continue
+        warnings.append(f"missing_value: {building} {target_cell} 源表 {room_code}-CRAH... 总_有功功率 值为空")
+    return warnings
 
 
 def build_capacity_cells_with_config(context: Dict[str, Any], config: Dict[str, Any] | None = None) -> Dict[str, str]:
