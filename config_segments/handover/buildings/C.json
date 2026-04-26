@@ -1,0 +1,89 @@
+﻿{
+  "revision": 20,
+  "updated_at": "2026-04-25T20:37:36+08:00",
+  "data": {
+    "cell_rules": {
+      "building_rows": {
+        "C楼": []
+      }
+    },
+    "cloud_sheet_sync": {
+      "sheet_names": {
+        "C楼": "C楼"
+      }
+    },
+    "review_ui": {
+      "cabinet_power_defaults_by_building": {
+        "C楼": {
+          "cells": {
+            "B13": "99800",
+            "D13": "97200",
+            "F13": "",
+            "H13": ""
+          }
+        }
+      },
+      "footer_inventory_defaults_by_building": {
+        "C楼": {
+          "rows": [
+            {
+              "cells": {
+                "B": "值班手机",
+                "C": "C-112值班室",
+                "E": "1",
+                "F": "否",
+                "G": "无"
+              }
+            },
+            {
+              "cells": {
+                "B": "对讲机",
+                "C": "C-112值班室",
+                "E": "8",
+                "F": "否",
+                "G": "无"
+              }
+            },
+            {
+              "cells": {
+                "B": "钥匙",
+                "C": "C-112值班室钥匙箱",
+                "E": "4",
+                "F": "否",
+                "G": "无"
+              }
+            },
+            {
+              "cells": {
+                "B": "应急工具",
+                "C": "C-112值班室应急工具柜",
+                "E": "200",
+                "F": "否",
+                "G": "无"
+              }
+            }
+          ]
+        }
+      },
+      "review_link_recipients_by_building": {
+        "C楼": [
+          {
+            "note": "李世龙C",
+            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+            "enabled": true
+          },
+          {
+            "note": "C",
+            "open_id": "ou_99391b00c1406917930483d8500af400",
+            "enabled": true
+          },
+          {
+            "note": "m",
+            "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+            "enabled": true
+          }
+        ]
+      }
+    }
+  }
+}
