@@ -4037,6 +4037,7 @@ def _sync_substation_110kv_to_batch_capacity_reports(
                 shared_110kv=shared_110kv,
                 cooling_pump_pressures=cooling_pump_pressures,
                 capacity_output_file=str(updated_session.get("capacity_output_file", "") or capacity_file).strip(),
+                overlay_scope="substation_110kv",
             )
             updated += 1
         except Exception as exc:  # noqa: BLE001

@@ -126,6 +126,40 @@ def test_xlsx_write_queue_wait_times_out_when_worker_cannot_run(tmp_path: Path) 
         service.wait_for_job(building="A楼", job_id=job["job_id"], timeout_sec=0.1)
 
 
+def test_capacity_overlay_dedupes_by_scope_without_downgrading_full_task(tmp_path: Path) -> None:
+    class _Queue(HandoverXlsxWriteQueueService):
+        def _start_worker(self, *, building: str) -> None:
+            return
+
+    service = _Queue(_config(tmp_path), emit_log=lambda _msg: None)
+
+    full_job = service.enqueue_capacity_overlay_sync(
+        building="A楼",
+        session_id="A楼|2026-04-25|day",
+        tracked_cells={"H6": "10"},
+        capacity_output_file="capacity.xlsx",
+    )
+    light_job = service.enqueue_capacity_overlay_sync(
+        building="A楼",
+        session_id="A楼|2026-04-25|day",
+        tracked_cells={"H6": "10"},
+        capacity_output_file="capacity.xlsx",
+        overlay_scope="substation_110kv",
+    )
+    newer_light_job = service.enqueue_capacity_overlay_sync(
+        building="A楼",
+        session_id="A楼|2026-04-25|day",
+        tracked_cells={"H6": "11"},
+        capacity_output_file="capacity.xlsx",
+        overlay_scope="substation_110kv",
+    )
+
+    assert light_job["job_id"] != full_job["job_id"]
+    assert newer_light_job["job_id"] == light_job["job_id"]
+    assert newer_light_job["payload"]["tracked_cells"]["H6"] == "11"
+    assert newer_light_job["payload"]["overlay_scope"] == "substation_110kv"
+
+
 def test_review_excel_sync_failure_marks_sync_state_failed(tmp_path: Path) -> None:
     service = HandoverXlsxWriteQueueService(_config(tmp_path), emit_log=lambda _msg: None)
     store = ReviewBuildingDocumentStore(config=_config(tmp_path), building="A楼")

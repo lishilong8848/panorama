@@ -158,6 +158,72 @@ def test_shared_110kv_save_changed_payload_saves_and_queues_capacity_sync(monkey
     assert sync_calls[0]["shared_110kv"]["rows"][0]["power_kw"] == "120"
 
 
+def test_substation_110kv_batch_sync_queues_light_overlay_scope(monkeypatch) -> None:
+    shared_110kv = _block(revision=8, power_kw="120")
+    document = {
+        "fixed_blocks": [
+            {
+                "fields": [
+                    {"cell": "H6", "value": "10"},
+                    {"cell": "F8", "value": "西区30/东区40"},
+                    {"cell": "B6", "value": "1.2"},
+                    {"cell": "D6", "value": "2000"},
+                    {"cell": "F6", "value": "1200"},
+                    {"cell": "D8", "value": "8"},
+                    {"cell": "B13", "value": "100"},
+                    {"cell": "D13", "value": "80"},
+                ]
+            }
+        ],
+        "cooling_pump_pressures": {"rows": []},
+    }
+    queued_calls: list[dict] = []
+
+    class _FakeReviewService:
+        def list_batch_sessions(self, batch_key: str) -> list[dict]:
+            assert batch_key == "2026-04-25|day"
+            return [
+                {
+                    "session_id": "A楼|2026-04-25|day",
+                    "building": "A楼",
+                    "capacity_output_file": "capacity-a.xlsx",
+                }
+            ]
+
+        def update_capacity_sync(self, **kwargs) -> dict:
+            assert kwargs["capacity_status"] == "pending"
+            return {
+                "session_id": kwargs["session_id"],
+                "building": "A楼",
+                "capacity_output_file": "capacity-a.xlsx",
+            }
+
+    class _FakeDocumentState:
+        def load_document(self, session: dict) -> tuple[dict, dict]:
+            return document, session
+
+    class _FakeQueueService:
+        def enqueue_capacity_overlay_sync(self, **kwargs) -> dict:
+            queued_calls.append(kwargs)
+            return {"job_id": "job-1"}
+
+    monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *args, **kwargs: _FakeDocumentState())
+    monkeypatch.setattr(routes, "_build_xlsx_write_queue_service", lambda *args, **kwargs: _FakeQueueService())
+
+    result = routes._sync_substation_110kv_to_batch_capacity_reports(
+        container=object(),
+        review_service=_FakeReviewService(),
+        parser=object(),
+        writer=object(),
+        shared_110kv=shared_110kv,
+        emit_log=lambda _msg: None,
+    )
+
+    assert result["updated"] == 1
+    assert queued_calls[0]["overlay_scope"] == "substation_110kv"
+    assert queued_calls[0]["shared_110kv"]["rows"][0]["power_kw"] == "120"
+
+
 @pytest.mark.parametrize(
     ("save_error", "detail"),
     [

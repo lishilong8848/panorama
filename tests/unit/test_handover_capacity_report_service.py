@@ -5,6 +5,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
 import openpyxl
+import pytest
 
 from handover_log_module.core.models import RawRow
 from handover_log_module.service.capacity_report_common import (
@@ -19,6 +20,12 @@ from handover_log_module.service.handover_capacity_report_service import (
     _build_fixed_header_cells,
 )
 from handover_log_module.service.cooling_pump_pressure_defaults_service import CoolingPumpPressureDefaultsService
+
+
+@pytest.fixture(autouse=True)
+def _clear_capacity_weather_cache() -> None:
+    HandoverCapacityReportService._shared_weather_payload_cache.clear()
+    HandoverCapacityReportService._weather_payload_cache_inflight.clear()
 
 
 def test_build_fixed_header_cells_for_a_building() -> None:
@@ -195,6 +202,80 @@ def test_capacity_overlay_writes_substation_110kv_and_cooling_pump_pressures(tmp
         saved.close()
 
 
+def test_substation_110kv_overlay_only_skips_weather_and_water(tmp_path, monkeypatch) -> None:
+    output_file = tmp_path / "capacity.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "本班组"
+    sheet["L2"] = "原天气"
+    sheet["X2"] = "原湿度"
+    sheet["O57"] = "原当日耗水"
+    sheet["AC25"] = "原月耗水"
+    sheet.merge_cells("A55:L55")
+    for row in range(57, 64):
+        sheet.merge_cells(start_row=row, start_column=11, end_row=row, end_column=12)
+    workbook.save(output_file)
+    workbook.close()
+
+    service = HandoverCapacityReportService({"capacity_report": {"template": {"sheet_name": "本班组"}}})
+    monkeypatch.setattr(
+        service,
+        "_query_capacity_water_summary",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("110KV补写不应查询耗水")),
+    )
+    monkeypatch.setattr(
+        service,
+        "_fetch_weather_payload_for_duty_date",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("110KV补写不应查询天气")),
+    )
+
+    result = service.sync_substation_110kv_for_existing_report_from_cells(
+        building="A楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        handover_cells={
+            "H6": "10",
+            "F8": "西区30/东区40",
+            "B6": "1.2",
+            "D6": "2000",
+            "F6": "1200",
+            "D8": "8",
+            "B13": "100",
+            "D13": "80",
+        },
+        capacity_output_file=str(output_file),
+        shared_110kv={
+            "revision": 3,
+            "rows": [
+                {
+                    "row_id": "incoming_akai",
+                    "line_voltage": "115.82",
+                    "current": "105.05",
+                    "power_kw": "21180",
+                    "power_factor": "1",
+                    "load_rate": "0.2118",
+                },
+            ],
+        },
+        emit_log=lambda _msg: None,
+    )
+
+    assert result["status"] == "ready"
+    saved = openpyxl.load_workbook(output_file, data_only=False)
+    try:
+        ws = saved["本班组"]
+        assert ws["C57"].value == "115.82"
+        assert ws["E57"].value == "105.05"
+        assert ws["G57"].value == "21180"
+        assert ws["K57"].value == "0.2118"
+        assert ws["L2"].value == "原天气"
+        assert ws["X2"].value == "原湿度"
+        assert ws["O57"].value == "原当日耗水"
+        assert ws["AC25"].value == "原月耗水"
+    finally:
+        saved.close()
+
+
 def test_cooling_pump_pressure_defaults_match_building_zone_unit() -> None:
     service = CoolingPumpPressureDefaultsService()
     defaults = service.merge_document_rows_into_defaults(
@@ -295,6 +376,71 @@ def test_weather_payload_uses_seniverse_for_today_and_caches(monkeypatch) -> Non
         emit_log=lambda _msg: None,
     )
     second = service._fetch_weather_payload_for_duty_date(
+        duty_date="2026-04-17",
+        emit_log=lambda _msg: None,
+    )
+
+    assert first == {"text": "多云", "humidity": "96%"}
+    assert second == first
+    assert calls["count"] == 1
+
+
+def test_weather_payload_cache_is_shared_across_service_instances(monkeypatch) -> None:
+    config = {
+        "capacity_report": {
+            "weather": {
+                "seniverse_public_key": "test-public",
+                "seniverse_private_key": "test-private",
+                "location": "崇川区",
+                "language": "zh-Hans",
+                "unit": "c",
+                "timeout_sec": 8,
+            }
+        }
+    }
+    first_service = HandoverCapacityReportService(config)
+    second_service = HandoverCapacityReportService(config)
+    monkeypatch.setattr(first_service, "_today_local_date", lambda: date(2026, 4, 17))
+    monkeypatch.setattr(second_service, "_today_local_date", lambda: date(2026, 4, 17))
+    calls = {"count": 0}
+
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "results": [
+                        {
+                            "daily": [
+                                {
+                                    "date": "2026-04-17",
+                                    "text_day": "多云",
+                                    "humidity": "96",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def _fake_urlopen(request, timeout=0):  # noqa: ANN001
+        calls["count"] += 1
+        return _FakeResponse()
+
+    monkeypatch.setattr("handover_log_module.service.handover_capacity_report_service.urlopen", _fake_urlopen)
+
+    first = first_service._fetch_weather_payload_for_duty_date(
+        duty_date="2026-04-17",
+        emit_log=lambda _msg: None,
+    )
+    second = second_service._fetch_weather_payload_for_duty_date(
         duty_date="2026-04-17",
         emit_log=lambda _msg: None,
     )

@@ -93,13 +93,15 @@ class HandoverXlsxWriteQueueService:
         shared_110kv: Dict[str, Any] | None = None,
         cooling_pump_pressures: Dict[str, Any] | None = None,
         capacity_output_file: str = "",
+        overlay_scope: str = "",
     ) -> Dict[str, Any]:
         building_text = str(building or "").strip()
         session_id_text = str(session_id or "").strip()
         if not building_text or not session_id_text:
             return {}
         dedupe_file = str(capacity_output_file or "").strip()
-        dedupe_key = f"{session_id_text}|{dedupe_file}"
+        scope_text = str(overlay_scope or "").strip() or "full"
+        dedupe_key = f"{session_id_text}|{dedupe_file}|{scope_text}"
         job = self._store(building_text).enqueue_xlsx_write_job(
             task_type="capacity_overlay_sync",
             dedupe_key=dedupe_key,
@@ -110,6 +112,7 @@ class HandoverXlsxWriteQueueService:
                 "shared_110kv": shared_110kv if isinstance(shared_110kv, dict) else {},
                 "cooling_pump_pressures": cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {},
                 "capacity_output_file": dedupe_file,
+                "overlay_scope": scope_text,
             },
             dedupe_pending=True,
         )
@@ -292,6 +295,7 @@ class HandoverXlsxWriteQueueService:
         from handover_log_module.service.review_session_service import ReviewSessionService
 
         session_id = str(payload.get("session_id", "") or "").strip()
+        overlay_scope = str(payload.get("overlay_scope", "") or "").strip().lower() or "full"
         tracked_cells = payload.get("tracked_cells", {}) if isinstance(payload.get("tracked_cells", {}), dict) else {}
         shared_110kv = payload.get("shared_110kv", {}) if isinstance(payload.get("shared_110kv", {}), dict) else {}
         cooling_pump_pressures = (
@@ -310,16 +314,28 @@ class HandoverXlsxWriteQueueService:
                 raise ValueError("容量表补写缺少日期或班次")
             with self._resource_guard(building=building, name=f"xlsx_capacity_overlay:{building}:{session_id}"):
                 capacity_service = HandoverCapacityReportService(self.config)
-                sync_payload = capacity_service.sync_overlay_for_existing_report_from_cells(
-                    building=building,
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
-                    handover_cells=tracked_cells,
-                    capacity_output_file=str(session.get("capacity_output_file", "") or "").strip(),
-                    shared_110kv=shared_110kv,
-                    cooling_pump_pressures=cooling_pump_pressures,
-                    emit_log=self.emit_log,
-                )
+                if overlay_scope == "substation_110kv":
+                    sync_payload = capacity_service.sync_substation_110kv_for_existing_report_from_cells(
+                        building=building,
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        handover_cells=tracked_cells,
+                        capacity_output_file=str(session.get("capacity_output_file", "") or "").strip(),
+                        shared_110kv=shared_110kv,
+                        cooling_pump_pressures=cooling_pump_pressures,
+                        emit_log=self.emit_log,
+                    )
+                else:
+                    sync_payload = capacity_service.sync_overlay_for_existing_report_from_cells(
+                        building=building,
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        handover_cells=tracked_cells,
+                        capacity_output_file=str(session.get("capacity_output_file", "") or "").strip(),
+                        shared_110kv=shared_110kv,
+                        cooling_pump_pressures=cooling_pump_pressures,
+                        emit_log=self.emit_log,
+                    )
             sync_status = str(sync_payload.get("status", "") if isinstance(sync_payload, dict) else "").strip().lower()
             if sync_status == "ready":
                 capacity_status = "success"

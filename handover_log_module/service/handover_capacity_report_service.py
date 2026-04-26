@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import re
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
@@ -224,12 +225,42 @@ def _write_cells_with_merged_support(sheet: Any, cell_values: Dict[str, Any]) ->
 
 
 class HandoverCapacityReportService:
+    _weather_payload_cache_guard = threading.Lock()
+    _shared_weather_payload_cache: Dict[str, Dict[str, str]] = {}
+    _weather_payload_cache_inflight: Dict[str, threading.Event] = {}
+
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
         self._review_session_service = ReviewSessionService(self.config)
         self._cooling_pump_defaults = CoolingPumpPressureDefaultsService()
-        self._weather_payload_cache: Dict[str, Dict[str, str]] = {}
+        self._weather_payload_cache = self._shared_weather_payload_cache
         self._water_summary_cache: Dict[tuple[str, str], Dict[str, str]] = {}
+
+    @classmethod
+    def _claim_weather_cache_fetch(cls, cache_key: str) -> tuple[Dict[str, str] | None, bool]:
+        key = str(cache_key or "")
+        while key:
+            with cls._weather_payload_cache_guard:
+                cached = cls._shared_weather_payload_cache.get(key)
+                if isinstance(cached, dict):
+                    return dict(cached), False
+                event = cls._weather_payload_cache_inflight.get(key)
+                if event is None:
+                    event = threading.Event()
+                    cls._weather_payload_cache_inflight[key] = event
+                    return None, True
+            event.wait(timeout=30.0)
+        return None, True
+
+    @classmethod
+    def _finish_weather_cache_fetch(cls, cache_key: str, payload: Dict[str, str]) -> None:
+        key = str(cache_key or "")
+        with cls._weather_payload_cache_guard:
+            if key:
+                cls._shared_weather_payload_cache[key] = dict(payload if isinstance(payload, dict) else {})
+                event = cls._weather_payload_cache_inflight.pop(key, None)
+                if event is not None:
+                    event.set()
 
     def _capacity_cfg(self) -> Dict[str, Any]:
         raw = self.config.get("capacity_report", {})
@@ -1090,6 +1121,18 @@ class HandoverCapacityReportService:
         duty_date_text = _text(duty_date)
         if not duty_date_text:
             return {"text": "", "humidity": ""}
+        weather_cfg = self._weather_cfg()
+        private_hash = hashlib.sha1(_text(weather_cfg.get("seniverse_private_key")).encode("utf-8")).hexdigest()[:12]
+        cache_key = (
+            f"weather:{_text(weather_cfg.get('provider')).lower() or 'seniverse'}:{duty_date_text}:"
+            f"{'|'.join(self._seniverse_candidate_locations())}:"
+            f"{_text(weather_cfg.get('language'))}:{_text(weather_cfg.get('unit'))}:"
+            f"{_text(weather_cfg.get('seniverse_public_key'))}:{private_hash}"
+        )
+        cached, should_fetch = self._claim_weather_cache_fetch(cache_key)
+        if isinstance(cached, dict):
+            return cached
+        payload = {"text": "", "humidity": ""}
         try:
             duty_day = parse_duty_date(duty_date_text)
         except ValueError as exc:
@@ -1097,15 +1140,87 @@ class HandoverCapacityReportService:
                 "[交接班][容量报表][天气] 查询失败 "
                 f"duty_date={duty_date_text}, error={exc}"
             )
-            return {"text": "", "humidity": ""}
-        if duty_day < self._today_local_date():
-            return self._legacy_fetch_weather_payload_for_duty_date(
-                duty_date=duty_date_text,
-                emit_log=emit_log,
+            if should_fetch:
+                self._finish_weather_cache_fetch(cache_key, payload)
+            return payload
+        try:
+            if duty_day < self._today_local_date():
+                payload = self._legacy_fetch_weather_payload_for_duty_date(
+                    duty_date=duty_date_text,
+                    emit_log=emit_log,
+                )
+            else:
+                payload = self._fetch_seniverse_weather_payload_for_duty_date(
+                    duty_date=duty_date_text,
+                    emit_log=emit_log,
+                )
+            return dict(payload if isinstance(payload, dict) else {"text": "", "humidity": ""})
+        finally:
+            if should_fetch:
+                self._finish_weather_cache_fetch(
+                    cache_key,
+                    payload if isinstance(payload, dict) else {"text": "", "humidity": ""},
+                )
+
+    def sync_substation_110kv_for_existing_report_from_cells(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        handover_cells: Dict[str, Any],
+        capacity_output_file: str,
+        shared_110kv: Dict[str, Any],
+        cooling_pump_pressures: Dict[str, Any] | None = None,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        shared_payload = ReviewSessionService.normalize_substation_110kv_payload(shared_110kv if isinstance(shared_110kv, dict) else {})
+        cooling_payload = cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {}
+        input_signature = self.capacity_input_signature(
+            handover_cells,
+            shared_110kv_signature=self._substation_110kv_signature(shared_payload),
+            cooling_pump_signature=self._cooling_pump_defaults.signature(cooling_payload),
+        )
+        capacity_output_path = Path(_text(capacity_output_file))
+        if not _text(capacity_output_file) or not capacity_output_path.exists():
+            return self._build_capacity_sync_payload(
+                status="missing_file",
+                error="交接班容量报表文件不存在，请重新生成",
+                input_signature=input_signature,
             )
-        return self._fetch_seniverse_weather_payload_for_duty_date(
-            duty_date=duty_date_text,
-            emit_log=emit_log,
+        valid, error = self._validate_capacity_overlay_inputs(handover_cells)
+        if not valid:
+            return self._build_capacity_sync_payload(
+                status="pending_input",
+                error=error,
+                input_signature=input_signature,
+            )
+        try:
+            workbook = load_workbook_quietly(capacity_output_path)
+            try:
+                sheet_name = self._sheet_name(workbook, _text(self._template_cfg().get("sheet_name")))
+                sheet = workbook[sheet_name]
+                _write_cells_with_merged_support(sheet, self._substation_110kv_cell_values(shared_payload))
+                atomic_save_workbook(workbook, capacity_output_path)
+            finally:
+                workbook.close()
+        except Exception as exc:  # noqa: BLE001
+            emit_log(
+                "[交接班][容量报表][110KV补写] 失败 "
+                f"building={building}, duty={duty_date}/{duty_shift}, error={exc}"
+            )
+            return self._build_capacity_sync_payload(
+                status="failed",
+                error=f"容量报表110KV补写失败: {exc}",
+                input_signature=input_signature,
+            )
+        emit_log(
+            "[交接班][容量报表][110KV补写] 完成 "
+            f"building={building}, duty={duty_date}/{duty_shift}, output={capacity_output_path}"
+        )
+        return self._build_capacity_sync_payload(
+            status="ready",
+            input_signature=input_signature,
         )
 
     def _fetch_weather_text_for_duty_date(
