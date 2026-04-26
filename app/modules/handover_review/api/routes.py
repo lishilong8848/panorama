@@ -4164,6 +4164,28 @@ def _substation_110kv_value_signature(payload: Dict[str, Any] | None, *, batch_k
     return tuple(signature)
 
 
+def _substation_110kv_dirty_payload_matches(
+    *,
+    submitted_110kv: Dict[str, Any],
+    lock_state: Dict[str, Any],
+    batch_key: str,
+) -> bool:
+    if not bool((lock_state or {}).get("client_holds_lock", False)):
+        return False
+    if not bool((lock_state or {}).get("dirty", False)):
+        return False
+    dirty_payload = (lock_state or {}).get("dirty_payload", {})
+    if not isinstance(dirty_payload, dict):
+        return False
+    return _substation_110kv_value_signature(
+        submitted_110kv,
+        batch_key=batch_key,
+    ) == _substation_110kv_value_signature(
+        dirty_payload,
+        batch_key=batch_key,
+    )
+
+
 def _shared_110kv_lock_response(
     *,
     service: ReviewSessionService,
@@ -4369,13 +4391,67 @@ def handover_review_shared_110kv_save(
                 "capacity_sync_result": sync_result,
                 "no_change": True,
             }
-        shared_110kv = service.save_substation_110kv(
-            batch_key=batch_key,
-            building=building,
-            client_id=client_id,
-            base_revision=base_revision,
-            rows=submitted_110kv.get("rows", []),
-        )
+        try:
+            shared_110kv = service.save_substation_110kv(
+                batch_key=batch_key,
+                building=building,
+                client_id=client_id,
+                base_revision=base_revision,
+                rows=submitted_110kv.get("rows", []),
+            )
+        except ValueError as exc:
+            if str(exc) != "shared_block_revision_conflict":
+                raise
+            current_after_conflict = service.get_substation_110kv(batch_key)
+            if _substation_110kv_value_signature(
+                submitted_110kv,
+                batch_key=batch_key,
+            ) == _substation_110kv_value_signature(
+                current_after_conflict,
+                batch_key=batch_key,
+            ):
+                sync_result = {"updated": 0, "failed": 0, "errors": [], "no_change": True}
+                lock_state = service.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id)
+                if bool(lock_state.get("client_holds_lock", False)) and bool(lock_state.get("dirty", False)):
+                    try:
+                        lock_state = service.clear_substation_110kv_dirty(batch_key=batch_key, client_id=client_id)
+                    except Exception as clear_exc:  # noqa: BLE001
+                        container.add_system_log(
+                            f"[交接班][110KV共享] revision冲突后确认内容已保存但dirty清理失败 "
+                            f"building={building}, batch={batch_key}, error={clear_exc}"
+                        )
+                container.add_system_log(
+                    f"[交接班][110KV共享] revision冲突后确认内容已是最新，按成功返回 "
+                    f"building={building}, batch={batch_key}, revision={current_after_conflict.get('revision', 0)}"
+                )
+                return {
+                    "ok": True,
+                    "building": building,
+                    "session": _attach_excel_sync_from_store(container, service.get_session_by_id(session_id) or target),
+                    "shared_blocks": {"substation_110kv": current_after_conflict},
+                    "shared_block_locks": {"substation_110kv": lock_state},
+                    "capacity_sync_result": sync_result,
+                    "no_change": True,
+                }
+            lock_state = service.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id)
+            if not _substation_110kv_dirty_payload_matches(
+                submitted_110kv=submitted_110kv,
+                lock_state=lock_state,
+                batch_key=batch_key,
+            ):
+                raise
+            container.add_system_log(
+                f"[交接班][110KV共享] revision冲突但当前client持有相同dirty预览，按最新revision重试保存 "
+                f"building={building}, batch={batch_key}, base_revision={base_revision}, "
+                f"current_revision={current_after_conflict.get('revision', 0)}"
+            )
+            shared_110kv = service.save_substation_110kv(
+                batch_key=batch_key,
+                building=building,
+                client_id=client_id,
+                base_revision=int(current_after_conflict.get("revision", 0) or 0),
+                rows=submitted_110kv.get("rows", []),
+            )
     except ValueError as exc:
         reason = str(exc)
         if reason == "shared_block_revision_conflict":

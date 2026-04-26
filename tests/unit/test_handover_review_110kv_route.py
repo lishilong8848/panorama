@@ -108,6 +108,25 @@ class _FakeReviewService:
         return self.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id) | {"dirty_cleared": True}
 
 
+class _RevisionCheckingFakeReviewService(_FakeReviewService):
+    def save_substation_110kv(self, **kwargs) -> dict:
+        self.saved_calls.append(kwargs)
+        if int(kwargs.get("base_revision", 0) or 0) != int(self.current.get("revision", 0) or 0):
+            raise ValueError("shared_block_revision_conflict")
+        saved = ReviewSessionService.normalize_substation_110kv_payload(
+            {
+                "batch_key": kwargs["batch_key"],
+                "revision": int(self.current.get("revision", 0)) + 1,
+                "rows": kwargs["rows"],
+            },
+            batch_key=kwargs["batch_key"],
+        )
+        self.current = saved
+        self.dirty = False
+        self.dirty_payload = {}
+        return saved
+
+
 def _patch_route_services(monkeypatch, service: _FakeReviewService, sync_calls: list[dict]) -> None:
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (service, object(), object(), None))
     monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
@@ -259,6 +278,35 @@ def test_shared_110kv_save_changed_payload_saves_and_queues_capacity_sync(monkey
     assert service.saved_calls[0]["base_revision"] == 7
     assert len(sync_calls) == 1
     assert sync_calls[0]["shared_110kv"]["rows"][0]["power_kw"] == "120"
+
+
+def test_shared_110kv_save_rebases_same_client_dirty_preview_after_revision_conflict(monkeypatch) -> None:
+    current = _block(revision=8, power_kw="110")
+    changed = _block(revision=8, power_kw="120")
+    service = _RevisionCheckingFakeReviewService(current)
+    service.dirty = True
+    service.dirty_payload = changed
+    sync_calls: list[dict] = []
+    _patch_route_services(monkeypatch, service, sync_calls)
+    request, logs = _fake_request()
+
+    response = routes.handover_review_shared_110kv_save(
+        "a",
+        request,
+        {
+            "session_id": "A楼|2026-04-25|day",
+            "client_id": "client-a",
+            "base_revision": 7,
+            "rows": changed["rows"],
+        },
+    )
+
+    assert response["ok"] is True
+    assert response["shared_blocks"]["substation_110kv"]["revision"] == 9
+    assert response["shared_blocks"]["substation_110kv"]["rows"][0]["power_kw"] == "120"
+    assert [call["base_revision"] for call in service.saved_calls] == [7, 8]
+    assert len(sync_calls) == 1
+    assert any("按最新revision重试保存" in line for line in logs)
 
 
 def test_substation_110kv_batch_sync_queues_light_overlay_scope(monkeypatch) -> None:
