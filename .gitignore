@@ -78,3 +78,5 @@ config_segments/handover/buildings/D.json
 config_segments/handover/buildings/E.json
 config_segments/handover/common.json
 config_segments/handover/buildings/D.json
+QLDownload/
+runtime/
