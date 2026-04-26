@@ -436,7 +436,10 @@ export function createConfigSaveUiHelpers(options = {}) {
 
   async function sendHandoverReviewLink(building, options = {}) {
     const targetBuilding = String(building || "").trim() || String(handoverConfigBuilding?.value || "").trim() || "A楼";
-    if (hasPendingHandoverConfigChanges(targetBuilding)) {
+    const shouldCheckPendingConfig =
+      String(currentView?.value || "").trim() === "config"
+      && String(activeConfigTab?.value || "").trim() === "feature_handover";
+    if (shouldCheckPendingConfig && hasPendingHandoverConfigChanges(targetBuilding)) {
       if (message) message.value = "当前交接班配置有未保存修改，请先点击保存配置";
       return {
         accepted: false,
@@ -444,8 +447,16 @@ export function createConfigSaveUiHelpers(options = {}) {
         error: "当前交接班配置有未保存修改，请先点击保存配置",
       };
     }
+    if (typeof sendHandoverReviewLinkAction !== "function") {
+      if (message) message.value = "审核链接发送入口未初始化，请刷新页面后重试";
+      return {
+        accepted: false,
+        reason: "action_unavailable",
+        error: "审核链接发送入口未初始化，请刷新页面后重试",
+      };
+    }
     if (message) message.value = `${targetBuilding}审核链接测试发送中...`;
-    return sendHandoverReviewLinkAction?.(targetBuilding, options);
+    return sendHandoverReviewLinkAction(targetBuilding, options);
   }
 
   async function onHandoverConfigBuildingChange(nextBuilding) {

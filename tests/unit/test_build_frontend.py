@@ -171,6 +171,21 @@ def test_handover_review_recipients_use_local_draft_building_switch() -> None:
     assert "handoverBuildingSegmentRevisions" in runtime_actions
 
 
+def test_handover_review_link_send_only_checks_unsaved_config_inside_handover_config_tab() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    save_helpers = (
+        project_root / "web" / "frontend" / "src" / "config_save_ui_helpers.js"
+    ).read_text(encoding="utf-8")
+
+    send_body = save_helpers[save_helpers.index("async function sendHandoverReviewLink") :]
+    send_body = send_body[: send_body.index("async function onHandoverConfigBuildingChange")]
+    assert "const shouldCheckPendingConfig =" in send_body
+    assert 'String(currentView?.value || "").trim() === "config"' in send_body
+    assert 'String(activeConfigTab?.value || "").trim() === "feature_handover"' in send_body
+    assert "if (shouldCheckPendingConfig && hasPendingHandoverConfigChanges(targetBuilding))" in send_body
+    assert 'reason: "action_unavailable"' in send_body
+
+
 def test_handover_review_capacity_image_send_is_sync_without_job_polling() -> None:
     project_root = Path(__file__).resolve().parents[2]
     source = (
