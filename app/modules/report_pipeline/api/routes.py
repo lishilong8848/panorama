@@ -1054,6 +1054,24 @@ def _filter_accessible_cached_entries(entries: Any) -> list[Dict[str, Any]]:
     return output
 
 
+def _normalize_cached_entries(entries: Any, *, validate_files: bool = True) -> list[Dict[str, Any]]:
+    output: list[Dict[str, Any]] = []
+    for item in entries if isinstance(entries, list) else []:
+        if not isinstance(item, dict):
+            continue
+        building = str(item.get("building", "") or "").strip()
+        file_path = str(item.get("file_path", "") or item.get("resolved_file_path", "") or "").strip()
+        if not building or not file_path:
+            continue
+        if validate_files and not is_accessible_cached_file_path(file_path):
+            continue
+        normalized = dict(item)
+        normalized["building"] = building
+        normalized["file_path"] = file_path
+        output.append(normalized)
+    return output
+
+
 def _format_bucket_age_hours_text(value: Any) -> str:
     try:
         age_hours = float(value)
@@ -1067,7 +1085,7 @@ def _format_bucket_age_hours_text(value: Any) -> str:
     return f"{rounded:.1f} 小时"
 
 
-def _normalize_latest_cache_selection(selection: Any) -> Dict[str, Any]:
+def _normalize_latest_cache_selection(selection: Any, *, validate_files: bool = True) -> Dict[str, Any]:
     payload = selection if isinstance(selection, dict) else {}
     best_bucket_age_hours_raw = payload.get("best_bucket_age_hours")
     try:
@@ -1079,7 +1097,10 @@ def _normalize_latest_cache_selection(selection: Any) -> Dict[str, Any]:
         "best_bucket_key": str(payload.get("best_bucket_key", "") or "").strip(),
         "best_bucket_age_hours": best_bucket_age_hours,
         "is_best_bucket_too_old": is_best_bucket_too_old,
-        "selected_entries": _filter_accessible_cached_entries(payload.get("selected_entries", [])),
+        "selected_entries": _normalize_cached_entries(
+            payload.get("selected_entries", []),
+            validate_files=validate_files,
+        ),
         "fallback_buildings": [
             str(item or "").strip()
             for item in payload.get("fallback_buildings", [])
@@ -1351,10 +1372,10 @@ def _run_external_day_metric_shared_flow(
         "[12项独立上传] 已进入后台共享文件处理: "
         f"dates={','.join(selected_dates)}, scope={building_scope}, building={building or '-'}"
     )
-    cached_entries = _filter_accessible_cached_entries(bridge_service.get_day_metric_by_date_cache_entries(
+    cached_entries = _normalize_cached_entries(bridge_service.get_day_metric_by_date_cache_entries(
         selected_dates=selected_dates,
         buildings=target_buildings,
-    ))
+    ), validate_files=False)
     expected_count = len(selected_dates) * len(target_buildings)
     if len(cached_entries) < expected_count:
         emit_log("[共享缓存][12项] 外网端只读取内网端已登记索引，缺失项将交由内网端补采")
@@ -1471,7 +1492,7 @@ def _run_external_monthly_auto_once_shared_flow(
     selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
         source_family="monthly_report_family",
         buildings=target_buildings,
-    ))
+    ), validate_files=False)
     cached_entries = selection["selected_entries"]
     if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
         dedupe_key = _job_dedupe_key(
@@ -1533,7 +1554,7 @@ def _run_external_wet_bulb_shared_flow(
     selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
         source_family="handover_log_family",
         buildings=target_buildings,
-    ))
+    ), validate_files=False)
     cached_entries = selection["selected_entries"]
     if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
         dedupe_key = _job_dedupe_key(
@@ -1588,10 +1609,10 @@ def _run_external_multi_date_shared_flow(
     bridge_service = _shared_bridge_service_or_raise(container)
     target_buildings = bridge_service.get_source_cache_buildings()
     emit_log(f"[多日期自动流程] 已进入后台共享文件处理: dates={','.join(selected_dates)}")
-    cached_entries = _filter_accessible_cached_entries(bridge_service.get_monthly_by_date_cache_entries(
+    cached_entries = _normalize_cached_entries(bridge_service.get_monthly_by_date_cache_entries(
         selected_dates=selected_dates,
         buildings=target_buildings,
-    ))
+    ), validate_files=False)
     expected_count = len(selected_dates) * len(target_buildings)
     if len(cached_entries) < expected_count:
         dedupe_key = _job_dedupe_key(
@@ -1659,17 +1680,18 @@ def _run_external_handover_shared_flow(
     )
     selection: Dict[str, Any] = {}
     if duty_date_text and duty_shift_text:
-        cached_entries = _filter_accessible_cached_entries(bridge_service.get_handover_by_date_cache_entries(
+        cached_entries = _normalize_cached_entries(bridge_service.get_handover_by_date_cache_entries(
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
             buildings=target_buildings,
-        ))
-        capacity_cached_entries = _filter_accessible_cached_entries(
+        ), validate_files=False)
+        capacity_cached_entries = _normalize_cached_entries(
             bridge_service.get_handover_capacity_by_date_cache_entries(
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
                 buildings=target_buildings,
-            )
+            ),
+            validate_files=False,
         )
         if len(cached_entries) < len(target_buildings) or len(capacity_cached_entries) < len(target_buildings):
             dedupe_key = _job_dedupe_key(
@@ -1726,32 +1748,20 @@ def _run_external_handover_shared_flow(
         selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
             source_family="handover_log_family",
             buildings=target_buildings,
-        ))
+        ), validate_files=False)
         cached_entries = selection["selected_entries"]
-        capacity_building_files = []
-        for item in cached_entries:
-            building = str(item.get("building", "") or "").strip()
-            duty_date_value = str(item.get("duty_date", "") or "").strip()
-            duty_shift_value = str(item.get("duty_shift", "") or "").strip().lower()
-            if not building or not duty_date_value or duty_shift_value not in {"day", "night"}:
-                continue
-            matched = _filter_accessible_cached_entries(
-                bridge_service.get_handover_capacity_by_date_cache_entries(
-                    duty_date=duty_date_value,
-                    duty_shift=duty_shift_value,
-                    buildings=[building],
-                )
-            )
-            if not matched:
-                continue
-            capacity_building_files.append(
-                (
-                    str(matched[0].get("building", "") or "").strip(),
-                    str(matched[0].get("file_path", "") or "").strip(),
-                )
-            )
+        capacity_selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
+            source_family="handover_capacity_report_family",
+            buildings=target_buildings,
+        ), validate_files=False)
+        capacity_cached_entries = capacity_selection["selected_entries"]
+        capacity_building_files = [
+            (str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip())
+            for item in capacity_cached_entries
+        ]
         if (
             not selection["can_proceed"]
+            or not capacity_selection["can_proceed"]
             or len(cached_entries) < len(target_buildings)
             or len(capacity_building_files) < len(target_buildings)
         ):
@@ -4363,12 +4373,13 @@ async def job_handover_from_file(
     if duty_date_text and duty_shift_text:
         bridge_service = getattr(container, "shared_bridge_service", None)
         if bridge_service is not None:
-            matched_capacity = _filter_accessible_cached_entries(
+            matched_capacity = _normalize_cached_entries(
                 bridge_service.get_handover_capacity_by_date_cache_entries(
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     buildings=[building],
-                )
+                ),
+                validate_files=False,
             )
             if matched_capacity:
                 capacity_source_file = str(matched_capacity[0].get("file_path", "") or "").strip()
@@ -4476,12 +4487,13 @@ async def job_handover_from_files(
     if duty_date_text and duty_shift_text:
         bridge_service = getattr(container, "shared_bridge_service", None)
         if bridge_service is not None:
-            matched_capacity = _filter_accessible_cached_entries(
+            matched_capacity = _normalize_cached_entries(
                 bridge_service.get_handover_capacity_by_date_cache_entries(
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     buildings=building_list,
-                )
+                ),
+                validate_files=False,
             )
             capacity_building_files = [
                 (str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip())

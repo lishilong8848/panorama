@@ -1068,13 +1068,18 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     buildings=target_buildings,
                 )
                 cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
-                capacity_entries = bridge_service.get_handover_capacity_by_date_cache_entries(
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
+                capacity_selection = bridge_service.get_latest_source_cache_selection(
+                    source_family="handover_capacity_report_family",
                     buildings=target_buildings,
+                )
+                capacity_entries = (
+                    list(capacity_selection.get("selected_entries", []))
+                    if isinstance(capacity_selection, dict)
+                    else []
                 )
                 if (
                     not bool(selection.get("can_proceed", False))
+                    or not bool(capacity_selection.get("can_proceed", False))
                     or len(cached_entries) < len(target_buildings)
                     or len(capacity_entries) < len(target_buildings)
                 ):
@@ -1364,8 +1369,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         selected_dates=[target_date],
                         buildings=target_buildings,
                     )
-                    if str(item.get("file_path", "") or "").strip()
-                    and os.path.exists(str(item.get("file_path", "") or "").strip())
+                    if str(item.get("file_path", "") or item.get("resolved_file_path", "") or "").strip()
                 ]
                 if len(cached_entries) < expected_count:
                     try:
@@ -1382,8 +1386,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                                 selected_dates=[target_date],
                                 buildings=target_buildings,
                             )
-                            if str(item.get("file_path", "") or "").strip()
-                            and os.path.exists(str(item.get("file_path", "") or "").strip())
+                            if str(item.get("file_path", "") or item.get("resolved_file_path", "") or "").strip()
                         ]
                     except Exception as exc:  # noqa: BLE001
                         emit_log(f"[12项独立上传调度] 直接复用交接班日志源文件失败，继续等待内网补采同步: {exc}")
@@ -1426,7 +1429,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     {
                         "duty_date": str(item.get("duty_date", "") or "").strip(),
                         "building": str(item.get("building", "") or "").strip(),
-                        "source_file": str(item.get("file_path", "") or "").strip(),
+                        "source_file": str(item.get("file_path", "") or item.get("resolved_file_path", "") or "").strip(),
                     }
                     for item in cached_entries
                 ]

@@ -40,6 +40,7 @@ def sanitize_alarm_export_config(alarm_export: Dict[str, Any] | None) -> Dict[st
 
 def sanitize_wet_bulb_collection_config(wet_bulb_collection: Dict[str, Any] | None) -> Dict[str, Any]:
     sanitized = copy.deepcopy(_dict(wet_bulb_collection))
+    sanitized.pop("enabled", None)
     sanitized.pop("manual_button_enabled", None)
     source = _dict(sanitized.get("source"))
     source.pop("switch_to_internal_before_download", None)
