@@ -1735,12 +1735,17 @@ export function mountHandoverReviewApp(Vue) {
 
       async function updateSubstation110kvCell(rowIndex, key, value) {
         if (substation110kvReadonly.value) return;
+        const fieldKey = String(key || "");
+        if (!SUBSTATION_110KV_VALUE_KEYS.includes(fieldKey)) return;
+        const currentRow = substation110kvBlock.value?.rows?.[rowIndex];
+        const nextValue = String(value ?? "");
+        if (!currentRow || String(currentRow[fieldKey] ?? "") === nextValue) return;
         const locked = await ensureSubstation110kvLock();
         if (!locked) return;
         const block = cloneDeep(substation110kvBlock.value);
         const row = block.rows?.[rowIndex];
-        if (!row || !SUBSTATION_110KV_VALUE_KEYS.includes(String(key || ""))) return;
-        row[key] = String(value ?? "");
+        if (!row || String(row[fieldKey] ?? "") === nextValue) return;
+        row[fieldKey] = nextValue;
         sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: block };
         markSubstation110kvDirty();
       }
@@ -1763,20 +1768,28 @@ export function mountHandoverReviewApp(Vue) {
         const lines = text.split(/\r?\n/).map((line) => line.split("\t"));
         const nextBlock = cloneDeep(substation110kvBlock.value);
         let changed = false;
+        let recognized = false;
         nextBlock.rows = nextBlock.rows.map((row) => {
           const matchedLine = lines.find((cells) => cells.some((cell) => String(cell || "").trim() === row.label));
           if (!matchedLine) return row;
+          recognized = true;
           const values = valuesAfterRowLabel(matchedLine, row.label);
           if (!values.length) return row;
           const nextRow = { ...row };
+          let rowChanged = false;
           SUBSTATION_110KV_VALUE_KEYS.forEach((key, index) => {
-            nextRow[key] = values[index] ?? "";
+            const nextValue = values[index] ?? "";
+            if (String(nextRow[key] ?? "") !== nextValue) {
+              nextRow[key] = nextValue;
+              rowChanged = true;
+            }
           });
+          if (!rowChanged) return row;
           changed = true;
           return nextRow;
         });
         if (!changed) {
-          statusText.value = "未识别到110KV变电站表格行";
+          statusText.value = recognized ? "110KV变电站内容无变化" : "未识别到110KV变电站表格行";
           return;
         }
         sharedBlocks.value = { ...sharedBlocks.value, substation_110kv: nextBlock };

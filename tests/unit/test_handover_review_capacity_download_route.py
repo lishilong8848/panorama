@@ -58,6 +58,49 @@ def test_handover_review_capacity_download_returns_file_response(tmp_path, monke
     assert any("[交接班][下载容量报表]" in message for message in container.logs)
 
 
+def test_handover_review_capacity_download_waits_for_active_xlsx_queue(tmp_path, monkeypatch):
+    output_file = tmp_path / "A楼交接班容量报表.xlsx"
+    output_file.write_bytes(b"demo")
+    container = _FakeContainer()
+    queue_calls = []
+    session = {
+        "session_id": "sess-1",
+        "capacity_output_file": str(output_file),
+        "capacity_sync": {"status": "ready"},
+        "building": "A楼",
+    }
+
+    class _Queue:
+        def __init__(self):
+            self.active_checks = 0
+
+        def has_active_write_jobs(self, *, building):
+            self.active_checks += 1
+            queue_calls.append(("active", building, self.active_checks))
+            return self.active_checks == 1
+
+        def wait_for_barrier(self, *, building, timeout_sec):
+            queue_calls.append(("barrier", building, timeout_sec))
+            return {"status": "success"}
+
+    queue = _Queue()
+    monkeypatch.setattr(routes, "_build_review_services", lambda _container: (object(), None, None, None))
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(routes, "_load_target_session_or_404", lambda _service, **kwargs: dict(session))
+    monkeypatch.setattr(routes, "_ensure_capacity_overlay_queue_drained_for_session", lambda **_kwargs: dict(session))
+    monkeypatch.setattr(routes, "_build_xlsx_write_queue_service", lambda *_args, **_kwargs: queue)
+
+    response = routes.handover_review_capacity_download("a", _fake_request(container), session_id="sess-1")
+
+    assert Path(response.path) == output_file
+    assert queue_calls == [
+        ("active", "A楼", 1),
+        ("barrier", "A楼", 120.0),
+        ("active", "A楼", 2),
+    ]
+    assert any("继续等待" in message for message in container.logs)
+
+
 def test_handover_review_capacity_download_rejects_empty_session_id(monkeypatch):
     container = _FakeContainer()
 

@@ -63,6 +63,7 @@ _REVIEW_DOCUMENT_WARMUPS_INFLIGHT: set[str] = set()
 _REVIEW_BOOTSTRAP_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_HISTORY_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_HISTORY_CACHE_TTL_SEC = 15.0
+_SUBSTATION_110KV_COMPARE_KEYS = ("line_voltage", "current", "power_kw", "power_factor", "load_rate")
 
 
 def _raise_review_store_http_error(
@@ -3250,23 +3251,68 @@ def handover_review_capacity_download(building_code: str, request: Request, sess
     output_file_text = str(target.get("capacity_output_file", "")).strip()
     if not output_file_text:
         raise HTTPException(status_code=404, detail="当前交接班容量报表尚未生成")
-    output_file = Path(output_file_text)
-    if not output_file.exists() or not output_file.is_file():
-        raise HTTPException(status_code=404, detail="交接班容量报表文件不存在，请重新生成")
-    capacity_sync = target.get("capacity_sync", {}) if isinstance(target.get("capacity_sync", {}), dict) else {}
-    capacity_sync_status = str(capacity_sync.get("status", "")).strip().lower()
-    if capacity_sync_status != "ready":
-        detail = str(capacity_sync.get("error", "")).strip() or "容量报表待补写完成后才能下载"
-        raise HTTPException(status_code=409, detail=detail)
+    try:
+        target = _ensure_capacity_overlay_queue_drained_for_session(
+            container=container,
+            review_service=service,
+            building=building,
+            session_id=session_id_text,
+            timeout_sec=120.0,
+        )
+    except HandoverXlsxWriteQueueTimeoutError as exc:
+        container.add_system_log(
+            "[交接班][下载容量报表] 等待xlsx写入队列超时 "
+            f"building={building}, session={session_id_text}, error={exc}"
+        )
+        raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试") from exc
+    except ReviewDocumentStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    container.add_system_log(
-        f"[交接班][下载容量报表] building={building}, session_id={session_id_text}, file={output_file}"
-    )
-    return FileResponse(
-        path=output_file,
-        filename=output_file.name,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    queue_service = _build_xlsx_write_queue_service(container)
+    for attempt in range(3):
+        needs_queue_wait = False
+        with _resource_guard_or_null(
+            container,
+            name=f"handover_capacity_download:{building}:{session_id_text}",
+            resource_keys=_handover_resource_keys(building=building),
+        ):
+            if queue_service.has_active_write_jobs(building=building):
+                needs_queue_wait = True
+                container.add_system_log(
+                    "[交接班][下载容量报表] 获取下载锁后发现xlsx队列仍有写入任务，继续等待 "
+                    f"building={building}, session={session_id_text}, attempt={attempt + 1}"
+                )
+            else:
+                target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+                output_file_text = str(target.get("capacity_output_file", "")).strip()
+                if not output_file_text:
+                    raise HTTPException(status_code=404, detail="当前交接班容量报表尚未生成")
+                output_file = Path(output_file_text)
+                if not output_file.exists() or not output_file.is_file():
+                    raise HTTPException(status_code=404, detail="交接班容量报表文件不存在，请重新生成")
+                capacity_sync = target.get("capacity_sync", {}) if isinstance(target.get("capacity_sync", {}), dict) else {}
+                capacity_sync_status = str(capacity_sync.get("status", "")).strip().lower()
+                if capacity_sync_status != "ready":
+                    detail = str(capacity_sync.get("error", "")).strip() or "容量报表待补写完成后才能下载"
+                    raise HTTPException(status_code=409, detail=detail)
+                container.add_system_log(
+                    f"[交接班][下载容量报表] building={building}, session_id={session_id_text}, file={output_file}"
+                )
+                return FileResponse(
+                    path=output_file,
+                    filename=output_file.name,
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+        if needs_queue_wait:
+            try:
+                queue_service.wait_for_barrier(building=building, timeout_sec=120.0)
+            except HandoverXlsxWriteQueueTimeoutError as exc:
+                container.add_system_log(
+                    "[交接班][下载容量报表] 下载锁复查后等待xlsx队列超时 "
+                    f"building={building}, session={session_id_text}, error={exc}"
+                )
+                raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试") from exc
+    raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试")
 
 
 @router.post("/api/handover/review/{building_code}/capacity-image/send")
@@ -4007,6 +4053,21 @@ def _sync_substation_110kv_to_batch_capacity_reports(
     return {"updated": updated, "failed": failed, "errors": errors}
 
 
+def _substation_110kv_value_signature(payload: Dict[str, Any] | None, *, batch_key: str = "") -> tuple[tuple[str, str, str, str, str, str], ...]:
+    normalized = ReviewSessionService.normalize_substation_110kv_payload(payload, batch_key=batch_key)
+    signature: list[tuple[str, str, str, str, str, str]] = []
+    for row in normalized.get("rows", []):
+        if not isinstance(row, dict):
+            continue
+        signature.append(
+            (
+                str(row.get("row_id", "") or "").strip(),
+                *(str(row.get(key, "") or "").strip() for key in _SUBSTATION_110KV_COMPARE_KEYS),
+            )
+        )
+    return tuple(signature)
+
+
 def _shared_110kv_lock_response(
     *,
     service: ReviewSessionService,
@@ -4137,13 +4198,37 @@ def handover_review_shared_110kv_save(
     target = _load_target_session_or_404(service, building=building, session_id=session_id)
     batch_key = str(target.get("batch_key", "") or "").strip()
     rows = payload.get("rows", [])
+    submitted_110kv = ReviewSessionService.normalize_substation_110kv_payload(
+        {"batch_key": batch_key, "rows": rows if isinstance(rows, list) else []},
+        batch_key=batch_key,
+    )
     try:
+        current_110kv = service.get_substation_110kv(batch_key)
+        if _substation_110kv_value_signature(submitted_110kv, batch_key=batch_key) == _substation_110kv_value_signature(
+            current_110kv,
+            batch_key=batch_key,
+        ):
+            sync_result = {"updated": 0, "failed": 0, "errors": [], "no_change": True}
+            lock_state = service.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id)
+            container.add_system_log(
+                f"[交接班][110KV共享] 内容无变化，跳过保存和容量补写 building={building}, "
+                f"batch={batch_key}, revision={current_110kv.get('revision', 0)}"
+            )
+            return {
+                "ok": True,
+                "building": building,
+                "session": _attach_excel_sync_from_store(container, service.get_session_by_id(session_id) or target),
+                "shared_blocks": {"substation_110kv": current_110kv},
+                "shared_block_locks": {"substation_110kv": lock_state},
+                "capacity_sync_result": sync_result,
+                "no_change": True,
+            }
         shared_110kv = service.save_substation_110kv(
             batch_key=batch_key,
             building=building,
             client_id=client_id,
             base_revision=base_revision,
-            rows=rows if isinstance(rows, list) else [],
+            rows=submitted_110kv.get("rows", []),
         )
     except ValueError as exc:
         reason = str(exc)

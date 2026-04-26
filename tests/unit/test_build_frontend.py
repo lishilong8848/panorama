@@ -185,6 +185,25 @@ def test_handover_review_capacity_image_send_is_sync_without_job_polling() -> No
     assert "部分收件人发送失败" not in send_body
 
 
+def test_handover_review_110kv_dirty_only_marks_actual_changes() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    source = (
+        project_root / "web" / "frontend" / "src" / "handover_review_app.js"
+    ).read_text(encoding="utf-8")
+
+    update_body = source[source.index("async function updateSubstation110kvCell") :]
+    update_body = update_body[: update_body.index("function valuesAfterRowLabel")]
+    paste_body = source[source.index("async function pasteSubstation110kvTable") :]
+    paste_body = paste_body[: paste_body.index("function updateCoolingPumpPressure")]
+
+    assert 'if (!currentRow || String(currentRow[fieldKey] ?? "") === nextValue) return;' in update_body
+    assert 'if (!row || String(row[fieldKey] ?? "") === nextValue) return;' in update_body
+    assert "let recognized = false;" in paste_body
+    assert "let rowChanged = false;" in paste_body
+    assert "if (!rowChanged) return row;" in paste_body
+    assert 'statusText.value = recognized ? "110KV变电站内容无变化" : "未识别到110KV变电站表格行";' in paste_body
+
+
 def test_runtime_time_normalizer_accepts_single_digit_hour() -> None:
     project_root = Path(__file__).resolve().parents[2]
     source = (project_root / "web" / "frontend" / "src" / "config_date_utils.js").read_text(encoding="utf-8")
