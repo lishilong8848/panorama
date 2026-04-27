@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 13,
-  "updated_at": "2026-04-25T20:37:36+08:00",
+  "revision": 15,
+  "updated_at": "2026-04-27T08:07:46+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -629,8 +629,8 @@
       "cabinet_power_defaults_by_building": {
         "B楼": {
           "cells": {
-            "B13": "107600",
-            "D13": "102300",
+            "B13": "1076",
+            "D13": "1025",
             "F13": "/",
             "H13": "/"
           }
