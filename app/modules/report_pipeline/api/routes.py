@@ -447,6 +447,33 @@ def _empty_job_panel_summary() -> Dict[str, Any]:
     }
 
 
+def _build_fresh_job_panel_summary(
+    container,
+    *,
+    limit: int = 60,
+    strict: bool = False,
+) -> Dict[str, Any]:
+    return build_job_panel_summary(
+        container,
+        limit=limit,
+        emit_log=getattr(container, "add_system_log", None),
+        strict=strict,
+    )
+
+
+def _request_runtime_status_refresh(container, *, reason: str) -> None:
+    coordinator = getattr(container, "runtime_status_coordinator", None)
+    if coordinator is None:
+        return
+    request_refresh = getattr(coordinator, "request_refresh", None)
+    if not callable(request_refresh):
+        return
+    try:
+        request_refresh(reason=reason)
+    except Exception:
+        return
+
+
 def _empty_runtime_resources_summary() -> Dict[str, Any]:
     return {
         "network": {},
@@ -5046,25 +5073,50 @@ def cancel_job(job_id: str, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     bridge_task_id = str(current_job.get("bridge_task_id", "") or "").strip() if isinstance(current_job, dict) else ""
     wait_reason = str(current_job.get("wait_reason", "") or "").strip().lower() if isinstance(current_job, dict) else ""
-    if bridge_task_id and wait_reason == "waiting:shared_bridge":
-        bridge_service = getattr(container, "shared_bridge_service", None)
-        if bridge_service is not None:
-            try:
-                bridge_service.cancel_task(bridge_task_id)
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=503, detail=f"绑定补采任务暂时不可取消，请稍后重试：{exc}") from exc
+    bridge_cancel_error = ""
     try:
         payload = container.job_service.cancel_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except TaskEngineUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {
+
+    if bridge_task_id and wait_reason == "waiting:shared_bridge":
+        bridge_service = getattr(container, "shared_bridge_service", None)
+        if bridge_service is not None:
+            bridge_cancel_error = "本地等待任务已取消，绑定补采任务正在后台取消"
+            add_log = getattr(container, "add_system_log", None)
+
+            def _cancel_bound_bridge_task() -> None:
+                try:
+                    bridge_service.cancel_task(bridge_task_id)
+                    if callable(add_log):
+                        add_log(
+                            "[任务] 绑定补采任务已取消: "
+                            f"job_id={job_id}, bridge_task_id={bridge_task_id}"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    if callable(add_log):
+                        add_log(
+                            "[任务] 本地任务已取消，但绑定补采任务取消失败: "
+                            f"job_id={job_id}, bridge_task_id={bridge_task_id}, error={exc}"
+                        )
+
+            threading.Thread(
+                target=_cancel_bound_bridge_task,
+                daemon=True,
+                name=f"job-bridge-cancel-{job_id[:8]}",
+            ).start()
+    response = {
         "ok": True,
         "accepted": True,
         "job": present_job_item(payload) if isinstance(payload, dict) else payload,
-        "job_panel_summary": build_job_panel_summary(container, limit=60),
+        "job_panel_summary": _build_fresh_job_panel_summary(container, limit=60),
     }
+    _request_runtime_status_refresh(container, reason="job_cancelled")
+    if bridge_cancel_error:
+        response["bridge_cancel_error"] = bridge_cancel_error
+    return response
 
 
 @router.post("/api/jobs/{job_id}/retry")
@@ -5076,12 +5128,14 @@ def retry_job(job_id: str, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
+    response = {
         "ok": True,
         "accepted": True,
         "job": present_job_item(payload) if isinstance(payload, dict) else payload,
-        "job_panel_summary": build_job_panel_summary(container, limit=60),
+        "job_panel_summary": _build_fresh_job_panel_summary(container, limit=60),
     }
+    _request_runtime_status_refresh(container, reason="job_retried")
+    return response
 
 
 @router.get("/api/jobs")
@@ -5092,21 +5146,7 @@ def list_jobs(request: Request, limit: int = 50, statuses: str = "") -> Dict[str
         for item in str(statuses or "").split(",")
         if str(item or "").strip()
     ]
-    runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
     safe_limit = max(1, min(int(limit or 50), 200))
-    if (
-        not normalized_statuses
-        and runtime_status_coordinator is not None
-        and callable(getattr(runtime_status_coordinator, "is_running", None))
-        and runtime_status_coordinator.is_running()
-    ):
-        try:
-            snapshot = runtime_status_coordinator.read_scope_snapshot("job_panel_summary")
-            payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
-            if isinstance(payload, dict):
-                return payload
-        except Exception:
-            pass
     try:
         if normalized_statuses:
             raw_jobs = container.job_service.list_jobs(limit=safe_limit, statuses=normalized_statuses)
@@ -5122,7 +5162,7 @@ def list_jobs(request: Request, limit: int = 50, statuses: str = "") -> Dict[str
                 "active_job_ids": container.job_service.active_job_ids(include_waiting=True),
                 "job_counts": job_counts,
             }
-        payload = build_job_panel_summary(container, limit=safe_limit, strict=True)
+        payload = _build_fresh_job_panel_summary(container, limit=safe_limit, strict=True)
     except TaskEngineUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return payload
@@ -5408,11 +5448,14 @@ def _build_external_jobs_module(request: Request) -> Dict[str, Any]:
                 "current_task_overview": summary["display"]["overview"],
             },
         )
-    job_panel_summary = (
-        _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_jobs")
-        or _external_read_scope(container, "job_panel_summary", reason_prefix="external_jobs")
-        or _empty_job_panel_summary()
-    )
+    try:
+        job_panel_summary = _build_fresh_job_panel_summary(container, limit=60, strict=True)
+    except TaskEngineUnavailableError:
+        job_panel_summary = (
+            _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_jobs")
+            or _external_read_scope(container, "job_panel_summary", reason_prefix="external_jobs")
+            or _empty_job_panel_summary()
+        )
     overview = (
         job_panel_summary.get("display", {}).get("overview", {})
         if isinstance(job_panel_summary.get("display", {}), dict)
@@ -5716,11 +5759,14 @@ def _build_external_system_module(request: Request) -> Dict[str, Any]:
         or _empty_runtime_resources_summary()
     )
     task_overview = {}
-    job_panel_summary = (
-        _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_system")
-        or _external_read_scope(container, "job_panel_summary", reason_prefix="external_system")
-        or _empty_job_panel_summary()
-    )
+    try:
+        job_panel_summary = _build_fresh_job_panel_summary(container, limit=60, strict=True)
+    except TaskEngineUnavailableError:
+        job_panel_summary = (
+            _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_system")
+            or _external_read_scope(container, "job_panel_summary", reason_prefix="external_system")
+            or _empty_job_panel_summary()
+        )
     if isinstance(job_panel_summary.get("display", {}), dict):
         task_overview = job_panel_summary.get("display", {}).get("overview", {})
     updater_summary = {}
@@ -5966,11 +6012,14 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
     internal_alert_overview = present_external_internal_alert_overview(
         live_shared_bridge.get("internal_alert_status", {})
     )
-    job_panel_summary = (
-        _read_scope("job_panel_dashboard_summary")
-        or _read_scope("job_panel_summary")
-        or _empty_job_panel_summary()
-    )
+    try:
+        job_panel_summary = _build_fresh_job_panel_summary(container, limit=60, strict=True)
+    except TaskEngineUnavailableError:
+        job_panel_summary = (
+            _read_scope("job_panel_dashboard_summary")
+            or _read_scope("job_panel_summary")
+            or _empty_job_panel_summary()
+        )
     bridge_tasks_summary = _read_scope("bridge_tasks_dashboard_summary")
     if not isinstance(bridge_tasks_summary, dict):
         bridge_tasks_summary_raw = _read_scope("bridge_tasks_summary") or {

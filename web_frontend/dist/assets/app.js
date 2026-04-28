@@ -1465,6 +1465,10 @@ createApp({
       runSingleFlight,
       setSchedulerToggleState,
     });
+    runtimeActionsRef.current = {
+      ...runtimeActions,
+      ...dashboardActions,
+    };
 
     const {
       runAutoOnce,

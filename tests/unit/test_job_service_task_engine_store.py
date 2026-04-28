@@ -183,6 +183,43 @@ def test_job_service_can_cancel_waiting_resource_job_restored_from_sqlite(tmp_pa
     assert restored_service.get_job("job-waiting-restored")["status"] == "cancelled"
 
 
+def test_job_service_active_jobs_use_sqlite_state_when_memory_is_stale(tmp_path: Path) -> None:
+    service = JobService()
+    service.configure_task_engine(
+        runtime_config={"paths": {}},
+        app_dir=tmp_path,
+        config_snapshot_getter=lambda: {"paths": {}},
+    )
+    waiting_job = service.create_waiting_worker_job(
+        "bridge-waiting",
+        worker_handler="multi_date",
+        worker_payload={"selected_dates": ["2026-04-21"]},
+        resource_keys=["shared_bridge:monthly_report"],
+        feature="multi_date",
+        wait_reason="waiting:shared_bridge",
+        summary="等待内网补采同步",
+        bridge_task_id="bridge-task-1",
+    )
+    assert waiting_job.job_id in service.active_job_ids(include_waiting=True)
+
+    db = service._task_engine_db  # noqa: SLF001
+    assert db is not None
+    payload = service.get_job(waiting_job.job_id)
+    payload.update(
+        {
+            "status": "cancelled",
+            "summary": "cancelled",
+            "finished_at": "2026-04-28 20:10:00",
+            "cancel_requested": True,
+        }
+    )
+    db.upsert_job(payload, config_snapshot={"paths": {}})
+
+    assert service.get_job_state(waiting_job.job_id).status == "waiting_resource"
+    assert service.active_job_id() == ""
+    assert waiting_job.job_id not in service.active_job_ids(include_waiting=True)
+
+
 def test_job_service_preserves_shared_bridge_waiting_job_on_restore(tmp_path: Path) -> None:
     first_service = JobService()
     first_service.configure_task_engine(

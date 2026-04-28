@@ -402,7 +402,34 @@ class JobService:
     def _ordered_jobs(self) -> List[JobState]:
         return sorted(self._jobs.values(), key=lambda item: item.sequence)
 
+    @staticmethod
+    def _active_db_jobs_order_key(job: Dict[str, Any]) -> tuple[str, str]:
+        return (
+            str(job.get("created_at", "") or "").strip(),
+            str(job.get("job_id", "") or "").strip(),
+        )
+
+    def _active_jobs_from_db(self, statuses: set[str]) -> List[Dict[str, Any]] | None:
+        if not self._task_engine_db:
+            return None
+        try:
+            rows = self._task_engine_db.list_jobs(limit=1000, statuses=sorted(statuses))
+        except Exception as exc:  # noqa: BLE001
+            if not _is_recoverable_task_engine_error(exc):
+                raise
+            return None
+        return sorted(
+            [item for item in rows if isinstance(item, dict)],
+            key=self._active_db_jobs_order_key,
+        )
+
     def active_job_id(self) -> str:
+        running_db_jobs = self._active_jobs_from_db(_RUNNING_JOB_STATUSES)
+        if running_db_jobs is not None:
+            if running_db_jobs:
+                return str(running_db_jobs[0].get("job_id", "") or "").strip()
+            pending_db_jobs = self._active_jobs_from_db(_INCOMPLETE_JOB_STATUSES)
+            return str((pending_db_jobs or [{}])[0].get("job_id", "") or "").strip() if pending_db_jobs else ""
         with self._lock:
             running = [job for job in self._ordered_jobs() if job.status in _RUNNING_JOB_STATUSES]
             if running:
@@ -411,8 +438,15 @@ class JobService:
             return pending[0].job_id if pending else ""
 
     def active_job_ids(self, *, include_waiting: bool = True) -> List[str]:
+        target_statuses = _INCOMPLETE_JOB_STATUSES if include_waiting else _RUNNING_JOB_STATUSES
+        db_jobs = self._active_jobs_from_db(target_statuses)
+        if db_jobs is not None:
+            return [
+                str(job.get("job_id", "") or "").strip()
+                for job in db_jobs
+                if str(job.get("job_id", "") or "").strip()
+            ]
         with self._lock:
-            target_statuses = _INCOMPLETE_JOB_STATUSES if include_waiting else _RUNNING_JOB_STATUSES
             return [job.job_id for job in self._ordered_jobs() if job.status in target_statuses]
 
     def has_incomplete_jobs(self) -> bool:

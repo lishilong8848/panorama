@@ -272,7 +272,8 @@ export function createDashboardJobActions(ctx) {
           if (!summaryApplied && typeof fetchJobs === "function") {
             void fetchJobs({ silentMessage: true });
           }
-          message.value = "任务取消请求已提交";
+          const bridgeCancelError = String(data?.bridge_cancel_error || data?.bridgeCancelError || "").trim();
+          message.value = bridgeCancelError || "任务取消请求已提交";
         } catch (err) {
           if (typeof fetchJobs === "function") {
             await fetchJobs({ silentMessage: true });
