@@ -6,7 +6,8 @@ import hmac
 import json
 import re
 import threading
-from datetime import datetime, timedelta
+import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 from urllib.error import HTTPError, URLError
@@ -23,7 +24,7 @@ from app.modules.sheet_import.core.field_value_converter import parse_timestamp_
 from app.shared.utils.atomic_file import atomic_save_workbook
 from app.shared.utils.artifact_naming import OUTPUT_TYPE_HANDOVER_CAPACITY, build_output_base_path
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
-from handover_log_module.core.shift_window import parse_duty_date
+from handover_log_module.core.shift_window import build_duty_window, parse_duty_date
 from handover_log_module.core.normalizers import format_number
 from handover_log_module.repository.excel_reader import load_rows, load_workbook_quietly
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
@@ -56,6 +57,20 @@ _CAPACITY_WATER_SOURCE = {
         "water_total": "当日耗水总量（修正）",
     },
 }
+_CAPACITY_TOTAL_ELECTRICITY_SOURCE = {
+    "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+    "table_id": "tblqSskJvBnx9UJj",
+    "page_size": 500,
+    "max_records": 20000,
+    "fields": {
+        "category": "汇总分类",
+        "building": "楼栋",
+        "date": "日期",
+        "value": "数值（整数）",
+    },
+    "category_value": "总用电量",
+}
+_CAPACITY_TOTAL_ELECTRICITY_CACHE_TTL_SEC = 30.0
 _CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13")
 _CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
 _SUBSTATION_110KV_VALUE_CELLS = {
@@ -131,6 +146,13 @@ def _field_text(value: Any) -> str:
 
 
 def _field_text_with_option_map(value: Any, option_map: Dict[str, str]) -> str:
+    if isinstance(value, dict):
+        option_id = str(value.get("id", "") or value.get("option_id", "") or "").strip()
+        if option_id and option_id in option_map:
+            return str(option_map.get(option_id, "") or "").strip()
+    if isinstance(value, list):
+        parts = [_field_text_with_option_map(item, option_map) for item in value]
+        return "、".join([item for item in parts if item])
     text = _field_text(value)
     if not text:
         return ""
@@ -228,6 +250,9 @@ class HandoverCapacityReportService:
     _weather_payload_cache_guard = threading.Lock()
     _shared_weather_payload_cache: Dict[str, Dict[str, str]] = {}
     _weather_payload_cache_inflight: Dict[str, threading.Event] = {}
+    _electricity_summary_cache_guard = threading.Lock()
+    _shared_electricity_summary_cache: Dict[tuple[str, ...], tuple[float, Dict[str, Any]]] = {}
+    _electricity_summary_cache_inflight: Dict[tuple[str, ...], threading.Event] = {}
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
@@ -235,6 +260,7 @@ class HandoverCapacityReportService:
         self._cooling_pump_defaults = CoolingPumpPressureDefaultsService()
         self._weather_payload_cache = self._shared_weather_payload_cache
         self._water_summary_cache: Dict[tuple[str, str], Dict[str, str]] = {}
+        self._electricity_summary_cache: Dict[tuple[str, str, str], Dict[str, Any]] = {}
 
     @classmethod
     def _claim_weather_cache_fetch(cls, cache_key: str) -> tuple[Dict[str, str] | None, bool]:
@@ -259,6 +285,43 @@ class HandoverCapacityReportService:
             if key:
                 cls._shared_weather_payload_cache[key] = dict(payload if isinstance(payload, dict) else {})
                 event = cls._weather_payload_cache_inflight.pop(key, None)
+                if event is not None:
+                    event.set()
+
+    @staticmethod
+    def _deepcopy_jsonable(payload: Dict[str, Any]) -> Dict[str, Any]:
+        return json.loads(json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=False))
+
+    @classmethod
+    def _claim_electricity_summary_cache(cls, cache_key: tuple[str, ...]) -> tuple[Dict[str, Any] | None, bool]:
+        key = tuple(str(item or "") for item in cache_key)
+        while key:
+            now = time.monotonic()
+            with cls._electricity_summary_cache_guard:
+                cached = cls._shared_electricity_summary_cache.get(key)
+                if cached is not None:
+                    cached_at, payload = cached
+                    if now - float(cached_at or 0.0) <= _CAPACITY_TOTAL_ELECTRICITY_CACHE_TTL_SEC:
+                        return cls._deepcopy_jsonable(payload), False
+                    cls._shared_electricity_summary_cache.pop(key, None)
+                event = cls._electricity_summary_cache_inflight.get(key)
+                if event is None:
+                    event = threading.Event()
+                    cls._electricity_summary_cache_inflight[key] = event
+                    return None, True
+            event.wait(timeout=30.0)
+        return None, True
+
+    @classmethod
+    def _finish_electricity_summary_cache(cls, cache_key: tuple[str, ...], payload: Dict[str, Any]) -> None:
+        key = tuple(str(item or "") for item in cache_key)
+        with cls._electricity_summary_cache_guard:
+            if key:
+                cls._shared_electricity_summary_cache[key] = (
+                    time.monotonic(),
+                    cls._deepcopy_jsonable(payload if isinstance(payload, dict) else {}),
+                )
+                event = cls._electricity_summary_cache_inflight.pop(key, None)
                 if event is not None:
                     event.set()
 
@@ -679,6 +742,7 @@ class HandoverCapacityReportService:
         table_id: str,
         target_fields: List[str],
         emit_log: Callable[[str], None],
+        log_scope: str = "耗水摘要",
     ) -> Dict[str, Dict[str, str]]:
         field_names = [str(name or "").strip() for name in (target_fields or []) if str(name or "").strip()]
         if not field_names or not str(table_id or "").strip():
@@ -686,7 +750,7 @@ class HandoverCapacityReportService:
         try:
             field_defs = client.list_fields(table_id=table_id, page_size=200)
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][容量报表][耗水摘要] 字段定义读取失败 building=全局, error={exc}")
+            emit_log(f"[交接班][容量报表][{_text(log_scope) or '多维表'}] 字段定义读取失败 building=全局, error={exc}")
             return {}
         output: Dict[str, Dict[str, str]] = {}
         for field_def in field_defs:
@@ -1251,6 +1315,26 @@ class HandoverCapacityReportService:
             dimension_mapping={},
         )
 
+    def _new_capacity_electricity_client(self) -> FeishuBitableClient:
+        global_feishu = require_feishu_auth_settings(self.config)
+        app_token = str(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("app_token", "") or "").strip()
+        table_id = str(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("table_id", "") or "").strip()
+        if not app_token or not table_id:
+            raise ValueError("容量报表总用电量多维配置缺失: app_token/table_id")
+        return FeishuBitableClient(
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
+            app_token=app_token,
+            calc_table_id=table_id,
+            attachment_table_id=table_id,
+            timeout=int(global_feishu.get("timeout", 30) or 30),
+            request_retry_count=int(global_feishu.get("request_retry_count", 3) or 3),
+            request_retry_interval_sec=float(global_feishu.get("request_retry_interval_sec", 2) or 2),
+            date_text_to_timestamp_ms_fn=date_text_to_timestamp_ms,
+            canonical_metric_name_fn=lambda value: str(value or "").strip(),
+            dimension_mapping={},
+        )
+
     @staticmethod
     def _matches_building(record_building: Any, target_building: str) -> bool:
         record_text = _field_text(record_building)
@@ -1345,19 +1429,312 @@ class HandoverCapacityReportService:
         )
         return summary
 
+    def _duty_start_day(self, *, duty_date: str, duty_shift: str) -> date:
+        duty_date_text = _text(duty_date)
+        duty_shift_text = _text(duty_shift).lower()
+        download_cfg = self.config.get("download", {}) if isinstance(self.config.get("download", {}), dict) else {}
+        shift_windows = download_cfg.get("shift_windows", {}) if isinstance(download_cfg.get("shift_windows", {}), dict) else {}
+        try:
+            duty_window = build_duty_window(
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text if duty_shift_text in {"day", "night"} else "day",
+                shift_windows=shift_windows,
+            )
+            return datetime.strptime(duty_window.start_time, "%Y-%m-%d %H:%M:%S").date()
+        except Exception:
+            return parse_duty_date(duty_date_text)
+
+    @staticmethod
+    def _month_window_for_day(day: date) -> tuple[datetime, datetime]:
+        month_start_dt = datetime(day.year, day.month, 1, 0, 0, 0)
+        if day.month == 12:
+            month_end_dt = datetime(day.year + 1, 1, 1, 0, 0, 0)
+        else:
+            month_end_dt = datetime(day.year, day.month + 1, 1, 0, 0, 0)
+        return month_start_dt, month_end_dt
+
+    @staticmethod
+    def _previous_month_start(day: date) -> date:
+        if day.month == 1:
+            return date(day.year - 1, 12, 1)
+        return date(day.year, day.month - 1, 1)
+
+    @classmethod
+    def _electricity_query_window_for_start_day(cls, start_day: date) -> tuple[date, date, date, str]:
+        prev_day = start_day - timedelta(days=1)
+        if start_day.day == 1:
+            query_start = cls._previous_month_start(start_day)
+            query_end = start_day
+        else:
+            query_start = date(start_day.year, start_day.month, 1)
+            if start_day.month == 12:
+                query_end = date(start_day.year + 1, 1, 1)
+            else:
+                query_end = date(start_day.year, start_day.month + 1, 1)
+        return query_start, query_end, prev_day, query_start.strftime("%Y-%m")
+
+    @staticmethod
+    def _formula_literal(value: Any) -> str:
+        text = str(value or "")
+        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    @classmethod
+    def _capacity_electricity_filter_formula(
+        cls,
+        *,
+        date_field: str,
+        category_field: str,
+        category_value: str,
+        query_start: date,
+        query_end: date,
+    ) -> str:
+        return (
+            f"AND(CurrentValue.[{date_field}]>=TODATE({cls._formula_literal(query_start.strftime('%Y-%m-%d'))}), "
+            f"CurrentValue.[{date_field}]<TODATE({cls._formula_literal(query_end.strftime('%Y-%m-%d'))}), "
+            f"CurrentValue.[{category_field}]={cls._formula_literal(category_value)})"
+        )
+
+    @staticmethod
+    def _empty_electricity_summary(*, error: str = "") -> Dict[str, Any]:
+        output: Dict[str, Any] = {}
+        for building in _BUILDER_BY_BUILDING:
+            output[building] = {
+                "prev_day_total": "0",
+                "month_total": "0",
+                "prev_day_record_found": False,
+                "prev_day_found": False,
+                "month_record_count": 0,
+                "month_matched_records": 0,
+                "missing_value_records": 0,
+                "query_error": error,
+            }
+        return output
+
+    def _query_capacity_electricity_batch_summary(
+        self,
+        *,
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        start_day = self._duty_start_day(duty_date=duty_date, duty_shift=duty_shift)
+        query_start, query_end, prev_day, summary_month = self._electricity_query_window_for_start_day(start_day)
+        month_start_dt = datetime(query_start.year, query_start.month, query_start.day, 0, 0, 0)
+        month_end_dt = datetime(query_end.year, query_end.month, query_end.day, 0, 0, 0)
+        table_id = str(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("table_id", "") or "").strip()
+        cache_key = (
+            table_id,
+            query_start.strftime("%Y-%m-%d"),
+            query_end.strftime("%Y-%m-%d"),
+            prev_day.strftime("%Y-%m-%d"),
+            summary_month,
+        )
+        cached, should_fetch = self._claim_electricity_summary_cache(cache_key)
+        if isinstance(cached, dict):
+            emit_log(
+                "[交接班][容量报表][总用电量] 查询短缓存命中 "
+                f"batch={duty_date}|{duty_shift}, query_window={cache_key[1]}~{cache_key[2]}, "
+                f"prev_day={cache_key[3]}, summary_month={cache_key[4]}"
+            )
+            return cached
+
+        fields_cfg = _CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("fields", {})
+        if not isinstance(fields_cfg, dict):
+            fields_cfg = {}
+        category_field = str(fields_cfg.get("category", "") or "").strip()
+        building_field = str(fields_cfg.get("building", "") or "").strip()
+        date_field = str(fields_cfg.get("date", "") or "").strip()
+        value_field = str(fields_cfg.get("value", "") or "").strip()
+        category_value = str(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("category_value", "") or "").strip()
+        filter_formula = self._capacity_electricity_filter_formula(
+            date_field=date_field,
+            category_field=category_field,
+            category_value=category_value,
+            query_start=query_start,
+            query_end=query_end,
+        )
+
+        emit_log(
+            "[交接班][容量报表][总用电量] 查询开始 "
+            f"batch={duty_date}|{duty_shift}, query_window={cache_key[1]}~{cache_key[2]}, "
+            f"prev_day={cache_key[3]}, summary_month={summary_month}, "
+            f"app_token={_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get('app_token', '')}, table_id={table_id}, "
+            f"filter={filter_formula}"
+        )
+        try:
+            client = self._new_capacity_electricity_client()
+            option_maps = self._load_field_option_maps(
+                client=client,
+                table_id=table_id,
+                target_fields=[category_field, building_field],
+                emit_log=emit_log,
+                log_scope="总用电量",
+            )
+            records = client.list_records(
+                table_id=table_id,
+                page_size=max(1, int(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("page_size", 500) or 500)),
+                max_records=0,
+                filter_formula=filter_formula,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)
+            emit_log(
+                "[交接班][容量报表][总用电量] 查询失败 "
+                f"batch={duty_date}|{duty_shift}, query_window={cache_key[1]}~{cache_key[2]}, "
+                f"prev_day={cache_key[3]}, summary_month={summary_month}, error={error}"
+            )
+            summary = self._empty_electricity_summary(error=error)
+            if should_fetch:
+                self._finish_electricity_summary_cache(cache_key, summary)
+            return self._deepcopy_jsonable(summary)
+
+        summary = self._empty_electricity_summary()
+        raw_totals: Dict[str, Dict[str, float]] = {
+            building: {"prev_day_total": 0.0, "month_total": 0.0}
+            for building in _BUILDER_BY_BUILDING
+        }
+        category_option_map = option_maps.get(category_field, {})
+        building_option_map = option_maps.get(building_field, {})
+        raw_record_count = 0
+        matched_record_count = 0
+        month_start_day = month_start_dt.date()
+        month_end_day = month_end_dt.date()
+        for item in records if isinstance(records, list) else []:
+            if not isinstance(item, dict):
+                continue
+            raw_record_count += 1
+            fields = item.get("fields", {})
+            if not isinstance(fields, dict):
+                continue
+            category_text = _field_text_with_option_map(fields.get(category_field), category_option_map)
+            if category_text != category_value:
+                continue
+            record_dt = _parse_datetime(fields.get(date_field))
+            if record_dt is None:
+                continue
+            record_day = record_dt.date()
+            in_month = month_start_day <= record_day < month_end_day
+            is_prev_day = record_day == prev_day
+            if not in_month and not is_prev_day:
+                continue
+            record_building = _field_text_with_option_map(fields.get(building_field), building_option_map)
+            building_text = ""
+            for candidate in _BUILDER_BY_BUILDING:
+                if self._matches_building(record_building, candidate):
+                    building_text = candidate
+                    break
+            if not building_text:
+                continue
+            matched_record_count += 1
+            if is_prev_day:
+                summary[building_text]["prev_day_record_found"] = True
+            if in_month:
+                summary[building_text]["month_record_count"] += 1
+            number = _to_float(fields.get(value_field))
+            if number is None:
+                summary[building_text]["missing_value_records"] += 1
+                continue
+            if is_prev_day:
+                summary[building_text]["prev_day_found"] = True
+                raw_totals[building_text]["prev_day_total"] += number
+            if in_month:
+                summary[building_text]["month_matched_records"] += 1
+                raw_totals[building_text]["month_total"] += number
+
+        for building_text, values in summary.items():
+            values["prev_day_total"] = format_number(raw_totals[building_text]["prev_day_total"])
+            values["month_total"] = format_number(raw_totals[building_text]["month_total"])
+            emit_log(
+                "[交接班][容量报表][总用电量] 楼栋结果 "
+                f"building={building_text}, V57={values.get('prev_day_total') or '0'}, "
+                f"Y57={values.get('month_total') or '0'}, month_records={values.get('month_record_count', 0)}, "
+                f"matched_month_records={values.get('month_matched_records', 0)}, "
+                f"prev_day_found={bool(values.get('prev_day_found', False))}"
+            )
+        emit_log(
+            "[交接班][容量报表][总用电量] 查询完成 "
+            f"batch={duty_date}|{duty_shift}, raw_records={raw_record_count}, matched={matched_record_count}"
+        )
+        if should_fetch:
+            self._finish_electricity_summary_cache(cache_key, summary)
+        return self._deepcopy_jsonable(summary)
+
+    def _query_capacity_electricity_summary(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None],
+        warnings: List[str] | None = None,
+    ) -> Dict[str, str]:
+        building_text = _text(building)
+        batch_summary = self._query_capacity_electricity_batch_summary(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=emit_log,
+        )
+        summary = batch_summary.get(building_text, {}) if isinstance(batch_summary, dict) else {}
+        if not isinstance(summary, dict):
+            summary = {}
+        warning_list = warnings if isinstance(warnings, list) else None
+        query_error = _text(summary.get("query_error"))
+        if query_error:
+            message = f"总用电量查询失败，{building_text} V57/Y57 按0填入: {query_error}"
+            if warning_list is not None:
+                warning_list.append(message)
+            emit_log(f"[交接班][容量报表][总用电量] {message}")
+            return {
+                "prev_day_total": _text(summary.get("prev_day_total")) or "0",
+                "month_total": _text(summary.get("month_total")) or "0",
+            }
+        if not bool(summary.get("prev_day_record_found", summary.get("prev_day_found", False))):
+            start_day = self._duty_start_day(duty_date=duty_date, duty_shift=duty_shift)
+            prev_day = (start_day - timedelta(days=1)).strftime("%Y-%m-%d")
+            message = f"{building_text} V57 缺少 {prev_day} 总用电量记录，已填0"
+            if warning_list is not None:
+                warning_list.append(message)
+            emit_log(f"[交接班][容量报表][总用电量] {message}")
+        if int(summary.get("month_record_count", summary.get("month_matched_records", 0)) or 0) <= 0:
+            start_day = self._duty_start_day(duty_date=duty_date, duty_shift=duty_shift)
+            query_start, _, _, summary_month = self._electricity_query_window_for_start_day(start_day)
+            message = f"{building_text} Y57 缺少 {summary_month or query_start.strftime('%Y-%m')} 总用电量记录，已填0"
+            if warning_list is not None:
+                warning_list.append(message)
+            emit_log(f"[交接班][容量报表][总用电量] {message}")
+        missing_value_records = int(summary.get("missing_value_records", 0) or 0)
+        if missing_value_records > 0:
+            message = f"{building_text} 总用电量存在 {missing_value_records} 条记录的数值（整数）为空，已跳过"
+            if warning_list is not None:
+                warning_list.append(message)
+            emit_log(f"[交接班][容量报表][总用电量] {message}")
+        return {
+            "prev_day_total": _text(summary.get("prev_day_total")) or "0",
+            "month_total": _text(summary.get("month_total")) or "0",
+        }
+
     def _build_capacity_overlay_values(
         self,
         *,
         building: str,
         duty_date: str,
+        duty_shift: str = "",
         handover_cells: Dict[str, Any],
         emit_log: Callable[[str], None],
+        warnings: List[str] | None = None,
     ) -> Dict[str, str]:
         handover = handover_cells if isinstance(handover_cells, dict) else {}
         water_summary = self._query_capacity_water_summary(
             building=building,
             duty_date=duty_date,
             emit_log=emit_log,
+        )
+        electricity_summary = self._query_capacity_electricity_summary(
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=emit_log,
+            warnings=warnings,
         )
         weather_text = self._fetch_weather_text_for_duty_date(
             duty_date=duty_date,
@@ -1381,6 +1758,8 @@ class HandoverCapacityReportService:
             "X2": weather_humidity,
             "AC25": _text(water_summary.get("month_total")),
             "O57": _text(water_summary.get("latest_daily_total")),
+            "V57": _text(electricity_summary.get("prev_day_total")),
+            "Y57": _text(electricity_summary.get("month_total")),
         }
         return {cell: value for cell, value in overlay.items() if value != ""}
 
@@ -1457,6 +1836,7 @@ class HandoverCapacityReportService:
                 input_signature=input_signature,
             )
 
+        warnings: List[str] = []
         try:
             workbook = load_workbook_quietly(capacity_output_path)
             try:
@@ -1465,8 +1845,10 @@ class HandoverCapacityReportService:
                 overlay_values = self._build_capacity_overlay_values(
                     building=building,
                     duty_date=duty_date,
+                    duty_shift=duty_shift,
                     handover_cells=handover_cells,
                     emit_log=emit_log,
+                    warnings=warnings,
                 )
                 overlay_values.update(self._substation_110kv_cell_values(shared_payload))
                 overlay_values.update(self._cooling_pump_pressure_values_from_payload(cooling_payload))
@@ -1489,10 +1871,13 @@ class HandoverCapacityReportService:
             "[交接班][容量报表][补写] 完成 "
             f"building={building}, duty={duty_date}/{duty_shift}, output={capacity_output_path}"
         )
-        return self._build_capacity_sync_payload(
+        result = self._build_capacity_sync_payload(
             status="ready",
             input_signature=input_signature,
         )
+        if warnings:
+            result["warnings"] = list(warnings)
+        return result
 
     def generate(
         self,
@@ -1655,8 +2040,10 @@ class HandoverCapacityReportService:
                 self._build_capacity_overlay_values(
                     building=building_text,
                     duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
                     handover_cells=handover_cells,
                     emit_log=emit_log,
+                    warnings=warnings,
                 )
             )
             cell_values.update(self._substation_110kv_cell_values(shared_110kv))

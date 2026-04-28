@@ -418,6 +418,14 @@ def test_external_auto_publish_git_head_syncs_py_only_and_restarts(tmp_path: Pat
     assert command["status"] == "pending"
     assert command["source_commit"] == "1234567890abcdef"
     assert service.get_runtime_snapshot()["last_published_commit"] == "1234567890abcdef"
+    manifest = json.loads((shared_root / "updater" / "approved" / "source_manifest.json").read_text(encoding="utf-8"))
+    publish_state = json.loads(
+        (shared_root / "updater" / "approved" / "source_publish_state.json").read_text(encoding="utf-8")
+    )
+    assert manifest["display_version"] == "1234567"
+    assert manifest["target_display_version"] == "1234567"
+    assert publish_state["mirror_version"] == "1234567"
+    assert publish_state["approved_commit"] == "1234567890abcdef"
     with zipfile.ZipFile(shared_root / "updater" / "approved" / "source_snapshot.zip", "r") as archive:
         names = set(archive.namelist())
     assert "main.py" in names
@@ -597,3 +605,4 @@ def test_internal_apply_approved_source_snapshot_preserves_user_config(tmp_path:
     assert not (app_dir / "old.py").exists()
     assert json.loads((app_dir / "表格计算配置.json").read_text(encoding="utf-8"))["secret"] == "keep"
     assert service.get_runtime_snapshot()["restart_required"] is True
+    assert service.get_runtime_snapshot()["local_version"] == "fedcba9"

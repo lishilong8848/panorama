@@ -209,6 +209,49 @@ def test_handover_review_capacity_image_send_is_sync_without_job_polling() -> No
     assert "部分收件人发送失败" not in send_body
 
 
+def test_handover_review_confirm_claims_lock_and_shows_non_revision_409() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    action_helpers = (
+        project_root / "web" / "frontend" / "src" / "handover_review_action_helpers.js"
+    ).read_text(encoding="utf-8")
+    review_app = (
+        project_root / "web" / "frontend" / "src" / "handover_review_app.js"
+    ).read_text(encoding="utf-8")
+
+    toggle_body = action_helpers[action_helpers.index("async function toggleConfirm") :]
+    toggle_body = toggle_body[: toggle_body.index("async function retryCloudSheetSync")]
+    assert "if (confirmActionVm.value.disabled)" in toggle_body
+    assert "ensureEditingLock" in toggle_body
+    assert "当前审核页编辑锁获取失败" in toggle_body
+    assert "statusText.value = \"确认失败，请处理后重试。\";" in toggle_body
+
+    display_helpers = (
+        project_root / "web" / "frontend" / "src" / "handover_review_display_ui_helpers.js"
+    ).read_text(encoding="utf-8")
+    confirm_vm_body = display_helpers[display_helpers.index("const confirmActionVm = computed") :]
+    confirm_vm_body = confirm_vm_body[: confirm_vm_body.index("const saveActionVm = computed")]
+    assert "needsRefresh?.value" in confirm_vm_body
+    assert "staleRevisionConflict?.value" in confirm_vm_body
+    assert "capacityImageSending.value" in confirm_vm_body
+
+    conflict_body = review_app[review_app.index("function isRevisionConflictError") :]
+    conflict_body = conflict_body[: conflict_body.index("function beginRemoteSaveRefresh")]
+    assert "Number.parseInt(String(error?.httpStatus || 0), 10) !== 409" in conflict_body
+    assert "revision conflict" in conflict_body
+
+
+def test_handover_config_save_requires_segment_revision_loaded() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    runtime_actions = (
+        project_root / "web" / "frontend" / "src" / "runtime_health_config_actions.js"
+    ).read_text(encoding="utf-8")
+
+    assert "交接班公共配置还未加载完成，请刷新配置后再保存" in runtime_actions
+    assert "交接班公共配置还未加载完成，请刷新配置后再保存审核访问地址" in runtime_actions
+    assert "交接班配置还未加载完成，请刷新配置后再保存" in runtime_actions
+    assert 'reason: "segment_not_loaded"' in runtime_actions
+
+
 def test_handover_review_download_uses_fetch_and_surfaces_backend_errors() -> None:
     project_root = Path(__file__).resolve().parents[2]
     app_source = (

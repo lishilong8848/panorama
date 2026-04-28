@@ -118,17 +118,7 @@
           <div class="hint" v-if="updaterMirrorOverview.errorText">
             发布异常：{{ updaterMirrorOverview.errorText }}
           </div>
-          <div class="btn-line" style="margin-top:10px;" v-if="isInternalDeploymentRole">
-            <button
-              class="btn"
-              :class="updaterButtonClass"
-              @click="runUpdaterMainAction"
-              :disabled="isUpdaterActionLocked"
-            >
-              {{ updaterMainButtonText }}
-            </button>
-          </div>
-          <div class="btn-line" style="margin-top:10px;" v-else>
+          <div class="btn-line" style="margin-top:10px;">
             <button
               class="btn btn-secondary"
               @click="publishUpdaterApprovedNow"

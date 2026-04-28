@@ -14,6 +14,41 @@ class HandoverXlsxWriteQueueTimeoutError(TimeoutError):
     pass
 
 
+def _is_capacity_electricity_warning(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text and ("总用电量" in text or "V57" in text or "Y57" in text))
+
+
+def _merge_capacity_electricity_warnings(existing: Any, current: Any) -> list[str]:
+    output: list[str] = []
+    for item in existing if isinstance(existing, list) else []:
+        text = str(item or "").strip()
+        if text and not _is_capacity_electricity_warning(text) and text not in output:
+            output.append(text)
+    for item in current if isinstance(current, list) else []:
+        text = str(item or "").strip()
+        if text and text not in output:
+            output.append(text)
+    return output
+
+
+def _capacity_warnings_for_overlay_sync(
+    *,
+    overlay_scope: str,
+    session: Dict[str, Any],
+    sync_payload: Dict[str, Any],
+    sync_status: str,
+) -> list[str] | None:
+    if str(overlay_scope or "").strip().lower() == "substation_110kv":
+        return None
+    if str(sync_status or "").strip().lower() != "ready":
+        return None
+    return _merge_capacity_electricity_warnings(
+        session.get("capacity_warnings", []) if isinstance(session, dict) else [],
+        sync_payload.get("warnings", []) if isinstance(sync_payload, dict) else [],
+    )
+
+
 class HandoverXlsxWriteQueueService:
     """Per-building serialized queue for handover review related xlsx writes."""
 
@@ -349,11 +384,18 @@ class HandoverXlsxWriteQueueService:
             else:
                 capacity_status = "failed"
                 capacity_error = str(sync_payload.get("error", "")).strip()
+            capacity_warnings = _capacity_warnings_for_overlay_sync(
+                overlay_scope=overlay_scope,
+                session=session,
+                sync_payload=sync_payload if isinstance(sync_payload, dict) else {},
+                sync_status=sync_status,
+            )
             updated = review_service.update_capacity_sync(
                 session_id=session_id,
                 capacity_sync=sync_payload if isinstance(sync_payload, dict) else {},
                 capacity_status=capacity_status,
                 capacity_error=capacity_error,
+                capacity_warnings=capacity_warnings,
             )
             self.emit_log(
                 "[交接班][容量报表][xlsx队列] 补写状态 "

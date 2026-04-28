@@ -2663,10 +2663,12 @@ export function createAppState(vueApi) {
     const sync = updaterMirrorOverview.value?.sync && typeof updaterMirrorOverview.value.sync === "object"
       ? updaterMirrorOverview.value.sync
       : {};
+    const updateMode = String(health.updater?.update_mode || "").trim().toLowerCase();
+    const syncMode = String(sync.mode || "").trim().toLowerCase();
     const localCommit = String(sync.localCommit || health.updater?.local_commit || "").trim();
-    if (localCommit) return `commit ${localCommit.slice(0, 7)}`;
-    const publishedCommit = String(sync.publishedCommit || health.updater?.approved_commit || "").trim();
-    if (publishedCommit) return `published ${publishedCommit.slice(0, 7)}`;
+    if (updateMode === "git_pull" || syncMode.startsWith("git")) {
+      return localCommit ? `commit ${localCommit.slice(0, 7)}` : "";
+    }
     return String(health.updater?.local_version || health.version || "").trim();
   });
   const dashboardActiveModuleTitle = computed(() => {

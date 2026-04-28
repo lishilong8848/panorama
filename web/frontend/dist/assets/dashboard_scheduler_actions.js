@@ -226,40 +226,59 @@ export function createDashboardSchedulerActions(ctx) {
     if (!config.value) return;
     const handoverScheduler = config.value?.handover_log?.scheduler || {};
     const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
-    const morningTime = normalizeRunTimeText(
-      Object.prototype.hasOwnProperty.call(overrideValues, "morning_time")
-        ? overrideValues.morning_time
-        : handoverScheduler.morning_time,
-    );
-    const afternoonTime = normalizeRunTimeText(
-      Object.prototype.hasOwnProperty.call(overrideValues, "afternoon_time")
-        ? overrideValues.afternoon_time
-        : handoverScheduler.afternoon_time,
-    );
-    if (!morningTime || !afternoonTime) {
-      message.value = "交接班调度时间格式错误，必须是 HH:MM 或 HH:MM:SS";
-      return;
-    }
-    handoverScheduler.morning_time = morningTime;
-    handoverScheduler.afternoon_time = afternoonTime;
+    const overrideKeys = Object.keys(overrideValues);
+    const hasExplicitOverrides = overrideKeys.length > 0;
+    const shouldSaveMorning =
+      !hasExplicitOverrides || Object.prototype.hasOwnProperty.call(overrideValues, "morning_time");
+    const shouldSaveAfternoon =
+      !hasExplicitOverrides || Object.prototype.hasOwnProperty.call(overrideValues, "afternoon_time");
     const payload = {
       enabled: true,
-      auto_start_in_gui: Boolean(handoverScheduler.auto_start_in_gui),
-      morning_time: morningTime,
-      afternoon_time: afternoonTime,
-      check_interval_sec: Number.parseInt(String(handoverScheduler.check_interval_sec ?? 30), 10) || 30,
-      catch_up_if_missed: Boolean(handoverScheduler.catch_up_if_missed),
-      retry_failed_in_same_period: Boolean(handoverScheduler.retry_failed_in_same_period),
-      morning_state_file: String(handoverScheduler.morning_state_file || "").trim(),
-      afternoon_state_file: String(handoverScheduler.afternoon_state_file || "").trim(),
     };
-    if (!payload.morning_state_file || !payload.afternoon_state_file) {
-      message.value = "交接班调度状态文件不能为空";
-      return;
+
+    if (shouldSaveMorning) {
+      const morningTime = normalizeRunTimeText(
+        Object.prototype.hasOwnProperty.call(overrideValues, "morning_time")
+          ? overrideValues.morning_time
+          : handoverScheduler.morning_time,
+      );
+      if (!morningTime) {
+        message.value = "交接班调度上午时间格式错误，必须是 HH:MM 或 HH:MM:SS";
+        return;
+      }
+      handoverScheduler.morning_time = morningTime;
+      payload.morning_time = morningTime;
     }
-    if (!Number.isInteger(payload.check_interval_sec) || payload.check_interval_sec <= 0) {
-      message.value = "交接班调度检查间隔必须大于0";
-      return;
+
+    if (shouldSaveAfternoon) {
+      const afternoonTime = normalizeRunTimeText(
+        Object.prototype.hasOwnProperty.call(overrideValues, "afternoon_time")
+          ? overrideValues.afternoon_time
+          : handoverScheduler.afternoon_time,
+      );
+      if (!afternoonTime) {
+        message.value = "交接班调度下午时间格式错误，必须是 HH:MM 或 HH:MM:SS";
+        return;
+      }
+      handoverScheduler.afternoon_time = afternoonTime;
+      payload.afternoon_time = afternoonTime;
+    }
+
+    if (!hasExplicitOverrides) {
+      payload.auto_start_in_gui = Boolean(handoverScheduler.auto_start_in_gui);
+      payload.check_interval_sec = Number.parseInt(String(handoverScheduler.check_interval_sec ?? 30), 10) || 30;
+      payload.catch_up_if_missed = Boolean(handoverScheduler.catch_up_if_missed);
+      payload.retry_failed_in_same_period = Boolean(handoverScheduler.retry_failed_in_same_period);
+      payload.morning_state_file = String(handoverScheduler.morning_state_file || "").trim();
+      payload.afternoon_state_file = String(handoverScheduler.afternoon_state_file || "").trim();
+      if (!payload.morning_state_file || !payload.afternoon_state_file) {
+        message.value = "交接班调度状态文件不能为空";
+        return;
+      }
+      if (!Number.isInteger(payload.check_interval_sec) || payload.check_interval_sec <= 0) {
+        message.value = "交接班调度检查间隔必须大于0";
+        return;
+      }
     }
     return guardedRun(
       ACTION_KEYS.handoverSchedulerSave,

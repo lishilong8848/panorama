@@ -26,6 +26,8 @@ from handover_log_module.service.cooling_pump_pressure_defaults_service import C
 def _clear_capacity_weather_cache() -> None:
     HandoverCapacityReportService._shared_weather_payload_cache.clear()
     HandoverCapacityReportService._weather_payload_cache_inflight.clear()
+    HandoverCapacityReportService._shared_electricity_summary_cache.clear()
+    HandoverCapacityReportService._electricity_summary_cache_inflight.clear()
 
 
 def test_build_fixed_header_cells_for_a_building() -> None:
@@ -91,6 +93,11 @@ def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         service,
+        "_query_capacity_electricity_summary",
+        lambda **kwargs: {"month_total": "30", "prev_day_total": "10"},
+    )
+    monkeypatch.setattr(
+        service,
         "_fetch_weather_payload_for_duty_date",
         lambda **kwargs: {"text": "多云", "humidity": "96%"},
     )
@@ -113,7 +120,204 @@ def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
 
     assert values["AC24"] == "9.8"
     assert values["X2"] == "96%"
+    assert values["V57"] == "10"
+    assert values["Y57"] == "30"
     assert "D8" in service.tracked_cells()
+
+
+def test_capacity_electricity_summary_reuses_one_query_for_all_buildings(monkeypatch) -> None:
+    class _FakeBitableClient:
+        list_records_calls = 0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def list_fields(self, *, table_id, page_size):  # noqa: ANN001
+            assert table_id == "tblqSskJvBnx9UJj"
+            assert page_size == 200
+            return [
+                {
+                    "field_name": "汇总分类",
+                    "property": {"options": [{"id": "opt-total", "name": "总用电量"}, {"id": "opt-other", "name": "其他"}]},
+                },
+                {
+                    "field_name": "楼栋",
+                    "property": {"options": [{"id": "opt-b", "name": "B楼"}, {"id": "opt-e", "name": "E楼"}]},
+                },
+            ]
+
+        def list_records(self, *, table_id, page_size, max_records, filter_formula=""):  # noqa: ANN001
+            assert table_id == "tblqSskJvBnx9UJj"
+            assert page_size == 500
+            assert max_records == 0
+            assert "CurrentValue.[日期]>=TODATE(\"2026-04-01\")" in filter_formula
+            assert "CurrentValue.[日期]<TODATE(\"2026-05-01\")" in filter_formula
+            assert 'CurrentValue.[汇总分类]="总用电量"' in filter_formula
+            _FakeBitableClient.list_records_calls += 1
+            return [
+                {"fields": {"汇总分类": "总用电量", "楼栋": "A", "日期": "2026-04-14", "数值（整数）": 10}},
+                {"fields": {"汇总分类": "总用电量", "楼栋": "A楼", "日期": "2026-04-15", "数值（整数）": 20}},
+                {"fields": {"汇总分类": "opt-total", "楼栋": "opt-b", "日期": "2026-04-14", "数值（整数）": "5"}},
+                {"fields": {"汇总分类": {"id": "opt-total"}, "楼栋": {"id": "opt-b"}, "日期": "2026-04-20", "数值（整数）": "7"}},
+                {"fields": {"汇总分类": "opt-total", "楼栋": "opt-e", "日期": "2026-04-14", "数值（整数）": 0}},
+                {"fields": {"汇总分类": "opt-total", "楼栋": "E楼", "日期": "2026-04-16", "数值（整数）": 0}},
+                {"fields": {"汇总分类": "opt-other", "楼栋": "A楼", "日期": "2026-04-16", "数值（整数）": 999}},
+            ]
+
+    monkeypatch.setattr(
+        "handover_log_module.service.handover_capacity_report_service.FeishuBitableClient",
+        _FakeBitableClient,
+    )
+    service = HandoverCapacityReportService(
+        {"common": {"feishu_auth": {"app_id": "app-id", "app_secret": "app-secret"}}}
+    )
+    monkeypatch.setattr(
+        service,
+        "_query_capacity_water_summary",
+        lambda **_kwargs: {"month_total": "0", "latest_daily_total": "0"},
+    )
+    monkeypatch.setattr(
+        service,
+        "_fetch_weather_payload_for_duty_date",
+        lambda **_kwargs: {"text": "晴", "humidity": "50%"},
+    )
+    warnings: list[str] = []
+
+    a_values = service._build_capacity_overlay_values(
+        building="A楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        handover_cells={"F8": "西区30/东区40"},
+        emit_log=lambda _msg: None,
+        warnings=warnings,
+    )
+    b_values = service._build_capacity_overlay_values(
+        building="B楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        handover_cells={"F8": "西区30/东区40"},
+        emit_log=lambda _msg: None,
+        warnings=warnings,
+    )
+    e_values = service._build_capacity_overlay_values(
+        building="E楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        handover_cells={"F8": "西区30/东区40"},
+        emit_log=lambda _msg: None,
+        warnings=warnings,
+    )
+
+    assert a_values["V57"] == "10"
+    assert a_values["Y57"] == "30"
+    assert b_values["V57"] == "5"
+    assert b_values["Y57"] == "12"
+    assert e_values["V57"] == "0"
+    assert e_values["Y57"] == "0"
+    assert warnings == []
+    assert _FakeBitableClient.list_records_calls == 1
+    second_service = HandoverCapacityReportService(
+        {"common": {"feishu_auth": {"app_id": "app-id", "app_secret": "app-secret"}}}
+    )
+    second_service._query_capacity_electricity_summary(
+        building="C楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        emit_log=lambda _msg: None,
+        warnings=[],
+    )
+    assert _FakeBitableClient.list_records_calls == 1
+
+
+def test_capacity_electricity_summary_handles_cross_month_and_missing(monkeypatch) -> None:
+    class _FakeBitableClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def list_fields(self, **_kwargs):
+            return [
+                {"field_name": "汇总分类", "property": {"options": [{"id": "total", "name": "总用电量"}]}},
+                {"field_name": "楼栋", "property": {"options": [{"id": "a", "name": "A楼"}]}},
+            ]
+
+        def list_records(self, **kwargs):
+            formula = str(kwargs.get("filter_formula", ""))
+            assert "CurrentValue.[日期]>=TODATE(\"2026-03-01\")" in formula
+            assert "CurrentValue.[日期]<TODATE(\"2026-04-01\")" in formula
+            return [
+                {"fields": {"汇总分类": "total", "楼栋": "a", "日期": "2026-03-31", "数值（整数）": 9}},
+                {"fields": {"汇总分类": "total", "楼栋": "A楼", "日期": "2026-03-01", "数值（整数）": 1}},
+            ]
+
+    monkeypatch.setattr(
+        "handover_log_module.service.handover_capacity_report_service.FeishuBitableClient",
+        _FakeBitableClient,
+    )
+    service = HandoverCapacityReportService(
+        {"common": {"feishu_auth": {"app_id": "app-id", "app_secret": "app-secret"}}}
+    )
+    warnings: list[str] = []
+
+    a_summary = service._query_capacity_electricity_summary(
+        building="A楼",
+        duty_date="2026-04-01",
+        duty_shift="day",
+        emit_log=lambda _msg: None,
+        warnings=warnings,
+    )
+    d_summary = service._query_capacity_electricity_summary(
+        building="D楼",
+        duty_date="2026-04-01",
+        duty_shift="day",
+        emit_log=lambda _msg: None,
+        warnings=warnings,
+    )
+
+    assert a_summary == {"prev_day_total": "9", "month_total": "10"}
+    assert d_summary == {"prev_day_total": "0", "month_total": "0"}
+    assert any("D楼 V57 缺少 2026-03-31 总用电量记录" in item for item in warnings)
+    assert any("D楼 Y57 缺少 2026-03 总用电量记录" in item for item in warnings)
+
+
+def test_capacity_electricity_summary_value_missing_does_not_report_missing_record(monkeypatch) -> None:
+    class _FakeBitableClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def list_fields(self, **_kwargs):
+            return [
+                {"field_name": "汇总分类", "property": {"options": [{"id": "total", "name": "总用电量"}]}},
+                {"field_name": "楼栋", "property": {"options": [{"id": "d", "name": "D楼"}]}},
+            ]
+
+        def list_records(self, **_kwargs):
+            return [
+                {"fields": {"汇总分类": "total", "楼栋": "d", "日期": "2026-04-14", "数值（整数）": ""}},
+                {"fields": {"汇总分类": "total", "楼栋": "D楼", "日期": "2026-04-02", "数值（整数）": None}},
+                {"fields": {"汇总分类": "total", "楼栋": "E楼", "日期": "2026-04-14", "数值（整数）": 0}},
+            ]
+
+    monkeypatch.setattr(
+        "handover_log_module.service.handover_capacity_report_service.FeishuBitableClient",
+        _FakeBitableClient,
+    )
+    service = HandoverCapacityReportService(
+        {"common": {"feishu_auth": {"app_id": "app-id", "app_secret": "app-secret"}}}
+    )
+    warnings: list[str] = []
+
+    summary = service._query_capacity_electricity_summary(
+        building="D楼",
+        duty_date="2026-04-15",
+        duty_shift="day",
+        emit_log=lambda _msg: None,
+        warnings=warnings,
+    )
+
+    assert summary == {"prev_day_total": "0", "month_total": "0"}
+    assert any("D楼 总用电量存在 2 条记录的数值（整数）为空" in item for item in warnings)
+    assert not any("D楼 V57 缺少" in item for item in warnings)
+    assert not any("D楼 Y57 缺少" in item for item in warnings)
 
 
 def test_capacity_overlay_writes_substation_110kv_and_cooling_pump_pressures(tmp_path, monkeypatch) -> None:
@@ -132,6 +336,11 @@ def test_capacity_overlay_writes_substation_110kv_and_cooling_pump_pressures(tmp
         service,
         "_query_capacity_water_summary",
         lambda **kwargs: {"month_total": "0", "latest_daily_total": "0"},
+    )
+    monkeypatch.setattr(
+        service,
+        "_query_capacity_electricity_summary",
+        lambda **kwargs: {"month_total": "0", "prev_day_total": "0"},
     )
     monkeypatch.setattr(
         service,

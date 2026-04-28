@@ -902,10 +902,10 @@ class UpdaterService:
                 state["mirror_ready"] = False
         approved_commit = str(manifest.get("source_commit", state.get("approved_commit", "")) or "").strip()
         version = str(
-            manifest.get("display_version")
+            _short_git_commit(approved_commit)
+            or manifest.get("display_version")
             or manifest.get("target_display_version")
             or state.get("mirror_version", "")
-            or _short_git_commit(approved_commit)
             or ""
         ).strip()
         return {
@@ -1493,7 +1493,7 @@ class UpdaterService:
                 )
 
             local = normalize_local_version(load_local_build_meta(self.app_dir))
-            local_version_text = str(local.get("display_version") or local.get("build_id") or "").strip()
+            local_commit_text = _short_git_commit(local_commit)
             local_release_revision = int(local.get("release_revision", 0) or 0)
             published_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             manifest = {
@@ -1503,9 +1503,9 @@ class UpdaterService:
                 "branch": branch,
                 "created_at": published_at,
                 "zip_relpath": _SOURCE_SNAPSHOT_ZIP_NAME,
-                "display_version": local_version_text,
+                "display_version": local_commit_text,
                 "release_revision": local_release_revision,
-                "target_display_version": local_version_text,
+                "target_display_version": local_commit_text,
                 "target_release_revision": local_release_revision,
                 "published_by_role": self.role_mode,
                 "published_by_node_id": self.node_id,
@@ -1536,7 +1536,7 @@ class UpdaterService:
             os.replace(manifest_tmp, self._source_manifest_path)
             publish_state = {
                 "mirror_ready": True,
-                "mirror_version": local_version_text or _short_git_commit(local_commit),
+                "mirror_version": local_commit_text,
                 "mirror_release_revision": local_release_revision,
                 "last_publish_at": published_at,
                 "last_publish_error": "",
@@ -1562,7 +1562,7 @@ class UpdaterService:
                 "sha256": actual_sha,
                 "source_commit": local_commit,
                 "branch": branch,
-                "display_version": local_version_text,
+                "display_version": local_commit_text,
                 "release_revision": local_release_revision,
                 "included_files": int(build_result.get("included_files", 0) or 0),
             }
@@ -2036,9 +2036,9 @@ class UpdaterService:
 
         approved_commit = str(manifest.get("source_commit", "") or "").strip()
         approved_version = str(
-            manifest.get("display_version")
+            _short_git_commit(approved_commit)
+            or manifest.get("display_version")
             or manifest.get("target_display_version")
-            or _short_git_commit(approved_commit)
             or ""
         ).strip()
         approved_revision = int(manifest.get("release_revision", manifest.get("target_release_revision", 0)) or 0)
@@ -2109,7 +2109,8 @@ class UpdaterService:
 
         refreshed_local = normalize_local_version(load_local_build_meta(self.app_dir))
         refreshed_local_text = (
-            str(manifest.get("display_version") or manifest.get("target_display_version") or "").strip()
+            _short_git_commit(approved_commit)
+            or str(manifest.get("display_version") or manifest.get("target_display_version") or "").strip()
             or refreshed_local.get("display_version")
             or refreshed_local.get("build_id")
             or "-"

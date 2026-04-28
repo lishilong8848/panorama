@@ -10,6 +10,7 @@ from handover_log_module.repository.review_building_document_store import Review
 from handover_log_module.service.handover_xlsx_write_queue_service import (
     HandoverXlsxWriteQueueService,
     HandoverXlsxWriteQueueTimeoutError,
+    _capacity_warnings_for_overlay_sync,
 )
 
 
@@ -158,6 +159,54 @@ def test_capacity_overlay_dedupes_by_scope_without_downgrading_full_task(tmp_pat
     assert newer_light_job["job_id"] == light_job["job_id"]
     assert newer_light_job["payload"]["tracked_cells"]["H6"] == "11"
     assert newer_light_job["payload"]["overlay_scope"] == "substation_110kv"
+
+
+def test_capacity_overlay_warning_merge_preserves_non_electricity_warnings() -> None:
+    merged = _capacity_warnings_for_overlay_sync(
+        overlay_scope="full",
+        session={
+            "capacity_warnings": [
+                "C楼 AE80 缺少 C-212-CRAH 总_有功功率",
+                "A楼 V57 缺少 2026-04-14 总用电量记录，已填0",
+                "A楼 总用电量存在 1 条记录的数值（整数）为空，已跳过",
+            ]
+        },
+        sync_payload={"warnings": ["A楼 Y57 缺少 2026-04 总用电量记录，已填0"]},
+        sync_status="ready",
+    )
+
+    assert merged == [
+        "C楼 AE80 缺少 C-212-CRAH 总_有功功率",
+        "A楼 Y57 缺少 2026-04 总用电量记录，已填0",
+    ]
+
+
+def test_capacity_overlay_warning_merge_clears_old_electricity_warnings_when_clean() -> None:
+    merged = _capacity_warnings_for_overlay_sync(
+        overlay_scope="full",
+        session={
+            "capacity_warnings": [
+                "D楼 Y57 缺少 2026-04 总用电量记录，已填0",
+                "D楼 空调功率缺少 D-212",
+            ]
+        },
+        sync_payload={},
+        sync_status="ready",
+    )
+
+    assert merged == ["D楼 空调功率缺少 D-212"]
+
+
+def test_substation_overlay_does_not_update_capacity_warnings() -> None:
+    assert (
+        _capacity_warnings_for_overlay_sync(
+            overlay_scope="substation_110kv",
+            session={"capacity_warnings": ["旧告警"]},
+            sync_payload={"warnings": ["A楼 Y57 缺少 2026-04 总用电量记录，已填0"]},
+            sync_status="ready",
+        )
+        is None
+    )
 
 
 def test_review_excel_sync_failure_marks_sync_state_failed(tmp_path: Path) -> None:

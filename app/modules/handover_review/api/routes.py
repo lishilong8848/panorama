@@ -2169,6 +2169,12 @@ def _build_review_display_state(
         confirm_disabled_reason = "仅最新交接班日志支持确认、撤销确认和云表重试"
     elif remote_editor_active:
         confirm_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
+    elif not confirmed and not has_output_file:
+        confirm_allowed = False
+        confirm_disabled_reason = "当前没有可确认的交接班文件"
+    elif not confirmed and excel_sync_state["status"] == "failed":
+        confirm_allowed = False
+        confirm_disabled_reason = excel_sync_state["error"] or "交接班Excel同步失败，请先保存或刷新后重试"
     retry_allowed = bool(session_payload) and (not is_history_mode) and confirmed and all_confirmed and str(cloud_sheet_state["status"]) in {"failed", "prepare_failed"}
     retry_disabled_reason = ""
     if not session_payload:
@@ -3838,17 +3844,25 @@ def handover_review_confirm(
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     _load_target_session_or_404(service, building=building, session_id=session_id)
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id)
-    _ensure_session_lock_held_or_409(
-        service,
-        building=building,
-        session_id=session_id,
-        client_id=str(payload.get("client_id", "")).strip(),
-    )
+    try:
+        _ensure_session_lock_held_or_409(
+            service,
+            building=building,
+            session_id=session_id,
+            client_id=str(payload.get("client_id", "")).strip(),
+        )
+    except HTTPException as exc:
+        if int(getattr(exc, "status_code", 0) or 0) == 409:
+            container.add_system_log(
+                f"[交接班][审核确认] 已拒绝 building={building}, session_id={session_id}, "
+                f"base_revision={base_revision}, reason={exc.detail}"
+            )
+        raise
     target_session = _load_target_session_or_404(service, building=building, session_id=session_id)
     target_batch_key = str(target_session.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
         name=f"handover_confirm:{target_batch_key}:{building}",
-        resource_keys=_handover_resource_keys(batch_key=target_batch_key),
+        resource_keys=_handover_resource_keys(building=building, batch_key=target_batch_key),
     ):
         try:
             _build_xlsx_write_queue_service(container).wait_for_barrier(building=building, timeout_sec=120.0)
@@ -3858,8 +3872,16 @@ def handover_review_confirm(
                     str(sync_state.get("error", "") or "").strip() or "交接班Excel同步失败"
                 )
         except HandoverXlsxWriteQueueTimeoutError as exc:
+            container.add_system_log(
+                f"[交接班][审核确认] 已拒绝 building={building}, session_id={session_id}, "
+                f"base_revision={base_revision}, reason=交接班文件写入队列繁忙"
+            )
             raise HTTPException(status_code=409, detail="交接班文件写入队列繁忙，请稍后重试") from exc
         except ReviewDocumentStateError as exc:
+            container.add_system_log(
+                f"[交接班][审核确认] 已拒绝 building={building}, session_id={session_id}, "
+                f"base_revision={base_revision}, reason={exc}"
+            )
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         try:
             session, batch_status = service.mark_confirmed(
@@ -3869,6 +3891,49 @@ def handover_review_confirm(
                 base_revision=base_revision,
             )
         except ReviewSessionConflictError as exc:
+            latest_after_conflict = service.get_session_by_id(session_id) or {}
+            if isinstance(latest_after_conflict, dict) and bool(latest_after_conflict.get("confirmed", False)):
+                container.add_system_log(
+                    f"[交接班][审核确认] 重复确认已按成功返回 building={building}, session_id={session_id}, "
+                    f"base_revision={base_revision}, current_revision={latest_after_conflict.get('revision', 0)}"
+                )
+                latest_session = _attach_excel_sync_from_store(container, latest_after_conflict)
+                _review_history_cache_invalidate(building=building)
+                latest_batch_key = str(latest_session.get("batch_key", "")).strip()
+                latest_batch_status = _attach_followup_progress(
+                    followup,
+                    service.get_batch_status(latest_batch_key),
+                )
+                response = {
+                    "ok": True,
+                    "session": latest_session,
+                    "latest_session_id": _safe_latest_session_id(service, building=building, emit_log=container.add_system_log),
+                    "operation_feedback": _build_review_confirm_feedback(
+                        confirmed=True,
+                        followup_result=None,
+                    ),
+                    "concurrency": _get_session_concurrency_safe(
+                        service,
+                        building=building,
+                        session_id=str(latest_session.get("session_id", "")).strip(),
+                        client_id=str(payload.get("client_id", "")).strip(),
+                        current_revision=int(latest_session.get("revision", 0) or 0),
+                        emit_log=container.add_system_log,
+                    ),
+                    "batch_status": latest_batch_status,
+                    "followup_result": {"status": "already_confirmed"},
+                }
+                return _attach_review_display_state(
+                    response,
+                    service=service,
+                    building=building,
+                    client_id=str(payload.get("client_id", "")).strip(),
+                    emit_log=container.add_system_log,
+                )
+            container.add_system_log(
+                f"[交接班][审核确认] 已拒绝 building={building}, session_id={session_id}, "
+                f"base_revision={base_revision}, reason={exc}"
+            )
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -3945,12 +4010,20 @@ def handover_review_unconfirm(
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     _load_target_session_or_404(service, building=building, session_id=session_id)
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id)
-    _ensure_session_lock_held_or_409(
-        service,
-        building=building,
-        session_id=session_id,
-        client_id=str(payload.get("client_id", "")).strip(),
-    )
+    try:
+        _ensure_session_lock_held_or_409(
+            service,
+            building=building,
+            session_id=session_id,
+            client_id=str(payload.get("client_id", "")).strip(),
+        )
+    except HTTPException as exc:
+        if int(getattr(exc, "status_code", 0) or 0) == 409:
+            container.add_system_log(
+                f"[交接班][审核撤销] 已拒绝 building={building}, session_id={session_id}, "
+                f"base_revision={base_revision}, reason={exc.detail}"
+            )
+        raise
     target_session = _load_target_session_or_404(service, building=building, session_id=session_id)
     target_batch_key = str(target_session.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
@@ -3965,6 +4038,44 @@ def handover_review_unconfirm(
                 base_revision=base_revision,
             )
         except ReviewSessionConflictError as exc:
+            latest_after_conflict = service.get_session_by_id(session_id) or {}
+            if isinstance(latest_after_conflict, dict) and not bool(latest_after_conflict.get("confirmed", False)):
+                container.add_system_log(
+                    f"[交接班][审核撤销] 重复撤销已按成功返回 building={building}, session_id={session_id}, "
+                    f"base_revision={base_revision}, current_revision={latest_after_conflict.get('revision', 0)}"
+                )
+                session = _attach_excel_sync_from_store(container, latest_after_conflict)
+                _review_history_cache_invalidate(building=building)
+                batch_status = service.get_batch_status(str(session.get("batch_key", "")).strip())
+                response = {
+                    "ok": True,
+                    "session": session,
+                    "latest_session_id": _safe_latest_session_id(service, building=building, emit_log=container.add_system_log),
+                    "operation_feedback": _build_review_confirm_feedback(
+                        confirmed=False,
+                        followup_result=None,
+                    ),
+                    "concurrency": _get_session_concurrency_safe(
+                        service,
+                        building=building,
+                        session_id=str(session.get("session_id", "")).strip(),
+                        client_id=str(payload.get("client_id", "")).strip(),
+                        current_revision=int(session.get("revision", 0) or 0),
+                        emit_log=container.add_system_log,
+                    ),
+                    "batch_status": batch_status,
+                }
+                return _attach_review_display_state(
+                    response,
+                    service=service,
+                    building=building,
+                    client_id=str(payload.get("client_id", "")).strip(),
+                    emit_log=container.add_system_log,
+                )
+            container.add_system_log(
+                f"[交接班][审核撤销] 已拒绝 building={building}, session_id={session_id}, "
+                f"base_revision={base_revision}, reason={exc}"
+            )
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

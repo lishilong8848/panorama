@@ -132,6 +132,7 @@ function ensureRoot(cfg) {
   cfg.feishu = cfg.feishu || {};
   cfg.alarm_export = cfg.alarm_export || {};
   cfg.feishu_sheet_import = cfg.feishu_sheet_import || {};
+  cfg.manual_upload_gui = cfg.manual_upload_gui || {};
   cfg.handover_log = cfg.handover_log || {};
   cfg.day_metric_upload = cfg.day_metric_upload || {};
   cfg.wet_bulb_collection = cfg.wet_bulb_collection || {};
@@ -919,8 +920,8 @@ function applyHandoverDefaults(cfg) {
 
   setBooleanDefault(scheduler, "enabled", true);
   setBooleanDefault(scheduler, "auto_start_in_gui", false);
-  setStringDefault(scheduler, "morning_time", "07:00:00");
-  setStringDefault(scheduler, "afternoon_time", "16:00:00");
+  setStringDefault(scheduler, "morning_time", "08:00:00");
+  setStringDefault(scheduler, "afternoon_time", "17:00:00");
   setNumberDefault(scheduler, "check_interval_sec", 30);
   setBooleanDefault(scheduler, "catch_up_if_missed", false);
   setBooleanDefault(scheduler, "retry_failed_in_same_period", false);
@@ -1198,6 +1199,7 @@ export function ensureConfigShape(raw) {
   applyNetworkDefaults(cfg);
   applyWetBulbCollectionDefaults(cfg);
   applyDayMetricUploadDefaults(cfg);
+  setBooleanDefault(cfg.manual_upload_gui, "enabled", true);
   applySchedulerDefaults(cfg);
   applyUpdaterDefaults(cfg);
   cfg.download.sites = Array.isArray(cfg.download.sites) ? cfg.download.sites : [];

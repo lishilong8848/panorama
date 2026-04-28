@@ -39,6 +39,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     refreshActionVm,
     clearSaveTimers,
     saveDocument,
+    ensureEditingLock,
     releaseCurrentLock,
     loadReviewData,
     shouldPreferBootstrapLoad,
@@ -122,6 +123,10 @@ export function createHandoverReviewActionHelpers(options = {}) {
   }
 
   async function toggleConfirm() {
+    if (confirmActionVm.value.disabled) {
+      statusText.value = confirmActionVm.value.disabledReason || "";
+      return;
+    }
     if (!confirmActionBase.value.allowed) {
       statusText.value = confirmActionVm.value.disabledReason || "";
       return;
@@ -138,11 +143,24 @@ export function createHandoverReviewActionHelpers(options = {}) {
     if (dirty.value) {
       const saved = await saveDocument({ reason: "confirm" });
       if (!saved) return;
+      if (dirty.value) {
+        statusText.value = "审核内容仍有未保存修改，请保存完成后再确认。";
+        return;
+      }
     }
     confirming.value = true;
     errorText.value = "";
-    statusText.value = "正在同步交接班文件并执行确认上传...";
+    statusText.value = "正在获取审核页编辑锁...";
     try {
+      if (typeof ensureEditingLock === "function") {
+        const locked = await ensureEditingLock();
+        if (!locked) {
+          errorText.value = "当前审核页编辑锁获取失败，请确认没有其他终端编辑后重试";
+          statusText.value = "确认失败，请处理后重试。";
+          return;
+        }
+      }
+      statusText.value = "正在同步交接班文件并执行确认上传...";
       const request = {
         session_id: session.value.session_id,
         base_revision: session.value.revision,
@@ -169,6 +187,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
         statusText.value = "已同步最新审核内容";
       } else {
         errorText.value = String(error?.message || error || "确认失败");
+        statusText.value = "确认失败，请处理后重试。";
       }
     } finally {
       confirming.value = false;

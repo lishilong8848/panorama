@@ -3299,11 +3299,18 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
   }
 
+  function normalizeHandoverLogConfigShape(handoverLog) {
+    const normalized = ensureConfigShape({
+      handover_log: handoverLog && typeof handoverLog === "object" ? handoverLog : {},
+    });
+    return normalized.handover_log && typeof normalized.handover_log === "object"
+      ? normalized.handover_log
+      : {};
+  }
+
   function ensureHandoverSegmentConfigShape() {
     if (!config.value || typeof config.value !== "object") return null;
-    config.value.handover_log = config.value.handover_log && typeof config.value.handover_log === "object"
-      ? config.value.handover_log
-      : {};
+    config.value.handover_log = normalizeHandoverLogConfigShape(config.value.handover_log);
     const handover = config.value.handover_log;
     handover.capacity_report = handover.capacity_report && typeof handover.capacity_report === "object"
       ? handover.capacity_report
@@ -3413,6 +3420,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     next.review_ui.footer_inventory_defaults_by_building = preservedFooterDefaults;
     next.review_ui.review_link_recipients_by_building = preservedReviewLinkRecipients;
     config.value.handover_log = next;
+    ensureHandoverSegmentConfigShape();
   }
 
   function applyHandoverBuildingSegmentData(building, segmentData) {
@@ -3723,9 +3731,17 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   async function saveHandoverCommonConfig(options = {}) {
     const runner = async () => {
+      const baseRevision = Number.parseInt(String(handoverConfigCommonRevision?.value || 0), 10) || 0;
+      if (baseRevision <= 0) {
+        const errorText = "交接班公共配置还未加载完成，请刷新配置后再保存";
+        if (!options?.silentErrorMessage) {
+          message.value = errorText;
+        }
+        return { saved: false, reason: "segment_not_loaded", error: errorText };
+      }
       try {
         const data = await putHandoverCommonConfigSegmentApi({
-          base_revision: Number.parseInt(String(handoverConfigCommonRevision?.value || 0), 10) || 0,
+          base_revision: baseRevision,
           data: buildHandoverCommonSegmentPayload(),
         });
         withConfigSaveSuspended(() => {
@@ -3790,9 +3806,17 @@ export function createRuntimeHealthConfigActions(ctx) {
       return { saved: true, reason: "unchanged", value: normalizedBaseUrl };
     }
     const runner = async () => {
+      const baseRevision = Number.parseInt(String(handoverConfigCommonRevision?.value || 0), 10) || 0;
+      if (baseRevision <= 0) {
+        const errorText = "交接班公共配置还未加载完成，请刷新配置后再保存审核访问地址";
+        if (!options?.silentMessage) {
+          message.value = errorText;
+        }
+        return { saved: false, reason: "segment_not_loaded", error: errorText };
+      }
       try {
         const data = await putHandoverCommonConfigSegmentApi({
-          base_revision: Number.parseInt(String(handoverConfigCommonRevision?.value || 0), 10) || 0,
+          base_revision: baseRevision,
           data: {
             review_ui: {
               public_base_url: normalizedBaseUrl,
@@ -3856,12 +3880,21 @@ export function createRuntimeHealthConfigActions(ctx) {
         }
         return { saved: false, reason: "invalid_recipient_draft", error: errorText };
       }
+      const hasKnownRevision = Object.prototype.hasOwnProperty.call(options || {}, "baseRevision")
+        || Object.prototype.hasOwnProperty.call(handoverBuildingSegmentRevisions, buildingText);
+      const baseRevision = Object.prototype.hasOwnProperty.call(options || {}, "baseRevision")
+        ? Number.parseInt(String(options.baseRevision || 0), 10) || 0
+        : (Object.prototype.hasOwnProperty.call(handoverBuildingSegmentRevisions, buildingText)
+          ? handoverBuildingSegmentRevisions[buildingText]
+          : Number.parseInt(String(handoverConfigBuildingRevision?.value || 0), 10) || 0);
+      if (!hasKnownRevision || baseRevision <= 0) {
+        const errorText = `${buildingText}交接班配置还未加载完成，请刷新配置后再保存`;
+        if (!options?.silentErrorMessage) {
+          message.value = errorText;
+        }
+        return { saved: false, reason: "segment_not_loaded", error: errorText };
+      }
       try {
-        const baseRevision = Object.prototype.hasOwnProperty.call(options || {}, "baseRevision")
-          ? Number.parseInt(String(options.baseRevision || 0), 10) || 0
-          : (Object.prototype.hasOwnProperty.call(handoverBuildingSegmentRevisions, buildingText)
-            ? handoverBuildingSegmentRevisions[buildingText]
-            : Number.parseInt(String(handoverConfigBuildingRevision?.value || 0), 10) || 0);
         const data = await putHandoverBuildingConfigSegmentApi(buildingCode, {
           base_revision: baseRevision,
           data: buildHandoverBuildingSegmentPayload(buildingText),

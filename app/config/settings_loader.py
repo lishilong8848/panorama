@@ -35,6 +35,7 @@ from app.config.handover_segment_store import (
     handover_segment_target_lock,
     has_all_handover_segment_files,
     has_any_handover_segment_file,
+    preserve_non_empty_handover_building_segment_data,
     read_all_segment_documents,
     read_segment_document,
     write_segment_document,
@@ -2276,10 +2277,27 @@ def get_handover_common_segment(config_path: str | Path | None = None) -> Dict[s
 def get_handover_building_segment(building_code: str, config_path: str | Path | None = None) -> Dict[str, Any]:
     target = get_settings_path(config_path)
     building_path = handover_building_segment_path(target, building_code)
+    target_building = building_name_from_segment_code(building_code)
     if building_path.exists():
-        return read_segment_document(building_path)
+        document = read_segment_document(building_path)
+        try:
+            root_payload = load_pipeline_config(target)
+            base_data = extract_handover_building_data(root_payload, target_building)
+            repaired_data = preserve_non_empty_handover_building_segment_data(
+                document.get("data", {}) if isinstance(document.get("data"), dict) else {},
+                base_data,
+            )
+            if repaired_data != document.get("data", {}):
+                return build_segment_document(
+                    repaired_data,
+                    revision=int(document.get("revision", 0) or 0),
+                    updated_at=str(document.get("updated_at", "") or ""),
+                )
+        except Exception:
+            return document
+        return document
     _, building_docs = build_segment_documents_from_config(load_pipeline_config(target))
-    building_doc = building_docs[building_name_from_segment_code(building_code)]
+    building_doc = building_docs[target_building]
     return build_segment_document(building_doc.get("data", {}), revision=0, updated_at="")
 
 
@@ -2407,7 +2425,23 @@ def load_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
     _ = _ensure_handover_segment_files(cfg, config_path)
     composed = _compose_handover_segmented_config(cfg, config_path)
+    rewrite_title_config = _contains_noncanonical_handover_template_title_config(composed)
     normalized = validate_settings(composed)
+    if rewrite_title_config:
+        target = get_settings_path(config_path)
+        if has_any_handover_segment_file(target):
+            common_path = handover_common_segment_path(target)
+            common_doc = read_segment_document(common_path)
+            next_common_data = extract_handover_common_data(normalized)
+            if common_doc.get("data", {}) != next_common_data:
+                write_segment_document(
+                    common_path,
+                    build_segment_document(
+                        next_common_data,
+                        revision=int(common_doc.get("revision", 0) or 0) + 1,
+                    ),
+                )
+        write_settings_atomically(_normalize_footer_defaults_for_persistence(normalized), target)
     return _normalize_console_host_for_lan(normalized, config_path)
 
 

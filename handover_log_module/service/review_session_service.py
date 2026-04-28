@@ -2128,6 +2128,7 @@ class ReviewSessionService:
         capacity_sync: Dict[str, Any],
         capacity_status: str = "",
         capacity_error: str = "",
+        capacity_warnings: List[str] | None = None,
     ) -> Dict[str, Any]:
         target_session_id = str(session_id or "").strip()
         state = self._load_state()
@@ -2149,6 +2150,12 @@ class ReviewSessionService:
             session["capacity_status"] = str(capacity_status or "").strip().lower()
         if capacity_error is not None:
             session["capacity_error"] = str(capacity_error or "").strip()
+        if isinstance(capacity_warnings, list):
+            session["capacity_warnings"] = [
+                str(item or "").strip()
+                for item in capacity_warnings
+                if str(item or "").strip()
+            ]
         session["updated_at"] = _now_text()
         self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)

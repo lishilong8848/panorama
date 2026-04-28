@@ -16,6 +16,8 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     updatingHistoryCloudSync,
     dirty,
     syncingRemoteRevision,
+    needsRefresh,
+    staleRevisionConflict,
     cloudSyncBusy,
     errorText,
     statusText,
@@ -246,25 +248,45 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
 
   const confirmActionVm = computed(() => {
     const base = confirmActionBase.value;
+    const baseDisabledReason = resolveReviewActionDisabledReasonStrict(base);
+    let localDisabledReason = "";
+    if (!base.allowed) {
+      localDisabledReason = baseDisabledReason;
+    } else if (loading.value) {
+      localDisabledReason = "正在加载审核内容，请稍候";
+    } else if (saving.value) {
+      localDisabledReason = "正在保存审核内容，请稍候";
+    } else if (confirming.value) {
+      localDisabledReason = "确认处理中，请稍候";
+    } else if (downloading.value) {
+      localDisabledReason = "交接班文件正在下载，请稍候";
+    } else if (capacityDownloading.value) {
+      localDisabledReason = "容量报表正在下载，请稍候";
+    } else if (capacityImageSending.value) {
+      localDisabledReason = "容量表图片正在发送，请稍候";
+    } else if (retryingCloudSync.value || updatingHistoryCloudSync.value || cloudSyncBusy.value) {
+      localDisabledReason = "云表同步处理中，请稍候";
+    } else if (syncingRemoteRevision.value) {
+      localDisabledReason = "正在同步最新审核内容，请稍候";
+    } else if (needsRefresh?.value) {
+      localDisabledReason = "审核内容已变化，请刷新后重试";
+    } else if (staleRevisionConflict?.value) {
+      localDisabledReason = "审核内容版本已变化，请等待同步后重试";
+    } else if (base.pending) {
+      localDisabledReason = baseDisabledReason || "请求处理中，请稍候";
+    }
     const actionVm = buildReviewActionVmBase({
       baseAction: base,
       fallbackLabel: "确认当前楼栋",
       inFlight: confirming.value,
       inFlightText: "处理中...",
-      disabled:
-        loading.value
-        || saving.value
-        || confirming.value
-        || cloudSyncBusy.value
-        || syncingRemoteRevision.value
-        || base.pending
-        || !base.allowed,
+      disabled: Boolean(localDisabledReason),
     });
     return {
       text: actionVm.text,
       variant: base.variant || "warning",
       disabled: actionVm.disabled,
-      disabledReason: actionVm.disabledReason,
+      disabledReason: localDisabledReason || actionVm.disabledReason,
     };
   });
 

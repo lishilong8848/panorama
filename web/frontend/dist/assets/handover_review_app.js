@@ -1110,6 +1110,8 @@ export function mountHandoverReviewApp(Vue) {
         updatingHistoryCloudSync,
         dirty,
         syncingRemoteRevision,
+        needsRefresh,
+        staleRevisionConflict,
         cloudSyncBusy,
         errorText,
         statusText,
@@ -1235,7 +1237,19 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       function isRevisionConflictError(error) {
-        return Number.parseInt(String(error?.httpStatus || 0), 10) === 409;
+        if (Number.parseInt(String(error?.httpStatus || 0), 10) !== 409) return false;
+        const text = String(
+          error?.message
+          || error?.responseText
+          || error?.responseRawText
+          || "",
+        ).trim().toLowerCase();
+        if (!text) return false;
+        return text.includes("revision conflict")
+          || text.includes("版本冲突")
+          || text.includes("已被其他人修改")
+          || text.includes("内容已被其他")
+          || text.includes("已被其他楼栋更新");
       }
 
       function beginRemoteSaveRefresh(message = "其他用户正在保存，请稍等，系统将自动刷新最新内容。") {
@@ -2273,6 +2287,7 @@ export function mountHandoverReviewApp(Vue) {
         refreshActionVm,
         clearSaveTimers,
         saveDocument,
+        ensureEditingLock,
         releaseCurrentLock,
         loadReviewData,
         shouldPreferBootstrapLoad,

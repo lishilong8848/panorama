@@ -1157,6 +1157,8 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             empty="未上报" if internal_peer_available else "-",
         )
     )
+    local_commit_text = _short_commit(local_commit) or "未知"
+    internal_peer_commit_text = _short_commit(internal_peer_commit) or ("未上报" if internal_peer_available else "未接入")
     if not internal_peer_command_active:
         internal_peer_command_label = "无待执行命令"
     else:
@@ -1618,13 +1620,13 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                 "tone": "warning" if pending_sync_commit else ("success" if published_matches_local else "neutral"),
             },
             {
-                "label": "外网版本号",
-                "value": local_version_text,
+                "label": "外网提交",
+                "value": local_commit_text,
                 "tone": "neutral",
             },
             {
-                "label": "内网版本号",
-                "value": internal_peer_version_text if internal_peer_available else "未接入",
+                "label": "内网提交",
+                "value": internal_peer_commit_text,
                 "tone": internal_peer_version_tone,
             },
             {
@@ -1764,19 +1766,6 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
                 ),
             },
         }
-    git_items = []
-    if update_mode == "git_pull":
-        git_items = [
-            {"label": "更新模式", "value": "Git 拉取代码", "tone": "info"},
-            {"label": "当前分支", "value": branch or "-", "tone": "neutral"},
-            {"label": "本地提交", "value": local_commit[:7] if local_commit else "-", "tone": "neutral"},
-            {"label": "远端提交", "value": remote_commit[:7] if remote_commit else "-", "tone": "neutral"},
-            {
-                "label": "工作区状态",
-                "value": "存在本地修改" if worktree_dirty else "干净",
-                "tone": "warning" if worktree_dirty else "success",
-            },
-        ]
     tone = "neutral"
     status_text = "尚未发布到共享目录"
     summary_text = "当前更新链路尚未生成可供内网跟随的批准版本。"
@@ -1862,8 +1851,6 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             "tone": internal_peer_update_tone,
         },
     ]
-    if git_items:
-        items = git_items + items
     return {
         "tone": tone,
         "kicker": "更新镜像",
