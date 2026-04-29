@@ -145,7 +145,7 @@ class HandoverSummaryMessageService:
             f"【值班手机】{DUTY_PHONE_BY_BUILDING.get(building, '')}",
             "【交接内容】",
         ]
-        lines.extend(self._build_handover_content_lines(building=building, output=output))
+        lines.extend(self._build_handover_content_lines(building=building, output=output, session=payload))
 
         work_items = [item for item in (output.get("work_items", []) if isinstance(output.get("work_items", []), list) else []) if _text(item)]
         lines.append("")
@@ -242,7 +242,85 @@ class HandoverSummaryMessageService:
                     items.append(item)
         return items
 
-    def _build_handover_content_lines(self, *, building: str, output: Dict[str, Any]) -> List[str]:
+    @staticmethod
+    def _normalize_running_units(raw: Any) -> Dict[str, List[Dict[str, Any]]]:
+        output: Dict[str, List[Dict[str, Any]]] = {"west": [], "east": []}
+        payload = raw if isinstance(raw, dict) else {}
+        for zone in ("west", "east"):
+            rows = payload.get(zone, [])
+            if not isinstance(rows, list):
+                continue
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    unit = int(item.get("unit", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    unit = 0
+                if unit <= 0:
+                    continue
+                output[zone].append({"unit": unit, "mode_text": _text(item.get("mode_text"))})
+            output[zone].sort(key=lambda row: int(row.get("unit", 0) or 0))
+        return output
+
+    @staticmethod
+    def _fallback_cooling_line(*, zone: str, running_units: Dict[str, List[Dict[str, Any]]]) -> str:
+        zone_name = "A区" if zone == "west" else "B区"
+        active_units = list((running_units or {}).get(zone, []))
+        running_count = len(active_units)
+        backup_count = max(0, 3 - running_count)
+        parts = [
+            f"冷冻站{zone_name}3套制冷单元{running_count}用{backup_count}备",
+            "群控模式为开启状态",
+            "备用机组与备用二次泵状态正常可用",
+        ]
+        for item in active_units:
+            unit = int(item.get("unit", 0) or 0)
+            mode_text = _text(item.get("mode_text"))
+            parts.append(f"{unit}#制冷单元{mode_text}模式运行正常" if mode_text else f"{unit}#制冷单元运行正常")
+        return "，".join(parts).rstrip("，") + "；"
+
+    @staticmethod
+    def _running_units_from_capacity_file(capacity_output_file: str) -> Dict[str, List[Dict[str, Any]]]:
+        output: Dict[str, List[Dict[str, Any]]] = {"west": [], "east": []}
+        path = Path(_text(capacity_output_file))
+        if not _text(capacity_output_file) or not path.exists() or not path.is_file():
+            return output
+        workbook = load_workbook_quietly(path, data_only=True)
+        try:
+            ws = workbook.active
+            for zone, cells in {"west": ["D23", "D33"], "east": ["Q23", "Q33"]}.items():
+                for cell_name in cells:
+                    text = _cell(ws, cell_name)
+                    match = re.search(r"(\d+)\s*[#号]?\s*制冷单元\s*[→:：-]?\s*([\u4e00-\u9fff]*)", text)
+                    if not match:
+                        continue
+                    output[zone].append({"unit": int(match.group(1)), "mode_text": _text(match.group(2))})
+        finally:
+            workbook.close()
+        for zone in ("west", "east"):
+            output[zone].sort(key=lambda row: int(row.get("unit", 0) or 0))
+        return output
+
+    def _cooling_content_lines(self, session: Dict[str, Any]) -> List[str]:
+        summary = session.get("capacity_cooling_summary", {}) if isinstance(session, dict) else {}
+        lines_payload = summary.get("lines", {}) if isinstance(summary, dict) else {}
+        west_line = _text(lines_payload.get("west")) if isinstance(lines_payload, dict) else ""
+        east_line = _text(lines_payload.get("east")) if isinstance(lines_payload, dict) else ""
+        if west_line or east_line:
+            return [
+                west_line or self._fallback_cooling_line(zone="west", running_units={"west": [], "east": []}),
+                east_line or self._fallback_cooling_line(zone="east", running_units={"west": [], "east": []}),
+            ]
+        running_units = self._normalize_running_units(session.get("capacity_running_units", {}) if isinstance(session, dict) else {})
+        if not running_units.get("west") and not running_units.get("east"):
+            running_units = self._running_units_from_capacity_file(_text(session.get("capacity_output_file")) if isinstance(session, dict) else "")
+        return [
+            self._fallback_cooling_line(zone="west", running_units=running_units),
+            self._fallback_cooling_line(zone="east", running_units=running_units),
+        ]
+
+    def _build_handover_content_lines(self, *, building: str, output: Dict[str, Any], session: Dict[str, Any] | None = None) -> List[str]:
         powered = _format_number_text(output.get("powered_cabinets"))
         unpowered = _format_number_text(output.get("unpowered_cabinets"))
         cabinet_text = (
@@ -253,10 +331,11 @@ class HandoverSummaryMessageService:
         code_match = re.search(r"([A-Za-z])", building)
         code = code_match.group(1).upper() if code_match else ""
         switchgear = f"{code}-144、{code}-120变电所" if code else "变电所"
+        cooling_lines = self._cooling_content_lines(session if isinstance(session, dict) else {})
         return [
             f"1、{building}机房楼由双路市电带载运行，{switchgear}内10KV中压母联开关为“热备用”状态，投退方式为“自投自复”状态，综保状态正常；",
-            "2、冷冻站A区制冷单元按当前运行方式运行，群控模式为开启状态，备用机组与备用二次泵状态正常可用；",
-            "3、冷冻站B区制冷单元按当前运行方式运行，群控模式为开启状态，备用机组与备用二次泵状态正常可用；",
+            f"2、{cooling_lines[0]}",
+            f"3、{cooling_lines[1]}",
             f"4、{cabinet_text}",
             "5、变更，事件周汇总，当日有I2及以上告警需填写并发送H楼；",
             "6、每晚24点进行超功率机柜统计，每月进行超功率汇总统计；",

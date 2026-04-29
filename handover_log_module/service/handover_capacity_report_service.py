@@ -30,7 +30,7 @@ from handover_log_module.core.normalizers import format_number
 from handover_log_module.repository.excel_reader import load_rows, load_workbook_quietly
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
-from handover_log_module.service.capacity_report_common import build_capacity_template_snapshot
+from handover_log_module.service.capacity_report_common import CapacitySourceQuery, build_capacity_template_snapshot
 from handover_log_module.service.review_session_service import ReviewSessionService
 from pipeline_utils import get_app_dir
 
@@ -71,6 +71,14 @@ _CAPACITY_TOTAL_ELECTRICITY_SOURCE = {
 }
 _TOTAL_ELECTRICITY_CACHE_LOCK = threading.RLock()
 _TOTAL_ELECTRICITY_CACHE: Dict[tuple[str, str, str], tuple[float, Dict[str, Any]]] = {}
+_TOTAL_ELECTRICITY_INFLIGHT: Dict[Any, threading.Event] = {}
+_WATER_SUMMARY_CACHE_LOCK = threading.RLock()
+_WATER_SUMMARY_CACHE: Dict[Any, tuple[float, Dict[str, Any]]] = {}
+_WATER_SUMMARY_INFLIGHT: Dict[Any, threading.Event] = {}
+_WEATHER_CACHE_LOCK = threading.RLock()
+_WEATHER_CACHE: Dict[Any, tuple[float, Dict[str, Any]]] = {}
+_WEATHER_INFLIGHT: Dict[Any, threading.Event] = {}
+_CAPACITY_BATCH_CACHE_TTL_SEC = 30
 _CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13")
 _CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
 _SUBSTATION_110KV_TARGET_ROWS = {
@@ -114,6 +122,10 @@ _WEATHER_PHENOMENON_PRIORITY = (
 _SENIVERSE_DAILY_WEATHER_ENDPOINT = "https://api.seniverse.com/v3/weather/daily.json"
 _SENIVERSE_SIGN_TTL_SEC = 1800
 _SENIVERSE_MAX_DAYS = 15
+_COOLING_TOWER_LEVEL_ALIASES = ["冷却塔液位", "冷塔液位", "冷却塔水位", "冷塔水位"]
+_COOLING_TANK_TEMP_ALIASES = ["蓄冷罐后备温度", "蓄冷罐温度", "蓄冷罐供水温度", "蓄冷罐回水温度"]
+_COOLING_TANK_LEVEL_ALIASES = ["蓄冷罐液位", "蓄冷罐水位", "蓄冷罐后备液位"]
+_COOLING_SECONDARY_PUMP_ALIASES = ["冷冻水二次泵变频反馈", "二次冷冻泵频率反馈", "二次泵频率反馈", "冷冻水二次泵频率反馈"]
 _LEGACY_CAPACITY_TEMPLATE_NAME = "交接班容量报表空模板.xlsx"
 _CAPACITY_TEMPLATE_BY_FAMILY = {
     "other_buildings": "其他楼交接班容量报表空模板.xlsx",
@@ -207,6 +219,56 @@ def _date_only(value: Any) -> str:
         text = _text(value)
         return text[:10] if len(text) >= 10 else text
     return parsed.strftime("%Y-%m-%d")
+
+
+def _read_short_cache(
+    cache: Dict[Any, tuple[float, Dict[str, Any]]],
+    lock: threading.RLock,
+    key: Any,
+    *,
+    ttl_sec: int,
+) -> Dict[str, Any] | None:
+    now = time.monotonic()
+    with lock:
+        cached = cache.get(key)
+        if cached and now - cached[0] <= max(1, int(ttl_sec)):
+            return copy.deepcopy(cached[1])
+    return None
+
+
+def _store_short_cache(
+    cache: Dict[Any, tuple[float, Dict[str, Any]]],
+    lock: threading.RLock,
+    key: Any,
+    payload: Dict[str, Any],
+) -> None:
+    with lock:
+        cache[key] = (time.monotonic(), copy.deepcopy(payload))
+
+
+def _claim_singleflight(
+    inflight: Dict[Any, threading.Event],
+    lock: threading.RLock,
+    key: Any,
+) -> tuple[bool, threading.Event]:
+    with lock:
+        event = inflight.get(key)
+        if event is not None:
+            return False, event
+        event = threading.Event()
+        inflight[key] = event
+        return True, event
+
+
+def _finish_singleflight(
+    inflight: Dict[Any, threading.Event],
+    lock: threading.RLock,
+    key: Any,
+    event: threading.Event,
+) -> None:
+    with lock:
+        inflight.pop(key, None)
+        event.set()
 
 
 def _build_fixed_header_cells(building: Any) -> Dict[str, str]:
@@ -832,8 +894,20 @@ class HandoverCapacityReportService:
         if not duty_date_text:
             return {"text": "", "humidity": ""}
         cache_key = f"legacy_html:{duty_date_text}"
-        if cache_key in self._weather_payload_cache:
-            return dict(self._weather_payload_cache[cache_key])
+        global_key = ("legacy", cache_key)
+        while True:
+            cached = _read_short_cache(
+                _WEATHER_CACHE,
+                _WEATHER_CACHE_LOCK,
+                global_key,
+                ttl_sec=_CAPACITY_BATCH_CACHE_TTL_SEC,
+            )
+            if cached is not None:
+                return {"text": _text(cached.get("text")), "humidity": _text(cached.get("humidity"))}
+            leader, event = _claim_singleflight(_WEATHER_INFLIGHT, _WEATHER_CACHE_LOCK, global_key)
+            if leader:
+                break
+            event.wait()
         try:
             duty_day = parse_duty_date(duty_date_text)
             date_token = duty_day.strftime("%Y%m%d")
@@ -850,21 +924,23 @@ class HandoverCapacityReportService:
                     "[交接班][容量报表][天气] 查询完成 "
                     f"duty_date={duty_date_text}, provider=legacy_html, weather={payload.get('text') or '-'}, humidity={payload.get('humidity') or '-'}"
                 )
-                self._weather_payload_cache[cache_key] = dict(payload)
+                _store_short_cache(_WEATHER_CACHE, _WEATHER_CACHE_LOCK, global_key, payload)
                 return payload
             emit_log(
                 "[交接班][容量报表][天气] 查询失败 "
                 f"duty_date={duty_date_text}, provider=legacy_html, reason=页面未解析到天气现象/湿度"
             )
-            self._weather_payload_cache[cache_key] = {"text": "", "humidity": ""}
+            _store_short_cache(_WEATHER_CACHE, _WEATHER_CACHE_LOCK, global_key, {"text": "", "humidity": ""})
             return {"text": "", "humidity": ""}
         except (ValueError, OSError, TimeoutError, URLError) as exc:
             emit_log(
                 "[交接班][容量报表][天气] 查询失败 "
                 f"duty_date={duty_date_text}, provider=legacy_html, error={exc}"
             )
-            self._weather_payload_cache[cache_key] = {"text": "", "humidity": ""}
+            _store_short_cache(_WEATHER_CACHE, _WEATHER_CACHE_LOCK, global_key, {"text": "", "humidity": ""})
             return {"text": "", "humidity": ""}
+        finally:
+            _finish_singleflight(_WEATHER_INFLIGHT, _WEATHER_CACHE_LOCK, global_key, event)
 
     @staticmethod
     def _format_seniverse_humidity(value: Any) -> str:
@@ -950,8 +1026,28 @@ class HandoverCapacityReportService:
             return {"text": "", "humidity": ""}
         candidate_locations = self._seniverse_candidate_locations()
         cache_key = f"seniverse:{duty_date_text}:{'|'.join(candidate_locations)}"
-        if cache_key in self._weather_payload_cache:
-            return dict(self._weather_payload_cache[cache_key])
+        weather_cfg = self._weather_cfg()
+        global_key = (
+            "seniverse",
+            cache_key,
+            _text(weather_cfg.get("seniverse_public_key")),
+            _text(weather_cfg.get("language")) or "zh-Hans",
+            _text(weather_cfg.get("unit")) or "c",
+            str(id(urlopen)),
+        )
+        while True:
+            cached = _read_short_cache(
+                _WEATHER_CACHE,
+                _WEATHER_CACHE_LOCK,
+                global_key,
+                ttl_sec=_CAPACITY_BATCH_CACHE_TTL_SEC,
+            )
+            if cached is not None:
+                return {"text": _text(cached.get("text")), "humidity": _text(cached.get("humidity"))}
+            leader, event = _claim_singleflight(_WEATHER_INFLIGHT, _WEATHER_CACHE_LOCK, global_key)
+            if leader:
+                break
+            event.wait()
         try:
             duty_day = parse_duty_date(duty_date_text)
             today = self._today_local_date()
@@ -961,9 +1057,8 @@ class HandoverCapacityReportService:
                     "[交接班][容量报表][天气] 查询失败 "
                     f"duty_date={duty_date_text}, provider=seniverse, reason=历史日期无可用天气数据"
                 )
-                self._weather_payload_cache[cache_key] = {"text": "", "humidity": ""}
+                _store_short_cache(_WEATHER_CACHE, _WEATHER_CACHE_LOCK, global_key, {"text": "", "humidity": ""})
                 return {"text": "", "humidity": ""}
-            weather_cfg = self._weather_cfg()
             timeout_sec = int(weather_cfg.get("timeout_sec") or 8)
             primary_location = _text(weather_cfg.get("location")) or "崇川区"
             attempted_errors: List[str] = []
@@ -1007,7 +1102,7 @@ class HandoverCapacityReportService:
                             f"duty_date={duty_date_text}, provider=seniverse, location={primary_location}, "
                             f"request_location={request_location}, weather={payload.get('text') or '-'}, humidity={payload.get('humidity') or '-'}"
                         )
-                        self._weather_payload_cache[cache_key] = dict(payload)
+                        _store_short_cache(_WEATHER_CACHE, _WEATHER_CACHE_LOCK, global_key, payload)
                         return payload
                     attempted_errors.append(f"{request_location}: 未解析到天气现象/湿度")
                 except HTTPError as exc:
@@ -1022,15 +1117,17 @@ class HandoverCapacityReportService:
                 f"duty_date={duty_date_text}, provider=seniverse, attempted_locations={candidate_locations}, "
                 f"error={' | '.join(attempted_errors) if attempted_errors else '未知错误'}"
             )
-            self._weather_payload_cache[cache_key] = {"text": "", "humidity": ""}
+            _store_short_cache(_WEATHER_CACHE, _WEATHER_CACHE_LOCK, global_key, {"text": "", "humidity": ""})
             return {"text": "", "humidity": ""}
         except (ValueError, OSError, TimeoutError, URLError, json.JSONDecodeError) as exc:
             emit_log(
                 "[交接班][容量报表][天气] 查询失败 "
                 f"duty_date={duty_date_text}, provider=seniverse, error={exc}"
             )
-            self._weather_payload_cache[cache_key] = {"text": "", "humidity": ""}
+            _store_short_cache(_WEATHER_CACHE, _WEATHER_CACHE_LOCK, global_key, {"text": "", "humidity": ""})
             return {"text": "", "humidity": ""}
+        finally:
+            _finish_singleflight(_WEATHER_INFLIGHT, _WEATHER_CACHE_LOCK, global_key, event)
 
     def _fetch_weather_payload_for_duty_date(
         self,
@@ -1088,6 +1185,17 @@ class HandoverCapacityReportService:
         )
 
     @staticmethod
+    def _build_capacity_water_filter_formula(*, start_date: str, end_date: str) -> str:
+        fields_cfg = _CAPACITY_WATER_SOURCE.get("fields", {})
+        if not isinstance(fields_cfg, dict):
+            fields_cfg = {}
+        date_field = str(fields_cfg.get("date", "执行日期") or "执行日期").strip()
+        return (
+            f'AND(CurrentValue.[{date_field}]>=TODATE({_formula_literal(start_date)}), '
+            f'CurrentValue.[{date_field}]<TODATE({_formula_literal(end_date)}))'
+        )
+
+    @staticmethod
     def _matches_building(record_building: Any, target_building: str) -> bool:
         record_text = _field_text(record_building)
         target_text = _text(target_building)
@@ -1100,20 +1208,16 @@ class HandoverCapacityReportService:
             and _extract_building_code(record_text) == _extract_building_code(target_text)
         )
 
-    def _query_capacity_water_summary(
+    def _query_capacity_water_batch(
         self,
         *,
-        building: str,
         duty_date: str,
         emit_log: Callable[[str], None],
-    ) -> Dict[str, str]:
-        building_text = _text(building)
+    ) -> Dict[str, Any]:
         duty_date_text = _text(duty_date)
-        cache_key = (building_text, duty_date_text)
-        if cache_key in self._water_summary_cache:
-            return dict(self._water_summary_cache[cache_key])
-
         month_start_dt, month_end_dt = self._month_window_for_duty_date(duty_date_text)
+        start_text = month_start_dt.strftime("%Y-%m-%d")
+        end_text = month_end_dt.strftime("%Y-%m-%d")
 
         fields_cfg = _CAPACITY_WATER_SOURCE.get("fields", {})
         if not isinstance(fields_cfg, dict):
@@ -1122,6 +1226,40 @@ class HandoverCapacityReportService:
         building_field = str(fields_cfg.get("building", "") or "").strip()
         water_total_field = str(fields_cfg.get("water_total", "") or "").strip()
         table_id = str(_CAPACITY_WATER_SOURCE.get("table_id", "") or "").strip()
+        app_token = str(_CAPACITY_WATER_SOURCE.get("app_token", "") or "").strip()
+        cache_key = (app_token, table_id, date_field, building_field, water_total_field, start_text, end_text)
+        ttl_sec = max(1, int(_CAPACITY_WATER_SOURCE.get("cache_ttl_sec", _CAPACITY_BATCH_CACHE_TTL_SEC) or _CAPACITY_BATCH_CACHE_TTL_SEC))
+        while True:
+            cached = _read_short_cache(
+                _WATER_SUMMARY_CACHE,
+                _WATER_SUMMARY_CACHE_LOCK,
+                cache_key,
+                ttl_sec=ttl_sec,
+            )
+            if cached is not None:
+                emit_log(
+                    "[交接班][容量报表][耗水摘要] 命中短缓存 "
+                    f"window={start_text}~{end_text}, raw={cached.get('raw_count', 0)}, matched={cached.get('matched_count', 0)}"
+                )
+                return cached
+            leader, event = _claim_singleflight(_WATER_SUMMARY_INFLIGHT, _WATER_SUMMARY_CACHE_LOCK, cache_key)
+            if leader:
+                break
+            event.wait()
+
+        result: Dict[str, Any] = {
+            "start_date": start_text,
+            "end_date": end_text,
+            "by_building": {},
+            "raw_count": 0,
+            "matched_count": 0,
+        }
+        for building_name in _BUILDER_BY_BUILDING:
+            result["by_building"][building_name] = {
+                "month_total": "",
+                "latest_daily_total": "",
+                "matched_records": 0,
+            }
 
         try:
             client = self._new_capacity_water_client()
@@ -1131,23 +1269,27 @@ class HandoverCapacityReportService:
                 target_fields=[building_field],
                 emit_log=emit_log,
             )
+            filter_formula = self._build_capacity_water_filter_formula(start_date=start_text, end_date=end_text)
             records = client.list_records(
                 table_id=table_id,
                 page_size=max(1, int(_CAPACITY_WATER_SOURCE.get("page_size", 500) or 500)),
                 max_records=max(1, int(_CAPACITY_WATER_SOURCE.get("max_records", 20000) or 20000)),
+                filter_formula=filter_formula,
             )
         except Exception as exc:  # noqa: BLE001
             emit_log(
                 "[交接班][容量报表][耗水摘要] 查询失败 "
-                f"building={building_text}, duty_date={duty_date_text}, error={exc}"
+                f"window={start_text}~{end_text}, duty_date={duty_date_text}, error={exc}"
             )
-            return {}
+            _store_short_cache(_WATER_SUMMARY_CACHE, _WATER_SUMMARY_CACHE_LOCK, cache_key, result)
+            _finish_singleflight(_WATER_SUMMARY_INFLIGHT, _WATER_SUMMARY_CACHE_LOCK, cache_key, event)
+            return result
 
-        month_total = 0.0
-        latest_daily_total: float | None = None
-        latest_record_dt: datetime | None = None
-        matched_records = 0
+        result["raw_count"] = len(records)
         building_option_map = option_maps.get(building_field, {})
+        month_totals: Dict[str, float] = {building_name: 0.0 for building_name in _BUILDER_BY_BUILDING}
+        latest_values: Dict[str, float | None] = {building_name: None for building_name in _BUILDER_BY_BUILDING}
+        latest_record_dates: Dict[str, datetime | None] = {building_name: None for building_name in _BUILDER_BY_BUILDING}
         for item in records:
             if not isinstance(item, dict):
                 continue
@@ -1158,28 +1300,56 @@ class HandoverCapacityReportService:
             if record_dt is None or record_dt < month_start_dt or record_dt >= month_end_dt:
                 continue
             record_building = _field_text_with_option_map(fields.get(building_field), building_option_map)
-            if not self._matches_building(record_building, building_text):
+            matched_building = ""
+            for building_name in _BUILDER_BY_BUILDING:
+                if self._matches_building(record_building, building_name):
+                    matched_building = building_name
+                    break
+            if not matched_building:
                 continue
             water_total = _to_float(fields.get(water_total_field))
             if water_total is None:
                 continue
-            matched_records += 1
-            month_total += water_total
+            bucket = result["by_building"][matched_building]
+            bucket["matched_records"] = int(bucket.get("matched_records", 0) or 0) + 1
+            result["matched_count"] = int(result.get("matched_count", 0) or 0) + 1
+            month_totals[matched_building] += water_total
+            latest_record_dt = latest_record_dates.get(matched_building)
             if latest_record_dt is None or record_dt >= latest_record_dt:
-                latest_record_dt = record_dt
-                latest_daily_total = water_total
+                latest_record_dates[matched_building] = record_dt
+                latest_values[matched_building] = water_total
 
-        summary = {
-            "month_total": format_number(month_total),
-            "latest_daily_total": format_number(latest_daily_total),
-        }
-        self._water_summary_cache[cache_key] = dict(summary)
+        for building_name, bucket in result["by_building"].items():
+            bucket["month_total"] = format_number(month_totals.get(building_name, 0.0))
+            bucket["latest_daily_total"] = format_number(latest_values.get(building_name))
+            emit_log(
+                "[交接班][容量报表][耗水摘要] 楼栋结果 "
+                f"building={building_name}, O57={bucket.get('latest_daily_total', '') or '-'}, "
+                f"AC25={bucket.get('month_total', '') or '-'}, matched={bucket.get('matched_records', 0)}"
+            )
         emit_log(
             "[交接班][容量报表][耗水摘要] 查询完成 "
-            f"building={building_text}, window={month_start_dt.strftime('%Y-%m-%d')}~{month_end_dt.strftime('%Y-%m-%d')}, "
-            f"matched={matched_records}, O57={summary.get('latest_daily_total', '') or '-'}, AC25={summary.get('month_total', '') or '-'}"
+            f"window={start_text}~{end_text}, raw={result.get('raw_count', 0)}, matched={result.get('matched_count', 0)}"
         )
-        return summary
+        _store_short_cache(_WATER_SUMMARY_CACHE, _WATER_SUMMARY_CACHE_LOCK, cache_key, result)
+        _finish_singleflight(_WATER_SUMMARY_INFLIGHT, _WATER_SUMMARY_CACHE_LOCK, cache_key, event)
+        return result
+
+    def _query_capacity_water_summary(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, str]:
+        building_text = _text(building)
+        batch = self._query_capacity_water_batch(duty_date=duty_date, emit_log=emit_log)
+        by_building = batch.get("by_building", {}) if isinstance(batch.get("by_building", {}), dict) else {}
+        summary = by_building.get(building_text, {}) if isinstance(by_building.get(building_text, {}), dict) else {}
+        return {
+            "month_total": _text(summary.get("month_total")),
+            "latest_daily_total": _text(summary.get("latest_daily_total")),
+        }
 
     def _new_total_electricity_client(self) -> FeishuBitableClient:
         global_feishu = require_feishu_auth_settings(self.config)
@@ -1246,16 +1416,23 @@ class HandoverCapacityReportService:
         prev_day_text = prev_day_dt.strftime("%Y-%m-%d")
         cache_key = (start_text, end_text, prev_day_text)
         ttl_sec = max(1, int(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("cache_ttl_sec", 30) or 30))
-        now = time.monotonic()
-        with _TOTAL_ELECTRICITY_CACHE_LOCK:
-            cached = _TOTAL_ELECTRICITY_CACHE.get(cache_key)
-            if cached and now - cached[0] <= ttl_sec:
-                payload = copy.deepcopy(cached[1])
+        while True:
+            cached = _read_short_cache(
+                _TOTAL_ELECTRICITY_CACHE,
+                _TOTAL_ELECTRICITY_CACHE_LOCK,
+                cache_key,
+                ttl_sec=ttl_sec,
+            )
+            if cached is not None:
                 emit_log(
                     "[交接班][容量报表][总用电量] 命中短缓存 "
-                    f"window={start_text}~{end_text}, prev_day={prev_day_text}, raw={payload.get('raw_count', 0)}, matched={payload.get('matched_count', 0)}"
+                    f"window={start_text}~{end_text}, prev_day={prev_day_text}, raw={cached.get('raw_count', 0)}, matched={cached.get('matched_count', 0)}"
                 )
-                return payload
+                return cached
+            leader, event = _claim_singleflight(_TOTAL_ELECTRICITY_INFLIGHT, _TOTAL_ELECTRICITY_CACHE_LOCK, cache_key)
+            if leader:
+                break
+            event.wait()
 
         fields_cfg = _CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("fields", {})
         if not isinstance(fields_cfg, dict):
@@ -1310,8 +1487,8 @@ class HandoverCapacityReportService:
                 "[交接班][容量报表][总用电量] 查询失败 "
                 f"window={start_text}~{end_text}, prev_day={prev_day_text}, error={exc}"
             )
-            with _TOTAL_ELECTRICITY_CACHE_LOCK:
-                _TOTAL_ELECTRICITY_CACHE[cache_key] = (now, copy.deepcopy(result))
+            _store_short_cache(_TOTAL_ELECTRICITY_CACHE, _TOTAL_ELECTRICITY_CACHE_LOCK, cache_key, result)
+            _finish_singleflight(_TOTAL_ELECTRICITY_INFLIGHT, _TOTAL_ELECTRICITY_CACHE_LOCK, cache_key, event)
             return result
 
         result["raw_count"] = len(records)
@@ -1374,8 +1551,8 @@ class HandoverCapacityReportService:
             "[交接班][容量报表][总用电量] 查询完成 "
             f"window={start_text}~{end_text}, prev_day={prev_day_text}, raw={result.get('raw_count', 0)}, matched={result.get('matched_count', 0)}"
         )
-        with _TOTAL_ELECTRICITY_CACHE_LOCK:
-            _TOTAL_ELECTRICITY_CACHE[cache_key] = (now, copy.deepcopy(result))
+        _store_short_cache(_TOTAL_ELECTRICITY_CACHE, _TOTAL_ELECTRICITY_CACHE_LOCK, cache_key, result)
+        _finish_singleflight(_TOTAL_ELECTRICITY_INFLIGHT, _TOTAL_ELECTRICITY_CACHE_LOCK, cache_key, event)
         return result
 
     def query_total_electricity_summary(
@@ -1432,13 +1609,9 @@ class HandoverCapacityReportService:
             duty_date=duty_date,
             emit_log=emit_log,
         )
-        weather_text = self._fetch_weather_text_for_duty_date(
-            duty_date=duty_date,
-            emit_log=emit_log,
-        )
-        weather_humidity = _text(
-            self._fetch_weather_payload_for_duty_date(duty_date=duty_date, emit_log=emit_log).get("humidity")
-        )
+        weather_payload = self._fetch_weather_payload_for_duty_date(duty_date=duty_date, emit_log=emit_log)
+        weather_text = _text(weather_payload.get("text"))
+        weather_humidity = _text(weather_payload.get("humidity"))
         west_tank, east_tank = self._derive_tank_pair_from_f8(handover.get("F8"))
         overlay = {
             "AC24": _text(handover.get("D8")),
@@ -1657,6 +1830,133 @@ class HandoverCapacityReportService:
                     }
                 )
         return {"rows": rows}
+
+    @staticmethod
+    def _format_with_unit(value: Any, unit: str) -> str:
+        text = _text(value)
+        if not text:
+            return ""
+        return text if unit and unit in text else f"{text}{unit}"
+
+    @staticmethod
+    def _extract_equipment_numbers(row: Any) -> List[int]:
+        text = " ".join(
+            _text(getattr(row, attr, ""))
+            for attr in ("d_name", "c_text", "b_text")
+        )
+        numbers: List[int] = []
+        for match in re.finditer(r"(?<!\d)([1-9])\s*[#号]", text):
+            number = int(match.group(1))
+            if number not in numbers:
+                numbers.append(number)
+        return sorted(numbers)
+
+    def _secondary_pump_running_text(self, query: CapacitySourceQuery, *, zone: str) -> str:
+        rows = query.rows_by_d_regexes(
+            [re.escape(alias) for alias in _COOLING_SECONDARY_PUMP_ALIASES],
+            zone=zone,
+            allow_global=True,
+        )
+        running_rows = [
+            row for row in rows
+            if getattr(row, "value", None) is not None and float(getattr(row, "value", 0) or 0) > 10
+        ]
+        if not running_rows:
+            return ""
+        numbers: List[int] = []
+        for row in running_rows:
+            for number in self._extract_equipment_numbers(row):
+                if number not in numbers:
+                    numbers.append(number)
+        if numbers:
+            return f"{''.join(f'{number}#' for number in sorted(numbers))}二次泵运行正常"
+        return f"{len(running_rows)}台二次泵运行正常"
+
+    def _cooling_zone_sentence(
+        self,
+        *,
+        zone: str,
+        running_units: Dict[str, List[Dict[str, Any]]],
+        query: CapacitySourceQuery,
+    ) -> tuple[str, List[str]]:
+        zone_name = "A区" if zone == "west" else "B区"
+        active_units = list((running_units or {}).get(zone, []))
+        running_count = len(active_units)
+        backup_count = max(0, 3 - running_count)
+        warnings: List[str] = []
+        if running_count <= 0:
+            warnings.append(f"冷冻站{zone_name}未识别到运行制冷单元")
+        parts: List[str] = [
+            f"冷冻站{zone_name}3套制冷单元{running_count}用{backup_count}备",
+            "群控模式为开启状态",
+            "备用机组与备用二次泵状态正常可用",
+        ]
+        for unit_info in active_units:
+            try:
+                unit = int(unit_info.get("unit", 0) or 0)
+            except Exception:  # noqa: BLE001
+                unit = 0
+            if unit <= 0:
+                continue
+            mode_text = _text(unit_info.get("mode_text"))
+            if mode_text:
+                parts.append(f"{unit}#制冷单元{mode_text}模式运行正常")
+            else:
+                parts.append(f"{unit}#制冷单元运行正常")
+            tower_level = query.first_text_by_d_aliases(
+                _COOLING_TOWER_LEVEL_ALIASES,
+                zone=zone,
+                unit=unit,
+                allow_global=False,
+            )
+            if tower_level:
+                parts.append(f"{unit}#冷却塔液位{self._format_with_unit(tower_level, 'm')}正常")
+            else:
+                warnings.append(f"冷冻站{zone_name}{unit}#冷却塔液位未识别")
+
+        secondary_text = self._secondary_pump_running_text(query, zone=zone)
+        if secondary_text:
+            parts.append(secondary_text)
+        else:
+            warnings.append(f"冷冻站{zone_name}二次泵运行信息未识别")
+
+        tank_temp = query.first_text_by_d_aliases(_COOLING_TANK_TEMP_ALIASES, zone=zone, allow_global=True)
+        tank_level = query.first_text_by_d_aliases(_COOLING_TANK_LEVEL_ALIASES, zone=zone, allow_global=True)
+        tank_parts: List[str] = []
+        if tank_temp:
+            tank_parts.append(f"后备温度{self._format_with_unit(tank_temp, '℃')}正常")
+        else:
+            warnings.append(f"冷冻站{zone_name}蓄冷罐后备温度未识别")
+        if tank_level:
+            tank_parts.append(f"液位{self._format_with_unit(tank_level, 'm')}正常")
+        else:
+            warnings.append(f"冷冻站{zone_name}蓄冷罐液位未识别")
+        if tank_parts:
+            parts.append(f"蓄冷罐{'、'.join(tank_parts)}")
+        return "，".join(parts).rstrip("，") + "；", warnings
+
+    def build_capacity_cooling_summary(
+        self,
+        *,
+        capacity_rows: List[Any],
+        running_units: Dict[str, List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        query = CapacitySourceQuery(capacity_rows if isinstance(capacity_rows, list) else [])
+        lines: Dict[str, str] = {}
+        warnings: List[str] = []
+        for zone in ("west", "east"):
+            line, zone_warnings = self._cooling_zone_sentence(
+                zone=zone,
+                running_units=running_units,
+                query=query,
+            )
+            lines[zone] = line
+            warnings.extend(zone_warnings)
+        return {
+            "version": "capacity-cooling-summary-v1",
+            "lines": lines,
+            "warnings": warnings,
+        }
 
     def _validate_capacity_overlay_inputs(self, handover_cells: Dict[str, Any]) -> tuple[bool, str]:
         handover = handover_cells if isinstance(handover_cells, dict) else {}
@@ -1889,6 +2189,10 @@ class HandoverCapacityReportService:
             template_snapshot = build_capacity_template_snapshot(sheet, building_text)
             template_snapshot["template_family"] = _text(template_selection.get("template_family"))
             running_units = self._resolve_running_units(resolved_values_by_id)
+            capacity_cooling_summary = self.build_capacity_cooling_summary(
+                capacity_rows=capacity_rows,
+                running_units=running_units,
+            )
             shared_110kv = self._shared_substation_110kv_for_batch(
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
@@ -1962,6 +2266,7 @@ class HandoverCapacityReportService:
             "error": "",
             "capacity_sync": capacity_sync,
             "running_units": running_units,
+            "capacity_cooling_summary": capacity_cooling_summary,
         }
 
 

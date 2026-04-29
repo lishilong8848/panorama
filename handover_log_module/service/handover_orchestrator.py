@@ -935,6 +935,7 @@ class HandoverOrchestrator:
             capacity_warnings: List[str] = []
             capacity_sync: Dict[str, Any] = {}
             capacity_running_units: Dict[str, Any] = {}
+            capacity_cooling_summary: Dict[str, Any] = {}
             capacity_source_file_text = str(capacity_source_file or "").strip()
             if duty_date_text and duty_shift_text and result.output_file:
                 if capacity_source_file_text:
@@ -983,6 +984,11 @@ class HandoverOrchestrator:
                         capacity_running_units = (
                             dict(capacity_result.get("running_units", {}))
                             if isinstance(capacity_result.get("running_units", {}), dict)
+                            else {}
+                        )
+                        capacity_cooling_summary = (
+                            dict(capacity_result.get("capacity_cooling_summary", {}))
+                            if isinstance(capacity_result.get("capacity_cooling_summary", {}), dict)
                             else {}
                         )
                         capacity_sync = (
@@ -1042,6 +1048,7 @@ class HandoverOrchestrator:
                         capacity_warnings=result.capacity_warnings,
                         capacity_sync=capacity_sync,
                         capacity_running_units=capacity_running_units,
+                        capacity_cooling_summary=capacity_cooling_summary,
                     )
                     result.review_session = review_session
                     result.batch_key = str(review_session.get("batch_key", "")).strip()

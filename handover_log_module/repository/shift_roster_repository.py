@@ -306,6 +306,10 @@ class ShiftRosterRepository:
             long_day_fields_cfg.get("people_text", self.PREFERRED_PEOPLE_TEXT_FIELD)
         )
         long_day_cfg["fields"] = long_day_fields_cfg
+        rest_text = str(long_day_cfg.get("rest_text", "/") or "/").strip() or "/"
+        if rest_text == "休息":
+            rest_text = "/"
+        long_day_cfg["rest_text"] = rest_text
         cfg["long_day"] = long_day_cfg
         return cfg
 
@@ -887,9 +891,10 @@ class ShiftRosterRepository:
             if target_cell in result:
                 result[target_cell] = f"{prefix}{row_people or rest_text}"
             grouped[building] = result
+            result_label = "命中" if row_people else f"未命中, fallback={rest_text}"
             emit_log(
                 f"[交接班][长白岗查询] building={building}, duty={duty_date}/{normalized_shift}, "
-                f"query_date={target_date_text}, result={'命中' if row_people else '休息'}"
+                f"query_date={target_date_text}, result={result_label}"
             )
 
         emit_log(f"[交接班][长白岗查询] 批量预取完成: buildings={len(grouped)}, records={len(records)}")

@@ -50,3 +50,19 @@ def test_query_long_day_cell_values_grouped_loads_records_once(monkeypatch) -> N
     assert captured["kwargs"]["stage"] == "长白岗查询"
     assert grouped["A楼"]["B4"] == "长白岗：张三"
     assert grouped["B楼"]["B4"] == "长白岗：李四"
+
+
+def test_query_long_day_cell_values_uses_slash_when_old_config_rest_text_is_rest(monkeypatch) -> None:
+    repo = ShiftRosterRepository({"shift_roster": {"long_day": {"rest_text": "休息"}}})
+    monkeypatch.setattr(repo, "_load_records_from_source", lambda **_kwargs: [])
+    logs = []
+
+    grouped = repo.query_long_day_cell_values_grouped(
+        buildings=["A楼"],
+        duty_date="2026-03-14",
+        duty_shift="day",
+        emit_log=logs.append,
+    )
+
+    assert grouped["A楼"]["B4"] == "长白岗：/"
+    assert any("fallback=/" in line for line in logs)

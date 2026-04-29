@@ -824,6 +824,11 @@ class ReviewSessionService:
                 if str(item or "").strip()
             ],
             "capacity_running_units": self._normalize_capacity_running_units(raw.get("capacity_running_units", {})),
+            "capacity_cooling_summary": (
+                dict(raw.get("capacity_cooling_summary", {}))
+                if isinstance(raw.get("capacity_cooling_summary", {}), dict)
+                else {}
+            ),
             "capacity_sync": capacity_sync,
             "data_file": str(raw.get("data_file", "")).strip(),
             "source_mode": str(raw.get("source_mode", "")).strip(),
@@ -1920,6 +1925,7 @@ class ReviewSessionService:
         capacity_warnings: List[str] | None = None,
         capacity_sync: Dict[str, Any] | None = None,
         capacity_running_units: Dict[str, Any] | None = None,
+        capacity_cooling_summary: Dict[str, Any] | None = None,
         source_mode: str,
         source_file_cache: Dict[str, Any] | None = None,
         source_data_attachment_export: Dict[str, Any] | None = None,
@@ -1966,6 +1972,11 @@ class ReviewSessionService:
                 if str(item or "").strip()
             ],
             "capacity_running_units": self._normalize_capacity_running_units(capacity_running_units),
+            "capacity_cooling_summary": (
+                dict(capacity_cooling_summary)
+                if isinstance(capacity_cooling_summary, dict)
+                else {}
+            ),
             "capacity_sync": self._normalize_capacity_sync(
                 capacity_sync,
                 fallback=self._derive_capacity_sync_from_legacy_fields(

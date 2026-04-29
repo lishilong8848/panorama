@@ -13,6 +13,7 @@ from handover_log_module.service.capacity_report_common import (
     build_capacity_cells_with_config,
     build_capacity_template_snapshot,
 )
+from handover_log_module.service import handover_capacity_report_service as capacity_module
 from handover_log_module.service.handover_capacity_report_service import (
     HandoverCapacityReportService,
     _build_fixed_header_cells,
@@ -77,6 +78,7 @@ def test_build_capacity_cells_include_direct_source_values_and_zone_capacity_for
 
 def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
     service = HandoverCapacityReportService({})
+    weather_calls = {"count": 0}
     monkeypatch.setattr(
         service,
         "_query_capacity_water_summary",
@@ -84,8 +86,18 @@ def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         service,
+        "query_total_electricity_summary",
+        lambda **kwargs: {"V57": "7", "Y57": "8"},
+    )
+
+    def _fake_weather(**kwargs):
+        weather_calls["count"] += 1
+        return {"text": "多云", "humidity": "96%"}
+
+    monkeypatch.setattr(
+        service,
         "_fetch_weather_payload_for_duty_date",
-        lambda **kwargs: {"text": "多云", "humidity": "96%"},
+        _fake_weather,
     )
 
     values = service._build_capacity_overlay_values(
@@ -106,7 +118,79 @@ def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
 
     assert values["AC24"] == "9.8"
     assert values["X2"] == "96%"
+    assert values["V57"] == "7"
+    assert values["Y57"] == "8"
+    assert weather_calls["count"] == 1
     assert "D8" in service.tracked_cells()
+
+
+def test_capacity_water_summary_queries_once_for_batch(monkeypatch) -> None:
+    with capacity_module._WATER_SUMMARY_CACHE_LOCK:
+        capacity_module._WATER_SUMMARY_CACHE.clear()
+        capacity_module._WATER_SUMMARY_INFLIGHT.clear()
+
+    service = HandoverCapacityReportService({})
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def list_fields(self, **_kwargs):
+            return []
+
+        def list_records(self, **kwargs):
+            self.calls += 1
+            assert "filter_formula" in kwargs
+            return [
+                {"fields": {"执行日期": "2026-04-28", "楼栋": "A楼", "当日耗水总量（修正）": 10}},
+                {"fields": {"执行日期": "2026-04-29", "楼栋": "A楼", "当日耗水总量（修正）": 12}},
+                {"fields": {"执行日期": "2026-04-29", "楼栋": "B", "当日耗水总量（修正）": 5}},
+            ]
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(service, "_new_capacity_water_client", lambda: fake_client)
+
+    a_summary = service._query_capacity_water_summary(
+        building="A楼",
+        duty_date="2026-04-29",
+        emit_log=lambda _msg: None,
+    )
+    b_summary = service._query_capacity_water_summary(
+        building="B楼",
+        duty_date="2026-04-29",
+        emit_log=lambda _msg: None,
+    )
+
+    assert fake_client.calls == 1
+    assert a_summary == {"month_total": "22", "latest_daily_total": "12"}
+    assert b_summary == {"month_total": "5", "latest_daily_total": "5"}
+
+
+def test_build_capacity_cooling_summary_uses_running_units_and_source_rows() -> None:
+    service = HandoverCapacityReportService({})
+    rows = [
+        RawRow(1, "", "西区 102 2号冷机", "冷却塔液位", "0.43", 0.43),
+        RawRow(2, "", "西区 103 3号冷机", "冷却塔液位", "0.4", 0.4),
+        RawRow(3, "", "西区", "1#二次泵频率反馈", "35", 35.0),
+        RawRow(4, "", "西区", "2#二次泵频率反馈", "36", 36.0),
+        RawRow(5, "", "西区", "蓄冷罐后备温度", "16.9", 16.9),
+        RawRow(6, "", "西区", "蓄冷罐液位", "27.32", 27.32),
+    ]
+
+    summary = service.build_capacity_cooling_summary(
+        capacity_rows=rows,
+        running_units={
+            "west": [{"unit": 2, "mode_text": "板换"}, {"unit": 3, "mode_text": "板换"}],
+            "east": [],
+        },
+    )
+
+    west_line = summary["lines"]["west"]
+    assert "冷冻站A区3套制冷单元2用1备" in west_line
+    assert "2#制冷单元板换模式运行正常" in west_line
+    assert "2#冷却塔液位0.43m正常" in west_line
+    assert "1#2#二次泵运行正常" in west_line
+    assert "蓄冷罐后备温度16.9℃正常、液位27.32m正常" in west_line
 
 
 def test_weather_payload_uses_seniverse_for_today_and_caches(monkeypatch) -> None:
