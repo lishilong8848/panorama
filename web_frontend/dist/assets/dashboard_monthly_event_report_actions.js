@@ -68,11 +68,11 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   } = ctx;
   function triggerDashboardRefresh(reason = "monthly_report_action") {
     if (typeof scheduleExternalDashboardRefresh === "function") {
-      scheduleExternalDashboardRefresh(reason);
+      scheduleExternalDashboardRefresh(reason, { force: true, delayMs: 0 });
       return;
     }
     if (typeof fetchExternalDashboardSummary === "function") {
-      void fetchExternalDashboardSummary({ silentMessage: true });
+      void fetchExternalDashboardSummary({ silentMessage: true, force: true });
     }
   }
 
@@ -358,6 +358,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     if (!config.value) return;
     const monthly = config.value.handover_log?.monthly_event_report || {};
     const scheduler = monthly.scheduler || {};
+    const previousScheduler = { ...scheduler };
     const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
     const runTime = normalizeRunTimeText(
       Object.prototype.hasOwnProperty.call(overrideValues, "run_time")
@@ -367,16 +368,23 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     const payload = {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
-      day_of_month: Number.parseInt(String(scheduler.day_of_month ?? 1), 10) || 1,
+      day_of_month: Number.parseInt(String(
+        Object.prototype.hasOwnProperty.call(overrideValues, "day_of_month")
+          ? overrideValues.day_of_month
+          : scheduler.day_of_month ?? 1,
+      ), 10) || 1,
       run_time: runTime,
-      check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
+      check_interval_sec: Number.parseInt(String(
+        Object.prototype.hasOwnProperty.call(overrideValues, "check_interval_sec")
+          ? overrideValues.check_interval_sec
+          : scheduler.check_interval_sec ?? 30,
+      ), 10) || 30,
       state_file: String(scheduler.state_file || "").trim(),
     };
     if (!payload.run_time) {
       message.value = "月度事件统计表调度时间格式错误，必须是 HH:MM 或 HH:MM:SS。";
       return;
     }
-    scheduler.run_time = runTime;
     if (!payload.state_file) {
       message.value = "月度事件统计表调度状态文件名不能为空。";
       return;
@@ -398,9 +406,13 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           if (config.value?.handover_log?.monthly_event_report?.scheduler && data?.scheduler_config) {
             Object.assign(config.value.handover_log.monthly_event_report.scheduler, data.scheduler_config);
           }
+          applySchedulerSnapshot(health?.monthly_event_report?.scheduler, data?.scheduler_status || data);
           triggerDashboardRefresh("monthly_event_scheduler_save");
           message.value = data?.message || "月度事件统计表调度配置已更新";
         } catch (err) {
+          if (config.value?.handover_log?.monthly_event_report?.scheduler) {
+            Object.assign(config.value.handover_log.monthly_event_report.scheduler, previousScheduler);
+          }
           message.value = formatError(err, "月度事件统计表调度自动更新");
         } finally {
           monthlyEventReportSchedulerQuickSaving.value = false;
@@ -468,6 +480,7 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     if (!config.value) return;
     const monthly = config.value.handover_log?.monthly_change_report || {};
     const scheduler = monthly.scheduler || {};
+    const previousScheduler = { ...scheduler };
     const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
     const runTime = normalizeRunTimeText(
       Object.prototype.hasOwnProperty.call(overrideValues, "run_time")
@@ -477,16 +490,23 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     const payload = {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
-      day_of_month: Number.parseInt(String(scheduler.day_of_month ?? 1), 10) || 1,
+      day_of_month: Number.parseInt(String(
+        Object.prototype.hasOwnProperty.call(overrideValues, "day_of_month")
+          ? overrideValues.day_of_month
+          : scheduler.day_of_month ?? 1,
+      ), 10) || 1,
       run_time: runTime,
-      check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
+      check_interval_sec: Number.parseInt(String(
+        Object.prototype.hasOwnProperty.call(overrideValues, "check_interval_sec")
+          ? overrideValues.check_interval_sec
+          : scheduler.check_interval_sec ?? 30,
+      ), 10) || 30,
       state_file: String(scheduler.state_file || "").trim(),
     };
     if (!payload.run_time) {
       message.value = "月度变更统计表调度时间格式错误，必须是 HH:MM 或 HH:MM:SS。";
       return;
     }
-    scheduler.run_time = runTime;
     if (!payload.state_file) {
       message.value = "月度变更统计表调度状态文件名不能为空。";
       return;
@@ -508,9 +528,13 @@ export function createDashboardMonthlyEventReportActions(ctx) {
           if (config.value?.handover_log?.monthly_change_report?.scheduler && data?.scheduler_config) {
             Object.assign(config.value.handover_log.monthly_change_report.scheduler, data.scheduler_config);
           }
+          applySchedulerSnapshot(health?.monthly_change_report?.scheduler, data?.scheduler_status || data);
           triggerDashboardRefresh("monthly_change_scheduler_save");
           message.value = data?.message || "月度变更统计表调度配置已更新";
         } catch (err) {
+          if (config.value?.handover_log?.monthly_change_report?.scheduler) {
+            Object.assign(config.value.handover_log.monthly_change_report.scheduler, previousScheduler);
+          }
           message.value = formatError(err, "月度变更统计表调度自动更新");
         } finally {
           monthlyChangeReportSchedulerQuickSaving.value = false;

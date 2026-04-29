@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
@@ -19,8 +20,15 @@ ALLOWED_KEYS = {
     "enabled",
     "auto_start_in_gui",
     "run_time",
+    "check_interval_sec",
+    "catch_up_if_missed",
+    "retry_failed_in_same_period",
     "state_file",
 }
+
+
+def _valid_time(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(value or "").strip()))
 
 
 def _scheduler_cfg_from_v3(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -107,10 +115,20 @@ def alarm_event_upload_scheduler_config(payload: Dict[str, Any], request: Reques
         value = payload.get(key)
         if key in {"enabled", "auto_start_in_gui"}:
             scheduler_cfg[key] = bool(value)
+        elif key == "check_interval_sec":
+            try:
+                number = int(value)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="check_interval_sec 必须是整数") from exc
+            if number <= 0:
+                raise HTTPException(status_code=400, detail="check_interval_sec 必须大于 0")
+            scheduler_cfg[key] = number
+        elif key in {"catch_up_if_missed", "retry_failed_in_same_period"}:
+            scheduler_cfg[key] = bool(value)
         elif key == "run_time":
             text = str(value or "").strip()
-            if not text:
-                raise HTTPException(status_code=400, detail="run_time 不能为空")
+            if not _valid_time(text):
+                raise HTTPException(status_code=400, detail="run_time 必须是 HH:MM:SS")
             scheduler_cfg[key] = text
         elif key == "state_file":
             text = str(value or "").strip()
@@ -130,11 +148,15 @@ def alarm_event_upload_scheduler_config(payload: Dict[str, Any], request: Reques
         path=("features", "alarm_export", "scheduler"),
         scheduler_cfg=new_cfg,
     )
-    data = _build_payload(container)
+    status_payload = _build_payload(container)
+    data = dict(status_payload)
     data.update(
         {
             "message": "告警信息上传调度配置已更新并热重载",
+            "state_reset": {},
+            "scheduler_status": status_payload,
             "scheduler_config": {key: new_cfg.get(key) for key in sorted(ALLOWED_KEYS)},
+            "updated_at": "",
         }
     )
     return data

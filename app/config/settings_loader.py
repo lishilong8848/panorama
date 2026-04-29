@@ -7,7 +7,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List
 
 from app.config.config_compat_cleanup import sanitize_day_metric_upload_config
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3, deep_merge_defaults
@@ -2347,6 +2347,43 @@ def save_handover_common_segment(
         write_segment_document(handover_common_segment_path(target), next_doc)
     refreshed_config, aggregate_refresh_error = _refresh_handover_aggregate_view(target)
     return refreshed_config, next_doc, aggregate_refresh_error
+
+
+def update_handover_common_segment_data(
+    updater: Callable[[Dict[str, Any]], None],
+    *,
+    config_path: str | Path | None = None,
+) -> tuple[Dict[str, Any], Dict[str, Any], str, Dict[str, Any], bool]:
+    """Patch the handover common segment under its segment lock.
+
+    Returns: refreshed_config, next_document, aggregate_refresh_error,
+    previous_document, changed.
+    """
+    target = get_settings_path(config_path)
+    with handover_segment_target_lock(target, "common"):
+        current_full = load_settings(target)
+        current_doc = read_segment_document(handover_common_segment_path(target))
+        current_revision = int(current_doc.get("revision", 0) or 0)
+        current_data = copy.deepcopy(current_doc.get("data", {}) if isinstance(current_doc.get("data", {}), dict) else {})
+        next_data = copy.deepcopy(current_data)
+        updater(next_data)
+        changed = next_data != current_data
+        if not changed:
+            return current_full, current_doc, "", current_doc, False
+
+        next_full = apply_handover_segment_data(
+            current_full,
+            common_data=next_data,
+            building_data_by_name=_extract_all_handover_building_segments(current_full),
+        )
+        validated = _normalize_footer_defaults_for_persistence(validate_settings(next_full))
+        next_doc = build_segment_document(
+            extract_handover_common_data(validated),
+            revision=current_revision + 1,
+        )
+        write_segment_document(handover_common_segment_path(target), next_doc)
+    refreshed_config, aggregate_refresh_error = _refresh_handover_aggregate_view(target)
+    return refreshed_config, next_doc, aggregate_refresh_error, current_doc, True
 
 
 def save_handover_building_segment(

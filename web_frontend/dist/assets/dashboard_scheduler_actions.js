@@ -71,11 +71,11 @@ export function createDashboardSchedulerActions(ctx) {
 
   function triggerDashboardRefresh(reason = "scheduler_action") {
     if (typeof scheduleExternalDashboardRefresh === "function") {
-      scheduleExternalDashboardRefresh(reason);
+      scheduleExternalDashboardRefresh(reason, { force: true, delayMs: 0 });
       return;
     }
     if (typeof fetchExternalDashboardSummary === "function") {
-      void fetchExternalDashboardSummary({ silentMessage: true });
+      void fetchExternalDashboardSummary({ silentMessage: true, force: true });
     }
   }
 
@@ -225,6 +225,7 @@ export function createDashboardSchedulerActions(ctx) {
   async function saveHandoverSchedulerQuickConfig(overrides = {}) {
     if (!config.value) return;
     const handoverScheduler = config.value?.handover_log?.scheduler || {};
+    const previousScheduler = { ...handoverScheduler };
     const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
     const overrideKeys = Object.keys(overrideValues);
     const hasExplicitOverrides = overrideKeys.length > 0;
@@ -246,7 +247,6 @@ export function createDashboardSchedulerActions(ctx) {
         message.value = "交接班调度上午时间格式错误，必须是 HH:MM 或 HH:MM:SS";
         return;
       }
-      handoverScheduler.morning_time = morningTime;
       payload.morning_time = morningTime;
     }
 
@@ -260,7 +260,6 @@ export function createDashboardSchedulerActions(ctx) {
         message.value = "交接班调度下午时间格式错误，必须是 HH:MM 或 HH:MM:SS";
         return;
       }
-      handoverScheduler.afternoon_time = afternoonTime;
       payload.afternoon_time = afternoonTime;
     }
 
@@ -296,6 +295,9 @@ export function createDashboardSchedulerActions(ctx) {
             ? "交接班调度配置已更新，已重置对应时段今日状态"
             : data?.message || "交接班调度配置已更新";
         } catch (err) {
+          if (config.value?.handover_log?.scheduler) {
+            Object.assign(config.value.handover_log.scheduler, previousScheduler);
+          }
           message.value = `交接班调度自动更新失败: ${err}`;
         } finally {
           handoverSchedulerQuickSaving.value = false;
@@ -511,6 +513,7 @@ export function createDashboardSchedulerActions(ctx) {
   async function saveAlarmEventUploadSchedulerQuickConfig(overrides = {}) {
     if (!config.value) return;
     const scheduler = config.value?.alarm_export?.scheduler || {};
+    const previousScheduler = { ...scheduler };
     const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
     const runTime = normalizeRunTimeText(
       Object.prototype.hasOwnProperty.call(overrideValues, "run_time")
@@ -521,13 +524,15 @@ export function createDashboardSchedulerActions(ctx) {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       run_time: runTime,
+      check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
+      catch_up_if_missed: Boolean(scheduler.catch_up_if_missed),
+      retry_failed_in_same_period: Boolean(scheduler.retry_failed_in_same_period),
       state_file: String(scheduler.state_file || "").trim(),
     };
     if (!payload.run_time) {
       message.value = "告警信息上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS";
       return;
     }
-    scheduler.run_time = runTime;
     if (!payload.state_file) {
       message.value = "告警信息上传调度状态文件不能为空";
       return;
@@ -545,6 +550,9 @@ export function createDashboardSchedulerActions(ctx) {
           triggerDashboardRefresh("alarm_scheduler_save");
           message.value = data?.message || "告警信息上传调度配置已更新";
         } catch (err) {
+          if (config.value?.alarm_export?.scheduler) {
+            Object.assign(config.value.alarm_export.scheduler, previousScheduler);
+          }
           message.value = `告警信息上传调度自动更新失败: ${err}`;
         } finally {
           alarmEventUploadSchedulerQuickSaving.value = false;

@@ -1,15 +1,14 @@
 ﻿from __future__ import annotations
 
-import copy
 import re
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.config.settings_loader import save_settings
 from app.modules.scheduler.api._config_persistence import (
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
+    save_handover_common_scheduler_patch,
 )
 
 
@@ -102,20 +101,6 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
     old_morning = str(old_cfg.get("morning_time", "")).strip()
     old_afternoon = str(old_cfg.get("afternoon_time", "")).strip()
 
-    merged = copy.deepcopy(container.config)
-    features = merged.get("features")
-    if not isinstance(features, dict):
-        features = {}
-        merged["features"] = features
-    handover = features.get("handover_log")
-    if not isinstance(handover, dict):
-        handover = {}
-        features["handover_log"] = handover
-    scheduler_cfg = handover.get("scheduler")
-    if not isinstance(scheduler_cfg, dict):
-        scheduler_cfg = {}
-        handover["scheduler"] = scheduler_cfg
-
     allowed = {
         "enabled",
         "auto_start_in_gui",
@@ -127,6 +112,7 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
         "morning_state_file",
         "afternoon_state_file",
     }
+    scheduler_patch: Dict[str, Any] = {}
     for key in allowed:
         if key not in payload:
             continue
@@ -135,7 +121,7 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
             text = str(value or "").strip()
             if not _valid_time(text):
                 raise HTTPException(status_code=400, detail=f"{key} 必须是 HH:MM:SS")
-            scheduler_cfg[key] = text
+            scheduler_patch[key] = text
         elif key == "check_interval_sec":
             try:
                 number = int(value)
@@ -143,17 +129,23 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
                 raise HTTPException(status_code=400, detail="check_interval_sec 必须是整数") from exc
             if number <= 0:
                 raise HTTPException(status_code=400, detail="check_interval_sec 必须大于 0")
-            scheduler_cfg[key] = number
+            scheduler_patch[key] = number
         elif key in {"morning_state_file", "afternoon_state_file"}:
             text = str(value or "").strip()
             if not text:
                 raise HTTPException(status_code=400, detail=f"{key} 不能为空")
-            scheduler_cfg[key] = text
+            scheduler_patch[key] = text
         else:
-            scheduler_cfg[key] = bool(value)
+            scheduler_patch[key] = bool(value)
 
     try:
-        saved = save_settings(merged, container.config_path)
+        patch_result = save_handover_common_scheduler_patch(
+            container,
+            path=("features", "handover_log", "scheduler"),
+            scheduler_patch=scheduler_patch,
+            source="交接班调度配置保存",
+        )
+        saved = patch_result["saved_config"]
         container.reload_config(saved)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -177,14 +169,19 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
                 "afternoon"
             )
 
-    data = _build_handover_scheduler_payload(container)
+    status_payload = _build_handover_scheduler_payload(container)
+    data = dict(status_payload)
     data.update(
         {
             "message": "交接班调度配置已更新并热重载",
             "morning_time_changed": morning_changed,
             "afternoon_time_changed": afternoon_changed,
             "state_reset": reset_results,
+            "scheduler_status": status_payload,
             "scheduler_config": {k: new_cfg.get(k) for k in sorted(allowed)},
+            "updated_at": str(patch_result.get("document", {}).get("updated_at", "") or ""),
+            "segment_revision": int(patch_result.get("document", {}).get("revision", 0) or 0),
+            "changed": bool(patch_result.get("changed", False)),
         }
     )
     return data

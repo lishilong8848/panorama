@@ -1399,8 +1399,25 @@ createApp({
         if (!bootstrapReady.value) return;
         const currentViewText = String(view || "").trim().toLowerCase();
         const prevViewText = String(prevView || "").trim().toLowerCase();
-        const moduleChanged = String(dashboardActiveModule.value || "").trim() !== String(prevModule || "").trim();
+        const activeModuleText = String(dashboardActiveModule.value || "").trim();
+        const moduleChanged = activeModuleText !== String(prevModule || "").trim();
         const enteredDashboard = currentViewText === "dashboard" && prevViewText !== "dashboard";
+        const schedulerModules = new Set([
+          "auto_flow",
+          "handover_log",
+          "wet_bulb_collection",
+          "day_metric_upload",
+          "alarm_event_upload",
+          "monthly_event_report",
+          "scheduler_overview",
+        ]);
+        if (
+          currentViewText === "dashboard"
+          && schedulerModules.has(activeModuleText)
+          && !configLoaded.value
+        ) {
+          void fetchConfig({ silentMessage: true, loadHandoverSegments: true });
+        }
         if ((enteredDashboard || moduleChanged) && currentViewText === "dashboard" && shouldPollExternalDashboardSummary.value) {
           void fetchExternalDashboardSummary({ force: true, silentMessage: true });
         }
@@ -1413,6 +1430,16 @@ createApp({
         if (enteredDashboard && shouldPollBridgeTasks.value) {
           void fetchBridgeTasks({ silentMessage: true });
         }
+      },
+      { immediate: true },
+    );
+
+    watch(
+      () => currentView.value,
+      (view) => {
+        const currentViewText = String(view || "").trim().toLowerCase();
+        if (currentViewText !== "config" || !bootstrapReady.value || configLoaded.value) return;
+        void fetchConfig({ silentMessage: true, loadHandoverSegments: true });
       },
       { immediate: true },
     );

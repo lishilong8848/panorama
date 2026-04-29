@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import copy
+import re
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.config.settings_loader import save_settings
 from app.modules.scheduler.api._config_persistence import (
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
+    save_handover_common_scheduler_patch,
 )
 
 
@@ -23,6 +23,10 @@ ALLOWED_KEYS = {
     "check_interval_sec",
     "state_file",
 }
+
+
+def _valid_time(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(value or "").strip()))
 
 
 def _scheduler_cfg_from_v3(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -92,30 +96,17 @@ def monthly_event_report_scheduler_config(payload: Dict[str, Any], request: Requ
         raise HTTPException(status_code=400, detail="请求体必须是JSON对象")
 
     container = request.app.state.container
-    merged = copy.deepcopy(container.config)
-    features = merged.get("features")
-    if not isinstance(features, dict):
-        features = {}
-        merged["features"] = features
-    handover = features.get("handover_log")
-    if not isinstance(handover, dict):
-        handover = {}
-        features["handover_log"] = handover
-    monthly_cfg = handover.get("monthly_event_report")
-    if not isinstance(monthly_cfg, dict):
-        monthly_cfg = {}
-        handover["monthly_event_report"] = monthly_cfg
-    scheduler_cfg = monthly_cfg.get("scheduler")
-    if not isinstance(scheduler_cfg, dict):
-        scheduler_cfg = {}
-        monthly_cfg["scheduler"] = scheduler_cfg
+    old_cfg = _scheduler_cfg_from_v3(container.config)
+    old_day = int(old_cfg.get("day_of_month", 0) or 0)
+    old_run_time = str(old_cfg.get("run_time", "") or "").strip()
 
+    scheduler_patch: Dict[str, Any] = {}
     for key in ALLOWED_KEYS:
         if key not in payload:
             continue
         value = payload.get(key)
         if key in {"enabled", "auto_start_in_gui"}:
-            scheduler_cfg[key] = bool(value)
+            scheduler_patch[key] = bool(value)
         elif key in {"day_of_month", "check_interval_sec"}:
             try:
                 number = int(value)
@@ -125,20 +116,26 @@ def monthly_event_report_scheduler_config(payload: Dict[str, Any], request: Requ
                 raise HTTPException(status_code=400, detail="day_of_month 必须在 1 到 31 之间")
             if key == "check_interval_sec" and number <= 0:
                 raise HTTPException(status_code=400, detail="check_interval_sec 必须大于 0")
-            scheduler_cfg[key] = number
+            scheduler_patch[key] = number
         elif key == "run_time":
             text = str(value or "").strip()
-            if not text:
-                raise HTTPException(status_code=400, detail="run_time 不能为空")
-            scheduler_cfg[key] = text
+            if not _valid_time(text):
+                raise HTTPException(status_code=400, detail="run_time 必须是 HH:MM:SS")
+            scheduler_patch[key] = text
         elif key == "state_file":
             text = str(value or "").strip()
             if not text:
                 raise HTTPException(status_code=400, detail="state_file 不能为空")
-            scheduler_cfg[key] = text
+            scheduler_patch[key] = text
 
     try:
-        saved = save_settings(merged, container.config_path)
+        patch_result = save_handover_common_scheduler_patch(
+            container,
+            path=("features", "handover_log", "monthly_event_report", "scheduler"),
+            scheduler_patch=scheduler_patch,
+            source="月度事件统计表调度配置保存",
+        )
+        saved = patch_result["saved_config"]
         container.reload_config(saved)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -149,11 +146,24 @@ def monthly_event_report_scheduler_config(payload: Dict[str, Any], request: Requ
         path=("features", "handover_log", "monthly_event_report", "scheduler"),
         scheduler_cfg=new_cfg,
     )
-    data = _build_payload(container)
+    new_day = int(new_cfg.get("day_of_month", 0) or 0)
+    new_run_time = str(new_cfg.get("run_time", "") or "").strip()
+    schedule_changed = old_day != new_day or old_run_time != new_run_time
+    reset_result: Dict[str, Any] = {}
+    if schedule_changed and container.monthly_event_report_scheduler:
+        reset_result = container.monthly_event_report_scheduler.reset_current_month_state_for_schedule_change()
+    status_payload = _build_payload(container)
+    data = dict(status_payload)
     data.update(
         {
             "message": "月度事件统计表调度配置已更新并热重载",
+            "schedule_changed": schedule_changed,
+            "state_reset": reset_result,
+            "scheduler_status": status_payload,
             "scheduler_config": {key: new_cfg.get(key) for key in sorted(ALLOWED_KEYS)},
+            "updated_at": str(patch_result.get("document", {}).get("updated_at", "") or ""),
+            "segment_revision": int(patch_result.get("document", {}).get("revision", 0) or 0),
+            "changed": bool(patch_result.get("changed", False)),
         }
     )
     return data

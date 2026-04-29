@@ -4,6 +4,7 @@ from datetime import datetime
 
 import app.modules.scheduler.service.daily_scheduler_service as scheduler_mod
 from app.modules.scheduler.service.daily_scheduler_service import DailyAutoSchedulerService
+from app.modules.scheduler.service.monthly_scheduler_service import MonthlySchedulerService
 
 
 def _build_service(tmp_path):
@@ -126,6 +127,41 @@ def test_reset_today_state_for_run_time_change(tmp_path):
     assert svc.state["last_success_period"] == ""
     assert svc.state["last_attempt_period"] == ""
     assert svc.state["retry_done_period"] == ""
+    assert svc.state["last_status"] == ""
+    assert svc.state["last_error"] == ""
+    assert svc.state["last_run_at"] == ""
+
+
+def test_monthly_scheduler_reset_current_month_state_for_schedule_change(tmp_path):
+    svc = MonthlySchedulerService(
+        scheduler_cfg={
+            "enabled": True,
+            "auto_start_in_gui": False,
+            "day_of_month": 1,
+            "run_time": "01:00:00",
+            "check_interval_sec": 30,
+            "state_file": "monthly_state.json",
+        },
+        runtime_state_root=str(tmp_path),
+        emit_log=lambda _: None,
+        run_callback=lambda _: (True, ""),
+        is_busy=lambda: False,
+    )
+    svc.state.update(
+        {
+            "last_success_period": "2026-04",
+            "last_attempt_period": "2026-04",
+            "last_status": "failed",
+            "last_error": "x",
+            "last_run_at": "2026-04-01 01:00:00",
+        }
+    )
+
+    out = svc.reset_current_month_state_for_schedule_change(datetime(2026, 4, 29, 12, 0, 0))
+
+    assert out["changed"] is True
+    assert svc.state["last_success_period"] == ""
+    assert svc.state["last_attempt_period"] == ""
     assert svc.state["last_status"] == ""
     assert svc.state["last_error"] == ""
     assert svc.state["last_run_at"] == ""

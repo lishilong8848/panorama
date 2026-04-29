@@ -28,7 +28,7 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
                         <div class="task-grid two-col">
                           <div class="form-row">
                             <label class="label">每日执行时间</label>
-                            <input type="time" step="1" v-model="config.alarm_export.scheduler.run_time" @change="saveAlarmEventUploadSchedulerQuickConfig({ run_time: $event.target.value })" />
+                            <input type="time" step="1" :value="config.alarm_export.scheduler.run_time" :disabled="alarmEventUploadSchedulerQuickSaving" @change="saveAlarmEventUploadSchedulerQuickConfig({ run_time: $event.target.value })" />
                           </div>
                           <div class="form-row">
                             <label class="label">最近决策</label>
@@ -38,14 +38,14 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
                         <div class="btn-line">
                           <button
                             class="btn btn-success"
-                            :disabled="isSchedulerStartDisabled('alarm_event_upload', actionKeyAlarmEventUploadSchedulerStart, actionKeyAlarmEventUploadSchedulerStop)"
+                            :disabled="alarmEventUploadSchedulerQuickSaving || isSchedulerStartDisabled('alarm_event_upload', actionKeyAlarmEventUploadSchedulerStart, actionKeyAlarmEventUploadSchedulerStop)"
                             @click="startAlarmEventUploadScheduler"
                           >
                             {{ getSchedulerStartButtonText('alarm_event_upload') }}
                           </button>
                           <button
                             class="btn btn-danger"
-                            :disabled="isSchedulerStopDisabled('alarm_event_upload', actionKeyAlarmEventUploadSchedulerStart, actionKeyAlarmEventUploadSchedulerStop)"
+                            :disabled="alarmEventUploadSchedulerQuickSaving || isSchedulerStopDisabled('alarm_event_upload', actionKeyAlarmEventUploadSchedulerStart, actionKeyAlarmEventUploadSchedulerStop)"
                             @click="stopAlarmEventUploadScheduler"
                           >
                             {{ getSchedulerStopButtonText('alarm_event_upload') }}

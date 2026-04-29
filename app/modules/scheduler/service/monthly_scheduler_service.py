@@ -115,6 +115,31 @@ class MonthlySchedulerService:
         except Exception as exc:
             self._log(f"保存状态失败: {exc}")
 
+    def reset_current_month_state_for_schedule_change(self, now: datetime | None = None) -> Dict[str, Any]:
+        current = now or datetime.now()
+        period = self._period(current)
+        reset_keys: list[str] = []
+        for key in ("last_success_period", "last_attempt_period"):
+            if self.state.get(key, "") == period:
+                self.state[key] = ""
+                reset_keys.append(key)
+        for key in ("last_status", "last_error", "last_run_at"):
+            if self.state.get(key, ""):
+                self.state[key] = ""
+                reset_keys.append(key)
+        changed = bool(reset_keys)
+        if changed:
+            self._save_state()
+            self._log(f"调度时间变更，已重置当月调度状态: period={period}, keys={reset_keys}")
+        else:
+            self._log(f"调度时间变更，当月状态无需重置: period={period}")
+        return {
+            "changed": changed,
+            "period": period,
+            "reset_keys": reset_keys,
+            "state_path": str(self.state_path),
+        }
+
     @staticmethod
     def _period(dt: datetime) -> str:
         return dt.strftime("%Y-%m")

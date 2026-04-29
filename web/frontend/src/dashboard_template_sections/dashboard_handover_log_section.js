@@ -34,7 +34,8 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                 <input
                   type="time"
                   step="1"
-                  v-model="config.handover_log.scheduler.morning_time"
+                  :value="config.handover_log.scheduler.morning_time"
+                  :disabled="handoverSchedulerQuickSaving"
                   @change="saveHandoverSchedulerQuickConfig({ morning_time: $event.target.value })"
                 />
               </div>
@@ -43,7 +44,8 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                 <input
                   type="time"
                   step="1"
-                  v-model="config.handover_log.scheduler.afternoon_time"
+                  :value="config.handover_log.scheduler.afternoon_time"
+                  :disabled="handoverSchedulerQuickSaving"
                   @change="saveHandoverSchedulerQuickConfig({ afternoon_time: $event.target.value })"
                 />
               </div>
@@ -51,14 +53,14 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
             <div class="btn-line" style="margin-top:10px;">
               <button
                 class="btn btn-success"
-                :disabled="isSchedulerStartDisabled('handover', actionKeyHandoverSchedulerStart, actionKeyHandoverSchedulerStop)"
+                :disabled="handoverSchedulerQuickSaving || isSchedulerStartDisabled('handover', actionKeyHandoverSchedulerStart, actionKeyHandoverSchedulerStop)"
                 @click="startHandoverScheduler"
               >
                 {{ getSchedulerStartButtonText('handover') }}
               </button>
               <button
                 class="btn btn-danger"
-                :disabled="isSchedulerStopDisabled('handover', actionKeyHandoverSchedulerStart, actionKeyHandoverSchedulerStop)"
+                :disabled="handoverSchedulerQuickSaving || isSchedulerStopDisabled('handover', actionKeyHandoverSchedulerStart, actionKeyHandoverSchedulerStop)"
                 @click="stopHandoverScheduler"
               >
                 {{ getSchedulerStopButtonText('handover') }}
