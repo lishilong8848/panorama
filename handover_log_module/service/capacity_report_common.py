@@ -641,12 +641,6 @@ def _resolve_public_flow_values(query: CapacitySourceQuery, *, zone: str, contex
     return {cells["first"]: first_text, cells["second"]: second_text, cells["tank"]: tank_text}
 
 
-def _resolve_primary_flow_number(query: CapacitySourceQuery, *, zone: str, context: Dict[str, Any]) -> float | None:
-    cells = _WEST_PUBLIC_CELLS if zone == "west" else _EAST_PUBLIC_CELLS
-    public_values = _resolve_public_flow_values(query, zone=zone, context=context)
-    return _to_float_text(public_values.get(cells["first"]))
-
-
 def _region_summary_cells(zone: str) -> Dict[str, str]:
     if zone == "west":
         return {"redundancy": "D42", "secondary_value": "D48", "secondary_redundancy": "D49", "tank_level": "AC27"}
@@ -666,8 +660,6 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
 
 
 def _build_capacity_source_direct_values(query: CapacitySourceQuery, *, context: Dict[str, Any]) -> Dict[str, str]:
-    alias_groups = _default_alias_groups(context)
-    running_units = context.get("running_units", {}) if isinstance(context.get("running_units", {}), dict) else {}
     values: Dict[str, str] = {}
 
     oil_amount = _first_text_by_d_exact(
@@ -683,46 +675,27 @@ def _build_capacity_source_direct_values(query: CapacitySourceQuery, *, context:
     if oil_amount:
         values["U16"] = oil_amount
 
-    def _first_running_unit(zone: str) -> int:
-        for unit_info in list(running_units.get(zone, []))[:1]:
-            try:
-                unit_number = int(unit_info.get("unit", 0) or 0)
-            except (TypeError, ValueError):
-                unit_number = 0
-            if unit_number > 0:
-                return unit_number
-        return 0
-
-    def _zone_capacity(zone: str) -> float | None:
-        primary_flow = _resolve_primary_flow_number(query, zone=zone, context=context)
-        unit_number = _first_running_unit(zone)
-        if primary_flow is None or unit_number <= 0:
-            return None
-        chilled_return_temp = query.first_number_by_d_aliases(
-            alias_groups["plate_chilled_in_temp"],
-            zone=zone,
-            unit=unit_number,
-            allow_global=False,
-        )
-        chilled_supply_temp = query.first_number_by_d_aliases(
-            alias_groups["plate_chilled_out_temp"],
-            zone=zone,
-            unit=unit_number,
-            allow_global=False,
-        )
-        if chilled_return_temp is None or chilled_supply_temp is None:
-            return None
-        return abs(float(chilled_return_temp) - float(chilled_supply_temp)) * float(primary_flow) * 1.163
-
-    west_capacity = _zone_capacity("west")
-    if west_capacity is not None:
-        values["D22"] = format_number(west_capacity)
-
-    east_capacity = _zone_capacity("east")
-    if east_capacity is not None:
-        values["Q22"] = format_number(east_capacity)
-
     return values
+
+
+def _build_zone_capacity_formula_values(values: Dict[str, str]) -> Dict[str, str]:
+    results: Dict[str, str] = {}
+
+    def _calc(*, flow_cell: str, return_cell: str, supply_cell: str) -> str:
+        primary_flow = _to_float_text(values.get(flow_cell))
+        chilled_return_temp = _to_float_text(values.get(return_cell))
+        chilled_supply_temp = _to_float_text(values.get(supply_cell))
+        if primary_flow is None or chilled_return_temp is None or chilled_supply_temp is None:
+            return ""
+        return format_number(abs(chilled_return_temp - chilled_supply_temp) * primary_flow * 1.163)
+
+    west_value = _calc(flow_cell="G22", return_cell="L28", supply_cell="L29")
+    if west_value:
+        results["D22"] = west_value
+    east_value = _calc(flow_cell="T22", return_cell="Y28", supply_cell="Y29")
+    if east_value:
+        results["Q22"] = east_value
+    return results
 
 
 def _block_cell_map(zone: str, position: int) -> Dict[str, str]:
@@ -929,6 +902,7 @@ def build_capacity_cells_with_config(context: Dict[str, Any], config: Dict[str, 
     values.update(_build_capacity_source_direct_values(query, context=context))
     values.update(_build_zone_unit_values(query, zone="west", running_units=running_units, context=context))
     values.update(_build_zone_unit_values(query, zone="east", running_units=running_units, context=context))
+    values.update(_build_zone_capacity_formula_values(values))
     values.update(_build_zone_summary_values(query, zone="west", running_units=running_units))
     values.update(_build_zone_summary_values(query, zone="east", running_units=running_units))
     values.update(_build_tr_values(query, snapshot))
