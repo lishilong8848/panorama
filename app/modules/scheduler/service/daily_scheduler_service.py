@@ -213,8 +213,6 @@ class DailyAutoSchedulerService:
             return scheduled
         should_run, _, _ = self._should_trigger(now)
         if should_run:
-            if not self.is_running() and not str(self.runtime.get("started_at", "") or "").strip():
-                return scheduled
             return now
         return self._schedule_for_day(now + timedelta(days=1))
 
@@ -307,11 +305,7 @@ class DailyAutoSchedulerService:
                     )
                     source = "内置每日调度补跑" if is_retry else "内置每日调度"
                     self._diag(f"触发执行: source={source}, period={period}")
-                    try:
-                        ok, detail = self.run_callback(source)
-                    except Exception as exc:  # noqa: BLE001
-                        ok, detail = False, str(exc)
-                        self._diag(f"触发执行异常: {detail}")
+                    ok, detail = self.run_callback(source)
 
                     self.state["last_attempt_period"] = period
                     self.state["last_run_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

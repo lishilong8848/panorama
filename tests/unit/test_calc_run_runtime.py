@@ -70,30 +70,6 @@ def test_run_with_explicit_file_items_date_validation(tmp_path: Path) -> None:
         )
 
 
-def test_run_with_explicit_file_items_does_not_resolve_source_paths(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    x = tmp_path / "A.xlsx"
-    x.write_bytes(b"x")
-    captured: Dict[str, Any] = {}
-
-    def _raise_resolve(self: Path, *args: Any, **kwargs: Any) -> Path:
-        raise AssertionError("Path.resolve must not run on source files")
-
-    monkeypatch.setattr(Path, "resolve", _raise_resolve)
-
-    run_with_explicit_file_items(
-        config={},
-        file_items=[{"building": "A楼", "file_path": str(x), "upload_date": "2026-03-08"}],
-        build_results_from_file_items=lambda *_args, **_kwargs: [_Result("A楼", "2026-03-08", {"a": 1})],
-        save_results_fn=lambda *_args, **_kwargs: None,
-        upload_results_to_feishu_fn=lambda *_args, **kwargs: captured.update(kwargs),
-    )
-
-    assert captured["date_override_by_source"]
-
-
 def test_save_results_respects_save_json_flag(tmp_path: Path) -> None:
     output_cfg = {"output": {"save_json": False, "json_dir": str(tmp_path)}}
     save_results(

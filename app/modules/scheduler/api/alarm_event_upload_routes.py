@@ -5,13 +5,11 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app.config.settings_loader import save_settings
 from app.modules.scheduler.api._config_persistence import (
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
-    save_scheduler_config_snapshot,
 )
-from app.modules.scheduler.api._display_payload import with_scheduler_display
-from app.modules.scheduler.api._time_normalization import normalize_scheduler_time
 
 
 router = APIRouter(prefix="/api/scheduler/alarm-event-upload", tags=["scheduler-alarm-event-upload"])
@@ -40,7 +38,7 @@ def _scheduler_cfg_from_v3(config: Dict[str, Any]) -> Dict[str, Any]:
 
 def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Dict[str, Any]:
     snapshot = container.alarm_event_upload_scheduler_status()
-    payload = {
+    return {
         "ok": True,
         "action": action_result or {},
         "enabled": bool(snapshot.get("enabled", False)),
@@ -59,18 +57,12 @@ def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Di
         "effective_auto_start_in_gui": bool(snapshot.get("effective_auto_start_in_gui", False)),
         "memory_source": str(snapshot.get("memory_source", "") or ""),
     }
-    return with_scheduler_display(payload, container, slot_keys=())
 
 
 @router.post("/start")
 def alarm_event_upload_scheduler_start(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    persist_scheduler_toggle(
-        container,
-        path=("features", "alarm_export", "scheduler"),
-        scheduler_key="alarm_event_upload",
-        auto_start_in_gui=True,
-    )
+    persist_scheduler_toggle(container, path=("features", "alarm_export", "scheduler"), auto_start_in_gui=True)
     action = container.start_alarm_event_upload_scheduler()
     return _build_payload(container, action_result=action)
 
@@ -78,12 +70,7 @@ def alarm_event_upload_scheduler_start(request: Request) -> Dict[str, Any]:
 @router.post("/stop")
 def alarm_event_upload_scheduler_stop(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    persist_scheduler_toggle(
-        container,
-        path=("features", "alarm_export", "scheduler"),
-        scheduler_key="alarm_event_upload",
-        auto_start_in_gui=False,
-    )
+    persist_scheduler_toggle(container, path=("features", "alarm_export", "scheduler"), auto_start_in_gui=False)
     action = container.stop_alarm_event_upload_scheduler()
     return _build_payload(container, action_result=action)
 
@@ -121,22 +108,19 @@ def alarm_event_upload_scheduler_config(payload: Dict[str, Any], request: Reques
         if key in {"enabled", "auto_start_in_gui"}:
             scheduler_cfg[key] = bool(value)
         elif key == "run_time":
-            scheduler_cfg[key] = normalize_scheduler_time(value)
+            text = str(value or "").strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="run_time 不能为空")
+            scheduler_cfg[key] = text
         elif key == "state_file":
             text = str(value or "").strip()
             if not text:
                 raise HTTPException(status_code=400, detail="state_file 不能为空")
             scheduler_cfg[key] = text
 
-    restart_running = bool(container.alarm_event_upload_scheduler.is_running()) if container.alarm_event_upload_scheduler else False
     try:
-        save_scheduler_config_snapshot(
-            container,
-            merged,
-            path=("features", "alarm_export", "scheduler"),
-            scheduler_key="alarm_event_upload",
-            restart_running=restart_running,
-        )
+        saved = save_settings(merged, container.config_path)
+        container.reload_config(saved)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -149,7 +133,7 @@ def alarm_event_upload_scheduler_config(payload: Dict[str, Any], request: Reques
     data = _build_payload(container)
     data.update(
         {
-            "message": "告警信息上传调度配置已更新并立即生效" if restart_running else "告警信息上传调度配置已保存",
+            "message": "告警信息上传调度配置已更新并热重载",
             "scheduler_config": {key: new_cfg.get(key) for key in sorted(ALLOWED_KEYS)},
         }
     )

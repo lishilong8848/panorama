@@ -135,12 +135,6 @@ class ReviewDocumentWriter:
                         if follower_col in normalized_cells:
                             normalized_cells[follower_col] = ""
                 payload_rows.append({"cells": normalized_cells})
-            content_rows = [
-                row
-                for row in payload_rows
-                if any(str(value or "").strip() for value in row.get("cells", {}).values())
-            ]
-            payload_rows = content_rows
             output[section_name] = payload_rows
         return output
 

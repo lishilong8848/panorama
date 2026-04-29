@@ -125,7 +125,23 @@ async function triggerBrowserDownload(url, fallbackName = "") {
     cache: "no-store",
   });
   if (!response.ok) {
-    throw new Error(await readDownloadError(response));
+    const detail = await readDownloadError(response);
+    const error = new Error(detail);
+    error.httpStatus = response.status;
+    error.responseText = detail;
+    error.responseRawText = detail;
+    throw error;
+  }
+  const warningBase64 = String(response.headers.get("x-handover-download-warning-base64") || "").trim();
+  let warning = "";
+  if (warningBase64) {
+    try {
+      const binary = window.atob(warningBase64);
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      warning = new TextDecoder("utf-8").decode(bytes).trim();
+    } catch (_error) {
+      warning = "";
+    }
   }
   const blob = await response.blob();
   const objectUrl = window.URL.createObjectURL(blob);
@@ -141,6 +157,7 @@ async function triggerBrowserDownload(url, fallbackName = "") {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1000);
+  return { warning };
 }
 
 function badgeVm(text, tone = "neutral", emphasis = "soft", icon = "dot") {
@@ -1246,9 +1263,12 @@ export function mountHandoverReviewApp(Vue) {
         ).trim().toLowerCase();
         if (!text) return false;
         return text.includes("revision conflict")
+          || text.includes("revision落后")
+          || text.includes("无法同步excel")
           || text.includes("版本冲突")
           || text.includes("已被其他人修改")
           || text.includes("内容已被其他")
+          || text.includes("审核内容已被更新")
           || text.includes("已被其他楼栋更新");
       }
 
@@ -1923,10 +1943,13 @@ export function mountHandoverReviewApp(Vue) {
         if (!buildingCode) {
           loading.value = false;
           errorText.value = "无效的楼栋审核页面地址";
-          return;
+          if (!background) {
+            syncingRemoteRevision.value = false;
+          }
+          return false;
         }
         if (background && (saving.value || loading.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || downloading.value || capacityDownloading.value || capacityImageSending.value)) {
-          return;
+          return false;
         }
         const resolvedMode = background ? "status" : (mode === "bootstrap" ? "bootstrap" : "full");
         const requestSeq = ++latestLoadRequestSeq;
@@ -1951,7 +1974,7 @@ export function mountHandoverReviewApp(Vue) {
               );
             } catch (error) {
               if (error?.name === "AbortError") {
-                return;
+                return false;
               }
               payload = await getHandoverReviewApi(
                 buildingCode,
@@ -1960,7 +1983,7 @@ export function mountHandoverReviewApp(Vue) {
               );
             }
             if (requestSeq !== latestLoadRequestSeq) {
-              return;
+              return false;
             }
             pollIntervalMs.value = resolvePollInterval(payload?.review_ui && typeof payload.review_ui === "object" ? payload.review_ui : {});
             restartPollTimer();
@@ -1994,7 +2017,7 @@ export function mountHandoverReviewApp(Vue) {
             ) {
               statusText.value = "";
             }
-            return;
+            return true;
           }
           const payload = await (resolvedMode === "status" ? getHandoverReviewStatusApi : getHandoverReviewApi)(
             buildingCode,
@@ -2002,22 +2025,25 @@ export function mountHandoverReviewApp(Vue) {
             buildRequestOptions(activeLoadController),
           );
           if (requestSeq !== latestLoadRequestSeq) {
-            return;
+            return false;
           }
           if (resolvedMode === "status") {
             await applyStatusPayload(payload, { background: true });
-            return;
+            return true;
           }
           pollIntervalMs.value = resolvePollInterval(payload?.review_ui && typeof payload.review_ui === "object" ? payload.review_ui : {});
           restartPollTimer();
           hydrateFromPayload(payload, { fromBackground: false });
+          return true;
         } catch (error) {
           if (error?.name === "AbortError") {
-            return;
+            return false;
           }
           if (!background) {
             errorText.value = String(error?.message || error || "加载失败");
+            syncingRemoteRevision.value = false;
           }
+          return false;
         } finally {
           if (requestSeq === latestLoadRequestSeq) {
             activeLoadController = null;

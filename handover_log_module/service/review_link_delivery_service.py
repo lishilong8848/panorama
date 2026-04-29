@@ -19,7 +19,6 @@ from handover_log_module.service.review_access_snapshot_service import (
     normalize_review_base_url,
 )
 from handover_log_module.service.review_session_service import ReviewSessionService
-from handover_log_module.service.handover_summary_message_service import HandoverSummaryMessageService
 
 
 def _now_text() -> str:
@@ -80,7 +79,6 @@ def _normalize_delivery_state(raw: Dict[str, Any] | None) -> Dict[str, Any]:
             {
                 "open_id": str(item.get("open_id", "") or "").strip(),
                 "note": str(item.get("note", "") or "").strip(),
-                "step": str(item.get("step", "") or "").strip(),
                 "error": str(item.get("error", "") or "").strip(),
             }
             for item in (payload.get("failed_recipients", []) if isinstance(payload.get("failed_recipients", []), list) else [])
@@ -92,29 +90,12 @@ def _normalize_delivery_state(raw: Dict[str, Any] | None) -> Dict[str, Any]:
     }
 
 
-def _enabled_value(raw: Any) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    if raw is None:
-        return True
-    text = str(raw).strip().lower()
-    if text in {"false", "0", "no", "n", "off", "disabled", "disable", "停用", "禁用", "未启用"}:
-        return False
-    if text in {"true", "1", "yes", "y", "on", "enabled", "enable", "启用", "已启用"}:
-        return True
-    return True
-
-
 class ReviewLinkDeliveryService:
     def __init__(self, runtime_config: Dict[str, Any], *, config_path: str | Path | None = None) -> None:
         self.runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
         self.config_path = Path(config_path) if config_path else None
         self.handover_cfg = _resolve_handover_config(self.runtime_config)
         self._review_service = ReviewSessionService(self.handover_cfg)
-        self._summary_message_service = HandoverSummaryMessageService(
-            self.handover_cfg,
-            config_path=self.config_path,
-        )
 
     def _review_cfg(self) -> Dict[str, Any]:
         review_ui = self.handover_cfg.get("review_ui", {})
@@ -137,34 +118,24 @@ class ReviewLinkDeliveryService:
         invalid_count = 0
         enabled_count = 0
         disabled_count = 0
-        disabled_recipients: List[Dict[str, str]] = []
-        invalid_recipients: List[Dict[str, str]] = []
         normalized_items = raw_items if isinstance(raw_items, list) else []
         for raw in normalized_items:
             if not isinstance(raw, dict):
                 invalid_count += 1
-                invalid_recipients.append({"open_id": "", "note": "", "reason": "not_object"})
                 continue
             open_id = str(raw.get("open_id", "") or "").strip()
             note = str(raw.get("note", "") or "").strip()
             if not open_id or open_id in seen_open_ids:
                 invalid_count += 1
-                invalid_recipients.append(
-                    {
-                        "open_id": open_id,
-                        "note": note,
-                        "reason": "empty_open_id" if not open_id else "duplicate_open_id",
-                    }
-                )
                 continue
             seen_open_ids.add(open_id)
-            enabled_bool = _enabled_value(raw.get("enabled", True))
+            enabled = raw.get("enabled", True)
+            enabled_bool = enabled if isinstance(enabled, bool) else True
             if enabled_bool:
                 enabled_count += 1
                 recipients.append({"open_id": open_id, "note": note, "enabled": True})
             else:
                 disabled_count += 1
-                disabled_recipients.append({"open_id": open_id, "note": note, "enabled": False})
         return {
             "raw_count": len(normalized_items),
             "invalid_count": invalid_count,
@@ -172,9 +143,6 @@ class ReviewLinkDeliveryService:
             "disabled_count": disabled_count,
             "recipients": recipients,
             "open_ids": [item["open_id"] for item in recipients],
-            "disabled_recipients": disabled_recipients,
-            "disabled_open_ids": [item["open_id"] for item in disabled_recipients],
-            "invalid_recipients": invalid_recipients,
         }
 
     def _recipient_snapshot_for_building(self, building: str) -> Dict[str, Any]:
@@ -388,26 +356,6 @@ class ReviewLinkDeliveryService:
             review_link_delivery=payload,
         )
 
-    def _build_review_link_summary(
-        self,
-        session: Dict[str, Any],
-        *,
-        building: str,
-        session_id: str,
-        emit_log: Callable[[str], None],
-    ) -> str:
-        builder = getattr(self._summary_message_service, "build_review_link_summary_for_session", None)
-        if not callable(builder):
-            return ""
-        try:
-            return str(builder(session, emit_log=emit_log) or "").strip()
-        except Exception as exc:  # noqa: BLE001
-            emit_log(
-                "[交接班][审核链接摘要] 生成失败但不阻断发送 "
-                f"building={building}, session_id={session_id}, error={exc}"
-            )
-            return ""
-
     def _resolve_batch_sessions(
         self,
         *,
@@ -505,10 +453,7 @@ class ReviewLinkDeliveryService:
             f"enabled={int(recipient_snapshot.get('enabled_count', 0) or 0)}, "
             f"disabled={int(recipient_snapshot.get('disabled_count', 0) or 0)}, "
             f"invalid={int(recipient_snapshot.get('invalid_count', 0) or 0)}, "
-            f"open_ids={recipient_snapshot.get('open_ids', [])}, "
-            f"disabled_open_ids={recipient_snapshot.get('disabled_open_ids', [])}, "
-            f"invalid_recipients={recipient_snapshot.get('invalid_recipients', [])}, "
-            f"access_ready={bool(url)}, source={source_text}, "
+            f"open_ids={recipient_snapshot.get('open_ids', [])}, access_ready={bool(url)}, source={source_text}, "
             f"recipient_source={str(recipient_snapshot.get('source', '') or '').strip() or 'unknown'}"
         )
         if not recipients:
@@ -553,14 +498,6 @@ class ReviewLinkDeliveryService:
             return next_state
 
         message_text = self._build_message(normalized_session, url)
-        summary_text = self._build_review_link_summary(
-            normalized_session,
-            building=building,
-            session_id=session_id,
-            emit_log=emit_log,
-        )
-        if summary_text:
-            message_text = f"{message_text}\n\n{summary_text}"
         attempt_at = _now_text()
         successful_recipients: List[str] = []
         failed_recipients: List[Dict[str, str]] = []
@@ -586,7 +523,6 @@ class ReviewLinkDeliveryService:
                     {
                         "open_id": open_id,
                         "note": note,
-                        "step": "text",
                         "error": str(exc),
                     }
                 )
@@ -596,12 +532,12 @@ class ReviewLinkDeliveryService:
                     f"receive_id_type={receive_id_type}, note={note or '-'}, error={exc}"
                 )
 
-        if not failed_recipients and len(successful_recipients) == len(recipients):
+        if successful_recipients and failed_recipients:
+            status = "partial_failed"
+            error = "部分收件人发送失败"
+        elif successful_recipients:
             status = "success"
             error = ""
-        elif successful_recipients:
-            status = "failed"
-            error = "发送失败，详见收件人明细"
         else:
             status = "failed"
             error = "全部收件人发送失败"
@@ -610,7 +546,7 @@ class ReviewLinkDeliveryService:
             **delivery_state,
             "status": status,
             "last_attempt_at": attempt_at,
-            "last_sent_at": attempt_at if status == "success" else str(delivery_state.get("last_sent_at", "") or "").strip(),
+            "last_sent_at": attempt_at if successful_recipients else str(delivery_state.get("last_sent_at", "") or "").strip(),
             "error": error,
             "url": url,
             "successful_recipients": successful_recipients,
@@ -709,17 +645,23 @@ class ReviewLinkDeliveryService:
             for item in results
             if str(item.get("delivery", {}).get("status", "") or "").strip().lower() == "success"
         )
+        partial_failed_count = sum(
+            1
+            for item in results
+            if str(item.get("delivery", {}).get("status", "") or "").strip().lower() == "partial_failed"
+        )
         unsent_rows = [
             item
             for item in results
-            if str(item.get("delivery", {}).get("status", "") or "").strip().lower() != "success"
+            if str(item.get("delivery", {}).get("status", "") or "").strip().lower()
+            not in {"success", "partial_failed"}
         ]
         emit_log(
             "[交接班][审核链接发送] 批次完成 "
             f"batch={batch_key_text}, building={building_text or '-'}, "
-            f"success={success_count}, failed={len(unsent_rows)}"
+            f"success={success_count}, partial_failed={partial_failed_count}, unsent={len(unsent_rows)}"
         )
-        if source != "auto" and success_count == 0 and unsent_rows:
+        if source != "auto" and success_count == 0 and partial_failed_count == 0 and unsent_rows:
             first_error = str(unsent_rows[0].get("delivery", {}).get("error", "") or "").strip() or "审核链接发送失败"
             raise RuntimeError(first_error)
         return {
@@ -770,10 +712,7 @@ class ReviewLinkDeliveryService:
             f"enabled={int(recipient_snapshot.get('enabled_count', 0) or 0)}, "
             f"disabled={int(recipient_snapshot.get('disabled_count', 0) or 0)}, "
             f"invalid={int(recipient_snapshot.get('invalid_count', 0) or 0)}, "
-            f"open_ids={recipient_snapshot.get('open_ids', [])}, "
-            f"disabled_open_ids={recipient_snapshot.get('disabled_open_ids', [])}, "
-            f"invalid_recipients={recipient_snapshot.get('invalid_recipients', [])}, "
-            f"access_ready={bool(url)}, "
+            f"open_ids={recipient_snapshot.get('open_ids', [])}, access_ready={bool(url)}, "
             f"recipient_source={str(recipient_snapshot.get('source', '') or '').strip() or 'unknown'}"
         )
         message_text = self._build_message(
@@ -808,7 +747,6 @@ class ReviewLinkDeliveryService:
                     {
                         "open_id": open_id,
                         "note": note,
-                        "step": "text",
                         "error": str(exc),
                     }
                 )
@@ -817,12 +755,12 @@ class ReviewLinkDeliveryService:
                     f"building={building_text}, open_id={open_id}, receive_id_type={receive_id_type}, note={note or '-'}, error={exc}"
                 )
 
-        if not failed_recipients and len(successful_recipients) == len(recipients):
+        if successful_recipients and failed_recipients:
+            status = "partial_failed"
+            error = "部分收件人发送失败"
+        elif successful_recipients:
             status = "success"
             error = ""
-        elif successful_recipients:
-            status = "failed"
-            error = "发送失败，详见收件人明细"
         else:
             status = "failed"
             error = "全部收件人发送失败"

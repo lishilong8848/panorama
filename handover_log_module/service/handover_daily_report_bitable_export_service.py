@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -221,78 +221,6 @@ class HandoverDailyReportBitableExportService:
             error_detail=str(detail or "").strip(),
         )
 
-    @staticmethod
-    def _formula_literal(value: Any) -> str:
-        if isinstance(value, bool):
-            return "TRUE()" if value else "FALSE()"
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return str(int(value)) if isinstance(value, int) else str(value)
-        text = str(value or "").strip().replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{text}"'
-
-    def _build_record_filter_formula(self, *, duty_date: str, duty_shift: str, cfg: Dict[str, Any]) -> str:
-        fields = cfg.get("fields", {})
-        year_field = str(fields.get("year", "年度") or "年度").strip()
-        date_field = str(fields.get("date", "日期") or "日期").strip()
-        shift_field = str(fields.get("shift", "班次") or "班次").strip()
-        next_date = (datetime.strptime(str(duty_date or "").strip(), "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-        return (
-            f"AND(CurrentValue.[{year_field}]={self._formula_literal(self._year_text(duty_date))}, "
-            f"CurrentValue.[{date_field}]>=TODATE({self._formula_literal(duty_date)}), "
-            f"CurrentValue.[{date_field}]<TODATE({self._formula_literal(next_date)}), "
-            f"CurrentValue.[{shift_field}]={self._formula_literal(self._shift_text(duty_shift))})"
-        )
-
-    def _build_record_scoped_filter_formula(self, *, duty_date: str, duty_shift: str, cfg: Dict[str, Any]) -> str:
-        fields = cfg.get("fields", {})
-        year_field = str(fields.get("year", "年度") or "年度").strip()
-        shift_field = str(fields.get("shift", "班次") or "班次").strip()
-        return (
-            f"AND(CurrentValue.[{year_field}]={self._formula_literal(self._year_text(duty_date))}, "
-            f"CurrentValue.[{shift_field}]={self._formula_literal(self._shift_text(duty_shift))})"
-        )
-
-    def _write_record_with_url_fallback(
-        self,
-        *,
-        client: Any,
-        table_id: str,
-        payload_fields: Dict[str, Any],
-        record_id: str,
-        spreadsheet_url: str,
-        report_field_name: str,
-        report_link_ui_type: str,
-        duty_date: str,
-        duty_shift: str,
-        emit_log: Callable[[str], None],
-    ) -> str:
-        try:
-            if record_id:
-                client.update_record(table_id=table_id, record_id=record_id, fields=payload_fields)
-                return record_id
-            responses = client.batch_create_records(table_id=table_id, fields_list=[payload_fields], batch_size=1)
-        except Exception as exc:  # noqa: BLE001
-            if not self._is_url_field_conv_fail(exc):
-                raise
-            emit_log(
-                "[交接班][日报多维] URL 字段写入回退重试 "
-                f"field={report_field_name}, ui_type={report_link_ui_type or '-'}, batch={duty_date}|{duty_shift}"
-            )
-            payload_fields[report_field_name] = self._build_report_link_object_payload(spreadsheet_url)
-            try:
-                if record_id:
-                    client.update_record(table_id=table_id, record_id=record_id, fields=payload_fields)
-                    return record_id
-                responses = client.batch_create_records(table_id=table_id, fields_list=[payload_fields], batch_size=1)
-            except Exception as retry_exc:  # noqa: BLE001
-                raise self._build_url_field_error(str(retry_exc)) from retry_exc
-        new_record_id = ""
-        if responses and isinstance(responses[0], dict):
-            records = responses[0].get("data", {}).get("records", []) if isinstance(responses[0].get("data", {}), dict) else []
-            if isinstance(records, list) and records and isinstance(records[0], dict):
-                new_record_id = str(records[0].get("record_id", "") or "").strip()
-        return new_record_id
-
     def _match_existing_record_ids(
         self,
         *,
@@ -319,57 +247,6 @@ class HandoverDailyReportBitableExportService:
             if year_text == target_year and shift_text == target_shift and date_ms == target_date_ms:
                 matched.append(record_id)
         return matched
-
-    def _list_existing_records_for_upsert(
-        self,
-        *,
-        client: Any,
-        table_id: str,
-        cfg: Dict[str, Any],
-        target: Dict[str, Any],
-        duty_date: str,
-        duty_shift: str,
-        emit_log: Callable[[str], None],
-    ) -> List[Dict[str, Any]]:
-        page_size = int(target.get("page_size", 500) or 500)
-        max_records = int(target.get("max_records", 5000) or 5000)
-        attempts = [
-            ("exact", self._build_record_filter_formula(duty_date=duty_date, duty_shift=duty_shift, cfg=cfg)),
-            ("year_shift", self._build_record_scoped_filter_formula(duty_date=duty_date, duty_shift=duty_shift, cfg=cfg)),
-        ]
-        collected: List[Dict[str, Any]] = []
-        seen: set[str] = set()
-        for label, filter_formula in attempts:
-            existing_records = client.list_records(
-                table_id=table_id,
-                page_size=page_size,
-                max_records=max_records,
-                filter_formula=filter_formula,
-            )
-            for item in existing_records:
-                if not isinstance(item, dict):
-                    continue
-                record_id = str(item.get("record_id", "") or "").strip()
-                dedupe_key = record_id or f"{label}:{len(collected)}"
-                if dedupe_key in seen:
-                    continue
-                seen.add(dedupe_key)
-                collected.append(item)
-            matched_ids = self._match_existing_record_ids(
-                existing_records=collected,
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                cfg=cfg,
-            )
-            if matched_ids:
-                if label != "exact":
-                    emit_log(
-                        f"[交接班][日报多维] 精确过滤未命中，已使用范围过滤匹配旧记录: batch={duty_date}|{duty_shift}, strategy={label}, matched={len(matched_ids)}"
-                    )
-                return collected
-            if label == "exact" and existing_records:
-                return collected
-        return []
 
     def export_record(
         self,
@@ -399,14 +276,10 @@ class HandoverDailyReportBitableExportService:
         except Exception as exc:  # noqa: BLE001
             fields_meta = []
             emit_log(f"[交接班][日报多维] 字段元数据读取失败，按纯文本链接回退: {exc}")
-        existing_records = self._list_existing_records_for_upsert(
-            client=client,
+        existing_records = client.list_records(
             table_id=table_id,
-            cfg=cfg,
-            target=target,
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            emit_log=emit_log,
+            page_size=int(target.get("page_size", 500) or 500),
+            max_records=int(target.get("max_records", 5000) or 5000),
         )
         matched_ids = self._match_existing_record_ids(
             existing_records=existing_records,
@@ -414,7 +287,13 @@ class HandoverDailyReportBitableExportService:
             duty_shift=duty_shift,
             cfg=cfg,
         )
-        update_record_id = matched_ids[0] if matched_ids and bool(target.get("replace_existing", True)) else ""
+        if matched_ids and bool(target.get("replace_existing", True)):
+            client.batch_delete_records(
+                table_id=table_id,
+                record_ids=matched_ids,
+                batch_size=int(target.get("delete_batch_size", 200) or 200),
+            )
+            emit_log(f"[交接班][日报多维] 删除旧记录 count={len(matched_ids)}, batch={duty_date}|{duty_shift}")
 
         summary_token = client.upload_attachment_bytes(
             file_name=summary_path.name,
@@ -443,20 +322,26 @@ class HandoverDailyReportBitableExportService:
                 {"file_token": external_token},
             ],
         }
-        record_id = self._write_record_with_url_fallback(
-            client=client,
-            table_id=table_id,
-            payload_fields=payload_fields,
-            record_id=update_record_id,
-            spreadsheet_url=spreadsheet_url,
-            report_field_name=fields["report_link"],
-            report_link_ui_type=report_link_ui_type,
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            emit_log=emit_log,
-        )
-        action_text = "更新" if update_record_id else "写入"
-        emit_log(f"[交接班][日报多维] {action_text}成功 batch={duty_date}|{duty_shift}, record_id={record_id or '-'}")
+        try:
+            responses = client.batch_create_records(table_id=table_id, fields_list=[payload_fields], batch_size=1)
+        except Exception as exc:  # noqa: BLE001
+            if not self._is_url_field_conv_fail(exc):
+                raise
+            emit_log(
+                "[交接班][日报多维] URL 字段写入回退重试 "
+                f"field={report_field_name}, ui_type={report_link_ui_type or '-'}, batch={duty_date}|{duty_shift}"
+            )
+            payload_fields[fields["report_link"]] = self._build_report_link_object_payload(spreadsheet_url)
+            try:
+                responses = client.batch_create_records(table_id=table_id, fields_list=[payload_fields], batch_size=1)
+            except Exception as retry_exc:  # noqa: BLE001
+                raise self._build_url_field_error(str(retry_exc)) from retry_exc
+        record_id = ""
+        if responses and isinstance(responses[0], dict):
+            records = responses[0].get("data", {}).get("records", []) if isinstance(responses[0].get("data", {}), dict) else []
+            if isinstance(records, list) and records and isinstance(records[0], dict):
+                record_id = str(records[0].get("record_id", "") or "").strip()
+        emit_log(f"[交接班][日报多维] 写入成功 batch={duty_date}|{duty_shift}, record_id={record_id or '-'}")
         return {
             "status": "success",
             "record_id": record_id,

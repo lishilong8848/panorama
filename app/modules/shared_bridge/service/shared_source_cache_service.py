@@ -190,7 +190,6 @@ def _normalize_nullable_text(value: Any) -> str:
 
 class SharedSourceCacheService:
     EXTERNAL_FULL_SNAPSHOT_MAX_AGE_SEC = 15.0
-    EXTERNAL_FAST_OVERVIEW_MAX_AGE_SEC = 30.0
     REFRESHING_ENTRY_TIMEOUT_SEC = 600.0
     REPAIR_SWEEP_COOLDOWN_SEC = 30.0
     ORPHAN_FILE_RETENTION_DAYS = 60
@@ -277,8 +276,6 @@ class SharedSourceCacheService:
         self._external_full_snapshot_cache: Dict[str, Any] = {}
         self._external_full_snapshot_dirty = True
         self._external_full_snapshot_built_monotonic = 0.0
-        self._external_fast_overview_cache: Dict[str, Any] = {}
-        self._external_fast_overview_built_monotonic = 0.0
         self._last_refreshing_repair_monotonic = 0.0
         self._refresh_config()
         with self._lock:
@@ -1064,114 +1061,6 @@ class SharedSourceCacheService:
         presented["display_overview"] = dict(presented)
         return presented
 
-    def _cached_external_fast_family(self, source_family: str) -> Dict[str, Any] | None:
-        overview = self._external_fast_overview_cache if isinstance(self._external_fast_overview_cache, dict) else {}
-        families = overview.get("families", []) if isinstance(overview.get("families", []), list) else []
-        normalized_family = self._normalize_source_family(source_family)
-        for family in families:
-            if not isinstance(family, dict):
-                continue
-            if str(family.get("key", "") or "").strip() == normalized_family:
-                return copy.deepcopy(family)
-        return None
-
-    def _build_latest_selection_from_cached_external_family(
-        self,
-        *,
-        source_family: str,
-        buildings: List[str],
-        max_selection_age_hours: float,
-    ) -> Dict[str, Any] | None:
-        family = self._cached_external_fast_family(source_family)
-        if not isinstance(family, dict):
-            return None
-        requested = [str(item or "").strip() for item in buildings if str(item or "").strip()]
-        if not requested:
-            return None
-        selected_rows = family.get("selected_entries", []) if isinstance(family.get("selected_entries", []), list) else []
-        by_building: Dict[str, Dict[str, Any]] = {}
-        for item in selected_rows:
-            if not isinstance(item, dict):
-                continue
-            building = str(item.get("building", "") or "").strip()
-            if building not in requested or building in by_building:
-                continue
-            file_path = str(item.get("file_path", "") or item.get("resolved_file_path", "") or "").strip()
-            relative_path = str(item.get("relative_path", "") or "").strip()
-            if not file_path and relative_path and self.shared_root is not None:
-                file_path = str(self.shared_root / relative_path)
-            if not file_path:
-                continue
-            normalized_item = dict(item)
-            normalized_item["building"] = building
-            normalized_item["file_path"] = file_path
-            by_building[building] = normalized_item
-
-        if len(by_building) < len(requested):
-            display_rows = family.get("buildings", []) if isinstance(family.get("buildings", []), list) else []
-            for row in display_rows:
-                if not isinstance(row, dict):
-                    continue
-                building = str(row.get("building", "") or "").strip()
-                if building not in requested or building in by_building:
-                    continue
-                status = str(row.get("status_key", "") or row.get("status", "") or "").strip().lower()
-                file_path = str(row.get("file_path", "") or row.get("resolved_file_path", "") or "").strip()
-                if status != "ready" or not file_path:
-                    continue
-                by_building[building] = {
-                    "source_family": self._normalize_source_family(source_family),
-                    "building": building,
-                    "bucket_kind": "latest",
-                    "bucket_key": str(row.get("bucket_key", "") or family.get("best_bucket_key", "") or "").strip(),
-                    "duty_date": str(row.get("duty_date", "") or "").strip(),
-                    "duty_shift": str(row.get("duty_shift", "") or "").strip(),
-                    "downloaded_at": str(row.get("downloaded_at", "") or "").strip(),
-                    "relative_path": str(row.get("relative_path", "") or "").strip(),
-                    "status": "ready",
-                    "metadata": {},
-                    "file_path": file_path,
-                }
-
-        best_bucket_key = str(family.get("best_bucket_key", "") or family.get("current_bucket", "") or "").strip()
-        best_bucket_dt = _parse_hour_bucket(best_bucket_key)
-        best_bucket_age_hours = None
-        is_best_bucket_too_old = bool(family.get("is_best_bucket_too_old", False))
-        if best_bucket_dt is not None:
-            best_bucket_age_hours = round(max(0.0, (_now_dt() - best_bucket_dt).total_seconds() / 3600.0), 3)
-            is_best_bucket_too_old = best_bucket_age_hours > float(max_selection_age_hours)
-
-        selected_entries = [by_building[building] for building in requested if building in by_building]
-        missing_buildings = [building for building in requested if building not in by_building]
-        stale_buildings = [
-            str(item or "").strip()
-            for item in family.get("stale_buildings", [])
-            if str(item or "").strip()
-        ] if isinstance(family.get("stale_buildings", []), list) else []
-        return {
-            "best_bucket_key": best_bucket_key,
-            "best_bucket_age_hours": best_bucket_age_hours,
-            "is_best_bucket_too_old": is_best_bucket_too_old,
-            "selected_entries": selected_entries,
-            "fallback_buildings": [
-                str(item or "").strip()
-                for item in family.get("fallback_buildings", [])
-                if str(item or "").strip()
-            ] if isinstance(family.get("fallback_buildings", []), list) else [],
-            "missing_buildings": missing_buildings,
-            "stale_buildings": stale_buildings,
-            "blocked_buildings": [
-                item for item in family.get("blocked_buildings", []) if isinstance(item, dict)
-            ] if isinstance(family.get("blocked_buildings", []), list) else [],
-            "buildings": family.get("buildings", []) if isinstance(family.get("buildings", []), list) else [],
-            "can_proceed": bool(family.get("can_proceed", False))
-            and not missing_buildings
-            and not stale_buildings
-            and not is_best_bucket_too_old
-            and len(selected_entries) == len(requested),
-            "source": "external_fast_overview_cache",
-        }
-
     def get_external_source_cache_overview_fast(self) -> Dict[str, Any]:
         """Fast external UI snapshot from the cache index only.
 
@@ -1179,11 +1068,6 @@ class SharedSourceCacheService:
         external dashboard can render known status and paths immediately. The
         full shared-bridge snapshot still performs validation in the background.
         """
-        with self._lock:
-            if self._external_fast_overview_cache:
-                age_sec = time.monotonic() - float(self._external_fast_overview_built_monotonic or 0.0)
-                if age_sec < self.EXTERNAL_FAST_OVERVIEW_MAX_AGE_SEC:
-                    return copy.deepcopy(self._external_fast_overview_cache)
         buildings = self.get_enabled_buildings()
         current_bucket = self._current_hour_bucket or self.current_hour_bucket()
         snapshot = {
@@ -1213,9 +1097,6 @@ class SharedSourceCacheService:
             FAMILY_ALARM_EVENT: self._build_fast_alarm_external_family_from_index(buildings=buildings),
         }
         snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
-        with self._lock:
-            self._external_fast_overview_cache = copy.deepcopy(snapshot["display_overview"])
-            self._external_fast_overview_built_monotonic = time.monotonic()
         return copy.deepcopy(snapshot["display_overview"])
 
     def _get_external_full_snapshot_cached(self) -> Dict[str, Any]:
@@ -2625,25 +2506,6 @@ class SharedSourceCacheService:
         max_version_gap: int = 3,
         max_selection_age_hours: float = 3.0,
     ) -> Dict[str, Any]:
-        if self.role_mode == "external":
-            requested = [
-                str(item or "").strip()
-                for item in (buildings or self.get_enabled_buildings())
-                if str(item or "").strip()
-            ]
-            cached_selection = self._build_latest_selection_from_cached_external_family(
-                source_family=source_family,
-                buildings=list(dict.fromkeys(requested)),
-                max_selection_age_hours=max_selection_age_hours,
-            )
-            if cached_selection is not None:
-                return cached_selection
-            return self._build_fast_latest_selection_from_index(
-                source_family=source_family,
-                buildings=list(dict.fromkeys(requested)),
-                max_version_gap=max_version_gap,
-                max_selection_age_hours=max_selection_age_hours,
-            )
         self._repair_stale_refreshing_entries()
         requested = [
             str(item or "").strip()
@@ -2660,9 +2522,9 @@ class SharedSourceCacheService:
                 source_family=source_family,
                 building=building,
             )
-            file_path = self._resolve_entry_file_path(entry)
             if not entry:
                 continue
+            file_path = self._resolve_entry_file_path(entry)
             bucket_key = str(entry.get("bucket_key", "") or "").strip()
             bucket_dt = _parse_hour_bucket(bucket_key)
             if file_path is None or bucket_dt is None:

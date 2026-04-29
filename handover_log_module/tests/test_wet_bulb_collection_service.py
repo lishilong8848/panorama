@@ -125,7 +125,7 @@ def test_resolve_wet_bulb_value_falls_back_to_source_rows() -> None:
             row_index=1,
             b_text="",
             c_text="",
-            d_name="E-124-DDC-100_室外湿度1",
+            d_name="E-124-DDC-100_室外温度1",
             e_raw=14.11,
             value=14.11,
             b_norm="",
@@ -332,21 +332,3 @@ def test_continue_from_source_units_logs_runtime_error_failure_in_chinese(monkey
     assert result["status"] == "failed"
     assert result["failed_buildings"] == [{"building": "E楼", "error": "页面超时", "code": "page_timeout"}]
     assert any("[湿球温度定时采集][E楼] 提取失败: 页面超时" in line for line in logs)
-
-
-def test_continue_from_source_units_logs_disabled_skip() -> None:
-    service = WetBulbCollectionService(_build_runtime_config_for_run(enable_auto_switch_wifi=False))
-    logs: list[str] = []
-    cfg = _build_cfg()
-    cfg["enabled"] = False
-
-    result = service.continue_from_source_units(
-        source_units=[{"building": "E楼", "file_path": "fake.xlsx"}],
-        emit_log=logs.append,
-        cfg=cfg,
-        target_descriptor=_build_success_target(target_kind="wiki_token_pair"),
-    )
-
-    assert result["status"] == "skipped"
-    assert result["reason"] == "disabled"
-    assert any("wet_bulb_collection.enabled=false" in line for line in logs)

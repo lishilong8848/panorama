@@ -103,7 +103,7 @@ def test_runtime_resources_route_returns_resource_snapshot() -> None:
     assert payload["controlled_browser"]["queue_length"] == 1
 
 
-def test_list_jobs_route_uses_live_job_summary_when_runtime_snapshot_is_stale() -> None:
+def test_list_jobs_route_prefers_runtime_status_snapshot_when_available() -> None:
     request = _fake_request()
 
     class _Coordinator:
@@ -131,9 +131,8 @@ def test_list_jobs_route_uses_live_job_summary_when_runtime_snapshot_is_stale() 
 
     payload = routes.list_jobs(request, limit=10, statuses="")
 
-    assert payload["count"] == 2
-    assert payload["jobs"][0]["job_id"] == "job-running"
-    assert payload["jobs"][1]["job_id"] == "job-waiting"
+    assert payload["count"] == 1
+    assert payload["jobs"][0]["job_id"] == "job-from-sqlite"
 
 
 def test_runtime_resources_route_prefers_runtime_status_snapshot_when_available() -> None:

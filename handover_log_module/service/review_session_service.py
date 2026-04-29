@@ -71,17 +71,11 @@ def _reraise_review_store_error(exc: Exception) -> None:
 
 def _normalize_review_link_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
-    status = str(payload.get("status", "") or "").strip().lower()
-    if status == "partial_failed":
-        status = "failed"
-    error = str(payload.get("error", "") or "").strip()
-    if error == "部分收件人发送失败":
-        error = "发送失败，详见收件人明细"
     return {
-        "status": status,
+        "status": str(payload.get("status", "") or "").strip().lower(),
         "last_attempt_at": str(payload.get("last_attempt_at", "") or "").strip(),
         "last_sent_at": str(payload.get("last_sent_at", "") or "").strip(),
-        "error": error,
+        "error": str(payload.get("error", "") or "").strip(),
         "url": str(payload.get("url", "") or "").strip(),
         "successful_recipients": [
             str(item or "").strip()
@@ -96,7 +90,6 @@ def _normalize_review_link_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any
             {
                 "open_id": str(item.get("open_id", "") or "").strip(),
                 "note": str(item.get("note", "") or "").strip(),
-                "step": str(item.get("step", "") or "").strip(),
                 "error": str(item.get("error", "") or "").strip(),
             }
             for item in (
@@ -112,62 +105,53 @@ def _normalize_review_link_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any
     }
 
 
-def _normalize_capacity_image_delivery(raw: Dict[str, Any] | None) -> Dict[str, Any]:
-    payload = raw if isinstance(raw, dict) else {}
-    status = str(payload.get("status", "") or "").strip().lower()
-    if status == "partial_failed":
-        status = "failed"
-    error = str(payload.get("error", "") or "").strip()
-    if error == "部分收件人发送失败":
-        error = "发送失败，详见收件人明细"
-    return {
-        "status": status,
-        "last_attempt_at": str(payload.get("last_attempt_at", "") or "").strip(),
-        "last_sent_at": str(payload.get("last_sent_at", "") or "").strip(),
-        "error": error,
-        "image_path": str(payload.get("image_path", "") or "").strip(),
-        "image_key": str(payload.get("image_key", "") or "").strip(),
-        "image_signature": str(payload.get("image_signature", "") or "").strip(),
-        "cache_hit": bool(payload.get("cache_hit", False)),
-        "generated_at": str(payload.get("generated_at", "") or "").strip(),
-        "successful_recipients": [
-            str(item or "").strip()
-            for item in (
-                payload.get("successful_recipients", [])
-                if isinstance(payload.get("successful_recipients", []), list)
-                else []
-            )
-            if str(item or "").strip()
-        ],
-        "failed_recipients": [
-            {
-                "open_id": str(item.get("open_id", "") or "").strip(),
-                "note": str(item.get("note", "") or "").strip(),
-                "step": str(item.get("step", "") or "").strip(),
-                "error": str(item.get("error", "") or "").strip(),
-            }
-            for item in (
-                payload.get("failed_recipients", [])
-                if isinstance(payload.get("failed_recipients", []), list)
-                else []
-            )
-            if isinstance(item, dict)
-        ],
-        "source": str(payload.get("source", "") or "").strip().lower(),
-    }
-
-
 _CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13"]
 _SUBSTATION_110KV_BLOCK_ID = "substation_110kv"
-_SUBSTATION_110KV_ROWS = (
-    ("incoming_akai", "阿开", "incoming"),
-    ("incoming_ajia", "阿家", "incoming"),
-    ("transformer_1", "1#主变", "transformer"),
-    ("transformer_2", "2#主变", "transformer"),
-    ("transformer_3", "3#主变", "transformer"),
-    ("transformer_4", "4#主变", "transformer"),
-)
-_SUBSTATION_110KV_VALUE_KEYS = ("line_voltage", "current", "power_kw", "power_factor", "load_rate")
+_SUBSTATION_110KV_VALUE_KEYS = ["line_voltage", "current", "power_kw", "power_factor", "load_rate"]
+_SUBSTATION_110KV_COLUMNS = [
+    {"key": "line_voltage", "label": "线电压"},
+    {"key": "current", "label": "电流/输出电流"},
+    {"key": "power_kw", "label": "当前功率KW"},
+    {"key": "power_factor", "label": "功率因数"},
+    {"key": "load_rate", "label": "负载率"},
+]
+_SUBSTATION_110KV_ROWS = [
+    {"row_id": "incoming_akai", "label": "阿开", "group": "incoming"},
+    {"row_id": "incoming_ajia", "label": "阿家", "group": "incoming"},
+    {"row_id": "transformer_1", "label": "1#主变", "group": "transformer"},
+    {"row_id": "transformer_2", "label": "2#主变", "group": "transformer"},
+    {"row_id": "transformer_3", "label": "3#主变", "group": "transformer"},
+    {"row_id": "transformer_4", "label": "4#主变", "group": "transformer"},
+]
+
+
+def _normalize_substation_110kv_payload(raw: Dict[str, Any] | None) -> Dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    source_rows = payload.get("rows", [])
+    rows = source_rows if isinstance(source_rows, list) else []
+    by_id: Dict[str, Dict[str, Any]] = {}
+    by_label: Dict[str, Dict[str, Any]] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        row_id = str(item.get("row_id", "") or "").strip()
+        label = str(item.get("label", "") or "").strip()
+        if row_id:
+            by_id[row_id] = item
+        if label:
+            by_label[label] = item
+    output_rows: List[Dict[str, Any]] = []
+    for base in _SUBSTATION_110KV_ROWS:
+        source = by_id.get(base["row_id"]) or by_label.get(base["label"]) or {}
+        row = {
+            "row_id": base["row_id"],
+            "label": base["label"],
+            "group": base.get("group", ""),
+        }
+        for key in _SUBSTATION_110KV_VALUE_KEYS:
+            row[key] = str(source.get(key, "") if isinstance(source, dict) else "")
+        output_rows.append(row)
+    return {"rows": output_rows}
 
 
 class ReviewSessionService:
@@ -193,239 +177,6 @@ class ReviewSessionService:
     def _review_cfg(self) -> Dict[str, Any]:
         review_ui = self.config.get("review_ui", {})
         return review_ui if isinstance(review_ui, dict) else {}
-
-    @staticmethod
-    def substation_110kv_block_id() -> str:
-        return _SUBSTATION_110KV_BLOCK_ID
-
-    @staticmethod
-    def _default_substation_110kv_payload(batch_key: str = "") -> Dict[str, Any]:
-        return {
-            "block_id": _SUBSTATION_110KV_BLOCK_ID,
-            "batch_key": str(batch_key or "").strip(),
-            "revision": 0,
-            "updated_at": "",
-            "updated_by_building": "",
-            "updated_by_client": "",
-            "columns": [
-                {"key": "line_voltage", "label": "线电压"},
-                {"key": "current", "label": "电流/输出电流"},
-                {"key": "power_kw", "label": "当前功率KW"},
-                {"key": "power_factor", "label": "功率因数"},
-                {"key": "load_rate", "label": "负载率"},
-            ],
-            "rows": [
-                {
-                    "row_id": row_id,
-                    "label": label,
-                    "group": group,
-                    **{key: "" for key in _SUBSTATION_110KV_VALUE_KEYS},
-                }
-                for row_id, label, group in _SUBSTATION_110KV_ROWS
-            ],
-        }
-
-    @classmethod
-    def normalize_substation_110kv_payload(cls, raw: Dict[str, Any] | None, *, batch_key: str = "") -> Dict[str, Any]:
-        payload = raw if isinstance(raw, dict) else {}
-        row_by_id: Dict[str, Dict[str, Any]] = {}
-        row_by_label: Dict[str, Dict[str, Any]] = {}
-        for item in payload.get("rows", []) if isinstance(payload.get("rows", []), list) else []:
-            if not isinstance(item, dict):
-                continue
-            row_id = str(item.get("row_id", "") or "").strip()
-            label = str(item.get("label", "") or "").strip()
-            if row_id:
-                row_by_id[row_id] = item
-            if label:
-                row_by_label[label] = item
-        rows: List[Dict[str, Any]] = []
-        for row_id, label, group in _SUBSTATION_110KV_ROWS:
-            source = row_by_id.get(row_id) or row_by_label.get(label) or {}
-            row = {
-                "row_id": row_id,
-                "label": label,
-                "group": group,
-            }
-            for key in _SUBSTATION_110KV_VALUE_KEYS:
-                row[key] = str(source.get(key, "") or "").strip()
-            rows.append(row)
-        default_payload = cls._default_substation_110kv_payload(batch_key=batch_key)
-        default_payload.update(
-            {
-                "batch_key": str(payload.get("batch_key", "") or batch_key or "").strip(),
-                "revision": int(payload.get("revision", 0) or 0),
-                "updated_at": str(payload.get("updated_at", "") or "").strip(),
-                "updated_by_building": str(payload.get("updated_by_building", "") or "").strip(),
-                "updated_by_client": str(payload.get("updated_by_client", "") or "").strip(),
-                "rows": rows,
-            }
-        )
-        return default_payload
-
-    def get_substation_110kv(self, batch_key: str) -> Dict[str, Any]:
-        target_batch = str(batch_key or "").strip()
-        try:
-            raw = self._review_state_store.get_shared_block(
-                batch_key=target_batch,
-                block_id=_SUBSTATION_110KV_BLOCK_ID,
-                fallback=self._default_substation_110kv_payload(batch_key=target_batch),
-            )
-        except Exception as exc:  # noqa: BLE001
-            _reraise_review_store_error(exc)
-        return self.normalize_substation_110kv_payload(raw, batch_key=target_batch)
-
-    def get_substation_110kv_lock(self, *, batch_key: str, client_id: str = "") -> Dict[str, Any]:
-        block = self.get_substation_110kv(batch_key)
-        try:
-            return self._review_state_store.get_shared_block_lock(
-                batch_key=str(batch_key or "").strip(),
-                block_id=_SUBSTATION_110KV_BLOCK_ID,
-                revision=int(block.get("revision", 0) or 0),
-                client_id=str(client_id or "").strip(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            _reraise_review_store_error(exc)
-
-    def claim_substation_110kv_lock(
-        self,
-        *,
-        batch_key: str,
-        building: str,
-        client_id: str,
-        holder_label: str = "",
-        lease_ttl_sec: int = 60,
-    ) -> Dict[str, Any]:
-        block = self.get_substation_110kv(batch_key)
-        try:
-            return self._review_state_store.claim_shared_block_lock(
-                batch_key=str(batch_key or "").strip(),
-                block_id=_SUBSTATION_110KV_BLOCK_ID,
-                revision=int(block.get("revision", 0) or 0),
-                building=str(building or "").strip(),
-                client_id=str(client_id or "").strip(),
-                holder_label=str(holder_label or "").strip(),
-                lease_ttl_sec=lease_ttl_sec,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _reraise_review_store_error(exc)
-
-    def heartbeat_substation_110kv_lock(
-        self,
-        *,
-        batch_key: str,
-        client_id: str,
-        lease_ttl_sec: int = 60,
-    ) -> Dict[str, Any]:
-        block = self.get_substation_110kv(batch_key)
-        try:
-            return self._review_state_store.heartbeat_shared_block_lock(
-                batch_key=str(batch_key or "").strip(),
-                block_id=_SUBSTATION_110KV_BLOCK_ID,
-                revision=int(block.get("revision", 0) or 0),
-                client_id=str(client_id or "").strip(),
-                lease_ttl_sec=lease_ttl_sec,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _reraise_review_store_error(exc)
-
-    def mark_substation_110kv_dirty(
-        self,
-        *,
-        batch_key: str,
-        building: str,
-        client_id: str,
-        rows: List[Dict[str, Any]] | None = None,
-    ) -> Dict[str, Any]:
-        target_batch = str(batch_key or "").strip()
-        block = self.get_substation_110kv(target_batch)
-        dirty_payload: Dict[str, Any] = {}
-        if rows is not None:
-            dirty_payload = self.normalize_substation_110kv_payload(
-                {
-                    "batch_key": target_batch,
-                    "revision": int(block.get("revision", 0) or 0),
-                    "updated_at": str(block.get("updated_at", "") or "").strip(),
-                    "updated_by_building": str(block.get("updated_by_building", "") or "").strip(),
-                    "updated_by_client": str(block.get("updated_by_client", "") or "").strip(),
-                    "rows": rows if isinstance(rows, list) else [],
-                },
-                batch_key=target_batch,
-            )
-        try:
-            return self._review_state_store.mark_shared_block_dirty(
-                batch_key=target_batch,
-                block_id=_SUBSTATION_110KV_BLOCK_ID,
-                revision=int(block.get("revision", 0) or 0),
-                building=str(building or "").strip(),
-                client_id=str(client_id or "").strip(),
-                dirty_payload=dirty_payload,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _reraise_review_store_error(exc)
-
-    def clear_expired_substation_110kv_dirty(self, *, batch_key: str, client_id: str = "") -> Dict[str, Any]:
-        block = self.get_substation_110kv(batch_key)
-        try:
-            return self._review_state_store.clear_expired_shared_block_dirty(
-                batch_key=str(batch_key or "").strip(),
-                block_id=_SUBSTATION_110KV_BLOCK_ID,
-                revision=int(block.get("revision", 0) or 0),
-                client_id=str(client_id or "").strip(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            _reraise_review_store_error(exc)
-
-    def clear_substation_110kv_dirty(self, *, batch_key: str, client_id: str) -> Dict[str, Any]:
-        block = self.get_substation_110kv(batch_key)
-        try:
-            return self._review_state_store.clear_shared_block_dirty(
-                batch_key=str(batch_key or "").strip(),
-                block_id=_SUBSTATION_110KV_BLOCK_ID,
-                revision=int(block.get("revision", 0) or 0),
-                client_id=str(client_id or "").strip(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            _reraise_review_store_error(exc)
-
-    def release_substation_110kv_lock(self, *, batch_key: str, client_id: str) -> Dict[str, Any]:
-        block = self.get_substation_110kv(batch_key)
-        try:
-            return self._review_state_store.release_shared_block_lock(
-                batch_key=str(batch_key or "").strip(),
-                block_id=_SUBSTATION_110KV_BLOCK_ID,
-                revision=int(block.get("revision", 0) or 0),
-                client_id=str(client_id or "").strip(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            _reraise_review_store_error(exc)
-
-    def save_substation_110kv(
-        self,
-        *,
-        batch_key: str,
-        building: str,
-        client_id: str,
-        base_revision: int,
-        rows: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        target_batch = str(batch_key or "").strip()
-        payload = self.normalize_substation_110kv_payload(
-            {"batch_key": target_batch, "rows": rows if isinstance(rows, list) else []},
-            batch_key=target_batch,
-        )
-        try:
-            saved = self._review_state_store.save_shared_block(
-                batch_key=target_batch,
-                block_id=_SUBSTATION_110KV_BLOCK_ID,
-                payload=payload,
-                base_revision=int(base_revision or 0),
-                updated_by_building=str(building or "").strip(),
-                updated_by_client=str(client_id or "").strip(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            _reraise_review_store_error(exc)
-        return self.normalize_substation_110kv_payload(saved, batch_key=target_batch)
 
     def _template_output_dir(self) -> Path | None:
         template_cfg = self.config.get("template", {})
@@ -974,6 +725,34 @@ class ReviewSessionService:
             "input_signature": str(merged.get("input_signature", "") or "").strip(),
         }
 
+    @staticmethod
+    def _normalize_capacity_running_units(raw: Dict[str, Any] | None) -> Dict[str, List[Dict[str, Any]]]:
+        payload = raw if isinstance(raw, dict) else {}
+        output: Dict[str, List[Dict[str, Any]]] = {"west": [], "east": []}
+        for zone in ("west", "east"):
+            rows = payload.get(zone, [])
+            if not isinstance(rows, list):
+                continue
+            for item in rows[:2]:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    unit = int(item.get("unit", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    unit = 0
+                if unit <= 0:
+                    continue
+                output[zone].append(
+                    {
+                        "unit": unit,
+                        "metric_key": str(item.get("metric_key", "") or "").strip(),
+                        "mode_code": str(item.get("mode_code", "") or "").strip(),
+                        "mode_text": str(item.get("mode_text", "") or "").strip(),
+                    }
+                )
+            output[zone].sort(key=lambda row: int(row.get("unit", 0) or 0))
+        return output
+
     def _normalize_session(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         building = str(raw.get("building", "")).strip()
         duty_date = str(raw.get("duty_date", "")).strip()
@@ -1001,6 +780,7 @@ class ReviewSessionService:
                 for item in (raw.get("capacity_warnings", []) if isinstance(raw.get("capacity_warnings", []), list) else [])
                 if str(item or "").strip()
             ],
+            "capacity_running_units": self._normalize_capacity_running_units(raw.get("capacity_running_units", {})),
             "capacity_sync": capacity_sync,
             "data_file": str(raw.get("data_file", "")).strip(),
             "source_mode": str(raw.get("source_mode", "")).strip(),
@@ -1015,7 +795,6 @@ class ReviewSessionService:
                 raw.get("source_data_attachment_export", {})
             ),
             "review_link_delivery": _normalize_review_link_delivery(raw.get("review_link_delivery", {})),
-            "capacity_image_delivery": _normalize_capacity_image_delivery(raw.get("capacity_image_delivery", {})),
         }
 
     def _managed_source_file_references(self, state: Dict[str, Any]) -> set[str]:
@@ -1697,6 +1476,181 @@ class ReviewSessionService:
         except Exception as exc:  # noqa: BLE001
             _reraise_review_store_error(exc)
 
+    def _compose_substation_110kv_block(self, raw_block: Dict[str, Any]) -> Dict[str, Any]:
+        block = raw_block if isinstance(raw_block, dict) else {}
+        payload = block.get("payload", {}) if isinstance(block.get("payload", {}), dict) else {}
+        normalized = _normalize_substation_110kv_payload(payload)
+        return {
+            "block_id": _SUBSTATION_110KV_BLOCK_ID,
+            "batch_key": str(block.get("batch_key", "") or "").strip(),
+            "revision": int(block.get("revision", 0) or 0),
+            "updated_at": str(block.get("updated_at", "") or "").strip(),
+            "updated_by_building": str(block.get("updated_by_building", "") or "").strip(),
+            "updated_by_client": str(block.get("updated_by_client", "") or "").strip(),
+            "columns": [dict(item) for item in _SUBSTATION_110KV_COLUMNS],
+            "rows": normalized["rows"],
+        }
+
+    def get_substation_110kv_state(
+        self,
+        *,
+        batch_key: str,
+        client_id: str = "",
+    ) -> Dict[str, Any]:
+        batch_key_text = str(batch_key or "").strip()
+        try:
+            raw_block = self._review_state_store.get_shared_block(
+                batch_key=batch_key_text,
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+            )
+            block = self._compose_substation_110kv_block(raw_block)
+            lock = self._review_state_store.get_shared_block_lock(
+                batch_key=batch_key_text,
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                current_revision=int(block.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+            )
+            dirty_payload = lock.get("dirty_payload", {}) if isinstance(lock.get("dirty_payload", {}), dict) else {}
+            if lock.get("dirty") and dirty_payload:
+                dirty_block = _normalize_substation_110kv_payload(dirty_payload)
+                block = dict(block)
+                block["rows"] = dirty_block["rows"]
+                block["dirty_preview"] = True
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        return {
+            "shared_blocks": {_SUBSTATION_110KV_BLOCK_ID: block},
+            "shared_block_locks": {_SUBSTATION_110KV_BLOCK_ID: lock},
+        }
+
+    def claim_substation_110kv_lock(
+        self,
+        *,
+        batch_key: str,
+        building: str,
+        client_id: str,
+        holder_label: str = "",
+        lease_ttl_sec: int = 60,
+    ) -> Dict[str, Any]:
+        state = self.get_substation_110kv_state(batch_key=batch_key, client_id=client_id)
+        block = state["shared_blocks"][_SUBSTATION_110KV_BLOCK_ID]
+        try:
+            lock = self._review_state_store.claim_shared_block_lock(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                building=str(building or "").strip(),
+                client_id=str(client_id or "").strip(),
+                holder_label=str(holder_label or "").strip(),
+                current_revision=int(block.get("revision", 0) or 0),
+                lease_ttl_sec=lease_ttl_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        state = self.get_substation_110kv_state(batch_key=batch_key, client_id=client_id)
+        state["shared_block_locks"][_SUBSTATION_110KV_BLOCK_ID] = lock
+        return state
+
+    def heartbeat_substation_110kv_lock(
+        self,
+        *,
+        batch_key: str,
+        client_id: str,
+        lease_ttl_sec: int = 60,
+    ) -> Dict[str, Any]:
+        state = self.get_substation_110kv_state(batch_key=batch_key, client_id=client_id)
+        block = state["shared_blocks"][_SUBSTATION_110KV_BLOCK_ID]
+        try:
+            lock = self._review_state_store.heartbeat_shared_block_lock(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                client_id=str(client_id or "").strip(),
+                current_revision=int(block.get("revision", 0) or 0),
+                lease_ttl_sec=lease_ttl_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        state = self.get_substation_110kv_state(batch_key=batch_key, client_id=client_id)
+        state["shared_block_locks"][_SUBSTATION_110KV_BLOCK_ID] = lock
+        return state
+
+    def release_substation_110kv_lock(
+        self,
+        *,
+        batch_key: str,
+        client_id: str,
+    ) -> Dict[str, Any]:
+        state = self.get_substation_110kv_state(batch_key=batch_key, client_id=client_id)
+        block = state["shared_blocks"][_SUBSTATION_110KV_BLOCK_ID]
+        try:
+            lock = self._review_state_store.release_shared_block_lock(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                client_id=str(client_id or "").strip(),
+                current_revision=int(block.get("revision", 0) or 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        state = self.get_substation_110kv_state(batch_key=batch_key, client_id=client_id)
+        state["shared_block_locks"][_SUBSTATION_110KV_BLOCK_ID] = lock
+        return state
+
+    def mark_substation_110kv_dirty(
+        self,
+        *,
+        batch_key: str,
+        building: str,
+        client_id: str,
+        rows: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        payload = _normalize_substation_110kv_payload({"rows": rows if isinstance(rows, list) else []})
+        state = self.get_substation_110kv_state(batch_key=batch_key, client_id=client_id)
+        block = state["shared_blocks"][_SUBSTATION_110KV_BLOCK_ID]
+        try:
+            lock = self._review_state_store.mark_shared_block_dirty(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                building=str(building or "").strip(),
+                client_id=str(client_id or "").strip(),
+                payload=payload,
+                current_revision=int(block.get("revision", 0) or 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        if not bool(lock.get("dirty_marked", False)):
+            raise ReviewSessionConflictError("110KV变电站正在其他楼栋编辑，请稍后重试")
+        return self.get_substation_110kv_state(batch_key=batch_key, client_id=client_id)
+
+    def save_substation_110kv(
+        self,
+        *,
+        batch_key: str,
+        building: str,
+        client_id: str,
+        rows: List[Dict[str, Any]],
+        base_revision: int | None = None,
+    ) -> Dict[str, Any]:
+        payload = _normalize_substation_110kv_payload({"rows": rows if isinstance(rows, list) else []})
+        try:
+            saved = self._review_state_store.save_shared_block(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+                building=str(building or "").strip(),
+                client_id=str(client_id or "").strip(),
+                payload=payload,
+                base_revision=base_revision,
+            )
+        except ValueError as exc:
+            raise ReviewSessionConflictError(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        block = self._compose_substation_110kv_block(saved.get("block", {}))
+        lock = saved.get("lock", {}) if isinstance(saved.get("lock", {}), dict) else {}
+        return {
+            "shared_blocks": {_SUBSTATION_110KV_BLOCK_ID: block},
+            "shared_block_locks": {_SUBSTATION_110KV_BLOCK_ID: lock},
+            "no_change": bool(saved.get("no_change", False)),
+        }
+
     def get_session_for_building_duty(self, building: str, duty_date: str, duty_shift: str) -> Dict[str, Any] | None:
         return self._get_session_for_building_duty(
             building,
@@ -1921,6 +1875,7 @@ class ReviewSessionService:
         capacity_error: str = "",
         capacity_warnings: List[str] | None = None,
         capacity_sync: Dict[str, Any] | None = None,
+        capacity_running_units: Dict[str, Any] | None = None,
         source_mode: str,
         source_file_cache: Dict[str, Any] | None = None,
         source_data_attachment_export: Dict[str, Any] | None = None,
@@ -1966,6 +1921,7 @@ class ReviewSessionService:
                 for item in (capacity_warnings if isinstance(capacity_warnings, list) else [])
                 if str(item or "").strip()
             ],
+            "capacity_running_units": self._normalize_capacity_running_units(capacity_running_units),
             "capacity_sync": self._normalize_capacity_sync(
                 capacity_sync,
                 fallback=self._derive_capacity_sync_from_legacy_fields(
@@ -2023,28 +1979,6 @@ class ReviewSessionService:
             raise ReviewSessionNotFoundError("review session not found")
         session = self._normalize_session(raw_session)
         session["review_link_delivery"] = _normalize_review_link_delivery(review_link_delivery)
-        session["updated_at"] = _now_text()
-        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
-        return dict(session)
-
-    def update_capacity_image_delivery(
-        self,
-        *,
-        session_id: str,
-        capacity_image_delivery: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        target_session_id = str(session_id or "").strip()
-        if not target_session_id:
-            raise ReviewSessionNotFoundError("review session not found")
-        state = self._load_state()
-        sessions = state.get("review_sessions", {})
-        if not isinstance(sessions, dict) or target_session_id not in sessions:
-            raise ReviewSessionNotFoundError("review session not found")
-        raw_session = sessions.get(target_session_id, {})
-        if not isinstance(raw_session, dict):
-            raise ReviewSessionNotFoundError("review session not found")
-        session = self._normalize_session(raw_session)
-        session["capacity_image_delivery"] = _normalize_capacity_image_delivery(capacity_image_delivery)
         session["updated_at"] = _now_text()
         self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)
@@ -2128,7 +2062,6 @@ class ReviewSessionService:
         capacity_sync: Dict[str, Any],
         capacity_status: str = "",
         capacity_error: str = "",
-        capacity_warnings: List[str] | None = None,
     ) -> Dict[str, Any]:
         target_session_id = str(session_id or "").strip()
         state = self._load_state()
@@ -2150,12 +2083,6 @@ class ReviewSessionService:
             session["capacity_status"] = str(capacity_status or "").strip().lower()
         if capacity_error is not None:
             session["capacity_error"] = str(capacity_error or "").strip()
-        if isinstance(capacity_warnings, list):
-            session["capacity_warnings"] = [
-                str(item or "").strip()
-                for item in capacity_warnings
-                if str(item or "").strip()
-            ]
         session["updated_at"] = _now_text()
         self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)

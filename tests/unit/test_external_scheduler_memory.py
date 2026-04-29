@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 import sys
 
-import pytest
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -15,20 +13,7 @@ from app.config.config_adapter import adapt_runtime_config
 
 
 class _FakeJobService:
-    def update_log_buffer_size(self, _size: int) -> None:
-        return None
-
-    def configure_task_engine(self, **_kwargs) -> None:
-        return None
-
-    def has_incomplete_jobs(self) -> bool:
-        return False
-
-    def has_running_jobs(self) -> bool:
-        return False
-
-    def set_global_log_sink(self, _sink) -> None:  # noqa: ANN001
-        return None
+    pass
 
 
 def _build_base_config(runtime_state_root: Path) -> dict:
@@ -179,91 +164,3 @@ def test_record_external_scheduler_toggle_updates_target_key_only(tmp_path: Path
     assert resolved["states"]["day_metric_upload"] is True
     assert resolved["states"]["auto_flow"] is True
     assert resolved["states"]["handover"] is False
-
-
-def test_external_scheduler_memory_updates_runtime_scheduler_paths(tmp_path: Path) -> None:
-    container = _build_container(tmp_path)
-    container.persist_external_scheduler_autostart_state(
-        source="调度开关",
-        states={
-            "auto_flow": False,
-            "handover": True,
-            "wet_bulb_collection": True,
-            "day_metric_upload": False,
-            "alarm_event_upload": False,
-            "monthly_change_report": False,
-            "monthly_event_report": False,
-        },
-    )
-
-    result = container.apply_external_scheduler_autostart_state(source="test")
-
-    assert result["ok"] is True
-    assert container.runtime_config["handover_log"]["scheduler"]["auto_start_in_gui"] is True
-    assert container.runtime_config["wet_bulb_collection"]["scheduler"]["auto_start_in_gui"] is True
-
-
-def test_refresh_single_scheduler_runtime_rebuilds_only_target_scheduler(tmp_path: Path) -> None:
-    container = _build_container(tmp_path)
-    container.scheduler = container._build_scheduler()
-    container.handover_scheduler_manager = container._build_handover_scheduler_manager()
-    original_auto_flow = container.scheduler
-    original_handover = container.handover_scheduler_manager
-    updated = _build_base_config(tmp_path / "runtime_state")
-    updated["features"]["handover_log"]["scheduler"]["morning_time"] = "08:30:00"
-
-    result = container.refresh_single_scheduler_runtime("handover", updated, restart_running=False)
-
-    assert result["ok"] is True
-    assert result["scheduler_key"] == "handover"
-    assert container.scheduler is original_auto_flow
-    assert container.handover_scheduler_manager is not original_handover
-    assert container.runtime_config["handover_log"]["scheduler"]["morning_time"] == "08:30:00"
-
-
-def test_refresh_single_scheduler_runtime_restarts_only_running_target(tmp_path: Path) -> None:
-    container = _build_container(tmp_path)
-    container.scheduler = container._build_scheduler()
-    container.handover_scheduler_manager = container._build_handover_scheduler_manager()
-    container.handover_scheduler_manager.start()
-    original_auto_flow = container.scheduler
-    original_handover = container.handover_scheduler_manager
-    updated = _build_base_config(tmp_path / "runtime_state")
-    updated["features"]["handover_log"]["scheduler"]["afternoon_time"] = "17:05:00"
-
-    result = container.refresh_single_scheduler_runtime("handover", updated, restart_running=True)
-
-    assert result["ok"] is True
-    assert result["was_running"] is True
-    assert result["running"] is True
-    assert result["restarted"] is True
-    assert container.scheduler is original_auto_flow
-    assert container.handover_scheduler_manager is not original_handover
-    assert container.runtime_config["handover_log"]["scheduler"]["afternoon_time"] == "17:05:00"
-    container.handover_scheduler_manager.stop()
-
-
-def test_refresh_single_scheduler_runtime_restores_previous_scheduler_when_rebuild_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    container = _build_container(tmp_path)
-    container.handover_scheduler_manager = container._build_handover_scheduler_manager()
-    container.handover_scheduler_manager.start()
-    original_scheduler = container.handover_scheduler_manager
-    original_config = json.loads(json.dumps(container.config, ensure_ascii=False))
-    updated = _build_base_config(tmp_path / "runtime_state")
-    updated["features"]["handover_log"]["scheduler"]["morning_time"] = "09:45:00"
-
-    def _boom():
-        raise RuntimeError("rebuild failed")
-
-    monkeypatch.setattr(container, "_build_handover_scheduler_manager", _boom)
-
-    with pytest.raises(RuntimeError, match="rebuild failed"):
-        container.refresh_single_scheduler_runtime("handover", updated, restart_running=True)
-
-    assert container.handover_scheduler_manager is original_scheduler
-    assert container.handover_scheduler_manager.is_running() is True
-    assert container.config == original_config
-    container.handover_scheduler_manager.stop()

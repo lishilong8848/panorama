@@ -164,7 +164,7 @@ class ReviewSessionStateStore:
                 updated_at TEXT NOT NULL DEFAULT '',
                 updated_by_building TEXT NOT NULL DEFAULT '',
                 updated_by_client TEXT NOT NULL DEFAULT '',
-                payload_json TEXT NOT NULL
+                payload_json TEXT NOT NULL DEFAULT '{}'
             );
             CREATE INDEX IF NOT EXISTS idx_review_shared_blocks_batch
                 ON review_shared_blocks(batch_key, block_id);
@@ -173,35 +173,22 @@ class ReviewSessionStateStore:
                 lock_key TEXT PRIMARY KEY,
                 batch_key TEXT NOT NULL,
                 block_id TEXT NOT NULL,
-                holder_building TEXT NOT NULL,
-                holder_client_id TEXT NOT NULL,
-                holder_label TEXT NOT NULL,
-                claimed_at TEXT NOT NULL,
-                last_heartbeat_at TEXT NOT NULL,
-                lease_expires_at TEXT NOT NULL,
+                holder_building TEXT NOT NULL DEFAULT '',
+                holder_client_id TEXT NOT NULL DEFAULT '',
+                holder_label TEXT NOT NULL DEFAULT '',
+                claimed_at TEXT NOT NULL DEFAULT '',
+                last_heartbeat_at TEXT NOT NULL DEFAULT '',
+                lease_expires_at TEXT NOT NULL DEFAULT '',
                 dirty INTEGER NOT NULL DEFAULT 0,
                 dirty_at TEXT NOT NULL DEFAULT '',
                 dirty_by_building TEXT NOT NULL DEFAULT '',
                 dirty_by_client TEXT NOT NULL DEFAULT '',
-                dirty_payload_json TEXT NOT NULL DEFAULT ''
+                dirty_payload_json TEXT NOT NULL DEFAULT '{}'
             );
-            CREATE INDEX IF NOT EXISTS idx_review_shared_block_locks_target
+            CREATE INDEX IF NOT EXISTS idx_review_shared_block_locks_batch
                 ON review_shared_block_locks(batch_key, block_id);
             """
         )
-        columns = {
-            str(row["name"] or "").strip()
-            for row in conn.execute("PRAGMA table_info(review_shared_block_locks)").fetchall()
-        }
-        for column, definition in {
-            "dirty": "INTEGER NOT NULL DEFAULT 0",
-            "dirty_at": "TEXT NOT NULL DEFAULT ''",
-            "dirty_by_building": "TEXT NOT NULL DEFAULT ''",
-            "dirty_by_client": "TEXT NOT NULL DEFAULT ''",
-            "dirty_payload_json": "TEXT NOT NULL DEFAULT ''",
-        }.items():
-            if column not in columns:
-                conn.execute(f"ALTER TABLE review_shared_block_locks ADD COLUMN {column} {definition}")
 
     def _migrate_from_legacy_if_needed(self, conn: sqlite3.Connection) -> None:
         existing_sessions = int(
@@ -559,6 +546,84 @@ class ReviewSessionStateStore:
     def _shared_block_key(batch_key: str, block_id: str) -> str:
         return f"{str(batch_key or '').strip()}::{str(block_id or '').strip()}"
 
+    @staticmethod
+    def _loads_json_object(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        text = str(value or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:  # noqa: BLE001
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _row_to_shared_block(
+        self,
+        row: sqlite3.Row | None,
+        *,
+        batch_key: str,
+        block_id: str,
+    ) -> Dict[str, Any]:
+        if row is None:
+            return {
+                "batch_key": str(batch_key or "").strip(),
+                "block_id": str(block_id or "").strip(),
+                "revision": 0,
+                "updated_at": "",
+                "updated_by_building": "",
+                "updated_by_client": "",
+                "payload": {},
+            }
+        return {
+            "batch_key": str(row["batch_key"] or "").strip(),
+            "block_id": str(row["block_id"] or "").strip(),
+            "revision": int(row["revision"] or 0),
+            "updated_at": str(row["updated_at"] or "").strip(),
+            "updated_by_building": str(row["updated_by_building"] or "").strip(),
+            "updated_by_client": str(row["updated_by_client"] or "").strip(),
+            "payload": self._loads_json_object(row["payload_json"]),
+        }
+
+    def _row_to_shared_lock(
+        self,
+        row: sqlite3.Row | None,
+        *,
+        current_revision: int,
+        client_id: str,
+    ) -> Dict[str, Any]:
+        holder_client_id = str(row["holder_client_id"] or "").strip() if row is not None else ""
+        holder_label = str(row["holder_label"] or "").strip() if row is not None else ""
+        holder_building = str(row["holder_building"] or "").strip() if row is not None else ""
+        lease_expires_at = str(row["lease_expires_at"] or "").strip() if row is not None else ""
+        claimed_at = str(row["claimed_at"] or "").strip() if row is not None else ""
+        last_heartbeat_at = str(row["last_heartbeat_at"] or "").strip() if row is not None else ""
+        client_holds_lock = bool(client_id and holder_client_id and holder_client_id == client_id)
+        active_editor = (
+            {
+                "holder_label": holder_label,
+                "holder_building": holder_building,
+                "claimed_at": claimed_at,
+                "last_heartbeat_at": last_heartbeat_at,
+            }
+            if holder_label or holder_building
+            else None
+        )
+        dirty = bool(int(row["dirty"] or 0)) if row is not None else False
+        return {
+            "current_revision": int(current_revision or 0),
+            "active_editor": active_editor,
+            "lease_expires_at": lease_expires_at,
+            "is_editing_elsewhere": bool(active_editor and not client_holds_lock),
+            "client_holds_lock": client_holds_lock,
+            "dirty": dirty,
+            "dirty_at": str(row["dirty_at"] or "").strip() if row is not None and dirty else "",
+            "dirty_by_building": str(row["dirty_by_building"] or "").strip() if row is not None and dirty else "",
+            "dirty_by_client": str(row["dirty_by_client"] or "").strip() if row is not None and dirty else "",
+            "dirty_payload": self._loads_json_object(row["dirty_payload_json"]) if row is not None and dirty else {},
+        }
+
     def _row_to_concurrency(
         self,
         row: sqlite3.Row | None,
@@ -773,189 +838,45 @@ class ReviewSessionStateStore:
             client_id=normalized_client_id,
         ) | {"released": released}
 
-    @staticmethod
-    def _row_to_shared_block(row: sqlite3.Row | None, *, fallback: Dict[str, Any]) -> Dict[str, Any]:
-        if row is None:
-            return dict(fallback if isinstance(fallback, dict) else {})
-        try:
-            payload = json.loads(str(row["payload_json"] or "{}"))
-        except Exception:  # noqa: BLE001
-            payload = {}
-        output = dict(payload if isinstance(payload, dict) else {})
-        output["batch_key"] = str(row["batch_key"] or "").strip()
-        output["block_id"] = str(row["block_id"] or "").strip()
-        output["revision"] = int(row["revision"] or 0)
-        output["updated_at"] = str(row["updated_at"] or "").strip()
-        output["updated_by_building"] = str(row["updated_by_building"] or "").strip()
-        output["updated_by_client"] = str(row["updated_by_client"] or "").strip()
-        return output
-
     def get_shared_block(
         self,
         *,
         batch_key: str,
         block_id: str,
-        fallback: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
+        batch_key_text = str(batch_key or "").strip()
+        block_id_text = str(block_id or "").strip()
+        if not batch_key_text or not block_id_text:
+            return self._row_to_shared_block(None, batch_key=batch_key_text, block_id=block_id_text)
         self.ensure_ready()
-        normalized_batch = str(batch_key or "").strip()
-        normalized_block = str(block_id or "").strip()
-        fallback_payload = dict(fallback if isinstance(fallback, dict) else {})
         with self.connect(read_only=True) as conn:
             row = conn.execute(
-                "SELECT * FROM review_shared_blocks WHERE block_key=?",
-                (self._shared_block_key(normalized_batch, normalized_block),),
-            ).fetchone()
-        return self._row_to_shared_block(row, fallback=fallback_payload)
-
-    def save_shared_block(
-        self,
-        *,
-        batch_key: str,
-        block_id: str,
-        payload: Dict[str, Any],
-        base_revision: int,
-        updated_by_building: str,
-        updated_by_client: str,
-    ) -> Dict[str, Any]:
-        normalized_batch = str(batch_key or "").strip()
-        normalized_block = str(block_id or "").strip()
-        normalized_client_id = str(updated_by_client or "").strip()
-        if not normalized_batch or not normalized_block:
-            raise ValueError("shared_block_target_required")
-        if not normalized_client_id:
-            raise ValueError("client_id_required")
-        block_key = self._shared_block_key(normalized_batch, normalized_block)
-        now_text = _now_text()
-        self.ensure_ready()
-        with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?", (now_text,))
-            lock_row = conn.execute(
-                "SELECT * FROM review_shared_block_locks WHERE lock_key=? AND lease_expires_at > ?",
-                (block_key, now_text),
-            ).fetchone()
-            if lock_row is None or str(lock_row["holder_client_id"] or "").strip() != normalized_client_id:
-                raise ValueError("shared_block_lock_required")
-            current = conn.execute(
-                "SELECT * FROM review_shared_blocks WHERE block_key=?",
-                (block_key,),
-            ).fetchone()
-            current_revision = int(current["revision"] or 0) if current is not None else 0
-            if int(base_revision or 0) != current_revision:
-                raise ValueError("shared_block_revision_conflict")
-            next_revision = current_revision + 1
-            stored_payload = dict(payload if isinstance(payload, dict) else {})
-            stored_payload["batch_key"] = normalized_batch
-            stored_payload["block_id"] = normalized_block
-            stored_payload["revision"] = next_revision
-            stored_payload["updated_at"] = now_text
-            stored_payload["updated_by_building"] = str(updated_by_building or "").strip()
-            stored_payload["updated_by_client"] = normalized_client_id
-            conn.execute(
                 """
-                INSERT INTO review_shared_blocks(
-                    block_key, batch_key, block_id, revision, updated_at,
-                    updated_by_building, updated_by_client, payload_json
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(block_key) DO UPDATE SET
-                    batch_key=excluded.batch_key,
-                    block_id=excluded.block_id,
-                    revision=excluded.revision,
-                    updated_at=excluded.updated_at,
-                    updated_by_building=excluded.updated_by_building,
-                    updated_by_client=excluded.updated_by_client,
-                    payload_json=excluded.payload_json
+                SELECT *
+                  FROM review_shared_blocks
+                 WHERE block_key = ?
                 """,
-                (
-                    block_key,
-                    normalized_batch,
-                    normalized_block,
-                    next_revision,
-                    now_text,
-                    str(updated_by_building or "").strip(),
-                    normalized_client_id,
-                    json.dumps(stored_payload, ensure_ascii=False),
-                ),
-            )
-            cursor = conn.execute(
-                """
-                UPDATE review_shared_block_locks
-                   SET dirty=0,
-                       dirty_at='',
-                       dirty_by_building='',
-                       dirty_by_client='',
-                       dirty_payload_json=''
-                 WHERE lock_key=?
-                   AND holder_client_id=?
-                """,
-                (block_key, normalized_client_id),
-            )
-            row = conn.execute(
-                "SELECT * FROM review_shared_blocks WHERE block_key=?",
-                (block_key,),
+                (self._shared_block_key(batch_key_text, block_id_text),),
             ).fetchone()
-        return self._row_to_shared_block(row, fallback={})
-
-    def _row_to_shared_lock(
-        self,
-        row: sqlite3.Row | None,
-        *,
-        revision: int,
-        client_id: str,
-    ) -> Dict[str, Any]:
-        holder_client_id = str(row["holder_client_id"] or "").strip() if row is not None else ""
-        holder_label = str(row["holder_label"] or "").strip() if row is not None else ""
-        holder_building = str(row["holder_building"] or "").strip() if row is not None else ""
-        lease_expires_at = str(row["lease_expires_at"] or "").strip() if row is not None else ""
-        claimed_at = str(row["claimed_at"] or "").strip() if row is not None else ""
-        last_heartbeat_at = str(row["last_heartbeat_at"] or "").strip() if row is not None else ""
-        lock_active = bool(row is not None and lease_expires_at and lease_expires_at > _now_text())
-        dirty = bool(lock_active and row is not None and int(row["dirty"] or 0))
-        dirty_at = str(row["dirty_at"] or "").strip() if row is not None else ""
-        dirty_by_building = str(row["dirty_by_building"] or "").strip() if row is not None else ""
-        dirty_by_client = str(row["dirty_by_client"] or "").strip() if row is not None else ""
-        dirty_payload: Dict[str, Any] = {}
-        dirty_payload_json = str(row["dirty_payload_json"] or "").strip() if row is not None else ""
-        if dirty and dirty_payload_json:
-            try:
-                parsed_payload = json.loads(dirty_payload_json)
-                if isinstance(parsed_payload, dict):
-                    dirty_payload = parsed_payload
-            except Exception:
-                dirty_payload = {}
-        client_holds_lock = bool(lock_active and client_id and holder_client_id and holder_client_id == client_id)
-        active_editor = (
-            {
-                "holder_label": holder_label,
-                "holder_building": holder_building,
-                "claimed_at": claimed_at,
-                "last_heartbeat_at": last_heartbeat_at,
-            }
-            if lock_active and (holder_label or holder_building)
-            else None
-        )
-        return {
-            "current_revision": int(revision or 0),
-            "active_editor": active_editor,
-            "lease_expires_at": lease_expires_at if lock_active else "",
-            "is_editing_elsewhere": bool(active_editor and not client_holds_lock),
-            "client_holds_lock": client_holds_lock,
-            "dirty": dirty,
-            "dirty_at": dirty_at if dirty else "",
-            "dirty_by_building": dirty_by_building if dirty else "",
-            "dirty_by_client": dirty_by_client if dirty else "",
-            "dirty_payload": dirty_payload if dirty else {},
-        }
+        return self._row_to_shared_block(row, batch_key=batch_key_text, block_id=block_id_text)
 
     def get_shared_block_lock(
         self,
         *,
         batch_key: str,
         block_id: str,
-        revision: int,
+        current_revision: int,
         client_id: str = "",
     ) -> Dict[str, Any]:
+        batch_key_text = str(batch_key or "").strip()
+        block_id_text = str(block_id or "").strip()
+        normalized_client_id = str(client_id or "").strip()
+        if not batch_key_text or not block_id_text:
+            return self._row_to_shared_lock(
+                None,
+                current_revision=current_revision,
+                client_id=normalized_client_id,
+            )
         self.ensure_ready()
         with self.connect(read_only=True) as conn:
             row = conn.execute(
@@ -963,154 +884,50 @@ class ReviewSessionStateStore:
                 SELECT *
                   FROM review_shared_block_locks
                  WHERE lock_key = ?
+                   AND lease_expires_at > ?
                 """,
-                (self._shared_block_key(batch_key, block_id),),
+                (self._shared_block_key(batch_key_text, block_id_text), _now_text()),
             ).fetchone()
-        return self._row_to_shared_lock(row, revision=revision, client_id=str(client_id or "").strip())
-
-    def mark_shared_block_dirty(
-        self,
-        *,
-        batch_key: str,
-        block_id: str,
-        revision: int,
-        building: str,
-        client_id: str,
-        dirty_payload: Dict[str, Any] | None = None,
-    ) -> Dict[str, Any]:
-        normalized_client_id = str(client_id or "").strip()
-        if not normalized_client_id:
-            raise ValueError("client_id 不能为空")
-        now_text = _now_text()
-        lock_key = self._shared_block_key(batch_key, block_id)
-        self.ensure_ready()
-        with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?", (now_text,))
-            current = conn.execute(
-                "SELECT * FROM review_shared_block_locks WHERE lock_key=? AND lease_expires_at > ?",
-                (lock_key, now_text),
-            ).fetchone()
-            if current is None or str(current["holder_client_id"] or "").strip() != normalized_client_id:
-                raise ValueError("shared_block_lock_required")
-            conn.execute(
-                """
-                UPDATE review_shared_block_locks
-                   SET dirty=1,
-                       dirty_at=CASE WHEN dirty=1 AND dirty_at<>'' THEN dirty_at ELSE ? END,
-                       dirty_by_building=?,
-                       dirty_by_client=?,
-                       dirty_payload_json=?
-                 WHERE lock_key=?
-                   AND holder_client_id=?
-                """,
-                (
-                    now_text,
-                    str(building or "").strip(),
-                    normalized_client_id,
-                    json.dumps(dirty_payload if isinstance(dirty_payload, dict) else {}, ensure_ascii=False),
-                    lock_key,
-                    normalized_client_id,
-                ),
-            )
-            row = conn.execute("SELECT * FROM review_shared_block_locks WHERE lock_key=?", (lock_key,)).fetchone()
-        return self._row_to_shared_lock(row, revision=revision, client_id=normalized_client_id) | {"dirty_marked": True}
-
-    def clear_expired_shared_block_dirty(
-        self,
-        *,
-        batch_key: str,
-        block_id: str,
-        revision: int,
-        client_id: str = "",
-    ) -> Dict[str, Any]:
-        now_text = _now_text()
-        lock_key = self._shared_block_key(batch_key, block_id)
-        self.ensure_ready()
-        with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.execute(
-                """
-                UPDATE review_shared_block_locks
-                   SET dirty=0,
-                       dirty_at='',
-                       dirty_by_building='',
-                       dirty_by_client='',
-                       dirty_payload_json=''
-                 WHERE lock_key=?
-                   AND lease_expires_at <= ?
-                   AND dirty=1
-                """,
-                (lock_key, now_text),
-            )
-            cleared = cursor.rowcount > 0
-            conn.execute("DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?", (now_text,))
-            row = conn.execute("SELECT * FROM review_shared_block_locks WHERE lock_key=?", (lock_key,)).fetchone()
-        return self._row_to_shared_lock(row, revision=revision, client_id=str(client_id or "").strip()) | {"expired_dirty_cleared": cleared}
-
-    def clear_shared_block_dirty(
-        self,
-        *,
-        batch_key: str,
-        block_id: str,
-        revision: int,
-        client_id: str,
-    ) -> Dict[str, Any]:
-        normalized_client_id = str(client_id or "").strip()
-        if not normalized_client_id:
-            raise ValueError("client_id 不能为空")
-        now_text = _now_text()
-        lock_key = self._shared_block_key(batch_key, block_id)
-        self.ensure_ready()
-        with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?", (now_text,))
-            current = conn.execute(
-                "SELECT * FROM review_shared_block_locks WHERE lock_key=? AND lease_expires_at > ?",
-                (lock_key, now_text),
-            ).fetchone()
-            if current is None or str(current["holder_client_id"] or "").strip() != normalized_client_id:
-                raise ValueError("shared_block_lock_required")
-            cursor = conn.execute(
-                """
-                UPDATE review_shared_block_locks
-                   SET dirty=0,
-                       dirty_at='',
-                       dirty_by_building='',
-                       dirty_by_client='',
-                       dirty_payload_json=''
-                 WHERE lock_key=?
-                   AND holder_client_id=?
-                """,
-                (lock_key, normalized_client_id),
-            )
-            row = conn.execute("SELECT * FROM review_shared_block_locks WHERE lock_key=?", (lock_key,)).fetchone()
-        return self._row_to_shared_lock(row, revision=revision, client_id=normalized_client_id) | {"dirty_cleared": cursor.rowcount > 0}
+        return self._row_to_shared_lock(
+            row,
+            current_revision=current_revision,
+            client_id=normalized_client_id,
+        )
 
     def claim_shared_block_lock(
         self,
         *,
         batch_key: str,
         block_id: str,
-        revision: int,
         building: str,
         client_id: str,
         holder_label: str = "",
+        current_revision: int = 0,
         lease_ttl_sec: int = 60,
     ) -> Dict[str, Any]:
+        batch_key_text = str(batch_key or "").strip()
+        block_id_text = str(block_id or "").strip()
         normalized_client_id = str(client_id or "").strip()
+        if not batch_key_text:
+            raise ValueError("batch_key 不能为空")
+        if not block_id_text:
+            raise ValueError("block_id 不能为空")
         if not normalized_client_id:
             raise ValueError("client_id 不能为空")
+        building_text = str(building or "").strip()
         label = str(holder_label or "").strip() or _default_holder_label(normalized_client_id)
         now_text = _now_text()
         expires_at = _add_seconds_text(now_text, lease_ttl_sec)
-        lock_key = self._shared_block_key(batch_key, block_id)
+        lock_key = self._shared_block_key(batch_key_text, block_id_text)
         self.ensure_ready()
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?", (now_text,))
+            conn.execute(
+                "DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?",
+                (now_text,),
+            )
             current = conn.execute(
-                "SELECT * FROM review_shared_block_locks WHERE lock_key=?",
+                "SELECT * FROM review_shared_block_locks WHERE lock_key = ?",
                 (lock_key,),
             ).fetchone()
             if current is not None:
@@ -1118,31 +935,40 @@ class ReviewSessionStateStore:
                 if existing_holder and existing_holder != normalized_client_id:
                     return self._row_to_shared_lock(
                         current,
-                        revision=revision,
+                        current_revision=current_revision,
                         client_id=normalized_client_id,
                     ) | {"acquired": False}
             conn.execute(
                 """
                 INSERT INTO review_shared_block_locks(
-                    lock_key, batch_key, block_id, holder_building,
-                    holder_client_id, holder_label, claimed_at,
-                    last_heartbeat_at, lease_expires_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    lock_key,
+                    batch_key,
+                    block_id,
+                    holder_building,
+                    holder_client_id,
+                    holder_label,
+                    claimed_at,
+                    last_heartbeat_at,
+                    lease_expires_at,
+                    dirty,
+                    dirty_at,
+                    dirty_by_building,
+                    dirty_by_client,
+                    dirty_payload_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', '', '', '{}')
                 ON CONFLICT(lock_key) DO UPDATE SET
-                    batch_key=excluded.batch_key,
-                    block_id=excluded.block_id,
-                    holder_building=excluded.holder_building,
-                    holder_client_id=excluded.holder_client_id,
-                    holder_label=excluded.holder_label,
-                    claimed_at=excluded.claimed_at,
-                    last_heartbeat_at=excluded.last_heartbeat_at,
-                    lease_expires_at=excluded.lease_expires_at
+                    holder_building = excluded.holder_building,
+                    holder_client_id = excluded.holder_client_id,
+                    holder_label = excluded.holder_label,
+                    claimed_at = excluded.claimed_at,
+                    last_heartbeat_at = excluded.last_heartbeat_at,
+                    lease_expires_at = excluded.lease_expires_at
                 """,
                 (
                     lock_key,
-                    str(batch_key or "").strip(),
-                    str(block_id or "").strip(),
-                    str(building or "").strip(),
+                    batch_key_text,
+                    block_id_text,
+                    building_text,
                     normalized_client_id,
                     label,
                     now_text,
@@ -1151,12 +977,12 @@ class ReviewSessionStateStore:
                 ),
             )
             claimed = conn.execute(
-                "SELECT * FROM review_shared_block_locks WHERE lock_key=?",
+                "SELECT * FROM review_shared_block_locks WHERE lock_key = ?",
                 (lock_key,),
             ).fetchone()
         return self._row_to_shared_lock(
             claimed,
-            revision=revision,
+            current_revision=current_revision,
             client_id=normalized_client_id,
         ) | {"acquired": True}
 
@@ -1165,33 +991,40 @@ class ReviewSessionStateStore:
         *,
         batch_key: str,
         block_id: str,
-        revision: int,
         client_id: str,
+        current_revision: int = 0,
         lease_ttl_sec: int = 60,
     ) -> Dict[str, Any]:
+        batch_key_text = str(batch_key or "").strip()
+        block_id_text = str(block_id or "").strip()
         normalized_client_id = str(client_id or "").strip()
         if not normalized_client_id:
             raise ValueError("client_id 不能为空")
         now_text = _now_text()
         expires_at = _add_seconds_text(now_text, lease_ttl_sec)
-        lock_key = self._shared_block_key(batch_key, block_id)
+        lock_key = self._shared_block_key(batch_key_text, block_id_text)
         self.ensure_ready()
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?", (now_text,))
+            conn.execute(
+                "DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?",
+                (now_text,),
+            )
             current = conn.execute(
-                "SELECT * FROM review_shared_block_locks WHERE lock_key=?",
+                "SELECT * FROM review_shared_block_locks WHERE lock_key = ?",
                 (lock_key,),
             ).fetchone()
-            renewed = False
-            if current is not None and str(current["holder_client_id"] or "").strip() == normalized_client_id:
-                renewed = True
+            renewed = bool(
+                current is not None
+                and str(current["holder_client_id"] or "").strip() == normalized_client_id
+            )
+            if renewed:
                 conn.execute(
                     """
                     UPDATE review_shared_block_locks
-                       SET last_heartbeat_at=?,
-                           lease_expires_at=?
-                     WHERE lock_key=?
+                       SET last_heartbeat_at = ?,
+                           lease_expires_at = ?
+                     WHERE lock_key = ?
                     """,
                     (now_text, expires_at, lock_key),
                 )
@@ -1199,14 +1032,14 @@ class ReviewSessionStateStore:
                 """
                 SELECT *
                   FROM review_shared_block_locks
-                 WHERE lock_key=?
+                 WHERE lock_key = ?
                    AND lease_expires_at > ?
                 """,
                 (lock_key, now_text),
             ).fetchone()
         return self._row_to_shared_lock(
             current,
-            revision=revision,
+            current_revision=current_revision,
             client_id=normalized_client_id,
         ) | {"renewed": renewed}
 
@@ -1215,29 +1048,218 @@ class ReviewSessionStateStore:
         *,
         batch_key: str,
         block_id: str,
-        revision: int,
         client_id: str,
+        current_revision: int = 0,
     ) -> Dict[str, Any]:
+        batch_key_text = str(batch_key or "").strip()
+        block_id_text = str(block_id or "").strip()
         normalized_client_id = str(client_id or "").strip()
-        lock_key = self._shared_block_key(batch_key, block_id)
+        lock_key = self._shared_block_key(batch_key_text, block_id_text)
         self.ensure_ready()
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             released = conn.execute(
-                "DELETE FROM review_shared_block_locks WHERE lock_key=? AND holder_client_id=?",
+                "DELETE FROM review_shared_block_locks WHERE lock_key = ? AND holder_client_id = ?",
                 (lock_key, normalized_client_id),
             ).rowcount > 0
             current = conn.execute(
                 """
                 SELECT *
                   FROM review_shared_block_locks
-                 WHERE lock_key=?
+                 WHERE lock_key = ?
                    AND lease_expires_at > ?
                 """,
                 (lock_key, _now_text()),
             ).fetchone()
         return self._row_to_shared_lock(
             current,
-            revision=revision,
+            current_revision=current_revision,
             client_id=normalized_client_id,
         ) | {"released": released}
+
+    def mark_shared_block_dirty(
+        self,
+        *,
+        batch_key: str,
+        block_id: str,
+        building: str,
+        client_id: str,
+        payload: Dict[str, Any],
+        current_revision: int = 0,
+    ) -> Dict[str, Any]:
+        batch_key_text = str(batch_key or "").strip()
+        block_id_text = str(block_id or "").strip()
+        building_text = str(building or "").strip()
+        normalized_client_id = str(client_id or "").strip()
+        if not normalized_client_id:
+            raise ValueError("client_id 不能为空")
+        now_text = _now_text()
+        lock_key = self._shared_block_key(batch_key_text, block_id_text)
+        self.ensure_ready()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?",
+                (now_text,),
+            )
+            current = conn.execute(
+                "SELECT * FROM review_shared_block_locks WHERE lock_key = ?",
+                (lock_key,),
+            ).fetchone()
+            if current is None or str(current["holder_client_id"] or "").strip() != normalized_client_id:
+                return self._row_to_shared_lock(
+                    current,
+                    current_revision=current_revision,
+                    client_id=normalized_client_id,
+                ) | {"dirty_marked": False}
+            conn.execute(
+                """
+                UPDATE review_shared_block_locks
+                   SET dirty = 1,
+                       dirty_at = ?,
+                       dirty_by_building = ?,
+                       dirty_by_client = ?,
+                       dirty_payload_json = ?
+                 WHERE lock_key = ?
+                """,
+                (
+                    now_text,
+                    building_text,
+                    normalized_client_id,
+                    json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=False),
+                    lock_key,
+                ),
+            )
+            current = conn.execute(
+                "SELECT * FROM review_shared_block_locks WHERE lock_key = ?",
+                (lock_key,),
+            ).fetchone()
+        return self._row_to_shared_lock(
+            current,
+            current_revision=current_revision,
+            client_id=normalized_client_id,
+        ) | {"dirty_marked": True}
+
+    def save_shared_block(
+        self,
+        *,
+        batch_key: str,
+        block_id: str,
+        building: str,
+        client_id: str,
+        payload: Dict[str, Any],
+        base_revision: int | None = None,
+    ) -> Dict[str, Any]:
+        batch_key_text = str(batch_key or "").strip()
+        block_id_text = str(block_id or "").strip()
+        building_text = str(building or "").strip()
+        normalized_client_id = str(client_id or "").strip()
+        if not normalized_client_id:
+            raise ValueError("client_id 不能为空")
+        now_text = _now_text()
+        block_key = self._shared_block_key(batch_key_text, block_id_text)
+        payload_json = json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=False, sort_keys=True)
+        self.ensure_ready()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM review_shared_block_locks WHERE lease_expires_at <= ?",
+                (now_text,),
+            )
+            lock_row = conn.execute(
+                "SELECT * FROM review_shared_block_locks WHERE lock_key = ?",
+                (block_key,),
+            ).fetchone()
+            if lock_row is None or str(lock_row["holder_client_id"] or "").strip() != normalized_client_id:
+                raise ValueError("110KV变电站正在其他楼栋编辑，请稍后重试")
+            block_row = conn.execute(
+                "SELECT * FROM review_shared_blocks WHERE block_key = ?",
+                (block_key,),
+            ).fetchone()
+            current = self._row_to_shared_block(block_row, batch_key=batch_key_text, block_id=block_id_text)
+            current_revision = int(current.get("revision", 0) or 0)
+            current_payload_json = json.dumps(
+                current.get("payload", {}) if isinstance(current.get("payload", {}), dict) else {},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            no_change = payload_json == current_payload_json
+            if base_revision is not None and int(base_revision or 0) != current_revision and not no_change:
+                raise ValueError("110KV变电站内容已被其他楼栋更新，请刷新后重试")
+            if no_change:
+                conn.execute(
+                    """
+                    UPDATE review_shared_block_locks
+                       SET dirty = 0,
+                           dirty_at = '',
+                           dirty_by_building = '',
+                           dirty_by_client = '',
+                           dirty_payload_json = '{}'
+                     WHERE lock_key = ?
+                    """,
+                    (block_key,),
+                )
+            else:
+                next_revision = current_revision + 1
+                conn.execute(
+                    """
+                    INSERT INTO review_shared_blocks(
+                        block_key,
+                        batch_key,
+                        block_id,
+                        revision,
+                        updated_at,
+                        updated_by_building,
+                        updated_by_client,
+                        payload_json
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(block_key) DO UPDATE SET
+                        revision = excluded.revision,
+                        updated_at = excluded.updated_at,
+                        updated_by_building = excluded.updated_by_building,
+                        updated_by_client = excluded.updated_by_client,
+                        payload_json = excluded.payload_json
+                    """,
+                    (
+                        block_key,
+                        batch_key_text,
+                        block_id_text,
+                        next_revision,
+                        now_text,
+                        building_text,
+                        normalized_client_id,
+                        payload_json,
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE review_shared_block_locks
+                       SET dirty = 0,
+                           dirty_at = '',
+                           dirty_by_building = '',
+                           dirty_by_client = '',
+                           dirty_payload_json = '{}'
+                     WHERE lock_key = ?
+                    """,
+                    (block_key,),
+                )
+            saved_row = conn.execute(
+                "SELECT * FROM review_shared_blocks WHERE block_key = ?",
+                (block_key,),
+            ).fetchone()
+            lock_row = conn.execute(
+                """
+                SELECT *
+                  FROM review_shared_block_locks
+                 WHERE lock_key = ?
+                   AND lease_expires_at > ?
+                """,
+                (block_key, now_text),
+            ).fetchone()
+        block = self._row_to_shared_block(saved_row, batch_key=batch_key_text, block_id=block_id_text)
+        lock = self._row_to_shared_lock(
+            lock_row,
+            current_revision=int(block.get("revision", 0) or 0),
+            client_id=normalized_client_id,
+        )
+        return {"block": block, "lock": lock, "no_change": no_change}

@@ -77,13 +77,6 @@ _AIRCON_ZONE_DIRECTION_BY_AREA = {
     "3": ("west", "south"),
     "4": ("west", "north"),
 }
-_AIRCON_ROOM_SUFFIX_BY_ZONE_DIRECTION = {
-    ("east", "south"): "12",
-    ("east", "north"): "11",
-    ("west", "south"): "41",
-    ("west", "north"): "40",
-}
-_CHINESE_DIGIT_MAP = {"一": "1", "二": "2", "三": "3", "四": "4"}
 _DEFAULT_PRIMARY_PUMP_ALIASES = {
     "A楼": ["冷冻水一次泵变频反馈"],
     "B楼": ["冷冻水一次泵变频反馈"],
@@ -133,7 +126,6 @@ _E_BUILDING_FLOW_ALIASES = {
 }
 _SECONDARY_PUMP_ALIASES = ["冷冻水二次泵变频反馈", "二次冷冻泵频率反馈", "二次泵频率反馈", "冷冻水二次泵频率反馈"]
 _TANK_LEVEL_ALIASES = ["水池液位", "蓄水罐液位", "补水罐液位"]
-_ACTIVE_CHILLER_MODE_TEXTS = {"制冷", "预冷"}
 _E_BUILDING_CHILLER_SKIP_KEYS = {
     "current_or_power",
     "chilled_out_temp",
@@ -211,36 +203,20 @@ def _zone_of_row(row: RawRow) -> str:
     return ""
 
 
-def _unit_from_row(row: RawRow, *, building: str = "") -> int | None:
+def _unit_from_row(row: RawRow) -> int | None:
     text = _text(getattr(row, "c_text", ""))
     lowered = text.casefold()
-    building_text = _text(building)
     if ("150" in text or "西区" in text) and ("101" in text or "一号冷机" in text or "1号冷机" in lowered):
         return 1
     if ("150" in text or "西区" in text) and ("102" in text or "二号冷机" in text or "2号冷机" in lowered):
         return 2
     if ("150" in text or "西区" in text) and ("103" in text or "三号冷机" in text or "3号冷机" in lowered):
         return 3
-    if ("124" in text or "东区" in text) and (
-        "101" in text
-        or "四号冷机" in text
-        or "4号冷机" in lowered
-        or (building_text == "D楼" and ("一号冷机" in text or "1号冷机" in lowered))
-    ):
+    if ("124" in text or "东区" in text) and ("101" in text or "四号冷机" in text or "4号冷机" in lowered):
         return 4
-    if ("124" in text or "东区" in text) and (
-        "102" in text
-        or "五号冷机" in text
-        or "5号冷机" in lowered
-        or (building_text == "D楼" and ("二号冷机" in text or "2号冷机" in lowered))
-    ):
+    if ("124" in text or "东区" in text) and ("102" in text or "五号冷机" in text or "5号冷机" in lowered):
         return 5
-    if ("124" in text or "东区" in text) and (
-        "103" in text
-        or "六号冷机" in text
-        or "6号冷机" in lowered
-        or (building_text == "D楼" and ("三号冷机" in text or "3号冷机" in lowered))
-    ):
+    if ("124" in text or "东区" in text) and ("103" in text or "六号冷机" in text or "6号冷机" in lowered):
         return 6
     if "一号冷机" in text or "1号冷机" in lowered:
         return 1
@@ -267,9 +243,8 @@ def _compile_placeholder_regex(pattern: str) -> re.Pattern[str]:
 
 
 class CapacitySourceQuery:
-    def __init__(self, rows: Iterable[RawRow] | None, *, building: str = "") -> None:
+    def __init__(self, rows: Iterable[RawRow] | None) -> None:
         self.rows: List[RawRow] = [row for row in (rows or []) if isinstance(row, RawRow)]
-        self.building = _text(building)
 
     def _iter_rows(
         self,
@@ -285,7 +260,7 @@ class CapacitySourceQuery:
         target_rows: List[RawRow] = []
         for row in self.rows:
             row_zone = _zone_of_row(row)
-            row_unit = _unit_from_row(row, building=self.building)
+            row_unit = _unit_from_row(row)
             if normalized_zone and row_zone != normalized_zone:
                 continue
             if unit is not None and row_unit != int(unit):
@@ -690,47 +665,6 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
     return {cell: value for cell, value in results.items() if value != ""}
 
 
-def _select_active_chiller_unit(
-    query: CapacitySourceQuery,
-    *,
-    zone: str,
-    running_units: Dict[str, List[Dict[str, Any]]],
-    context: Dict[str, Any],
-) -> Dict[str, Any] | None:
-    alias_groups = _default_alias_groups(context)
-    candidates: List[tuple[bool, float, int, Dict[str, Any]]] = []
-    for unit_info in list(running_units.get(zone, [])):
-        mode_text = _text(unit_info.get("mode_text"))
-        if mode_text not in _ACTIVE_CHILLER_MODE_TEXTS:
-            continue
-        unit_number = int(unit_info.get("unit", 0) or 0)
-        if unit_number <= 0:
-            continue
-        chilled_out_temp = query.first_number_by_d_aliases(
-            alias_groups["chilled_out_temp"],
-            zone=zone,
-            unit=unit_number,
-            allow_global=False,
-        )
-        sort_temp = float(chilled_out_temp) if chilled_out_temp is not None else float("inf")
-        candidates.append(
-            (
-                chilled_out_temp is None,
-                sort_temp,
-                unit_number,
-                {
-                    "unit": unit_number,
-                    "mode_text": mode_text,
-                    "chilled_out_temp": chilled_out_temp,
-                },
-            )
-        )
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-    return dict(candidates[0][3])
-
-
 def _build_capacity_source_direct_values(query: CapacitySourceQuery, *, context: Dict[str, Any]) -> Dict[str, str]:
     alias_groups = _default_alias_groups(context)
     running_units = context.get("running_units", {}) if isinstance(context.get("running_units", {}), dict) else {}
@@ -749,27 +683,36 @@ def _build_capacity_source_direct_values(query: CapacitySourceQuery, *, context:
     if oil_amount:
         values["U16"] = oil_amount
 
+    def _first_running_unit(zone: str) -> int:
+        for unit_info in list(running_units.get(zone, []))[:1]:
+            try:
+                unit_number = int(unit_info.get("unit", 0) or 0)
+            except (TypeError, ValueError):
+                unit_number = 0
+            if unit_number > 0:
+                return unit_number
+        return 0
+
     def _zone_capacity(zone: str) -> float | None:
         primary_flow = _resolve_primary_flow_number(query, zone=zone, context=context)
-        plate_cooling_in_temp = query.first_number_by_d_aliases(
-            alias_groups["plate_cooling_in_temp"],
+        unit_number = _first_running_unit(zone)
+        if primary_flow is None or unit_number <= 0:
+            return None
+        chilled_return_temp = query.first_number_by_d_aliases(
+            alias_groups["plate_chilled_in_temp"],
             zone=zone,
-            allow_global=True,
+            unit=unit_number,
+            allow_global=False,
         )
-        if primary_flow is None or plate_cooling_in_temp is None:
+        chilled_supply_temp = query.first_number_by_d_aliases(
+            alias_groups["plate_chilled_out_temp"],
+            zone=zone,
+            unit=unit_number,
+            allow_global=False,
+        )
+        if chilled_return_temp is None or chilled_supply_temp is None:
             return None
-        selected_unit = _select_active_chiller_unit(query, zone=zone, running_units=running_units, context=context)
-        if selected_unit is not None:
-            source_temp = selected_unit.get("chilled_out_temp")
-        else:
-            source_temp = query.first_number_by_d_aliases(
-                alias_groups["plate_chilled_out_temp"],
-                zone=zone,
-                allow_global=True,
-            )
-        if source_temp is None:
-            return None
-        return abs(float(source_temp) - float(plate_cooling_in_temp)) * 4.2 * 1000 / 3600 * float(primary_flow)
+        return abs(float(chilled_return_temp) - float(chilled_supply_temp)) * float(primary_flow) * 1.163
 
     west_capacity = _zone_capacity("west")
     if west_capacity is not None:
@@ -916,36 +859,23 @@ def _build_rpp_values(snapshot: Dict[str, Any]) -> Dict[str, str]:
     return values
 
 
-def _aircon_equipment_room_code(row: RawRow, *, building_code: str) -> str:
-    b_text = _text(getattr(row, "b_text", ""))
-    c_text = _text(getattr(row, "c_text", ""))
-    combined = f"{b_text} {c_text}".upper()
-    code = _text(building_code).upper()
-    prefix_pattern = re.escape(code) if code else r"[A-Z]"
-    match = re.search(rf"(?<![A-Z0-9]){prefix_pattern}-(?P<room>[234](?:11|12|40|41))[-_]?CRAH", combined)
-    return _text(match.group("room")) if match else ""
-
-
 def _aircon_quadrant(row: RawRow, *, building_code: str) -> tuple[int, str, str] | None:
+    _ = building_code
     b_text = _text(getattr(row, "b_text", ""))
     c_text = _text(getattr(row, "c_text", ""))
     combined = f"{b_text} {c_text}"
-    equipment_room_code = _aircon_equipment_room_code(row, building_code=building_code)
-    if "空调" not in combined and not equipment_room_code:
+    if "空调" not in combined:
         return None
-    floor_match = re.search(r"([234二三四])层", combined)
-    code_match = re.search(r"([234](?:11|12|40|41))", equipment_room_code or combined)
-    area_match = re.search(r"空调区?\s*([1-4一二三四])", combined)
+    floor_match = re.search(r"([234])层", combined)
+    code_match = re.search(r"([234](?:11|12|40|41))", combined)
+    area_match = re.search(r"空调区([1-4])", combined)
     floor_token = _text(floor_match.group(1)) if floor_match else ""
-    floor_token = _CHINESE_DIGIT_MAP.get(floor_token, floor_token)
     if not floor_token and code_match:
         floor_token = _text(code_match.group(1))[:1]
     if not floor_token:
         return None
     if area_match:
-        area_token = _text(area_match.group(1))
-        area_token = _CHINESE_DIGIT_MAP.get(area_token, area_token)
-        mapping = _AIRCON_ZONE_DIRECTION_BY_AREA.get(area_token)
+        mapping = _AIRCON_ZONE_DIRECTION_BY_AREA.get(_text(area_match.group(1)))
         if mapping:
             zone, direction = mapping
             return int(floor_token), zone, direction
@@ -963,16 +893,6 @@ def _aircon_quadrant(row: RawRow, *, building_code: str) -> tuple[int, str, str]
     return None
 
 
-def _aircon_value_text(row: RawRow) -> str:
-    raw_value = getattr(row, "e_raw", None)
-    if raw_value is None:
-        return ""
-    number = getattr(row, "value", None)
-    if number is not None:
-        return format_number(number)
-    return str(raw_value).strip()
-
-
 def _build_aircon_matrix_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> Dict[str, str]:
     building_code = _text(snapshot.get("building_code")).upper()
     template_family = _text(snapshot.get("template_family")) or _TEMPLATE_FAMILY_OTHER_BUILDINGS
@@ -986,7 +906,7 @@ def _build_aircon_matrix_values(query: CapacitySourceQuery, snapshot: Dict[str, 
         if key is None:
             continue
         target_cell = target_cells.get(key)
-        value_text = _aircon_value_text(row)
+        value_text = _text(getattr(row, "e_raw", None))
         if not target_cell or not value_text:
             continue
         if target_cell in values and _text(values.get(target_cell)):
@@ -995,69 +915,9 @@ def _build_aircon_matrix_values(query: CapacitySourceQuery, snapshot: Dict[str, 
     return {cell: value for cell, value in values.items() if value != ""}
 
 
-def _aircon_expected_room_code(building_code: str, key: tuple[int, str, str]) -> str:
-    floor, zone, direction = key
-    suffix = _AIRCON_ROOM_SUFFIX_BY_ZONE_DIRECTION.get((zone, direction), "")
-    return f"{_text(building_code).upper()}-{int(floor)}{suffix}" if suffix and _text(building_code) else ""
-
-
-def _aircon_rows_by_room_code(query: CapacitySourceQuery, room_code: str) -> List[RawRow]:
-    token = _text(room_code).upper()
-    if not token:
-        return []
-    rows: List[RawRow] = []
-    for row in query.rows:
-        combined = f"{_text(getattr(row, 'b_text', ''))} {_text(getattr(row, 'c_text', ''))}".upper()
-        d_name = _casefold(getattr(row, "d_name", ""))
-        if token not in combined:
-            continue
-        if "crah" not in combined.casefold():
-            continue
-        if "总_有功功率" not in d_name and "总有功功率" not in d_name:
-            continue
-        rows.append(row)
-    return rows
-
-
-def _has_aircon_output_value(value: Any) -> bool:
-    if value is None:
-        return False
-    return str(value).strip() != ""
-
-
-def build_aircon_matrix_missing_warnings(context: Dict[str, Any], cell_values: Dict[str, Any]) -> List[str]:
-    query = CapacitySourceQuery(
-        context.get("capacity_rows", []) if isinstance(context.get("capacity_rows", []), list) else [],
-        building=_text(context.get("building")),
-    )
-    snapshot = context.get("template_snapshot", {}) if isinstance(context.get("template_snapshot", {}), dict) else {}
-    building = _text(context.get("building"))
-    building_code = _text(snapshot.get("building_code")).upper() or _extract_building_code(building)
-    template_family = _text(snapshot.get("template_family")) or _TEMPLATE_FAMILY_OTHER_BUILDINGS
-    target_cells = _AIRCON_TARGET_CELLS_BY_TEMPLATE_FAMILY.get(
-        template_family,
-        _AIRCON_TARGET_CELLS_BY_TEMPLATE_FAMILY[_TEMPLATE_FAMILY_OTHER_BUILDINGS],
-    )
-    warnings: List[str] = []
-    normalized_values = {str(cell).upper(): value for cell, value in (cell_values or {}).items()}
-    for key, target_cell in target_cells.items():
-        if _has_aircon_output_value(normalized_values.get(target_cell)):
-            continue
-        room_code = _aircon_expected_room_code(building_code, key)
-        matched_rows = _aircon_rows_by_room_code(query, room_code)
-        if not matched_rows:
-            warnings.append(f"missing_row: {building} {target_cell} 缺少 {room_code}-CRAH... 总_有功功率")
-            continue
-        warnings.append(f"missing_value: {building} {target_cell} 源表 {room_code}-CRAH... 总_有功功率 值为空")
-    return warnings
-
-
 def build_capacity_cells_with_config(context: Dict[str, Any], config: Dict[str, Any] | None = None) -> Dict[str, str]:
     _ = config
-    query = CapacitySourceQuery(
-        context.get("capacity_rows", []) if isinstance(context.get("capacity_rows", []), list) else [],
-        building=_text(context.get("building")),
-    )
+    query = CapacitySourceQuery(context.get("capacity_rows", []) if isinstance(context.get("capacity_rows", []), list) else [])
     running_units = context.get("running_units", {}) if isinstance(context.get("running_units", {}), dict) else {}
     snapshot = context.get("template_snapshot", {}) if isinstance(context.get("template_snapshot", {}), dict) else {}
 

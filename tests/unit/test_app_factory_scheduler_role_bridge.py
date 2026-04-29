@@ -137,33 +137,6 @@ class _FakeBridgeService:
         self.calls.append(("create_wet_bulb_collection_task", dict(kwargs)))
         return {"task_id": "bridge-wet-bulb-1", "feature": "wet_bulb_collection", "status": "queued_for_internal"}
 
-    def get_day_metric_by_date_cache_entries(self, *, selected_dates, buildings):  # noqa: ANN001
-        self.calls.append(
-            (
-                "get_day_metric_by_date_cache_entries",
-                {"selected_dates": list(selected_dates), "buildings": list(buildings)},
-            )
-        )
-        return [
-            {
-                "duty_date": str(selected_dates[0]),
-                "building": building,
-                "file_path": f"D:/QJPT_Shared/handover_log_family/{building}.xlsx",
-            }
-            for building in buildings
-        ] if self.ready else []
-
-    def fill_day_metric_history(self, **kwargs):  # noqa: ANN003
-        self.calls.append(("fill_day_metric_history", dict(kwargs)))
-        return []
-
-    def create_day_metric_from_download_task(self, **kwargs):  # noqa: ANN003
-        self.calls.append(("create_day_metric_from_download_task", dict(kwargs)))
-        return {"task_id": "bridge-day-metric-1", "feature": "day_metric_from_download", "status": "queued_for_internal"}
-
-    def get_or_create_day_metric_from_download_task(self, **kwargs):  # noqa: ANN003
-        return self.create_day_metric_from_download_task(**kwargs)
-
 
 class _FakeJob:
     def __init__(self, job_id: str = "job-cache-1", *, status: str = "queued", summary: str = "ok", wait_reason: str = "", bridge_task_id: str = "") -> None:
@@ -247,7 +220,6 @@ class _FakeContainer:
         self.scheduler_callback = None
         self.handover_scheduler_callback = None
         self.wet_bulb_collection_scheduler_callback = None
-        self.day_metric_upload_scheduler_callback = None
 
     def add_system_log(self, text: str, *_args, **_kwargs):
         self.logs.append(str(text))
@@ -277,9 +249,6 @@ class _FakeContainer:
     def set_wet_bulb_collection_scheduler_callback(self, callback):
         self.wet_bulb_collection_scheduler_callback = callback
 
-    def set_day_metric_upload_scheduler_callback(self, callback):
-        self.day_metric_upload_scheduler_callback = callback
-
     def set_updater_restart_callback(self, *_args, **_kwargs):
         return None
 
@@ -299,12 +268,6 @@ class _FakeContainer:
         return "wet_bulb_collection_scheduler_callback"
 
     def is_wet_bulb_collection_scheduler_executor_bound(self):
-        return True
-
-    def day_metric_upload_scheduler_executor_name(self):
-        return "day_metric_upload_scheduler_callback"
-
-    def is_day_metric_upload_scheduler_executor_bound(self):
         return True
 
 
@@ -443,24 +406,3 @@ def test_wet_bulb_scheduler_external_requires_bridge(
     assert "共享桥接未启用或共享目录未配置" in message
     assert container.job_service.started_jobs == []
     assert container.wet_bulb_records and container.wet_bulb_records[-1]["status"] == "failed"
-
-
-def test_day_metric_scheduler_external_submits_background_job_before_cache_work(
-    monkeypatch: pytest.MonkeyPatch,
-    work_dir: Path,
-):
-    bridge = _FakeBridgeService(ready=False)
-    container = _FakeContainer(
-        frontend_root=work_dir,
-        role_mode="external",
-        bridge_enabled=True,
-        bridge_service=bridge,
-    )
-    _build_app(monkeypatch, work_dir, container)
-
-    ok, message = container.day_metric_upload_scheduler_callback("12项独立上传调度")
-
-    assert ok is True
-    assert "已提交12项独立上传共享文件处理任务" in message
-    assert container.job_service.started_jobs[0]["feature"] == "day_metric_cache_by_date"
-    assert [item[0] for item in bridge.calls] == ["get_source_cache_buildings"]

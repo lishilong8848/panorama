@@ -35,7 +35,6 @@ from app.config.handover_segment_store import (
     handover_segment_target_lock,
     has_all_handover_segment_files,
     has_any_handover_segment_file,
-    preserve_non_empty_handover_building_segment_data,
     read_all_segment_documents,
     read_segment_document,
     write_segment_document,
@@ -1731,25 +1730,6 @@ def _migrate_shift_roster_people_text_fields(cfg: Dict[str, Any]) -> None:
         _migrate_fields(long_day.get("fields", {}))
 
 
-def _normalize_handover_cloud_sheet_sync_sheet_names(cfg: Dict[str, Any]) -> None:
-    features = cfg.get("features", {})
-    if not isinstance(features, dict):
-        return
-    handover = features.get("handover_log", {})
-    if not isinstance(handover, dict):
-        return
-    sync_cfg = handover.get("cloud_sheet_sync", {})
-    if not isinstance(sync_cfg, dict):
-        return
-    sheet_names = sync_cfg.get("sheet_names", {})
-    if not isinstance(sheet_names, dict):
-        sheet_names = {}
-        sync_cfg["sheet_names"] = sheet_names
-    for building in ("A楼", "B楼", "C楼", "D楼", "E楼"):
-        if not str(sheet_names.get(building, "") or "").strip():
-            sheet_names[building] = building
-
-
 def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     normalized_v3 = ensure_v3_config(cfg)
 
@@ -1764,7 +1744,6 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     normalized_v3 = ensure_v3_config(normalized_v3)
     _migrate_shift_roster_people_text_fields(normalized_v3)
     _normalize_handover_template_title_config(normalized_v3)
-    _normalize_handover_cloud_sheet_sync_sheet_names(normalized_v3)
 
     _validate_scheduler(normalized_v3)
     _validate_updater(normalized_v3)
@@ -2277,27 +2256,10 @@ def get_handover_common_segment(config_path: str | Path | None = None) -> Dict[s
 def get_handover_building_segment(building_code: str, config_path: str | Path | None = None) -> Dict[str, Any]:
     target = get_settings_path(config_path)
     building_path = handover_building_segment_path(target, building_code)
-    target_building = building_name_from_segment_code(building_code)
     if building_path.exists():
-        document = read_segment_document(building_path)
-        try:
-            root_payload = load_pipeline_config(target)
-            base_data = extract_handover_building_data(root_payload, target_building)
-            repaired_data = preserve_non_empty_handover_building_segment_data(
-                document.get("data", {}) if isinstance(document.get("data"), dict) else {},
-                base_data,
-            )
-            if repaired_data != document.get("data", {}):
-                return build_segment_document(
-                    repaired_data,
-                    revision=int(document.get("revision", 0) or 0),
-                    updated_at=str(document.get("updated_at", "") or ""),
-                )
-        except Exception:
-            return document
-        return document
+        return read_segment_document(building_path)
     _, building_docs = build_segment_documents_from_config(load_pipeline_config(target))
-    building_doc = building_docs[target_building]
+    building_doc = building_docs[building_name_from_segment_code(building_code)]
     return build_segment_document(building_doc.get("data", {}), revision=0, updated_at="")
 
 
@@ -2425,23 +2387,7 @@ def load_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
     _ = _ensure_handover_segment_files(cfg, config_path)
     composed = _compose_handover_segmented_config(cfg, config_path)
-    rewrite_title_config = _contains_noncanonical_handover_template_title_config(composed)
     normalized = validate_settings(composed)
-    if rewrite_title_config:
-        target = get_settings_path(config_path)
-        if has_any_handover_segment_file(target):
-            common_path = handover_common_segment_path(target)
-            common_doc = read_segment_document(common_path)
-            next_common_data = extract_handover_common_data(normalized)
-            if common_doc.get("data", {}) != next_common_data:
-                write_segment_document(
-                    common_path,
-                    build_segment_document(
-                        next_common_data,
-                        revision=int(common_doc.get("revision", 0) or 0) + 1,
-                    ),
-                )
-        write_settings_atomically(_normalize_footer_defaults_for_persistence(normalized), target)
     return _normalize_console_host_for_lan(normalized, config_path)
 
 

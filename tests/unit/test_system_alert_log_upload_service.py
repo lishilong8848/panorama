@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from app.bootstrap.container import AppContainer
@@ -23,15 +22,6 @@ class _FakeClient:
             }
         )
         return []
-
-
-def _wait_until(predicate, timeout_sec: float = 3.0) -> None:
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
-        if predicate():
-            return
-        time.sleep(0.05)
-    raise AssertionError("condition not met before timeout")
 
 
 def test_container_keeps_structured_alert_entries() -> None:
@@ -145,18 +135,3 @@ def test_job_service_global_sink_receives_job_output() -> None:
     service.wait_job(job.job_id, timeout_sec=5)
 
     assert any("UserWarning:" in item for item in captured)
-
-
-def test_job_service_global_sink_receives_generated_failure_line() -> None:
-    service = JobService()
-    captured = []
-    service.set_global_log_sink(lambda text: captured.append(str(text or "").strip()))
-
-    def _run(_emit_log):  # noqa: ANN001
-        raise RuntimeError("boom")
-
-    job = service.start_job(name="demo", run_func=_run)
-    service.wait_job(job.job_id, timeout_sec=5)
-    _wait_until(lambda: any("boom" in item and "文件流程失败" in item for item in captured))
-
-    assert any("boom" in item and "文件流程失败" in item for item in captured)

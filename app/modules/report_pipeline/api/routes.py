@@ -47,7 +47,6 @@ from app.modules.report_pipeline.service.job_panel_presenter import (
 from app.modules.report_pipeline.service.scheduler_state_presenter import (
     present_scheduler_overview_items,
     present_scheduler_overview_summary,
-    present_scheduler_snapshot_with_display,
     present_scheduler_state,
 )
 from app.modules.report_pipeline.service.job_service import JobBusyError, TaskEngineUnavailableError
@@ -392,29 +391,6 @@ def _health_cached_component_sync_default(
     return copy.deepcopy(value)
 
 
-def _invalidate_health_component_cache(
-    request: Request,
-    *,
-    key_prefixes: tuple[str, ...] = (),
-    keys: tuple[str, ...] = (),
-) -> None:
-    state = request.app.state
-    cache = getattr(state, _HEALTH_COMPONENT_CACHE_ATTR, None)
-    if not isinstance(cache, dict):
-        return
-    cache_lock = getattr(state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, None)
-    if not isinstance(cache_lock, _THREAD_LOCK_TYPE):
-        cache_lock = threading.Lock()
-        setattr(state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, cache_lock)
-    key_set = {str(item) for item in keys if str(item)}
-    prefixes = tuple(str(item) for item in key_prefixes if str(item))
-    with cache_lock:
-        for cache_key in list(cache.keys()):
-            cache_key_text = str(cache_key)
-            if cache_key_text in key_set or any(cache_key_text.startswith(prefix) for prefix in prefixes):
-                cache.pop(cache_key, None)
-
-
 def _empty_job_panel_summary() -> Dict[str, Any]:
     return {
         "jobs": [],
@@ -445,33 +421,6 @@ def _empty_job_panel_summary() -> Dict[str, Any]:
             },
         },
     }
-
-
-def _build_fresh_job_panel_summary(
-    container,
-    *,
-    limit: int = 60,
-    strict: bool = False,
-) -> Dict[str, Any]:
-    return build_job_panel_summary(
-        container,
-        limit=limit,
-        emit_log=getattr(container, "add_system_log", None),
-        strict=strict,
-    )
-
-
-def _request_runtime_status_refresh(container, *, reason: str) -> None:
-    coordinator = getattr(container, "runtime_status_coordinator", None)
-    if coordinator is None:
-        return
-    request_refresh = getattr(coordinator, "request_refresh", None)
-    if not callable(request_refresh):
-        return
-    try:
-        request_refresh(reason=reason)
-    except Exception:
-        return
 
 
 def _empty_runtime_resources_summary() -> Dict[str, Any]:
@@ -1081,24 +1030,6 @@ def _filter_accessible_cached_entries(entries: Any) -> list[Dict[str, Any]]:
     return output
 
 
-def _normalize_cached_entries(entries: Any, *, validate_files: bool = True) -> list[Dict[str, Any]]:
-    output: list[Dict[str, Any]] = []
-    for item in entries if isinstance(entries, list) else []:
-        if not isinstance(item, dict):
-            continue
-        building = str(item.get("building", "") or "").strip()
-        file_path = str(item.get("file_path", "") or item.get("resolved_file_path", "") or "").strip()
-        if not building or not file_path:
-            continue
-        if validate_files and not is_accessible_cached_file_path(file_path):
-            continue
-        normalized = dict(item)
-        normalized["building"] = building
-        normalized["file_path"] = file_path
-        output.append(normalized)
-    return output
-
-
 def _format_bucket_age_hours_text(value: Any) -> str:
     try:
         age_hours = float(value)
@@ -1112,7 +1043,7 @@ def _format_bucket_age_hours_text(value: Any) -> str:
     return f"{rounded:.1f} 小时"
 
 
-def _normalize_latest_cache_selection(selection: Any, *, validate_files: bool = True) -> Dict[str, Any]:
+def _normalize_latest_cache_selection(selection: Any) -> Dict[str, Any]:
     payload = selection if isinstance(selection, dict) else {}
     best_bucket_age_hours_raw = payload.get("best_bucket_age_hours")
     try:
@@ -1124,10 +1055,7 @@ def _normalize_latest_cache_selection(selection: Any, *, validate_files: bool = 
         "best_bucket_key": str(payload.get("best_bucket_key", "") or "").strip(),
         "best_bucket_age_hours": best_bucket_age_hours,
         "is_best_bucket_too_old": is_best_bucket_too_old,
-        "selected_entries": _normalize_cached_entries(
-            payload.get("selected_entries", []),
-            validate_files=validate_files,
-        ),
+        "selected_entries": _filter_accessible_cached_entries(payload.get("selected_entries", [])),
         "fallback_buildings": [
             str(item or "").strip()
             for item in payload.get("fallback_buildings", [])
@@ -1399,10 +1327,10 @@ def _run_external_day_metric_shared_flow(
         "[12项独立上传] 已进入后台共享文件处理: "
         f"dates={','.join(selected_dates)}, scope={building_scope}, building={building or '-'}"
     )
-    cached_entries = _normalize_cached_entries(bridge_service.get_day_metric_by_date_cache_entries(
+    cached_entries = _filter_accessible_cached_entries(bridge_service.get_day_metric_by_date_cache_entries(
         selected_dates=selected_dates,
         buildings=target_buildings,
-    ), validate_files=False)
+    ))
     expected_count = len(selected_dates) * len(target_buildings)
     if len(cached_entries) < expected_count:
         emit_log("[共享缓存][12项] 外网端只读取内网端已登记索引，缺失项将交由内网端补采")
@@ -1519,7 +1447,7 @@ def _run_external_monthly_auto_once_shared_flow(
     selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
         source_family="monthly_report_family",
         buildings=target_buildings,
-    ), validate_files=False)
+    ))
     cached_entries = selection["selected_entries"]
     if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
         dedupe_key = _job_dedupe_key(
@@ -1581,7 +1509,7 @@ def _run_external_wet_bulb_shared_flow(
     selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
         source_family="handover_log_family",
         buildings=target_buildings,
-    ), validate_files=False)
+    ))
     cached_entries = selection["selected_entries"]
     if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
         dedupe_key = _job_dedupe_key(
@@ -1636,10 +1564,10 @@ def _run_external_multi_date_shared_flow(
     bridge_service = _shared_bridge_service_or_raise(container)
     target_buildings = bridge_service.get_source_cache_buildings()
     emit_log(f"[多日期自动流程] 已进入后台共享文件处理: dates={','.join(selected_dates)}")
-    cached_entries = _normalize_cached_entries(bridge_service.get_monthly_by_date_cache_entries(
+    cached_entries = _filter_accessible_cached_entries(bridge_service.get_monthly_by_date_cache_entries(
         selected_dates=selected_dates,
         buildings=target_buildings,
-    ), validate_files=False)
+    ))
     expected_count = len(selected_dates) * len(target_buildings)
     if len(cached_entries) < expected_count:
         dedupe_key = _job_dedupe_key(
@@ -1707,18 +1635,17 @@ def _run_external_handover_shared_flow(
     )
     selection: Dict[str, Any] = {}
     if duty_date_text and duty_shift_text:
-        cached_entries = _normalize_cached_entries(bridge_service.get_handover_by_date_cache_entries(
+        cached_entries = _filter_accessible_cached_entries(bridge_service.get_handover_by_date_cache_entries(
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
             buildings=target_buildings,
-        ), validate_files=False)
-        capacity_cached_entries = _normalize_cached_entries(
+        ))
+        capacity_cached_entries = _filter_accessible_cached_entries(
             bridge_service.get_handover_capacity_by_date_cache_entries(
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
                 buildings=target_buildings,
-            ),
-            validate_files=False,
+            )
         )
         if len(cached_entries) < len(target_buildings) or len(capacity_cached_entries) < len(target_buildings):
             dedupe_key = _job_dedupe_key(
@@ -1775,20 +1702,32 @@ def _run_external_handover_shared_flow(
         selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
             source_family="handover_log_family",
             buildings=target_buildings,
-        ), validate_files=False)
+        ))
         cached_entries = selection["selected_entries"]
-        capacity_selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
-            source_family="handover_capacity_report_family",
-            buildings=target_buildings,
-        ), validate_files=False)
-        capacity_cached_entries = capacity_selection["selected_entries"]
-        capacity_building_files = [
-            (str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip())
-            for item in capacity_cached_entries
-        ]
+        capacity_building_files = []
+        for item in cached_entries:
+            building = str(item.get("building", "") or "").strip()
+            duty_date_value = str(item.get("duty_date", "") or "").strip()
+            duty_shift_value = str(item.get("duty_shift", "") or "").strip().lower()
+            if not building or not duty_date_value or duty_shift_value not in {"day", "night"}:
+                continue
+            matched = _filter_accessible_cached_entries(
+                bridge_service.get_handover_capacity_by_date_cache_entries(
+                    duty_date=duty_date_value,
+                    duty_shift=duty_shift_value,
+                    buildings=[building],
+                )
+            )
+            if not matched:
+                continue
+            capacity_building_files.append(
+                (
+                    str(matched[0].get("building", "") or "").strip(),
+                    str(matched[0].get("file_path", "") or "").strip(),
+                )
+            )
         if (
             not selection["can_proceed"]
-            or not capacity_selection["can_proceed"]
             or len(cached_entries) < len(target_buildings)
             or len(capacity_building_files) < len(target_buildings)
         ):
@@ -3420,23 +3359,6 @@ def put_handover_common_config_segment(payload: Dict[str, Any], request: Request
             config_path=container.config_path,
         )
         _apply_container_config_snapshot(container, saved_config, mode="light")
-        review_cfg = (
-            saved_config.get("features", {}).get("handover_log", {}).get("review_ui", {})
-            if isinstance(saved_config.get("features", {}), dict)
-            else {}
-        )
-        configured_base_url = _normalize_review_base_url(
-            review_cfg.get("public_base_url", "") if isinstance(review_cfg, dict) else ""
-        )
-        handover_review_access = (
-            _persist_manual_review_access_snapshot(container)
-            if configured_base_url
-            else _materialize_review_access_snapshot(container)
-        )
-        _invalidate_health_component_cache(
-            request,
-            key_prefixes=("handover_review_access:",),
-        )
         if aggregate_refresh_error:
             container.add_system_log(
                 f"[配置] 交接班公共配置已保存，但聚合配置刷新失败: {aggregate_refresh_error}"
@@ -3447,7 +3369,6 @@ def put_handover_common_config_segment(payload: Dict[str, Any], request: Request
             "revision": int(document.get("revision", 0) or 0),
             "updated_at": str(document.get("updated_at", "") or "").strip(),
             "data": mask_settings(copy.deepcopy(document.get("data", {}))),
-            "handover_review_access": handover_review_access,
             "apply_mode": "business_only",
             "reload_performed": False,
             "applied_services": ["config_snapshot", "runtime_config", "job_service_config"],
@@ -4400,13 +4321,12 @@ async def job_handover_from_file(
     if duty_date_text and duty_shift_text:
         bridge_service = getattr(container, "shared_bridge_service", None)
         if bridge_service is not None:
-            matched_capacity = _normalize_cached_entries(
+            matched_capacity = _filter_accessible_cached_entries(
                 bridge_service.get_handover_capacity_by_date_cache_entries(
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     buildings=[building],
-                ),
-                validate_files=False,
+                )
             )
             if matched_capacity:
                 capacity_source_file = str(matched_capacity[0].get("file_path", "") or "").strip()
@@ -4514,13 +4434,12 @@ async def job_handover_from_files(
     if duty_date_text and duty_shift_text:
         bridge_service = getattr(container, "shared_bridge_service", None)
         if bridge_service is not None:
-            matched_capacity = _normalize_cached_entries(
+            matched_capacity = _filter_accessible_cached_entries(
                 bridge_service.get_handover_capacity_by_date_cache_entries(
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     buildings=building_list,
-                ),
-                validate_files=False,
+                )
             )
             capacity_building_files = [
                 (str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip())
@@ -5073,50 +4992,25 @@ def cancel_job(job_id: str, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     bridge_task_id = str(current_job.get("bridge_task_id", "") or "").strip() if isinstance(current_job, dict) else ""
     wait_reason = str(current_job.get("wait_reason", "") or "").strip().lower() if isinstance(current_job, dict) else ""
-    bridge_cancel_error = ""
+    if bridge_task_id and wait_reason == "waiting:shared_bridge":
+        bridge_service = getattr(container, "shared_bridge_service", None)
+        if bridge_service is not None:
+            try:
+                bridge_service.cancel_task(bridge_task_id)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=503, detail=f"绑定补采任务暂时不可取消，请稍后重试：{exc}") from exc
     try:
         payload = container.job_service.cancel_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except TaskEngineUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    if bridge_task_id and wait_reason == "waiting:shared_bridge":
-        bridge_service = getattr(container, "shared_bridge_service", None)
-        if bridge_service is not None:
-            bridge_cancel_error = "本地等待任务已取消，绑定补采任务正在后台取消"
-            add_log = getattr(container, "add_system_log", None)
-
-            def _cancel_bound_bridge_task() -> None:
-                try:
-                    bridge_service.cancel_task(bridge_task_id)
-                    if callable(add_log):
-                        add_log(
-                            "[任务] 绑定补采任务已取消: "
-                            f"job_id={job_id}, bridge_task_id={bridge_task_id}"
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    if callable(add_log):
-                        add_log(
-                            "[任务] 本地任务已取消，但绑定补采任务取消失败: "
-                            f"job_id={job_id}, bridge_task_id={bridge_task_id}, error={exc}"
-                        )
-
-            threading.Thread(
-                target=_cancel_bound_bridge_task,
-                daemon=True,
-                name=f"job-bridge-cancel-{job_id[:8]}",
-            ).start()
-    response = {
+    return {
         "ok": True,
         "accepted": True,
         "job": present_job_item(payload) if isinstance(payload, dict) else payload,
-        "job_panel_summary": _build_fresh_job_panel_summary(container, limit=60),
+        "job_panel_summary": build_job_panel_summary(container, limit=60),
     }
-    _request_runtime_status_refresh(container, reason="job_cancelled")
-    if bridge_cancel_error:
-        response["bridge_cancel_error"] = bridge_cancel_error
-    return response
 
 
 @router.post("/api/jobs/{job_id}/retry")
@@ -5128,14 +5022,12 @@ def retry_job(job_id: str, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    response = {
+    return {
         "ok": True,
         "accepted": True,
         "job": present_job_item(payload) if isinstance(payload, dict) else payload,
-        "job_panel_summary": _build_fresh_job_panel_summary(container, limit=60),
+        "job_panel_summary": build_job_panel_summary(container, limit=60),
     }
-    _request_runtime_status_refresh(container, reason="job_retried")
-    return response
 
 
 @router.get("/api/jobs")
@@ -5146,7 +5038,21 @@ def list_jobs(request: Request, limit: int = 50, statuses: str = "") -> Dict[str
         for item in str(statuses or "").split(",")
         if str(item or "").strip()
     ]
+    runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
     safe_limit = max(1, min(int(limit or 50), 200))
+    if (
+        not normalized_statuses
+        and runtime_status_coordinator is not None
+        and callable(getattr(runtime_status_coordinator, "is_running", None))
+        and runtime_status_coordinator.is_running()
+    ):
+        try:
+            snapshot = runtime_status_coordinator.read_scope_snapshot("job_panel_summary")
+            payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
     try:
         if normalized_statuses:
             raw_jobs = container.job_service.list_jobs(limit=safe_limit, statuses=normalized_statuses)
@@ -5162,7 +5068,7 @@ def list_jobs(request: Request, limit: int = 50, statuses: str = "") -> Dict[str
                 "active_job_ids": container.job_service.active_job_ids(include_waiting=True),
                 "job_counts": job_counts,
             }
-        payload = _build_fresh_job_panel_summary(container, limit=safe_limit, strict=True)
+        payload = build_job_panel_summary(container, limit=safe_limit, strict=True)
     except TaskEngineUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return payload
@@ -5448,14 +5354,11 @@ def _build_external_jobs_module(request: Request) -> Dict[str, Any]:
                 "current_task_overview": summary["display"]["overview"],
             },
         )
-    try:
-        job_panel_summary = _build_fresh_job_panel_summary(container, limit=60, strict=True)
-    except TaskEngineUnavailableError:
-        job_panel_summary = (
-            _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_jobs")
-            or _external_read_scope(container, "job_panel_summary", reason_prefix="external_jobs")
-            or _empty_job_panel_summary()
-        )
+    job_panel_summary = (
+        _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_jobs")
+        or _external_read_scope(container, "job_panel_summary", reason_prefix="external_jobs")
+        or _empty_job_panel_summary()
+    )
     overview = (
         job_panel_summary.get("display", {}).get("overview", {})
         if isinstance(job_panel_summary.get("display", {}), dict)
@@ -5522,7 +5425,7 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
     }
     for key, snapshot in list(summary.items()):
         if isinstance(snapshot, dict):
-            summary[key] = present_scheduler_snapshot_with_display(snapshot, role_mode=role_mode)
+            summary[key] = {**snapshot, "display": present_scheduler_state(snapshot, role_mode=role_mode)}
     return summary
 
 
@@ -5759,14 +5662,11 @@ def _build_external_system_module(request: Request) -> Dict[str, Any]:
         or _empty_runtime_resources_summary()
     )
     task_overview = {}
-    try:
-        job_panel_summary = _build_fresh_job_panel_summary(container, limit=60, strict=True)
-    except TaskEngineUnavailableError:
-        job_panel_summary = (
-            _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_system")
-            or _external_read_scope(container, "job_panel_summary", reason_prefix="external_system")
-            or _empty_job_panel_summary()
-        )
+    job_panel_summary = (
+        _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_system")
+        or _external_read_scope(container, "job_panel_summary", reason_prefix="external_system")
+        or _empty_job_panel_summary()
+    )
     if isinstance(job_panel_summary.get("display", {}), dict):
         task_overview = job_panel_summary.get("display", {}).get("overview", {})
     updater_summary = {}
@@ -6012,14 +5912,11 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
     internal_alert_overview = present_external_internal_alert_overview(
         live_shared_bridge.get("internal_alert_status", {})
     )
-    try:
-        job_panel_summary = _build_fresh_job_panel_summary(container, limit=60, strict=True)
-    except TaskEngineUnavailableError:
-        job_panel_summary = (
-            _read_scope("job_panel_dashboard_summary")
-            or _read_scope("job_panel_summary")
-            or _empty_job_panel_summary()
-        )
+    job_panel_summary = (
+        _read_scope("job_panel_dashboard_summary")
+        or _read_scope("job_panel_summary")
+        or _empty_job_panel_summary()
+    )
     bridge_tasks_summary = _read_scope("bridge_tasks_dashboard_summary")
     if not isinstance(bridge_tasks_summary, dict):
         bridge_tasks_summary_raw = _read_scope("bridge_tasks_summary") or {
@@ -6191,7 +6088,10 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
 
     for key, snapshot in list(scheduler_status_summary.items()):
         if isinstance(snapshot, dict):
-            scheduler_status_summary[key] = present_scheduler_snapshot_with_display(snapshot, role_mode=role_mode)
+            scheduler_status_summary[key] = {
+                **snapshot,
+                "display": present_scheduler_state(snapshot, role_mode=role_mode),
+            }
 
     scheduler_overview_items = present_scheduler_overview_items(
         container.config,

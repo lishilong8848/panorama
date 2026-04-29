@@ -602,7 +602,6 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         )
     )
     alarm_export = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
-    wet_bulb_collection = sanitize_wet_bulb_collection_config(_dict(features.get("wet_bulb_collection")))
     manual_upload_gui = _dict(features.get("manual_upload_gui"))
     runtime_download = {
         "save_dir": monthly_download_dir,
@@ -719,7 +718,6 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "handover_log": runtime_handover_log,
         "day_metric_upload": copy.deepcopy(day_metric_upload),
         "alarm_export": copy.deepcopy(alarm_export),
-        "wet_bulb_collection": copy.deepcopy(wet_bulb_collection),
         "manual_upload_gui": copy.deepcopy(manual_upload_gui),
         "web": copy.deepcopy(console),
     }

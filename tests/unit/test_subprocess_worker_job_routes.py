@@ -408,7 +408,7 @@ def test_cancel_job_route_calls_job_service() -> None:
     assert request.app.state.container.job_service.cancel_calls == ["job-1"]
 
 
-def test_cancel_job_route_cancels_bound_bridge_task() -> None:
+def test_cancel_job_route_cancels_bound_bridge_task_first() -> None:
     request = _fake_request(role_mode="external", bridge_enabled=True)
     cancelled_bridge_tasks = []
 
@@ -429,30 +429,6 @@ def test_cancel_job_route_cancels_bound_bridge_task() -> None:
     assert response["accepted"] is True
     assert request.app.state.container.job_service.cancel_calls == ["job-1"]
     assert cancelled_bridge_tasks == ["bridge-cache-fill-1"]
-
-
-def test_cancel_job_route_keeps_local_cancel_when_bound_bridge_cancel_fails() -> None:
-    request = _fake_request(role_mode="external", bridge_enabled=True)
-
-    request.app.state.container.job_service.get_job = lambda job_id: {  # noqa: E731
-        "job_id": job_id,
-        "status": "waiting_resource",
-        "wait_reason": "waiting:shared_bridge",
-        "bridge_task_id": "bridge-cache-fill-1",
-    }
-
-    def _raise_cancel_error(task_id):  # noqa: ANN001
-        raise RuntimeError(f"shared bridge unavailable: {task_id}")
-
-    request.app.state.container.shared_bridge_service.cancel_task = _raise_cancel_error
-
-    response = routes.cancel_job("job-1", request)
-
-    assert response["ok"] is True
-    assert response["accepted"] is True
-    assert response["job"]["status"] == "cancelled"
-    assert request.app.state.container.job_service.cancel_calls == ["job-1"]
-    assert response["bridge_cancel_error"] == "本地等待任务已取消，绑定补采任务正在后台取消"
 
 
 def test_retry_job_route_calls_job_service() -> None:

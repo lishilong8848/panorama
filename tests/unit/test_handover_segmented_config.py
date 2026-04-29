@@ -10,11 +10,9 @@ import pytest
 from app.config import settings_loader
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3
 from app.config.handover_segment_store import (
-    build_segment_document,
     handover_building_segment_path,
     handover_common_segment_path,
     read_segment_document,
-    write_segment_document,
 )
 from app.config.settings_loader import (
     get_handover_common_segment,
@@ -24,99 +22,11 @@ from app.config.settings_loader import (
     save_handover_building_segment,
     save_settings,
 )
-from app.modules.scheduler.api._config_persistence import (
-    persist_scheduler_toggle,
-    save_scheduler_config_snapshot,
-)
-
-
-class _SchedulerConfigContainer:
-    def __init__(self, config_path: Path, config: dict) -> None:
-        self.config_path = config_path
-        self.config = copy.deepcopy(config)
-        self.logs: list[str] = []
-        self.toggles: list[dict] = []
-        self.reloaded: list[dict] = []
-        self.refresh_calls: list[dict] = []
-
-    def reload_config(self, config: dict) -> None:
-        self.config = copy.deepcopy(config)
-        self.reloaded.append(copy.deepcopy(config))
-
-    def refresh_single_scheduler_runtime(
-        self,
-        scheduler_key: str,
-        config: dict,
-        *,
-        restart_running: bool = False,
-    ) -> dict:
-        self.config = copy.deepcopy(config)
-        self.refresh_calls.append(
-            {
-                "scheduler_key": scheduler_key,
-                "restart_running": restart_running,
-            }
-        )
-        return {"ok": True, "scheduler_key": scheduler_key, "running": False, "restarted": False}
-
-    def add_system_log(self, message: str) -> None:
-        self.logs.append(str(message))
-
-    def record_external_scheduler_toggle(self, **kwargs) -> None:
-        self.toggles.append(dict(kwargs))
 
 
 def _write_default_config(path: Path) -> None:
     payload = copy.deepcopy(DEFAULT_CONFIG_V3)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8-sig")
-
-
-def _inject_a_building_user_values(payload: dict) -> None:
-    handover = payload["features"]["handover_log"]
-    handover.setdefault("cell_rules", {}).setdefault("building_rows", {})["A楼"] = [
-        {
-            "id": "custom_a_rule",
-            "enabled": True,
-            "target_cell": "B9",
-            "rule_type": "direct",
-            "d_keywords": ["用户规则"],
-            "match_mode": "contains_casefold",
-            "agg": "first",
-            "template": "{value}",
-            "computed_op": "",
-            "params": {},
-        }
-    ]
-    handover.setdefault("cloud_sheet_sync", {}).setdefault("sheet_names", {})["A楼"] = "A楼-用户Sheet"
-    review_ui = handover.setdefault("review_ui", {})
-    review_ui.setdefault("review_link_recipients_by_building", {})["A楼"] = [
-        {"note": "用户接收人", "open_id": "ou_keep", "enabled": True}
-    ]
-    review_ui.setdefault("cabinet_power_defaults_by_building", {})["A楼"] = {
-        "cells": {"B13": "100", "D13": "200"}
-    }
-    review_ui.setdefault("footer_inventory_defaults_by_building", {})["A楼"] = {
-        "rows": [{"cells": {"B": "值班手机", "C": "桌面", "E": "1", "F": "否", "G": "无"}}]
-    }
-
-
-def _write_empty_a_segment(config_path: Path) -> None:
-    write_segment_document(
-        handover_building_segment_path(config_path, "A"),
-        build_segment_document(
-            {
-                "cell_rules": {"building_rows": {"A楼": []}},
-                "cloud_sheet_sync": {"sheet_names": {"A楼": ""}},
-                "review_ui": {
-                    "cabinet_power_defaults_by_building": {},
-                    "footer_inventory_defaults_by_building": {},
-                    "review_link_recipients_by_building": {},
-                },
-            },
-            revision=1,
-            updated_at="2026-04-27T08:32:15+08:00",
-        ),
-    )
 
 
 def test_load_settings_migrates_handover_segments_on_first_run(tmp_path: Path) -> None:
@@ -237,149 +147,6 @@ def test_save_settings_preserves_segment_backed_handover_values(tmp_path: Path) 
     assert saved["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-段配置真值"
 
 
-def test_load_settings_keeps_non_empty_root_when_building_segment_is_empty(tmp_path: Path) -> None:
-    config_path = tmp_path / "表格计算配置.json"
-    payload = copy.deepcopy(DEFAULT_CONFIG_V3)
-    _inject_a_building_user_values(payload)
-    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8-sig")
-
-    load_settings(config_path)
-    _write_empty_a_segment(config_path)
-
-    reloaded = load_settings(config_path)
-    handover = reloaded["features"]["handover_log"]
-
-    assert handover["cell_rules"]["building_rows"]["A楼"][0]["id"] == "custom_a_rule"
-    assert handover["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-用户Sheet"
-    assert handover["review_ui"]["review_link_recipients_by_building"]["A楼"][0]["open_id"] == "ou_keep"
-    assert handover["review_ui"]["cabinet_power_defaults_by_building"]["A楼"]["cells"]["B13"] == "100"
-    assert handover["review_ui"]["footer_inventory_defaults_by_building"]["A楼"]["rows"][0]["cells"]["B"] == "值班手机"
-
-
-def test_get_handover_building_segment_repairs_empty_segment_from_root_config(tmp_path: Path) -> None:
-    config_path = tmp_path / "表格计算配置.json"
-    payload = copy.deepcopy(DEFAULT_CONFIG_V3)
-    _inject_a_building_user_values(payload)
-    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8-sig")
-
-    load_settings(config_path)
-    _write_empty_a_segment(config_path)
-
-    document = get_handover_building_segment("A", config_path)
-    data = document["data"]
-
-    assert data["cell_rules"]["building_rows"]["A楼"][0]["id"] == "custom_a_rule"
-    assert data["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-用户Sheet"
-    assert data["review_ui"]["review_link_recipients_by_building"]["A楼"][0]["open_id"] == "ou_keep"
-
-
-def test_save_settings_does_not_let_empty_segment_overwrite_non_empty_payload(tmp_path: Path) -> None:
-    config_path = tmp_path / "表格计算配置.json"
-    payload = copy.deepcopy(DEFAULT_CONFIG_V3)
-    _inject_a_building_user_values(payload)
-    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8-sig")
-
-    load_settings(config_path)
-    _write_empty_a_segment(config_path)
-    next_payload = copy.deepcopy(payload)
-    next_payload["common"]["paths"]["business_root_dir"] = r"D:\KeepRoot"
-
-    saved = save_settings(next_payload, config_path)
-    handover = saved["features"]["handover_log"]
-
-    assert saved["common"]["paths"]["business_root_dir"] == r"D:\KeepRoot"
-    assert handover["cell_rules"]["building_rows"]["A楼"][0]["id"] == "custom_a_rule"
-    assert handover["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-用户Sheet"
-    assert handover["review_ui"]["review_link_recipients_by_building"]["A楼"][0]["open_id"] == "ou_keep"
-
-
-def test_scheduler_config_snapshot_updates_handover_common_segment(tmp_path: Path) -> None:
-    config_path = tmp_path / "表格计算配置.json"
-    _write_default_config(config_path)
-    current = load_settings(config_path)
-    container = _SchedulerConfigContainer(config_path, current)
-
-    merged = copy.deepcopy(current)
-    scheduler = merged["features"]["handover_log"]["scheduler"]
-    scheduler["morning_time"] = "08:05:00"
-    scheduler["afternoon_time"] = "16:35:00"
-
-    saved = save_scheduler_config_snapshot(
-        container,
-        merged,
-        path=("features", "handover_log", "scheduler"),
-    )
-
-    common_doc = get_handover_common_segment(config_path)
-    assert common_doc["data"]["scheduler"]["morning_time"] == "08:05:00"
-    assert common_doc["data"]["scheduler"]["afternoon_time"] == "16:35:00"
-    assert saved["features"]["handover_log"]["scheduler"]["morning_time"] == "08:05:00"
-    assert load_settings(config_path)["features"]["handover_log"]["scheduler"]["afternoon_time"] == "16:35:00"
-    assert container.reloaded == []
-    assert container.refresh_calls == [
-        {
-            "scheduler_key": "handover",
-            "restart_running": False,
-        }
-    ]
-
-
-def test_scheduler_toggle_updates_handover_common_segment(tmp_path: Path) -> None:
-    config_path = tmp_path / "表格计算配置.json"
-    _write_default_config(config_path)
-    current = load_settings(config_path)
-    container = _SchedulerConfigContainer(config_path, current)
-
-    persist_scheduler_toggle(
-        container,
-        path=("features", "handover_log", "scheduler"),
-        auto_start_in_gui=True,
-    )
-
-    common_doc = get_handover_common_segment(config_path)
-    assert common_doc["data"]["scheduler"]["auto_start_in_gui"] is True
-    assert common_doc["data"]["scheduler"]["enabled"] is True
-    assert container.config["features"]["handover_log"]["scheduler"]["auto_start_in_gui"] is True
-    assert container.reloaded == []
-    assert container.refresh_calls == [
-        {
-            "scheduler_key": "handover",
-            "restart_running": False,
-        }
-    ]
-
-
-def test_monthly_report_scheduler_config_snapshot_updates_handover_common_segment(tmp_path: Path) -> None:
-    config_path = tmp_path / "表格计算配置.json"
-    _write_default_config(config_path)
-    current = load_settings(config_path)
-    container = _SchedulerConfigContainer(config_path, current)
-
-    merged = copy.deepcopy(current)
-    scheduler = merged["features"]["handover_log"]["monthly_event_report"]["scheduler"]
-    scheduler["run_time"] = "09:15:00"
-
-    save_scheduler_config_snapshot(
-        container,
-        merged,
-        path=("features", "handover_log", "monthly_event_report", "scheduler"),
-    )
-
-    common_doc = get_handover_common_segment(config_path)
-    assert common_doc["data"]["monthly_event_report"]["scheduler"]["run_time"] == "09:15:00"
-    assert (
-        load_settings(config_path)["features"]["handover_log"]["monthly_event_report"]["scheduler"]["run_time"]
-        == "09:15:00"
-    )
-    assert container.reloaded == []
-    assert container.refresh_calls == [
-        {
-            "scheduler_key": "monthly_event_report",
-            "restart_running": False,
-        }
-    ]
-
-
 def test_save_settings_does_not_rewrite_existing_user_filled_values(tmp_path: Path) -> None:
     config_path = tmp_path / "表格计算配置.json"
     payload = copy.deepcopy(DEFAULT_CONFIG_V3)
@@ -406,7 +173,9 @@ def test_save_handover_segment_refresh_does_not_rewrite_unrelated_config_values(
     config_path = tmp_path / "表格计算配置.json"
     payload = copy.deepcopy(DEFAULT_CONFIG_V3)
     payload["common"]["paths"]["business_root_dir"] = r"D:\用户业务目录"
-    payload["features"]["handover_log"]["template"]["source_path"] = "用户自定义模板.xlsx"
+    payload["features"]["handover_log"]["template"]["title_cell"] = "C3"
+    payload["features"]["handover_log"]["template"]["building_title_pattern"] = "用户自定义标题"
+    payload["features"]["handover_log"]["template"]["building_title_map"] = {"A楼": "A楼自定义标题"}
     config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8-sig")
 
     load_settings(config_path)
@@ -423,7 +192,8 @@ def test_save_handover_segment_refresh_does_not_rewrite_unrelated_config_values(
 
     saved = json.loads(config_path.read_text(encoding="utf-8-sig"))
     assert saved["common"]["paths"]["business_root_dir"] == r"D:\用户业务目录"
-    assert saved["features"]["handover_log"]["template"]["source_path"] == "用户自定义模板.xlsx"
+    assert saved["features"]["handover_log"]["template"]["title_cell"] == "C3"
+    assert saved["features"]["handover_log"]["template"]["building_title_pattern"] == "用户自定义标题"
     assert saved["features"]["handover_log"]["cloud_sheet_sync"]["sheet_names"]["A楼"] == "A楼-分段保存后新值"
 
 

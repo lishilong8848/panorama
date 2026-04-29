@@ -55,15 +55,6 @@ _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS: tuple[tuple[str, str, tuple[str, ...]], ...
 _EXTERNAL_SCHEDULER_AUTOSTART_PATHS = {
     key: path for key, _label, path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS
 }
-_EXTERNAL_SCHEDULER_RUNTIME_PATHS = {
-    "auto_flow": ("scheduler",),
-    "handover": ("handover_log", "scheduler"),
-    "wet_bulb_collection": ("wet_bulb_collection", "scheduler"),
-    "day_metric_upload": ("day_metric_upload", "scheduler"),
-    "alarm_event_upload": ("alarm_export", "scheduler"),
-    "monthly_change_report": ("handover_log", "monthly_change_report", "scheduler"),
-    "monthly_event_report": ("handover_log", "monthly_event_report", "scheduler"),
-}
 _EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
     "auto_flow": "scheduler",
     "handover": "handover_scheduler_manager",
@@ -72,9 +63,6 @@ _EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
     "alarm_event_upload": "alarm_event_upload_scheduler",
     "monthly_change_report": "monthly_change_report_scheduler",
     "monthly_event_report": "monthly_event_report_scheduler",
-}
-_EXTERNAL_SCHEDULER_LABELS = {
-    key: label for key, label, _path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS
 }
 _EXTERNAL_SCHEDULER_LEGACY_EXIT_SOURCE_HINTS = (
     "退出快照",
@@ -201,6 +189,7 @@ class AppContainer:
             runtime_config=self.runtime_config,
             app_dir=get_app_dir(),
             config_snapshot_getter=lambda: self.runtime_config,
+            current_ssid_getter=lambda: self.wifi_service.current_ssid() if self.wifi_service else "",
         )
         _report_progress("binding_job_log_sink")
         self.job_service.set_global_log_sink(
@@ -414,16 +403,12 @@ class AppContainer:
         wet_cfg = self.runtime_config.get("wet_bulb_collection", {})
         if not isinstance(wet_cfg, dict):
             wet_cfg = {}
-        paths_cfg = self.runtime_config.get("paths", {})
-        if not isinstance(paths_cfg, dict):
-            paths_cfg = {}
-        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
         scheduler_cfg = wet_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
         return IntervalSchedulerService(
             scheduler_cfg=scheduler_cfg,
-            runtime_state_root=runtime_state_root or "runtime_state",
+            runtime_state_root="runtime_state",
             emit_log=self.add_system_log,
             run_callback=self.wet_bulb_collection_scheduler_callback or self._wet_bulb_collection_scheduler_run_callback,
             is_busy=lambda: False,
@@ -920,13 +905,7 @@ class AppContainer:
             return {"ok": False, "error": str(exc)}
 
     def _effective_external_scheduler_auto_start(self, key: str, fallback: bool = False) -> bool:
-        normalized_key = str(key or "").strip()
-        runtime_path = _EXTERNAL_SCHEDULER_RUNTIME_PATHS.get(normalized_key)
-        if runtime_path:
-            cfg = self._dict_path(self.runtime_config, runtime_path)
-            if isinstance(cfg, dict) and "auto_start_in_gui" in cfg:
-                return bool(cfg.get("auto_start_in_gui", False))
-        path = _EXTERNAL_SCHEDULER_AUTOSTART_PATHS.get(normalized_key)
+        path = _EXTERNAL_SCHEDULER_AUTOSTART_PATHS.get(str(key or "").strip())
         if not path:
             return bool(fallback)
         cfg = self._dict_path(self.runtime_config, path)
@@ -999,19 +978,17 @@ class AppContainer:
         return changed
 
     def _apply_single_external_scheduler_memory(self, key: str, desired: bool) -> bool:
-        normalized_key = str(key or "").strip()
-        path = _EXTERNAL_SCHEDULER_AUTOSTART_PATHS.get(normalized_key)
+        path = _EXTERNAL_SCHEDULER_AUTOSTART_PATHS.get(str(key or "").strip())
         changed = False
-        target_paths = [item for item in (path, _EXTERNAL_SCHEDULER_RUNTIME_PATHS.get(normalized_key)) if item]
-        for target_path in target_paths:
-            scheduler_cfg = self._ensure_config_dict_path(self.runtime_config, target_path)
+        if path:
+            scheduler_cfg = self._ensure_config_dict_path(self.runtime_config, path)
             if scheduler_cfg.get("auto_start_in_gui") is not desired:
                 scheduler_cfg["auto_start_in_gui"] = desired
                 changed = True
             if desired and scheduler_cfg.get("enabled") is not True:
                 scheduler_cfg["enabled"] = True
                 changed = True
-        if self._apply_scheduler_memory_to_runtime_object(normalized_key, desired):
+        if self._apply_scheduler_memory_to_runtime_object(str(key or "").strip(), desired):
             changed = True
         return changed
 
@@ -1038,125 +1015,6 @@ class AppContainer:
         except Exception as exc:  # noqa: BLE001
             self.add_system_log(f"[调度] {source}: 应用外网端调度记忆失败，继续按当前运行态: {exc}")
             return {"ok": False, "error": str(exc)}
-
-    def _normalize_single_scheduler_key(self, scheduler_key: str) -> str:
-        normalized_key = str(scheduler_key or "").strip().lower()
-        if normalized_key not in _EXTERNAL_SCHEDULER_OBJECT_ATTRS:
-            raise ValueError(f"unsupported scheduler key: {scheduler_key}")
-        return normalized_key
-
-    def _single_scheduler_object(self, scheduler_key: str) -> Any | None:
-        attr_name = _EXTERNAL_SCHEDULER_OBJECT_ATTRS[self._normalize_single_scheduler_key(scheduler_key)]
-        return getattr(self, attr_name, None)
-
-    def _single_scheduler_is_running(self, scheduler_key: str) -> bool:
-        scheduler_obj = self._single_scheduler_object(scheduler_key)
-        if scheduler_obj is None or not hasattr(scheduler_obj, "is_running"):
-            return False
-        try:
-            return bool(scheduler_obj.is_running())
-        except Exception:  # noqa: BLE001
-            return False
-
-    def _build_single_scheduler_object(self, scheduler_key: str) -> Any:
-        normalized_key = self._normalize_single_scheduler_key(scheduler_key)
-        if normalized_key == "auto_flow":
-            return self._build_scheduler()
-        if normalized_key == "handover":
-            return self._build_handover_scheduler_manager()
-        if normalized_key == "wet_bulb_collection":
-            return self._build_wet_bulb_collection_scheduler()
-        if normalized_key == "day_metric_upload":
-            return self._build_day_metric_upload_scheduler()
-        if normalized_key == "alarm_event_upload":
-            return self._build_alarm_event_upload_scheduler()
-        if normalized_key == "monthly_change_report":
-            return self._build_monthly_change_report_scheduler()
-        if normalized_key == "monthly_event_report":
-            return self._build_monthly_event_report_scheduler()
-        raise ValueError(f"unsupported scheduler key: {scheduler_key}")
-
-    def _bind_single_scheduler_callback(self, scheduler_key: str, scheduler_obj: Any) -> None:
-        normalized_key = self._normalize_single_scheduler_key(scheduler_key)
-        if normalized_key == "auto_flow":
-            if self.scheduler_callback:
-                scheduler_obj.run_callback = self.scheduler_callback
-            return
-        if normalized_key == "handover":
-            if self.handover_scheduler_callback:
-                scheduler_obj.set_run_callback(self.handover_scheduler_callback)
-            return
-        callback_attr = {
-            "wet_bulb_collection": "wet_bulb_collection_scheduler_callback",
-            "day_metric_upload": "day_metric_upload_scheduler_callback",
-            "alarm_event_upload": "alarm_event_upload_scheduler_callback",
-            "monthly_change_report": "monthly_change_report_scheduler_callback",
-            "monthly_event_report": "monthly_event_report_scheduler_callback",
-        }.get(normalized_key, "")
-        callback = getattr(self, callback_attr, None) if callback_attr else None
-        if callback is not None:
-            scheduler_obj.run_callback = callback
-
-    def _single_scheduler_enabled(self, scheduler_obj: Any) -> bool:
-        if isinstance(getattr(scheduler_obj, "_cfg", None), dict):
-            return bool(scheduler_obj._cfg.get("enabled", True))
-        if isinstance(getattr(scheduler_obj, "cfg", None), dict):
-            return bool(scheduler_obj.cfg.get("enabled", True))
-        if hasattr(scheduler_obj, "enabled"):
-            try:
-                return bool(getattr(scheduler_obj, "enabled"))
-            except Exception:  # noqa: BLE001
-                return True
-        return True
-
-    def refresh_single_scheduler_runtime(
-        self,
-        scheduler_key: str,
-        settings: Dict[str, Any],
-        *,
-        restart_running: bool = False,
-    ) -> Dict[str, Any]:
-        normalized_key = self._normalize_single_scheduler_key(scheduler_key)
-        attr_name = _EXTERNAL_SCHEDULER_OBJECT_ATTRS[normalized_key]
-        previous_config = copy.deepcopy(self.config)
-        previous_obj = getattr(self, attr_name, None)
-        was_running = self._single_scheduler_is_running(normalized_key)
-        self.apply_config_snapshot(settings, mode="light")
-        try:
-            scheduler_obj = self._build_single_scheduler_object(normalized_key)
-            self._bind_single_scheduler_callback(normalized_key, scheduler_obj)
-        except Exception:  # noqa: BLE001
-            self._apply_runtime_config_snapshot(previous_config)
-            raise
-
-        if previous_obj is not None and hasattr(previous_obj, "stop"):
-            previous_obj.stop()
-        setattr(self, attr_name, scheduler_obj)
-
-        restarted = False
-        if restart_running and was_running and self._single_scheduler_enabled(scheduler_obj) and hasattr(scheduler_obj, "start"):
-            try:
-                start_result = scheduler_obj.start()
-                restarted = bool(start_result.get("running", False)) if isinstance(start_result, dict) else bool(
-                    self._single_scheduler_is_running(normalized_key)
-                )
-            except Exception:  # noqa: BLE001
-                self._apply_runtime_config_snapshot(previous_config)
-                setattr(self, attr_name, previous_obj)
-                if previous_obj is not None and was_running and hasattr(previous_obj, "start"):
-                    try:
-                        previous_obj.start()
-                    except Exception:  # noqa: BLE001
-                        pass
-                raise
-        return {
-            "ok": True,
-            "scheduler_key": normalized_key,
-            "label": _EXTERNAL_SCHEDULER_LABELS.get(normalized_key, normalized_key),
-            "was_running": was_running,
-            "running": self._single_scheduler_is_running(normalized_key),
-            "restarted": restarted,
-        }
 
     @staticmethod
     def _inactive_startup_role_handoff() -> Dict[str, Any]:
@@ -2390,6 +2248,7 @@ class AppContainer:
             runtime_config=self.runtime_config,
             app_dir=get_app_dir(),
             config_snapshot_getter=lambda: self.runtime_config,
+            current_ssid_getter=lambda: self.wifi_service.current_ssid() if self.wifi_service else "",
         )
 
     def apply_config_snapshot(self, settings: Dict[str, Any], *, mode: str = "light") -> None:
@@ -2495,8 +2354,6 @@ class AppContainer:
                 write_console=False,
             )
         )
-        if self.runtime_services_armed and normalize_role_mode(self._configured_deployment_snapshot().get("role_mode")) == "external":
-            self.apply_external_scheduler_autostart_state(source="配置热重载")
 
         auto_start = bool(self.runtime_config.get("scheduler", {}).get("auto_start_in_gui", False))
         handover_cfg = self.runtime_config.get("handover_log", {})

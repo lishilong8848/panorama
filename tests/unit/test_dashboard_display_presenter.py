@@ -82,7 +82,7 @@ def test_present_external_dashboard_display_prefers_cache_waiting_state():
     assert payload["handover_review_overview"]["review_board_rows"][0]["cloud_sheet_sync"]["text"] == "云表最终上传失败"
     assert payload["handover_review_overview"]["review_board_rows"][1]["text"] == "待确认"
     assert payload["shared_root_diagnostic_overview"]["status_text"] == "路径写法不同但目录一致"
-    assert payload["shared_root_diagnostic_overview"]["paths"] == []
+    assert payload["shared_root_diagnostic_overview"]["paths"][0]["show_canonical_path"] is True
     assert payload["shared_root_diagnostic_overview"]["actions"] == {}
 
 
@@ -542,51 +542,13 @@ def test_present_updater_mirror_overview_for_git_pull_source_mode():
     assert payload["title"] == "外网到内网 .py 同步"
     assert payload["status_text"] == "本地提交待同步"
     assert payload["summary_text"] == "当前本地提交还没有发布到共享目录；updater 线程会自动尝试同步。"
-    assert payload["items"][0] == {"label": "同步状态", "value": "存在待同步提交", "tone": "warning"}
-    assert payload["items"][1] == {"label": "外网提交", "value": "abcdef1", "tone": "neutral"}
-    assert payload["items"][2] == {"label": "内网提交", "value": "未接入", "tone": "neutral"}
-    assert payload["items"][3] == {"label": "更新文件", "value": "否，共享目录未接入", "tone": "warning"}
-    assert payload["items"][4] == {"label": "工作区状态", "value": "干净", "tone": "success"}
+    assert payload["items"][0]["value"] == "Git 跟踪 .py 文件"
+    assert payload["items"][3]["value"] == "abcdef1"
+    assert payload["items"][6]["value"] == "abcdef1"
     assert payload["sync"]["pending_sync_commit"] == "abcdef123456"
     assert payload["actions"]["main"]["id"] == "check"
     assert payload["actions"]["main"]["label"] == "刷新本机代码状态"
     assert payload["actions"]["main"]["allowed"] is True
-
-
-def test_present_updater_mirror_overview_ignores_stale_restart_last_result():
-    payload = present_updater_mirror_overview(
-        {
-            "enabled": True,
-            "update_mode": "git_pull",
-            "source_kind": "git_remote",
-            "last_result": "updated_restart_scheduled",
-            "restart_required": False,
-            "running": False,
-            "dependency_sync_status": "success",
-            "queued_apply": {"queued": False},
-        }
-    )
-
-    assert payload["business_actions"]["allowed"] is True
-    assert payload["business_actions"]["reason_code"] == ""
-
-
-def test_present_updater_mirror_overview_blocks_running_update_result():
-    payload = present_updater_mirror_overview(
-        {
-            "enabled": True,
-            "update_mode": "git_pull",
-            "source_kind": "git_remote",
-            "last_result": "applying_patch",
-            "running": True,
-            "restart_required": False,
-            "dependency_sync_status": "success",
-            "queued_apply": {"queued": False},
-        }
-    )
-
-    assert payload["business_actions"]["allowed"] is False
-    assert payload["business_actions"]["reason_code"] == "applying_patch"
 
 
 def test_present_updater_mirror_overview_prefers_shared_mirror_waiting_text():
@@ -646,52 +608,10 @@ def test_present_updater_mirror_overview_shows_git_mode_items():
         }
     )
 
-    assert payload["items"][0]["label"] == "同步状态"
-    assert payload["items"][1]["label"] == "外网提交"
-    assert payload["items"][1]["value"] == "1111111"
-    assert payload["items"][2]["label"] == "内网提交"
-    assert payload["items"][3]["label"] == "更新文件"
-    assert payload["items"][4]["value"] == "存在本地修改"
-    assert payload["items"][5]["label"] == "内网端状态"
-
-
-def test_present_updater_mirror_overview_shows_versions_and_delivery_state():
-    payload = present_updater_mirror_overview(
-        {
-            "enabled": True,
-            "update_mode": "git_pull",
-            "source_kind": "git_remote",
-            "local_version": "V3.224.20260419",
-            "local_release_revision": 224,
-            "local_commit": "1111111222222333333",
-            "approved_commit": "1111111222222333333",
-            "last_published_commit": "1111111222222333333",
-            "mirror_manifest_path": r"D:\QJPT_Shared\updater\approved\source_manifest.json",
-            "internal_peer": {
-                "available": True,
-                "online": True,
-                "local_version": "V3.224.20260419",
-                "local_release_revision": 224,
-                "local_commit": "1111111222222333333",
-                "update_available": False,
-            },
-        }
-    )
-
-    items_by_label = {item["label"]: item for item in payload["items"]}
-
-    assert payload["status_text"] == "内外端代码一致"
-    assert items_by_label["外网提交"]["value"] == "1111111"
-    assert items_by_label["内网提交"] == {
-        "label": "内网提交",
-        "value": "1111111",
-        "tone": "success",
-    }
-    assert items_by_label["更新文件"] == {
-        "label": "更新文件",
-        "value": "是，内网已应用",
-        "tone": "success",
-    }
+    assert payload["items"][0]["value"] == "Git 跟踪 .py 文件"
+    assert payload["items"][2]["value"] == "master"
+    assert payload["items"][3]["value"] == "1111111"
+    assert payload["items"][8]["value"] == "存在本地修改"
 
 
 def test_present_external_module_hero_overviews_prefers_scheduler_summary_items() -> None:
@@ -712,8 +632,7 @@ def test_present_external_module_hero_overviews_prefers_scheduler_summary_items(
     metrics = payload["scheduler_overview"]["metrics"]
     assert metrics[0]["label"] == "已启动调度"
     assert metrics[0]["value"] == "3 项"
-    assert metrics[1]["label"] == "待关注项"
-    assert metrics[2]["label"] == "最近即将执行"
+    assert metrics[3]["label"] == "最近即将执行"
 
 
 def test_present_external_module_hero_overviews_uses_backend_summaries():

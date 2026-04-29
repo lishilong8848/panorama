@@ -215,7 +215,7 @@ export function registerAppRuntimeWatchers(options = {}) {
       }
       const justReady = !wasRuntimeReady && Boolean(state.runtimeReady);
       if (state.shouldPollExternalDashboardSummary && (justReady || !Boolean(previous.shouldPollExternalDashboardSummary))) {
-        void fetchExternalDashboardSummary({ silentMessage: true });
+        void fetchExternalDashboardSummary({ force: true, silentMessage: true });
       }
       if (state.shouldFetchHealth && (justReady || !Boolean(previous.shouldFetchHealth))) {
         void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
@@ -227,7 +227,7 @@ export function registerAppRuntimeWatchers(options = {}) {
         void fetchBridgeTasks({ silentMessage: true });
       }
       if (state.shouldPollDailyReport && (justReady || !Boolean(previous.shouldPollDailyReport))) {
-        void fetchHandoverDailyReportContext({ silentTransientNetworkError: true, silentMessage: true });
+        void fetchHandoverDailyReportContext({ force: true, silentTransientNetworkError: true, silentMessage: true });
       }
       if (state.shouldFetchPendingResumeRuns && (justReady || !Boolean(previous.shouldFetchPendingResumeRuns))) {
         void fetchPendingResumeRuns({ silentMessage: true });

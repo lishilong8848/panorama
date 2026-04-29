@@ -22,48 +22,6 @@ def test_load_handover_config_injects_role_and_shared_bridge() -> None:
     assert cfg["_shared_bridge"]["root_dir"] == "C:/QJPT/share"
 
 
-def test_load_handover_config_normalizes_e_building_wet_bulb_keyword() -> None:
-    runtime_cfg = {
-        "deployment": {"role_mode": "external"},
-        "download": {},
-        "network": {},
-        "handover_log": {
-            "cell_rules": {
-                "default_rows": [
-                    {
-                        "id": "wet_bulb",
-                        "enabled": True,
-                        "target_cell": "D7",
-                        "rule_type": "direct",
-                        "d_keywords": ["室外湿球温度"],
-                        "agg": "first",
-                        "template": "{value}",
-                    }
-                ],
-                "building_rows": {
-                    "E楼": [
-                        {
-                            "id": "wet_bulb",
-                            "enabled": True,
-                            "target_cell": "D7",
-                            "rule_type": "direct",
-                            "d_keywords": ["E-124-DDC-100_室外温度1", "室外温度1"],
-                            "agg": "first",
-                            "template": "{value}",
-                        }
-                    ]
-                },
-            }
-        },
-    }
-
-    cfg = load_handover_config(runtime_cfg)
-
-    e_rows = cfg["cell_rules"]["building_rows"]["E楼"]
-    wet_bulb_row = next(item for item in e_rows if item["id"] == "wet_bulb")
-    assert wet_bulb_row["d_keywords"] == ["E-124-DDC-100_室外湿度1", "室外湿度1"]
-
-
 def test_external_role_uses_alarm_json_summary() -> None:
     cfg = load_handover_config(
         {

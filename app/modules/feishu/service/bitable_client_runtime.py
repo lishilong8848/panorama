@@ -14,10 +14,8 @@ class FeishuBitableClient:
     CREATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
     LIST_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
     GET_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
-    UPDATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
     LIST_FIELD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
     BATCH_CREATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
-    BATCH_UPDATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update"
     BATCH_DELETE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_delete"
     UPLOAD_FILE_URL = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
 
@@ -38,15 +36,7 @@ class FeishuBitableClient:
         date_text_to_timestamp_ms_fn: Callable[..., int],
         canonical_metric_name_fn: Callable[[Any], str],
         dimension_mapping: Dict[str, tuple[str, str, str]],
-        emit_log: Callable[[str], None] | None = None,
     ) -> None:
-        log_func = emit_log if callable(emit_log) else None
-        auth_started = time.perf_counter()
-        if log_func is not None:
-            log_func(
-                "[飞书上传][client] 开始解析飞书认证配置: "
-                f"timeout={int(timeout)}, retry={int(request_retry_count)}"
-            )
         auth = resolve_feishu_auth_settings(
             {
                 "app_id": app_id,
@@ -56,11 +46,6 @@ class FeishuBitableClient:
                 "request_retry_interval_sec": request_retry_interval_sec,
             }
         )
-        if log_func is not None:
-            log_func(
-                "[飞书上传][client] 飞书认证配置解析完成: "
-                f"elapsed_ms={int((time.perf_counter() - auth_started) * 1000)}"
-            )
         self.app_id = str(auth.get("app_id", "") or "").strip()
         self.app_secret = str(auth.get("app_secret", "") or "").strip()
         self.app_token = app_token
@@ -78,11 +63,6 @@ class FeishuBitableClient:
         self._dimension_mapping = dict(dimension_mapping)
         if not self.app_id or not self.app_secret:
             raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
-        if log_func is not None:
-            log_func(
-                "[飞书上传][client] 客户端字段初始化完成: "
-                f"timeout={self.timeout}, retry={self.request_retry_count}"
-            )
 
     def _to_feishu_date(self, date_text: str) -> Any:
         if self.date_field_mode == "text":
@@ -255,14 +235,6 @@ class FeishuBitableClient:
             content_type_json=True,
         )
 
-    def _put_json(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._request_json_with_auth_retry(
-            "PUT",
-            url,
-            payload=payload,
-            content_type_json=True,
-        )
-
     def _get_json(self, url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self._request_json_with_auth_retry(
             "GET",
@@ -286,62 +258,6 @@ class FeishuBitableClient:
         for i in range(0, len(fields_list), batch_size):
             chunk = fields_list[i : i + batch_size]
             payload = {"records": [{"fields": fields} for fields in chunk]}
-            responses.append(self._post_json(url, payload))
-            uploaded += len(chunk)
-            if callable(progress_callback):
-                progress_callback(uploaded, total)
-        return responses
-
-    def update_record(self, table_id: str, record_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
-        table_text = str(table_id or "").strip()
-        record_text = str(record_id or "").strip()
-        if not table_text:
-            raise ValueError("table_id 不能为空")
-        if not record_text:
-            raise ValueError("record_id 不能为空")
-        if not isinstance(fields, dict):
-            raise ValueError("fields 必须是dict")
-        url = self.UPDATE_RECORD_URL.format(
-            app_token=self.app_token,
-            table_id=table_text,
-            record_id=record_text,
-        )
-        return self._put_json(url, {"fields": fields})
-
-    def batch_update_records(
-        self,
-        table_id: str,
-        records: List[Dict[str, Any]],
-        batch_size: int = 200,
-        progress_callback: Callable[[int, int], None] | None = None,
-    ) -> List[Dict[str, Any]]:
-        if batch_size <= 0:
-            raise ValueError("batch_size 必须大于0")
-        normalized: List[Dict[str, Any]] = []
-        for item in records or []:
-            if not isinstance(item, dict):
-                continue
-            record_id = str(item.get("record_id", "") or "").strip()
-            fields = item.get("fields", {})
-            if record_id and isinstance(fields, dict):
-                normalized.append({"record_id": record_id, "fields": fields})
-        if not normalized:
-            return []
-
-        url = self.BATCH_UPDATE_RECORD_URL.format(app_token=self.app_token, table_id=table_id)
-        responses: List[Dict[str, Any]] = []
-        total = len(normalized)
-        uploaded = 0
-        if callable(progress_callback):
-            progress_callback(0, total)
-        for i in range(0, len(normalized), batch_size):
-            chunk = normalized[i : i + batch_size]
-            payload = {
-                "records": [
-                    {"record_id": item["record_id"], "fields": item["fields"]}
-                    for item in chunk
-                ]
-            }
             responses.append(self._post_json(url, payload))
             uploaded += len(chunk)
             if callable(progress_callback):
@@ -556,21 +472,6 @@ class FeishuBitableClient:
         skip_zero_records: bool = False,
         date_override: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        return self.batch_create_records(
-            self.calc_table_id,
-            self.build_calc_record_fields(
-                records,
-                skip_zero_records=skip_zero_records,
-                date_override=date_override,
-            ),
-        )
-
-    def build_calc_record_fields(
-        self,
-        records: List[Any],
-        skip_zero_records: bool = False,
-        date_override: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
         fields_list: List[Dict[str, Any]] = []
         for record in records:
             if skip_zero_records and record.value == 0:
@@ -590,7 +491,7 @@ class FeishuBitableClient:
                     item_name=item_name,
                 )
             )
-        return fields_list
+        return self.batch_create_records(self.calc_table_id, fields_list)
 
     def upload_attachment_record(
         self,

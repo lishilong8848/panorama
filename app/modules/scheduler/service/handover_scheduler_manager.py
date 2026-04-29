@@ -27,8 +27,8 @@ class HandoverSchedulerManager:
         return {
             "enabled": bool(raw.get("enabled", True)),
             "auto_start_in_gui": bool(raw.get("auto_start_in_gui", False)),
-            "morning_time": str(raw.get("morning_time", "08:00:00")).strip() or "08:00:00",
-            "afternoon_time": str(raw.get("afternoon_time", "17:00:00")).strip() or "17:00:00",
+            "morning_time": str(raw.get("morning_time", "07:00:00")).strip() or "07:00:00",
+            "afternoon_time": str(raw.get("afternoon_time", "16:00:00")).strip() or "16:00:00",
             "check_interval_sec": int(raw.get("check_interval_sec", 30)),
             "catch_up_if_missed": bool(raw.get("catch_up_if_missed", False)),
             "retry_failed_in_same_period": bool(raw.get("retry_failed_in_same_period", False)),

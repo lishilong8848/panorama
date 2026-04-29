@@ -891,228 +891,91 @@ def test_handover_review_confirm_requires_active_lock(monkeypatch):
     assert "其他终端编辑" in str(exc_info.value.detail)
 
 
-def test_handover_review_confirm_action_disabled_without_output_or_failed_sync():
-    session_id = "A楼|2026-03-23|night"
-    base_session = {
-        "session_id": session_id,
-        "building": "A楼",
-        "revision": 3,
-        "confirmed": False,
-        "batch_key": "2026-03-23|night",
-        "output_file": "",
-        "excel_sync": {"status": "synced"},
-    }
+def test_handover_review_confirm_queues_followup_without_inline_upload(monkeypatch):
+    job_calls = []
 
-    state = routes._build_review_display_state(
-        building="A楼",
-        session=base_session,
-        batch_status={"batch_key": "2026-03-23|night"},
-        concurrency={"client_holds_lock": True},
-        latest_session_id=session_id,
-    )
-    assert state["actions"]["confirm"]["allowed"] is False
-    assert "交接班文件" in state["actions"]["confirm"]["disabled_reason"]
+    class _JobService:
+        @contextmanager
+        def resource_guard(self, **_kwargs):
+            yield
 
-    failed_sync_state = routes._build_review_display_state(
-        building="A楼",
-        session={
-            **base_session,
-            "output_file": "latest.xlsx",
-            "excel_sync": {"status": "failed", "error": "写入失败"},
-        },
-        batch_status={"batch_key": "2026-03-23|night"},
-        concurrency={"client_holds_lock": True},
-        latest_session_id=session_id,
-    )
-    assert failed_sync_state["actions"]["confirm"]["allowed"] is False
-    assert failed_sync_state["actions"]["confirm"]["disabled_reason"] == "写入失败"
-
-    confirmed_state = routes._build_review_display_state(
-        building="A楼",
-        session={**base_session, "confirmed": True},
-        batch_status={"batch_key": "2026-03-23|night"},
-        concurrency={"client_holds_lock": True},
-        latest_session_id=session_id,
-    )
-    assert confirmed_state["actions"]["confirm"]["allowed"] is True
-
-
-def test_handover_review_confirm_waits_for_xlsx_queue_before_marking_confirmed(monkeypatch):
-    marked_calls = []
-
-    class _Service:
-        def get_session_by_id(self, session_id):
-            return {
-                "session_id": session_id,
-                "building": "A楼",
-                "revision": 3,
-                "batch_key": "2026-03-23|night",
-                "output_file": "latest.xlsx",
-            }
-
-        def get_latest_session_id(self, _building):
-            return "A楼|2026-03-23|night"
-
-        def get_session_concurrency(self, **_kwargs):
-            return {"client_holds_lock": True}
-
-        def mark_confirmed(self, **kwargs):
-            marked_calls.append(kwargs)
-            return (
-                {
-                    "session_id": kwargs["session_id"],
-                    "building": "A楼",
-                    "revision": 4,
-                    "batch_key": "2026-03-23|night",
-                    "confirmed": True,
-                },
-                {"batch_key": "2026-03-23|night"},
+        def start_worker_job(self, **kwargs):
+            job_calls.append(kwargs)
+            return SimpleNamespace(
+                job_id="job-followup",
+                to_dict=lambda: {"job_id": "job-followup", "status": "queued"},
             )
 
-        def get_batch_status(self, _batch_key):
-            return {"batch_key": "2026-03-23|night"}
-
-    class _Followup:
-        def trigger_after_single_confirm(self, **_kwargs):
-            return {"status": "await_all_confirmed", "uploaded_buildings": [], "failed_buildings": [], "cloud_sheet_sync": {}}
-
-    class _Queue:
-        def __init__(self):
-            self.wait_calls = []
-
-        def wait_for_barrier(self, *, building, timeout_sec):
-            self.wait_calls.append((building, timeout_sec))
-            return {"status": "success"}
-
-    queue = _Queue()
-    service = _Service()
-    monkeypatch.setattr(routes, "_build_review_session_service", lambda _container: service)
-    monkeypatch.setattr(routes, "_build_review_followup_service", lambda _container: _Followup())
-    monkeypatch.setattr(routes, "_build_xlsx_write_queue_service", lambda _container: queue)
-    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
-    monkeypatch.setattr(routes, "_load_target_session_or_404", lambda _service, **_kwargs: service.get_session_by_id("A楼|2026-03-23|night"))
-    monkeypatch.setattr(routes, "_attach_excel_sync_from_store", lambda _container, session: {**session, "excel_sync": {"status": "success"}})
-    monkeypatch.setattr(routes, "_safe_latest_session_id", lambda _service, **_kwargs: "A楼|2026-03-23|night")
-    monkeypatch.setattr(routes, "_attach_followup_progress", lambda _followup, status: status)
-
-    response = routes.handover_review_confirm(
-        "a",
-        _fake_request(),
-        {
-            "session_id": "A楼|2026-03-23|night",
-            "base_revision": 3,
-            "client_id": "review-b001",
-        },
+    container = SimpleNamespace(
+        add_system_log=lambda *_args, **_kwargs: None,
+        config={},
+        config_path="config.json",
+        apply_config_snapshot=lambda _cfg, *, mode="light": None,
+        reload_config=lambda _cfg: None,
+        job_service=_JobService(),
     )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
 
-    assert response["ok"] is True
-    assert queue.wait_calls == [("A楼", 120.0)]
-    assert len(marked_calls) == 1
+    session = {
+        "session_id": "A楼|2026-03-23|night",
+        "building": "A楼",
+        "revision": 4,
+        "confirmed": True,
+        "batch_key": "2026-03-23|night",
+        "output_file": "latest.xlsx",
+    }
 
-
-def test_handover_review_confirm_returns_409_when_xlsx_queue_busy(monkeypatch):
     class _Service:
-        def get_session_by_id(self, session_id):
-            return {
-                "session_id": session_id,
-                "building": "A楼",
-                "revision": 3,
-                "batch_key": "2026-03-23|night",
-                "output_file": "latest.xlsx",
-            }
-
-        def get_latest_session_id(self, _building):
-            return "A楼|2026-03-23|night"
-
-        def get_session_concurrency(self, **_kwargs):
-            return {"client_holds_lock": True}
-
         def mark_confirmed(self, **_kwargs):
-            raise AssertionError("mark_confirmed should wait for xlsx queue first")
+            return dict(session), {"batch_key": "2026-03-23|night", "all_confirmed": True}
 
-    class _Queue:
-        def wait_for_barrier(self, *, building, timeout_sec):
-            raise routes.HandoverXlsxWriteQueueTimeoutError("busy")
-
-    service = _Service()
-    monkeypatch.setattr(routes, "_build_review_session_service", lambda _container: service)
-    monkeypatch.setattr(routes, "_build_review_followup_service", lambda _container: SimpleNamespace())
-    monkeypatch.setattr(routes, "_build_xlsx_write_queue_service", lambda _container: _Queue())
-    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
-    monkeypatch.setattr(routes, "_load_target_session_or_404", lambda _service, **_kwargs: service.get_session_by_id("A楼|2026-03-23|night"))
-
-    with pytest.raises(HTTPException) as exc_info:
-        routes.handover_review_confirm(
-            "a",
-            _fake_request(),
-            {
-                "session_id": "A楼|2026-03-23|night",
-                "base_revision": 3,
-                "client_id": "review-b001",
-            },
-        )
-
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.detail == "交接班文件写入队列繁忙，请稍后重试"
-
-
-def test_handover_review_confirm_duplicate_conflict_is_idempotent_success(monkeypatch):
-    class _Service:
-        def get_session_by_id(self, session_id):
-            return {
-                "session_id": session_id,
-                "building": "A楼",
-                "revision": 4,
-                "confirmed": True,
-                "batch_key": "2026-03-23|night",
-                "output_file": "latest.xlsx",
-            }
-
-        def get_latest_session_id(self, _building):
-            return "A楼|2026-03-23|night"
-
-        def get_session_concurrency(self, **_kwargs):
-            return {"client_holds_lock": True}
-
-        def mark_confirmed(self, **_kwargs):
-            raise routes.ReviewSessionConflictError("review session revision conflict")
+        def get_session_by_id(self, _session_id):
+            return dict(session)
 
         def get_batch_status(self, _batch_key):
-            return {"batch_key": "2026-03-23|night", "all_confirmed": False}
+            return {"batch_key": "2026-03-23|night", "all_confirmed": True}
 
     class _Followup:
-        def trigger_after_single_confirm(self, **_kwargs):
-            raise AssertionError("duplicate confirm should not trigger followup")
+        def evaluate(self, _batch_status):
+            return {"ready_for_followup_upload": True}
+
+        def is_first_full_cloud_sync_completed(self, _batch_key):
+            return False
 
         def get_followup_progress(self, _batch_key):
-            return {"status": "idle"}
+            return {"status": "idle", "can_resume_followup": False}
 
-    class _Queue:
-        def wait_for_barrier(self, *, building, timeout_sec):
-            return {"building": building, "timeout_sec": timeout_sec, "status": "success"}
+        def trigger_after_single_confirm(self, **_kwargs):
+            raise AssertionError("confirm route must not run upload inline")
 
-    service = _Service()
-    monkeypatch.setattr(routes, "_build_review_session_service", lambda _container: service)
+    monkeypatch.setattr(routes, "_build_review_session_service", lambda _container: _Service())
     monkeypatch.setattr(routes, "_build_review_followup_service", lambda _container: _Followup())
-    monkeypatch.setattr(routes, "_build_xlsx_write_queue_service", lambda _container: _Queue())
     monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
-    monkeypatch.setattr(routes, "_load_target_session_or_404", lambda _service, **_kwargs: service.get_session_by_id("A楼|2026-03-23|night"))
-    monkeypatch.setattr(routes, "_attach_excel_sync_from_store", lambda _container, session: {**session, "excel_sync": {"status": "success"}})
-    monkeypatch.setattr(routes, "_safe_latest_session_id", lambda _service, **_kwargs: "A楼|2026-03-23|night")
+    monkeypatch.setattr(routes, "_ensure_latest_session_actionable_or_400", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "_ensure_session_lock_held_or_409", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "_attach_excel_sync_from_store", lambda _container, raw: dict(raw))
+    monkeypatch.setattr(routes, "_attach_followup_progress", lambda _followup, raw: dict(raw or {}))
+    monkeypatch.setattr(routes, "_safe_latest_session_id", lambda *_args, **_kwargs: "A楼|2026-03-23|night")
+    monkeypatch.setattr(routes, "_attach_review_display_state", lambda response, **_kwargs: response)
+    monkeypatch.setattr(routes, "_get_session_concurrency_safe", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(routes, "_load_target_session_or_404", lambda _service, **_kwargs: dict(session))
 
     response = routes.handover_review_confirm(
         "a",
-        _fake_request(),
+        request,
         {
             "session_id": "A楼|2026-03-23|night",
             "base_revision": 3,
-            "client_id": "review-b001",
+            "client_id": "review-a001",
         },
     )
 
     assert response["ok"] is True
-    assert response["session"]["confirmed"] is True
-    assert response["followup_result"]["status"] == "already_confirmed"
+    assert response["followup_result"]["status"] == "queued"
+    assert response["operation_feedback"]["status"] == "followup_queued"
+    assert len(job_calls) == 1
+    assert job_calls[0]["worker_handler"] == "handover_followup_continue"
+    assert job_calls[0]["resource_keys"] == ["network:external", "handover_followup:2026-03-23|night"]
 
 
 def test_handover_review_unconfirm_requires_active_lock(monkeypatch):
@@ -1161,51 +1024,6 @@ def test_handover_review_unconfirm_requires_active_lock(monkeypatch):
 
     assert exc_info.value.status_code == 409
     assert "其他终端编辑" in str(exc_info.value.detail)
-
-
-def test_handover_review_unconfirm_duplicate_conflict_is_idempotent_success(monkeypatch):
-    class _Service:
-        def get_session_by_id(self, session_id):
-            return {
-                "session_id": session_id,
-                "building": "A楼",
-                "revision": 5,
-                "confirmed": False,
-                "batch_key": "2026-03-23|night",
-                "output_file": "latest.xlsx",
-            }
-
-        def get_latest_session_id(self, _building):
-            return "A楼|2026-03-23|night"
-
-        def get_session_concurrency(self, **_kwargs):
-            return {"client_holds_lock": True}
-
-        def mark_confirmed(self, **_kwargs):
-            raise routes.ReviewSessionConflictError("review session revision conflict")
-
-        def get_batch_status(self, _batch_key):
-            return {"batch_key": "2026-03-23|night", "all_confirmed": False}
-
-    service = _Service()
-    monkeypatch.setattr(routes, "_build_review_session_service", lambda _container: service)
-    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
-    monkeypatch.setattr(routes, "_load_target_session_or_404", lambda _service, **_kwargs: service.get_session_by_id("A楼|2026-03-23|night"))
-    monkeypatch.setattr(routes, "_attach_excel_sync_from_store", lambda _container, session: {**session, "excel_sync": {"status": "success"}})
-    monkeypatch.setattr(routes, "_safe_latest_session_id", lambda _service, **_kwargs: "A楼|2026-03-23|night")
-
-    response = routes.handover_review_unconfirm(
-        "a",
-        _fake_request(),
-        {
-            "session_id": "A楼|2026-03-23|night",
-            "base_revision": 4,
-            "client_id": "review-b001",
-        },
-    )
-
-    assert response["ok"] is True
-    assert response["session"]["confirmed"] is False
 
 
 def test_handover_review_cloud_sync_update_requires_active_lock(monkeypatch):

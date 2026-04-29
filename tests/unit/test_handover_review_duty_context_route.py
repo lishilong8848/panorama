@@ -92,3 +92,32 @@ def test_handover_review_data_loads_requested_duty_context(monkeypatch):
     assert payload["display_state"]["history_hint"].startswith("仅显示最近 10 条已成功上云")
     assert payload["display_state"]["download_state"]["status"] == "ready"
     assert payload["display_state"]["confirm_state"]["status"] == "pending_confirm"
+
+
+def test_review_display_disables_confirm_while_cloud_sheet_uploading():
+    display = routes._build_review_display_state(
+        building="A楼",
+        session={
+            "session_id": "A楼|2026-03-24|day",
+            "building": "A楼",
+            "batch_key": "2026-03-24|day",
+            "duty_date": "2026-03-24",
+            "duty_shift": "day",
+            "revision": 2,
+            "confirmed": True,
+            "output_file": "demo.xlsx",
+            "cloud_sheet_sync": {"status": "uploading"},
+        },
+        batch_status={"batch_key": "2026-03-24|day", "all_confirmed": True},
+        concurrency={},
+        history={"latest_session_id": "A楼|2026-03-24|day", "selected_is_latest": True},
+        defaults_sync={},
+        save_status={},
+        latest_session_id="A楼|2026-03-24|day",
+        client_session_id="A楼|2026-03-24|day",
+        client_revision=2,
+    )
+
+    assert display["cloud_sheet"]["status"] == "uploading"
+    assert display["actions"]["confirm"]["allowed"] is False
+    assert "云文档上传中" in display["actions"]["confirm"]["disabled_reason"]

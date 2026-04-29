@@ -17,10 +17,6 @@ from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateError,
     ReviewDocumentStateService,
 )
-from handover_log_module.service.handover_xlsx_write_queue_service import (
-    HandoverXlsxWriteQueueService,
-    HandoverXlsxWriteQueueTimeoutError,
-)
 from handover_log_module.service.review_session_service import ReviewSessionNotFoundError, ReviewSessionService
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
@@ -88,6 +84,8 @@ def _followup_status_text(value: Any) -> str:
         "prepared": "已预建",
         "prepare_failed": "预建失败",
         "pending_upload": "待上传",
+        "uploading": "上传中",
+        "syncing": "同步中",
         "pending_review": "待确认后上传",
         "success": "成功",
         "ok": "成功",
@@ -760,21 +758,11 @@ class ReviewFollowupTriggerService:
                 continue
             if force_excel_sync:
                 try:
-                    queue_service = HandoverXlsxWriteQueueService(
-                        self.config,
-                        emit_log=emit_log,
+                    self._review_document_state_service.force_sync_session_dict(
+                        session,
+                        reason="cloud_upload",
                     )
-                    queue_service.enqueue_review_excel_sync(session, target_revision=revision)
-                    queue_service.wait_for_barrier(building=building, timeout_sec=120.0)
-                    attach_sync = getattr(self._review_document_state_service, "attach_excel_sync", None)
-                    if callable(attach_sync):
-                        sync_state = attach_sync(session).get("excel_sync", {})
-                        status = str(sync_state.get("status", "") or "").strip().lower()
-                        if status == "failed":
-                            raise ReviewDocumentStateError(
-                                str(sync_state.get("error", "") or "").strip() or "交接班Excel同步失败"
-                            )
-                except (ReviewDocumentStateError, HandoverXlsxWriteQueueTimeoutError) as exc:
+                except ReviewDocumentStateError as exc:
                     emit_log(
                         "[交接班][云表最终上传] 同步最新审核内容失败 "
                         f"building={building}, session_id={session.get('session_id', '-')}, error={exc}"
@@ -881,6 +869,62 @@ class ReviewFollowupTriggerService:
                     emit_log=emit_log,
                 )
 
+    def _mark_cloud_sheet_uploading(
+        self,
+        *,
+        sessions: List[Dict[str, Any]],
+        batch_meta: Dict[str, Any],
+        upload_items: List[Dict[str, Any]],
+        emit_log: Callable[[str], None],
+    ) -> None:
+        batch_key = str(batch_meta.get("batch_key", "") or "").strip()
+        uploading_buildings = {
+            str(item.get("building", "")).strip()
+            for item in upload_items
+            if isinstance(item, dict) and str(item.get("building", "")).strip()
+        }
+        if not batch_key or not uploading_buildings:
+            return
+        spreadsheet_token = str(batch_meta.get("spreadsheet_token", "")).strip()
+        spreadsheet_url = str(batch_meta.get("spreadsheet_url", "")).strip()
+        spreadsheet_title = str(batch_meta.get("spreadsheet_title", "")).strip()
+        prepared_at = str(batch_meta.get("prepared_at", "")).strip()
+        for session in sessions:
+            session_id = str(session.get("session_id", "")).strip()
+            building = str(session.get("building", "")).strip()
+            if not session_id or building not in uploading_buildings:
+                continue
+            previous = _normalize_cloud_sync_state(session.get("cloud_sheet_sync", {}))
+            if previous["status"] == "disabled":
+                continue
+            revision = int(session.get("revision", 0) or 0)
+            payload = {
+                **previous,
+                "attempted": True,
+                "success": False,
+                "status": "uploading",
+                "spreadsheet_token": spreadsheet_token or previous["spreadsheet_token"],
+                "spreadsheet_url": spreadsheet_url or previous["spreadsheet_url"],
+                "spreadsheet_title": spreadsheet_title or previous["spreadsheet_title"],
+                "sheet_title": previous["sheet_title"] or building,
+                "synced_revision": int(previous.get("synced_revision", 0) or 0),
+                "last_attempt_revision": revision,
+                "prepared_at": prepared_at or previous["prepared_at"],
+                "updated_at": self._now_text(),
+                "error": "",
+                "synced_row_count": int(previous.get("synced_row_count", 0) or 0),
+                "synced_column_count": int(previous.get("synced_column_count", 0) or 0),
+                "synced_merges": previous.get("synced_merges", []),
+                "dynamic_merge_signature": str(previous.get("dynamic_merge_signature", "")).strip(),
+            }
+            self._update_cloud_sheet_sync_resilient(
+                batch_key=batch_key,
+                building=building,
+                session_id=session_id,
+                cloud_sheet_sync=payload,
+                emit_log=emit_log,
+            )
+
     def _run_cloud_sheet_upload(
         self,
         *,
@@ -959,11 +1003,34 @@ class ReviewFollowupTriggerService:
                 "details": {},
             }
 
-        result = self._cloud_sheet_sync_service.sync_confirmed_buildings(
+        self._mark_cloud_sheet_uploading(
+            sessions=sessions,
             batch_meta=batch_meta,
-            building_items=upload_items,
+            upload_items=upload_items,
             emit_log=emit_log,
         )
+        try:
+            result = self._cloud_sheet_sync_service.sync_confirmed_buildings(
+                batch_meta=batch_meta,
+                building_items=upload_items,
+                emit_log=emit_log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][云表最终上传] 批量异常 batch={batch_key}, error={exc}")
+            result = {
+                "status": "failed",
+                "spreadsheet_token": str(batch_meta.get("spreadsheet_token", "")).strip(),
+                "spreadsheet_url": str(batch_meta.get("spreadsheet_url", "")).strip(),
+                "spreadsheet_title": str(batch_meta.get("spreadsheet_title", "")).strip(),
+                "uploaded_buildings": [],
+                "skipped_buildings": [],
+                "failed_buildings": [
+                    {"building": str(item.get("building", "")).strip(), "error": str(exc)}
+                    for item in upload_items
+                    if isinstance(item, dict) and str(item.get("building", "")).strip()
+                ],
+                "details": {},
+            }
         result["skipped_buildings"] = list(skipped_buildings) + list(result.get("skipped_buildings", []) or [])
         result["failed_buildings"] = list(failed_buildings) + list(result.get("failed_buildings", []) or [])
         uploaded = list(result.get("uploaded_buildings", []) or [])

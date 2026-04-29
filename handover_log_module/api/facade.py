@@ -72,37 +72,6 @@ def _collect_buildings(cfg: Dict[str, Any]) -> list[str]:
     return output
 
 
-def _normalize_e_building_wet_bulb_keywords(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    output = copy.deepcopy(cfg if isinstance(cfg, dict) else {})
-    cell_rules = output.get("cell_rules", {}) if isinstance(output.get("cell_rules", {}), dict) else {}
-    building_rows = cell_rules.get("building_rows", {}) if isinstance(cell_rules.get("building_rows", {}), dict) else {}
-    e_rows = building_rows.get("E楼", [])
-    if not isinstance(e_rows, list):
-        return output
-
-    for row in e_rows:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("id", "")).strip() != "wet_bulb":
-            continue
-        keywords = row.get("d_keywords", [])
-        if not isinstance(keywords, list):
-            continue
-        normalized_keywords: list[str] = []
-        for item in keywords:
-            text = str(item or "").strip()
-            if not text:
-                continue
-            if text == "E-124-DDC-100_室外温度1":
-                text = "E-124-DDC-100_室外湿度1"
-            elif text == "室外温度1":
-                text = "室外湿度1"
-            if text not in normalized_keywords:
-                normalized_keywords.append(text)
-        row["d_keywords"] = normalized_keywords
-    return output
-
-
 def _normalize_role_mode(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text in {"internal", "external"}:
@@ -164,7 +133,6 @@ def load_handover_config(config: Dict[str, Any] | None = None) -> Dict[str, Any]
 
     # One-time compatibility in runtime: old rule structures are converted to cell_rules.
     base_cfg = migrate_legacy_rule_structures(base_cfg)
-    base_cfg = _normalize_e_building_wet_bulb_keywords(base_cfg)
     buildings = _collect_buildings(base_cfg)
     base_cfg["cell_rules"] = normalize_cell_rules(base_cfg, buildings)
 

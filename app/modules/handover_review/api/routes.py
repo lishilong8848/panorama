@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
-import contextlib
+import base64
 import copy
 import inspect
 import threading
@@ -23,7 +23,6 @@ from app.shared.utils.frontend_cache import render_frontend_index_html, source_f
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
-from handover_log_module.service.cooling_pump_pressure_defaults_service import CoolingPumpPressureDefaultsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from handover_log_module.service.handover_daily_report_asset_service import HandoverDailyReportAssetService
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
@@ -31,13 +30,6 @@ from handover_log_module.service.handover_daily_report_screenshot_service import
     HandoverDailyReportScreenshotService,
 )
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
-from handover_log_module.service.handover_xlsx_write_queue_service import (
-    HandoverXlsxWriteQueueService,
-    HandoverXlsxWriteQueueTimeoutError,
-)
-from handover_log_module.service.capacity_report_image_delivery_service import (
-    CapacityReportImageDeliveryService,
-)
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateConflictError,
@@ -63,7 +55,6 @@ _REVIEW_DOCUMENT_WARMUPS_INFLIGHT: set[str] = set()
 _REVIEW_BOOTSTRAP_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_HISTORY_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_HISTORY_CACHE_TTL_SEC = 15.0
-_SUBSTATION_110KV_COMPARE_KEYS = ("line_voltage", "current", "power_kw", "power_factor", "load_rate")
 
 
 def _raise_review_store_http_error(
@@ -501,6 +492,28 @@ def _get_session_concurrency_safe(
         return _empty_concurrency(current_revision=current_revision)
 
 
+def _get_substation_110kv_state_safe(
+    service: ReviewSessionService,
+    *,
+    batch_key: str,
+    client_id: str = "",
+    emit_log=None,
+) -> Dict[str, Any]:
+    getter = getattr(service, "get_substation_110kv_state", None)
+    if not callable(getter):
+        return {"shared_blocks": {}, "shared_block_locks": {}}
+    try:
+        state = getter(
+            batch_key=str(batch_key or "").strip(),
+            client_id=str(client_id or "").strip(),
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        if callable(emit_log):
+            emit_log(f"[交接班][110KV共享] 状态读取失败: batch={batch_key}, error={exc}")
+        return {"shared_blocks": {}, "shared_block_locks": {}}
+    return state if isinstance(state, dict) else {"shared_blocks": {}, "shared_block_locks": {}}
+
+
 def _ensure_session_lock_held_or_409(
     service: ReviewSessionService,
     *,
@@ -585,29 +598,6 @@ def _build_review_document_state_service(
         writer=writer,
         emit_log=getattr(container, "add_system_log", print),
     )
-
-
-def _build_xlsx_write_queue_service(
-    container,
-    *,
-    parser: ReviewDocumentParser | None = None,
-    writer: ReviewDocumentWriter | None = None,
-) -> HandoverXlsxWriteQueueService:
-    return HandoverXlsxWriteQueueService(
-        _handover_cfg(container),
-        emit_log=getattr(container, "add_system_log", print),
-        job_service=getattr(container, "job_service", None),
-        parser=parser,
-        writer=writer,
-    )
-
-
-def _resource_guard_or_null(container, *, name: str, resource_keys: list[str]):
-    job_service = getattr(container, "job_service", None)
-    guard = getattr(job_service, "resource_guard", None)
-    if callable(guard):
-        return guard(name=name, resource_keys=resource_keys)
-    return contextlib.nullcontext()
 
 
 def _attach_excel_sync_safe(document_state, session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -731,11 +721,77 @@ def _build_followup_failure_result(
     }
 
 
+def _build_followup_queued_result(
+    followup: ReviewFollowupTriggerService,
+    *,
+    batch_key: str,
+    job=None,
+) -> Dict[str, Any]:
+    target_batch = str(batch_key or "").strip()
+    job_payload = job.to_dict() if hasattr(job, "to_dict") else dict(job or {})
+    return {
+        "status": "queued",
+        "batch_key": target_batch,
+        "uploaded_buildings": [],
+        "skipped_buildings": [],
+        "failed_buildings": [],
+        "details": {},
+        "blocked_reason": "",
+        "cloud_sheet_sync": {
+            "status": "queued",
+            "uploaded_buildings": [],
+            "skipped_buildings": [],
+            "failed_buildings": [],
+            "details": {},
+            "blocked_reason": "",
+        },
+        "daily_report_record_export": {
+            "status": "queued",
+            "error": "",
+        },
+        "followup_progress": followup.get_followup_progress(target_batch) if target_batch else _empty_followup_progress(),
+        "job": job_payload,
+    }
+
+
+def _build_followup_await_all_result(
+    followup: ReviewFollowupTriggerService,
+    *,
+    batch_key: str,
+    blocked_reason: str = "",
+) -> Dict[str, Any]:
+    target_batch = str(batch_key or "").strip()
+    reason = str(blocked_reason or "").strip() or "五个楼栋尚未全部确认"
+    return {
+        "status": "await_all_confirmed",
+        "batch_key": target_batch,
+        "uploaded_buildings": [],
+        "skipped_buildings": [],
+        "failed_buildings": [],
+        "details": {},
+        "blocked_reason": reason,
+        "cloud_sheet_sync": {
+            "status": "await_all_confirmed",
+            "uploaded_buildings": [],
+            "skipped_buildings": [],
+            "failed_buildings": [],
+            "details": {},
+            "blocked_reason": reason,
+        },
+        "daily_report_record_export": {
+            "status": "idle",
+            "error": "",
+        },
+        "followup_progress": followup.get_followup_progress(target_batch) if target_batch else _empty_followup_progress(),
+    }
+
+
 def _followup_status_text(value: Any) -> str:
     text = str(value or "").strip().lower()
     mapping = {
         "ok": "成功",
         "success": "成功",
+        "queued": "已提交",
         "failed": "失败",
         "partial_failed": "部分失败",
         "blocked": "已阻塞",
@@ -743,8 +799,52 @@ def _followup_status_text(value: Any) -> str:
         "disabled": "已禁用",
         "ready_for_external": "等待外网继续",
         "pending_review": "待确认后上传",
+        "pending_upload": "待上传",
+        "uploading": "上传中",
+        "syncing": "同步中",
     }
     return mapping.get(text, text or "-")
+
+
+def _start_handover_followup_job_after_confirm(
+    container,
+    *,
+    batch_key: str,
+    submitted_by: str = "confirm",
+) -> Dict[str, Any]:
+    target_batch = str(batch_key or "").strip()
+    followup = _build_review_followup_service(container)
+    if not target_batch:
+        return _build_followup_failure_result(followup, batch_key=target_batch, error="batch_key 不能为空")
+
+    def _run(emit_log) -> Dict[str, Any]:
+        service = _build_review_followup_service(container)
+        emit_log(f"[交接班][确认后上传] 后台任务开始 batch={target_batch}")
+        result = service.continue_batch(target_batch, emit_log=emit_log)
+        emit_log(
+            f"[交接班][确认后上传] 后台任务完成 batch={target_batch}, "
+            f"状态={_followup_status_text(result.get('status'))}, "
+            f"已上传={len(result.get('uploaded_buildings', []) or [])}, "
+            f"已失败={len(result.get('failed_buildings', []) or [])}, "
+            f"云表状态={_followup_status_text((result.get('cloud_sheet_sync', {}) or {}).get('status', '-'))}"
+        )
+        return result
+
+    job = _start_handover_background_job(
+        container,
+        name=f"交接班确认后上传-{target_batch}",
+        run_func=_run,
+        worker_handler="handover_followup_continue",
+        worker_payload={"batch_key": target_batch},
+        resource_keys=["network:external", f"handover_followup:{target_batch}"],
+        priority="manual",
+        feature="handover_followup_continue",
+        submitted_by=submitted_by,
+        dedupe_key=f"handover_followup_continue:{target_batch}",
+    )
+    job_id = str(getattr(job, "job_id", "") or (job.get("job_id", "") if isinstance(job, dict) else "")).strip()
+    container.add_system_log(f"[任务] 已提交: 交接班确认后上传 batch={target_batch} ({job_id or '-'})")
+    return _build_followup_queued_result(followup, batch_key=target_batch, job=job)
 
 
 def _daily_report_stage_text(value: Any) -> str:
@@ -777,26 +877,39 @@ def _start_handover_background_job(
     submitted_by: str = "manual",
     worker_handler: str = "",
     worker_payload: Dict[str, Any] | None = None,
+    dedupe_key: str = "",
 ):
     job_service = container.job_service
     if worker_handler and hasattr(job_service, "start_worker_job"):
-        return job_service.start_worker_job(
-            name=name,
-            worker_handler=worker_handler,
-            worker_payload=worker_payload or {},
-            resource_keys=resource_keys,
-            priority=priority,
-            feature=feature,
-            submitted_by=submitted_by,
-        )
-    return job_service.start_job(
-        name=name,
-        run_func=run_func,
-        resource_keys=resource_keys,
-        priority=priority,
-        feature=feature,
-        submitted_by=submitted_by,
-    )
+        kwargs = {
+            "name": name,
+            "worker_handler": worker_handler,
+            "worker_payload": worker_payload or {},
+            "resource_keys": resource_keys,
+            "priority": priority,
+            "feature": feature,
+            "submitted_by": submitted_by,
+        }
+        try:
+            if "dedupe_key" in inspect.signature(job_service.start_worker_job).parameters:
+                kwargs["dedupe_key"] = dedupe_key
+        except (TypeError, ValueError):
+            kwargs["dedupe_key"] = dedupe_key
+        return job_service.start_worker_job(**kwargs)
+    kwargs = {
+        "name": name,
+        "run_func": run_func,
+        "resource_keys": resource_keys,
+        "priority": priority,
+        "feature": feature,
+        "submitted_by": submitted_by,
+    }
+    try:
+        if "dedupe_key" in inspect.signature(job_service.start_job).parameters:
+            kwargs["dedupe_key"] = dedupe_key
+    except (TypeError, ValueError):
+        kwargs["dedupe_key"] = dedupe_key
+    return job_service.start_job(**kwargs)
 
 
 def _build_daily_report_services(
@@ -1064,8 +1177,6 @@ def _should_sync_capacity_after_review_save(
     previous_session: Dict[str, Any] | None,
     dirty_regions: Dict[str, bool],
     tracked_cells: Dict[str, str],
-    shared_110kv: Dict[str, Any] | None = None,
-    cooling_pump_pressures: Dict[str, Any] | None = None,
 ) -> bool:
     dirty = dirty_regions or {}
     if not bool(dirty.get("fixed_blocks")) and not bool(dirty.get("cooling_pump_pressures")):
@@ -1073,46 +1184,46 @@ def _should_sync_capacity_after_review_save(
     previous = previous_session if isinstance(previous_session, dict) else {}
     previous_sync = previous.get("capacity_sync", {}) if isinstance(previous.get("capacity_sync", {}), dict) else {}
     previous_signature = str(previous_sync.get("input_signature", "") or "").strip()
-    next_signature = _capacity_input_signature_for_review(
-        tracked_cells=tracked_cells,
-        shared_110kv=shared_110kv,
-        cooling_pump_pressures=cooling_pump_pressures,
-    )
+    next_signature = HandoverCapacityReportService.capacity_input_signature(tracked_cells)
     if previous_signature != next_signature:
         return True
     status = str(previous_sync.get("status", "") or "").strip().lower()
     return status in {"pending_input", "missing_file", "failed"}
 
 
-def _capacity_input_signature_for_review(
+def _sync_capacity_overlay_after_review_save(
     *,
-    tracked_cells: Dict[str, str],
-    shared_110kv: Dict[str, Any] | None = None,
-    cooling_pump_pressures: Dict[str, Any] | None = None,
-) -> str:
-    shared_signature = ""
-    if isinstance(shared_110kv, dict):
-        shared_payload = ReviewSessionService.normalize_substation_110kv_payload(shared_110kv)
-        parts = []
-        for row in shared_payload.get("rows", []):
-            if not isinstance(row, dict):
-                continue
-            parts.append(
-                "{row_id}:{line_voltage},{current},{power_kw},{power_factor},{load_rate}".format(
-                    row_id=str(row.get("row_id", "") or "").strip(),
-                    line_voltage=str(row.get("line_voltage", "") or "").strip(),
-                    current=str(row.get("current", "") or "").strip(),
-                    power_kw=str(row.get("power_kw", "") or "").strip(),
-                    power_factor=str(row.get("power_factor", "") or "").strip(),
-                    load_rate=str(row.get("load_rate", "") or "").strip(),
-                )
-            )
-        shared_signature = f"rev={int(shared_payload.get('revision', 0) or 0)};" + "|".join(parts)
-    cooling_signature = CoolingPumpPressureDefaultsService.signature(cooling_pump_pressures or {})
-    return HandoverCapacityReportService.capacity_input_signature(
-        tracked_cells,
-        shared_110kv_signature=shared_signature,
-        cooling_pump_signature=cooling_signature,
+    container,
+    review_service: ReviewSessionService,
+    previous_session: Dict[str, Any],
+    saved_session: Dict[str, Any],
+    document: Dict[str, Any],
+    dirty_regions: Dict[str, bool],
+) -> Dict[str, Any]:
+    tracked_cells = _extract_capacity_tracked_cells(document)
+    if not _should_sync_capacity_after_review_save(
+        previous_session=previous_session,
+        dirty_regions=dirty_regions,
+        tracked_cells=tracked_cells,
+    ):
+        return saved_session
+    return _sync_capacity_overlay_for_saved_session(
+        container=container,
+        review_service=review_service,
+        saved_session=saved_session,
+        tracked_cells=tracked_cells,
+        shared_110kv=(
+            review_service.get_substation_110kv_state(
+                batch_key=str(saved_session.get("batch_key", "")).strip(),
+            ).get("shared_blocks", {}).get("substation_110kv", {})
+            if str(saved_session.get("batch_key", "")).strip()
+            else {}
+        ),
+        cooling_pump_pressures=(
+            document.get("cooling_pump_pressures", {})
+            if isinstance(document.get("cooling_pump_pressures", {}), dict)
+            else {}
+        ),
     )
 
 
@@ -1131,19 +1242,117 @@ def _build_pending_capacity_sync_payload(tracked_cells: Dict[str, str]) -> Dict[
     }
 
 
-def _build_pending_capacity_sync_payload_for_review(
+def _sync_capacity_overlay_for_saved_session(
     *,
+    container,
+    review_service: ReviewSessionService,
+    saved_session: Dict[str, Any],
     tracked_cells: Dict[str, str],
     shared_110kv: Dict[str, Any] | None = None,
     cooling_pump_pressures: Dict[str, Any] | None = None,
+    client_id: str = "",
 ) -> Dict[str, Any]:
-    payload = _build_pending_capacity_sync_payload(tracked_cells)
-    payload["input_signature"] = _capacity_input_signature_for_review(
-        tracked_cells=tracked_cells,
+    if not callable(getattr(review_service, "update_capacity_sync", None)):
+        return saved_session
+    runtime_cfg = getattr(container, "runtime_config", None)
+    if not isinstance(runtime_cfg, dict):
+        return saved_session
+
+    building = str(saved_session.get("building", "")).strip()
+    duty_date = str(saved_session.get("duty_date", "")).strip()
+    duty_shift = str(saved_session.get("duty_shift", "")).strip().lower()
+    if not building or not duty_date or duty_shift not in {"day", "night"}:
+        return saved_session
+
+    handover_cfg = _handover_cfg(container)
+    capacity_service = HandoverCapacityReportService(handover_cfg)
+    sync_payload = capacity_service.sync_overlay_for_existing_report_from_cells(
+        building=building,
+        duty_date=duty_date,
+        duty_shift=duty_shift,
+        handover_cells=tracked_cells,
+        capacity_output_file=str(saved_session.get("capacity_output_file", "")).strip(),
         shared_110kv=shared_110kv,
         cooling_pump_pressures=cooling_pump_pressures,
+        client_id=client_id,
+        emit_log=container.add_system_log,
     )
-    return payload
+    sync_status = str(sync_payload.get("status", "")).strip().lower()
+    if sync_status == "ready":
+        capacity_status = "success"
+        capacity_error = ""
+    elif sync_status == "pending_input":
+        capacity_status = "pending_input"
+        capacity_error = str(sync_payload.get("error", "")).strip()
+    elif sync_status == "missing_file":
+        capacity_status = "missing_file"
+        capacity_error = str(sync_payload.get("error", "")).strip()
+    else:
+        capacity_status = "failed"
+        capacity_error = str(sync_payload.get("error", "")).strip()
+
+    updated_session = review_service.update_capacity_sync(
+        session_id=str(saved_session.get("session_id", "")).strip(),
+        capacity_sync=sync_payload if isinstance(sync_payload, dict) else {},
+        capacity_status=capacity_status,
+        capacity_error=capacity_error,
+    )
+    container.add_system_log(
+        "[交接班][容量报表][审核联动] 保存后补写状态 "
+        f"building={updated_session.get('building', '-')}, "
+        f"session_id={updated_session.get('session_id', '-')}, "
+        f"status={sync_status or '-'}"
+    )
+    return updated_session
+
+
+def _run_capacity_overlay_after_review_save(
+    *,
+    container,
+    building: str,
+    session_id: str,
+    tracked_cells: Dict[str, str],
+) -> None:
+    building_name = str(building or "").strip()
+    session_id_text = str(session_id or "").strip()
+    if not building_name or not session_id_text:
+        return
+    review_service = ReviewSessionService(_handover_cfg(container))
+    try:
+        session = review_service.get_or_recover_session_by_id(session_id_text)
+        if not isinstance(session, dict):
+            container.add_system_log(
+                f"[交接班][容量报表][审核联动] 后台补写已跳过: building={building_name}, session_id={session_id_text}, reason=session_missing"
+            )
+            return
+        with container.job_service.resource_guard(
+            name=f"handover_capacity_overlay:{building_name}:{session_id_text}",
+            resource_keys=_handover_resource_keys(building=building_name),
+        ):
+            session = _sync_capacity_overlay_for_saved_session(
+                container=container,
+                review_service=review_service,
+                saved_session=session,
+                tracked_cells=tracked_cells,
+            )
+        bootstrap_signature = _review_bootstrap_signature(session)
+        cached_bootstrap = _review_bootstrap_cache_get(
+            building=building_name,
+            signature=bootstrap_signature,
+        )
+        if isinstance(cached_bootstrap, dict):
+            cached_bootstrap["session"] = copy.deepcopy(session)
+            cached_bootstrap["prepared_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            cached_bootstrap["snapshot_revision"] = int(session.get("revision", 0) or 0)
+            _review_bootstrap_cache_put(
+                building=building_name,
+                signature=bootstrap_signature,
+                payload=cached_bootstrap,
+            )
+    except Exception as exc:  # noqa: BLE001
+        container.add_system_log(
+            f"[交接班][容量报表][审核联动] 后台补写失败: building={building_name}, session_id={session_id_text}, error={exc}"
+        )
 
 
 def _queue_capacity_overlay_after_review_save(
@@ -1159,163 +1368,27 @@ def _queue_capacity_overlay_after_review_save(
     if not callable(getattr(review_service, "update_capacity_sync", None)):
         return saved_session, False
     tracked_cells = _extract_capacity_tracked_cells(document)
-    shared_110kv = {}
-    try:
-        shared_110kv = review_service.get_substation_110kv(str(saved_session.get("batch_key", "")).strip())
-    except Exception:
-        shared_110kv = {}
-    cooling_pump_pressures = (
-        document.get("cooling_pump_pressures", {}) if isinstance(document.get("cooling_pump_pressures", {}), dict) else {}
-    )
     if not _should_sync_capacity_after_review_save(
         previous_session=previous_session,
         dirty_regions=dirty_regions,
         tracked_cells=tracked_cells,
-        shared_110kv=shared_110kv,
-        cooling_pump_pressures=cooling_pump_pressures,
     ):
         return saved_session, False
-    pending_payload = _build_pending_capacity_sync_payload_for_review(
-        tracked_cells=tracked_cells,
-        shared_110kv=shared_110kv,
-        cooling_pump_pressures=cooling_pump_pressures,
-    )
+    pending_payload = _build_pending_capacity_sync_payload(tracked_cells)
     updated_session = review_service.update_capacity_sync(
         session_id=str(saved_session.get("session_id", "")).strip(),
         capacity_sync=pending_payload,
         capacity_status="pending",
         capacity_error="",
     )
-    del background_tasks
-    _build_xlsx_write_queue_service(container).enqueue_capacity_overlay_sync(
+    background_tasks.add_task(
+        _run_capacity_overlay_after_review_save,
+        container=container,
         building=str(updated_session.get("building", "")).strip() or str(saved_session.get("building", "")).strip(),
         session_id=str(updated_session.get("session_id", "")).strip() or str(saved_session.get("session_id", "")).strip(),
         tracked_cells=copy.deepcopy(tracked_cells),
-        shared_110kv=copy.deepcopy(shared_110kv),
-        cooling_pump_pressures=copy.deepcopy(cooling_pump_pressures),
-        capacity_output_file=str(updated_session.get("capacity_output_file", "") or saved_session.get("capacity_output_file", "") or "").strip(),
     )
     return updated_session, True
-
-
-def _ensure_substation_110kv_clean_or_409(
-    review_service: ReviewSessionService,
-    *,
-    batch_key: str,
-    client_id: str = "",
-    emit_log=print,
-    wait_sec: float = 5.0,
-) -> None:
-    batch_text = str(batch_key or "").strip()
-    if not batch_text:
-        return
-    try:
-        cleared = review_service.clear_expired_substation_110kv_dirty(
-            batch_key=batch_text,
-            client_id=str(client_id or "").strip(),
-        )
-        if isinstance(cleared, dict) and bool(cleared.get("expired_dirty_cleared", False)) and callable(emit_log):
-            emit_log(f"[交接班][110KV共享] 已清理过期dirty状态 batch={batch_text}")
-    except Exception as exc:  # noqa: BLE001
-        if callable(emit_log):
-            emit_log(f"[交接班][110KV共享] dirty状态清理失败 batch={batch_text}, error={exc}")
-    deadline = time.monotonic() + max(0.1, float(wait_sec or 5.0))
-    last_lock: Dict[str, Any] = {}
-    while True:
-        try:
-            last_lock = review_service.get_substation_110kv_lock(
-                batch_key=batch_text,
-                client_id=str(client_id or "").strip(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            if callable(emit_log):
-                emit_log(f"[交接班][110KV共享] dirty状态检查失败 batch={batch_text}, error={exc}")
-            return
-        if not bool(last_lock.get("dirty", False)):
-            return
-        if time.monotonic() >= deadline:
-            active_editor = last_lock.get("active_editor", {}) if isinstance(last_lock.get("active_editor", {}), dict) else {}
-            if callable(emit_log):
-                emit_log(
-                    "[交接班][110KV共享] 等待dirty状态清除超时 "
-                    f"batch={batch_text}, dirty_by={last_lock.get('dirty_by_building', '') or active_editor.get('holder_building', '') or '-'}, "
-                    f"dirty_at={last_lock.get('dirty_at', '') or '-'}"
-                )
-            raise HTTPException(status_code=409, detail="110KV变电站正在自动保存，请稍后重试")
-        time.sleep(0.2)
-
-
-def _ensure_capacity_overlay_queue_drained_for_session(
-    *,
-    container,
-    review_service: ReviewSessionService,
-    building: str,
-    session_id: str,
-    client_id: str = "",
-    timeout_sec: float = 120.0,
-) -> Dict[str, Any]:
-    target = _load_target_session_or_404(review_service, building=building, session_id=session_id)
-    _ensure_substation_110kv_clean_or_409(
-        review_service,
-        batch_key=str(target.get("batch_key", "") or "").strip(),
-        client_id=client_id,
-        emit_log=getattr(container, "add_system_log", print),
-    )
-    queue_service = _build_xlsx_write_queue_service(container)
-    output_file_text = str(target.get("output_file", "") or "").strip()
-    capacity_output_file_text = str(target.get("capacity_output_file", "") or "").strip()
-    output_file_exists = False
-    if output_file_text:
-        try:
-            output_file_exists = Path(output_file_text).exists()
-        except Exception:
-            output_file_exists = False
-    if output_file_exists and capacity_output_file_text:
-        service, parser, writer, _ = _build_review_services(container)
-        del service
-        document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
-        document, session_with_sync = document_state.load_document(target)
-        tracked_cells = _extract_capacity_tracked_cells(document)
-        try:
-            shared_110kv = review_service.get_substation_110kv(str(target.get("batch_key", "")).strip())
-        except Exception:
-            shared_110kv = {}
-        cooling_pump_pressures = (
-            document.get("cooling_pump_pressures", {})
-            if isinstance(document.get("cooling_pump_pressures", {}), dict)
-            else {}
-        )
-        next_signature = _capacity_input_signature_for_review(
-            tracked_cells=tracked_cells,
-            shared_110kv=shared_110kv,
-            cooling_pump_pressures=cooling_pump_pressures,
-        )
-        capacity_sync = target.get("capacity_sync", {}) if isinstance(target.get("capacity_sync", {}), dict) else {}
-        current_signature = str(capacity_sync.get("input_signature", "") or "").strip()
-        current_status = str(capacity_sync.get("status", "") or "").strip().lower()
-        queue_service = _build_xlsx_write_queue_service(container, parser=parser, writer=writer)
-        if current_signature != next_signature or current_status in {"", "failed", "missing_file", "pending_input"}:
-            pending_payload = _build_pending_capacity_sync_payload_for_review(
-                tracked_cells=tracked_cells,
-                shared_110kv=shared_110kv,
-                cooling_pump_pressures=cooling_pump_pressures,
-            )
-            updated_session = review_service.update_capacity_sync(
-                session_id=session_id,
-                capacity_sync=pending_payload,
-                capacity_status="pending",
-                capacity_error="",
-            )
-            queue_service.enqueue_capacity_overlay_sync(
-                building=building,
-                session_id=session_id,
-                tracked_cells=tracked_cells,
-                shared_110kv=shared_110kv,
-                cooling_pump_pressures=cooling_pump_pressures,
-                capacity_output_file=str(updated_session.get("capacity_output_file", "") or target.get("capacity_output_file", "") or "").strip(),
-            )
-    queue_service.wait_for_barrier(building=building, timeout_sec=timeout_sec)
-    return _load_target_session_or_404(review_service, building=building, session_id=session_id)
 
 
 def _normalized_review_defaults_snapshot(
@@ -1350,7 +1423,7 @@ def _persist_review_defaults(
     result: Dict[str, int | bool | str] = {
         "footer_inventory_rows": int(persisted.get("footer_inventory_rows", 0) or 0),
         "cabinet_power_fields": int(persisted.get("cabinet_power_fields", 0) or 0),
-        "cooling_pump_pressure_fields": int(persisted.get("cooling_pump_pressure_fields", 0) or 0),
+        "cooling_pump_pressure_rows": int(persisted.get("cooling_pump_pressure_rows", 0) or 0),
         "defaults_updated": bool(persisted.get("defaults_updated", False)),
         "config_updated": False,
         "aggregate_refresh_error": "",
@@ -1699,6 +1772,9 @@ def _present_review_cloud_sheet_state(raw: Any) -> Dict[str, Any]:
     if status == "success":
         text = "云表已同步"
         tone = "success"
+    elif status in {"uploading", "syncing"}:
+        text = "云表上传中"
+        tone = "info"
     elif status == "pending_upload":
         text = "云表待最终上传"
         tone = "warning"
@@ -1807,12 +1883,10 @@ def _review_action(
     visible: bool = True,
     tone: str = "neutral",
     variant: str = "secondary",
-    pending: bool = False,
 ) -> Dict[str, Any]:
     return {
         "allowed": bool(allowed),
         "visible": bool(visible),
-        "pending": bool(pending),
         "label": str(label or "").strip() or "-",
         "disabled_reason": str(disabled_reason or "").strip(),
         "tone": str(tone or "neutral").strip() or "neutral",
@@ -1885,6 +1959,14 @@ def _build_review_confirm_feedback(
             tone="info",
             reason_code="await_all_confirmed",
             detail_text="当前批次尚未全部确认，后续上传将在全部确认后执行。",
+        )
+    if followup_status == "queued":
+        return _review_display_item(
+            status="followup_queued",
+            text="已确认当前楼栋，后续上传任务已提交",
+            tone="success",
+            reason_code="followup_queued",
+            detail_text="当前楼栋确认完成，云文档上传将在后台继续执行。",
         )
     if followup_status in {"ok", "success"}:
         return _review_display_item(
@@ -2058,6 +2140,7 @@ def _build_review_display_state(
         and selected_session_id != latest_session_id_text
     )
     cloud_sheet_state = _present_review_cloud_sheet_state(session_payload.get("cloud_sheet_sync", {}))
+    cloud_sheet_uploading = str(cloud_sheet_state["status"]).strip().lower() in {"uploading", "syncing"}
     excel_sync_state = _present_review_excel_sync_state(session_payload.get("excel_sync", {}))
     capacity_state = _present_review_capacity_state(session_payload.get("capacity_sync", {}))
     confirmed = bool(session_payload.get("confirmed", False))
@@ -2116,6 +2199,14 @@ def _build_review_display_state(
                 "tone": "danger",
             }
         )
+    elif cloud_sheet_uploading:
+        status_banners.append(
+            {
+                "code": "cloud_sheet_uploading",
+                "text": "当前楼栋云文档上传中，上传完成前不能修改确认状态。",
+                "tone": "info",
+            }
+        )
     if excel_sync_state["status"] == "failed":
         status_banners.append(
             {
@@ -2161,7 +2252,7 @@ def _build_review_display_state(
         save_disabled_reason = "暂无可保存的交接班记录"
     elif remote_editor_active:
         save_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
-    confirm_allowed = bool(session_payload) and not is_history_mode and not remote_editor_active
+    confirm_allowed = bool(session_payload) and not is_history_mode and not remote_editor_active and not cloud_sheet_uploading
     confirm_disabled_reason = ""
     if not session_payload:
         confirm_disabled_reason = "暂无可确认的交接班记录"
@@ -2169,12 +2260,8 @@ def _build_review_display_state(
         confirm_disabled_reason = "仅最新交接班日志支持确认、撤销确认和云表重试"
     elif remote_editor_active:
         confirm_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
-    elif not confirmed and not has_output_file:
-        confirm_allowed = False
-        confirm_disabled_reason = "当前没有可确认的交接班文件"
-    elif not confirmed and excel_sync_state["status"] == "failed":
-        confirm_allowed = False
-        confirm_disabled_reason = excel_sync_state["error"] or "交接班Excel同步失败，请先保存或刷新后重试"
+    elif cloud_sheet_uploading:
+        confirm_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再操作确认状态"
     retry_allowed = bool(session_payload) and (not is_history_mode) and confirmed and all_confirmed and str(cloud_sheet_state["status"]) in {"failed", "prepare_failed"}
     retry_disabled_reason = ""
     if not session_payload:
@@ -2217,16 +2304,6 @@ def _build_review_display_state(
         capacity_disabled_reason = "当前没有可下载的交接班容量报表"
     elif str(capacity_state["status"]) != "ready":
         capacity_disabled_reason = capacity_state["error"] or "容量报表待补写完成后才能下载"
-    capacity_image_delivery = (
-        session_payload.get("capacity_image_delivery", {})
-        if isinstance(session_payload, dict) and isinstance(session_payload.get("capacity_image_delivery", {}), dict)
-        else {}
-    )
-    capacity_image_sending = str(capacity_image_delivery.get("status", "") or "").strip().lower() == "sending"
-    capacity_image_send_allowed = capacity_allowed and not capacity_image_sending
-    capacity_image_send_disabled_reason = capacity_disabled_reason
-    if capacity_image_sending:
-        capacity_image_send_disabled_reason = "容量表图片正在发送中，请等待发送完成"
     history_limit = max(1, int(history_payload.get("history_limit", HISTORY_CLOUD_SUCCESS_LIMIT) or HISTORY_CLOUD_SUCCESS_LIMIT))
     history_hint_rows = [f"仅显示最近 {history_limit} 条已成功上云的交接班日志。"]
     if session_payload and not bool(history_payload.get("selected_in_history_list", False)):
@@ -2387,15 +2464,6 @@ def _build_review_display_state(
                 tone="neutral",
                 variant="secondary",
             ),
-            "capacity_image_send": _review_action(
-                allowed=capacity_image_send_allowed,
-                visible=bool(session_payload),
-                label="发送容量表图片",
-                disabled_reason=capacity_image_send_disabled_reason,
-                tone="neutral",
-                variant="secondary",
-                pending=capacity_image_sending,
-            ),
             "confirm": _review_action(
                 allowed=confirm_allowed,
                 visible=bool(session_payload) and not is_history_mode,
@@ -2480,38 +2548,30 @@ def _attach_review_display_state(
         latest_session_id = _safe_latest_session_id(service, building=building, emit_log=emit_log)
     if latest_session_id:
         response["latest_session_id"] = latest_session_id
-    batch_key = str(session.get("batch_key", "") or "").strip()
-    if batch_key:
-        try:
-            shared_110kv = service.get_substation_110kv(batch_key)
-            lock_state = service.get_substation_110kv_lock(
-                batch_key=batch_key,
-                client_id=str(client_id or "").strip(),
-            )
-            shared_110kv = _substation_110kv_with_dirty_preview(shared_110kv, lock_state)
-            response["shared_blocks"] = {
-                **(
-                    response.get("shared_blocks", {})
-                    if isinstance(response.get("shared_blocks", {}), dict)
-                    else {}
-                ),
-                "substation_110kv": shared_110kv,
-            }
-            response["shared_block_locks"] = {
-                **(
-                    response.get("shared_block_locks", {})
-                    if isinstance(response.get("shared_block_locks", {}), dict)
-                    else {}
-                ),
-                "substation_110kv": lock_state,
-            }
-        except Exception as exc:  # noqa: BLE001
-            if callable(emit_log):
-                emit_log(
-                    f"[交接班][110KV共享] 状态附加失败 building={building}, batch={batch_key}, error={exc}"
-                )
     if include_concurrency:
         response["concurrency"] = concurrency
+    batch_key = str(session.get("batch_key", "") or "").strip()
+    if batch_key:
+        shared_state = _get_substation_110kv_state_safe(
+            service,
+            batch_key=batch_key,
+            client_id=str(client_id or "").strip(),
+            emit_log=emit_log,
+        )
+        shared_blocks = shared_state.get("shared_blocks", {}) if isinstance(shared_state, dict) else {}
+        shared_locks = shared_state.get("shared_block_locks", {}) if isinstance(shared_state, dict) else {}
+        response["shared_blocks"] = {
+            **(response.get("shared_blocks", {}) if isinstance(response.get("shared_blocks", {}), dict) else {}),
+            **(shared_blocks if isinstance(shared_blocks, dict) else {}),
+        }
+        response["shared_block_locks"] = {
+            **(
+                response.get("shared_block_locks", {})
+                if isinstance(response.get("shared_block_locks", {}), dict)
+                else {}
+            ),
+            **(shared_locks if isinstance(shared_locks, dict) else {}),
+        }
     response["display_state"] = _build_review_display_state(
         building=building,
         session=session,
@@ -2525,27 +2585,6 @@ def _attach_review_display_state(
         client_revision=client_revision,
     )
     return response
-
-
-def _substation_110kv_with_dirty_preview(shared_110kv: Dict[str, Any], lock_state: Dict[str, Any]) -> Dict[str, Any]:
-    if not bool((lock_state or {}).get("dirty", False)):
-        return shared_110kv
-    dirty_payload = (lock_state or {}).get("dirty_payload", {})
-    if not isinstance(dirty_payload, dict) or not isinstance(dirty_payload.get("rows", []), list):
-        return shared_110kv
-    preview = ReviewSessionService.normalize_substation_110kv_payload(
-        dirty_payload,
-        batch_key=str(shared_110kv.get("batch_key", "") or "").strip(),
-    )
-    preview["revision"] = int(shared_110kv.get("revision", 0) or 0)
-    preview["updated_at"] = str(shared_110kv.get("updated_at", "") or "").strip()
-    preview["updated_by_building"] = str(shared_110kv.get("updated_by_building", "") or "").strip()
-    preview["updated_by_client"] = str(shared_110kv.get("updated_by_client", "") or "").strip()
-    preview["dirty_preview"] = True
-    preview["dirty_at"] = str(lock_state.get("dirty_at", "") or "").strip()
-    preview["dirty_by_building"] = str(lock_state.get("dirty_by_building", "") or "").strip()
-    preview["dirty_by_client"] = str(lock_state.get("dirty_by_client", "") or "").strip()
-    return preview
 
 
 def _ensure_latest_session_actionable_or_400(service: ReviewSessionService, *, building: str, session_id: str) -> None:
@@ -3296,17 +3335,7 @@ def handover_review_download(building_code: str, request: Request, session_id: s
     if not output_file.exists() or not output_file.is_file():
         raise HTTPException(status_code=409, detail="交接班文件不存在，无法同步最新审核内容")
     try:
-        queue_service = _build_xlsx_write_queue_service(container, parser=parser, writer=writer)
-        queue_service.enqueue_review_excel_sync(
-            target,
-            target_revision=int(target.get("revision", 0) or 0),
-        )
-        queue_service.wait_for_barrier(building=building, timeout_sec=120.0)
-        sync_state = _attach_excel_sync_safe(document_state, target).get("excel_sync", {})
-        if str(sync_state.get("status", "") or "").strip().lower() == "failed":
-            raise ReviewDocumentStateError(str(sync_state.get("error", "") or "").strip() or "交接班Excel同步失败")
-    except HandoverXlsxWriteQueueTimeoutError as exc:
-        raise HTTPException(status_code=409, detail="交接班文件写入队列繁忙，请稍后重试") from exc
+        document_state.force_sync_session_dict(target, reason="download")
     except ReviewDocumentStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -3328,7 +3357,8 @@ def handover_review_capacity_download(
     client_id: str = "",
 ) -> FileResponse:
     container = request.app.state.container
-    service, _, _, _ = _build_review_services(container)
+    service, parser, writer, _ = _build_review_services(container)
+    document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
     building = _resolve_building_or_404(service, building_code)
 
     session_id_text = str(session_id or "").strip()
@@ -3339,174 +3369,96 @@ def handover_review_capacity_download(
     output_file_text = str(target.get("capacity_output_file", "")).strip()
     if not output_file_text:
         raise HTTPException(status_code=404, detail="当前交接班容量报表尚未生成")
+    output_file = Path(output_file_text)
+    if not output_file.exists() or not output_file.is_file():
+        raise HTTPException(status_code=404, detail="交接班容量报表文件不存在，请重新生成")
+    document_load_warning = ""
     try:
-        target = _ensure_capacity_overlay_queue_drained_for_session(
-            container=container,
-            review_service=service,
-            building=building,
-            session_id=session_id_text,
-            client_id=str(client_id or "").strip(),
-            timeout_sec=120.0,
-        )
-    except HandoverXlsxWriteQueueTimeoutError as exc:
-        container.add_system_log(
-            "[交接班][下载容量报表] 等待xlsx写入队列超时 "
-            f"building={building}, session={session_id_text}, error={exc}"
-        )
-        raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试") from exc
+        document, target = document_state.load_document(target)
     except ReviewDocumentStateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    queue_service = _build_xlsx_write_queue_service(container)
-    for attempt in range(3):
-        needs_queue_wait = False
-        with _resource_guard_or_null(
-            container,
-            name=f"handover_capacity_download:{building}:{session_id_text}",
-            resource_keys=_handover_resource_keys(building=building),
-        ):
-            if queue_service.has_active_write_jobs(building=building):
-                needs_queue_wait = True
-                container.add_system_log(
-                    "[交接班][下载容量报表] 获取下载锁后发现xlsx队列仍有写入任务，继续等待 "
-                    f"building={building}, session={session_id_text}, attempt={attempt + 1}"
-                )
-            else:
-                target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
-                output_file_text = str(target.get("capacity_output_file", "")).strip()
-                if not output_file_text:
-                    raise HTTPException(status_code=404, detail="当前交接班容量报表尚未生成")
-                output_file = Path(output_file_text)
-                if not output_file.exists() or not output_file.is_file():
-                    raise HTTPException(status_code=404, detail="交接班容量报表文件不存在，请重新生成")
-                capacity_sync = target.get("capacity_sync", {}) if isinstance(target.get("capacity_sync", {}), dict) else {}
-                capacity_sync_status = str(capacity_sync.get("status", "")).strip().lower()
-                if capacity_sync_status != "ready":
-                    detail = str(capacity_sync.get("error", "")).strip() or "容量报表待补写完成后才能下载"
-                    raise HTTPException(status_code=409, detail=detail)
-                container.add_system_log(
-                    f"[交接班][下载容量报表] building={building}, session_id={session_id_text}, file={output_file}"
-                )
-                return FileResponse(
-                    path=output_file,
-                    filename=output_file.name,
-                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-        if needs_queue_wait:
+        document_load_warning = str(exc)
+        container.add_system_log(
+            "[交接班][下载容量报表] 审核文档读取失败，继续下载业务容量表并尽量补写动态字段 "
+            f"building={building}, session_id={session_id_text}, error={document_load_warning}"
+        )
+        document = {}
+        attach_pump = getattr(document_state, "attach_cooling_pump_pressures", None)
+        if callable(attach_pump):
             try:
-                queue_service.wait_for_barrier(building=building, timeout_sec=120.0)
-            except HandoverXlsxWriteQueueTimeoutError as exc:
+                document = attach_pump(document={}, session=target)
+            except Exception as pump_exc:  # noqa: BLE001
                 container.add_system_log(
-                    "[交接班][下载容量报表] 下载锁复查后等待xlsx队列超时 "
-                    f"building={building}, session={session_id_text}, error={exc}"
+                    "[交接班][下载容量报表] 冷却水泵压力附加失败，继续下载 "
+                    f"building={building}, session_id={session_id_text}, error={pump_exc}"
                 )
-                raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试") from exc
-    raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试")
+    tracked_cells = _extract_capacity_tracked_cells(document)
+    shared_state = _get_substation_110kv_state_safe(
+        service,
+        batch_key=str(target.get("batch_key", "")).strip(),
+        client_id=str(client_id or "").strip(),
+        emit_log=container.add_system_log,
+    )
+    shared_110kv = (
+        shared_state.get("shared_blocks", {}).get("substation_110kv", {})
+        if isinstance(shared_state.get("shared_blocks", {}), dict)
+        else {}
+    )
+    cooling_pump_pressures = (
+        document.get("cooling_pump_pressures", {})
+        if isinstance(document.get("cooling_pump_pressures", {}), dict)
+        else {}
+    )
+    download_warning = ""
+    sync_payload = HandoverCapacityReportService(_handover_cfg(container)).sync_overlay_for_existing_report_from_cells(
+        building=building,
+        duty_date=str(target.get("duty_date", "")).strip(),
+        duty_shift=str(target.get("duty_shift", "")).strip().lower(),
+        handover_cells=tracked_cells,
+        capacity_output_file=output_file_text,
+        shared_110kv=shared_110kv if isinstance(shared_110kv, dict) else {},
+        cooling_pump_pressures=cooling_pump_pressures,
+        client_id=str(client_id or "").strip(),
+        emit_log=container.add_system_log,
+    )
+    sync_status = str(sync_payload.get("status", "")).strip().lower() if isinstance(sync_payload, dict) else ""
+    if sync_status == "ready":
+        try:
+            target = service.update_capacity_sync(
+                session_id=session_id_text,
+                capacity_sync=sync_payload,
+                capacity_status="success",
+                capacity_error="",
+            )
+        except Exception as exc:  # noqa: BLE001
+            container.add_system_log(
+                f"[交接班][下载容量报表] 补写状态更新失败 building={building}, session_id={session_id_text}, error={exc}"
+            )
+    else:
+        detail = str(sync_payload.get("error", "") if isinstance(sync_payload, dict) else "").strip() or "容量报表部分字段补写失败"
+        download_warning = detail
+        container.add_system_log(
+            f"[交接班][下载容量报表] 补写失败但继续下载业务文件 building={building}, session_id={session_id_text}, error={detail}"
+        )
+    if document_load_warning and not download_warning:
+        download_warning = f"审核文档读取失败，已下载现有容量报表：{document_load_warning}"
 
-
-@router.post("/api/handover/review/{building_code}/capacity-image/send")
-def handover_review_capacity_image_send(
-    building_code: str,
-    request: Request,
-    payload: Dict[str, Any] = Body(default={}),
-) -> Dict[str, Any]:
-    container = request.app.state.container
-    service, _, _, _ = _build_review_services(container)
-    building = _resolve_building_or_404(service, building_code)
-
-    payload_dict = payload if isinstance(payload, dict) else {}
-    session_id_text = str(payload_dict.get("session_id", "") or "").strip()
-    if not session_id_text:
-        raise HTTPException(status_code=400, detail="session_id 不能为空")
-    target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
     container.add_system_log(
-        "[交接班][容量表图片发送] 同步接口已命中 "
-        f"building={building}, session={session_id_text}, "
-        f"source_file={str(target.get('capacity_output_file', '') or '').strip() or '-'}"
+        f"[交接班][下载容量报表] building={building}, session_id={session_id_text}, "
+        f"110kv_revision={shared_110kv.get('revision', '-') if isinstance(shared_110kv, dict) else '-'}, "
+        f"pump_rows={len(cooling_pump_pressures.get('rows', [])) if isinstance(cooling_pump_pressures, dict) and isinstance(cooling_pump_pressures.get('rows', []), list) else 0}, "
+        f"file={output_file}"
     )
-    try:
-        target = _ensure_capacity_overlay_queue_drained_for_session(
-            container=container,
-            review_service=service,
-            building=building,
-            session_id=session_id_text,
-            client_id=str(payload_dict.get("client_id", "") or "").strip(),
-            timeout_sec=120.0,
-        )
-    except HandoverXlsxWriteQueueTimeoutError as exc:
-        container.add_system_log(
-            "[交接班][容量表图片发送] 等待xlsx写入队列超时 "
-            f"building={building}, session={session_id_text}, error={exc}"
-        )
-        raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试") from exc
-    except ReviewDocumentStateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    delivery_service = CapacityReportImageDeliveryService(
-        _handover_cfg(container),
-        config_path=getattr(container, "config_path", None),
+    headers = {}
+    if download_warning:
+        headers["x-handover-download-warning-base64"] = base64.b64encode(
+            download_warning.encode("utf-8")
+        ).decode("ascii")
+    return FileResponse(
+        path=output_file,
+        filename=output_file.name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
     )
-    queue_service = _build_xlsx_write_queue_service(container)
-    for attempt in range(3):
-        needs_queue_wait = False
-        with _resource_guard_or_null(
-            container,
-            name=f"handover_capacity_image_send:{building}:{session_id_text}",
-            resource_keys=_handover_resource_keys(building=building),
-        ):
-            if queue_service.has_active_write_jobs(building=building):
-                needs_queue_wait = True
-                container.add_system_log(
-                    "[交接班][容量表图片发送] 获取发送锁后发现xlsx队列仍有写入任务，继续等待 "
-                    f"building={building}, session={session_id_text}, attempt={attempt + 1}"
-                )
-            else:
-                try:
-                    delivery_service.begin_delivery(target, building=building, source="manual")
-                except FileNotFoundError as exc:
-                    container.add_system_log(
-                        "[交接班][容量表图片发送] 同步接口预检失败 "
-                        f"building={building}, session={session_id_text}, error={exc}"
-                    )
-                    raise HTTPException(status_code=404, detail=str(exc)) from exc
-                except ValueError as exc:
-                    container.add_system_log(
-                        "[交接班][容量表图片发送] 同步接口预检失败 "
-                        f"building={building}, session={session_id_text}, error={exc}"
-                    )
-                    raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-                try:
-                    latest_session = _load_target_session_or_404(service, building=building, session_id=session_id_text)
-                    result = delivery_service.send_for_session(
-                        latest_session,
-                        building=building,
-                        source="manual",
-                        emit_log=container.add_system_log,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    try:
-                        delivery_service.mark_failed(session_id=session_id_text, error=f"发送容量表图片失败: {exc}", source="manual")
-                    except Exception:
-                        pass
-                    container.add_system_log(
-                        "[交接班][容量表图片发送] 同步接口发送异常 "
-                        f"building={building}, session={session_id_text}, error={exc}"
-                    )
-                    raise HTTPException(status_code=400, detail=str(exc)) from exc
-                container.add_system_log(
-                    f"[交接班][容量表图片发送] 同步发送完成 building={building}, session={session_id_text}, status={result.get('status', '-')}"
-                )
-                return result
-        if needs_queue_wait:
-            try:
-                queue_service.wait_for_barrier(building=building, timeout_sec=120.0)
-            except HandoverXlsxWriteQueueTimeoutError as exc:
-                container.add_system_log(
-                    "[交接班][容量表图片发送] 发送锁复查后等待xlsx队列超时 "
-                    f"building={building}, session={session_id_text}, error={exc}"
-                )
-                raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试") from exc
-    raise HTTPException(status_code=409, detail="容量表写入队列繁忙，请稍后重试")
 
 
 @router.put("/api/handover/review/{building_code}")
@@ -3552,7 +3504,7 @@ def handover_review_save(
     defaults_config_status = "skipped"
     with container.job_service.resource_guard(
         name=f"handover_save:{batch_key or building}:{session_id}",
-        resource_keys=_handover_resource_keys(building=building, batch_key=batch_key),
+        resource_keys=_handover_resource_keys(building=building),
     ):
         write_started = time.perf_counter()
         previous_document_state: Dict[str, Any] | None = None
@@ -3565,8 +3517,6 @@ def handover_review_save(
                 ensure_ready=False,
             )
             if isinstance(_saved_document_state, dict):
-                if isinstance(_saved_document_state.get("document", {}), dict):
-                    document = _saved_document_state.get("document", {})
                 _review_document_cache_put(
                     building=building,
                     signature=_review_document_signature(
@@ -3593,30 +3543,6 @@ def handover_review_save(
             _raise_review_store_http_error(exc, saved_document=True)
         is_latest_session = bool(latest_session_id and latest_session_id == session_id)
         persisted_defaults = {"footer_inventory_rows": 0, "cabinet_power_fields": 0, "config_updated": False}
-        try:
-            session_started = time.perf_counter()
-            if is_latest_session:
-                session, batch_status = service.touch_session_after_save(
-                    building=building,
-                    session_id=session_id,
-                    base_revision=base_revision,
-                )
-            else:
-                session, batch_status = service.touch_session_after_history_save(
-                    building=building,
-                    session_id=session_id,
-                    base_revision=base_revision,
-                )
-            session_elapsed_ms = int((time.perf_counter() - session_started) * 1000)
-        except ReviewSessionConflictError as exc:
-            document_state.restore_document(building=building, previous=previous_document_state)
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except ReviewSessionNotFoundError as exc:
-            document_state.restore_document(building=building, previous=previous_document_state)
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ReviewSessionStoreUnavailableError as exc:
-            document_state.restore_document(building=building, previous=previous_document_state)
-            _raise_review_store_http_error(exc, saved_document=True)
         if is_latest_session:
             defaults_started = time.perf_counter()
             try:
@@ -3653,6 +3579,30 @@ def handover_review_save(
                         else {}
                     ),
                 )
+        try:
+            session_started = time.perf_counter()
+            if is_latest_session:
+                session, batch_status = service.touch_session_after_save(
+                    building=building,
+                    session_id=session_id,
+                    base_revision=base_revision,
+                )
+            else:
+                session, batch_status = service.touch_session_after_history_save(
+                    building=building,
+                    session_id=session_id,
+                    base_revision=base_revision,
+                )
+            session_elapsed_ms = int((time.perf_counter() - session_started) * 1000)
+        except ReviewSessionConflictError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ReviewSessionNotFoundError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ReviewSessionStoreUnavailableError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
+            _raise_review_store_http_error(exc, saved_document=True)
         try:
             capacity_started = time.perf_counter()
             session, queued_capacity_sync = _queue_capacity_overlay_after_review_save(
@@ -3715,15 +3665,13 @@ def handover_review_save(
             container.add_system_log(
                 f"[交接班][审核模板默认] 已写入楼栋SQLite默认值: building={building}, "
                 f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0)}, "
-                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0)}, "
-                f"cooling_pump_pressure_fields={persisted_defaults.get('cooling_pump_pressure_fields', 0)}"
+                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0)}"
             )
         else:
             container.add_system_log(
                 f"[交接班][审核模板默认] 楼栋SQLite默认值无变化，已跳过写入: building={building}, "
                 f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0) if isinstance(persisted_defaults, dict) else 0}, "
-                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}, "
-                f"cooling_pump_pressure_fields={persisted_defaults.get('cooling_pump_pressure_fields', 0) if isinstance(persisted_defaults, dict) else 0}"
+                f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}"
             )
         if defaults_config_status == "queued":
             container.add_system_log(
@@ -3844,45 +3792,18 @@ def handover_review_confirm(
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     _load_target_session_or_404(service, building=building, session_id=session_id)
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id)
-    try:
-        _ensure_session_lock_held_or_409(
-            service,
-            building=building,
-            session_id=session_id,
-            client_id=str(payload.get("client_id", "")).strip(),
-        )
-    except HTTPException as exc:
-        if int(getattr(exc, "status_code", 0) or 0) == 409:
-            container.add_system_log(
-                f"[交接班][审核确认] 已拒绝 building={building}, session_id={session_id}, "
-                f"base_revision={base_revision}, reason={exc.detail}"
-            )
-        raise
+    _ensure_session_lock_held_or_409(
+        service,
+        building=building,
+        session_id=session_id,
+        client_id=str(payload.get("client_id", "")).strip(),
+    )
     target_session = _load_target_session_or_404(service, building=building, session_id=session_id)
     target_batch_key = str(target_session.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
         name=f"handover_confirm:{target_batch_key}:{building}",
-        resource_keys=_handover_resource_keys(building=building, batch_key=target_batch_key),
+        resource_keys=_handover_resource_keys(batch_key=target_batch_key),
     ):
-        try:
-            _build_xlsx_write_queue_service(container).wait_for_barrier(building=building, timeout_sec=120.0)
-            sync_state = _attach_excel_sync_from_store(container, target_session).get("excel_sync", {})
-            if str(sync_state.get("status", "") or "").strip().lower() == "failed":
-                raise ReviewDocumentStateError(
-                    str(sync_state.get("error", "") or "").strip() or "交接班Excel同步失败"
-                )
-        except HandoverXlsxWriteQueueTimeoutError as exc:
-            container.add_system_log(
-                f"[交接班][审核确认] 已拒绝 building={building}, session_id={session_id}, "
-                f"base_revision={base_revision}, reason=交接班文件写入队列繁忙"
-            )
-            raise HTTPException(status_code=409, detail="交接班文件写入队列繁忙，请稍后重试") from exc
-        except ReviewDocumentStateError as exc:
-            container.add_system_log(
-                f"[交接班][审核确认] 已拒绝 building={building}, session_id={session_id}, "
-                f"base_revision={base_revision}, reason={exc}"
-            )
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
         try:
             session, batch_status = service.mark_confirmed(
                 building=building,
@@ -3891,49 +3812,6 @@ def handover_review_confirm(
                 base_revision=base_revision,
             )
         except ReviewSessionConflictError as exc:
-            latest_after_conflict = service.get_session_by_id(session_id) or {}
-            if isinstance(latest_after_conflict, dict) and bool(latest_after_conflict.get("confirmed", False)):
-                container.add_system_log(
-                    f"[交接班][审核确认] 重复确认已按成功返回 building={building}, session_id={session_id}, "
-                    f"base_revision={base_revision}, current_revision={latest_after_conflict.get('revision', 0)}"
-                )
-                latest_session = _attach_excel_sync_from_store(container, latest_after_conflict)
-                _review_history_cache_invalidate(building=building)
-                latest_batch_key = str(latest_session.get("batch_key", "")).strip()
-                latest_batch_status = _attach_followup_progress(
-                    followup,
-                    service.get_batch_status(latest_batch_key),
-                )
-                response = {
-                    "ok": True,
-                    "session": latest_session,
-                    "latest_session_id": _safe_latest_session_id(service, building=building, emit_log=container.add_system_log),
-                    "operation_feedback": _build_review_confirm_feedback(
-                        confirmed=True,
-                        followup_result=None,
-                    ),
-                    "concurrency": _get_session_concurrency_safe(
-                        service,
-                        building=building,
-                        session_id=str(latest_session.get("session_id", "")).strip(),
-                        client_id=str(payload.get("client_id", "")).strip(),
-                        current_revision=int(latest_session.get("revision", 0) or 0),
-                        emit_log=container.add_system_log,
-                    ),
-                    "batch_status": latest_batch_status,
-                    "followup_result": {"status": "already_confirmed"},
-                }
-                return _attach_review_display_state(
-                    response,
-                    service=service,
-                    building=building,
-                    client_id=str(payload.get("client_id", "")).strip(),
-                    emit_log=container.add_system_log,
-                )
-            container.add_system_log(
-                f"[交接班][审核确认] 已拒绝 building={building}, session_id={session_id}, "
-                f"base_revision={base_revision}, reason={exc}"
-            )
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -3944,19 +3822,29 @@ def handover_review_confirm(
             f"[交接班][审核确认] building={building}, batch={session.get('batch_key', '-')}"
         )
         target_batch_key = str(session.get("batch_key", "")).strip()
-        try:
-            followup_result = followup.trigger_after_single_confirm(
-                batch_key=target_batch_key,
-                building=building,
-                session_id=str(session.get("session_id", "")).strip(),
-                emit_log=container.add_system_log,
+        gate = followup.evaluate(batch_status)
+        if followup.is_first_full_cloud_sync_completed(target_batch_key) or bool(gate.get("ready_for_followup_upload", False)):
+            try:
+                followup_result = _start_handover_followup_job_after_confirm(
+                    container,
+                    batch_key=target_batch_key,
+                    submitted_by="confirm",
+                )
+            except Exception as exc:  # noqa: BLE001
+                container.add_system_log(f"[交接班][确认后上传] 任务提交失败 batch={target_batch_key}, 错误={exc}")
+                followup_result = _build_followup_failure_result(
+                    followup,
+                    batch_key=target_batch_key,
+                    error=str(exc),
+                )
+        else:
+            container.add_system_log(
+                f"[交接班][确认后上传] 当前仅更新确认状态，等待五楼全部确认: batch={target_batch_key}, building={building}"
             )
-        except Exception as exc:  # noqa: BLE001
-            container.add_system_log(f"[交接班][确认后上传] 失败 batch={target_batch_key}, 错误={exc}")
-            followup_result = _build_followup_failure_result(
+            followup_result = _build_followup_await_all_result(
                 followup,
                 batch_key=target_batch_key,
-                error=str(exc),
+                blocked_reason=str(gate.get("blocked_reason", "") or "").strip(),
             )
         container.add_system_log(
             f"[交接班][确认后上传] batch={session.get('batch_key', '-')}, 状态={_followup_status_text(followup_result.get('status'))}, "
@@ -4010,25 +3898,17 @@ def handover_review_unconfirm(
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     _load_target_session_or_404(service, building=building, session_id=session_id)
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id)
-    try:
-        _ensure_session_lock_held_or_409(
-            service,
-            building=building,
-            session_id=session_id,
-            client_id=str(payload.get("client_id", "")).strip(),
-        )
-    except HTTPException as exc:
-        if int(getattr(exc, "status_code", 0) or 0) == 409:
-            container.add_system_log(
-                f"[交接班][审核撤销] 已拒绝 building={building}, session_id={session_id}, "
-                f"base_revision={base_revision}, reason={exc.detail}"
-            )
-        raise
+    _ensure_session_lock_held_or_409(
+        service,
+        building=building,
+        session_id=session_id,
+        client_id=str(payload.get("client_id", "")).strip(),
+    )
     target_session = _load_target_session_or_404(service, building=building, session_id=session_id)
     target_batch_key = str(target_session.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
         name=f"handover_unconfirm:{target_batch_key}:{building}",
-        resource_keys=_handover_resource_keys(building=building, batch_key=target_batch_key),
+        resource_keys=_handover_resource_keys(building=building),
     ):
         try:
             session, batch_status = service.mark_confirmed(
@@ -4038,44 +3918,6 @@ def handover_review_unconfirm(
                 base_revision=base_revision,
             )
         except ReviewSessionConflictError as exc:
-            latest_after_conflict = service.get_session_by_id(session_id) or {}
-            if isinstance(latest_after_conflict, dict) and not bool(latest_after_conflict.get("confirmed", False)):
-                container.add_system_log(
-                    f"[交接班][审核撤销] 重复撤销已按成功返回 building={building}, session_id={session_id}, "
-                    f"base_revision={base_revision}, current_revision={latest_after_conflict.get('revision', 0)}"
-                )
-                session = _attach_excel_sync_from_store(container, latest_after_conflict)
-                _review_history_cache_invalidate(building=building)
-                batch_status = service.get_batch_status(str(session.get("batch_key", "")).strip())
-                response = {
-                    "ok": True,
-                    "session": session,
-                    "latest_session_id": _safe_latest_session_id(service, building=building, emit_log=container.add_system_log),
-                    "operation_feedback": _build_review_confirm_feedback(
-                        confirmed=False,
-                        followup_result=None,
-                    ),
-                    "concurrency": _get_session_concurrency_safe(
-                        service,
-                        building=building,
-                        session_id=str(session.get("session_id", "")).strip(),
-                        client_id=str(payload.get("client_id", "")).strip(),
-                        current_revision=int(session.get("revision", 0) or 0),
-                        emit_log=container.add_system_log,
-                    ),
-                    "batch_status": batch_status,
-                }
-                return _attach_review_display_state(
-                    response,
-                    service=service,
-                    building=building,
-                    client_id=str(payload.get("client_id", "")).strip(),
-                    emit_log=container.add_system_log,
-                )
-            container.add_system_log(
-                f"[交接班][审核撤销] 已拒绝 building={building}, session_id={session_id}, "
-                f"base_revision={base_revision}, reason={exc}"
-            )
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -4193,136 +4035,27 @@ def handover_review_lock_release(
     return {"ok": True, "concurrency": concurrency, "released": bool(concurrency.get("released", False))}
 
 
-def _sync_substation_110kv_to_batch_capacity_reports(
-    *,
-    container,
-    review_service: ReviewSessionService,
-    parser: ReviewDocumentParser,
-    writer: ReviewDocumentWriter,
-    shared_110kv: Dict[str, Any],
-    emit_log,
-) -> Dict[str, Any]:
-    batch_key = str(shared_110kv.get("batch_key", "") or "").strip()
-    if not batch_key:
-        return {"updated": 0, "failed": 0, "errors": []}
-    document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
-    queue_service = _build_xlsx_write_queue_service(container, parser=parser, writer=writer)
-    sessions = review_service.list_batch_sessions(batch_key)
-    updated = 0
-    failed = 0
-    errors: list[dict[str, str]] = []
-    for session in sessions:
-        building = str(session.get("building", "") or "").strip()
-        session_id = str(session.get("session_id", "") or "").strip()
-        capacity_file = str(session.get("capacity_output_file", "") or "").strip()
-        if not capacity_file:
-            continue
-        try:
-            document, session_with_sync = document_state.load_document(session)
-            tracked_cells = _extract_capacity_tracked_cells(document)
-            cooling_pump_pressures = (
-                document.get("cooling_pump_pressures", {})
-                if isinstance(document.get("cooling_pump_pressures", {}), dict)
-                else {}
-            )
-            pending_payload = _build_pending_capacity_sync_payload_for_review(
-                tracked_cells=tracked_cells,
-                shared_110kv=shared_110kv,
-                cooling_pump_pressures=cooling_pump_pressures,
-            )
-            updated_session = review_service.update_capacity_sync(
-                session_id=session_id,
-                capacity_sync=pending_payload,
-                capacity_status="pending",
-                capacity_error="",
-            )
-            queue_service.enqueue_capacity_overlay_sync(
-                building=building,
-                session_id=session_id,
-                tracked_cells=tracked_cells,
-                shared_110kv=shared_110kv,
-                cooling_pump_pressures=cooling_pump_pressures,
-                capacity_output_file=str(updated_session.get("capacity_output_file", "") or capacity_file).strip(),
-                overlay_scope="substation_110kv",
-            )
-            updated += 1
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            errors.append({"building": building, "session_id": session_id, "error": str(exc)})
-            if callable(emit_log):
-                emit_log(
-                    f"[交接班][110KV共享] 容量表补写失败 building={building}, session_id={session_id}, error={exc}"
-                )
-    if callable(emit_log):
-        emit_log(
-            f"[交接班][110KV共享] 本班容量表补写已入队 batch={batch_key}, queued={updated}, failed={failed}"
-        )
-    return {"updated": updated, "failed": failed, "errors": errors}
-
-
-def _substation_110kv_value_signature(payload: Dict[str, Any] | None, *, batch_key: str = "") -> tuple[tuple[str, str, str, str, str, str], ...]:
-    normalized = ReviewSessionService.normalize_substation_110kv_payload(payload, batch_key=batch_key)
-    signature: list[tuple[str, str, str, str, str, str]] = []
-    for row in normalized.get("rows", []):
-        if not isinstance(row, dict):
-            continue
-        signature.append(
-            (
-                str(row.get("row_id", "") or "").strip(),
-                *(str(row.get(key, "") or "").strip() for key in _SUBSTATION_110KV_COMPARE_KEYS),
-            )
-        )
-    return tuple(signature)
-
-
-def _substation_110kv_dirty_payload_matches(
-    *,
-    submitted_110kv: Dict[str, Any],
-    lock_state: Dict[str, Any],
-    batch_key: str,
-) -> bool:
-    if not bool((lock_state or {}).get("client_holds_lock", False)):
-        return False
-    if not bool((lock_state or {}).get("dirty", False)):
-        return False
-    dirty_payload = (lock_state or {}).get("dirty_payload", {})
-    if not isinstance(dirty_payload, dict):
-        return False
-    return _substation_110kv_value_signature(
-        submitted_110kv,
-        batch_key=batch_key,
-    ) == _substation_110kv_value_signature(
-        dirty_payload,
-        batch_key=batch_key,
-    )
-
-
-def _shared_110kv_lock_response(
-    *,
+def _substation_110kv_session_from_payload(
     service: ReviewSessionService,
+    *,
     building: str,
-    session_id: str,
-    client_id: str,
-    operation,
+    payload: Dict[str, Any],
 ) -> Dict[str, Any]:
-    target = _load_target_session_or_404(service, building=building, session_id=session_id)
-    batch_key = str(target.get("batch_key", "") or "").strip()
-    try:
-        lock_state = operation(batch_key)
-        block = service.get_substation_110kv(batch_key)
-        block = _substation_110kv_with_dirty_preview(block, lock_state)
-    except ReviewSessionStoreUnavailableError as exc:
-        _raise_review_store_http_error(exc)
-    return {
-        "ok": True,
-        "shared_blocks": {"substation_110kv": block},
-        "shared_block_locks": {"substation_110kv": lock_state},
-        "accepted": bool(lock_state.get("acquired", lock_state.get("renewed", True))),
-    }
+    session_id = str((payload or {}).get("session_id", "")).strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    return _load_target_session_or_404(service, building=building, session_id=session_id)
+
+
+def _substation_110kv_rows_from_payload(payload: Dict[str, Any]) -> list[dict[str, Any]]:
+    rows = (payload or {}).get("rows", [])
+    if not isinstance(rows, list):
+        return []
+    return [dict(item) for item in rows if isinstance(item, dict)]
 
 
 @router.post("/api/handover/review/{building_code}/shared-blocks/110kv/lock/claim")
-def handover_review_shared_110kv_lock_claim(
+def handover_review_110kv_lock_claim(
     building_code: str,
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
@@ -4330,29 +4063,30 @@ def handover_review_shared_110kv_lock_claim(
     container = request.app.state.container
     service = _build_review_session_service(container)
     building = _resolve_building_or_404(service, building_code)
-    session_id = str(payload.get("session_id", "") or "").strip()
-    client_id = str(payload.get("client_id", "") or "").strip()
-    holder_label = str(payload.get("holder_label", "") or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    client_id = str(payload.get("client_id", "")).strip()
+    holder_label = str(payload.get("holder_label", "")).strip()
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id 不能为空")
-    return _shared_110kv_lock_response(
-        service=service,
-        building=building,
-        session_id=session_id,
-        client_id=client_id,
-        operation=lambda batch_key: service.claim_substation_110kv_lock(
-            batch_key=batch_key,
+    session = _substation_110kv_session_from_payload(service, building=building, payload=payload)
+    try:
+        state = service.claim_substation_110kv_lock(
+            batch_key=str(session.get("batch_key", "")).strip(),
             building=building,
             client_id=client_id,
             holder_label=holder_label,
-        ),
-    )
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    lock = state.get("shared_block_locks", {}).get("substation_110kv", {}) if isinstance(state, dict) else {}
+    return {
+        "ok": True,
+        **(state if isinstance(state, dict) else {}),
+        "accepted": bool(lock.get("acquired", False) or lock.get("client_holds_lock", False)),
+    }
 
 
 @router.post("/api/handover/review/{building_code}/shared-blocks/110kv/lock/heartbeat")
-def handover_review_shared_110kv_lock_heartbeat(
+def handover_review_110kv_lock_heartbeat(
     building_code: str,
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
@@ -4360,26 +4094,27 @@ def handover_review_shared_110kv_lock_heartbeat(
     container = request.app.state.container
     service = _build_review_session_service(container)
     building = _resolve_building_or_404(service, building_code)
-    session_id = str(payload.get("session_id", "") or "").strip()
-    client_id = str(payload.get("client_id", "") or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    client_id = str(payload.get("client_id", "")).strip()
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id 不能为空")
-    return _shared_110kv_lock_response(
-        service=service,
-        building=building,
-        session_id=session_id,
-        client_id=client_id,
-        operation=lambda batch_key: service.heartbeat_substation_110kv_lock(
-            batch_key=batch_key,
+    session = _substation_110kv_session_from_payload(service, building=building, payload=payload)
+    try:
+        state = service.heartbeat_substation_110kv_lock(
+            batch_key=str(session.get("batch_key", "")).strip(),
             client_id=client_id,
-        ),
-    )
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    lock = state.get("shared_block_locks", {}).get("substation_110kv", {}) if isinstance(state, dict) else {}
+    return {
+        "ok": True,
+        **(state if isinstance(state, dict) else {}),
+        "accepted": bool(lock.get("renewed", False)),
+    }
 
 
 @router.post("/api/handover/review/{building_code}/shared-blocks/110kv/lock/release")
-def handover_review_shared_110kv_lock_release(
+def handover_review_110kv_lock_release(
     building_code: str,
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
@@ -4387,212 +4122,85 @@ def handover_review_shared_110kv_lock_release(
     container = request.app.state.container
     service = _build_review_session_service(container)
     building = _resolve_building_or_404(service, building_code)
-    session_id = str(payload.get("session_id", "") or "").strip()
-    client_id = str(payload.get("client_id", "") or "").strip()
-    if not session_id or not client_id:
-        return {
-            "ok": True,
-            "shared_block_locks": {"substation_110kv": _empty_concurrency()},
-            "released": False,
-        }
-    response = _shared_110kv_lock_response(
-        service=service,
-        building=building,
-        session_id=session_id,
-        client_id=client_id,
-        operation=lambda batch_key: service.release_substation_110kv_lock(
-            batch_key=batch_key,
+    client_id = str(payload.get("client_id", "")).strip()
+    session_id = str(payload.get("session_id", "")).strip()
+    if not client_id or not session_id:
+        return {"ok": True, "shared_blocks": {}, "shared_block_locks": {}, "released": False}
+    session = _substation_110kv_session_from_payload(service, building=building, payload=payload)
+    try:
+        state = service.release_substation_110kv_lock(
+            batch_key=str(session.get("batch_key", "")).strip(),
             client_id=client_id,
-        ),
-    )
-    response["released"] = bool(response.get("shared_block_locks", {}).get("substation_110kv", {}).get("released", False))
-    return response
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    lock = state.get("shared_block_locks", {}).get("substation_110kv", {}) if isinstance(state, dict) else {}
+    return {
+        "ok": True,
+        **(state if isinstance(state, dict) else {}),
+        "released": bool(lock.get("released", False)),
+    }
 
 
 @router.post("/api/handover/review/{building_code}/shared-blocks/110kv/dirty")
-def handover_review_shared_110kv_dirty(
+def handover_review_110kv_dirty(
     building_code: str,
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
 ) -> Dict[str, Any]:
     container = request.app.state.container
-    service, _, _, _ = _build_review_services(container)
+    service = _build_review_session_service(container)
     building = _resolve_building_or_404(service, building_code)
-    session_id = str(payload.get("session_id", "") or "").strip()
-    client_id = str(payload.get("client_id", "") or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    client_id = str(payload.get("client_id", "")).strip()
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id 不能为空")
-    target = _load_target_session_or_404(service, building=building, session_id=session_id)
-    batch_key = str(target.get("batch_key", "") or "").strip()
+    session = _substation_110kv_session_from_payload(service, building=building, payload=payload)
     try:
-        lock_state = service.mark_substation_110kv_dirty(
-            batch_key=batch_key,
+        state = service.mark_substation_110kv_dirty(
+            batch_key=str(session.get("batch_key", "")).strip(),
             building=building,
             client_id=client_id,
-            rows=payload.get("rows") if isinstance(payload.get("rows"), list) else None,
+            rows=_substation_110kv_rows_from_payload(payload),
         )
-    except ValueError as exc:
-        reason = str(exc)
-        if reason == "shared_block_lock_required":
-            raise HTTPException(status_code=409, detail="110KV变电站正在其他楼栋或终端编辑，请稍后重试") from exc
-        raise HTTPException(status_code=400, detail=reason or "110KV变电站dirty状态标记失败") from exc
-    shared_110kv = _substation_110kv_with_dirty_preview(service.get_substation_110kv(batch_key), lock_state)
-    container.add_system_log(
-        f"[交接班][110KV共享] 已标记dirty building={building}, batch={batch_key}, client={client_id}"
-    )
-    return {
-        "ok": True,
-        "building": building,
-        "session": _attach_excel_sync_from_store(container, service.get_session_by_id(session_id) or target),
-        "shared_blocks": {"substation_110kv": shared_110kv},
-        "shared_block_locks": {"substation_110kv": lock_state},
-    }
+    except ReviewSessionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    return {"ok": True, **(state if isinstance(state, dict) else {})}
 
 
 @router.put("/api/handover/review/{building_code}/shared-blocks/110kv")
-def handover_review_shared_110kv_save(
+def handover_review_110kv_save(
     building_code: str,
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
 ) -> Dict[str, Any]:
     container = request.app.state.container
-    service, parser, writer, _ = _build_review_services(container)
+    service = _build_review_session_service(container)
     building = _resolve_building_or_404(service, building_code)
-    session_id = str(payload.get("session_id", "") or "").strip()
-    client_id = str(payload.get("client_id", "") or "").strip()
-    base_revision = int(payload.get("base_revision", 0) or 0)
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    client_id = str(payload.get("client_id", "")).strip()
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id 不能为空")
-    target = _load_target_session_or_404(service, building=building, session_id=session_id)
-    batch_key = str(target.get("batch_key", "") or "").strip()
-    rows = payload.get("rows", [])
-    submitted_110kv = ReviewSessionService.normalize_substation_110kv_payload(
-        {"batch_key": batch_key, "rows": rows if isinstance(rows, list) else []},
-        batch_key=batch_key,
-    )
+    session = _substation_110kv_session_from_payload(service, building=building, payload=payload)
+    base_revision = _parse_base_revision_or_400(payload)
     try:
-        current_110kv = service.get_substation_110kv(batch_key)
-        if _substation_110kv_value_signature(submitted_110kv, batch_key=batch_key) == _substation_110kv_value_signature(
-            current_110kv,
-            batch_key=batch_key,
-        ):
-            sync_result = {"updated": 0, "failed": 0, "errors": [], "no_change": True}
-            lock_state = service.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id)
-            if bool(lock_state.get("client_holds_lock", False)) and bool(lock_state.get("dirty", False)):
-                try:
-                    lock_state = service.clear_substation_110kv_dirty(batch_key=batch_key, client_id=client_id)
-                except Exception as exc:  # noqa: BLE001
-                    container.add_system_log(
-                        f"[交接班][110KV共享] 内容无变化但dirty清理失败 building={building}, batch={batch_key}, error={exc}"
-                    )
-            container.add_system_log(
-                f"[交接班][110KV共享] 内容无变化，跳过保存和容量补写 building={building}, "
-                f"batch={batch_key}, revision={current_110kv.get('revision', 0)}"
-            )
-            return {
-                "ok": True,
-                "building": building,
-                "session": _attach_excel_sync_from_store(container, service.get_session_by_id(session_id) or target),
-                "shared_blocks": {"substation_110kv": current_110kv},
-                "shared_block_locks": {"substation_110kv": lock_state},
-                "capacity_sync_result": sync_result,
-                "no_change": True,
-            }
-        try:
-            shared_110kv = service.save_substation_110kv(
-                batch_key=batch_key,
-                building=building,
-                client_id=client_id,
-                base_revision=base_revision,
-                rows=submitted_110kv.get("rows", []),
-            )
-        except ValueError as exc:
-            if str(exc) != "shared_block_revision_conflict":
-                raise
-            current_after_conflict = service.get_substation_110kv(batch_key)
-            if _substation_110kv_value_signature(
-                submitted_110kv,
-                batch_key=batch_key,
-            ) == _substation_110kv_value_signature(
-                current_after_conflict,
-                batch_key=batch_key,
-            ):
-                sync_result = {"updated": 0, "failed": 0, "errors": [], "no_change": True}
-                lock_state = service.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id)
-                if bool(lock_state.get("client_holds_lock", False)) and bool(lock_state.get("dirty", False)):
-                    try:
-                        lock_state = service.clear_substation_110kv_dirty(batch_key=batch_key, client_id=client_id)
-                    except Exception as clear_exc:  # noqa: BLE001
-                        container.add_system_log(
-                            f"[交接班][110KV共享] revision冲突后确认内容已保存但dirty清理失败 "
-                            f"building={building}, batch={batch_key}, error={clear_exc}"
-                        )
-                container.add_system_log(
-                    f"[交接班][110KV共享] revision冲突后确认内容已是最新，按成功返回 "
-                    f"building={building}, batch={batch_key}, revision={current_after_conflict.get('revision', 0)}"
-                )
-                return {
-                    "ok": True,
-                    "building": building,
-                    "session": _attach_excel_sync_from_store(container, service.get_session_by_id(session_id) or target),
-                    "shared_blocks": {"substation_110kv": current_after_conflict},
-                    "shared_block_locks": {"substation_110kv": lock_state},
-                    "capacity_sync_result": sync_result,
-                    "no_change": True,
-                }
-            lock_state = service.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id)
-            if not _substation_110kv_dirty_payload_matches(
-                submitted_110kv=submitted_110kv,
-                lock_state=lock_state,
-                batch_key=batch_key,
-            ):
-                raise
-            container.add_system_log(
-                f"[交接班][110KV共享] revision冲突但当前client持有相同dirty预览，按最新revision重试保存 "
-                f"building={building}, batch={batch_key}, base_revision={base_revision}, "
-                f"current_revision={current_after_conflict.get('revision', 0)}"
-            )
-            shared_110kv = service.save_substation_110kv(
-                batch_key=batch_key,
-                building=building,
-                client_id=client_id,
-                base_revision=int(current_after_conflict.get("revision", 0) or 0),
-                rows=submitted_110kv.get("rows", []),
-            )
-    except ValueError as exc:
-        reason = str(exc)
-        if reason == "shared_block_revision_conflict":
-            raise HTTPException(status_code=409, detail="110KV变电站内容已被其他楼栋更新，请刷新后重试") from exc
-        if reason == "shared_block_lock_required":
-            raise HTTPException(status_code=409, detail="110KV变电站正在其他楼栋或终端编辑，请稍后重试") from exc
-        raise HTTPException(status_code=400, detail=reason or "110KV变电站保存失败") from exc
+        state = service.save_substation_110kv(
+            batch_key=str(session.get("batch_key", "")).strip(),
+            building=building,
+            client_id=client_id,
+            rows=_substation_110kv_rows_from_payload(payload),
+            base_revision=base_revision,
+        )
+    except ReviewSessionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ReviewSessionStoreUnavailableError as exc:
         _raise_review_store_http_error(exc)
-    sync_result = _sync_substation_110kv_to_batch_capacity_reports(
-        container=container,
-        review_service=service,
-        parser=parser,
-        writer=writer,
-        shared_110kv=shared_110kv,
-        emit_log=container.add_system_log,
-    )
-    lock_state = service.get_substation_110kv_lock(batch_key=batch_key, client_id=client_id)
+    block = state.get("shared_blocks", {}).get("substation_110kv", {}) if isinstance(state, dict) else {}
     container.add_system_log(
-        f"[交接班][110KV共享] 保存完成 building={building}, batch={batch_key}, "
-        f"revision={shared_110kv.get('revision', 0)}, 容量补写={sync_result.get('updated', 0)}/{sync_result.get('failed', 0)}"
+        f"[交接班][110KV共享] 保存完成 building={building}, batch={session.get('batch_key', '-')}, "
+        f"revision={block.get('revision', 0)}, no_change={bool(state.get('no_change', False))}"
     )
-    return {
-        "ok": True,
-        "building": building,
-        "session": _attach_excel_sync_from_store(container, service.get_session_by_id(session_id) or target),
-        "shared_blocks": {"substation_110kv": shared_110kv},
-        "shared_block_locks": {"substation_110kv": lock_state},
-        "capacity_sync_result": sync_result,
-    }
+    return {"ok": True, **(state if isinstance(state, dict) else {})}
 
 
 @router.post("/api/handover/review/{building_code}/cloud-sync/retry")

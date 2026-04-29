@@ -1,20 +1,23 @@
 ﻿from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app.config.settings_loader import save_settings
 from app.modules.scheduler.api._config_persistence import (
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
-    save_scheduler_config_snapshot,
 )
-from app.modules.scheduler.api._display_payload import with_scheduler_display
-from app.modules.scheduler.api._time_normalization import normalize_scheduler_time
 
 
 router = APIRouter(prefix="/api/scheduler/handover", tags=["scheduler-handover"])
+
+
+def _valid_time(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(value or "").strip()))
 
 
 def _handover_scheduler_cfg_from_v3(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -50,7 +53,7 @@ def _build_handover_scheduler_payload(container, action_result: Dict[str, Any] |
     slots = snapshot.get("slots", {}) if isinstance(snapshot.get("slots", {}), dict) else {}
     morning = _slot_payload(slots.get("morning"))
     afternoon = _slot_payload(slots.get("afternoon"))
-    payload = {
+    return {
         "ok": True,
         "action": action_result or {},
         "enabled": bool(snapshot.get("enabled", False)),
@@ -65,18 +68,12 @@ def _build_handover_scheduler_payload(container, action_result: Dict[str, Any] |
         "afternoon": afternoon,
         "state_paths": snapshot.get("state_paths", {}),
     }
-    return with_scheduler_display(payload, container)
 
 
 @router.post("/start")
 def handover_scheduler_start(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    persist_scheduler_toggle(
-        container,
-        path=("features", "handover_log", "scheduler"),
-        scheduler_key="handover",
-        auto_start_in_gui=True,
-    )
+    persist_scheduler_toggle(container, path=("features", "handover_log", "scheduler"), auto_start_in_gui=True)
     action = container.start_handover_scheduler()
     return _build_handover_scheduler_payload(container, action_result=action)
 
@@ -84,12 +81,7 @@ def handover_scheduler_start(request: Request) -> Dict[str, Any]:
 @router.post("/stop")
 def handover_scheduler_stop(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    persist_scheduler_toggle(
-        container,
-        path=("features", "handover_log", "scheduler"),
-        scheduler_key="handover",
-        auto_start_in_gui=False,
-    )
+    persist_scheduler_toggle(container, path=("features", "handover_log", "scheduler"), auto_start_in_gui=False)
     action = container.stop_handover_scheduler()
     return _build_handover_scheduler_payload(container, action_result=action)
 
@@ -140,7 +132,10 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
             continue
         value = payload.get(key)
         if key in {"morning_time", "afternoon_time"}:
-            scheduler_cfg[key] = normalize_scheduler_time(value, field_name=key)
+            text = str(value or "").strip()
+            if not _valid_time(text):
+                raise HTTPException(status_code=400, detail=f"{key} 必须是 HH:MM:SS")
+            scheduler_cfg[key] = text
         elif key == "check_interval_sec":
             try:
                 number = int(value)
@@ -157,15 +152,9 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
         else:
             scheduler_cfg[key] = bool(value)
 
-    restart_running = bool(container.handover_scheduler_manager.is_running()) if container.handover_scheduler_manager else False
     try:
-        save_scheduler_config_snapshot(
-            container,
-            merged,
-            path=("features", "handover_log", "scheduler"),
-            scheduler_key="handover",
-            restart_running=restart_running,
-        )
+        saved = save_settings(merged, container.config_path)
+        container.reload_config(saved)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -191,7 +180,7 @@ def handover_scheduler_config(payload: Dict[str, Any], request: Request) -> Dict
     data = _build_handover_scheduler_payload(container)
     data.update(
         {
-            "message": "交接班调度配置已更新并立即生效" if restart_running else "交接班调度配置已保存",
+            "message": "交接班调度配置已更新并热重载",
             "morning_time_changed": morning_changed,
             "afternoon_time_changed": afternoon_changed,
             "state_reset": reset_results,

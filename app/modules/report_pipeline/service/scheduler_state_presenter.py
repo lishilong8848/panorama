@@ -143,12 +143,12 @@ def present_scheduler_state(
         status_text = raw_status or "运行中"
         summary_text = "当前调度已在运行。"
     elif remembered_enabled:
-        tone = "warning"
-        status_text = "待启动"
+        tone = "info"
+        status_text = "已记住开启"
         if executor_bound:
-            summary_text = "已记住开启，但当前调度线程未运行。点击启动调度可立即恢复。"
+            summary_text = "当前记忆为开启，等待调度线程下一轮触发。"
         else:
-            summary_text = "已记住开启，但执行器尚未绑定。"
+            summary_text = "当前记忆为开启，但执行器尚未绑定。"
     else:
         tone = "neutral"
         status_text = raw_status or "未启动"
@@ -157,14 +157,14 @@ def present_scheduler_state(
     if not executor_bound and remembered_enabled and not running:
         tone = "warning"
 
-    start_allowed = not role_blocked and not running
-    stop_allowed = not role_blocked and (running or remembered_enabled)
+    start_allowed = not role_blocked and not remembered_enabled
+    stop_allowed = not role_blocked and remembered_enabled
 
     if role_blocked:
         start_disabled_reason = role_blocked_reason
         stop_disabled_reason = role_blocked_reason
     else:
-        start_disabled_reason = "" if start_allowed else "当前已在运行"
+        start_disabled_reason = "" if start_allowed else "当前已记住开启"
         stop_disabled_reason = "" if stop_allowed else "当前已记住关闭"
 
     detail_parts = []
@@ -187,7 +187,7 @@ def present_scheduler_state(
         "actions": {
             "start": {
                 "allowed": start_allowed,
-                "label": "已在运行" if running else start_label,
+                "label": "已记住开启" if remembered_enabled else start_label,
                 "disabled_reason": start_disabled_reason,
                 "pending": False,
             },
@@ -199,38 +199,6 @@ def present_scheduler_state(
             },
         },
     }
-
-
-def present_scheduler_snapshot_with_display(
-    snapshot: Any,
-    *,
-    role_mode: str = "",
-    slot_keys: Iterable[str] = ("morning", "afternoon"),
-) -> Dict[str, Any]:
-    payload = dict(snapshot) if isinstance(snapshot, dict) else {}
-    payload["display"] = present_scheduler_state(payload, role_mode=role_mode)
-    slots = dict(payload.get("slots")) if isinstance(payload.get("slots"), dict) else {}
-    parent_remembered_enabled = bool(payload.get("remembered_enabled", False))
-    parent_executor_bound = bool(payload.get("executor_bound", False))
-    for slot_key in slot_keys:
-        slot = payload.get(slot_key)
-        if not isinstance(slot, dict):
-            slot = slots.get(slot_key)
-        if not isinstance(slot, dict):
-            continue
-        slot = dict(slot)
-        slot.setdefault("remembered_enabled", parent_remembered_enabled)
-        slot.setdefault("executor_bound", parent_executor_bound)
-        slot_with_display = {
-            **slot,
-            "display": present_scheduler_state(slot, role_mode=role_mode),
-        }
-        payload[slot_key] = slot_with_display
-        if slots:
-            slots[slot_key] = slot_with_display
-    if slots:
-        payload["slots"] = slots
-    return payload
 
 
 def present_scheduler_overview_items(
@@ -486,7 +454,7 @@ def present_scheduler_overview_summary(items: Any) -> Dict[str, Any]:
     upcoming_parts: List[Dict[str, Any]] = []
     for item in rows:
         status_text = _text(item.get("status_text"))
-        if status_text == "运行中":
+        if status_text in {"运行中", "已记住开启"}:
             active_count += 1
         tone = _text(item.get("tone"))
         if tone in {"warning", "danger"}:

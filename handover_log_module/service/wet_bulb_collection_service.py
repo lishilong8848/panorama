@@ -368,8 +368,8 @@ class WetBulbCollectionService:
         fallback_keywords.extend(
             [
                 "室外湿球温度",
-                "室外湿度1",
-                "E-124-DDC-100_室外湿度1",
+                "室外温度1",
+                "E-124-DDC-100_室外温度1",
                 "E-124-DDC-100_室外湿球温度",
             ]
         )
@@ -602,13 +602,8 @@ class WetBulbCollectionService:
         resolved_target = dict(target_descriptor or self.build_target_descriptor(normalized_cfg, force_refresh=True))
 
         if not normalized_cfg.get("enabled", True):
-            emit_log(
-                "[湿球温度定时采集] 已跳过: 功能配置已关闭 "
-                "(wet_bulb_collection.enabled=false)，请先启用后再执行"
-            )
             return {
                 "status": "skipped",
-                "reason": "disabled",
                 "run_date": run_date,
                 "uploaded_buildings": [],
                 "failed_buildings": [],
@@ -770,13 +765,8 @@ class WetBulbCollectionService:
         created_count = 0
         target_descriptor = self.build_target_descriptor(cfg, force_refresh=True)
         if not cfg.get("enabled", True):
-            emit_log(
-                "[湿球温度定时采集] 已跳过: 功能配置已关闭 "
-                "(wet_bulb_collection.enabled=false)，请先启用后再执行"
-            )
             return {
                 "status": "skipped",
-                "reason": "disabled",
                 "run_date": run_date,
                 "uploaded_buildings": [],
                 "failed_buildings": [],

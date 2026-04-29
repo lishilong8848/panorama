@@ -1372,7 +1372,7 @@ createApp({
       () => shouldPollHandoverDailyReportContext.value,
       (enabled) => {
         if (!enabled || !bootstrapReady.value) return;
-        void fetchHandoverDailyReportContext({ silentTransientNetworkError: true, silentMessage: true });
+        void fetchHandoverDailyReportContext({ force: true, silentTransientNetworkError: true, silentMessage: true });
       },
       { immediate: true },
     );
@@ -1402,7 +1402,10 @@ createApp({
         const moduleChanged = String(dashboardActiveModule.value || "").trim() !== String(prevModule || "").trim();
         const enteredDashboard = currentViewText === "dashboard" && prevViewText !== "dashboard";
         if ((enteredDashboard || moduleChanged) && currentViewText === "dashboard" && shouldPollExternalDashboardSummary.value) {
-          void fetchExternalDashboardSummary({ silentMessage: true });
+          void fetchExternalDashboardSummary({ force: true, silentMessage: true });
+        }
+        if ((enteredDashboard || moduleChanged) && shouldPollHandoverDailyReportContext.value) {
+          void fetchHandoverDailyReportContext({ force: true, silentTransientNetworkError: true, silentMessage: true });
         }
         if (enteredDashboard && shouldFetchHealth.value) {
           void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });

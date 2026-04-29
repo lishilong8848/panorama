@@ -25,30 +25,17 @@ def test_handover_review_download_returns_file_response(tmp_path, monkeypatch):
     output_file.write_bytes(b"demo")
     container = _FakeContainer()
     document_state_calls = []
-    queue_calls = []
 
     class _DocumentState:
         def ensure_document_for_session(self, session):
             document_state_calls.append(("ensure", session["session_id"]))
 
-        def attach_excel_sync(self, session):
-            document_state_calls.append(("attach", session["session_id"]))
-            payload = dict(session)
-            payload["excel_sync"] = {"status": "synced", "synced_revision": 1, "pending_revision": 0, "error": ""}
-            return payload
-
-    class _Queue:
-        def enqueue_review_excel_sync(self, session, *, target_revision):
-            queue_calls.append(("enqueue", session["session_id"], target_revision))
-            return {"status": "pending"}
-
-        def wait_for_barrier(self, *, building, timeout_sec):
-            queue_calls.append(("barrier", building, timeout_sec))
-            return {"status": "success"}
+        def force_sync_session_dict(self, session, *, reason="manual"):
+            document_state_calls.append(("sync", session["session_id"], reason))
+            return {"status": "synced", "synced_revision": 1, "pending_revision": 0, "error": "", "updated_at": ""}
 
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (object(), None, None, None))
     monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
-    monkeypatch.setattr(routes, "_build_xlsx_write_queue_service", lambda *_args, **_kwargs: _Queue())
     monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
     monkeypatch.setattr(
         routes,
@@ -61,8 +48,7 @@ def test_handover_review_download_returns_file_response(tmp_path, monkeypatch):
     assert Path(response.path) == output_file
     assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     assert "A楼交接班日志.xlsx" in unquote(response.headers.get("content-disposition", ""))
-    assert document_state_calls == [("ensure", "sess-1"), ("attach", "sess-1")]
-    assert queue_calls == [("enqueue", "sess-1", 0), ("barrier", "A楼", 120.0)]
+    assert document_state_calls == [("ensure", "sess-1"), ("sync", "sess-1", "download")]
     assert any("[交接班][下载成品]" in message for message in container.logs)
 
 
@@ -88,21 +74,11 @@ def test_handover_review_download_uses_requested_session_id(monkeypatch, tmp_pat
         def ensure_document_for_session(self, _session):
             return None
 
-        def attach_excel_sync(self, session):
-            payload = dict(session)
-            payload["excel_sync"] = {"status": "synced"}
-            return payload
-
-    class _Queue:
-        def enqueue_review_excel_sync(self, session, *, target_revision):
-            return {"status": "pending"}
-
-        def wait_for_barrier(self, *, building, timeout_sec):
-            return {"status": "success"}
+        def force_sync_session_dict(self, _session, *, reason="manual"):
+            return {"status": "synced"}
 
     monkeypatch.setattr(routes, "_build_review_services", lambda _container: (object(), None, None, None))
     monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
-    monkeypatch.setattr(routes, "_build_xlsx_write_queue_service", lambda *_args, **_kwargs: _Queue())
     monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
 
     calls = []

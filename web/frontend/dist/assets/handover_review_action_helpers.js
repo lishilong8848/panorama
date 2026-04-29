@@ -64,6 +64,26 @@ export function createHandoverReviewActionHelpers(options = {}) {
     return normalized === "queued" || normalized === "running" || normalized === "waiting_resource";
   }
 
+  async function refreshAfterRevisionConflict(message = "已同步最新审核内容，请重新下载。") {
+    beginRemoteSaveRefresh();
+    try {
+      const loaded = await loadReviewData({
+        background: false,
+        mode: shouldPreferBootstrapLoad() ? "bootstrap" : "full",
+      });
+      if (loaded === false) {
+        throw new Error(errorText.value || "加载最新审核内容失败");
+      }
+      statusText.value = message;
+    } catch (error) {
+      syncingRemoteRevision.value = false;
+      needsRefresh.value = true;
+      staleRevisionConflict.value = true;
+      errorText.value = `刷新最新内容失败：${String(error?.message || error || "加载失败")}`;
+      statusText.value = "";
+    }
+  }
+
   async function waitForBackgroundJob(jobId, getJobApi, { timeoutMs = 120000, intervalMs = 1500 } = {}) {
     const targetJobId = String(jobId || "").trim();
     if (!targetJobId) return null;
@@ -308,9 +328,15 @@ export function createHandoverReviewActionHelpers(options = {}) {
         client_id: reviewClientId,
         ts: Date.now(),
       });
-      await triggerBrowserDownload(url, session.value?.output_file || "交接班日志.xlsx");
-      statusText.value = "交接班文件已下载";
+      const result = await triggerBrowserDownload(url, session.value?.output_file || "交接班日志.xlsx");
+      statusText.value = result?.warning
+        ? `文件已下载，但部分填充失败：${result.warning}`
+        : "交接班文件已下载";
     } catch (error) {
+      if (isRevisionConflictError(error)) {
+        await refreshAfterRevisionConflict();
+        return;
+      }
       errorText.value = String(error?.message || error || "下载失败");
     } finally {
       downloading.value = false;
@@ -330,27 +356,33 @@ export function createHandoverReviewActionHelpers(options = {}) {
       const saved = await saveDocument({ reason: "capacity_download" });
       if (!saved) return;
     }
-    if (!session.value || !session.value.session_id || !String(session.value.capacity_output_file || "").trim()) {
+    if (!session.value || !session.value.session_id) {
       statusText.value = capacityDownloadActionVm.value.disabledReason || "";
       return;
     }
     const sessionId = String(session.value?.session_id || "").trim();
     const capacityOutputFile = String(session.value?.capacity_output_file || "").trim();
-    if (!buildingCode || !sessionId || !capacityOutputFile) {
+    if (!buildingCode || !sessionId) {
       statusText.value = capacityDownloadActionVm.value.disabledReason || "";
       return;
     }
     capacityDownloading.value = true;
     errorText.value = "";
-    statusText.value = "容量报表已就绪，正在开始下载...";
+    statusText.value = "正在同步并下载容量报表...";
     try {
       const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, {
         client_id: reviewClientId,
         ts: Date.now(),
       });
-      await triggerBrowserDownload(url, capacityOutputFile || "交接班容量报表.xlsx");
-      statusText.value = "容量报表已下载";
+      const result = await triggerBrowserDownload(url, capacityOutputFile || "交接班容量报表.xlsx");
+      statusText.value = result?.warning
+        ? `文件已下载，但部分填充失败：${result.warning}`
+        : "容量报表已下载";
     } catch (error) {
+      if (isRevisionConflictError(error)) {
+        await refreshAfterRevisionConflict();
+        return;
+      }
       errorText.value = String(error?.message || error || "下载失败");
     } finally {
       capacityDownloading.value = false;

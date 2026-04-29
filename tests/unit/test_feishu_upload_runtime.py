@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
@@ -9,7 +7,6 @@ from typing import Any, Dict, List
 import pytest
 
 from app.modules.report_pipeline.service.feishu_upload_runtime import (
-    _date_field_matches,
     upload_results_to_feishu,
 )
 
@@ -30,8 +27,8 @@ class _FakeClient:
         self.calc_records: List[Dict[str, Any]] = []
         self.attachment_records: List[Dict[str, Any]] = []
 
-    def _to_feishu_date(self, date_text: str) -> Any:
-        return 1772294400000
+    def _to_feishu_date(self, date_text: str) -> str:
+        return date_text
 
     def list_records(
         self,
@@ -53,18 +50,8 @@ class _FakeClient:
         self.calls.append(("batch_delete_records", table_id, list(record_ids), batch_size))
         return len(record_ids)
 
-    def build_calc_record_fields(self, records: List[Dict[str, Any]], **kwargs: Any) -> List[Dict[str, Any]]:
-        self.calls.append(("build_calc_record_fields", records, kwargs))
-        return [dict(record) for record in records]
-
-    def batch_update_records(self, table_id: str, records: List[Dict[str, Any]], batch_size: int = 200) -> None:
-        self.calls.append(("batch_update_records", table_id, list(records), batch_size))
-
-    def batch_create_records(self, table_id: str, fields_list: List[Dict[str, Any]], batch_size: int = 200) -> None:
-        self.calls.append(("batch_create_records", table_id, list(fields_list), batch_size))
-
-    def update_record(self, table_id: str, record_id: str, fields: Dict[str, Any]) -> None:
-        self.calls.append(("update_record", table_id, record_id, dict(fields)))
+    def upload_calc_records(self, records: List[Dict[str, Any]], **kwargs: Any) -> None:
+        self.calls.append(("upload_calc_records", records, kwargs))
 
     def upload_attachment(self, source_file: str) -> str:
         self.calls.append(("upload_attachment", source_file))
@@ -109,71 +96,6 @@ def test_upload_results_to_feishu_skip_when_disabled() -> None:
     assert any("上传" in line and "关闭" in line for line in logs)
 
 
-def test_upload_results_to_feishu_logs_missing_target_config() -> None:
-    logs: List[str] = []
-    config = _build_config(enable_upload=True)
-    config["feishu"]["app_token"] = ""
-    config["feishu"]["calc_table_id"] = ""
-    config["feishu"]["attachment_table_id"] = ""
-
-    with pytest.raises(ValueError) as exc:
-        upload_results_to_feishu(
-            results=[],
-            config=config,
-            resolve_upload_date_from_runtime=lambda _cfg: None,
-            client_factory=lambda **_: (_ for _ in ()).throw(RuntimeError("should not init client")),
-            emit_log=logs.append,
-        )
-
-    assert "app_token" in str(exc.value)
-    assert any(
-        "app_token" in line and "calc_table_id" in line and "attachment_table_id" in line
-        for line in logs
-    )
-
-
-def test_date_field_matches_any_timestamp_inside_day() -> None:
-    start_ms = 1776700800000
-
-    assert _date_field_matches(start_ms + 12 * 60 * 60 * 1000, date_text="2026-04-21", target_value=start_ms)
-    assert not _date_field_matches(start_ms + 86_400_000, date_text="2026-04-21", target_value=start_ms)
-
-
-def test_upload_results_to_feishu_does_not_resolve_source_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    logs: List[str] = []
-    clients: List[_FakeClient] = []
-
-    def _raise_resolve(self: Path, *args: Any, **kwargs: Any) -> Path:
-        raise AssertionError("Path.resolve must not run on source files")
-
-    def _factory(**kwargs: Any) -> _FakeClient:
-        c = _FakeClient(**kwargs)
-        clients.append(c)
-        return c
-
-    monkeypatch.setattr(Path, "resolve", _raise_resolve)
-    source_file = r"\\172.16.1.2\share\全景平台月报源文件\202604\20260421--月报\A楼.xlsx"
-    result = _FakeResult(
-        source_file=source_file,
-        building="A楼",
-        month="2026-03-01",
-        values={"PUE": 1.2},
-        records=[{"楼栋": "A楼", "日期": "2026-03-08", "类型": "用电", "分类": "总览", "项目": "PUE"}],
-    )
-
-    upload_results_to_feishu(
-        results=[result],
-        config=_build_config(enable_upload=True),
-        resolve_upload_date_from_runtime=lambda _cfg: None,
-        client_factory=_factory,
-        date_override_by_source={source_file: "2026-03-08"},
-        emit_log=logs.append,
-    )
-
-    assert len(clients) == 1
-    assert any("日期=2026-03-08" in line for line in logs)
-
-
 def test_upload_results_to_feishu_success_flow(tmp_path: Path) -> None:
     logs: List[str] = []
     clients: List[_FakeClient] = []
@@ -183,7 +105,7 @@ def test_upload_results_to_feishu_success_flow(tmp_path: Path) -> None:
         c.calc_records = [
             {
                 "record_id": "rec_calc_1",
-                "fields": {"楼栋": "A楼", "日期": "2026-03-01", "类型": "用电", "分类": "总览", "项目": "PUE"},
+                "fields": {"楼栋": "A楼", "日期": "2026-03-01"},
             }
         ]
         c.attachment_records = [
@@ -202,7 +124,7 @@ def test_upload_results_to_feishu_success_flow(tmp_path: Path) -> None:
         building="A楼",
         month="2026-03-01",
         values={"PUE": 1.23456},
-        records=[{"楼栋": "A楼", "日期": "2026-03-01", "类型": "用电", "分类": "总览", "项目": "PUE", "值": 1.23}],
+        records=[{"k": "v"}],
     )
 
     upload_results_to_feishu(
@@ -216,70 +138,26 @@ def test_upload_results_to_feishu_success_flow(tmp_path: Path) -> None:
     assert len(clients) == 1
     client_calls = [c[0] for c in clients[0].calls]
     assert client_calls.count("list_records") == 2
-    assert client_calls.count("batch_delete_records") == 0
-    assert client_calls[-4:] == [
-        "build_calc_record_fields",
-        "batch_update_records",
+    assert client_calls.count("batch_delete_records") == 2
+    assert client_calls[-3:] == [
+        "upload_calc_records",
         "upload_attachment",
-        "update_record",
+        "upload_attachment_record",
     ]
     list_calls = [call for call in clients[0].calls if call[0] == "list_records"]
     assert "CurrentValue.[楼栋]" in list_calls[0][5]
     assert "CurrentValue.[日期]" in list_calls[0][5]
-    assert "CurrentValue.[日期]>=" in list_calls[0][5]
-    assert "CurrentValue.[日期]<" in list_calls[0][5]
-    assert 'TODATE("2026-03-01")' in list_calls[0][5]
-    assert 'TODATE("2026-03-02")' in list_calls[0][5]
     assert "CurrentValue.[类型]" in list_calls[1][5]
     assert any("PUE=1.235" in line for line in logs)
-    assert any("开始准备按日期 upsert" in line for line in logs)
+    assert any("开始准备覆盖查询" in line for line in logs)
     assert any("文件上传成功" in line for line in logs)
-
-
-def test_upload_results_to_feishu_does_not_block_on_worker_log_sink(tmp_path: Path) -> None:
-    clients: List[_FakeClient] = []
-    blocker = threading.Event()
-
-    def _blocking_worker_emit_log(_text: str) -> None:
-        blocker.wait(timeout=5)
-
-    _blocking_worker_emit_log.__module__ = "app.worker.entry"
-
-    def _factory(**kwargs: Any) -> _FakeClient:
-        c = _FakeClient(**kwargs)
-        clients.append(c)
-        return c
-
-    source_file = tmp_path / "A楼.xlsx"
-    source_file.write_bytes(b"fake")
-    result = _FakeResult(
-        source_file=str(source_file),
-        building="A楼",
-        month="2026-03-01",
-        values={"PUE": 1.23456},
-        records=[{"楼栋": "A楼", "日期": "2026-03-01", "类型": "用电", "分类": "总览", "项目": "PUE", "值": 1.23}],
-    )
-
-    started = time.perf_counter()
-    upload_results_to_feishu(
-        results=[result],
-        config=_build_config(enable_upload=True),
-        resolve_upload_date_from_runtime=lambda _cfg: "2026-03-01",
-        client_factory=_factory,
-        emit_log=_blocking_worker_emit_log,
-    )
-
-    assert time.perf_counter() - started < 2
-    assert len(clients) == 1
-    assert any(call[0] == "batch_create_records" for call in clients[0].calls)
-    assert any(call[0] == "upload_attachment" for call in clients[0].calls)
 
 
 def test_upload_results_to_feishu_calc_stage_failure() -> None:
     logs: List[str] = []
 
     class _FailClient(_FakeClient):
-        def batch_create_records(self, table_id: str, fields_list: List[Dict[str, Any]], batch_size: int = 200) -> None:
+        def upload_calc_records(self, records: List[Dict[str, Any]], **kwargs: Any) -> None:
             raise RuntimeError("calc boom")
 
     with pytest.raises(RuntimeError):
@@ -290,7 +168,7 @@ def test_upload_results_to_feishu_calc_stage_failure() -> None:
                     building="A楼",
                     month="2026-03-01",
                     values={"PUE": 1.0},
-                    records=[{"楼栋": "A楼", "日期": "2026-03-01", "类型": "用电", "分类": "总览", "项目": "PUE"}],
+                    records=[],
                 )
             ],
             config=_build_config(enable_upload=True),
@@ -329,14 +207,14 @@ def test_upload_results_to_feishu_queries_old_records_by_building_and_date(tmp_p
             building="A楼",
             month="2026-03-01",
             values={"PUE": 1.1},
-            records=[{"楼栋": "A楼", "日期": "2026-03-01", "类型": "用电", "分类": "总览", "项目": "PUE"}],
+            records=[{"k": "a"}],
         ),
         _FakeResult(
             source_file=str(source_b),
             building="B楼",
             month="2026-03-01",
             values={"PUE": 1.2},
-            records=[{"楼栋": "B楼", "日期": "2026-03-01", "类型": "用电", "分类": "总览", "项目": "PUE"}],
+            records=[{"k": "b"}],
         ),
     ]
 
@@ -357,86 +235,6 @@ def test_upload_results_to_feishu_queries_old_records_by_building_and_date(tmp_p
     assert "B楼" in list_calls[2][5]
     assert "B楼" in list_calls[3][5]
     delete_calls = [call for call in clients[0].calls if call[0] == "batch_delete_records"]
-    assert len(delete_calls) == 0
-    assert any("楼栋=A楼" in line and "已按日期读取计算记录" in line for line in logs)
-    assert any("楼栋=B楼" in line and "已按日期读取附件记录" in line for line in logs)
-
-
-def test_upload_results_to_feishu_falls_back_to_scoped_query_when_exact_filter_misses(tmp_path: Path) -> None:
-    logs: List[str] = []
-    clients: List[_FakeClient] = []
-
-    class _FallbackClient(_FakeClient):
-        def list_records(
-            self,
-            table_id: str,
-            page_size: int = 500,
-            max_records: int = 0,
-            *,
-            view_id: str = "",
-            filter_formula: str = "",
-        ) -> List[Dict[str, Any]]:
-            self.calls.append(("list_records", table_id, page_size, max_records, view_id, filter_formula))
-            if "CurrentValue.[日期]" in filter_formula:
-                return []
-            if table_id == "calc_table":
-                return [
-                    {
-                        "record_id": "rec_calc_1",
-                        "fields": {
-                            "楼栋": "E楼",
-                            "日期": 1772294400000 + 12 * 60 * 60 * 1000,
-                            "类型": "用电",
-                            "分类": "总览",
-                            "项目": "PUE",
-                        },
-                    }
-                ]
-            if table_id == "attach_table":
-                return [
-                    {
-                        "record_id": "rec_attach_1",
-                        "fields": {
-                            "类型": "全景平台月报",
-                            "楼栋": "E楼",
-                            "日期": 1772294400000 + 13 * 60 * 60 * 1000,
-                        },
-                    }
-                ]
-            return []
-
-    def _factory(**kwargs: Any) -> _FakeClient:
-        c = _FallbackClient(**kwargs)
-        clients.append(c)
-        return c
-
-    source_file = tmp_path / "E楼.xlsx"
-    source_file.write_bytes(b"fake")
-    result = _FakeResult(
-        source_file=str(source_file),
-        building="E楼",
-        month="2026-03-01",
-        values={"PUE": 1.111},
-        records=[{"楼栋": "E楼", "日期": "2026-03-01", "类型": "用电", "分类": "总览", "项目": "PUE", "值": 1.11}],
-    )
-
-    upload_results_to_feishu(
-        results=[result],
-        config=_build_config(enable_upload=True),
-        resolve_upload_date_from_runtime=lambda _cfg: "2026-03-01",
-        client_factory=_factory,
-        emit_log=logs.append,
-    )
-
-    assert len(clients) == 1
-    list_calls = [call for call in clients[0].calls if call[0] == "list_records"]
-    assert len(list_calls) == 4
-    assert "CurrentValue.[日期]" in list_calls[0][5]
-    assert 'TODATE("2026-03-01")' in list_calls[0][5]
-    assert "CurrentValue.[日期]" not in list_calls[1][5]
-    assert "CurrentValue.[日期]" in list_calls[2][5]
-    assert 'TODATE("2026-03-01")' in list_calls[2][5]
-    assert "CurrentValue.[日期]" not in list_calls[3][5]
-    assert any("范围过滤匹配计算记录" in line for line in logs)
-    assert any("范围过滤匹配附件记录" in line for line in logs)
-    assert ("batch_update_records", "calc_table", [{"record_id": "rec_calc_1", "fields": {"楼栋": "E楼", "日期": "2026-03-01", "类型": "用电", "分类": "总览", "项目": "PUE", "值": 1.11}}], 200) in clients[0].calls
+    assert len(delete_calls) == 4
+    assert any("楼栋=A楼" in line and "已读取旧计算记录" in line for line in logs)
+    assert any("楼栋=B楼" in line and "已读取旧附件记录" in line for line in logs)

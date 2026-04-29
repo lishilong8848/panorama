@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 
-from handover_log_module.service import review_followup_trigger_service as followup_module
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
 
 
@@ -277,17 +276,6 @@ class FakeReviewDocumentStateService:
             "updated_at": "2026-03-22 02:00:00",
         }
 
-    def attach_excel_sync(self, session: dict) -> dict:
-        payload = deepcopy(session)
-        payload["excel_sync"] = {
-            "status": "synced",
-            "synced_revision": int(session.get("revision", 0) or 0),
-            "pending_revision": 0,
-            "error": "",
-            "updated_at": "2026-03-22 02:00:00",
-        }
-        return payload
-
 
 def build_trigger(review_service: FakeReviewService, cloud_service: FakeCloudSyncService) -> ReviewFollowupTriggerService:
     trigger = ReviewFollowupTriggerService({"network": {"enable_auto_switch_wifi": False}})
@@ -322,41 +310,6 @@ def test_build_cloud_items_only_returns_buildings_with_outdated_cloud_sync() -> 
     assert skipped_buildings == [
         {"building": "A楼", "reason": "already_uploaded"},
         {"building": "C楼", "reason": "disabled"},
-    ]
-
-
-def test_build_cloud_items_force_excel_sync_uses_xlsx_queue(monkeypatch) -> None:
-    queue_calls = []
-
-    class _Queue:
-        def __init__(self, _config, *, emit_log=print):
-            queue_calls.append(("init", callable(emit_log)))
-
-        def enqueue_review_excel_sync(self, session, *, target_revision):
-            queue_calls.append(("enqueue", session["session_id"], target_revision))
-            return {"status": "pending"}
-
-        def wait_for_barrier(self, *, building, timeout_sec):
-            queue_calls.append(("barrier", building, timeout_sec))
-            return {"status": "success"}
-
-    monkeypatch.setattr(followup_module, "HandoverXlsxWriteQueueService", _Queue)
-    review_service = FakeReviewService([make_session("A楼", revision=2, cloud_status="pending_upload")])
-    trigger = build_trigger(review_service, FakeCloudSyncService())
-
-    upload_items, skipped_buildings, failed_buildings = trigger._build_cloud_items(
-        review_service.list_batch_sessions("2026-03-22|night"),
-        emit_log=lambda _message: None,
-        force_excel_sync=True,
-    )
-
-    assert [item["building"] for item in upload_items] == ["A楼"]
-    assert skipped_buildings == []
-    assert failed_buildings == []
-    assert queue_calls == [
-        ("init", True),
-        ("enqueue", "A楼|2026-03-22|night", 2),
-        ("barrier", "A楼", 120.0),
     ]
 
 

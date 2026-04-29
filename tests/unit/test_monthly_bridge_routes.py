@@ -217,16 +217,15 @@ def test_auto_once_route_starts_from_latest_cache_on_external_role() -> None:
     assert request.app.state.container.job_service.start_job_calls[0]["dedupe_key"].startswith("monthly_auto_once_external_dispatch:")
 
 
-def test_auto_once_route_trusts_indexed_file_path_without_prechecking_missing_file(monkeypatch) -> None:
+def test_auto_once_route_waits_when_indexed_file_is_missing() -> None:
     request = _fake_request(role_mode="external", bridge_enabled=True)
     request.app.state.container.shared_bridge_service.buildings = ["A楼"]
-    indexed_path = Path.cwd() / ".tmp_monthly_bridge_routes" / "missing" / "A楼-actual.xlsx"
     request.app.state.container.shared_bridge_service.get_latest_source_cache_selection = lambda **_kwargs: {  # noqa: E731
         "best_bucket_key": "2026-03-29 10",
         "selected_entries": [
             {
                 "building": "A楼",
-                "file_path": str(indexed_path),
+                "file_path": str(Path.cwd() / ".tmp_monthly_bridge_routes" / "missing" / "A楼-actual.xlsx"),
                 "bucket_key": "2026-03-29 10",
                 "duty_date": "2026-03-29",
                 "metadata": {"upload_date": "2026-03-29"},
@@ -239,25 +238,19 @@ def test_auto_once_route_trusts_indexed_file_path_without_prechecking_missing_fi
         "can_proceed": True,
     }
 
-    captured = {}
-
-    def _fake_run_monthly_from_file_items(_config, *, file_items, emit_log, source_label):  # noqa: ANN001
-        captured["file_items"] = file_items
-        captured["source_label"] = source_label
-        return {"ok": True}
-
-    monkeypatch.setattr(routes, "run_monthly_from_file_items", _fake_run_monthly_from_file_items)
-
     response = routes.job_auto_once(request)
-    result = _run_first_started_job(request)
 
     assert response["job_id"] == "job-1"
-    assert result == {"ok": True}
-    assert captured["source_label"] == "月报共享文件"
-    assert captured["file_items"][0]["file_path"] == str(indexed_path)
+    result = _run_first_started_job(request)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["accepted"] is True
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
+    assert result["waiting"]["job"]["status"] == "waiting_resource"
+    assert result["waiting"]["job"]["wait_reason"] == "waiting:shared_bridge"
+    assert result["waiting"]["job"]["bridge_task_id"] == "bridge-monthly-auto-once-1"
 
 
-def test_auto_once_route_does_not_probe_accessibility_before_using_index(monkeypatch) -> None:
+def test_auto_once_route_waits_when_indexed_file_is_inaccessible(monkeypatch) -> None:
     request = _fake_request(role_mode="external", bridge_enabled=True)
     request.app.state.container.shared_bridge_service.buildings = ["A楼"]
     actual_file = _touch_file(Path.cwd() / ".tmp_monthly_bridge_routes" / "indexed" / "A楼-actual.xlsx")
@@ -279,20 +272,13 @@ def test_auto_once_route_does_not_probe_accessibility_before_using_index(monkeyp
         "can_proceed": True,
     }
     monkeypatch.setattr(routes, "is_accessible_cached_file_path", lambda _path: False)
-    captured = {}
-
-    def _fake_run_monthly_from_file_items(_config, *, file_items, emit_log, source_label):  # noqa: ANN001
-        captured["file_items"] = file_items
-        return {"ok": True}
-
-    monkeypatch.setattr(routes, "run_monthly_from_file_items", _fake_run_monthly_from_file_items)
 
     response = routes.job_auto_once(request)
-    result = _run_first_started_job(request)
 
     assert response["job_id"] == "job-1"
-    assert result == {"ok": True}
-    assert captured["file_items"][0]["file_path"] == str(actual_file)
+    result = _run_first_started_job(request)
+    assert result["mode"] == "waiting_shared_bridge"
+    assert result["waiting"]["bridge_task"]["task_id"] == "bridge-monthly-auto-once-1"
 
 
 def test_auto_once_route_uses_cached_file_path_verbatim_on_external_role(monkeypatch) -> None:

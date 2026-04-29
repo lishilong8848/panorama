@@ -11,6 +11,8 @@ _SOURCE_FRONTEND_NO_CACHE_HEADERS = {
 
 
 def source_frontend_no_cache_headers(frontend_mode: str) -> dict[str, str]:
+    if str(frontend_mode or "").strip().lower() != "source":
+        return {}
     return dict(_SOURCE_FRONTEND_NO_CACHE_HEADERS)
 
 

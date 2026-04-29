@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
-import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -11,7 +11,6 @@ from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.footer_inventory_writer import write_footer_inventory_table
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
-from handover_log_module.service.cooling_pump_pressure_defaults_service import CoolingPumpPressureDefaultsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_writer import ReviewDocumentWriter
@@ -46,7 +45,6 @@ class ReviewDocumentStateService:
         self.writer = writer or ReviewDocumentWriter(self.config)
         self.emit_log = emit_log if callable(emit_log) else print
         self._cabinet_defaults = CabinetPowerDefaultsService()
-        self._cooling_pump_defaults = CoolingPumpPressureDefaultsService()
         self._footer_defaults = FooterInventoryDefaultsService()
 
     def _store(self, building: str) -> ReviewBuildingDocumentStore:
@@ -168,129 +166,65 @@ class ReviewDocumentStateService:
         return self.attach_cooling_pump_pressures(document=document, session=session_with_sync), session_with_sync
 
     @staticmethod
-    def _section_row_has_content(row: Any, columns: Any) -> bool:
-        if not isinstance(row, dict):
-            return False
-        cells = row.get("cells", {})
-        if not isinstance(cells, dict):
-            return False
-        keys = (
-            [
-                str(column.get("key", "")).strip().upper()
-                for column in columns
-                if isinstance(column, dict) and str(column.get("key", "")).strip()
-            ]
-            if isinstance(columns, list)
-            else []
-        )
-        if not keys:
-            keys = [str(key or "").strip().upper() for key in cells.keys() if str(key or "").strip()]
-        return any(str(cells.get(key, "") or "").strip() for key in keys)
-
-    @classmethod
-    def compact_section_blank_rows(cls, document: Dict[str, Any]) -> Dict[str, Any]:
-        payload = dict(document if isinstance(document, dict) else {})
-        sections = payload.get("sections", [])
-        if not isinstance(sections, list):
-            return payload
-        compacted_sections: List[Dict[str, Any]] = []
-        for section in sections:
-            if not isinstance(section, dict):
-                continue
-            next_section = dict(section)
-            columns = next_section.get("columns", [])
-            rows = next_section.get("rows", [])
+    def _normalize_capacity_running_units(raw: Dict[str, Any] | None) -> Dict[str, List[Dict[str, Any]]]:
+        payload = raw if isinstance(raw, dict) else {}
+        output: Dict[str, List[Dict[str, Any]]] = {"west": [], "east": []}
+        for zone in ("west", "east"):
+            rows = payload.get(zone, [])
             if not isinstance(rows, list):
-                compacted_sections.append(next_section)
                 continue
-            normalized_rows: List[Dict[str, Any]] = []
-            for row in rows:
-                if not isinstance(row, dict):
+            for item in rows[:2]:
+                if not isinstance(item, dict):
                     continue
-                next_row = dict(row)
-                next_row["cells"] = dict(row.get("cells", {}) if isinstance(row.get("cells", {}), dict) else {})
-                next_row["is_placeholder_row"] = not cls._section_row_has_content(next_row, columns)
-                normalized_rows.append(next_row)
-            content_rows = [row for row in normalized_rows if cls._section_row_has_content(row, columns)]
-            if content_rows:
-                next_section["rows"] = content_rows
-            elif normalized_rows:
-                placeholder = dict(normalized_rows[0])
-                source_cells = placeholder.get("cells", {}) if isinstance(placeholder.get("cells", {}), dict) else {}
-                placeholder["cells"] = {str(key or "").strip().upper(): "" for key in source_cells.keys()}
-                placeholder["is_placeholder_row"] = True
-                next_section["rows"] = [placeholder]
-            else:
-                next_section["rows"] = []
-            compacted_sections.append(next_section)
-        payload["sections"] = compacted_sections
-        return payload
-
-    @staticmethod
-    def _extract_unit_number_from_title(value: Any) -> int:
-        text = str(value or "").strip()
-        if not text:
-            return 0
-        match = re.search(r"(\d+)\s*(?:#|号)?\s*制冷单元", text)
-        if not match:
-            match = re.search(r"(\d+)\s*(?:#|号)", text)
-        if not match:
-            return 0
-        try:
-            return int(match.group(1))
-        except Exception:  # noqa: BLE001
-            return 0
-
-    def _running_units_from_capacity_output(self, session: Dict[str, Any]) -> tuple[Dict[str, List[Dict[str, Any]]], Dict[str, Dict[str, str]]]:
-        output_file = str(session.get("capacity_output_file", "") or "").strip()
-        running: Dict[str, List[Dict[str, Any]]] = {"west": [], "east": []}
-        values: Dict[str, Dict[str, str]] = {}
-        if not output_file:
-            return running, values
-        output_path = Path(output_file)
-        if not output_path.exists() or not output_path.is_file():
-            return running, values
-        workbook = load_workbook_quietly(output_path)
-        try:
-            sheet_name = self._sheet_name()
-            ws = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active
-            layout = (
-                ("west", 0, "D23", "I28", "I29"),
-                ("west", 1, "D33", "I38", "I39"),
-                ("east", 0, "Q23", "V28", "V29"),
-                ("east", 1, "Q33", "V38", "V39"),
-            )
-            for zone, position, title_cell, inlet_cell, outlet_cell in layout:
-                title_text = "" if ws[title_cell].value is None else str(ws[title_cell].value)
-                unit = self._extract_unit_number_from_title(title_text)
+                try:
+                    unit = int(item.get("unit", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    unit = 0
                 if unit <= 0:
                     continue
-                mode_text = ""
-                if "→" in title_text:
-                    mode_text = title_text.split("→", 1)[1].replace("模式", "").strip()
-                running[zone].append(
+                output[zone].append(
                     {
                         "unit": unit,
-                        "position": position,
-                        "mode_text": mode_text,
+                        "mode_text": str(item.get("mode_text", "") or "").strip(),
+                        "mode_code": str(item.get("mode_code", "") or "").strip(),
+                        "metric_key": str(item.get("metric_key", "") or "").strip(),
                     }
                 )
-                values[f"{zone}:{unit}"] = {
-                    "zone": zone,
-                    "unit": str(unit),
-                    "inlet_pressure": "" if ws[inlet_cell].value is None else str(ws[inlet_cell].value).strip(),
-                    "outlet_pressure": "" if ws[outlet_cell].value is None else str(ws[outlet_cell].value).strip(),
-                }
-        except Exception as exc:  # noqa: BLE001
-            self.emit_log(
-                f"[交接班][冷却水泵压力] 容量表运行单元读取失败: "
-                f"building={self._building(session)}, session_id={self._session_id(session)}, error={exc}"
-            )
+            output[zone].sort(key=lambda item: int(item.get("unit", 0) or 0))
+        return output
+
+    @staticmethod
+    def _running_units_from_capacity_file(capacity_output_file: str) -> Dict[str, List[Dict[str, Any]]]:
+        output: Dict[str, List[Dict[str, Any]]] = {"west": [], "east": []}
+        path = Path(str(capacity_output_file or "").strip())
+        if not str(path).strip() or not path.exists() or not path.is_file():
+            return output
+        workbook = load_workbook_quietly(path)
+        try:
+            sheet = workbook.active
+            title_cells = {
+                "west": ["D23", "D33"],
+                "east": ["Q23", "Q33"],
+            }
+            for zone, cells in title_cells.items():
+                for cell in cells:
+                    text = str(sheet[cell].value or "").strip()
+                    match = re.search(r"(\d+)\s*[#号]?\s*制冷单元\s*[→:：-]?\s*([\u4e00-\u9fff]*)", text)
+                    if not match:
+                        continue
+                    unit = int(match.group(1))
+                    mode_text = str(match.group(2) or "").strip()
+                    output[zone].append({"unit": unit, "mode_text": mode_text})
         finally:
             workbook.close()
         for zone in ("west", "east"):
-            running[zone].sort(key=lambda item: int(item.get("position", 0) or 0))
-        return running, values
+            output[zone].sort(key=lambda item: int(item.get("unit", 0) or 0))
+            output[zone] = output[zone][:2]
+        return output
+
+    @staticmethod
+    def _cooling_pump_pressure_defaults_key(zone: str, unit: int) -> str:
+        return f"{str(zone or '').strip().lower()}:{int(unit or 0)}"
 
     def attach_cooling_pump_pressures(
         self,
@@ -299,17 +233,54 @@ class ReviewDocumentStateService:
         session: Dict[str, Any],
     ) -> Dict[str, Any]:
         payload = dict(document if isinstance(document, dict) else {})
-        existing = payload.get("cooling_pump_pressures", {})
-        running_units, workbook_values = self._running_units_from_capacity_output(session)
-        defaults = self._store(self._building(session)).get_default(self._cooling_pump_defaults.DEFAULTS_KEY)
-        workbook_defaults = self._cooling_pump_defaults.normalize_defaults(workbook_values)
-        fallback_defaults = dict(self._cooling_pump_defaults.normalize_defaults(defaults))
-        fallback_defaults.update(workbook_defaults)
-        payload["cooling_pump_pressures"] = self._cooling_pump_defaults.document_payload(
-            running_units=running_units,
-            defaults=fallback_defaults,
-            existing_rows=existing,
+        building = self._building(session)
+        running_units = self._normalize_capacity_running_units(session.get("capacity_running_units", {}))
+        if not running_units.get("west") and not running_units.get("east"):
+            running_units = self._running_units_from_capacity_file(str(session.get("capacity_output_file", "") or ""))
+        defaults_raw = self._store(building).get_default("cooling_pump_pressures") if building else {}
+        defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
+        current_rows = (
+            payload.get("cooling_pump_pressures", {}).get("rows", [])
+            if isinstance(payload.get("cooling_pump_pressures", {}), dict)
+            else []
         )
+        current_by_key: Dict[str, Dict[str, Any]] = {}
+        if isinstance(current_rows, list):
+            for row in current_rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    unit = int(row.get("unit", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    unit = 0
+                key = self._cooling_pump_pressure_defaults_key(str(row.get("zone", "") or ""), unit)
+                if key.endswith(":0"):
+                    continue
+                current_by_key[key] = row
+        rows: List[Dict[str, Any]] = []
+        for zone in ("west", "east"):
+            zone_label = "西区" if zone == "west" else "东区"
+            for index, unit_info in enumerate(running_units.get(zone, [])[:2], start=1):
+                unit = int(unit_info.get("unit", 0) or 0)
+                if unit <= 0:
+                    continue
+                key = self._cooling_pump_pressure_defaults_key(zone, unit)
+                current = current_by_key.get(key, {})
+                default = defaults.get(key, {}) if isinstance(defaults.get(key, {}), dict) else {}
+                rows.append(
+                    {
+                        "row_id": key,
+                        "zone": zone,
+                        "zone_label": zone_label,
+                        "unit": unit,
+                        "unit_label": f"{unit}#制冷单元",
+                        "position": index,
+                        "mode_text": str(unit_info.get("mode_text", "") or "").strip(),
+                        "inlet_pressure": str(current.get("inlet_pressure", default.get("inlet_pressure", "")) or ""),
+                        "outlet_pressure": str(current.get("outlet_pressure", default.get("outlet_pressure", "")) or ""),
+                    }
+                )
+        payload["cooling_pump_pressures"] = {"rows": rows}
         return payload
 
     def save_document(
@@ -324,10 +295,9 @@ class ReviewDocumentStateService:
         if ensure_ready:
             self.ensure_document_for_session(session)
         try:
-            compacted_document = self.compact_section_blank_rows(document if isinstance(document, dict) else {})
             return self._store(self._building(session)).save_document(
                 session=session,
-                document=compacted_document,
+                document=document,
                 base_revision=base_revision,
                 dirty_regions=dirty_regions,
             )
@@ -350,14 +320,7 @@ class ReviewDocumentStateService:
             return {}
         store = self._store(building)
         try:
-            from handover_log_module.service.handover_xlsx_write_queue_service import HandoverXlsxWriteQueueService
-
-            return HandoverXlsxWriteQueueService(
-                self.config,
-                emit_log=self.emit_log,
-                parser=self.parser,
-                writer=self.writer,
-            ).enqueue_review_excel_sync(session, target_revision=target_revision)
+            self._start_worker(building=building)
         except Exception as exc:  # noqa: BLE001
             return store.update_sync_state(
                 session_id=session_id,
@@ -366,6 +329,7 @@ class ReviewDocumentStateService:
                 pending_revision=int(target_revision or 0),
                 error=f"后台Excel同步器启动失败: {exc}",
             )
+        return store.get_sync_state(session_id)
 
     def _start_worker(self, *, building: str) -> None:
         store = self._store(building)
@@ -518,10 +482,24 @@ class ReviewDocumentStateService:
 
     def force_sync_session_dict(self, session: Dict[str, Any], *, reason: str = "manual") -> Dict[str, Any]:
         self.ensure_document_for_session(session)
+        store = self._store(self._building(session))
+        state = store.get_document(self._session_id(session))
+        document_revision = (
+            int(state.get("revision", 0) or 0)
+            if isinstance(state, dict)
+            else 0
+        )
+        session_revision = int(session.get("revision", 0) or 0)
+        if session_revision and document_revision and document_revision < session_revision:
+            self.emit_log(
+                "[交接班][审核SQLite] session revision 高于审核文档 revision，按审核文档实际版本同步Excel "
+                f"building={self._building(session)}, session_id={self._session_id(session)}, "
+                f"document_revision={document_revision}, session_revision={session_revision}, reason={reason}"
+            )
         return self.force_sync_session(
             building=self._building(session),
             session_id=self._session_id(session),
-            target_revision=int(session.get("revision", 0) or 0),
+            target_revision=document_revision or None,
             reason=reason,
             reconcile_sync_job=True,
         )
@@ -536,12 +514,12 @@ class ReviewDocumentStateService:
         dirty = dirty_regions if isinstance(dirty_regions, dict) else {}
         footer_dirty = bool(dirty.get("footer_inventory"))
         cabinet_dirty = bool(dirty.get("fixed_blocks"))
-        cooling_pump_dirty = bool(dirty.get("cooling_pump_pressures"))
-        if not footer_dirty and not cabinet_dirty and not cooling_pump_dirty:
+        cooling_dirty = bool(dirty.get("cooling_pump_pressures"))
+        if not footer_dirty and not cabinet_dirty and not cooling_dirty:
             return {
                 "footer_inventory_rows": 0,
                 "cabinet_power_fields": 0,
-                "cooling_pump_pressure_fields": 0,
+                "cooling_pump_pressure_rows": 0,
                 "config_updated": False,
                 "defaults_updated": False,
             }
@@ -556,20 +534,41 @@ class ReviewDocumentStateService:
         if cabinet_dirty:
             cabinet_cells = self._cabinet_defaults.extract_cells_from_document(document)
             updated = store.set_default("cabinet_power", self._cabinet_defaults.normalize_cells(cabinet_cells)) or updated
-        if cooling_pump_dirty:
-            cooling_rows = self._cooling_pump_defaults.normalize_rows(
-                document.get("cooling_pump_pressures", {}) if isinstance(document, dict) else {}
+        if cooling_dirty:
+            raw_rows = (
+                document.get("cooling_pump_pressures", {}).get("rows", [])
+                if isinstance(document.get("cooling_pump_pressures", {}), dict)
+                else []
             )
-            previous_defaults = store.get_default(self._cooling_pump_defaults.DEFAULTS_KEY)
-            next_defaults = self._cooling_pump_defaults.merge_document_rows_into_defaults(
-                existing_defaults=previous_defaults,
-                document_payload={"rows": cooling_rows},
-            )
-            updated = store.set_default(self._cooling_pump_defaults.DEFAULTS_KEY, next_defaults) or updated
+            current_defaults = store.get_default("cooling_pump_pressures")
+            defaults = dict(current_defaults) if isinstance(current_defaults, dict) else {}
+            if isinstance(raw_rows, list):
+                for row in raw_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        unit = int(row.get("unit", 0) or 0)
+                    except Exception:  # noqa: BLE001
+                        unit = 0
+                    zone = str(row.get("zone", "") or "").strip().lower()
+                    if zone not in {"west", "east"} or unit <= 0:
+                        continue
+                    key = self._cooling_pump_pressure_defaults_key(zone, unit)
+                    inlet = str(row.get("inlet_pressure", "") or "").strip()
+                    outlet = str(row.get("outlet_pressure", "") or "").strip()
+                    cooling_rows.append(row)
+                    if inlet or outlet:
+                        defaults[key] = {
+                            "inlet_pressure": inlet,
+                            "outlet_pressure": outlet,
+                        }
+                    else:
+                        defaults.pop(key, None)
+            updated = store.set_default("cooling_pump_pressures", defaults) or updated
         return {
             "footer_inventory_rows": len(footer_rows),
             "cabinet_power_fields": len(cabinet_cells),
-            "cooling_pump_pressure_fields": len(cooling_rows),
+            "cooling_pump_pressure_rows": len(cooling_rows),
             "config_updated": False,
             "defaults_updated": bool(updated),
         }

@@ -40,13 +40,15 @@ export function createDashboardRefreshUiHelpers(options = {}) {
 
   function scheduleExternalDashboardRefresh(reason = "unknown", options = {}) {
     const includePendingResume = Boolean(options?.includePendingResume);
+    const force = Boolean(options?.force);
+    const delayMs = Math.max(0, Number.parseInt(String(options?.delayMs ?? 220), 10) || 220);
     if (timerState?.timer) {
       window.clearTimeout(timerState.timer);
     }
     timerState.timer = window.setTimeout(async () => {
       timerState.timer = null;
       if (shouldPollExternalDashboardSummary()) {
-        await fetchExternalDashboardSummary({ silentMessage: true });
+        await fetchExternalDashboardSummary({ silentMessage: true, force });
       }
       if (shouldFetchHealth()) {
         await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
@@ -57,7 +59,7 @@ export function createDashboardRefreshUiHelpers(options = {}) {
       if (includePendingResume && shouldFetchPendingResumeRuns()) {
         await fetchPendingResumeRuns({ silentMessage: true });
       }
-    }, 220);
+    }, delayMs);
     return reason;
   }
 

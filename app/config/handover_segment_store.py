@@ -219,71 +219,6 @@ def _deep_merge_dict(base: Dict[str, Any], overlay: Mapping[str, Any] | None) ->
     return base
 
 
-_PROTECTED_BUILDING_SEGMENT_PATHS: tuple[tuple[str, ...], ...] = (
-    ("cell_rules", "building_rows"),
-    ("cloud_sheet_sync", "sheet_names"),
-    ("review_ui", "cabinet_power_defaults_by_building"),
-    ("review_ui", "footer_inventory_defaults_by_building"),
-    ("review_ui", "review_link_recipients_by_building"),
-)
-
-
-def _nested_get(root: Mapping[str, Any] | None, path: tuple[str, ...]) -> Any:
-    current: Any = root if isinstance(root, Mapping) else {}
-    for part in path:
-        if not isinstance(current, Mapping):
-            return None
-        current = current.get(part)
-    return current
-
-
-def _nested_set(root: Dict[str, Any], path: tuple[str, ...], value: Any) -> None:
-    current = root
-    for part in path[:-1]:
-        child = current.get(part)
-        if not isinstance(child, dict):
-            child = {}
-            current[part] = child
-        current = child
-    current[path[-1]] = copy.deepcopy(value)
-
-
-def _has_meaningful_segment_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, (int, float)):
-        return True
-    if isinstance(value, list):
-        return any(_has_meaningful_segment_value(item) for item in value)
-    if isinstance(value, Mapping):
-        return any(_has_meaningful_segment_value(item) for item in value.values())
-    return bool(value)
-
-
-def preserve_non_empty_handover_building_segment_data(
-    segment_data: Mapping[str, Any] | None,
-    base_data: Mapping[str, Any] | None,
-) -> Dict[str, Any]:
-    """Keep non-empty building-scoped config from the base when a segment is empty.
-
-    Segment files are the normal source of truth after migration, but an incomplete
-    or accidentally empty segment must not erase previously configured per-building
-    rules, sheet names, recipients, or defaults.
-    """
-    output = copy.deepcopy(dict(segment_data or {}))
-    base = base_data if isinstance(base_data, Mapping) else {}
-    for path in _PROTECTED_BUILDING_SEGMENT_PATHS:
-        segment_value = _nested_get(output, path)
-        base_value = _nested_get(base, path)
-        if not _has_meaningful_segment_value(segment_value) and _has_meaningful_segment_value(base_value):
-            _nested_set(output, path, base_value)
-    return output
-
-
 def _normalize_footer_default_rows(rows: Any) -> list[Dict[str, Any]]:
     normalized: list[Dict[str, Any]] = []
     source_rows = rows if isinstance(rows, list) else []
@@ -485,21 +420,12 @@ def apply_handover_segment_data(
     handover = features.get("handover_log")
     if not isinstance(handover, dict):
         handover = {}
-    base_handover = copy.deepcopy(handover)
-    base_cfg = {"features": {"handover_log": base_handover}}
-    base_building_payloads = {
-        building: extract_handover_building_data(base_cfg, building)
-        for building in HANDOVER_SEGMENT_BUILDINGS
-    }
     handover = _clear_segment_backed_handover_fields(handover)
     handover = _deep_merge_dict(handover, common_data or {})
     for building in HANDOVER_SEGMENT_BUILDINGS:
         building_payload = (building_data_by_name or {}).get(building)
-        protected_payload = preserve_non_empty_handover_building_segment_data(
-            building_payload if isinstance(building_payload, Mapping) else {},
-            base_building_payloads.get(building, {}),
-        )
-        handover = _deep_merge_dict(handover, protected_payload)
+        if isinstance(building_payload, Mapping):
+            handover = _deep_merge_dict(handover, building_payload)
     features["handover_log"] = handover
     output["features"] = features
     return output

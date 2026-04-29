@@ -5,13 +5,11 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
 import openpyxl
-import pytest
 
 from handover_log_module.core.models import RawRow
 from handover_log_module.service.capacity_report_common import (
     _hvdc_search_tokens,
     _tr_replacement_search_tokens,
-    build_aircon_matrix_missing_warnings,
     build_capacity_cells_with_config,
     build_capacity_template_snapshot,
 )
@@ -19,15 +17,6 @@ from handover_log_module.service.handover_capacity_report_service import (
     HandoverCapacityReportService,
     _build_fixed_header_cells,
 )
-from handover_log_module.service.cooling_pump_pressure_defaults_service import CoolingPumpPressureDefaultsService
-
-
-@pytest.fixture(autouse=True)
-def _clear_capacity_weather_cache() -> None:
-    HandoverCapacityReportService._shared_weather_payload_cache.clear()
-    HandoverCapacityReportService._weather_payload_cache_inflight.clear()
-    HandoverCapacityReportService._shared_electricity_summary_cache.clear()
-    HandoverCapacityReportService._electricity_summary_cache_inflight.clear()
 
 
 def test_build_fixed_header_cells_for_a_building() -> None:
@@ -52,10 +41,12 @@ def test_build_capacity_cells_include_direct_source_values_and_zone_capacity_for
         RawRow(1, "", "西区 101 1号冷机", "冷机_冷冻水出水温度", "8", 8.0),
         RawRow(2, "", "西区 102 2号冷机", "冷机_冷冻水出水温度", "6", 6.0),
         RawRow(3, "", "西区", "板换冷却水进水温度", "10", 10.0),
-        RawRow(4, "", "西区", "板交冷冻供水温度", "14", 14.0),
+        RawRow(4, "", "西区 101 1号冷机", "板交冷冻供水温度", "14", 14.0),
+        RawRow(11, "", "西区 101 1号冷机", "板交冷冻回水温度", "9", 9.0),
         RawRow(5, "", "西区", "一次总流量", "100", 100.0),
         RawRow(6, "", "东区", "板换冷却水进水温度", "12", 12.0),
-        RawRow(7, "", "东区", "板交冷冻供水温度", "18", 18.0),
+        RawRow(7, "", "东区 104 4号冷机", "板交冷冻供水温度", "18", 18.0),
+        RawRow(12, "", "东区 104 4号冷机", "板交冷冻回水温度", "10", 10.0),
         RawRow(8, "", "东区", "一次总流量", "120", 120.0),
         RawRow(9, "", "", "蓄水池总储水量", "88.6", 88.6),
         RawRow(10, "", "", "油量", "55.2", 55.2),
@@ -80,8 +71,8 @@ def test_build_capacity_cells_include_direct_source_values_and_zone_capacity_for
 
     assert "AC29" not in values
     assert values["U16"] == "55.2"
-    assert values["D22"] == "466.67"
-    assert values["Q22"] == "840"
+    assert values["D22"] == "581.5"
+    assert values["Q22"] == "1116.48"
 
 
 def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
@@ -90,11 +81,6 @@ def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
         service,
         "_query_capacity_water_summary",
         lambda **kwargs: {"month_total": "123.4", "latest_daily_total": "5.6"},
-    )
-    monkeypatch.setattr(
-        service,
-        "_query_capacity_electricity_summary",
-        lambda **kwargs: {"month_total": "30", "prev_day_total": "10"},
     )
     monkeypatch.setattr(
         service,
@@ -120,405 +106,7 @@ def test_capacity_overlay_values_include_ac24_and_track_d8(monkeypatch) -> None:
 
     assert values["AC24"] == "9.8"
     assert values["X2"] == "96%"
-    assert values["V57"] == "10"
-    assert values["Y57"] == "30"
     assert "D8" in service.tracked_cells()
-
-
-def test_capacity_electricity_summary_reuses_one_query_for_all_buildings(monkeypatch) -> None:
-    class _FakeBitableClient:
-        list_records_calls = 0
-
-        def __init__(self, **_kwargs):
-            pass
-
-        def list_fields(self, *, table_id, page_size):  # noqa: ANN001
-            assert table_id == "tblqSskJvBnx9UJj"
-            assert page_size == 200
-            return [
-                {
-                    "field_name": "汇总分类",
-                    "property": {"options": [{"id": "opt-total", "name": "总用电量"}, {"id": "opt-other", "name": "其他"}]},
-                },
-                {
-                    "field_name": "楼栋",
-                    "property": {"options": [{"id": "opt-b", "name": "B楼"}, {"id": "opt-e", "name": "E楼"}]},
-                },
-            ]
-
-        def list_records(self, *, table_id, page_size, max_records, filter_formula=""):  # noqa: ANN001
-            assert table_id == "tblqSskJvBnx9UJj"
-            assert page_size == 500
-            assert max_records == 0
-            assert "CurrentValue.[日期]>=TODATE(\"2026-04-01\")" in filter_formula
-            assert "CurrentValue.[日期]<TODATE(\"2026-05-01\")" in filter_formula
-            assert 'CurrentValue.[汇总分类]="总用电量"' in filter_formula
-            _FakeBitableClient.list_records_calls += 1
-            return [
-                {"fields": {"汇总分类": "总用电量", "楼栋": "A", "日期": "2026-04-14", "数值（整数）": 10}},
-                {"fields": {"汇总分类": "总用电量", "楼栋": "A楼", "日期": "2026-04-15", "数值（整数）": 20}},
-                {"fields": {"汇总分类": "opt-total", "楼栋": "opt-b", "日期": "2026-04-14", "数值（整数）": "5"}},
-                {"fields": {"汇总分类": {"id": "opt-total"}, "楼栋": {"id": "opt-b"}, "日期": "2026-04-20", "数值（整数）": "7"}},
-                {"fields": {"汇总分类": "opt-total", "楼栋": "opt-e", "日期": "2026-04-14", "数值（整数）": 0}},
-                {"fields": {"汇总分类": "opt-total", "楼栋": "E楼", "日期": "2026-04-16", "数值（整数）": 0}},
-                {"fields": {"汇总分类": "opt-other", "楼栋": "A楼", "日期": "2026-04-16", "数值（整数）": 999}},
-            ]
-
-    monkeypatch.setattr(
-        "handover_log_module.service.handover_capacity_report_service.FeishuBitableClient",
-        _FakeBitableClient,
-    )
-    service = HandoverCapacityReportService(
-        {"common": {"feishu_auth": {"app_id": "app-id", "app_secret": "app-secret"}}}
-    )
-    monkeypatch.setattr(
-        service,
-        "_query_capacity_water_summary",
-        lambda **_kwargs: {"month_total": "0", "latest_daily_total": "0"},
-    )
-    monkeypatch.setattr(
-        service,
-        "_fetch_weather_payload_for_duty_date",
-        lambda **_kwargs: {"text": "晴", "humidity": "50%"},
-    )
-    warnings: list[str] = []
-
-    a_values = service._build_capacity_overlay_values(
-        building="A楼",
-        duty_date="2026-04-15",
-        duty_shift="day",
-        handover_cells={"F8": "西区30/东区40"},
-        emit_log=lambda _msg: None,
-        warnings=warnings,
-    )
-    b_values = service._build_capacity_overlay_values(
-        building="B楼",
-        duty_date="2026-04-15",
-        duty_shift="day",
-        handover_cells={"F8": "西区30/东区40"},
-        emit_log=lambda _msg: None,
-        warnings=warnings,
-    )
-    e_values = service._build_capacity_overlay_values(
-        building="E楼",
-        duty_date="2026-04-15",
-        duty_shift="day",
-        handover_cells={"F8": "西区30/东区40"},
-        emit_log=lambda _msg: None,
-        warnings=warnings,
-    )
-
-    assert a_values["V57"] == "10"
-    assert a_values["Y57"] == "30"
-    assert b_values["V57"] == "5"
-    assert b_values["Y57"] == "12"
-    assert e_values["V57"] == "0"
-    assert e_values["Y57"] == "0"
-    assert warnings == []
-    assert _FakeBitableClient.list_records_calls == 1
-    second_service = HandoverCapacityReportService(
-        {"common": {"feishu_auth": {"app_id": "app-id", "app_secret": "app-secret"}}}
-    )
-    second_service._query_capacity_electricity_summary(
-        building="C楼",
-        duty_date="2026-04-15",
-        duty_shift="day",
-        emit_log=lambda _msg: None,
-        warnings=[],
-    )
-    assert _FakeBitableClient.list_records_calls == 1
-
-
-def test_capacity_electricity_summary_handles_cross_month_and_missing(monkeypatch) -> None:
-    class _FakeBitableClient:
-        def __init__(self, **_kwargs):
-            pass
-
-        def list_fields(self, **_kwargs):
-            return [
-                {"field_name": "汇总分类", "property": {"options": [{"id": "total", "name": "总用电量"}]}},
-                {"field_name": "楼栋", "property": {"options": [{"id": "a", "name": "A楼"}]}},
-            ]
-
-        def list_records(self, **kwargs):
-            formula = str(kwargs.get("filter_formula", ""))
-            assert "CurrentValue.[日期]>=TODATE(\"2026-03-01\")" in formula
-            assert "CurrentValue.[日期]<TODATE(\"2026-04-01\")" in formula
-            return [
-                {"fields": {"汇总分类": "total", "楼栋": "a", "日期": "2026-03-31", "数值（整数）": 9}},
-                {"fields": {"汇总分类": "total", "楼栋": "A楼", "日期": "2026-03-01", "数值（整数）": 1}},
-            ]
-
-    monkeypatch.setattr(
-        "handover_log_module.service.handover_capacity_report_service.FeishuBitableClient",
-        _FakeBitableClient,
-    )
-    service = HandoverCapacityReportService(
-        {"common": {"feishu_auth": {"app_id": "app-id", "app_secret": "app-secret"}}}
-    )
-    warnings: list[str] = []
-
-    a_summary = service._query_capacity_electricity_summary(
-        building="A楼",
-        duty_date="2026-04-01",
-        duty_shift="day",
-        emit_log=lambda _msg: None,
-        warnings=warnings,
-    )
-    d_summary = service._query_capacity_electricity_summary(
-        building="D楼",
-        duty_date="2026-04-01",
-        duty_shift="day",
-        emit_log=lambda _msg: None,
-        warnings=warnings,
-    )
-
-    assert a_summary == {"prev_day_total": "9", "month_total": "10"}
-    assert d_summary == {"prev_day_total": "0", "month_total": "0"}
-    assert any("D楼 V57 缺少 2026-03-31 总用电量记录" in item for item in warnings)
-    assert any("D楼 Y57 缺少 2026-03 总用电量记录" in item for item in warnings)
-
-
-def test_capacity_electricity_summary_value_missing_does_not_report_missing_record(monkeypatch) -> None:
-    class _FakeBitableClient:
-        def __init__(self, **_kwargs):
-            pass
-
-        def list_fields(self, **_kwargs):
-            return [
-                {"field_name": "汇总分类", "property": {"options": [{"id": "total", "name": "总用电量"}]}},
-                {"field_name": "楼栋", "property": {"options": [{"id": "d", "name": "D楼"}]}},
-            ]
-
-        def list_records(self, **_kwargs):
-            return [
-                {"fields": {"汇总分类": "total", "楼栋": "d", "日期": "2026-04-14", "数值（整数）": ""}},
-                {"fields": {"汇总分类": "total", "楼栋": "D楼", "日期": "2026-04-02", "数值（整数）": None}},
-                {"fields": {"汇总分类": "total", "楼栋": "E楼", "日期": "2026-04-14", "数值（整数）": 0}},
-            ]
-
-    monkeypatch.setattr(
-        "handover_log_module.service.handover_capacity_report_service.FeishuBitableClient",
-        _FakeBitableClient,
-    )
-    service = HandoverCapacityReportService(
-        {"common": {"feishu_auth": {"app_id": "app-id", "app_secret": "app-secret"}}}
-    )
-    warnings: list[str] = []
-
-    summary = service._query_capacity_electricity_summary(
-        building="D楼",
-        duty_date="2026-04-15",
-        duty_shift="day",
-        emit_log=lambda _msg: None,
-        warnings=warnings,
-    )
-
-    assert summary == {"prev_day_total": "0", "month_total": "0"}
-    assert any("D楼 总用电量存在 2 条记录的数值（整数）为空" in item for item in warnings)
-    assert not any("D楼 V57 缺少" in item for item in warnings)
-    assert not any("D楼 Y57 缺少" in item for item in warnings)
-
-
-def test_capacity_overlay_writes_substation_110kv_and_cooling_pump_pressures(tmp_path, monkeypatch) -> None:
-    output_file = tmp_path / "capacity.xlsx"
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.title = "本班组"
-    sheet.merge_cells("A55:L55")
-    for row in range(57, 64):
-        sheet.merge_cells(start_row=row, start_column=11, end_row=row, end_column=12)
-    workbook.save(output_file)
-    workbook.close()
-
-    service = HandoverCapacityReportService({"capacity_report": {"template": {"sheet_name": "本班组"}}})
-    monkeypatch.setattr(
-        service,
-        "_query_capacity_water_summary",
-        lambda **kwargs: {"month_total": "0", "latest_daily_total": "0"},
-    )
-    monkeypatch.setattr(
-        service,
-        "_query_capacity_electricity_summary",
-        lambda **kwargs: {"month_total": "0", "prev_day_total": "0"},
-    )
-    monkeypatch.setattr(
-        service,
-        "_fetch_weather_payload_for_duty_date",
-        lambda **kwargs: {"text": "晴", "humidity": "50%"},
-    )
-
-    result = service.sync_overlay_for_existing_report_from_cells(
-        building="A楼",
-        duty_date="2026-04-15",
-        duty_shift="day",
-        handover_cells={
-            "H6": "10",
-            "F8": "西区30/东区40",
-            "B6": "1.2",
-            "D6": "2000",
-            "F6": "1200",
-            "D8": "8",
-            "B13": "100",
-            "D13": "80",
-        },
-        capacity_output_file=str(output_file),
-        shared_110kv={
-            "revision": 2,
-            "rows": [
-                {
-                    "row_id": "incoming_akai",
-                    "line_voltage": "115.82",
-                    "current": "105.05",
-                    "power_kw": "21180",
-                    "power_factor": "1",
-                    "load_rate": "0.2118",
-                },
-                {
-                    "row_id": "transformer_4",
-                    "line_voltage": "10.39",
-                    "current": "738.64",
-                    "power_kw": "13270",
-                    "power_factor": "1",
-                    "load_rate": "0.2654",
-                },
-            ],
-        },
-        cooling_pump_pressures={
-            "rows": [
-                {"zone": "west", "unit": 2, "position": 0, "inlet_pressure": "0.31", "outlet_pressure": "0.27"},
-                {"zone": "east", "unit": 5, "position": 1, "inlet_pressure": "0.42", "outlet_pressure": "0.36"},
-            ]
-        },
-        emit_log=lambda _msg: None,
-    )
-
-    assert result["status"] == "ready"
-    saved = openpyxl.load_workbook(output_file, data_only=False)
-    try:
-        ws = saved["本班组"]
-        assert ws["C57"].value == "115.82"
-        assert ws["E57"].value == "105.05"
-        assert ws["G57"].value == "21180"
-        assert ws["K57"].value == "0.2118"
-        assert ws["C63"].value == "10.39"
-        assert ws["I28"].value == "0.31"
-        assert ws["I29"].value == "0.27"
-        assert ws["V38"].value == "0.42"
-        assert ws["V39"].value == "0.36"
-        assert "A55:L55" in {str(item) for item in ws.merged_cells.ranges}
-    finally:
-        saved.close()
-
-
-def test_substation_110kv_overlay_only_skips_weather_and_water(tmp_path, monkeypatch) -> None:
-    output_file = tmp_path / "capacity.xlsx"
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.title = "本班组"
-    sheet["L2"] = "原天气"
-    sheet["X2"] = "原湿度"
-    sheet["O57"] = "原当日耗水"
-    sheet["AC25"] = "原月耗水"
-    sheet.merge_cells("A55:L55")
-    for row in range(57, 64):
-        sheet.merge_cells(start_row=row, start_column=11, end_row=row, end_column=12)
-    workbook.save(output_file)
-    workbook.close()
-
-    service = HandoverCapacityReportService({"capacity_report": {"template": {"sheet_name": "本班组"}}})
-    monkeypatch.setattr(
-        service,
-        "_query_capacity_water_summary",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("110KV补写不应查询耗水")),
-    )
-    monkeypatch.setattr(
-        service,
-        "_fetch_weather_payload_for_duty_date",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("110KV补写不应查询天气")),
-    )
-
-    result = service.sync_substation_110kv_for_existing_report_from_cells(
-        building="A楼",
-        duty_date="2026-04-15",
-        duty_shift="day",
-        handover_cells={
-            "H6": "10",
-            "F8": "西区30/东区40",
-            "B6": "1.2",
-            "D6": "2000",
-            "F6": "1200",
-            "D8": "8",
-            "B13": "100",
-            "D13": "80",
-        },
-        capacity_output_file=str(output_file),
-        shared_110kv={
-            "revision": 3,
-            "rows": [
-                {
-                    "row_id": "incoming_akai",
-                    "line_voltage": "115.82",
-                    "current": "105.05",
-                    "power_kw": "21180",
-                    "power_factor": "1",
-                    "load_rate": "0.2118",
-                },
-            ],
-        },
-        emit_log=lambda _msg: None,
-    )
-
-    assert result["status"] == "ready"
-    saved = openpyxl.load_workbook(output_file, data_only=False)
-    try:
-        ws = saved["本班组"]
-        assert ws["C57"].value == "115.82"
-        assert ws["E57"].value == "105.05"
-        assert ws["G57"].value == "21180"
-        assert ws["K57"].value == "0.2118"
-        assert ws["L2"].value == "原天气"
-        assert ws["X2"].value == "原湿度"
-        assert ws["O57"].value == "原当日耗水"
-        assert ws["AC25"].value == "原月耗水"
-    finally:
-        saved.close()
-
-
-def test_cooling_pump_pressure_defaults_match_building_zone_unit() -> None:
-    service = CoolingPumpPressureDefaultsService()
-    defaults = service.merge_document_rows_into_defaults(
-        existing_defaults={},
-        document_payload={
-            "rows": [
-                {"zone": "west", "unit": 2, "inlet_pressure": "0.31", "outlet_pressure": "0.27"},
-            ]
-        },
-    )
-
-    payload = service.document_payload(
-        running_units={
-            "west": [{"unit": 2, "mode_text": "制冷"}, {"unit": 3, "mode_text": "板换"}],
-            "east": [{"unit": 5, "mode_text": "制冷"}],
-        },
-        defaults=defaults,
-    )
-
-    rows = payload["rows"]
-    assert rows[0]["zone"] == "west"
-    assert rows[0]["unit"] == 2
-    assert rows[0]["inlet_pressure"] == "0.31"
-    assert rows[0]["outlet_pressure"] == "0.27"
-    assert rows[1]["unit"] == 3
-    assert rows[1]["inlet_pressure"] == ""
-    assert rows[2]["zone"] == "east"
-    assert rows[2]["inlet_pressure"] == ""
-
-    cleared = service.merge_document_rows_into_defaults(
-        existing_defaults=defaults,
-        document_payload={"rows": [{"zone": "west", "unit": 2, "inlet_pressure": "", "outlet_pressure": ""}]},
-    )
-    assert "west:2" not in cleared
 
 
 def test_weather_payload_uses_seniverse_for_today_and_caches(monkeypatch) -> None:
@@ -585,71 +173,6 @@ def test_weather_payload_uses_seniverse_for_today_and_caches(monkeypatch) -> Non
         emit_log=lambda _msg: None,
     )
     second = service._fetch_weather_payload_for_duty_date(
-        duty_date="2026-04-17",
-        emit_log=lambda _msg: None,
-    )
-
-    assert first == {"text": "多云", "humidity": "96%"}
-    assert second == first
-    assert calls["count"] == 1
-
-
-def test_weather_payload_cache_is_shared_across_service_instances(monkeypatch) -> None:
-    config = {
-        "capacity_report": {
-            "weather": {
-                "seniverse_public_key": "test-public",
-                "seniverse_private_key": "test-private",
-                "location": "崇川区",
-                "language": "zh-Hans",
-                "unit": "c",
-                "timeout_sec": 8,
-            }
-        }
-    }
-    first_service = HandoverCapacityReportService(config)
-    second_service = HandoverCapacityReportService(config)
-    monkeypatch.setattr(first_service, "_today_local_date", lambda: date(2026, 4, 17))
-    monkeypatch.setattr(second_service, "_today_local_date", lambda: date(2026, 4, 17))
-    calls = {"count": 0}
-
-    class _FakeResponse:
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self) -> bytes:
-            return json.dumps(
-                {
-                    "results": [
-                        {
-                            "daily": [
-                                {
-                                    "date": "2026-04-17",
-                                    "text_day": "多云",
-                                    "humidity": "96",
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ).encode("utf-8")
-
-    def _fake_urlopen(request, timeout=0):  # noqa: ANN001
-        calls["count"] += 1
-        return _FakeResponse()
-
-    monkeypatch.setattr("handover_log_module.service.handover_capacity_report_service.urlopen", _fake_urlopen)
-
-    first = first_service._fetch_weather_payload_for_duty_date(
-        duty_date="2026-04-17",
-        emit_log=lambda _msg: None,
-    )
-    second = second_service._fetch_weather_payload_for_duty_date(
         duty_date="2026-04-17",
         emit_log=lambda _msg: None,
     )
@@ -779,8 +302,8 @@ def test_d_building_current_oil_values_use_specific_tank_volume_aliases() -> Non
     rows = [
         RawRow(1, "", "燃油自控系统", "1#油罐容积", "10", 10.0),
         RawRow(2, "", "燃油自控系统", "2#油罐容积", "20", 20.0),
-        RawRow(3, "", "现场采集", "1#油罐体积", "31", 31.0),
-        RawRow(4, "", "现场采集", "2#油罐体积", "41", 41.0),
+        RawRow(3, "", "燃油自控系统", "1#油罐体积", "31", 31.0),
+        RawRow(4, "", "燃油自控系统", "2#油罐体积", "41", 41.0),
     ]
 
     values = service._extract_current_oil_display_values(
@@ -1142,46 +665,6 @@ def test_d_building_cooling_tower_out_temp_alias_fills_f30() -> None:
     assert values["F30"] == "27.5"
 
 
-def test_d_building_east_first_active_chiller_fills_q31_like_west_block() -> None:
-    rows = [
-        RawRow(1, "", "西区 1号冷机", "冷凝器小温差", "1.8", 1.8),
-        RawRow(2, "", "东区 1号冷机", "冷凝器小温差", "2.8", 2.8),
-    ]
-    context = {
-        "building": "D楼",
-        "duty_shift": "day",
-        "capacity_rows": rows,
-        "running_units": {
-            "west": [{"unit": 1, "mode_text": "制冷"}],
-            "east": [{"unit": 4, "mode_text": "制冷"}],
-        },
-    }
-
-    values = build_capacity_cells_with_config(context)
-
-    assert values["D31"] == "1.8"
-    assert values["Q31"] == "2.8"
-
-
-def test_east_first_chiller_alias_scope_does_not_change_other_buildings() -> None:
-    rows = [
-        RawRow(1, "", "东区 1号冷机", "冷凝器小温差", "2.8", 2.8),
-    ]
-    context = {
-        "building": "A楼",
-        "duty_shift": "day",
-        "capacity_rows": rows,
-        "running_units": {
-            "west": [],
-            "east": [{"unit": 4, "mode_text": "制冷"}],
-        },
-    }
-
-    values = build_capacity_cells_with_config(context)
-
-    assert "Q31" not in values
-
-
 def test_e_building_plate_mode_skips_chiller_fields_but_keeps_fan_and_pump_values() -> None:
     rows = [
         RawRow(1, "", "西区 101 1号冷机", "冷机_电流百分比", "45", 45.0),
@@ -1299,80 +782,3 @@ def test_aircon_matrix_mapping_skips_blank_first_hit_and_keeps_later_value_for_e
     assert values["AE112"] == "1.12"
     assert values["AE142"] == "1.42"
     assert values["AE152"] == "1.52"
-
-
-def test_aircon_matrix_mapping_uses_chinese_floor_and_area_text_for_e_building() -> None:
-    rows = [
-        RawRow(1, "南通阿里保税A区E楼/E楼/三层/空调区三", "E-CRAH-10_电量仪", "总_有功功率", "1.12", 1.12),
-        RawRow(2, "南通阿里保税A区E楼/E楼/三层/空调区二", "E-CRAH-11_电量仪", "总_有功功率", "1.42", 1.42),
-        RawRow(3, "南通阿里保税A区E楼/E楼/四层/空调区三", "E-CRAH-12_电量仪", "总_有功功率", "1.52", 1.52),
-    ]
-    context = {
-        "capacity_rows": rows,
-        "running_units": {},
-        "template_snapshot": {"building_code": "E", "template_family": "e_building"},
-    }
-
-    values = build_capacity_cells_with_config(context)
-
-    assert values["AE112"] == "1.12"
-    assert values["AE142"] == "1.42"
-    assert values["AE152"] == "1.52"
-
-
-def test_aircon_matrix_mapping_uses_crah_equipment_code_when_aircon_path_is_missing() -> None:
-    rows = [
-        RawRow(1, "", "C-212-CRAHB-B_电量仪", "总_有功功率_KW", "20.99", 20.99),
-        RawRow(2, "", "C-211-CRAHB-B_电量仪", "总_有功功率_KW", "21.76", 21.76),
-    ]
-    context = {
-        "building": "C楼",
-        "capacity_rows": rows,
-        "running_units": {},
-        "template_snapshot": {"building_code": "C", "template_family": "other_buildings"},
-    }
-
-    values = build_capacity_cells_with_config(context)
-
-    assert values["AE80"] == "20.99"
-    assert values["AE85"] == "21.76"
-
-
-def test_aircon_matrix_mapping_preserves_numeric_zero_values() -> None:
-    rows = [
-        RawRow(1, "南通阿里保税A区E楼/E楼/三层/空调区3 E-341", "E-341-CRAHB-B_电量仪", "总_有功功率", 0.0, 0.0),
-        RawRow(2, "南通阿里保税A区E楼/E楼/三层/空调区2 E-311", "E-311-CRAHB-B_电量仪", "总_有功功率", 0.0, 0.0),
-        RawRow(3, "南通阿里保税A区E楼/E楼/四层/空调区3 E-441", "E-441-CRAHB-B_电量仪", "总_有功功率", 0.0, 0.0),
-    ]
-    context = {
-        "building": "E楼",
-        "capacity_rows": rows,
-        "running_units": {},
-        "template_snapshot": {"building_code": "E", "template_family": "e_building"},
-    }
-
-    values = build_capacity_cells_with_config(context)
-
-    assert values["AE112"] == "0"
-    assert values["AE142"] == "0"
-    assert values["AE152"] == "0"
-
-
-def test_aircon_matrix_missing_warnings_report_missing_row_without_substituting_neighbor() -> None:
-    rows = [
-        RawRow(1, "南通阿里保税A区D楼/D楼/二层/空调区2 D-211", "D-211-CRAHB-A_电量仪", "总_有功功率", "5.12", 5.12),
-    ]
-    context = {
-        "building": "D楼",
-        "capacity_rows": rows,
-        "running_units": {},
-        "template_snapshot": {"building_code": "D", "template_family": "other_buildings"},
-    }
-
-    values = build_capacity_cells_with_config(context)
-    warnings = build_aircon_matrix_missing_warnings(context, values)
-
-    assert values["AE85"] == "5.12"
-    assert "AE80" not in values
-    assert any("missing_row" in item and "D楼 AE80" in item and "D-212-CRAH" in item for item in warnings)
-    assert not any("AE85" in item for item in warnings)

@@ -11,8 +11,6 @@ def test_runtime_dependency_spec_entries_are_complete() -> None:
 
     assert specs
     assert {"package": "fastapi", "import_name": "fastapi"} in specs
-    assert {"package": "pywin32", "import_name": "pythoncom"} in specs
-    assert {"package": "pywin32", "import_name": "win32com.client"} in specs
     assert {"package": "python-multipart", "import_name": "multipart"} in specs
 
 
@@ -26,3 +24,4 @@ def test_build_runtime_dependency_lock_contains_exact_versions() -> None:
     assert payload["python_version"] == "3.11.9"
     assert len(payload["packages"]) == len(normalized_runtime_dependency_specs())
     assert payload["packages"][0]["version"] == "1.2.3"
+

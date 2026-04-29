@@ -8,7 +8,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List
 
 from app.shared.utils.atomic_file import atomic_write_file
-from pipeline_utils import DEFAULT_CALC_FILENAME, DEFAULT_DOWNLOAD_FILENAME
 
 
 BACKUP_MANIFEST_NAME = "backup_manifest.json"
@@ -33,10 +32,6 @@ SOURCE_SNAPSHOT_PROTECTED_PREFIXES = (
 SOURCE_SNAPSHOT_PROTECTED_FILES = {
     "表格计算配置.json",
     ".env",
-}
-SOURCE_SNAPSHOT_REQUIRED_ROOT_PY_FILES = {
-    DEFAULT_CALC_FILENAME,
-    DEFAULT_DOWNLOAD_FILENAME,
 }
 
 
@@ -300,8 +295,6 @@ class UpdateApplier:
                 continue
             rel_text = _rel_text(rel)
             if rel_text in snapshot_files or _is_source_snapshot_protected(rel):
-                continue
-            if len(rel.parts) == 1 and rel.name in SOURCE_SNAPSHOT_REQUIRED_ROOT_PY_FILES:
                 continue
             if _is_py_only_snapshot(manifest) and rel.suffix.lower() != ".py":
                 continue

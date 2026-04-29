@@ -206,6 +206,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   let lastBootstrapHealthFetchAt = 0;
   let lastExternalDashboardSummaryFetchAt = 0;
   let lastDailyReportContextFetchAt = 0;
+  let handoverDailyReportRefreshTimer = null;
   let lastPendingRuntimeRefreshAt = 0;
   let bootstrapRetryTimer = null;
   let updaterReconnectTimer = null;
@@ -385,9 +386,31 @@ export function createRuntimeHealthConfigActions(ctx) {
       return;
     }
     if (typeof scheduleExternalDashboardRefresh === "function") {
+      const delayMs = Math.max(0, Number.parseInt(String(options?.delayMs ?? 220), 10) || 220);
       scheduleExternalDashboardRefresh(reason, {
         includePendingResume: Boolean(options?.includePendingResume),
+        force: options?.force !== false,
+        delayMs,
       });
+      if (
+        typeof fetchHandoverDailyReportContext === "function"
+        && (
+          typeof shouldFetchHandoverDailyReportContext !== "function"
+          || Boolean(shouldFetchHandoverDailyReportContext())
+        )
+      ) {
+        if (handoverDailyReportRefreshTimer) {
+          window.clearTimeout(handoverDailyReportRefreshTimer);
+        }
+        handoverDailyReportRefreshTimer = window.setTimeout(() => {
+          handoverDailyReportRefreshTimer = null;
+          void fetchHandoverDailyReportContext({
+            force: true,
+            silentTransientNetworkError: true,
+            silentMessage: true,
+          });
+        }, delayMs + 80);
+      }
       return;
     }
     if (typeof fetchExternalDashboardSummary === "function") {
@@ -2768,7 +2791,13 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => {
       try {
         const data = await refreshCurrentHourSourceCacheApi();
-        refreshRoleScopedRuntimeStatus("source_cache_refresh_current_hour");
+        refreshRoleScopedRuntimeStatus("source_cache_refresh_current_hour", { force: true });
+        window.setTimeout(() => {
+          refreshRoleScopedRuntimeStatus("source_cache_refresh_current_hour_followup", {
+            force: true,
+            delayMs: 0,
+          });
+        }, 1800);
         message.value = String(data?.message || "").trim() || "已开始下载当前小时全部文件";
         return data;
       } catch (err) {
@@ -2796,7 +2825,14 @@ export function createRuntimeHealthConfigActions(ctx) {
     const runner = async () => {
       try {
         const data = await refreshBuildingLatestSourceCacheApi(sourceFamilyText, buildingText);
-        refreshRoleScopedRuntimeStatus("source_cache_refresh_building_latest", { building: buildingText });
+        refreshRoleScopedRuntimeStatus("source_cache_refresh_building_latest", { building: buildingText, force: true });
+        window.setTimeout(() => {
+          refreshRoleScopedRuntimeStatus("source_cache_refresh_building_latest_followup", {
+            building: buildingText,
+            force: true,
+            delayMs: 0,
+          });
+        }, 1800);
         const familyLabel = SOURCE_CACHE_FAMILY_LABELS[sourceFamilyText] || sourceFamilyText;
         message.value = String(data?.message || "").trim() || `已开始重新拉取 ${buildingText} ${familyLabel}`;
         return data;
@@ -3151,7 +3187,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     }
     handoverDailyReportPreviewModal.value = {
       open: true,
-      title: `${getDailyReportTargetLabel(targetText)}棰勮`,
+      title: `${getDailyReportTargetLabel(targetText)}预览`,
       imageUrl: fullImageUrl,
       downloadName: String(asset?.downloadName || "").trim(),
     };

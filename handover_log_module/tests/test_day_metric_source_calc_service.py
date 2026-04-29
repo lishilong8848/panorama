@@ -74,7 +74,7 @@ def test_calculate_uses_water_pool_backup_for_c_building(monkeypatch) -> None:
 
 def test_calculate_uses_e_building_wet_bulb_override(monkeypatch) -> None:
     rows = [
-        _row(1, "E-124-DDC-100_室外湿度1", 19.6),
+        _row(1, "E-124-DDC-100_室外温度1", 19.6),
         _row(2, "室外湿球温度", 25.3),
     ]
     monkeypatch.setattr(module, "load_rows", lambda **kwargs: rows)
@@ -86,7 +86,7 @@ def test_calculate_uses_e_building_wet_bulb_override(monkeypatch) -> None:
     )
 
     assert result["resolved_metrics"]["wet_bulb"] == 19.6
-    assert result["metric_origin_context"]["by_metric_id"]["wet_bulb"]["d_name"] == "E-124-DDC-100_室外湿度1"
+    assert result["metric_origin_context"]["by_metric_id"]["wet_bulb"]["d_name"] == "E-124-DDC-100_室外温度1"
 
 
 def test_calculate_rejects_source_when_e_column_has_no_data(monkeypatch) -> None:

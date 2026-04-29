@@ -3,12 +3,11 @@ from __future__ import annotations
 from app.modules.report_pipeline.service.scheduler_state_presenter import (
     present_scheduler_overview_items,
     present_scheduler_overview_summary,
-    present_scheduler_snapshot_with_display,
     present_scheduler_state,
 )
 
 
-def test_present_scheduler_state_allows_start_when_memory_is_on_but_thread_is_stopped() -> None:
+def test_present_scheduler_state_prefers_memory_state_for_actions() -> None:
     payload = present_scheduler_state(
         {
             "running": False,
@@ -22,10 +21,10 @@ def test_present_scheduler_state_allows_start_when_memory_is_on_but_thread_is_st
         role_mode="external",
     )
 
-    assert payload["tone"] == "warning"
-    assert payload["status_text"] == "待启动"
-    assert payload["actions"]["start"]["allowed"] is True
-    assert payload["actions"]["start"]["label"] == "启动调度"
+    assert payload["tone"] == "info"
+    assert payload["status_text"] == "已记住开启"
+    assert payload["actions"]["start"]["allowed"] is False
+    assert payload["actions"]["start"]["label"] == "已记住开启"
     assert payload["actions"]["stop"]["allowed"] is True
     assert "下次执行" in payload["detail_text"]
     assert payload["next_run_text"] == "2026-04-17 21:00:00"
@@ -117,61 +116,6 @@ def test_present_scheduler_state_maps_decision_and_trigger_texts() -> None:
     assert payload["decision_text"] == "未到下次执行时间"
     assert payload["trigger_text"] == "任务占用已跳过"
     assert payload["last_trigger_text"] == "2026-04-18 07:00:00"
-
-
-def test_present_scheduler_snapshot_with_display_adds_handover_slot_displays() -> None:
-    payload = present_scheduler_snapshot_with_display(
-        {
-            "running": True,
-            "status": "运行中",
-            "remembered_enabled": True,
-            "slots": {
-                "morning": {
-                    "running": True,
-                    "next_run_time": "2026-04-23 07:00:00",
-                    "last_decision": "skip:before_schedule_time",
-                },
-                "afternoon": {
-                    "running": True,
-                    "next_run_time": "2026-04-23 16:00:00",
-                    "last_decision": "skip:before_next_run",
-                },
-            },
-        },
-        role_mode="external",
-    )
-
-    assert payload["display"]["status_text"] == "运行中"
-    assert payload["morning"]["display"]["next_run_text"] == "2026-04-23 07:00:00"
-    assert payload["morning"]["display"]["decision_text"] == "未到执行时间"
-    assert payload["afternoon"]["display"]["next_run_text"] == "2026-04-23 16:00:00"
-    assert payload["afternoon"]["display"]["decision_text"] == "未到下次执行时间"
-    assert payload["slots"]["morning"]["display"]["next_run_text"] == "2026-04-23 07:00:00"
-
-
-def test_present_scheduler_snapshot_marks_stopped_remembered_slots_as_startable() -> None:
-    payload = present_scheduler_snapshot_with_display(
-        {
-            "running": False,
-            "status": "未启动",
-            "remembered_enabled": True,
-            "executor_bound": True,
-            "slots": {
-                "morning": {
-                    "running": False,
-                    "next_run_time": "2026-04-23 07:00:00",
-                    "last_decision": "skip:not_started",
-                },
-            },
-        },
-        role_mode="external",
-    )
-
-    assert payload["display"]["tone"] == "warning"
-    assert payload["display"]["actions"]["start"]["allowed"] is True
-    assert payload["morning"]["remembered_enabled"] is True
-    assert payload["morning"]["display"]["tone"] == "warning"
-    assert payload["morning"]["display"]["actions"]["start"]["allowed"] is True
 
 
 def test_present_scheduler_overview_summary_prefers_attention_item() -> None:

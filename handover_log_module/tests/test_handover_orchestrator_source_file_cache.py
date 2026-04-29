@@ -195,6 +195,19 @@ def test_run_from_existing_file_external_keeps_shared_source_path(tmp_path: Path
     monkeypatch.setattr(orchestrator._fill_service, "fill", _fake_fill)
     monkeypatch.setattr(orchestrator, "_build_shift_roster_fixed_values", lambda **_kwargs: {})
     monkeypatch.setattr(
+        orchestrator._day_metric_export_service,
+        "build_deferred_state",
+        lambda **_kwargs: {
+            "status": "pending_review",
+            "reason": "await_all_confirmed",
+            "uploaded_count": 0,
+            "error": "",
+            "uploaded_at": "",
+            "uploaded_revision": 0,
+            "metric_values_by_id": {},
+        },
+    )
+    monkeypatch.setattr(
         orchestrator._source_data_attachment_export_service,
         "build_deferred_state",
         lambda **_kwargs: {
@@ -251,6 +264,19 @@ def test_run_from_existing_file_auto_sends_review_link_with_force(tmp_path: Path
     monkeypatch.setattr(orchestrator._fill_service, "fill", _fake_fill)
     monkeypatch.setattr(orchestrator, "_build_shift_roster_fixed_values", lambda **_kwargs: {})
     monkeypatch.setattr(
+        orchestrator._day_metric_export_service,
+        "build_deferred_state",
+        lambda **_kwargs: {
+            "status": "pending_review",
+            "reason": "await_all_confirmed",
+            "uploaded_count": 0,
+            "error": "",
+            "uploaded_at": "",
+            "uploaded_revision": 0,
+            "metric_values_by_id": {},
+        },
+    )
+    monkeypatch.setattr(
         orchestrator._source_data_attachment_export_service,
         "build_deferred_state",
         lambda **_kwargs: {
@@ -262,8 +288,6 @@ def test_run_from_existing_file_auto_sends_review_link_with_force(tmp_path: Path
             "uploaded_revision": 0,
         },
     )
-
-    captured: dict = {}
 
     def _fake_send_for_session(session, *, source, force, emit_log):
         captured["session_id"] = str(session.get("session_id", "")).strip()
