@@ -255,6 +255,17 @@ function normalizeFixedBlock(block, index) {
 }
 
 function normalizeCoolingPumpPressures(raw = {}) {
+  const rawTanks = raw?.tanks && typeof raw.tanks === "object" ? raw.tanks : {};
+  const tanks = {};
+  ["west", "east"].forEach((zone) => {
+    const tank = rawTanks?.[zone] && typeof rawTanks[zone] === "object" ? rawTanks[zone] : {};
+    tanks[zone] = {
+      zone,
+      zone_label: String(tank.zone_label || (zone === "east" ? "东区" : "西区")).trim(),
+      temperature: String(tank.temperature ?? ""),
+      level: String(tank.level ?? ""),
+    };
+  });
   const rows = Array.isArray(raw?.rows)
     ? raw.rows
         .filter((row) => row && typeof row === "object")
@@ -271,11 +282,12 @@ function normalizeCoolingPumpPressures(raw = {}) {
             mode_text: String(row.mode_text || "").trim(),
             inlet_pressure: String(row.inlet_pressure ?? ""),
             outlet_pressure: String(row.outlet_pressure ?? ""),
+            cooling_tower_level: String(row.cooling_tower_level ?? ""),
           };
         })
         .filter((row) => row.zone && row.unit > 0)
     : [];
-  return { rows };
+  return { rows, tanks };
 }
 
 function normalizeSubstation110kvBlock(raw = {}) {
@@ -1065,6 +1077,18 @@ export function mountHandoverReviewApp(Vue) {
         dirty.value = hasReviewDocumentDirty() || substation110kvDirty.value;
       }
       const coolingPumpPressureRows = computed(() => documentRef.value?.cooling_pump_pressures?.rows || []);
+      const coolingTankRows = computed(() => {
+        const tanks = documentRef.value?.cooling_pump_pressures?.tanks || {};
+        return ["west", "east"].map((zone) => {
+          const row = tanks?.[zone] && typeof tanks[zone] === "object" ? tanks[zone] : {};
+          return {
+            zone,
+            zone_label: String(row.zone_label || (zone === "east" ? "东区" : "西区")).trim(),
+            temperature: String(row.temperature ?? ""),
+            level: String(row.level ?? ""),
+          };
+        });
+      });
       const {
         selectedSessionId,
         latestSessionId,
@@ -2135,6 +2159,41 @@ export function mountHandoverReviewApp(Vue) {
         markDocumentDirty({ region: "cooling_pump_pressures" });
       }
 
+      function updateCoolingTowerLevel(rowIndex, value) {
+        const rows = documentRef.value?.cooling_pump_pressures?.rows;
+        if (!Array.isArray(rows) || !rows[rowIndex]) return;
+        const nextValue = String(value ?? "");
+        if (String(rows[rowIndex].cooling_tower_level ?? "") === nextValue) return;
+        rows[rowIndex].cooling_tower_level = nextValue;
+        markDocumentDirty({ region: "cooling_pump_pressures" });
+      }
+
+      function updateCoolingTankValue(zone, key, value) {
+        const normalizedZone = String(zone || "").trim().toLowerCase();
+        if (!["west", "east"].includes(normalizedZone)) return;
+        if (!["temperature", "level"].includes(String(key || ""))) return;
+        const pressures = documentRef.value?.cooling_pump_pressures;
+        if (!pressures || typeof pressures !== "object") return;
+        pressures.tanks = pressures.tanks && typeof pressures.tanks === "object" ? pressures.tanks : {};
+        const current = pressures.tanks[normalizedZone] && typeof pressures.tanks[normalizedZone] === "object"
+          ? pressures.tanks[normalizedZone]
+          : {
+              zone: normalizedZone,
+              zone_label: normalizedZone === "east" ? "东区" : "西区",
+              temperature: "",
+              level: "",
+            };
+        const nextValue = String(value ?? "");
+        if (String(current[key] ?? "") === nextValue) return;
+        pressures.tanks[normalizedZone] = {
+          ...current,
+          zone: normalizedZone,
+          zone_label: current.zone_label || (normalizedZone === "east" ? "东区" : "西区"),
+          [key]: nextValue,
+        };
+        markDocumentDirty({ region: "cooling_pump_pressures" });
+      }
+
       async function saveSubstation110kvIfNeeded() {
         if (!substation110kvDirty.value) return true;
         const locked = await ensureSubstation110kvLock();
@@ -2432,6 +2491,7 @@ export function mountHandoverReviewApp(Vue) {
         substation110kvMetaText,
         substation110kvLockText,
         coolingPumpPressureRows,
+        coolingTankRows,
         reviewHeaderBadges,
         reviewStatusBanners,
         confirmActionVm,
@@ -2451,6 +2511,8 @@ export function mountHandoverReviewApp(Vue) {
         updateSubstation110kvCell,
         pasteSubstation110kvTable,
         updateCoolingPumpPressure,
+        updateCoolingTowerLevel,
+        updateCoolingTankValue,
         saveCurrentReview,
         toggleConfirm,
         retryCloudSheetSync: () => retryCloudSheetSync(getJobApi),

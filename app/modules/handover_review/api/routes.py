@@ -3563,6 +3563,7 @@ def handover_review_capacity_image_send(
 
     current_session = dict(target)
     current_session.update(target_with_document if isinstance(target_with_document, dict) else {})
+    current_session["cooling_pump_pressures"] = cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {}
 
     def _ensure_capacity_ready_for_send() -> Dict[str, Any]:
         nonlocal current_session

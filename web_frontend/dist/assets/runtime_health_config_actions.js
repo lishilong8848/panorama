@@ -1301,6 +1301,26 @@ export function createRuntimeHealthConfigActions(ctx) {
     return merged;
   }
 
+  function normalizeHandoverSchedulerSnapshot(snapshot) {
+    const payload = snapshot && typeof snapshot === "object" ? { ...snapshot } : {};
+    const slots = payload.slots && typeof payload.slots === "object" ? payload.slots : {};
+    if (
+      (!payload.morning || typeof payload.morning !== "object")
+      && slots.morning
+      && typeof slots.morning === "object"
+    ) {
+      payload.morning = { ...slots.morning };
+    }
+    if (
+      (!payload.afternoon || typeof payload.afternoon !== "object")
+      && slots.afternoon
+      && typeof slots.afternoon === "object"
+    ) {
+      payload.afternoon = { ...slots.afternoon };
+    }
+    return payload;
+  }
+
   function applyHealthSnapshot(data) {
     if (!data || typeof data !== "object") return;
     const healthMode = String(data?.health_mode || "").trim().toLowerCase();
@@ -1446,7 +1466,7 @@ export function createRuntimeHealthConfigActions(ctx) {
       Object.assign(health.scheduler, data.scheduler);
     }
     if (data.handover_scheduler && typeof data.handover_scheduler === "object") {
-      Object.assign(health.handover_scheduler, data.handover_scheduler);
+      Object.assign(health.handover_scheduler, normalizeHandoverSchedulerSnapshot(data.handover_scheduler));
     }
     if (data.handover && typeof data.handover === "object") {
       if (data.handover.engineer_directory && typeof data.handover.engineer_directory === "object") {
@@ -2055,7 +2075,7 @@ export function createRuntimeHealthConfigActions(ctx) {
       Object.assign(health.scheduler, summary.scheduler);
     }
     if (summary.handover_scheduler && typeof summary.handover_scheduler === "object") {
-      Object.assign(health.handover_scheduler, summary.handover_scheduler);
+      Object.assign(health.handover_scheduler, normalizeHandoverSchedulerSnapshot(summary.handover_scheduler));
     }
     const wet = summary.wet_bulb_collection_scheduler;
     if (wet && typeof wet === "object" && health?.wet_bulb_collection?.scheduler) {

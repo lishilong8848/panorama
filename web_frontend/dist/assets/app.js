@@ -1394,14 +1394,15 @@ createApp({
     );
 
     watch(
-      () => [currentView.value, dashboardActiveModule.value],
-      ([view], [prevView, prevModule] = []) => {
-        if (!bootstrapReady.value) return;
+      () => [bootstrapReady.value, currentView.value, dashboardActiveModule.value],
+      ([ready, view, activeModule], [prevReady, prevView, prevModule] = []) => {
+        if (!ready) return;
         const currentViewText = String(view || "").trim().toLowerCase();
         const prevViewText = String(prevView || "").trim().toLowerCase();
-        const activeModuleText = String(dashboardActiveModule.value || "").trim();
+        const activeModuleText = String(activeModule || "").trim();
         const moduleChanged = activeModuleText !== String(prevModule || "").trim();
-        const enteredDashboard = currentViewText === "dashboard" && prevViewText !== "dashboard";
+        const becameReady = Boolean(ready) && !Boolean(prevReady);
+        const enteredDashboard = currentViewText === "dashboard" && (prevViewText !== "dashboard" || becameReady);
         const schedulerModules = new Set([
           "auto_flow",
           "handover_log",
@@ -1435,10 +1436,10 @@ createApp({
     );
 
     watch(
-      () => currentView.value,
-      (view) => {
+      () => [bootstrapReady.value, currentView.value],
+      ([ready, view]) => {
         const currentViewText = String(view || "").trim().toLowerCase();
-        if (currentViewText !== "config" || !bootstrapReady.value || configLoaded.value) return;
+        if (currentViewText !== "config" || !ready || configLoaded.value) return;
         void fetchConfig({ silentMessage: true, loadHandoverSegments: true });
       },
       { immediate: true },

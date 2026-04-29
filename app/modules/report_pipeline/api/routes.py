@@ -5414,9 +5414,22 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
         except Exception:
             return {}
 
+    def _normalize_handover_scheduler(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(snapshot or {})
+        slots = payload.get("slots", {})
+        if not isinstance(slots, dict):
+            return payload
+        for slot in ("morning", "afternoon"):
+            if isinstance(payload.get(slot), dict):
+                continue
+            slot_payload = slots.get(slot)
+            if isinstance(slot_payload, dict):
+                payload[slot] = dict(slot_payload)
+        return payload
+
     summary = {
         "scheduler": _safe_scheduler("scheduler_status"),
-        "handover_scheduler": _safe_scheduler("handover_scheduler_status"),
+        "handover_scheduler": _normalize_handover_scheduler(_safe_scheduler("handover_scheduler_status")),
         "wet_bulb_collection_scheduler": _safe_scheduler("wet_bulb_collection_scheduler_status"),
         "day_metric_upload_scheduler": _safe_scheduler("day_metric_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),

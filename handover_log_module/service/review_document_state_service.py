@@ -233,6 +233,44 @@ class ReviewDocumentStateService:
     def _cooling_pump_pressure_defaults_key(zone: str, unit: int) -> str:
         return f"{str(zone or '').strip().lower()}:{int(unit or 0)}"
 
+    @staticmethod
+    def _cooling_tank_defaults_key(zone: str) -> str:
+        return f"tank:{str(zone or '').strip().lower()}"
+
+    @staticmethod
+    def _first_non_empty(*values: Any) -> str:
+        for value in values:
+            text = str(value if value is not None else "").strip()
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _cooling_summary_lines(session: Dict[str, Any]) -> Dict[str, str]:
+        summary = session.get("capacity_cooling_summary", {}) if isinstance(session, dict) else {}
+        lines = summary.get("lines", {}) if isinstance(summary, dict) else {}
+        return {
+            "west": str(lines.get("west", "") or "").strip() if isinstance(lines, dict) else "",
+            "east": str(lines.get("east", "") or "").strip() if isinstance(lines, dict) else "",
+        }
+
+    @staticmethod
+    def _cooling_tower_level_from_line(line: str, unit: int) -> str:
+        if unit <= 0:
+            return ""
+        match = re.search(rf"{unit}\s*[#号]\s*冷却塔液位\s*([^，、；]+?)\s*正常", str(line or ""))
+        return str(match.group(1)).strip() if match else ""
+
+    @staticmethod
+    def _cooling_tank_values_from_line(line: str) -> Dict[str, str]:
+        text = str(line or "")
+        temp_match = re.search(r"蓄冷罐[^，；]*?后备温度\s*([^，、；]+?)\s*正常", text)
+        level_match = re.search(r"蓄冷罐[^；]*?液位\s*([^，、；]+?)\s*正常", text)
+        return {
+            "temperature": str(temp_match.group(1)).strip() if temp_match else "",
+            "level": str(level_match.group(1)).strip() if level_match else "",
+        }
+
     def attach_cooling_pump_pressures(
         self,
         *,
@@ -246,10 +284,16 @@ class ReviewDocumentStateService:
             running_units = self._running_units_from_capacity_file(str(session.get("capacity_output_file", "") or ""))
         defaults_raw = self._store(building).get_default("cooling_pump_pressures") if building else {}
         defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
+        summary_lines = self._cooling_summary_lines(session)
         current_rows = (
             payload.get("cooling_pump_pressures", {}).get("rows", [])
             if isinstance(payload.get("cooling_pump_pressures", {}), dict)
             else []
+        )
+        current_tanks = (
+            payload.get("cooling_pump_pressures", {}).get("tanks", {})
+            if isinstance(payload.get("cooling_pump_pressures", {}), dict)
+            else {}
         )
         current_by_key: Dict[str, Dict[str, Any]] = {}
         if isinstance(current_rows, list):
@@ -274,6 +318,15 @@ class ReviewDocumentStateService:
                 key = self._cooling_pump_pressure_defaults_key(zone, unit)
                 current = current_by_key.get(key, {})
                 default = defaults.get(key, {}) if isinstance(defaults.get(key, {}), dict) else {}
+                summary_line = summary_lines.get(zone, "")
+                tower_value = (
+                    str(current.get("cooling_tower_level") if current.get("cooling_tower_level") is not None else "").strip()
+                    if "cooling_tower_level" in current
+                    else self._first_non_empty(
+                        default.get("cooling_tower_level"),
+                        self._cooling_tower_level_from_line(summary_line, unit),
+                    )
+                )
                 rows.append(
                     {
                         "row_id": key,
@@ -285,9 +338,34 @@ class ReviewDocumentStateService:
                         "mode_text": str(unit_info.get("mode_text", "") or "").strip(),
                         "inlet_pressure": str(current.get("inlet_pressure", default.get("inlet_pressure", "")) or ""),
                         "outlet_pressure": str(current.get("outlet_pressure", default.get("outlet_pressure", "")) or ""),
+                        "cooling_tower_level": tower_value,
                     }
                 )
-        payload["cooling_pump_pressures"] = {"rows": rows}
+        tanks: Dict[str, Dict[str, Any]] = {}
+        current_tanks_payload = current_tanks if isinstance(current_tanks, dict) else {}
+        for zone in ("west", "east"):
+            zone_label = "西区" if zone == "west" else "东区"
+            key = self._cooling_tank_defaults_key(zone)
+            current = current_tanks_payload.get(zone, {}) if isinstance(current_tanks_payload.get(zone, {}), dict) else {}
+            default = defaults.get(key, {}) if isinstance(defaults.get(key, {}), dict) else {}
+            summary_tank = self._cooling_tank_values_from_line(summary_lines.get(zone, ""))
+            tank_temperature = (
+                str(current.get("temperature") if current.get("temperature") is not None else "").strip()
+                if "temperature" in current
+                else self._first_non_empty(default.get("temperature"), summary_tank.get("temperature"))
+            )
+            tank_level = (
+                str(current.get("level") if current.get("level") is not None else "").strip()
+                if "level" in current
+                else self._first_non_empty(default.get("level"), summary_tank.get("level"))
+            )
+            tanks[zone] = {
+                "zone": zone,
+                "zone_label": zone_label,
+                "temperature": tank_temperature,
+                "level": tank_level,
+            }
+        payload["cooling_pump_pressures"] = {"rows": rows, "tanks": tanks}
         return payload
 
     def save_document(
@@ -542,11 +620,13 @@ class ReviewDocumentStateService:
             cabinet_cells = self._cabinet_defaults.extract_cells_from_document(document)
             updated = store.set_default("cabinet_power", self._cabinet_defaults.normalize_cells(cabinet_cells)) or updated
         if cooling_dirty:
-            raw_rows = (
-                document.get("cooling_pump_pressures", {}).get("rows", [])
+            cooling_payload = (
+                document.get("cooling_pump_pressures", {})
                 if isinstance(document.get("cooling_pump_pressures", {}), dict)
-                else []
+                else {}
             )
+            raw_rows = cooling_payload.get("rows", []) if isinstance(cooling_payload, dict) else []
+            raw_tanks = cooling_payload.get("tanks", {}) if isinstance(cooling_payload, dict) else {}
             current_defaults = store.get_default("cooling_pump_pressures")
             defaults = dict(current_defaults) if isinstance(current_defaults, dict) else {}
             if isinstance(raw_rows, list):
@@ -563,11 +643,26 @@ class ReviewDocumentStateService:
                     key = self._cooling_pump_pressure_defaults_key(zone, unit)
                     inlet = str(row.get("inlet_pressure", "") or "").strip()
                     outlet = str(row.get("outlet_pressure", "") or "").strip()
+                    tower_level = str(row.get("cooling_tower_level", "") or "").strip()
                     cooling_rows.append(row)
-                    if inlet or outlet:
+                    if inlet or outlet or tower_level:
                         defaults[key] = {
                             "inlet_pressure": inlet,
                             "outlet_pressure": outlet,
+                            "cooling_tower_level": tower_level,
+                        }
+                    else:
+                        defaults.pop(key, None)
+            if isinstance(raw_tanks, dict):
+                for zone in ("west", "east"):
+                    tank = raw_tanks.get(zone, {}) if isinstance(raw_tanks.get(zone, {}), dict) else {}
+                    key = self._cooling_tank_defaults_key(zone)
+                    temperature = str(tank.get("temperature", "") or "").strip()
+                    level = str(tank.get("level", "") or "").strip()
+                    if temperature or level:
+                        defaults[key] = {
+                            "temperature": temperature,
+                            "level": level,
                         }
                     else:
                         defaults.pop(key, None)

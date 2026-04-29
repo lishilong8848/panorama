@@ -256,6 +256,49 @@
               />
             </label>
           </div>
+          <div class="review-subsection-head">
+            <h3>冷塔及蓄冷罐液位温度</h3>
+          </div>
+          <div v-if="!coolingPumpPressureRows.length" class="review-empty-inline">
+            当前容量表未识别到运行制冷单元，冷却塔液位可在识别后填写
+          </div>
+          <div v-else class="review-fixed-fields review-pump-fields">
+            <label
+              v-for="(row, rowIndex) in coolingPumpPressureRows"
+              :key="'tower:' + (row.row_id || (row.zone + ':' + row.unit))"
+              class="review-field review-pump-field"
+            >
+              <span class="review-field-label">{{ row.zone_label }} {{ row.unit_label }} 冷却塔液位</span>
+              <input
+                class="review-input"
+                :value="row.cooling_tower_level"
+                @input="updateCoolingTowerLevel(rowIndex, $event.target.value)"
+                @change="updateCoolingTowerLevel(rowIndex, $event.target.value)"
+              />
+            </label>
+          </div>
+          <div class="review-fixed-fields review-pump-fields">
+            <label
+              v-for="tank in coolingTankRows"
+              :key="'tank:' + tank.zone"
+              class="review-field review-pump-field"
+            >
+              <span class="review-field-label">{{ tank.zone_label }}蓄冷罐温度</span>
+              <input
+                class="review-input"
+                :value="tank.temperature"
+                @input="updateCoolingTankValue(tank.zone, 'temperature', $event.target.value)"
+                @change="updateCoolingTankValue(tank.zone, 'temperature', $event.target.value)"
+              />
+              <span class="review-field-label">{{ tank.zone_label }}蓄冷罐液位</span>
+              <input
+                class="review-input"
+                :value="tank.level"
+                @input="updateCoolingTankValue(tank.zone, 'level', $event.target.value)"
+                @change="updateCoolingTankValue(tank.zone, 'level', $event.target.value)"
+              />
+            </label>
+          </div>
         </article>
       </section>
 

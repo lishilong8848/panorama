@@ -281,6 +281,96 @@ class HandoverSummaryMessageService:
         return "，".join(parts).rstrip("，") + "；"
 
     @staticmethod
+    def _format_with_unit(value: Any, unit: str) -> str:
+        text = _text(value)
+        if not text:
+            return ""
+        return text if unit and unit in text else f"{text}{unit}"
+
+    @staticmethod
+    def _manual_cooling_rows_by_unit(payload: Dict[str, Any], *, zone: str) -> Dict[int, Dict[str, Any]]:
+        rows = payload.get("rows", []) if isinstance(payload.get("rows", []), list) else []
+        output: Dict[int, Dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict) or _text(row.get("zone")).lower() != zone:
+                continue
+            try:
+                unit = int(row.get("unit", 0) or 0)
+            except Exception:  # noqa: BLE001
+                unit = 0
+            if unit > 0:
+                output[unit] = row
+        return output
+
+    @staticmethod
+    def _manual_cooling_tank(payload: Dict[str, Any], *, zone: str) -> Dict[str, Any]:
+        tanks = payload.get("tanks", {}) if isinstance(payload.get("tanks", {}), dict) else {}
+        tank = tanks.get(zone, {}) if isinstance(tanks.get(zone, {}), dict) else {}
+        return tank
+
+    @staticmethod
+    def _secondary_text_from_cooling_line(line: str) -> str:
+        match = re.search(r"([^，；]*二次泵运行正常)", _text(line))
+        return _text(match.group(1)) if match else ""
+
+    def _manual_cooling_line(
+        self,
+        *,
+        zone: str,
+        base_line: str,
+        running_units: Dict[str, List[Dict[str, Any]]],
+        cooling_payload: Dict[str, Any],
+    ) -> str:
+        manual_rows = self._manual_cooling_rows_by_unit(cooling_payload, zone=zone)
+        manual_tank = self._manual_cooling_tank(cooling_payload, zone=zone)
+        has_manual = bool(manual_rows) or any(key in manual_tank for key in ("temperature", "level"))
+        if not has_manual:
+            return _text(base_line)
+
+        zone_name = "A区" if zone == "west" else "B区"
+        active_units = list((running_units or {}).get(zone, []))
+        if not active_units:
+            active_units = [
+                {
+                    "unit": unit,
+                    "mode_text": _text(row.get("mode_text")),
+                }
+                for unit, row in sorted(manual_rows.items(), key=lambda item: item[0])
+            ]
+        running_count = len(active_units)
+        backup_count = max(0, 3 - running_count)
+        parts = [
+            f"冷冻站{zone_name}3套制冷单元{running_count}用{backup_count}备",
+            "群控模式为开启状态",
+            "备用机组与备用二次泵状态正常可用",
+        ]
+        for item in active_units:
+            unit = int(item.get("unit", 0) or 0)
+            if unit <= 0:
+                continue
+            manual_row = manual_rows.get(unit, {})
+            mode_text = _text(item.get("mode_text")) or _text(manual_row.get("mode_text"))
+            parts.append(f"{unit}#制冷单元{mode_text}模式运行正常" if mode_text else f"{unit}#制冷单元运行正常")
+            tower_level = _text(manual_row.get("cooling_tower_level"))
+            if tower_level:
+                parts.append(f"{unit}#冷却塔液位{self._format_with_unit(tower_level, 'm')}正常")
+
+        secondary_text = self._secondary_text_from_cooling_line(base_line)
+        if secondary_text:
+            parts.append(secondary_text)
+
+        tank_parts: List[str] = []
+        tank_temp = _text(manual_tank.get("temperature"))
+        tank_level = _text(manual_tank.get("level"))
+        if tank_temp:
+            tank_parts.append(f"后备温度{self._format_with_unit(tank_temp, '℃')}正常")
+        if tank_level:
+            tank_parts.append(f"液位{self._format_with_unit(tank_level, 'm')}正常")
+        if tank_parts:
+            parts.append(f"蓄冷罐{'、'.join(tank_parts)}")
+        return "，".join(parts).rstrip("，") + "；"
+
+    @staticmethod
     def _running_units_from_capacity_file(capacity_output_file: str) -> Dict[str, List[Dict[str, Any]]]:
         output: Dict[str, List[Dict[str, Any]]] = {"west": [], "east": []}
         path = Path(_text(capacity_output_file))
@@ -307,14 +397,51 @@ class HandoverSummaryMessageService:
         lines_payload = summary.get("lines", {}) if isinstance(summary, dict) else {}
         west_line = _text(lines_payload.get("west")) if isinstance(lines_payload, dict) else ""
         east_line = _text(lines_payload.get("east")) if isinstance(lines_payload, dict) else ""
+        running_units = self._normalize_running_units(session.get("capacity_running_units", {}) if isinstance(session, dict) else {})
+        if not running_units.get("west") and not running_units.get("east"):
+            running_units = self._running_units_from_capacity_file(_text(session.get("capacity_output_file")) if isinstance(session, dict) else "")
+        cooling_payload = (
+            session.get("cooling_pump_pressures", {})
+            if isinstance(session, dict) and isinstance(session.get("cooling_pump_pressures", {}), dict)
+            else {}
+        )
         if west_line or east_line:
+            if cooling_payload:
+                west_base = west_line or self._fallback_cooling_line(zone="west", running_units=running_units)
+                east_base = east_line or self._fallback_cooling_line(zone="east", running_units=running_units)
+                return [
+                    self._manual_cooling_line(
+                        zone="west",
+                        base_line=west_base,
+                        running_units=running_units,
+                        cooling_payload=cooling_payload,
+                    ),
+                    self._manual_cooling_line(
+                        zone="east",
+                        base_line=east_base,
+                        running_units=running_units,
+                        cooling_payload=cooling_payload,
+                    ),
+                ]
             return [
                 west_line or self._fallback_cooling_line(zone="west", running_units={"west": [], "east": []}),
                 east_line or self._fallback_cooling_line(zone="east", running_units={"west": [], "east": []}),
             ]
-        running_units = self._normalize_running_units(session.get("capacity_running_units", {}) if isinstance(session, dict) else {})
-        if not running_units.get("west") and not running_units.get("east"):
-            running_units = self._running_units_from_capacity_file(_text(session.get("capacity_output_file")) if isinstance(session, dict) else "")
+        if cooling_payload:
+            return [
+                self._manual_cooling_line(
+                    zone="west",
+                    base_line=self._fallback_cooling_line(zone="west", running_units=running_units),
+                    running_units=running_units,
+                    cooling_payload=cooling_payload,
+                ),
+                self._manual_cooling_line(
+                    zone="east",
+                    base_line=self._fallback_cooling_line(zone="east", running_units=running_units),
+                    running_units=running_units,
+                    cooling_payload=cooling_payload,
+                ),
+            ]
         return [
             self._fallback_cooling_line(zone="west", running_units=running_units),
             self._fallback_cooling_line(zone="east", running_units=running_units),

@@ -1827,9 +1827,20 @@ class HandoverCapacityReportService:
                         "mode_text": _text(unit_info.get("mode_text")),
                         "inlet_pressure": _text(default.get("inlet_pressure")),
                         "outlet_pressure": _text(default.get("outlet_pressure")),
+                        "cooling_tower_level": _text(default.get("cooling_tower_level")),
                     }
                 )
-        return {"rows": rows}
+        tanks: Dict[str, Dict[str, str]] = {}
+        for zone in ("west", "east"):
+            key = f"tank:{zone}"
+            default = defaults.get(key, {}) if isinstance(defaults.get(key, {}), dict) else {}
+            tanks[zone] = {
+                "zone": zone,
+                "zone_label": "西区" if zone == "west" else "东区",
+                "temperature": _text(default.get("temperature")),
+                "level": _text(default.get("level")),
+            }
+        return {"rows": rows, "tanks": tanks}
 
     @staticmethod
     def _format_with_unit(value: Any, unit: str) -> str:
@@ -1872,18 +1883,44 @@ class HandoverCapacityReportService:
             return f"{''.join(f'{number}#' for number in sorted(numbers))}二次泵运行正常"
         return f"{len(running_rows)}台二次泵运行正常"
 
+    @staticmethod
+    def _manual_cooling_rows(cooling_pump_pressures: Dict[str, Any] | None, *, zone: str) -> Dict[int, Dict[str, Any]]:
+        payload = cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {}
+        rows = payload.get("rows", []) if isinstance(payload.get("rows", []), list) else []
+        output: Dict[int, Dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict) or _text(row.get("zone")).lower() != zone:
+                continue
+            try:
+                unit = int(row.get("unit", 0) or 0)
+            except Exception:  # noqa: BLE001
+                unit = 0
+            if unit > 0:
+                output[unit] = row
+        return output
+
+    @staticmethod
+    def _manual_cooling_tank(cooling_pump_pressures: Dict[str, Any] | None, *, zone: str) -> Dict[str, Any]:
+        payload = cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {}
+        tanks = payload.get("tanks", {}) if isinstance(payload.get("tanks", {}), dict) else {}
+        tank = tanks.get(zone, {}) if isinstance(tanks.get(zone, {}), dict) else {}
+        return tank
+
     def _cooling_zone_sentence(
         self,
         *,
         zone: str,
         running_units: Dict[str, List[Dict[str, Any]]],
         query: CapacitySourceQuery,
+        cooling_pump_pressures: Dict[str, Any] | None = None,
     ) -> tuple[str, List[str]]:
         zone_name = "A区" if zone == "west" else "B区"
         active_units = list((running_units or {}).get(zone, []))
         running_count = len(active_units)
         backup_count = max(0, 3 - running_count)
         warnings: List[str] = []
+        manual_rows = self._manual_cooling_rows(cooling_pump_pressures, zone=zone)
+        manual_tank = self._manual_cooling_tank(cooling_pump_pressures, zone=zone)
         if running_count <= 0:
             warnings.append(f"冷冻站{zone_name}未识别到运行制冷单元")
         parts: List[str] = [
@@ -1903,7 +1940,7 @@ class HandoverCapacityReportService:
                 parts.append(f"{unit}#制冷单元{mode_text}模式运行正常")
             else:
                 parts.append(f"{unit}#制冷单元运行正常")
-            tower_level = query.first_text_by_d_aliases(
+            tower_level = _text(manual_rows.get(unit, {}).get("cooling_tower_level")) or query.first_text_by_d_aliases(
                 _COOLING_TOWER_LEVEL_ALIASES,
                 zone=zone,
                 unit=unit,
@@ -1920,8 +1957,16 @@ class HandoverCapacityReportService:
         else:
             warnings.append(f"冷冻站{zone_name}二次泵运行信息未识别")
 
-        tank_temp = query.first_text_by_d_aliases(_COOLING_TANK_TEMP_ALIASES, zone=zone, allow_global=True)
-        tank_level = query.first_text_by_d_aliases(_COOLING_TANK_LEVEL_ALIASES, zone=zone, allow_global=True)
+        tank_temp = _text(manual_tank.get("temperature")) or query.first_text_by_d_aliases(
+            _COOLING_TANK_TEMP_ALIASES,
+            zone=zone,
+            allow_global=True,
+        )
+        tank_level = _text(manual_tank.get("level")) or query.first_text_by_d_aliases(
+            _COOLING_TANK_LEVEL_ALIASES,
+            zone=zone,
+            allow_global=True,
+        )
         tank_parts: List[str] = []
         if tank_temp:
             tank_parts.append(f"后备温度{self._format_with_unit(tank_temp, '℃')}正常")
@@ -1940,6 +1985,7 @@ class HandoverCapacityReportService:
         *,
         capacity_rows: List[Any],
         running_units: Dict[str, List[Dict[str, Any]]],
+        cooling_pump_pressures: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         query = CapacitySourceQuery(capacity_rows if isinstance(capacity_rows, list) else [])
         lines: Dict[str, str] = {}
@@ -1949,6 +1995,7 @@ class HandoverCapacityReportService:
                 zone=zone,
                 running_units=running_units,
                 query=query,
+                cooling_pump_pressures=cooling_pump_pressures,
             )
             lines[zone] = line
             warnings.extend(zone_warnings)
@@ -2189,18 +2236,19 @@ class HandoverCapacityReportService:
             template_snapshot = build_capacity_template_snapshot(sheet, building_text)
             template_snapshot["template_family"] = _text(template_selection.get("template_family"))
             running_units = self._resolve_running_units(resolved_values_by_id)
+            cooling_pump_pressures = self._cooling_pump_pressures_from_defaults(
+                building=building_text,
+                running_units=running_units,
+            )
             capacity_cooling_summary = self.build_capacity_cooling_summary(
                 capacity_rows=capacity_rows,
                 running_units=running_units,
+                cooling_pump_pressures=cooling_pump_pressures,
             )
             shared_110kv = self._shared_substation_110kv_for_batch(
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
                 emit_log=emit_log,
-            )
-            cooling_pump_pressures = self._cooling_pump_pressures_from_defaults(
-                building=building_text,
-                running_units=running_units,
             )
             context = {
                 "building": building_text,

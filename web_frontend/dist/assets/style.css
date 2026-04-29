@@ -2622,6 +2622,19 @@ button:disabled,
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.review-subsection-head {
+  margin: 14px 0 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.review-subsection-head h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--text-1);
+}
+
 .review-pump-field {
   grid-template-columns: minmax(96px, 0.9fr) minmax(90px, 1fr);
   align-items: center;
