@@ -302,6 +302,81 @@ def test_handover_review_save_latest_passes_dirty_regions_and_returns_save_profi
     assert payload["display_state"]["actions"]["capacity_download"]["allowed"] is False
 
 
+def test_handover_review_save_session_conflict_does_not_persist_defaults_or_queue_side_effects(monkeypatch):
+    persisted_defaults_calls = []
+    restored = []
+
+    class _Service:
+        def get_latest_session_id(self, building):
+            assert building == "A楼"
+            return "A楼|2026-03-23|night"
+
+        def touch_session_after_save(self, *, building, session_id, base_revision):
+            raise routes.ReviewSessionConflictError("revision conflict")
+
+        def touch_session_after_history_save(self, **_kwargs):
+            raise AssertionError("history save branch should not run")
+
+    class _DocumentState:
+        def ensure_document_for_session(self, _session):
+            return None
+
+        def save_document(self, *, session, document, base_revision, dirty_regions, ensure_ready=True):
+            return (
+                {"session_id": session["session_id"], "revision": base_revision + 1, "document": document},
+                {"session_id": session["session_id"], "revision": base_revision},
+            )
+
+        def restore_document(self, *, building, previous):
+            restored.append((building, previous))
+
+        def enqueue_excel_sync(self, *_args, **_kwargs):
+            raise AssertionError("excel sync should not be queued after session conflict")
+
+    monkeypatch.setattr(routes, "_build_review_services", lambda _container: (_Service(), None, None, None))
+    monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(routes, "_ensure_session_lock_held_or_409", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        routes,
+        "_queue_capacity_overlay_after_review_save",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("capacity sync should not be queued")),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_load_target_session_or_404",
+        lambda _service, **_kwargs: {
+            "session_id": "A楼|2026-03-23|night",
+            "building": "A楼",
+            "revision": 7,
+            "output_file": "latest.xlsx",
+            "batch_key": "2026-03-23|night",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_persist_review_defaults",
+        lambda *_args, **_kwargs: persisted_defaults_calls.append(True),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        routes.handover_review_save(
+            "a",
+            _fake_request(),
+            _background_tasks(),
+            {
+                "session_id": "A楼|2026-03-23|night",
+                "base_revision": 7,
+                "document": {"fixed_blocks": [], "sections": [], "footer_blocks": []},
+                "dirty_regions": {"fixed_blocks": True},
+            },
+        )
+
+    assert exc_info.value.status_code == 409
+    assert persisted_defaults_calls == []
+    assert restored and restored[0][0] == "A楼"
+
+
 def test_handover_review_update_cloud_sync_uses_history_session(monkeypatch):
     followup_calls = []
 

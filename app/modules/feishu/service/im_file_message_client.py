@@ -14,6 +14,7 @@ from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_
 class FeishuImFileMessageClient:
     AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
     UPLOAD_FILE_URL = "https://open.feishu.cn/open-apis/im/v1/files"
+    UPLOAD_IMAGE_URL = "https://open.feishu.cn/open-apis/im/v1/images"
     SEND_MESSAGE_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
 
     def __init__(
@@ -176,6 +177,24 @@ class FeishuImFileMessageClient:
             raise RuntimeError(f"飞书文件上传失败: {body}")
         return {"file_key": file_key, "raw": body}
 
+    def upload_image(self, image_path: str) -> Dict[str, Any]:
+        path = Path(str(image_path or "").strip())
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"待发送图片不存在: {path}")
+        mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
+        with path.open("rb") as handle:
+            body = self._request_json_with_auth_retry(
+                "POST",
+                self.UPLOAD_IMAGE_URL,
+                data={"image_type": "message"},
+                files={"image": (path.name, handle, mime_type)},
+            )
+        data = body.get("data", {}) if isinstance(body.get("data", {}), dict) else {}
+        image_key = str(data.get("image_key", "") or "").strip()
+        if not image_key:
+            raise RuntimeError(f"飞书图片上传失败: {body}")
+        return {"image_key": image_key, "raw": body}
+
     def send_file_message(
         self,
         *,
@@ -229,6 +248,37 @@ class FeishuImFileMessageClient:
                 "receive_id": receive_id_text,
                 "msg_type": "text",
                 "content": json.dumps({"text": text_value}, ensure_ascii=False),
+            },
+            content_type_json=True,
+        )
+        data = body.get("data", {}) if isinstance(body.get("data", {}), dict) else {}
+        return {
+            "message_id": str(data.get("message_id", "") or "").strip(),
+            "raw": body,
+        }
+
+    def send_image_message(
+        self,
+        *,
+        receive_id: str,
+        receive_id_type: str,
+        image_key: str,
+    ) -> Dict[str, Any]:
+        receive_id_text = str(receive_id or "").strip()
+        receive_id_type_text = str(receive_id_type or "").strip() or "open_id"
+        image_key_text = str(image_key or "").strip()
+        if not receive_id_text:
+            raise ValueError("receive_id 不能为空")
+        if not image_key_text:
+            raise ValueError("image_key 不能为空")
+        body = self._request_json_with_auth_retry(
+            "POST",
+            self.SEND_MESSAGE_URL,
+            params={"receive_id_type": receive_id_type_text},
+            payload={
+                "receive_id": receive_id_text,
+                "msg_type": "image",
+                "content": json.dumps({"image_key": image_key_text}, ensure_ascii=False),
             },
             content_type_json=True,
         )

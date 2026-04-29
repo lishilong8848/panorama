@@ -54,6 +54,29 @@ class _FakeJobService:
         )
         return job
 
+    def start_job(self, name, *, run_func, resource_keys=None, priority="manual", feature="", submitted_by=""):  # noqa: ANN001
+        job = _FakeJob(
+            job_id=f"job-{len(self.calls) + 1}",
+            name=name,
+            resource_keys=list(resource_keys or []),
+            priority=submitted_by or priority,
+            feature=feature or name,
+        )
+        self.calls.append(
+            {
+                "name": name,
+                "run_func": run_func,
+                "worker_handler": "",
+                "worker_payload": {},
+                "resource_keys": list(resource_keys or []),
+                "priority": priority,
+                "feature": feature,
+                "submitted_by": submitted_by,
+                "job": job,
+            }
+        )
+        return job
+
 
 def _fake_request():
     container = SimpleNamespace(
@@ -76,9 +99,10 @@ def test_handover_review_confirm_all_prefers_worker_job() -> None:
     assert payload["ok"] is True
     assert payload["accepted"] is True
     assert payload["job"]["feature"] == "handover_confirm_all"
-    assert job_service.calls[0]["worker_handler"] == "handover_confirm_all"
-    assert job_service.calls[0]["worker_payload"] == {"batch_key": "2026-03-26|day"}
+    assert job_service.calls[0]["worker_handler"] == ""
+    assert job_service.calls[0]["worker_payload"] == {}
     assert "handover_batch:2026-03-26|day" in job_service.calls[0]["resource_keys"]
+    assert "network:external" not in job_service.calls[0]["resource_keys"]
 
 
 def test_handover_daily_report_rewrite_prefers_worker_job() -> None:

@@ -26,6 +26,7 @@ from handover_log_module.service.cabinet_power_defaults_service import CabinetPo
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from handover_log_module.service.handover_daily_report_asset_service import HandoverDailyReportAssetService
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
+from handover_log_module.service.capacity_report_image_delivery_service import CapacityReportImageDeliveryService
 from handover_log_module.service.handover_daily_report_screenshot_service import (
     HandoverDailyReportScreenshotService,
 )
@@ -2143,6 +2144,12 @@ def _build_review_display_state(
     cloud_sheet_uploading = str(cloud_sheet_state["status"]).strip().lower() in {"uploading", "syncing"}
     excel_sync_state = _present_review_excel_sync_state(session_payload.get("excel_sync", {}))
     capacity_state = _present_review_capacity_state(session_payload.get("capacity_sync", {}))
+    capacity_image_delivery = (
+        session_payload.get("capacity_image_delivery", {})
+        if isinstance(session_payload.get("capacity_image_delivery", {}), dict)
+        else {}
+    )
+    capacity_image_sending = str(capacity_image_delivery.get("status", "") or "").strip().lower() == "sending"
     confirmed = bool(session_payload.get("confirmed", False))
     has_output_file = bool(str(session_payload.get("output_file", "")).strip())
     has_capacity_file = bool(str(session_payload.get("capacity_output_file", "")).strip())
@@ -2304,6 +2311,18 @@ def _build_review_display_state(
         capacity_disabled_reason = "当前没有可下载的交接班容量报表"
     elif str(capacity_state["status"]) != "ready":
         capacity_disabled_reason = capacity_state["error"] or "容量报表待补写完成后才能下载"
+    capacity_image_send_allowed = bool(session_payload) and has_capacity_file and not is_history_mode and not remote_editor_active and not capacity_image_sending
+    capacity_image_send_disabled_reason = ""
+    if not session_payload:
+        capacity_image_send_disabled_reason = "当前没有可发送的容量报表"
+    elif is_history_mode:
+        capacity_image_send_disabled_reason = "历史交接班日志不支持发送容量表图片"
+    elif remote_editor_active:
+        capacity_image_send_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
+    elif not has_capacity_file:
+        capacity_image_send_disabled_reason = "当前没有可发送的容量报表"
+    elif capacity_image_sending:
+        capacity_image_send_disabled_reason = "容量表图片正在发送中，请等待发送完成"
     history_limit = max(1, int(history_payload.get("history_limit", HISTORY_CLOUD_SUCCESS_LIMIT) or HISTORY_CLOUD_SUCCESS_LIMIT))
     history_hint_rows = [f"仅显示最近 {history_limit} 条已成功上云的交接班日志。"]
     if session_payload and not bool(history_payload.get("selected_in_history_list", False)):
@@ -2461,6 +2480,14 @@ def _build_review_display_state(
                 visible=bool(session_payload),
                 label="下载交接班容量报表",
                 disabled_reason=capacity_disabled_reason,
+                tone="neutral",
+                variant="secondary",
+            ),
+            "capacity_image_send": _review_action(
+                allowed=capacity_image_send_allowed,
+                visible=bool(session_payload) and not is_history_mode,
+                label="发送容量表图片",
+                disabled_reason=capacity_image_send_disabled_reason,
                 tone="neutral",
                 variant="secondary",
             ),
@@ -2639,11 +2666,14 @@ def handover_review_confirm_all(batch_key: str, request: Request) -> Dict[str, A
         emit_log(
             f"[交接班][审核一键全确认] batch={batch_key}, sessions={len(updated_sessions)}, all_confirmed={bool(batch_status.get('all_confirmed', False))}"
         )
-        emit_log(f"[交接班][确认后上传] 开始 batch={batch_key}")
         try:
-            followup_result = followup.trigger_batch(batch_key, emit_log=emit_log)
+            followup_result = _start_handover_followup_job_after_confirm(
+                container,
+                batch_key=batch_key,
+                submitted_by="confirm_all",
+            )
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][确认后上传] 失败 batch={batch_key}, 错误={exc}")
+            emit_log(f"[交接班][确认后上传] 任务提交失败 batch={batch_key}, 错误={exc}")
             followup_result = _build_followup_failure_result(
                 followup,
                 batch_key=batch_key,
@@ -2651,7 +2681,6 @@ def handover_review_confirm_all(batch_key: str, request: Request) -> Dict[str, A
             )
         emit_log(
             f"[交接班][确认后上传] batch={batch_key}, 状态={_followup_status_text(followup_result.get('status'))}, "
-            f"已上传={len(followup_result.get('uploaded_buildings', []))}, 已失败={len(followup_result.get('failed_buildings', []))}, "
             f"云表状态={_followup_status_text(followup_result.get('cloud_sheet_sync', {}).get('status', '-'))}"
         )
         refreshed_batch_status = _attach_followup_progress(followup, service.get_batch_status(batch_key))
@@ -2668,8 +2697,8 @@ def handover_review_confirm_all(batch_key: str, request: Request) -> Dict[str, A
         container,
         name=f"交接班审核一键全确认-{batch_key}",
         run_func=_run,
-        worker_handler="handover_confirm_all",
-        worker_payload={"batch_key": batch_key},
+        worker_handler="",
+        worker_payload={},
         resource_keys=_handover_resource_keys(batch_key=batch_key),
         priority="manual",
         feature="handover_confirm_all",
@@ -3334,18 +3363,30 @@ def handover_review_download(building_code: str, request: Request, session_id: s
     output_file = Path(output_file_text)
     if not output_file.exists() or not output_file.is_file():
         raise HTTPException(status_code=409, detail="交接班文件不存在，无法同步最新审核内容")
+    download_warning = ""
     try:
         document_state.force_sync_session_dict(target, reason="download")
     except ReviewDocumentStateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        download_warning = str(exc)
+        container.add_system_log(
+            "[交接班][下载成品] 同步最新审核内容失败，继续下载现有业务文件 "
+            f"building={building}, session_id={session_id_text}, file={output_file}, error={download_warning}"
+        )
 
     container.add_system_log(
-        f"[交接班][下载成品] building={building}, session_id={session_id_text}, file={output_file}"
+        f"[交接班][下载成品] building={building}, session_id={session_id_text}, file={output_file}, "
+        f"warning={'yes' if download_warning else 'no'}"
     )
+    headers = {}
+    if download_warning:
+        headers["x-handover-download-warning-base64"] = base64.b64encode(
+            f"交接班文件部分审核内容同步失败，已下载现有业务文件：{download_warning}".encode("utf-8")
+        ).decode("ascii")
     return FileResponse(
         path=output_file,
         filename=output_file.name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
     )
 
 
@@ -3461,6 +3502,119 @@ def handover_review_capacity_download(
     )
 
 
+@router.post("/api/handover/review/{building_code}/capacity-image/send")
+def handover_review_capacity_image_send(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service, parser, writer, _ = _build_review_services(container)
+    document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
+    building = _resolve_building_or_404(service, building_code)
+
+    session_id_text = str(payload.get("session_id", "") or "").strip()
+    client_id = str(payload.get("client_id", "") or "").strip()
+    if not session_id_text:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
+    target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    if not str(target.get("capacity_output_file", "") or "").strip():
+        return {
+            "ok": False,
+            "status": "failed",
+            "error": "当前交接班容量报表尚未生成",
+            "building": building,
+            "session_id": session_id_text,
+            "successful_recipients": [],
+            "failed_recipients": [],
+            "capacity_image_delivery": target.get("capacity_image_delivery", {}),
+            "review_link_delivery": target.get("review_link_delivery", {}),
+        }
+
+    try:
+        document_state.ensure_document_for_session(target)
+        with container.job_service.resource_guard(
+            name=f"handover_capacity_image_excel_sync:{building}:{session_id_text}",
+            resource_keys=_handover_resource_keys(building=building),
+        ):
+            document_state.force_sync_session_dict(target, reason="capacity_image_send")
+        document, target_with_document = document_state.load_document(target)
+    except ReviewDocumentStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    tracked_cells = _extract_capacity_tracked_cells(document)
+    shared_state = _get_substation_110kv_state_safe(
+        service,
+        batch_key=str(target.get("batch_key", "")).strip(),
+        client_id=client_id,
+        emit_log=container.add_system_log,
+    )
+    shared_110kv = (
+        shared_state.get("shared_blocks", {}).get("substation_110kv", {})
+        if isinstance(shared_state.get("shared_blocks", {}), dict)
+        else {}
+    )
+    cooling_pump_pressures = (
+        document.get("cooling_pump_pressures", {})
+        if isinstance(document.get("cooling_pump_pressures", {}), dict)
+        else {}
+    )
+
+    current_session = dict(target)
+    current_session.update(target_with_document if isinstance(target_with_document, dict) else {})
+
+    def _ensure_capacity_ready_for_send() -> Dict[str, Any]:
+        nonlocal current_session
+        with container.job_service.resource_guard(
+            name=f"handover_capacity_image_overlay:{building}:{session_id_text}",
+            resource_keys=_handover_resource_keys(building=building),
+        ):
+            current_session = _sync_capacity_overlay_for_saved_session(
+                container=container,
+                review_service=service,
+                saved_session=current_session,
+                tracked_cells=tracked_cells,
+                shared_110kv=shared_110kv if isinstance(shared_110kv, dict) else {},
+                cooling_pump_pressures=cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {},
+                client_id=client_id,
+            )
+        return current_session
+
+    delivery_service = CapacityReportImageDeliveryService(
+        _handover_cfg(container),
+        config_path=getattr(container, "config_path", None),
+        review_service=service,
+    )
+    try:
+        result = delivery_service.send_for_session(
+            current_session,
+            building=building,
+            handover_cells=tracked_cells,
+            shared_110kv=shared_110kv if isinstance(shared_110kv, dict) else {},
+            cooling_pump_pressures=cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {},
+            client_id=client_id,
+            ensure_capacity_ready=_ensure_capacity_ready_for_send,
+            emit_log=container.add_system_log,
+        )
+    except Exception as exc:  # noqa: BLE001
+        container.add_system_log(
+            f"[交接班][容量表图片发送] 接口异常 building={building}, session_id={session_id_text}, error={exc}"
+        )
+        return {
+            "ok": False,
+            "status": "failed",
+            "error": str(exc),
+            "building": building,
+            "session_id": session_id_text,
+            "successful_recipients": [],
+            "failed_recipients": [],
+            "capacity_image_delivery": current_session.get("capacity_image_delivery", {}),
+            "review_link_delivery": current_session.get("review_link_delivery", {}),
+        }
+    return result
+
+
 @router.put("/api/handover/review/{building_code}")
 def handover_review_save(
     building_code: str,
@@ -3504,10 +3658,11 @@ def handover_review_save(
     defaults_config_status = "skipped"
     with container.job_service.resource_guard(
         name=f"handover_save:{batch_key or building}:{session_id}",
-        resource_keys=_handover_resource_keys(building=building),
+        resource_keys=_handover_resource_keys(building=building, batch_key=batch_key),
     ):
         write_started = time.perf_counter()
         previous_document_state: Dict[str, Any] | None = None
+        saved_document_state_for_cache: Dict[str, Any] | None = None
         try:
             _saved_document_state, previous_document_state = document_state.save_document(
                 session=target,
@@ -3517,16 +3672,7 @@ def handover_review_save(
                 ensure_ready=False,
             )
             if isinstance(_saved_document_state, dict):
-                _review_document_cache_put(
-                    building=building,
-                    signature=_review_document_signature(
-                        target,
-                        revision_override=int(_saved_document_state.get("revision", 0) or 0),
-                    ),
-                    document=_saved_document_state.get("document", {})
-                    if isinstance(_saved_document_state.get("document", {}), dict)
-                    else document,
-                )
+                saved_document_state_for_cache = _saved_document_state
         except ReviewDocumentStateConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewDocumentStateError as exc:
@@ -3543,6 +3689,41 @@ def handover_review_save(
             _raise_review_store_http_error(exc, saved_document=True)
         is_latest_session = bool(latest_session_id and latest_session_id == session_id)
         persisted_defaults = {"footer_inventory_rows": 0, "cabinet_power_fields": 0, "config_updated": False}
+        try:
+            session_started = time.perf_counter()
+            if is_latest_session:
+                session, batch_status = service.touch_session_after_save(
+                    building=building,
+                    session_id=session_id,
+                    base_revision=base_revision,
+                )
+            else:
+                session, batch_status = service.touch_session_after_history_save(
+                    building=building,
+                    session_id=session_id,
+                    base_revision=base_revision,
+                )
+            session_elapsed_ms = int((time.perf_counter() - session_started) * 1000)
+        except ReviewSessionConflictError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ReviewSessionNotFoundError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ReviewSessionStoreUnavailableError as exc:
+            document_state.restore_document(building=building, previous=previous_document_state)
+            _raise_review_store_http_error(exc, saved_document=True)
+        if isinstance(saved_document_state_for_cache, dict):
+            _review_document_cache_put(
+                building=building,
+                signature=_review_document_signature(
+                    session,
+                    revision_override=int(saved_document_state_for_cache.get("revision", 0) or 0),
+                ),
+                document=saved_document_state_for_cache.get("document", {})
+                if isinstance(saved_document_state_for_cache.get("document", {}), dict)
+                else document,
+            )
         if is_latest_session:
             defaults_started = time.perf_counter()
             try:
@@ -3579,30 +3760,6 @@ def handover_review_save(
                         else {}
                     ),
                 )
-        try:
-            session_started = time.perf_counter()
-            if is_latest_session:
-                session, batch_status = service.touch_session_after_save(
-                    building=building,
-                    session_id=session_id,
-                    base_revision=base_revision,
-                )
-            else:
-                session, batch_status = service.touch_session_after_history_save(
-                    building=building,
-                    session_id=session_id,
-                    base_revision=base_revision,
-                )
-            session_elapsed_ms = int((time.perf_counter() - session_started) * 1000)
-        except ReviewSessionConflictError as exc:
-            document_state.restore_document(building=building, previous=previous_document_state)
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except ReviewSessionNotFoundError as exc:
-            document_state.restore_document(building=building, previous=previous_document_state)
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ReviewSessionStoreUnavailableError as exc:
-            document_state.restore_document(building=building, previous=previous_document_state)
-            _raise_review_store_http_error(exc, saved_document=True)
         try:
             capacity_started = time.perf_counter()
             session, queued_capacity_sync = _queue_capacity_overlay_after_review_save(

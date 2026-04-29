@@ -52,18 +52,22 @@ export function createHandoverReviewDocumentEditHelpers(options = {}) {
     const block = documentRef.value.fixed_blocks?.[blockIndex];
     const field = block?.fields?.[fieldIndex];
     if (!field) return;
+    const nextValue = String(value ?? "");
+    if (String(field.value ?? "") === nextValue) return;
     const cellName = String(field.cell || "").trim().toUpperCase();
+    field.value = nextValue;
     markDocumentDirty({ region: "fixed_blocks", capacityCell: cellName });
-    field.value = String(value ?? "");
   }
 
   function updateSectionCell(sectionIndex, rowIndex, column, value) {
     const section = documentRef.value.sections?.[sectionIndex];
     const row = section?.rows?.[rowIndex];
     if (!section || !row || !row.cells) return;
-    markDocumentDirty({ region: "sections" });
-    row.cells[column] = String(value ?? "");
+    const nextValue = String(value ?? "");
+    if (String(row.cells[column] ?? "") === nextValue) return;
+    row.cells[column] = nextValue;
     row.is_placeholder_row = !hasSectionRowContent(row, section.columns);
+    markDocumentDirty({ region: "sections" });
   }
 
   function addSectionRow(sectionIndex) {
@@ -88,9 +92,11 @@ export function createHandoverReviewDocumentEditHelpers(options = {}) {
     if (!block || block.type !== "inventory_table") return;
     const row = block.rows?.[rowIndex];
     if (!row || !row.cells) return;
-    markDocumentDirty({ region: "footer_inventory" });
-    row.cells[column] = String(value ?? "");
+    const nextValue = String(value ?? "");
+    if (String(row.cells[column] ?? "") === nextValue) return;
+    row.cells[column] = nextValue;
     row.is_placeholder_row = !footerRowHasContent(row, block.columns);
+    markDocumentDirty({ region: "footer_inventory" });
   }
 
   function addFooterRow(blockIndex) {

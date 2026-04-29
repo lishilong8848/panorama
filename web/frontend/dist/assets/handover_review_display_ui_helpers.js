@@ -200,10 +200,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       disabled:
         loading.value
         || saving.value
-        || confirming.value
-        || cloudSyncBusy.value
         || syncingRemoteRevision.value
-        || capacityDownloading.value
         || capacityImageSending.value
         || capacityImageSendActionBase.value.pending
         || !capacityImageSendActionBase.value.allowed,
@@ -262,8 +259,6 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       localDisabledReason = "交接班文件正在下载，请稍候";
     } else if (capacityDownloading.value) {
       localDisabledReason = "容量报表正在下载，请稍候";
-    } else if (capacityImageSending.value) {
-      localDisabledReason = "容量表图片正在发送，请稍候";
     } else if (retryingCloudSync.value || updatingHistoryCloudSync.value || cloudSyncBusy.value) {
       localDisabledReason = "云表同步处理中，请稍候";
     } else if (syncingRemoteRevision.value) {

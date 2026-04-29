@@ -215,6 +215,7 @@
                       :disabled="substation110kvReadonly"
                       @focus="ensureSubstation110kvLock"
                       @input="updateSubstation110kvCell(rowIndex, column.key, $event.target.value)"
+                      @change="updateSubstation110kvCell(rowIndex, column.key, $event.target.value)"
                     />
                   </td>
                 </tr>
@@ -244,12 +245,14 @@
                 class="review-input"
                 :value="row.inlet_pressure"
                 @input="updateCoolingPumpPressure(rowIndex, 'inlet_pressure', $event.target.value)"
+                @change="updateCoolingPumpPressure(rowIndex, 'inlet_pressure', $event.target.value)"
               />
               <span class="review-field-label">{{ row.zone_label }} {{ row.unit_label }} 出水压力</span>
               <input
                 class="review-input"
                 :value="row.outlet_pressure"
                 @input="updateCoolingPumpPressure(rowIndex, 'outlet_pressure', $event.target.value)"
+                @change="updateCoolingPumpPressure(rowIndex, 'outlet_pressure', $event.target.value)"
               />
             </label>
           </div>
@@ -272,6 +275,7 @@
                 class="review-input"
                 :value="field.value"
                 @input="updateFixedField(blockIndex, fieldIndex, $event.target.value)"
+                @change="updateFixedField(blockIndex, fieldIndex, $event.target.value)"
               />
             </label>
           </div>
@@ -317,6 +321,7 @@
                       rows="1"
                       :value="row.cells[column.key] || ''"
                       @input="updateSectionCell(sectionIndex, rowIndex, column.key, $event.target.value)"
+                      @change="updateSectionCell(sectionIndex, rowIndex, column.key, $event.target.value)"
                     ></textarea>
                   </td>
                   <td class="review-col-action">
@@ -371,6 +376,7 @@
                         rows="1"
                         :value="row.cells[column.key] || ''"
                         @input="updateFooterCell(blockIndex, rowIndex, column.key, $event.target.value)"
+                        @change="updateFooterCell(blockIndex, rowIndex, column.key, $event.target.value)"
                       ></textarea>
                     </td>
                     <td class="review-col-action">

@@ -552,6 +552,12 @@ class ReviewBuildingDocumentStore:
         self.ensure_ready()
         now = _now_text()
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            running = conn.execute(
+                "SELECT session_id FROM sync_jobs WHERE status='running' LIMIT 1"
+            ).fetchone()
+            if running is not None:
+                return None
             row = conn.execute(
                 """
                 SELECT * FROM sync_jobs
@@ -564,13 +570,31 @@ class ReviewBuildingDocumentStore:
                 return None
             session_id = str(row["session_id"] or "")
             conn.execute(
-                "UPDATE sync_jobs SET status='running', attempts=attempts+1, updated_at=? WHERE session_id=?",
-                (now, session_id),
+                """
+                UPDATE sync_jobs
+                   SET status='running', attempts=attempts+1, updated_at=?
+                 WHERE session_id=?
+                   AND status='pending'
+                   AND NOT EXISTS (
+                        SELECT 1 FROM sync_jobs
+                         WHERE status='running'
+                           AND session_id<>?
+                   )
+                """,
+                (now, session_id, session_id),
             )
+            if conn.total_changes <= 0:
+                return None
+            claimed = conn.execute(
+                "SELECT * FROM sync_jobs WHERE session_id=? AND status='running'",
+                (session_id,),
+            ).fetchone()
+            if claimed is None:
+                return None
             return {
                 "session_id": session_id,
-                "target_revision": int(row["target_revision"] or 0),
-                "attempts": int(row["attempts"] or 0) + 1,
+                "target_revision": int(claimed["target_revision"] or 0),
+                "attempts": int(claimed["attempts"] or 0),
             }
 
     def finish_job(

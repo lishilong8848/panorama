@@ -593,6 +593,37 @@ def test_present_updater_mirror_overview_marks_remote_publish_ready():
     assert payload["items"][2]["value"] == "V3.216.20260417"
 
 
+def test_present_updater_mirror_overview_does_not_block_business_actions_for_stale_restart_result():
+    payload = present_updater_mirror_overview(
+        {
+            "enabled": True,
+            "source_kind": "git_remote",
+            "last_result": "updated_restart_scheduled",
+            "restart_required": False,
+            "dependency_sync_status": "success",
+            "queued_apply": {"queued": False},
+        }
+    )
+
+    assert payload["business_actions"]["allowed"] is True
+
+
+def test_present_updater_mirror_overview_blocks_business_actions_when_restart_required():
+    payload = present_updater_mirror_overview(
+        {
+            "enabled": True,
+            "source_kind": "git_remote",
+            "last_result": "updated_restart_scheduled",
+            "restart_required": True,
+            "dependency_sync_status": "success",
+            "queued_apply": {"queued": False},
+        }
+    )
+
+    assert payload["business_actions"]["allowed"] is False
+    assert payload["business_actions"]["reason_code"] == "restart_required"
+
+
 def test_present_updater_mirror_overview_shows_git_mode_items():
     payload = present_updater_mirror_overview(
         {

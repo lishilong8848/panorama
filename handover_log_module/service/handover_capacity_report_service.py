@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import hmac
 import json
 import re
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
@@ -52,6 +55,22 @@ _CAPACITY_WATER_SOURCE = {
         "water_total": "当日耗水总量（修正）",
     },
 }
+_CAPACITY_TOTAL_ELECTRICITY_SOURCE = {
+    "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+    "table_id": "tblqSskJvBnx9UJj",
+    "page_size": 500,
+    "max_records": 0,
+    "cache_ttl_sec": 30,
+    "fields": {
+        "category": "汇总分类",
+        "building": "楼栋",
+        "date": "日期",
+        "value": "数值（整数）",
+    },
+    "category_value": "总用电量",
+}
+_TOTAL_ELECTRICITY_CACHE_LOCK = threading.RLock()
+_TOTAL_ELECTRICITY_CACHE: Dict[tuple[str, str, str], tuple[float, Dict[str, Any]]] = {}
 _CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13")
 _CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
 _SUBSTATION_110KV_TARGET_ROWS = {
@@ -171,6 +190,23 @@ def _extract_building_code(value: Any) -> str:
 
 def _normalize_building_text(value: Any) -> str:
     return _text(value).replace(" ", "").casefold()
+
+
+def _formula_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        return "TRUE()" if value else "FALSE()"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(int(value)) if isinstance(value, int) else str(value)
+    text = _text(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
+
+
+def _date_only(value: Any) -> str:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        text = _text(value)
+        return text[:10] if len(text) >= 10 else text
+    return parsed.strftime("%Y-%m-%d")
 
 
 def _build_fixed_header_cells(building: Any) -> Dict[str, str]:
@@ -1145,6 +1181,238 @@ class HandoverCapacityReportService:
         )
         return summary
 
+    def _new_total_electricity_client(self) -> FeishuBitableClient:
+        global_feishu = require_feishu_auth_settings(self.config)
+        app_token = str(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("app_token", "") or "").strip()
+        table_id = str(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("table_id", "") or "").strip()
+        if not app_token or not table_id:
+            raise ValueError("容量报表总用电量多维配置缺失: app_token/table_id")
+        return FeishuBitableClient(
+            app_id=str(global_feishu.get("app_id", "") or "").strip(),
+            app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
+            app_token=app_token,
+            calc_table_id=table_id,
+            attachment_table_id=table_id,
+            timeout=int(global_feishu.get("timeout", 30) or 30),
+            request_retry_count=int(global_feishu.get("request_retry_count", 3) or 3),
+            request_retry_interval_sec=float(global_feishu.get("request_retry_interval_sec", 2) or 2),
+            date_text_to_timestamp_ms_fn=date_text_to_timestamp_ms,
+            canonical_metric_name_fn=lambda value: str(value or "").strip(),
+            dimension_mapping={},
+        )
+
+    @staticmethod
+    def _total_electricity_window(duty_date: str) -> tuple[datetime, datetime, datetime]:
+        duty_day = parse_duty_date(duty_date)
+        if duty_day.day == 1:
+            month_end_dt = datetime(duty_day.year, duty_day.month, 1, 0, 0, 0)
+            if duty_day.month == 1:
+                month_start_dt = datetime(duty_day.year - 1, 12, 1, 0, 0, 0)
+            else:
+                month_start_dt = datetime(duty_day.year, duty_day.month - 1, 1, 0, 0, 0)
+        else:
+            month_start_dt = datetime(duty_day.year, duty_day.month, 1, 0, 0, 0)
+            if duty_day.month == 12:
+                month_end_dt = datetime(duty_day.year + 1, 1, 1, 0, 0, 0)
+            else:
+                month_end_dt = datetime(duty_day.year, duty_day.month + 1, 1, 0, 0, 0)
+        prev_day = datetime(duty_day.year, duty_day.month, duty_day.day, 0, 0, 0) - timedelta(days=1)
+        return month_start_dt, month_end_dt, prev_day
+
+    @staticmethod
+    def _build_total_electricity_filter_formula(*, start_date: str, end_date: str) -> str:
+        fields_cfg = _CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("fields", {})
+        if not isinstance(fields_cfg, dict):
+            fields_cfg = {}
+        date_field = str(fields_cfg.get("date", "日期") or "日期").strip()
+        category_field = str(fields_cfg.get("category", "汇总分类") or "汇总分类").strip()
+        category_value = str(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("category_value", "总用电量") or "总用电量").strip()
+        return (
+            f'AND(CurrentValue.[{date_field}]>=TODATE({_formula_literal(start_date)}), '
+            f'CurrentValue.[{date_field}]<TODATE({_formula_literal(end_date)}), '
+            f'CurrentValue.[{category_field}]={_formula_literal(category_value)})'
+        )
+
+    def _query_total_electricity_batch(
+        self,
+        *,
+        duty_date: str,
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        duty_date_text = _text(duty_date)
+        month_start_dt, month_end_dt, prev_day_dt = self._total_electricity_window(duty_date_text)
+        start_text = month_start_dt.strftime("%Y-%m-%d")
+        end_text = month_end_dt.strftime("%Y-%m-%d")
+        prev_day_text = prev_day_dt.strftime("%Y-%m-%d")
+        cache_key = (start_text, end_text, prev_day_text)
+        ttl_sec = max(1, int(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("cache_ttl_sec", 30) or 30))
+        now = time.monotonic()
+        with _TOTAL_ELECTRICITY_CACHE_LOCK:
+            cached = _TOTAL_ELECTRICITY_CACHE.get(cache_key)
+            if cached and now - cached[0] <= ttl_sec:
+                payload = copy.deepcopy(cached[1])
+                emit_log(
+                    "[交接班][容量报表][总用电量] 命中短缓存 "
+                    f"window={start_text}~{end_text}, prev_day={prev_day_text}, raw={payload.get('raw_count', 0)}, matched={payload.get('matched_count', 0)}"
+                )
+                return payload
+
+        fields_cfg = _CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("fields", {})
+        if not isinstance(fields_cfg, dict):
+            fields_cfg = {}
+        category_field = str(fields_cfg.get("category", "") or "").strip()
+        building_field = str(fields_cfg.get("building", "") or "").strip()
+        date_field = str(fields_cfg.get("date", "") or "").strip()
+        value_field = str(fields_cfg.get("value", "") or "").strip()
+        table_id = str(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("table_id", "") or "").strip()
+        filter_formula = self._build_total_electricity_filter_formula(start_date=start_text, end_date=end_text)
+        category_value = str(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("category_value", "总用电量") or "总用电量").strip()
+        result: Dict[str, Any] = {
+            "start_date": start_text,
+            "end_date": end_text,
+            "prev_day": prev_day_text,
+            "by_building": {},
+            "warnings": [],
+            "raw_count": 0,
+            "matched_count": 0,
+        }
+        for building_name in _BUILDER_BY_BUILDING:
+            result["by_building"][building_name] = {
+                "prev_day_value": "0",
+                "month_total": "0",
+                "prev_day_found": False,
+                "prev_day_value_found": False,
+                "month_records": 0,
+                "month_value_records": 0,
+            }
+        try:
+            client = self._new_total_electricity_client()
+            option_maps = self._load_field_option_maps(
+                client=client,
+                table_id=table_id,
+                target_fields=[category_field, building_field],
+                emit_log=emit_log,
+            )
+            emit_log(
+                "[交接班][容量报表][总用电量] 查询开始 "
+                f"window={start_text}~{end_text}, prev_day={prev_day_text}, filter={filter_formula}"
+            )
+            records = client.list_records(
+                table_id=table_id,
+                page_size=max(1, int(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("page_size", 500) or 500)),
+                max_records=int(_CAPACITY_TOTAL_ELECTRICITY_SOURCE.get("max_records", 0) or 0),
+                filter_formula=filter_formula,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warning = f"总用电量查询失败，V57/Y57 已按 0 处理: {exc}"
+            result["warnings"].append(warning)
+            emit_log(
+                "[交接班][容量报表][总用电量] 查询失败 "
+                f"window={start_text}~{end_text}, prev_day={prev_day_text}, error={exc}"
+            )
+            with _TOTAL_ELECTRICITY_CACHE_LOCK:
+                _TOTAL_ELECTRICITY_CACHE[cache_key] = (now, copy.deepcopy(result))
+            return result
+
+        result["raw_count"] = len(records)
+        category_option_map = option_maps.get(category_field, {})
+        building_option_map = option_maps.get(building_field, {})
+        month_totals: Dict[str, float] = {building_name: 0.0 for building_name in _BUILDER_BY_BUILDING}
+        prev_values: Dict[str, float | None] = {building_name: None for building_name in _BUILDER_BY_BUILDING}
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            fields = item.get("fields", {})
+            if not isinstance(fields, dict):
+                continue
+            category_text = _field_text_with_option_map(fields.get(category_field), category_option_map)
+            if category_text != category_value:
+                continue
+            record_date = _date_only(fields.get(date_field))
+            if not record_date or record_date < start_text or record_date >= end_text:
+                continue
+            matched_building = ""
+            record_building = _field_text_with_option_map(fields.get(building_field), building_option_map)
+            for building_name in _BUILDER_BY_BUILDING:
+                if self._matches_building(record_building, building_name):
+                    matched_building = building_name
+                    break
+            if not matched_building:
+                continue
+            bucket = result["by_building"][matched_building]
+            bucket["month_records"] = int(bucket.get("month_records", 0) or 0) + 1
+            value = _to_float(fields.get(value_field))
+            if record_date == prev_day_text:
+                bucket["prev_day_found"] = True
+                if value is not None:
+                    bucket["prev_day_value_found"] = True
+                    prev_values[matched_building] = value
+            if value is None:
+                continue
+            bucket["month_value_records"] = int(bucket.get("month_value_records", 0) or 0) + 1
+            month_totals[matched_building] += value
+            result["matched_count"] = int(result.get("matched_count", 0) or 0) + 1
+
+        for building_name, bucket in result["by_building"].items():
+            prev_value = prev_values.get(building_name)
+            bucket["prev_day_value"] = format_number(prev_value if prev_value is not None else 0)
+            bucket["month_total"] = format_number(month_totals.get(building_name, 0.0))
+            if not bool(bucket.get("prev_day_found")):
+                result["warnings"].append(f"{building_name} V57 缺少 {prev_day_text} 总用电量记录，已按 0 写入")
+            elif not bool(bucket.get("prev_day_value_found")):
+                result["warnings"].append(f"{building_name} V57 {prev_day_text} 总用电量数值为空，已按 0 写入")
+            if int(bucket.get("month_records", 0) or 0) <= 0:
+                result["warnings"].append(f"{building_name} Y57 缺少 {start_text}~{end_text} 总用电量记录，已按 0 写入")
+            elif int(bucket.get("month_value_records", 0) or 0) <= 0:
+                result["warnings"].append(f"{building_name} Y57 {start_text}~{end_text} 总用电量数值为空，已按 0 写入")
+            emit_log(
+                "[交接班][容量报表][总用电量] 楼栋结果 "
+                f"building={building_name}, V57={bucket.get('prev_day_value', '0')}, Y57={bucket.get('month_total', '0')}, "
+                f"matched_month_records={int(bucket.get('month_records', 0) or 0)}, prev_day_found={bool(bucket.get('prev_day_found'))}"
+            )
+        emit_log(
+            "[交接班][容量报表][总用电量] 查询完成 "
+            f"window={start_text}~{end_text}, prev_day={prev_day_text}, raw={result.get('raw_count', 0)}, matched={result.get('matched_count', 0)}"
+        )
+        with _TOTAL_ELECTRICITY_CACHE_LOCK:
+            _TOTAL_ELECTRICITY_CACHE[cache_key] = (now, copy.deepcopy(result))
+        return result
+
+    def query_total_electricity_summary(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        building_text = _text(building)
+        batch = self._query_total_electricity_batch(duty_date=duty_date, emit_log=emit_log)
+        by_building = batch.get("by_building", {}) if isinstance(batch.get("by_building", {}), dict) else {}
+        summary = by_building.get(building_text, {}) if isinstance(by_building.get(building_text, {}), dict) else {}
+        payload = {
+            "V57": _text(summary.get("prev_day_value")) or "0",
+            "Y57": _text(summary.get("month_total")) or "0",
+            "start_date": _text(batch.get("start_date")),
+            "end_date": _text(batch.get("end_date")),
+            "prev_day": _text(batch.get("prev_day")),
+            "warnings": [
+                str(item or "").strip()
+                for item in (batch.get("warnings", []) if isinstance(batch.get("warnings", []), list) else [])
+                if str(item or "").strip() and str(item or "").strip().startswith(building_text)
+            ],
+        }
+        payload["signature"] = "|".join(
+            [
+                f"start={payload['start_date']}",
+                f"end={payload['end_date']}",
+                f"prev={payload['prev_day']}",
+                f"building={building_text}",
+                f"V57={payload['V57']}",
+                f"Y57={payload['Y57']}",
+            ]
+        )
+        return payload
+
     def _build_capacity_overlay_values(
         self,
         *,
@@ -1155,6 +1423,11 @@ class HandoverCapacityReportService:
     ) -> Dict[str, str]:
         handover = handover_cells if isinstance(handover_cells, dict) else {}
         water_summary = self._query_capacity_water_summary(
+            building=building,
+            duty_date=duty_date,
+            emit_log=emit_log,
+        )
+        total_electricity = self.query_total_electricity_summary(
             building=building,
             duty_date=duty_date,
             emit_log=emit_log,
@@ -1181,6 +1454,8 @@ class HandoverCapacityReportService:
             "X2": weather_humidity,
             "AC25": _text(water_summary.get("month_total")),
             "O57": _text(water_summary.get("latest_daily_total")),
+            "V57": _text(total_electricity.get("V57")) or "0",
+            "Y57": _text(total_electricity.get("Y57")) or "0",
         }
         return {cell: value for cell, value in overlay.items() if value != ""}
 
@@ -1234,6 +1509,94 @@ class HandoverCapacityReportService:
             values[inlet_cell] = _text(row.get("inlet_pressure"))
             values[outlet_cell] = _text(row.get("outlet_pressure"))
         return values
+
+    @staticmethod
+    def _capacity_file_fingerprint(capacity_output_file: str) -> Dict[str, Any]:
+        path = Path(_text(capacity_output_file))
+        if not _text(capacity_output_file) or not path.exists() or not path.is_file():
+            return {
+                "path": _text(capacity_output_file),
+                "exists": False,
+                "size": 0,
+                "mtime_ns": 0,
+            }
+        try:
+            stat = path.stat()
+            return {
+                "path": str(path.resolve(strict=False)),
+                "exists": True,
+                "size": int(getattr(stat, "st_size", 0) or 0),
+                "mtime_ns": int(getattr(stat, "st_mtime_ns", 0) or int(getattr(stat, "st_mtime", 0) or 0)),
+            }
+        except Exception:  # noqa: BLE001
+            return {
+                "path": str(path),
+                "exists": False,
+                "size": 0,
+                "mtime_ns": 0,
+            }
+
+    def build_capacity_overlay_signature(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        handover_cells: Dict[str, Any],
+        capacity_output_file: str,
+        shared_110kv: Dict[str, Any] | None = None,
+        cooling_pump_pressures: Dict[str, Any] | None = None,
+        client_id: str = "",
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        handover = handover_cells if isinstance(handover_cells, dict) else {}
+        input_signature = self.capacity_input_signature(handover)
+        valid, error = self._validate_capacity_overlay_inputs(handover)
+        overlay_values = self._build_capacity_overlay_values(
+            building=building,
+            duty_date=duty_date,
+            handover_cells=handover,
+            emit_log=emit_log,
+        )
+        shared_block = (
+            shared_110kv
+            if isinstance(shared_110kv, dict)
+            else self._shared_substation_110kv_for_batch(
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                client_id=client_id,
+                emit_log=emit_log,
+            )
+        )
+        overlay_values.update(self._build_substation_110kv_values(shared_block))
+        if isinstance(cooling_pump_pressures, dict):
+            overlay_values.update(self._build_cooling_pump_pressure_values(cooling_pump_pressures))
+        normalized_values = {
+            _text(cell).upper(): _text(value)
+            for cell, value in overlay_values.items()
+            if _text(cell)
+        }
+        file_fingerprint = self._capacity_file_fingerprint(capacity_output_file)
+        payload = {
+            "version": "capacity-overlay-signature-v2",
+            "building": _text(building),
+            "duty_date": _text(duty_date),
+            "duty_shift": _text(duty_shift).lower(),
+            "input_signature": input_signature,
+            "file": file_fingerprint,
+            "values": {cell: normalized_values[cell] for cell in sorted(normalized_values)},
+        }
+        signature = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return {
+            "signature": signature,
+            "input_signature": input_signature,
+            "valid": bool(valid),
+            "error": error,
+            "file": file_fingerprint,
+            "values": payload["values"],
+        }
 
     def _shared_substation_110kv_for_batch(
         self,

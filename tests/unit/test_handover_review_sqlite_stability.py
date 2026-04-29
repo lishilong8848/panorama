@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from fastapi import BackgroundTasks
 
 from app.modules.handover_review.api import routes
+from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 
 
 class _DummyJobService:
@@ -163,3 +164,41 @@ def test_load_review_document_cached_reuses_latest_snapshot(tmp_path: Path):
     assert document_state.calls == 1
     assert first_document == second_document
     assert second_session["excel_sync"]["status"] == "synced"
+
+
+def test_review_document_state_keeps_sqlite_document_when_excel_fingerprint_changes(tmp_path: Path):
+    output_file = tmp_path / "handover.xlsx"
+    output_file.write_text("initial", encoding="utf-8")
+    config = {"_global_paths": {"runtime_state_root": str(tmp_path / "runtime")}}
+    session = {
+        "session_id": "A楼|2026-04-29|day",
+        "building": "A楼",
+        "duty_date": "2026-04-29",
+        "duty_shift": "day",
+        "batch_key": "2026-04-29|day",
+        "revision": 1,
+        "output_file": str(output_file),
+    }
+
+    class _Parser:
+        def __init__(self):
+            self.calls = 0
+
+        def parse(self, _path):
+            self.calls += 1
+            return {
+                "fixed_blocks": [{"fields": [{"cell": "A1", "value": "sqlite-source"}]}],
+                "sections": [],
+                "footer_blocks": [],
+            }
+
+    parser = _Parser()
+    service = ReviewDocumentStateService(config, parser=parser, emit_log=lambda *_args: None)
+
+    first = service.ensure_document_for_session(session)
+    output_file.write_text("changed by excel sync", encoding="utf-8")
+    second = service.ensure_document_for_session(session)
+
+    assert parser.calls == 1
+    assert second["revision"] == first["revision"]
+    assert second["document"]["fixed_blocks"][0]["fields"][0]["value"] == "sqlite-source"

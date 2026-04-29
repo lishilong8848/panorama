@@ -1511,8 +1511,8 @@ export function mountHandoverReviewApp(Vue) {
         const currentRevision = Number(sharedBlocks.value?.substation_110kv?.revision || 0);
         const incomingRevision = Number(incomingBlock.revision || 0);
         const serverRevisionChanged = hasIncomingSubstation && incomingRevision !== currentRevision;
-        const preserveLocalRows = Boolean(substation110kvDirty.value && incomingLock.client_holds_lock);
-        if (preserveLocalRows && serverRevisionChanged) {
+        const preserveLocalRows = Boolean(substation110kvDirty.value);
+        if (preserveLocalRows && hasIncomingSubstation) {
           const currentBlock = normalizeSubstation110kvBlock(sharedBlocks.value.substation_110kv || {});
           sharedBlocks.value = {
             ...sharedBlocks.value,
@@ -2129,8 +2129,10 @@ export function mountHandoverReviewApp(Vue) {
         const rows = documentRef.value?.cooling_pump_pressures?.rows;
         if (!Array.isArray(rows) || !rows[rowIndex]) return;
         if (!["inlet_pressure", "outlet_pressure"].includes(String(key || ""))) return;
+        const nextValue = String(value ?? "");
+        if (String(rows[rowIndex][key] ?? "") === nextValue) return;
+        rows[rowIndex][key] = nextValue;
         markDocumentDirty({ region: "cooling_pump_pressures" });
-        rows[rowIndex][key] = String(value ?? "");
       }
 
       async function saveSubstation110kvIfNeeded() {

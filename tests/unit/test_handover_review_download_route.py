@@ -52,6 +52,34 @@ def test_handover_review_download_returns_file_response(tmp_path, monkeypatch):
     assert any("[交接班][下载成品]" in message for message in container.logs)
 
 
+def test_handover_review_download_returns_existing_file_with_warning_when_sync_fails(tmp_path, monkeypatch):
+    output_file = tmp_path / "A楼交接班日志.xlsx"
+    output_file.write_bytes(b"demo")
+    container = _FakeContainer()
+
+    class _DocumentState:
+        def ensure_document_for_session(self, _session):
+            return None
+
+        def force_sync_session_dict(self, _session, *, reason="manual"):
+            raise routes.ReviewDocumentStateError("Excel 被占用")
+
+    monkeypatch.setattr(routes, "_build_review_services", lambda _container: (object(), None, None, None))
+    monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *_args, **_kwargs: _DocumentState())
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda _service, _code: "A楼")
+    monkeypatch.setattr(
+        routes,
+        "_load_target_session_or_404",
+        lambda _service, **kwargs: {"session_id": "sess-1", "output_file": str(output_file), "building": "A楼"},
+    )
+
+    response = routes.handover_review_download("a", _fake_request(container), session_id="sess-1")
+
+    assert Path(response.path) == output_file
+    assert response.headers.get("x-handover-download-warning-base64")
+    assert any("同步最新审核内容失败，继续下载现有业务文件" in message for message in container.logs)
+
+
 def test_handover_review_download_rejects_empty_session_id(monkeypatch):
     container = _FakeContainer()
 

@@ -1212,8 +1212,6 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         "dependency_checking",
         "dependency_syncing",
         "dependency_rollback",
-        "updated_restart_scheduled",
-        "restart_pending",
     }
     business_actions_allowed = True
     business_actions_reason_code = ""

@@ -394,8 +394,8 @@ export function createHandoverReviewActionHelpers(options = {}) {
       statusText.value = capacityImageSendActionVm.value.disabledReason || "";
       return;
     }
-    if (saving.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
-      statusText.value = "请先等待当前保存、同步或下载完成后再发送。";
+    if (saving.value || syncingRemoteRevision.value || capacityImageSending.value) {
+      statusText.value = "请先等待当前保存或同步完成后再发送。";
       return;
     }
     if (dirty.value) {

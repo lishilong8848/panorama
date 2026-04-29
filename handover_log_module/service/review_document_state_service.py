@@ -100,7 +100,7 @@ class ReviewDocumentStateService:
                 current_mtime
                 and (existing_mtime != current_mtime or existing_size != current_size)
             )
-            if path_changed or fingerprint_changed:
+            if path_changed:
                 store.delete_document(session_id)
                 self.emit_log(
                     f"[交接班][审核SQLite] 检测到会话输出文件已切换，已丢弃旧审核文档: "
@@ -108,6 +108,13 @@ class ReviewDocumentStateService:
                     f"new={current_output_file}, fingerprint_changed={'是' if fingerprint_changed else '否'}"
                 )
             else:
+                if fingerprint_changed:
+                    self.emit_log(
+                        f"[交接班][审核SQLite] 检测到交接班Excel文件指纹变化，继续以审核SQLite为准，避免覆盖已保存内容: "
+                        f"building={building}, session_id={session_id}, file={current_output_file}, "
+                        f"old_mtime={existing_mtime or '-'}, new_mtime={current_mtime or '-'}, "
+                        f"old_size={existing_size}, new_size={current_size}"
+                    )
                 return existing
 
         output_file = self._output_file(session)

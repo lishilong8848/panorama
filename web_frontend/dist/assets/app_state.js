@@ -995,7 +995,7 @@ export function createAppState(vueApi) {
       return true;
     }
     const reasonCode = String(businessActions.reasonCode || "").trim().toLowerCase();
-    if (reasonCode === "pending_backend") {
+    if (["pending_backend", "updated_restart_scheduled", "restart_pending"].includes(reasonCode)) {
       return true;
     }
     return businessActions.allowed !== false;
