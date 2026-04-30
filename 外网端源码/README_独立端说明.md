@@ -1,0 +1,23 @@
+# 外网端独立源码目录
+
+这个目录是外网端独立运行源码，用于和内网端彻底分开维护、部署和启动。
+
+## 启动
+
+双击 `启动程序.bat`。
+
+## 配置
+
+本目录不包含用户配置、密钥、运行数据和下载产物。部署时请把对应端自己的配置放到本目录或对应 `user_data` 目录中。
+
+已排除：
+- 表格计算配置.json
+- config_segments
+- .runtime / runtime_state / user_data
+- QLDownload / downloads / output
+- runtime/python
+- .env / 日志 / 缓存 / 测试目录
+
+## 角色
+
+本目录启动时会强制运行角色为 `external`（外网端），不会修改配置文件里的角色字段。

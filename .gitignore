@@ -73,3 +73,61 @@ tests/
 !tests/unit/test_settings_loader_handover_shift_fields.py
 QLDownload/
 runtime/
+
+# Split-source layout
+# The two endpoint folders are now the maintained source trees. Keep them tracked
+# even though broad legacy ignore rules above ignore *.json and tests/ globally.
+!/外网端源码/
+!/外网端源码/**
+!/内网端源码/
+!/内网端源码/**
+
+# Still ignore caches, local config, runtime data and generated state inside each endpoint tree.
+/外网端源码/**/__pycache__/
+/内网端源码/**/__pycache__/
+/外网端源码/**/*.py[cod]
+/内网端源码/**/*.py[cod]
+/外网端源码/.pytest_cache/
+/内网端源码/.pytest_cache/
+/外网端源码/.pytest_tmp/
+/内网端源码/.pytest_tmp/
+/外网端源码/.runtime/
+/内网端源码/.runtime/
+/外网端源码/runtime_state/
+/内网端源码/runtime_state/
+/外网端源码/runtime/
+/内网端源码/runtime/
+/外网端源码/QLDownload/
+/内网端源码/QLDownload/
+/外网端源码/downloads/
+/内网端源码/downloads/
+/外网端源码/output/
+/内网端源码/output/
+/外网端源码/表格计算配置.backup.*.json
+/内网端源码/表格计算配置.backup.*.json
+/外网端源码/表格计算配置.pre_handover_segments.*.json
+/内网端源码/表格计算配置.pre_handover_segments.*.json
+/外网端源码/*.log
+/内网端源码/*.log
+/外网端源码/*.tmp
+/内网端源码/*.tmp
+/外网端源码/*.bak
+/内网端源码/*.bak
+
+# Root after split: source moved into 外网端源码/ and 内网端源码/.
+# Keep root deployment/config/runtime artifacts out of Git.
+/config_segments/
+/downloads/
+/output/
+/QLDownload/
+/runtime/
+/runtime_state/
+/表格计算配置*.json
+/build_version_state.json
+/daily_scheduler_state.json
+/scheduler_first_launch_done.flag
+/交接班日志空模板.xlsx
+/其他楼交接班容量报表空模板.xlsx
+/E楼交接班容量报表空模板.xlsx
+/月度变更统计表空模板.xlsx
+/月度事件统计表空模板.xlsx

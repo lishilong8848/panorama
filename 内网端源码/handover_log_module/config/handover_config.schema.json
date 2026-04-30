@@ -1,0 +1,141 @@
+﻿{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "handover_log_module_config",
+  "type": "object",
+  "required": [
+    "download",
+    "template",
+    "parsing",
+    "normalize",
+    "chiller_mode",
+    "cell_rules"
+  ],
+  "properties": {
+    "enabled": { "type": "boolean" },
+    "download": {
+      "type": "object",
+      "required": ["template_name", "lookback_minutes", "scale_label"],
+      "properties": {
+        "template_name": { "type": "string" },
+        "lookback_minutes": { "type": "integer", "minimum": 1 },
+        "use_shift_window_when_provided": { "type": "boolean" },
+        "shift_windows": {
+          "type": "object",
+          "properties": {
+            "day": {
+              "type": "object",
+              "properties": {
+                "start": { "type": "string" },
+                "end": { "type": "string" }
+              }
+            },
+            "night": {
+              "type": "object",
+              "properties": {
+                "start": { "type": "string" },
+                "end_next_day": { "type": "string" }
+              }
+            }
+          }
+        },
+        "scale_label": { "type": "string" },
+        "query_result_timeout_ms": { "type": "integer", "minimum": 500 },
+        "download_event_timeout_ms": { "type": "integer", "minimum": 1000 },
+        "login_fill_timeout_ms": { "type": "integer", "minimum": 500 },
+        "start_end_visible_timeout_ms": { "type": "integer", "minimum": 500 },
+        "page_refresh_retry_count": { "type": "integer", "minimum": 0 },
+        "max_retries": { "type": "integer", "minimum": 1 },
+        "retry_wait_sec": { "type": "integer", "minimum": 0 },
+        "force_iframe_reopen_each_task": { "type": "boolean" },
+        "parallel_by_building": { "type": "boolean" },
+        "site_start_delay_sec": { "type": "integer", "minimum": 0 },
+        "debug_step_log": { "type": "boolean" },
+        "export_button_text": { "type": "string" }
+      }
+    },
+    "template": {
+      "type": "object",
+      "required": ["source_path", "sheet_name", "output_dir", "file_name_pattern", "date_format"]
+    },
+    "parsing": {
+      "type": "object",
+      "required": ["sheet_index", "start_row", "col_b", "col_c", "col_d", "col_e", "value_source"]
+    },
+    "normalize": {
+      "type": "object",
+      "required": ["b_extract_regex", "c_extract_regex", "fallback"]
+    },
+    "chiller_mode": {
+      "type": "object",
+      "required": ["west_keys", "east_keys", "value_map", "fallback_mode_text"],
+      "properties": {
+        "west_keys": { "type": "array", "items": { "type": "string" } },
+        "east_keys": { "type": "array", "items": { "type": "string" } },
+        "priority_order": { "type": "array", "items": { "type": "string" } },
+        "value_map": { "type": "object" },
+        "fallback_mode_text": { "type": "string" }
+      }
+    },
+    "missing_policy": { "type": "string", "enum": ["blank", "zero", "na"] },
+    "sites": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "template_fixed_fill": {
+      "type": "object"
+    },
+    "cell_rules": {
+      "type": "object",
+      "required": ["default_rows", "building_rows"],
+      "properties": {
+        "default_rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/cell_rule_row" }
+        },
+        "building_rows": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/cell_rule_row" }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "cell_rule_row": {
+      "type": "object",
+      "required": ["id", "enabled", "rule_type", "agg"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean" },
+        "target_cell": {
+          "type": "string",
+          "anyOf": [
+            { "const": "" },
+            { "pattern": "^[A-Z]+[1-9]\\d*$" }
+          ]
+        },
+        "rule_type": {
+          "type": "string",
+          "enum": ["direct", "aggregate", "computed"]
+        },
+        "d_keywords": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "match_mode": { "type": "string" },
+        "agg": {
+          "type": "string",
+          "enum": ["first", "max", "min"]
+        },
+        "template": { "type": "string" },
+        "computed_op": { "type": "string" },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

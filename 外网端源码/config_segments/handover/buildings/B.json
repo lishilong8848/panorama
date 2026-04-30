@@ -1,0 +1,21 @@
+﻿{
+  "revision": 2,
+  "updated_at": "2026-04-30T12:12:02+08:00",
+  "data": {
+    "cell_rules": {
+      "building_rows": {
+        "B楼": []
+      }
+    },
+    "cloud_sheet_sync": {
+      "sheet_names": {
+        "B楼": "B楼"
+      }
+    },
+    "review_ui": {
+      "cabinet_power_defaults_by_building": {},
+      "footer_inventory_defaults_by_building": {},
+      "review_link_recipients_by_building": {}
+    }
+  }
+}
