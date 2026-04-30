@@ -1,6 +1,10 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0"
+pushd "%~dp0" || (
+    echo [ERROR] Cannot enter project directory: %~dp0
+    if /i not "%QJPT_NO_PAUSE%"=="1" pause
+    endlocal & exit /b 1
+)
 chcp 65001 >nul 2>nul
 
 echo [INFO] Preparing bundled Python runtime under runtime\python
@@ -109,8 +113,10 @@ set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 echo [INFO] Runtime prepare exited with code %EXIT_CODE%.
 if /i not "%QJPT_NO_PAUSE%"=="1" pause
+popd >nul 2>nul
 endlocal & exit /b %EXIT_CODE%
 
 :fail_exit
 if /i not "%QJPT_NO_PAUSE%"=="1" pause
+popd >nul 2>nul
 endlocal & exit /b 1

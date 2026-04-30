@@ -1,7 +1,19 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0"
+set "QJPT_STARTUP_SOURCE_DIR=%~dp0"
+if not defined QJPT_STARTUP_LOG set "QJPT_STARTUP_LOG=%TEMP%\QJPT_internal_startup.log"
+> "%QJPT_STARTUP_LOG%" echo [INFO] QJPT internal startup invoked at %DATE% %TIME%
+>> "%QJPT_STARTUP_LOG%" echo [INFO] Source dir: %QJPT_STARTUP_SOURCE_DIR%
+echo [INFO] Startup log: %QJPT_STARTUP_LOG%
+pushd "%~dp0" || (
+    echo [ERROR] Cannot enter project directory: %~dp0
+    >> "%QJPT_STARTUP_LOG%" echo [ERROR] Cannot enter project directory: %~dp0
+    if /i not "%QJPT_NO_PAUSE%"=="1" pause
+    endlocal & exit /b 1
+)
 set "QJPT_FORCE_ROLE_MODE=internal"
 set "QJPT_MAIN_FILE=main_internal.py"
-call "%~dp0_启动基础程序.bat" %*
-endlocal & exit /b %ERRORLEVEL%
+call "%CD%\_启动基础程序.bat" %*
+set "EXIT_CODE=%ERRORLEVEL%"
+popd >nul 2>nul
+endlocal & exit /b %EXIT_CODE%

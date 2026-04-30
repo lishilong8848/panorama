@@ -1,8 +1,14 @@
 @echo off
 setlocal EnableExtensions
 title QJPT Web Console Log Window
-cd /d "%~dp0"
+pushd "%~dp0" || (
+    echo [ERROR] Cannot enter project directory: %~dp0
+    if defined QJPT_STARTUP_LOG echo [ERROR] Cannot enter project directory: %~dp0>> "%QJPT_STARTUP_LOG%"
+    if /i not "%QJPT_NO_PAUSE%"=="1" pause
+    endlocal & exit /b 1
+)
 chcp 65001 >nul 2>nul
+if defined QJPT_STARTUP_LOG echo [INFO] Base launcher cwd: %CD%>> "%QJPT_STARTUP_LOG%"
 
 set "PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple"
 set "PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn"
@@ -182,9 +188,13 @@ goto finish
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 echo [INFO] Program exited with code %EXIT_CODE%.
+if defined QJPT_STARTUP_LOG echo [INFO] Program exited with code %EXIT_CODE%.>> "%QJPT_STARTUP_LOG%"
 if /i not "%QJPT_NO_PAUSE%"=="1" pause
+popd >nul 2>nul
 endlocal & exit /b %EXIT_CODE%
 
 :fail_exit
+if defined QJPT_STARTUP_LOG echo [ERROR] Startup failed.>> "%QJPT_STARTUP_LOG%"
 if /i not "%QJPT_NO_PAUSE%"=="1" pause
+popd >nul 2>nul
 endlocal & exit /b 1
