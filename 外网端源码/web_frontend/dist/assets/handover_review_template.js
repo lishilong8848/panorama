@@ -368,9 +368,18 @@
                     ></textarea>
                   </td>
                   <td class="review-col-action">
-                    <button class="btn btn-danger btn-mini" @click="removeSectionRow(sectionIndex, rowIndex)">
-                      删除
-                    </button>
+                    <div class="review-row-actions">
+                      <button
+                        v-if="canTransferSectionRowToOtherImportantWork(section, row)"
+                        class="btn btn-secondary btn-mini"
+                        @click="transferSectionRowToOtherImportantWork(sectionIndex, rowIndex)"
+                      >
+                        转到其他重要工作记录
+                      </button>
+                      <button class="btn btn-danger btn-mini" @click="removeSectionRow(sectionIndex, rowIndex)">
+                        删除
+                      </button>
+                    </div>
                   </td>
                 </tr>
               </tbody>

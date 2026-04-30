@@ -1,4 +1,4 @@
-﻿{
+{
   "version": 3,
   "common": {
     "paths": {
@@ -227,13 +227,70 @@
         "date_field_mode": "timestamp",
         "date_field_day": 1,
         "date_tz_offset_hours": 8,
-        "app_token": "",
-        "calc_table_id": "",
-        "attachment_table_id": "",
+        "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+        "calc_table_id": "tblf1YG2l2BDqcjV",
+        "attachment_table_id": "tblA9tahsVnfvO31",
         "report_type": "全景平台月报"
       }
     },
-    "sheet_import": {},
+    "sheet_import": {
+      "app_token": "OoOIbWNNaailfssUlnccUQAWnf0",
+      "clear_before_upload": true,
+      "continue_on_sheet_error": true,
+      "create_batch_size": 200,
+      "delete_batch_size": 500,
+      "enabled": true,
+      "image_import": {
+        "enabled": true,
+        "mapping_mode": "explicit_then_auto",
+        "missing_attachment_field_strategy": "fail_sheet",
+        "multi_image_strategy": "all",
+        "sheet_image_rules": {
+          "0.重点推动": {
+            "上传图片/附件（如有）": "上传图片|附件（如有）图片",
+            "闭环照片": "闭环照片"
+          },
+          "1.楼内闭环": {
+            "上传图片/附件（如有）": "上传图片|附件（如有）图片",
+            "备注": "备注图片",
+            "当前进展": "当前进展图片",
+            "计划关闭日期": "计划关闭日期图片",
+            "闭环照片": "闭环照片图片"
+          },
+          "2.飞检问题": {
+            "完成图片": "完成图片图片",
+            "问题图片": "问题图片图片"
+          }
+        },
+        "upload_timeout": 30
+      },
+      "list_page_size": 500,
+      "request_retry_count": 3,
+      "request_retry_interval_sec": 2,
+      "sheet_rules": {
+        "0.重点推动": {
+          "header_row": 1,
+          "table_id": "tblpQHfmC556F0rV"
+        },
+        "1.楼内闭环": {
+          "header_row": 1,
+          "table_id": "tblicZe8NNfMRyTC"
+        },
+        "2.飞检问题": {
+          "header_row": 2,
+          "table_id": "tblwBDFn8Mhgc1EA"
+        },
+        "3.消防专项排查问题表": {
+          "header_row": 1,
+          "table_id": "tblbLn76fJoqWVq6"
+        },
+        "4.DE楼待维修项": {
+          "header_row": 2,
+          "table_id": "tbl9ZOfsYNVHFRno"
+        }
+      },
+      "timeout": 30
+    },
     "handover_log": {
       "enabled": true,
       "scheduler": {
@@ -4516,22 +4573,127 @@
         "state_file": "alarm_event_upload_scheduler_state.json"
       },
       "feishu": {
-        "app_token": "",
-        "table_id": "",
+        "app_token": "SOwsw315aiBJjgkl48ccoxIPntc",
+        "table_id": "tblD7hi70s6U6rlU",
         "page_size": 500,
         "delete_batch_size": 500,
-        "create_batch_size": 200
+        "create_batch_size": 200,
+        "list_page_size": 500,
+        "clear_before_upload": true,
+        "timeout": 30
       },
       "shared_source_upload": {
         "replace_existing_on_full": true
-      }
+      },
+      "skip_levels": [
+        5
+      ],
+      "enabled": true,
+      "fields": {
+        "event_level": "event_level",
+        "event_time": "event_time",
+        "recover_status": "recover_status",
+        "process_status": "process_status",
+        "confirm_user": "confirm_user",
+        "confirm_description": "confirm_description",
+        "accept_user": "accept_user",
+        "confirm_time": "confirm_time",
+        "accept_description": "accept_description",
+        "content": "content",
+        "recover_time": "recover_time",
+        "accept_time": "accept_time",
+        "alarm_type": "alarm_type",
+        "trigger_value": "trigger_value",
+        "process_suggestion": "process_suggestion",
+        "event_source": "event_source"
+      },
+      "window_days": 35,
+      "test_db": {
+        "time_field_mode": "auto",
+        "enabled": true,
+        "building_label": "测试楼栋",
+        "fixed_table": "event_2026_02",
+        "port": 3306,
+        "host": "127.0.0.1",
+        "password": "123456",
+        "user": "root",
+        "database": "e_event",
+        "table_mode": "fixed"
+      },
+      "run_with_scheduler": true,
+      "window_end_time": "00:00:00",
+      "level_mapping": {
+        "3": "重要",
+        "2": "严重",
+        "1": "紧急",
+        "4": "次要"
+      },
+      "alarm_category_default": "真实告警",
+      "resume": {
+        "enabled": true,
+        "max_retry": 3,
+        "state_file": "alarm_export_resume_state.json",
+        "root_dir": "alarm_export_resume",
+        "reuse_extracted_rows": true,
+        "retry_interval_sec": 2
+      },
+      "snapshot_mode": "clear_and_rebuild"
     },
     "manual_upload_gui": {
       "enabled": true
     },
     "wet_bulb_collection": {
-      "source": {},
-      "target": {}
+      "source": {
+        "reuse_handover_download": true,
+        "reuse_handover_rule_engine": true
+      },
+      "target": {
+        "app_token": "JbZywYBfgiltYpksj2bc1HvCnPd",
+        "create_batch_size": 200,
+        "delete_batch_size": 200,
+        "max_records": 5000,
+        "page_size": 500,
+        "replace_existing": true,
+        "table_id": "tblm3MOOxKCW3ZPd"
+      },
+      "cooling_mode": {
+        "priority_order": [
+          "1",
+          "2",
+          "3",
+          "4"
+        ],
+        "skip_modes": [
+          "停机"
+        ],
+        "source_value_map": {
+          "1": "制冷",
+          "2": "预冷",
+          "3": "板换",
+          "4": "停机"
+        },
+        "upload_value_map": {
+          "制冷": "机械制冷",
+          "板换": "自然冷模式",
+          "预冷": "预冷模式"
+        }
+      },
+      "enabled": false,
+      "fields": {
+        "building": "楼栋",
+        "cooling_mode": "冷源运行模式",
+        "date": "日期",
+        "sequence": "序号",
+        "wet_bulb_temp": "天气湿球温度"
+      },
+      "scheduler": {
+        "auto_start_in_gui": false,
+        "check_interval_sec": 30,
+        "enabled": true,
+        "interval_minutes": 60,
+        "retry_failed_on_next_tick": true,
+        "state_file": "wet_bulb_collection_scheduler_state.json"
+      }
     }
   }
 }

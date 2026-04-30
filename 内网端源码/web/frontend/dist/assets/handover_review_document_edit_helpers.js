@@ -87,6 +87,128 @@ export function createHandoverReviewDocumentEditHelpers(options = {}) {
     }
   }
 
+  function normalizeHeaderText(value) {
+    return String(value ?? "").replace(/\s+/g, "").trim().toLowerCase();
+  }
+
+  function normalizeCompareText(value) {
+    return String(value ?? "").replace(/\s+/g, "").trim().toLowerCase();
+  }
+
+  function sectionName(section) {
+    return String(section?.name || "").trim();
+  }
+
+  function findSectionIndexByName(name) {
+    const target = String(name || "").trim();
+    const sections = Array.isArray(documentRef.value.sections) ? documentRef.value.sections : [];
+    return sections.findIndex((section) => sectionName(section) === target);
+  }
+
+  function findColumnKey(section, labels, fallbackKey) {
+    const columns = Array.isArray(section?.columns) ? section.columns : [];
+    const normalizedLabels = (Array.isArray(labels) ? labels : [labels])
+      .map((label) => normalizeHeaderText(label))
+      .filter(Boolean);
+    const matched = columns.find((column) => {
+      const key = normalizeHeaderText(column?.key);
+      const label = normalizeHeaderText(column?.label);
+      return normalizedLabels.includes(key) || normalizedLabels.includes(label);
+    });
+    if (matched?.key) return matched.key;
+    const fallback = String(fallbackKey || "").trim().toUpperCase();
+    const fallbackColumn = columns.find((column) => String(column?.key || "").trim().toUpperCase() === fallback);
+    return fallbackColumn?.key || "";
+  }
+
+  function resolveTransferPayload(section, row) {
+    const name = sectionName(section);
+    if (name === "维护管理") {
+      const descriptionKey = findColumnKey(section, ["维护总项"], "B");
+      const executorKey = findColumnKey(section, ["执行人"], "H");
+      return {
+        description: String(row?.cells?.[descriptionKey] ?? "").trim(),
+        executor: String(row?.cells?.[executorKey] ?? "").trim(),
+      };
+    }
+    if (name === "变更管理") {
+      const descriptionKey = findColumnKey(section, ["描述"], "D");
+      const executorKey = findColumnKey(section, ["执行人"], "H");
+      return {
+        description: String(row?.cells?.[descriptionKey] ?? "").trim(),
+        executor: String(row?.cells?.[executorKey] ?? "").trim(),
+      };
+    }
+    return { description: "", executor: "" };
+  }
+
+  function canTransferSectionRowToOtherImportantWork(section, row) {
+    const name = sectionName(section);
+    if (name !== "维护管理" && name !== "变更管理") return false;
+    if (!row || row.is_placeholder_row) return false;
+    const payload = resolveTransferPayload(section, row);
+    return Boolean(payload.description);
+  }
+
+  function transferSectionRowToOtherImportantWork(sectionIndex, rowIndex) {
+    const sourceSection = documentRef.value.sections?.[sectionIndex];
+    const sourceRow = sourceSection?.rows?.[rowIndex];
+    if (!canTransferSectionRowToOtherImportantWork(sourceSection, sourceRow)) return;
+
+    const payload = resolveTransferPayload(sourceSection, sourceRow);
+    const targetIndex = findSectionIndexByName("其他重要工作记录");
+    if (targetIndex < 0) {
+      statusText.value = "未找到其他重要工作记录分类";
+      return;
+    }
+    const targetSection = documentRef.value.sections[targetIndex];
+    const descriptionKey = findColumnKey(targetSection, ["描述"], "B");
+    const completionKey = findColumnKey(targetSection, ["完成情况"], "F");
+    const executorKey = findColumnKey(targetSection, ["执行人"], "H");
+    if (!descriptionKey || !completionKey || !executorKey) {
+      statusText.value = "其他重要工作记录缺少描述、完成情况或执行人列";
+      return;
+    }
+
+    const duplicateDescription = normalizeCompareText(payload.description);
+    const duplicateExecutor = normalizeCompareText(payload.executor);
+    const rows = Array.isArray(targetSection.rows) ? targetSection.rows : [];
+    const exists = rows.some((row) => {
+      if (!row || row.is_placeholder_row || !row.cells) return false;
+      return normalizeCompareText(row.cells[descriptionKey]) === duplicateDescription
+        && normalizeCompareText(row.cells[executorKey]) === duplicateExecutor;
+    });
+
+    if (!exists) {
+      if (!Array.isArray(targetSection.rows)) {
+        targetSection.rows = [];
+      }
+      let targetRow = targetSection.rows.find((row) => row?.is_placeholder_row && !hasSectionRowContent(row, targetSection.columns));
+      if (!targetRow) {
+        targetRow = blankRow(targetSection.columns);
+        targetSection.rows.push(targetRow);
+      }
+      if (!targetRow.cells || typeof targetRow.cells !== "object") {
+        targetRow.cells = {};
+      }
+      targetRow.cells[descriptionKey] = payload.description;
+      targetRow.cells[completionKey] = "已完成";
+      targetRow.cells[executorKey] = payload.executor;
+      targetRow.is_placeholder_row = !hasSectionRowContent(targetRow, targetSection.columns);
+    }
+
+    if (Array.isArray(sourceSection.rows)) {
+      sourceSection.rows.splice(rowIndex, 1);
+      if (!sourceSection.rows.length) {
+        sourceSection.rows.push(blankRow(sourceSection.columns));
+      }
+    }
+    markDocumentDirty({ region: "sections" });
+    statusText.value = exists
+      ? "其他重要工作记录已存在该记录，已从原分类删除，待保存"
+      : "已转到其他重要工作记录，待保存";
+  }
+
   function updateFooterCell(blockIndex, rowIndex, column, value) {
     const block = documentRef.value.footer_blocks?.[blockIndex];
     if (!block || block.type !== "inventory_table") return;
@@ -125,6 +247,8 @@ export function createHandoverReviewDocumentEditHelpers(options = {}) {
     updateSectionCell,
     addSectionRow,
     removeSectionRow,
+    canTransferSectionRowToOtherImportantWork,
+    transferSectionRowToOtherImportantWork,
     updateFooterCell,
     addFooterRow,
     removeFooterRow,

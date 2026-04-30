@@ -1,58 +1,123 @@
-# Build outputs
+# ---------------------------------------------------------------------------
+# Repository layout
+# ---------------------------------------------------------------------------
+# Maintained source code lives in:
+#   /外网端源码/
+#   /内网端源码/
+#
+# Endpoint configs are part of the source package and should stay trackable:
+#   /外网端源码/表格计算配置.json
+#   /外网端源码/config_segments/**
+#   /内网端源码/表格计算配置.json
+#   /内网端源码/config_segments/**
+#
+# Ignore only local environments, runtime data, generated downloads,
+# temporary files and legacy root-level artifacts.
+
+# ---------------------------------------------------------------------------
+# OS / editor
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+
+# ---------------------------------------------------------------------------
+# Python / test caches
+# ---------------------------------------------------------------------------
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+**/.pytest_cache/
+.pytest_tmp/
+**/.pytest_tmp/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# Node / browser tooling caches
+# ---------------------------------------------------------------------------
+node_modules/
+**/node_modules/
+.npm-cache/
+.playwright-cli/
+**/.playwright-cli/
+
+# ---------------------------------------------------------------------------
+# Local Python environments
+# ---------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+!.env.example
+.venv/
+venv/
+env/
+
+# ---------------------------------------------------------------------------
+# Build and package outputs
+# ---------------------------------------------------------------------------
 /dist/
 /build/
 /build_output/
-/node_modules/
-/runtime/python/
 *.zip
+*.7z
+*.rar
 *.exe
 *.exe.manifest
-.git
+*.spec
 
-# Environment and caches
-/.env
-.env
-/.venv/
-/venv/
-__pycache__/
-*.py[cod]
-*.pyo
-QLDownload
-# IDE and test tooling
-/.idea/
-/.vscode/
-/.playwright-cli/
-/.pytest_cache/
-/.pytest_tmp/
-/.dev_instances/
-
-# Runtime state
-/.runtime/
-/runtime_state/
-/daily_scheduler_state.json
-/scheduler_first_launch_done.flag
-/build_meta.json
-/build_version_state.json
-
-# Temporary runtime and test artifacts
-/.tmp_runtime/
-/.tmp_runtime_tests/
-/.tmp_day_metric_sources/
-/.runtime_repair_tmp/
-/.tmp_*/
-/.tmp_*.py
-
-# Logs and transient files
+# ---------------------------------------------------------------------------
+# Generic temporary and log files
+# ---------------------------------------------------------------------------
 *.log
 *.tmp
 *.bak
 *.tmp_keep
-/.npm-cache/
-*.json
-/表格计算配置.json
-表格计算配置.pre_handover_segments.*.json
+*.old
+*.orig
+~$*
+.tmp_*/
+.tmp_*.py
+.tmp_runtime/
+.tmp_runtime_tests/
+.tmp_day_metric_sources/
+.runtime_repair_tmp/
+.dev_instances/
 
-# Project-specific backup and recovery files
+# ---------------------------------------------------------------------------
+# Root-level legacy/runtime artifacts after source split
+# ---------------------------------------------------------------------------
+/config_segments/
+/downloads/
+/output/
+/QLDownload/
+/runtime/
+/runtime_state/
+/.runtime/
+/daily_scheduler_state.json
+/scheduler_first_launch_done.flag
+/build_meta.json
+/build_version_state.json
+/表格计算配置*.json
+/表格计算配置.pre_handover_segments.*.json
+/全景平台月报自动定时上传.spec
+/docs/
+/tests/
+
+# Root-level generated templates or local workbook copies.
+/交接班日志空模板.xlsx
+/其他楼交接班容量报表空模板.xlsx
+/E楼交接班容量报表空模板.xlsx
+/月度变更统计表空模板.xlsx
+/月度事件统计表空模板.xlsx
+
+# Historical recovery files kept out of Git.
 /表格计算部分代码.cpython-*.py
 /表格计算部分代码.py.corrupted_*.bak
 /表格计算部分代码.py.extracted_from_pkg.bak
@@ -60,74 +125,33 @@ QLDownload
 /表格计算部分代码.py.recovered.tmp_keep
 /表格计算部分代码.py.recovered.uncompyle6.tmp_keep
 /表格计算部分代码.py.syntaxfix.bak
-/表格计算配置.backup.*.json
-/表格计算配置.json.*.bak
 
-# Existing local-only project artifacts
-/docs/
-/全景平台月报自动定时上传.spec
-tests/
-!tests/
-!tests/unit/
-!tests/unit/test_handover_shift_interval_filters.py
-!tests/unit/test_settings_loader_handover_shift_fields.py
-QLDownload/
-runtime/
-
-# Split-source layout
-# The two endpoint folders are now the maintained source trees. Keep them tracked
-# even though broad legacy ignore rules above ignore *.json and tests/ globally.
-!/外网端源码/
-!/外网端源码/**
-!/内网端源码/
-!/内网端源码/**
-
-# Still ignore caches, local config, runtime data and generated state inside each endpoint tree.
-/外网端源码/**/__pycache__/
-/内网端源码/**/__pycache__/
-/外网端源码/**/*.py[cod]
-/内网端源码/**/*.py[cod]
-/外网端源码/.pytest_cache/
-/内网端源码/.pytest_cache/
-/外网端源码/.pytest_tmp/
-/内网端源码/.pytest_tmp/
+# ---------------------------------------------------------------------------
+# Endpoint runtime data
+# ---------------------------------------------------------------------------
 /外网端源码/.runtime/
 /内网端源码/.runtime/
-/外网端源码/runtime_state/
-/内网端源码/runtime_state/
 /外网端源码/runtime/
 /内网端源码/runtime/
+/外网端源码/runtime_state/
+/内网端源码/runtime_state/
 /外网端源码/QLDownload/
 /内网端源码/QLDownload/
 /外网端源码/downloads/
 /内网端源码/downloads/
 /外网端源码/output/
 /内网端源码/output/
+/外网端源码/logs/
+/内网端源码/logs/
+
+# Endpoint local backup/snapshot files.
 /外网端源码/表格计算配置.backup.*.json
 /内网端源码/表格计算配置.backup.*.json
 /外网端源码/表格计算配置.pre_handover_segments.*.json
 /内网端源码/表格计算配置.pre_handover_segments.*.json
-/外网端源码/*.log
-/内网端源码/*.log
-/外网端源码/*.tmp
-/内网端源码/*.tmp
-/外网端源码/*.bak
-/内网端源码/*.bak
-
-# Root after split: source moved into 外网端源码/ and 内网端源码/.
-# Keep root deployment/config/runtime artifacts out of Git.
-/config_segments/
-/downloads/
-/output/
-/QLDownload/
-/runtime/
-/runtime_state/
-/表格计算配置*.json
-/build_version_state.json
-/daily_scheduler_state.json
-/scheduler_first_launch_done.flag
-/交接班日志空模板.xlsx
-/其他楼交接班容量报表空模板.xlsx
-/E楼交接班容量报表空模板.xlsx
-/月度变更统计表空模板.xlsx
-/月度事件统计表空模板.xlsx
+/外网端源码/**/*.bak
+/内网端源码/**/*.bak
+/外网端源码/**/*.tmp
+/内网端源码/**/*.tmp
+/外网端源码/**/*.log
+/内网端源码/**/*.log

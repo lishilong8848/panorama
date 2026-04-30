@@ -2743,8 +2743,20 @@ button:disabled,
 }
 
 .review-col-action {
-  width: 92px;
+  width: 168px;
   text-align: center;
+}
+
+.review-row-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+
+.review-row-actions .btn {
+  width: 100%;
+  white-space: normal;
+  line-height: 1.25;
 }
 
 .review-row-placeholder {

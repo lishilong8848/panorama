@@ -36,6 +36,7 @@ class FeishuBitableClient:
         date_text_to_timestamp_ms_fn: Callable[..., int],
         canonical_metric_name_fn: Callable[[Any], str],
         dimension_mapping: Dict[str, tuple[str, str, str]],
+        emit_log: Optional[Callable[[str], None]] = None,
     ) -> None:
         auth = resolve_feishu_auth_settings(
             {
@@ -61,6 +62,7 @@ class FeishuBitableClient:
         self._date_text_to_timestamp_ms_fn = date_text_to_timestamp_ms_fn
         self._canonical_metric_name_fn = canonical_metric_name_fn
         self._dimension_mapping = dict(dimension_mapping)
+        self._emit_log = emit_log
         if not self.app_id or not self.app_secret:
             raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
 
