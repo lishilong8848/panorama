@@ -2,7 +2,7 @@
   "version": 3,
   "common": {
     "paths": {
-      "business_root_dir": "D:\\QLDownload",
+      "business_root_dir": "C:\\Users\\HP\\Desktop\\自建app\\全景平台程序\\QJPT_V3\\外网端源码\\QLDownload",
       "runtime_state_root": ".runtime"
     },
     "deployment": {
@@ -13,9 +13,9 @@
     },
     "shared_bridge": {
       "enabled": true,
-      "root_dir": "C:\\Users\\Public\\共享代码文件夹\\share",
-      "internal_root_dir": "C:\\Users\\Public\\共享代码文件夹\\share",
-      "external_root_dir": "C:\\Users\\Public\\共享代码文件夹\\share",
+      "root_dir": "\\\\172.16.1.2\\share",
+      "internal_root_dir": "D:\\share",
+      "external_root_dir": "\\\\172.16.1.2\\share",
       "poll_interval_sec": 2,
       "heartbeat_interval_sec": 5,
       "claim_lease_sec": 30,
