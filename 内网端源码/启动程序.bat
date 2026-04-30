@@ -13,7 +13,7 @@ pushd "%~dp0" || (
 )
 set "QJPT_FORCE_ROLE_MODE=internal"
 set "QJPT_MAIN_FILE=main_internal.py"
-call "%CD%\_启动基础程序.bat" %*
+call "%CD%\_base_launcher.bat" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 popd >nul 2>nul
 endlocal & exit /b %EXIT_CODE%
