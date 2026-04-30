@@ -26,6 +26,16 @@ set "EMBEDDED_RUNTIME_PRESENT="
 set "EMBEDDED_RUNTIME_BROKEN="
 set "RUNTIME_REPAIR_ATTEMPTED="
 
+if defined QJPT_PYTHON_EXE (
+    set "PYTHON_EXE=%QJPT_PYTHON_EXE%"
+    goto verify_explicit_python
+)
+if defined QJPT_PREPARE_PYTHON_EXE (
+    set "PYTHON_EXE=%QJPT_PREPARE_PYTHON_EXE%"
+    goto verify_explicit_python
+)
+
+:try_venv
 if exist ".venv\Scripts\python.exe" (
     "%CD%\.venv\Scripts\python.exe" -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
     if not errorlevel 1 (
@@ -57,6 +67,21 @@ set "PYTHON_EXE=python"
 set "PYTHON_DESC=python on PATH"
 goto run_main
 
+:verify_explicit_python
+if not exist "%PYTHON_EXE%" (
+    echo [WARN] Explicit Python path does not exist: %PYTHON_EXE%
+    set "PYTHON_EXE="
+    goto try_venv
+)
+"%PYTHON_EXE%" -c "%PYTHON_HEALTH_PROBE%" >nul 2>nul
+if errorlevel 1 (
+    echo [WARN] Explicit Python path is not a healthy Python runtime: %PYTHON_EXE%
+    set "PYTHON_EXE="
+    goto try_venv
+)
+set "PYTHON_DESC=explicit Python path"
+goto run_main
+
 :try_registry_python
 for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $roots=@('HKCU:\\Software\\Python\\PythonCore','HKLM:\\Software\\Python\\PythonCore','HKLM:\\Software\\WOW6432Node\\Python\\PythonCore'); $candidates=@(); foreach($root in $roots){ if(Test-Path $root){ Get-ChildItem $root | ForEach-Object { $installKey = Join-Path $_.PsPath 'InstallPath'; if(Test-Path $installKey){ $installDir = (Get-ItemProperty -Path $installKey).'(default)'; if($installDir){ $exe = Join-Path $installDir 'python.exe'; if(Test-Path $exe){ $candidates += $exe } } } } } }; $candidates | Select-Object -First 1"` ) do set "PYTHON_EXE=%%~I"
 if defined PYTHON_EXE goto verify_registry_python
@@ -72,7 +97,7 @@ set "PYTHON_DESC=registered Python"
 goto run_main
 
 :try_common_python
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $candidates=@(); $bases=@($env:LOCALAPPDATA + '\\Programs\\Python','C:\\Python313','C:\\Python312','C:\\Python311','D:\\Python313','D:\\Python312','D:\\Python311'); foreach($base in $bases){ if(Test-Path $base){ $direct = Join-Path $base 'python.exe'; if(Test-Path $direct){ $candidates += $direct }; Get-ChildItem -Path $base -Directory | ForEach-Object { $exe = Join-Path $_.FullName 'python.exe'; if(Test-Path $exe){ $candidates += $exe } } } }; $candidates | Select-Object -First 1"` ) do set "PYTHON_EXE=%%~I"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $candidates=@(); $bases=@(); if($env:USERPROFILE){ $bases += (Join-Path $env:USERPROFILE 'python-sdk') }; if($env:LOCALAPPDATA){ $bases += (Join-Path $env:LOCALAPPDATA 'Programs\Python') }; if($env:ProgramFiles){ $bases += $env:ProgramFiles }; if(${env:ProgramFiles(x86)}){ $bases += ${env:ProgramFiles(x86)} }; $bases += @('C:\Python313','C:\Python312','C:\Python311','D:\Python313','D:\Python312','D:\Python311'); foreach($base in $bases){ if(Test-Path $base){ $direct = Join-Path $base 'python.exe'; if(Test-Path $direct){ $candidates += $direct }; Get-ChildItem -Path $base -Directory -Filter 'python*' | Sort-Object Name -Descending | ForEach-Object { $exe = Join-Path $_.FullName 'python.exe'; if(Test-Path $exe){ $candidates += $exe } } } }; $candidates | Select-Object -First 1"` ) do set "PYTHON_EXE=%%~I"
 if defined PYTHON_EXE goto verify_common_python
 goto try_py_launcher
 
@@ -129,8 +154,9 @@ echo [ERROR] Python runtime not found.
 echo [ERROR] This source-run version requires a local Python runtime or bundled runtime\python.
 echo [ERROR] If you are preparing a delivery folder, run the runtime-prepare BAT on the developer machine first.
 echo [ERROR] Otherwise install Python 3.11+ on this computer, or create .venv in the project directory.
+echo [ERROR] You can also set QJPT_PYTHON_EXE to the full python.exe path before launching.
 if defined EMBEDDED_RUNTIME_BROKEN echo [ERROR] Detected runtime\python, but it is incomplete and cannot import standard library modules.
-echo [ERROR] Current fallback order: .venv ^> runtime\python ^> python(PATH) ^> registered Python ^> common install paths ^> py -3
+echo [ERROR] Current fallback order: QJPT_PYTHON_EXE ^> .venv ^> runtime\python ^> python(PATH) ^> registered Python ^> common install paths ^> py -3
 goto fail_exit
 
 :run_main

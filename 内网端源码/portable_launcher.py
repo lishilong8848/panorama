@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-MAIN_FILE = PROJECT_ROOT / "main.py"
+MAIN_FILE = PROJECT_ROOT / str(os.environ.get("QJPT_MAIN_FILE", "main.py") or "main.py").strip()
 RESTART_EXIT_CODE = 194
 RESTART_EXIT_CODE_ENV = "QJPT_RESTART_EXIT_CODE"
 PORTABLE_LAUNCHER_ENV = "QJPT_PORTABLE_LAUNCHER"
