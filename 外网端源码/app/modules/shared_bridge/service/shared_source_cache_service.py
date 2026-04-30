@@ -38,7 +38,7 @@ from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
-from app.shared.utils.atomic_file import atomic_copy_file, validate_excel_workbook_file
+from app.shared.utils.atomic_file import atomic_copy_file, atomic_write_text, validate_excel_workbook_file
 from app.shared.utils.artifact_naming import build_source_artifact_path
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.excel_reader import load_rows
@@ -388,6 +388,8 @@ class SharedSourceCacheService:
         force: bool = False,
         limit: int = 2000,
     ) -> int:
+        if self.role_mode != "internal":
+            return 0
         if self.store is None:
             return 0
         now_monotonic = time.monotonic()
@@ -815,7 +817,7 @@ class SharedSourceCacheService:
             return ""
         return str(self.shared_root / relative_path)
 
-    def _fast_ready_entries_for_family(self, source_family: str) -> List[Dict[str, Any]]:
+    def _fast_index_entries_for_family(self, source_family: str, *, status: str = "") -> List[Dict[str, Any]]:
         if self.store is None:
             return []
         rows: List[Dict[str, Any]] = []
@@ -825,12 +827,15 @@ class SharedSourceCacheService:
                 for row in self.store.list_source_cache_entries(
                     source_family=family_name,
                     bucket_kind="latest",
-                    status="ready",
+                    status=str(status or "").strip().lower(),
                     limit=1000,
                 )
                 if isinstance(row, dict)
             )
         return rows
+
+    def _fast_ready_entries_for_family(self, source_family: str) -> List[Dict[str, Any]]:
+        return self._fast_index_entries_for_family(source_family, status="ready")
 
     def _build_fast_latest_selection_from_index(
         self,
@@ -840,8 +845,15 @@ class SharedSourceCacheService:
         max_version_gap: int = 3,
         max_selection_age_hours: float = 3.0,
     ) -> Dict[str, Any]:
-        rows = self._fast_ready_entries_for_family(source_family)
+        rows = self._fast_index_entries_for_family(source_family)
         candidates_by_building: Dict[str, Dict[str, Any]] = {}
+        failed_by_building: Dict[str, Dict[str, Any]] = {}
+
+        def _entry_sort_key(entry: Dict[str, Any]) -> tuple[datetime, datetime]:
+            bucket_dt = _parse_hour_bucket(str(entry.get("bucket_key", "") or "").strip())
+            downloaded_dt = _parse_datetime_text(entry.get("downloaded_at", ""))
+            return (bucket_dt or datetime.min, downloaded_dt or datetime.min)
+
         for row in rows:
             building = str(row.get("building", "") or "").strip()
             if building not in buildings:
@@ -850,14 +862,19 @@ class SharedSourceCacheService:
             bucket_dt = _parse_hour_bucket(bucket_key)
             if bucket_dt is None:
                 continue
-            current = candidates_by_building.get(building)
-            current_dt = _parse_hour_bucket(str(current.get("bucket_key", "") or "").strip()) if current else None
-            if current is None or current_dt is None or bucket_dt > current_dt:
-                candidates_by_building[building] = row
+            row_status = str(row.get("status", "") or "").strip().lower()
+            if row_status == "ready":
+                current = candidates_by_building.get(building)
+                if current is None or _entry_sort_key(row) > _entry_sort_key(current):
+                    candidates_by_building[building] = row
+            elif row_status == "failed":
+                current = failed_by_building.get(building)
+                if current is None or _entry_sort_key(row) > _entry_sort_key(current):
+                    failed_by_building[building] = row
 
         latest_bucket_dt: datetime | None = None
         latest_bucket_key = ""
-        for row in candidates_by_building.values():
+        for row in [*candidates_by_building.values(), *failed_by_building.values()]:
             bucket_dt = _parse_hour_bucket(str(row.get("bucket_key", "") or "").strip())
             if bucket_dt is not None and (latest_bucket_dt is None or bucket_dt > latest_bucket_dt):
                 latest_bucket_dt = bucket_dt
@@ -874,8 +891,13 @@ class SharedSourceCacheService:
         fallback_buildings: List[str] = []
         missing_buildings: List[str] = []
         stale_buildings: List[str] = []
+        failed_buildings: List[str] = []
         for building in buildings:
             row = candidates_by_building.get(building)
+            row_status = "ready"
+            if row is None:
+                row = failed_by_building.get(building)
+                row_status = "failed" if row is not None else "waiting"
             if row is None or latest_bucket_dt is None:
                 missing_buildings.append(building)
                 building_rows.append(
@@ -900,21 +922,24 @@ class SharedSourceCacheService:
             version_gap = 0
             if bucket_dt is not None:
                 version_gap = max(0, int((latest_bucket_dt - bucket_dt).total_seconds() // 3600))
-            status = "ready"
-            if version_gap > max_version_gap:
+            status = row_status
+            if row_status == "failed":
+                failed_buildings.append(building)
+            elif version_gap > max_version_gap:
                 status = "stale"
                 stale_buildings.append(building)
             elif version_gap > 0:
                 fallback_buildings.append(building)
+            metadata = row.get("metadata", {}) if isinstance(row.get("metadata", {}), dict) else {}
             resolved_path = self._fast_entry_file_path_text(row)
             output_row = {
                 "building": building,
                 "bucket_key": bucket_key,
                 "status": status,
-                "using_fallback": version_gap > 0,
+                "using_fallback": row_status == "ready" and version_gap > 0,
                 "version_gap": version_gap,
                 "downloaded_at": str(row.get("downloaded_at", "") or "").strip(),
-                "last_error": "",
+                "last_error": str(metadata.get("error", "") or row.get("last_error", "") or "").strip() if row_status == "failed" else "",
                 "relative_path": str(row.get("relative_path", "") or "").strip(),
                 "resolved_file_path": resolved_path,
                 "blocked": False,
@@ -922,7 +947,7 @@ class SharedSourceCacheService:
                 "next_probe_at": "",
             }
             building_rows.append(output_row)
-            if status == "ready":
+            if status == "ready" and row_status == "ready":
                 selected_entries.append({**row, "file_path": resolved_path})
 
         return {
@@ -932,6 +957,7 @@ class SharedSourceCacheService:
             "selected_entries": selected_entries,
             "fallback_buildings": fallback_buildings,
             "missing_buildings": missing_buildings,
+            "failed_buildings": failed_buildings,
             "stale_buildings": stale_buildings,
             "blocked_buildings": [],
             "buildings": building_rows,
@@ -1901,6 +1927,34 @@ class SharedSourceCacheService:
             "metadata": entry_metadata,
         }
 
+    def store_existing_source_file(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_kind: str,
+        bucket_key: str,
+        duty_date: str = "",
+        duty_shift: str = "",
+        source_path: str | Path,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        self._ensure_internal_source_writer("共享源文件登记")
+        path = Path(str(source_path or "").strip())
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"共享源文件登记失败，源文件不存在: {path}")
+        return self._store_entry(
+            source_family=source_family,
+            building=str(building or "").strip(),
+            bucket_kind=str(bucket_kind or "").strip().lower(),
+            bucket_key=str(bucket_key or "").strip(),
+            duty_date=str(duty_date or "").strip(),
+            duty_shift=str(duty_shift or "").strip().lower(),
+            source_path=path,
+            status="ready",
+            metadata=metadata,
+        )
+
     def _store_alias_entry(
         self,
         *,
@@ -2001,6 +2055,26 @@ class SharedSourceCacheService:
         payload = dict(metadata or {})
         if error_text:
             payload["error"] = error_text
+        marker_relative_path = self._failed_marker_relative_path(
+            source_family=source_family,
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            building=building,
+        )
+        self._write_failed_marker_file(
+            relative_path=marker_relative_path,
+            payload={
+                "status": "failed",
+                "source_family": self._normalize_source_family(source_family),
+                "building": building,
+                "bucket_kind": bucket_kind,
+                "bucket_key": bucket_key,
+                "duty_date": duty_date,
+                "duty_shift": duty_shift,
+                "created_at": _now_text(),
+                "metadata": payload,
+            },
+        )
         self.store.upsert_source_cache_entry(
             source_family=self._normalize_source_family(source_family),
             building=building,
@@ -2009,12 +2083,7 @@ class SharedSourceCacheService:
             duty_date=duty_date,
             duty_shift=duty_shift,
             downloaded_at=_now_text(),
-            relative_path=self._failed_marker_relative_path(
-                source_family=source_family,
-                bucket_kind=bucket_kind,
-                bucket_key=bucket_key,
-                building=building,
-            ),
+            relative_path=marker_relative_path,
             status="failed",
             file_hash="",
             size_bytes=0,
@@ -2037,12 +2106,7 @@ class SharedSourceCacheService:
                         "ready": False,
                         "downloaded_at": _now_text(),
                         "last_error": str(payload.get("error", "") or "").strip(),
-                        "relative_path": self._failed_marker_relative_path(
-                            source_family=source_family,
-                            bucket_kind=bucket_kind,
-                            bucket_key=bucket_key,
-                            building=building,
-                        ),
+                        "relative_path": marker_relative_path,
                         "resolved_file_path": "",
                         "started_at": "",
                         "blocked": False,
@@ -2050,6 +2114,22 @@ class SharedSourceCacheService:
                         "next_probe_at": "",
                     },
                 )
+
+    def _write_failed_marker_file(self, *, relative_path: str, payload: Dict[str, Any]) -> None:
+        marker_path = self._resolve_relative_path_under_shared_root(relative_path)
+        if marker_path is None:
+            return
+        try:
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(
+                marker_path,
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log_source_cache_event(
+                f"失败标记文件写入失败: relative_path={relative_path}, error={exc}"
+            )
 
     def _get_ready_entry(self, *, source_family: str, building: str, bucket_kind: str, bucket_key: str = "", duty_date: str = "", duty_shift: str = "") -> Dict[str, Any] | None:
         if self.store is None:
@@ -2075,7 +2155,16 @@ class SharedSourceCacheService:
         relative_text = str(relative_path or "").strip()
         if not relative_text:
             return None
-        return self.shared_root / relative_text
+        relative_candidate = Path(relative_text)
+        if relative_candidate.is_absolute():
+            return None
+        root = self.shared_root.resolve(strict=False)
+        candidate = (root / relative_candidate).resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return None
+        return candidate
 
     def _resolve_entry_file_path(self, entry: Dict[str, Any] | None) -> Path | None:
         if not isinstance(entry, dict):

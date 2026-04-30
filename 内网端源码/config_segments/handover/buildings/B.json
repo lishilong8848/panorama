@@ -1,10 +1,623 @@
 ﻿{
-  "revision": 1,
-  "updated_at": "2026-04-30T12:12:02+08:00",
+  "revision": 4,
+  "updated_at": "2026-04-30T14:59:00+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
-        "B楼": []
+        "B楼": [
+          {
+            "id": "cold_temp_max",
+            "enabled": true,
+            "target_cell": "B9",
+            "rule_type": "aggregate",
+            "d_keywords": [
+              "冷通道温度",
+              "温度"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "max",
+            "template": "{value}℃/{b_norm} {c_norm}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "cold_humi_max",
+            "enabled": true,
+            "target_cell": "D9",
+            "rule_type": "aggregate",
+            "d_keywords": [
+              "冷通道湿度",
+              "湿度"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "max",
+            "template": "{value}%/{b_norm} {c_norm}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "cold_temp_min",
+            "enabled": true,
+            "target_cell": "F9",
+            "rule_type": "aggregate",
+            "d_keywords": [
+              "冷通道温度",
+              "温度"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "min",
+            "template": "{value}℃/{b_norm} {c_norm}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "cold_humi_min",
+            "enabled": true,
+            "target_cell": "H9",
+            "rule_type": "aggregate",
+            "d_keywords": [
+              "冷通道湿度",
+              "湿度"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "min",
+            "template": "{value}%/{b_norm} {c_norm}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "tr_load_max",
+            "enabled": true,
+            "target_cell": "B10",
+            "rule_type": "aggregate",
+            "d_keywords": [
+              "负载率"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "max",
+            "template": "{value}%/{d_name}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": ".*负载率",
+            "group_contains": "TR",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "ups_load_max",
+            "enabled": true,
+            "target_cell": "D10",
+            "rule_type": "aggregate",
+            "d_keywords": [
+              "负载率"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "max",
+            "template": "{value}%/{d_name}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": ".*负载率",
+            "group_contains": "UPS",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "battery_backup_min",
+            "enabled": true,
+            "target_cell": "F10",
+            "rule_type": "aggregate",
+            "d_keywords": [
+              "电池放电后备时间"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "min",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "oil_backup_time",
+            "enabled": true,
+            "target_cell": "H6",
+            "rule_type": "direct",
+            "d_keywords": [
+              "油量后备时间",
+              "燃油后备时间"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "chiller_mode_1",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "1号冷机运行模式",
+              "1号冷机模式"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "chiller_mode_2",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "2号冷机运行模式",
+              "2号冷机模式"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "chiller_mode_3",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "3号冷机运行模式",
+              "3号冷机模式"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "chiller_mode_4",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "4号冷机运行模式",
+              "4号冷机模式"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "chiller_mode_5",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "5号冷机运行模式",
+              "5号冷机模式"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "chiller_mode_6",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "6号冷机运行模式",
+              "6号冷机模式"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "west_tank_time",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "西区蓄冷罐放冷时间"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "east_tank_time",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "东区蓄冷罐放冷时间"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "ring_124",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "制冷站冷冻水供水环管02水道温度"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "ring_150",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "制冷站冷冻水供水环管02水道温度"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "tank_backup",
+            "enabled": true,
+            "target_cell": "F8",
+            "rule_type": "computed",
+            "d_keywords": [],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "西区{west}/东区{east}",
+            "computed_op": "tank_backup",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "outdoor_temp",
+            "enabled": true,
+            "target_cell": "B7",
+            "rule_type": "direct",
+            "d_keywords": [
+              "室外温度",
+              "室外干球温度"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "wet_bulb",
+            "enabled": true,
+            "target_cell": "D7",
+            "rule_type": "direct",
+            "d_keywords": [
+              "室外湿球温度"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "ring_supply_temp",
+            "enabled": true,
+            "target_cell": "H7",
+            "rule_type": "computed",
+            "d_keywords": [],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "西区{west}℃/东区{east}℃",
+            "computed_op": "ring_supply_temp",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "chiller_mode_summary",
+            "enabled": true,
+            "target_cell": "F7",
+            "rule_type": "computed",
+            "d_keywords": [],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "西区{west_mode}/东区{east_mode}",
+            "computed_op": "chiller_mode_summary",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "city_water_pressure",
+            "enabled": true,
+            "target_cell": "B8",
+            "rule_type": "direct",
+            "d_keywords": [
+              "市政补水管压力",
+              "市政压力"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "pue",
+            "enabled": true,
+            "target_cell": "B6",
+            "rule_type": "direct",
+            "d_keywords": [
+              "PUE",
+              "实时PUE",
+              "实时pue"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "city_power",
+            "enabled": true,
+            "target_cell": "D6",
+            "rule_type": "direct",
+            "d_keywords": [
+              "市电进线总功率",
+              "市电总功率",
+              "D楼总功率"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "it_power",
+            "enabled": true,
+            "target_cell": "F6",
+            "rule_type": "direct",
+            "d_keywords": [
+              "IT总功率",
+              "IT功率",
+              "二三四层功率和",
+              "IT功率和"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "ch_1",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "东区水池液位m"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "ch_2",
+            "enabled": true,
+            "target_cell": "",
+            "rule_type": "direct",
+            "d_keywords": [
+              "西区水池液位m"
+            ],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          },
+          {
+            "id": "ch_all",
+            "enabled": true,
+            "target_cell": "D8",
+            "rule_type": "computed",
+            "d_keywords": [],
+            "match_mode": "contains_casefold",
+            "agg": "first",
+            "template": "{value}",
+            "computed_op": "(ch_1+ch_2)*150.6/264*24",
+            "params": {},
+            "d_equals": "",
+            "d_contains": "",
+            "d_regex": "",
+            "group_contains": "",
+            "use_b": false,
+            "use_c": false
+          }
+        ]
       }
     },
     "cloud_sheet_sync": {
@@ -13,9 +626,77 @@
       }
     },
     "review_ui": {
-      "cabinet_power_defaults_by_building": {},
-      "footer_inventory_defaults_by_building": {},
-      "review_link_recipients_by_building": {}
+      "cabinet_power_defaults_by_building": {
+        "B楼": {
+          "cells": {
+            "B13": "107600",
+            "D13": "102300",
+            "F13": "/",
+            "H13": "/"
+          }
+        }
+      },
+      "footer_inventory_defaults_by_building": {
+        "B楼": {
+          "rows": [
+            {
+              "cells": {
+                "B": "值班手机",
+                "C": "值班桌面",
+                "E": "3",
+                "F": "否",
+                "G": "无"
+              }
+            },
+            {
+              "cells": {
+                "B": "对讲机",
+                "C": "值班桌面",
+                "E": "5",
+                "F": "否",
+                "G": "无"
+              }
+            },
+            {
+              "cells": {
+                "B": "钥匙",
+                "C": "钥匙箱",
+                "E": "400",
+                "F": "否",
+                "G": "无"
+              }
+            },
+            {
+              "cells": {
+                "B": "手电筒",
+                "C": "值班桌面",
+                "E": "5",
+                "F": "否",
+                "G": "无"
+              }
+            }
+          ]
+        }
+      },
+      "review_link_recipients_by_building": {
+        "B楼": [
+          {
+            "note": "李世龙B",
+            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+            "enabled": true
+          },
+          {
+            "note": "B",
+            "open_id": "ou_160e991b0fd811cda7260de056d8a363",
+            "enabled": false
+          },
+          {
+            "note": "m",
+            "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+            "enabled": false
+          }
+        ]
+      }
     }
   }
 }

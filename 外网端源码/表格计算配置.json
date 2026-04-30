@@ -1,4 +1,4 @@
-{
+﻿{
   "version": 3,
   "common": {
     "paths": {
@@ -239,7 +239,7 @@
       "scheduler": {
         "enabled": true,
         "auto_start_in_gui": true,
-        "morning_time": "08:00:00",
+        "morning_time": "06:00:00",
         "afternoon_time": "16:00:00",
         "check_interval_sec": 30,
         "catch_up_if_missed": false,

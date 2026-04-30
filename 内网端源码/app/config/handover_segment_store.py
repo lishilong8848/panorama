@@ -324,15 +324,19 @@ def _clear_segment_backed_handover_fields(handover: Dict[str, Any]) -> Dict[str,
         review_ui["footer_inventory_defaults_by_building"] = {}
     review_link_recipients = review_ui.get("review_link_recipients_by_building", {})
     if isinstance(review_link_recipients, dict):
-        review_ui["review_link_recipients_by_building"] = _normalize_review_link_recipients_by_building(
+        cleaned_review_link_recipients = _normalize_review_link_recipients_by_building(
             {
                 key: copy.deepcopy(value)
                 for key, value in review_link_recipients.items()
                 if key not in HANDOVER_SEGMENT_BUILDINGS
             }
         )
+        if cleaned_review_link_recipients:
+            review_ui["review_link_recipients_by_building"] = cleaned_review_link_recipients
+        else:
+            review_ui.pop("review_link_recipients_by_building", None)
     else:
-        review_ui["review_link_recipients_by_building"] = {}
+        review_ui.pop("review_link_recipients_by_building", None)
     return output
 
 

@@ -2200,19 +2200,163 @@ def _compose_handover_segmented_config(cfg: Dict[str, Any], config_path: str | P
     )
 
 
+def _normalize_segment_review_link_recipients(payload: Any) -> dict[str, list[Dict[str, Any]]]:
+    output: dict[str, list[Dict[str, Any]]] = {}
+    source = payload if isinstance(payload, dict) else {}
+    for raw_building, raw_items in source.items():
+        building = str(raw_building or "").strip()
+        if building not in HANDOVER_SEGMENT_BUILDINGS:
+            continue
+        rows: list[Dict[str, Any]] = []
+        if isinstance(raw_items, list):
+            for raw_row in raw_items:
+                if not isinstance(raw_row, dict):
+                    continue
+                note = str(raw_row.get("note", "") or "").strip()
+                open_id = str(raw_row.get("open_id", "") or "").strip()
+                if not note and not open_id:
+                    continue
+                if not open_id:
+                    continue
+                rows.append(
+                    {
+                        "note": note,
+                        "open_id": open_id,
+                        "enabled": False if raw_row.get("enabled", True) is False else True,
+                    }
+                )
+        if rows:
+            output[building] = rows
+    return output
+
+
+def _extract_aggregate_review_link_recipients(cfg: Dict[str, Any]) -> dict[str, list[Dict[str, Any]]]:
+    features = cfg.get("features", {}) if isinstance(cfg, dict) else {}
+    handover = features.get("handover_log", {}) if isinstance(features, dict) else {}
+    review_ui = handover.get("review_ui", {}) if isinstance(handover, dict) else {}
+    recipients = review_ui.get("review_link_recipients_by_building", {}) if isinstance(review_ui, dict) else {}
+    return _normalize_segment_review_link_recipients(recipients)
+
+
+def _extract_aggregate_building_payloads(cfg: Dict[str, Any]) -> dict[str, Dict[str, Any]]:
+    if not isinstance(cfg, dict):
+        return {}
+    try:
+        normalized = ensure_v3_config(copy.deepcopy(cfg))
+    except Exception:  # noqa: BLE001
+        normalized = copy.deepcopy(cfg)
+    payloads: dict[str, Dict[str, Any]] = {}
+    for building in HANDOVER_SEGMENT_BUILDINGS:
+        try:
+            payloads[building] = extract_handover_building_data(normalized, building)
+        except Exception:  # noqa: BLE001
+            continue
+    return payloads
+
+
+def _merge_handover_segment_payload(base: Any, overlay: Any) -> Dict[str, Any]:
+    output = copy.deepcopy(base if isinstance(base, dict) else {})
+    if not isinstance(overlay, dict):
+        return output
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(output.get(key), dict):
+            output[key] = _merge_handover_segment_payload(output.get(key), value)
+        else:
+            output[key] = copy.deepcopy(value)
+    return output
+
+
+def _repair_handover_segment_required_defaults(
+    config_path: str | Path,
+    source_cfg: Dict[str, Any] | None = None,
+) -> bool:
+    changed = False
+    aggregate_recipients = _extract_aggregate_review_link_recipients(source_cfg or {})
+    aggregate_building_payloads = _extract_aggregate_building_payloads(source_cfg or {})
+    for building in HANDOVER_SEGMENT_BUILDINGS:
+        building_path = handover_building_segment_path(config_path, building)
+        if not building_path.exists():
+            continue
+        building_changed = False
+        doc = read_segment_document(building_path)
+        data = copy.deepcopy(doc.get("data", {}) if isinstance(doc.get("data"), dict) else {})
+        cloud_sheet_sync = data.get("cloud_sheet_sync")
+        if not isinstance(cloud_sheet_sync, dict):
+            cloud_sheet_sync = {}
+            data["cloud_sheet_sync"] = cloud_sheet_sync
+        sheet_names = cloud_sheet_sync.get("sheet_names")
+        if not isinstance(sheet_names, dict):
+            sheet_names = {}
+            cloud_sheet_sync["sheet_names"] = sheet_names
+        if not str(sheet_names.get(building, "") or "").strip():
+            sheet_names[building] = building
+            building_changed = True
+        source_payload = aggregate_building_payloads.get(building, {})
+        source_rows = (
+            source_payload.get("cell_rules", {}).get("building_rows", {}).get(building, [])
+            if isinstance(source_payload, dict)
+            else []
+        )
+        cell_rules = data.get("cell_rules")
+        if not isinstance(cell_rules, dict):
+            cell_rules = {}
+            data["cell_rules"] = cell_rules
+        building_rows = cell_rules.get("building_rows")
+        if not isinstance(building_rows, dict):
+            building_rows = {}
+            cell_rules["building_rows"] = building_rows
+        current_rows = building_rows.get(building)
+        if isinstance(source_rows, list) and source_rows and (not isinstance(current_rows, list) or not current_rows):
+            building_rows[building] = copy.deepcopy(source_rows)
+            building_changed = True
+        review_ui = data.get("review_ui")
+        if not isinstance(review_ui, dict):
+            review_ui = {}
+            data["review_ui"] = review_ui
+        source_review_ui = source_payload.get("review_ui", {}) if isinstance(source_payload, dict) else {}
+        for map_key in ("cabinet_power_defaults_by_building", "footer_inventory_defaults_by_building"):
+            source_map = source_review_ui.get(map_key, {}) if isinstance(source_review_ui, dict) else {}
+            source_value = source_map.get(building) if isinstance(source_map, dict) else None
+            if not source_value:
+                continue
+            target_map = review_ui.get(map_key)
+            if not isinstance(target_map, dict):
+                target_map = {}
+                review_ui[map_key] = target_map
+            current_value = target_map.get(building)
+            if not current_value:
+                target_map[building] = copy.deepcopy(source_value)
+                building_changed = True
+        if aggregate_recipients.get(building):
+            recipients = review_ui.get("review_link_recipients_by_building")
+            if not isinstance(recipients, dict):
+                recipients = {}
+                review_ui["review_link_recipients_by_building"] = recipients
+            if building not in recipients:
+                recipients[building] = copy.deepcopy(aggregate_recipients[building])
+                building_changed = True
+        if building_changed:
+            next_revision = max(0, int(doc.get("revision", 0) or 0)) + 1
+            write_segment_document(building_path, build_segment_document(data, revision=next_revision))
+            changed = True
+    return changed
+
+
 def _ensure_handover_segment_files(cfg: Dict[str, Any], config_path: str | Path | None = None) -> bool:
     try:
         target = get_settings_path(config_path)
     except FileNotFoundError:
         return False
     if has_all_handover_segment_files(target):
-        return False
+        return _repair_handover_segment_required_defaults(target, cfg)
     with handover_segment_write_lock():
         if has_all_handover_segment_files(target):
-            return False
+            return _repair_handover_segment_required_defaults(target, cfg)
         source_cfg = copy.deepcopy(cfg if isinstance(cfg, dict) else {})
+        source_cfg = ensure_v3_config(source_cfg)
         if has_any_handover_segment_file(target):
             source_cfg = _compose_handover_segmented_config(source_cfg, target)
+            source_cfg = ensure_v3_config(source_cfg)
         else:
             create_pre_handover_segment_backup(target)
         common_doc, building_docs = build_segment_documents_from_config(source_cfg)
@@ -2224,6 +2368,7 @@ def _ensure_handover_segment_files(cfg: Dict[str, Any], config_path: str | Path 
             if building_path.exists():
                 continue
             write_segment_document(building_path, building_docs[building])
+        _repair_handover_segment_required_defaults(target, source_cfg)
     return True
 
 
@@ -2334,9 +2479,11 @@ def save_handover_common_segment(
         current_revision = int(current_doc.get("revision", 0) or 0)
         if current_revision != int(base_revision):
             raise HandoverSegmentRevisionConflict("公共配置已被其他人修改，请刷新后重试")
+        current_common = extract_handover_common_data(current_full)
+        next_common = _merge_handover_segment_payload(current_common, data)
         next_full = apply_handover_segment_data(
             current_full,
-            common_data=data,
+            common_data=next_common,
             building_data_by_name=_extract_all_handover_building_segments(current_full),
         )
         validated = _normalize_footer_defaults_for_persistence(validate_settings(next_full))
@@ -2404,7 +2551,10 @@ def save_handover_building_segment(
             raise HandoverSegmentRevisionConflict("当前楼配置已被其他人修改，请刷新后重试")
         current_common = extract_handover_common_data(current_full)
         building_payloads = _extract_all_handover_building_segments(current_full)
-        building_payloads[target_building] = copy.deepcopy(data if isinstance(data, dict) else {})
+        building_payloads[target_building] = _merge_handover_segment_payload(
+            building_payloads.get(target_building, {}),
+            data,
+        )
         next_full = apply_handover_segment_data(
             current_full,
             common_data=current_common,

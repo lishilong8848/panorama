@@ -358,7 +358,7 @@ def _normalize_latest_selection_building(payload: Any, *, fallback_bucket: str =
     return {
         "building": _string(row.get("building", "")) or "-",
         "bucket_key": _string(row.get("bucket_key", "")) or _string(fallback_bucket) or "-",
-        "status": raw_status if raw_status in {"ready", "stale"} else "waiting",
+        "status": raw_status if raw_status in {"ready", "stale", "failed"} else "waiting",
         "using_fallback": bool(row.get("using_fallback", False)),
         "version_gap": version_gap_value,
         "downloaded_at": _string(row.get("downloaded_at", "")),
@@ -387,6 +387,9 @@ def present_latest_selection_building(payload: Any, *, fallback_bucket: str = ""
     elif row["status"] == "ready":
         tone = "success"
         status_text = "已就绪"
+    elif row["status"] == "failed":
+        tone = "danger"
+        status_text = "失败"
     elif row["status"] == "stale":
         tone = "danger"
         status_text = "版本过旧，等待更新"
@@ -417,7 +420,7 @@ def present_latest_selection_building(payload: Any, *, fallback_bucket: str = ""
 
 def has_meaningful_latest_selection_building(payload: Any, *, fallback_bucket: str = "") -> bool:
     row = _normalize_latest_selection_building(payload, fallback_bucket=fallback_bucket)
-    if row["status"] in {"ready", "stale"}:
+    if row["status"] in {"ready", "stale", "failed"}:
         return True
     if bool(row.get("using_fallback", False)):
         return True
@@ -443,18 +446,26 @@ def present_latest_selection_overview(payload: Any, *, key: str = "", title: str
     is_best_bucket_too_old = bool(selection.get("is_best_bucket_too_old", False))
     fallback_buildings = [_string(item) for item in (selection.get("fallback_buildings", []) if isinstance(selection.get("fallback_buildings", []), list) else []) if _string(item)]
     missing_buildings = [_string(item) for item in (selection.get("missing_buildings", []) if isinstance(selection.get("missing_buildings", []), list) else []) if _string(item)]
+    failed_buildings = [_string(item) for item in (selection.get("failed_buildings", []) if isinstance(selection.get("failed_buildings", []), list) else []) if _string(item)]
     stale_buildings = [_string(item) for item in (selection.get("stale_buildings", []) if isinstance(selection.get("stale_buildings", []), list) else []) if _string(item)]
     buildings = [
         present_latest_selection_building(item, fallback_bucket=best_bucket_key)
         for item in (selection.get("buildings", []) if isinstance(selection.get("buildings", []), list) else [])
         if isinstance(item, dict)
     ]
-    can_proceed = bool(selection.get("can_proceed", False)) and not missing_buildings and not stale_buildings and not is_best_bucket_too_old
+    if not failed_buildings:
+        failed_buildings = [item["building"] for item in buildings if item.get("status_key") == "failed" and _string(item.get("building", ""))]
+    can_proceed = bool(selection.get("can_proceed", False)) and not failed_buildings and not missing_buildings and not stale_buildings and not is_best_bucket_too_old
     tone = "warning"
     status_text = "等待共享文件就绪"
     summary_text = "共享文件尚未齐套。"
     reason_code = "waiting"
-    if is_best_bucket_too_old:
+    if failed_buildings:
+        tone = "danger"
+        status_text = "存在失败楼栋"
+        summary_text = f"以下楼栋共享文件同步失败：{' / '.join(failed_buildings)}"
+        reason_code = "failed"
+    elif is_best_bucket_too_old:
         tone = "danger"
         status_text = "最新时间桶已过旧"
         summary_text = (
@@ -489,6 +500,8 @@ def present_latest_selection_overview(payload: Any, *, key: str = "", title: str
         _push_meta_line(meta_lines, f"距当前约 {best_bucket_age_text}")
     if fallback_buildings:
         _push_meta_line(meta_lines, f"回退楼栋：{' / '.join(fallback_buildings)}")
+    if failed_buildings:
+        _push_meta_line(meta_lines, f"失败楼栋：{' / '.join(failed_buildings)}")
     if missing_buildings:
         _push_meta_line(meta_lines, f"缺失楼栋：{' / '.join(missing_buildings)}")
     if stale_buildings:
@@ -503,6 +516,11 @@ def present_latest_selection_overview(payload: Any, *, key: str = "", title: str
             "label": "回退楼栋",
             "value": f"{len(fallback_buildings)} 个",
             "tone": "warning" if fallback_buildings else "neutral",
+        },
+        {
+            "label": "失败楼栋",
+            "value": f"{len(failed_buildings)} 个",
+            "tone": "danger" if failed_buildings else "neutral",
         },
         {
             "label": "缺失楼栋",
@@ -525,6 +543,7 @@ def present_latest_selection_overview(payload: Any, *, key: str = "", title: str
         "is_best_bucket_too_old": is_best_bucket_too_old,
         "fallback_buildings": fallback_buildings,
         "missing_buildings": missing_buildings,
+        "failed_buildings": failed_buildings,
         "stale_buildings": stale_buildings,
         "buildings": buildings,
         "can_proceed": can_proceed,
@@ -1105,6 +1124,7 @@ def present_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
 
     has_stale = any(bool(item.get("stale_buildings", [])) for item in gating_families)
     has_too_old = any(bool(item.get("is_best_bucket_too_old", False)) for item in gating_families)
+    has_failed = any(bool(item.get("failed_buildings", [])) for item in gating_families)
     has_missing = any(bool(item.get("missing_buildings", [])) for item in gating_families)
     has_fallback = any(bool(item.get("fallback_buildings", [])) for item in gating_families)
     all_ready = bool(gating_families) and all(bool(item.get("can_proceed", False)) and bool(item.get("buildings")) for item in gating_families)
@@ -1146,7 +1166,11 @@ def present_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
     tone = "warning"
     status_text = "等待共享文件就绪"
     summary_text = "外网默认入口继续只依赖交接班日志源文件与全景平台月报源文件。"
-    if has_too_old:
+    if has_failed:
+        tone = "danger"
+        status_text = "共享文件同步失败"
+        summary_text = "部分楼栋共享文件同步失败，请先处理内网下载状态。"
+    elif has_too_old:
         tone = "danger"
         status_text = "等待共享文件更新"
         summary_text = "当前共享参考文件整体已超过 3 小时，等待内网更新后会自动重试默认入口。"
@@ -1167,7 +1191,9 @@ def present_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
         status_text = "共享文件已就绪"
         summary_text = "外网默认入口继续只依赖交接班日志源文件与全景平台月报源文件。"
     reason_code = "waiting"
-    if has_too_old:
+    if has_failed:
+        reason_code = "failed"
+    elif has_too_old:
         reason_code = "too_old"
     elif has_stale:
         reason_code = "stale"

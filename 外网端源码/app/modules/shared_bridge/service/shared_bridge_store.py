@@ -2415,6 +2415,7 @@ class SharedBridgeStore:
         status: str = "",
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
+        safe_limit = max(1, int(limit or 200))
         index_rows = self._source_cache_index_store.list_entries(
             source_family=source_family,
             building=building,
@@ -2423,10 +2424,8 @@ class SharedBridgeStore:
             duty_date=duty_date,
             duty_shift=duty_shift,
             status=status,
-            limit=max(1, int(limit or 200)),
+            limit=safe_limit,
         )
-        if index_rows:
-            return index_rows
         clauses: List[str] = []
         params: List[Any] = []
         if str(source_family or "").strip():
@@ -2451,19 +2450,55 @@ class SharedBridgeStore:
             clauses.append("status=?")
             params.append(str(status or "").strip())
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self.connect(read_only=True) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,
-                       downloaded_at, relative_path, status, file_hash, size_bytes, metadata_json, created_at, updated_at
-                FROM source_cache_entries
-                {where_sql}
-                ORDER BY downloaded_at DESC, updated_at DESC, entry_id DESC
-                LIMIT ?
-                """,
-                [*params, max(1, int(limit or 200))],
-            ).fetchall()
-        return [self._row_to_source_cache_entry_dict(row) for row in rows]
+        sqlite_rows: List[Dict[str, Any]] = []
+        try:
+            with self.connect(read_only=True) as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,
+                           downloaded_at, relative_path, status, file_hash, size_bytes, metadata_json, created_at, updated_at
+                    FROM source_cache_entries
+                    {where_sql}
+                    ORDER BY downloaded_at DESC, updated_at DESC, entry_id DESC
+                    LIMIT ?
+                    """,
+                    [*params, safe_limit],
+                ).fetchall()
+            sqlite_rows = [self._row_to_source_cache_entry_dict(row) for row in rows]
+        except Exception:
+            if index_rows:
+                return index_rows[:safe_limit]
+            raise
+        if not index_rows:
+            return sqlite_rows
+
+        merged: Dict[str, Dict[str, Any]] = {}
+        for row in sqlite_rows:
+            entry_id = str(row.get("entry_id", "") or "").strip()
+            if entry_id:
+                merged[entry_id] = row
+        for row in index_rows:
+            entry_id = str(row.get("entry_id", "") or "").strip()
+            if not entry_id:
+                continue
+            existing = merged.get(entry_id)
+            if existing is None:
+                merged[entry_id] = row
+                continue
+            existing_updated = str(existing.get("updated_at", "") or "").strip()
+            row_updated = str(row.get("updated_at", "") or "").strip()
+            if row_updated > existing_updated:
+                merged[entry_id] = row
+        output = list(merged.values())
+        output.sort(
+            key=lambda row: (
+                str(row.get("downloaded_at", "") or "").strip(),
+                str(row.get("updated_at", "") or "").strip(),
+                str(row.get("entry_id", "") or "").strip(),
+            ),
+            reverse=True,
+        )
+        return output[:safe_limit]
 
     def list_recent_source_cache_entries(
         self,

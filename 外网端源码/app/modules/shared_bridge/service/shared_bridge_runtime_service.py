@@ -3908,25 +3908,68 @@ class SharedBridgeRuntimeService:
             capacity_result = result.get("capacity", {}) if isinstance(result.get("capacity", {}), dict) else {}
             handover_success_files = handover_result.get("success_files", []) if isinstance(handover_result.get("success_files", []), list) else []
             capacity_success_files = capacity_result.get("success_files", []) if isinstance(capacity_result.get("success_files", []), list) else []
+            request_duty_date = str(request.get("duty_date", "") or "").strip()
+            request_duty_shift = str(request.get("duty_shift", "") or "").strip().lower()
+            request_bucket_key = str(request.get("target_bucket_key", "") or "").strip() or self.current_source_cache_bucket()
+
+            def _store_bridge_file(item: Dict[str, Any], *, source_family: str, result_payload: Dict[str, Any]) -> Dict[str, str] | None:
+                building = str(item.get("building", "") or "").strip()
+                file_path = str(item.get("file_path", "") or "").strip()
+                if not building or not file_path:
+                    return None
+                if self._source_cache_service is None:
+                    return {"building": building, "file_path": file_path}
+                source_path = Path(file_path)
+                if not source_path.exists() or not source_path.is_file():
+                    raise FileNotFoundError(f"内网下载完成后的源文件不存在: {source_path}")
+                if request_duty_date and request_duty_shift in {"day", "night"}:
+                    bucket_kind = "date"
+                    bucket_key = request_duty_date
+                    duty_date_value = request_duty_date
+                    duty_shift_value = request_duty_shift
+                else:
+                    bucket_kind = "latest"
+                    bucket_key = request_bucket_key
+                    inferred = self._source_cache_service._resolve_handover_entry_duty_context(  # noqa: SLF001
+                        {
+                            "bucket_key": bucket_key,
+                            "duty_date": result_payload.get("duty_date"),
+                            "duty_shift": result_payload.get("duty_shift"),
+                        }
+                    )
+                    duty_date_value = str(inferred.get("duty_date", "") or "").strip()
+                    duty_shift_value = str(inferred.get("duty_shift", "") or "").strip().lower()
+                stored = self._source_cache_service.store_existing_source_file(
+                    source_family=source_family,
+                    building=building,
+                    bucket_kind=bucket_kind,
+                    bucket_key=bucket_key,
+                    duty_date=duty_date_value,
+                    duty_shift=duty_shift_value,
+                    source_path=source_path,
+                    metadata={
+                        "family": source_family,
+                        "building": building,
+                        "duty_date": duty_date_value,
+                        "duty_shift": duty_shift_value,
+                        "bridge_task_id": task_id,
+                    },
+                )
+                return {"building": building, "file_path": str(stored.get("file_path", "") or "").strip()}
+
             handover_files = [
-                {
-                    "building": str(item.get("building", "") or "").strip(),
-                    "file_path": str(item.get("file_path", "") or "").strip(),
-                }
+                stored
                 for item in handover_success_files
                 if isinstance(item, dict)
-                and str(item.get("building", "") or "").strip()
-                and str(item.get("file_path", "") or "").strip()
+                for stored in [_store_bridge_file(item, source_family=FAMILY_HANDOVER_LOG, result_payload=handover_result)]
+                if stored is not None
             ]
             capacity_files = [
-                {
-                    "building": str(item.get("building", "") or "").strip(),
-                    "file_path": str(item.get("file_path", "") or "").strip(),
-                }
+                stored
                 for item in capacity_success_files
                 if isinstance(item, dict)
-                and str(item.get("building", "") or "").strip()
-                and str(item.get("file_path", "") or "").strip()
+                for stored in [_store_bridge_file(item, source_family=FAMILY_HANDOVER_CAPACITY_REPORT, result_payload=capacity_result)]
+                if stored is not None
             ]
             stage_result = dict(result)
             stage_result["handover_files"] = list(handover_files)

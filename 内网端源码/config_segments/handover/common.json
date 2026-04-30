@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 1,
-  "updated_at": "2026-04-30T12:12:02+08:00",
+  "revision": 3,
+  "updated_at": "2026-04-30T14:59:00+08:00",
   "data": {
     "enabled": true,
     "scheduler": {
@@ -42,7 +42,49 @@
       "parallel_by_building": false,
       "site_start_delay_sec": 1,
       "debug_step_log": true,
-      "export_button_text": "原样导出"
+      "export_button_text": "原样导出",
+      "sites": [
+        {
+          "building": "A楼",
+          "enabled": true,
+          "host": "192.168.210.50",
+          "username": "admin",
+          "password": "BMS@123456",
+          "url": null
+        },
+        {
+          "building": "B楼",
+          "enabled": true,
+          "host": "192.168.220.50",
+          "username": "admin",
+          "password": "BMS123456",
+          "url": null
+        },
+        {
+          "building": "C楼",
+          "enabled": true,
+          "host": "192.168.231.53",
+          "username": "admin",
+          "password": "BMS@123456",
+          "url": null
+        },
+        {
+          "building": "D楼",
+          "enabled": true,
+          "host": "192.168.232.53",
+          "username": "admin",
+          "password": "123456",
+          "url": null
+        },
+        {
+          "building": "E楼",
+          "enabled": true,
+          "host": "192.168.233.57",
+          "username": "admin",
+          "password": "BMS@123456",
+          "url": null
+        }
+      ]
     },
     "capacity_report": {
       "download": {
@@ -812,13 +854,12 @@
       "autosave_debounce_ms": 800,
       "poll_interval_sec": 5,
       "bind_latest_session": true,
-      "public_base_url": "",
+      "public_base_url": "http://192.168.31.10:18765",
       "section_hidden_columns": [
         "I"
       ],
       "cabinet_power_defaults_by_building": {},
-      "footer_inventory_defaults_by_building": {},
-      "review_link_recipients_by_building": {}
+      "footer_inventory_defaults_by_building": {}
     },
     "cell_rules": {
       "default_rows": [
@@ -1429,6 +1470,48 @@
         }
       ],
       "building_rows": {}
-    }
+    },
+    "sites": [
+      {
+        "building": "A楼",
+        "enabled": true,
+        "host": "192.168.210.50",
+        "username": "admin",
+        "password": "BMS@123456",
+        "url": null
+      },
+      {
+        "building": "B楼",
+        "enabled": true,
+        "host": "192.168.220.50",
+        "username": "admin",
+        "password": "BMS123456",
+        "url": null
+      },
+      {
+        "building": "C楼",
+        "enabled": true,
+        "host": "192.168.231.53",
+        "username": "admin",
+        "password": "BMS@123456",
+        "url": null
+      },
+      {
+        "building": "D楼",
+        "enabled": true,
+        "host": "192.168.232.53",
+        "username": "admin",
+        "password": "123456",
+        "url": null
+      },
+      {
+        "building": "E楼",
+        "enabled": true,
+        "host": "192.168.233.57",
+        "username": "admin",
+        "password": "BMS@123456",
+        "url": null
+      }
+    ]
   }
 }

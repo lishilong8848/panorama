@@ -40,7 +40,6 @@ from app.modules.scheduler.api.monthly_event_report_routes import router as mont
 from app.modules.scheduler.api.routes import router as scheduler_router
 from app.modules.scheduler.api.wet_bulb_collection_routes import router as wet_bulb_collection_scheduler_router
 from app.modules.sheet_import.api.routes import router as sheet_import_router
-from app.modules.updater.api.routes import router as updater_router
 from app.modules.user.api.routes import router as user_router
 from app.modules.websocket.api.log_stream_routes import router as logs_router
 from app.shared.utils.frontend_cache import (
@@ -177,7 +176,6 @@ def _install_windows_asyncio_exception_filter(container) -> None:
 def _register_common_routes(app: FastAPI) -> None:
     app.include_router(pipeline_router)
     app.include_router(logs_router)
-    app.include_router(updater_router)
     app.include_router(shared_bridge_router)
     app.include_router(user_router)
 
@@ -313,14 +311,17 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         normalized = normalize_role_mode(role_mode)
         if normalized not in {"internal", "external"}:
             return
-        merged = copy.deepcopy(container.config if isinstance(container.config, dict) else {})
-        deployment = _ensure_config_dict_path(merged, "common", "deployment")
+        snapshot = copy.deepcopy(container.config if isinstance(container.config, dict) else {})
+        deployment = _ensure_config_dict_path(snapshot, "common", "deployment")
         if deployment.get("last_started_role_mode") == normalized:
             return
         deployment["last_started_role_mode"] = normalized
-        saved = save_settings(merged, container.config_path)
-        container.config = copy.deepcopy(saved)
-        container.runtime_config = adapt_runtime_config(container.config)
+        apply_snapshot = getattr(container, "apply_config_snapshot", None)
+        if callable(apply_snapshot):
+            apply_snapshot(snapshot, mode="light")
+        else:
+            container.config = snapshot
+            container.runtime_config = adapt_runtime_config(container.config)
 
     def _persist_startup_role_selection(role_mode: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized = normalize_role_mode(role_mode)
@@ -463,6 +464,18 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         emit_log=lambda text: container.add_system_log(text, suppress_alert_upload=True),
         refresh_interval_sec=10.0,
     )
+
+    @app.middleware("http")
+    async def external_endpoint_surface_guard(request: Request, call_next):  # noqa: ANN001
+        path = str(request.url.path or "").strip() or "/"
+        blocked_prefixes = (
+            "/internal",
+            "/api/updater",
+            "/api/bridge/internal-runtime-status",
+        )
+        if any(path.startswith(prefix) for prefix in blocked_prefixes):
+            return Response(status_code=404)
+        return await call_next(request)
     container.runtime_activation_progress_callback = lambda step: setattr(
         app.state,
         "runtime_activation_step",
@@ -486,6 +499,15 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     @app.middleware("http")
     async def guard_role_selection_only_runtime(request: Request, call_next):
         path = str(request.url.path or "").strip() or "/"
+        if any(
+            path.startswith(prefix)
+            for prefix in (
+                "/internal",
+                "/api/updater",
+                "/api/bridge/internal-runtime-status",
+            )
+        ):
+            return Response(status_code=404)
         if _is_role_selection_allowed_path(path):
             return await call_next(request)
         if not path.startswith("/api/"):
@@ -1073,19 +1095,18 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 return False, detail
             try:
                 target_buildings = bridge_service.get_source_cache_buildings()
-                selection = bridge_service.get_latest_source_cache_selection(
-                    source_family="handover_log_family",
+                cached_entries = bridge_service.get_handover_by_date_cache_entries(
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
                     buildings=target_buildings,
                 )
-                cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
                 capacity_entries = bridge_service.get_handover_capacity_by_date_cache_entries(
                     duty_date=duty_date,
                     duty_shift=duty_shift,
                     buildings=target_buildings,
                 )
                 if (
-                    not bool(selection.get("can_proceed", False))
-                    or len(cached_entries) < len(target_buildings)
+                    len(cached_entries) < len(target_buildings)
                     or len(capacity_entries) < len(target_buildings)
                 ):
                     dedupe_key = f"handover:scheduler:{slot}:{duty_date}:{duty_shift}"
@@ -1110,7 +1131,12 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                             "requested_by": "scheduler",
                         },
                     )
-                    detail = _build_latest_cache_wait_text("交接班", selection if isinstance(selection, dict) else {})
+                    detail = (
+                        "交接班共享文件未齐全，等待内网补采同步："
+                        f"duty_date={duty_date}, duty_shift={duty_shift}, "
+                        f"日志={len(cached_entries)}/{len(target_buildings)}, "
+                        f"容量={len(capacity_entries)}/{len(target_buildings)}"
+                    )
                     accepted_detail = (
                         f"{detail} 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'}, job_id={job.job_id}"
                     )
@@ -1376,25 +1402,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             ]
             expected_count = len(target_buildings)
             if len(cached_entries) < expected_count:
-                try:
-                    container.add_system_log("[12项独立上传调度] 按日缓存未齐全，先尝试直接复用现有交接班日志源文件")
-                    bridge_service.fill_day_metric_history(
-                        selected_dates=[target_date],
-                        building_scope="all_enabled",
-                        building=None,
-                        emit_log=container.add_system_log,
-                    )
-                    cached_entries = [
-                        item
-                        for item in bridge_service.get_day_metric_by_date_cache_entries(
-                            selected_dates=[target_date],
-                            buildings=target_buildings,
-                        )
-                        if str(item.get("file_path", "") or "").strip()
-                        and os.path.exists(str(item.get("file_path", "") or "").strip())
-                    ]
-                except Exception as exc:  # noqa: BLE001
-                    container.add_system_log(f"[12项独立上传调度] 直接复用交接班日志源文件失败，继续等待内网补采同步: {exc}")
+                container.add_system_log(
+                    "[12项独立上传调度] 按日共享缓存未齐全，外网端不写共享索引，等待内网补采同步"
+                )
             if len(cached_entries) < expected_count:
                 dedupe_key = f"day_metric_upload:scheduler:{target_date}:{'|'.join(sorted(target_buildings))}"
                 job, bridge_task = start_waiting_bridge_job(
@@ -1680,9 +1690,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     @app.get("/login", response_class=HTMLResponse)
     @app.get("/index.html", response_class=HTMLResponse)
-    @app.get("/internal", response_class=HTMLResponse)
-    @app.get("/internal/status", response_class=HTMLResponse)
-    @app.get("/internal/config", response_class=HTMLResponse)
     @app.get("/external", response_class=HTMLResponse)
     @app.get("/external/status", response_class=HTMLResponse)
     @app.get("/external/dashboard", response_class=HTMLResponse)

@@ -1,4 +1,4 @@
-{
+﻿{
   "version": 3,
   "common": {
     "paths": {
@@ -238,8 +238,8 @@
       "enabled": true,
       "scheduler": {
         "enabled": true,
-        "auto_start_in_gui": true,
-        "morning_time": "08:00:00",
+        "auto_start_in_gui": false,
+        "morning_time": "07:00:00",
         "afternoon_time": "16:00:00",
         "check_interval_sec": 30,
         "catch_up_if_missed": false,
@@ -599,7 +599,7 @@
           "file_name_pattern": "{building}_{month}_事件月度统计表.xlsx"
         },
         "scheduler": {
-          "enabled": true,
+          "enabled": false,
           "auto_start_in_gui": false,
           "day_of_month": 1,
           "run_time": "01:00:00",
@@ -621,7 +621,7 @@
           "file_name_pattern": "{building}_{month}_变更月度统计表.xlsx"
         },
         "scheduler": {
-          "enabled": true,
+          "enabled": false,
           "auto_start_in_gui": false,
           "day_of_month": 1,
           "run_time": "01:00:00",
@@ -2023,17 +2023,13 @@
               "HVDC",
               "负载率"
             ],
+            "d_regex": ".*(HVDC.*负载率|负载率.*HVDC).*",
+            "group_contains": "HVDC",
             "match_mode": "contains_casefold",
             "agg": "max",
             "template": "{value}",
             "computed_op": "",
-            "params": {},
-            "d_equals": "",
-            "d_contains": "",
-            "d_regex": ".*(HVDC.*负载率|负载率.*HVDC).*",
-            "group_contains": "HVDC",
-            "use_b": false,
-            "use_c": false
+            "params": {}
           },
           {
             "id": "chilled_supply_temp_max",
@@ -2047,13 +2043,7 @@
             "agg": "max",
             "template": "{value}",
             "computed_op": "",
-            "params": {},
-            "d_equals": "",
-            "d_contains": "",
-            "d_regex": "",
-            "group_contains": "",
-            "use_b": false,
-            "use_c": false
+            "params": {}
           }
         ],
         "building_rows": {

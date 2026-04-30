@@ -19,10 +19,6 @@ from fastapi.staticfiles import StaticFiles
 from app.bootstrap.container import build_container
 from app.config.config_adapter import normalize_role_mode, adapt_runtime_config
 from app.config.settings_loader import save_settings
-from app.modules.handover_review.api.routes import router as handover_review_router
-from app.modules.feishu.api.routes import router as feishu_router
-from app.modules.notify.api.routes import router as notify_router
-from app.modules.ocr.api.routes import router as ocr_router
 from app.modules.report_pipeline.api.routes import (
     router as pipeline_router,
     schedule_handover_review_access_startup_probe,
@@ -32,14 +28,6 @@ from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import
 )
 from app.modules.shared_bridge.api.routes import router as shared_bridge_router
 from app.modules.shared_bridge.service.runtime_status_coordinator import RuntimeStatusCoordinator
-from app.modules.scheduler.api.handover_routes import router as handover_scheduler_router
-from app.modules.scheduler.api.day_metric_upload_routes import router as day_metric_upload_scheduler_router
-from app.modules.scheduler.api.alarm_event_upload_routes import router as alarm_event_upload_scheduler_router
-from app.modules.scheduler.api.monthly_change_report_routes import router as monthly_change_report_scheduler_router
-from app.modules.scheduler.api.monthly_event_report_routes import router as monthly_event_report_scheduler_router
-from app.modules.scheduler.api.routes import router as scheduler_router
-from app.modules.scheduler.api.wet_bulb_collection_routes import router as wet_bulb_collection_scheduler_router
-from app.modules.sheet_import.api.routes import router as sheet_import_router
 from app.modules.user.api.routes import router as user_router
 from app.modules.websocket.api.log_stream_routes import router as logs_router
 from app.shared.utils.frontend_cache import (
@@ -179,21 +167,6 @@ def _register_common_routes(app: FastAPI) -> None:
     app.include_router(shared_bridge_router)
     app.include_router(user_router)
 
-
-def _register_external_role_routes(app: FastAPI) -> None:
-    app.include_router(sheet_import_router)
-    app.include_router(handover_review_router)
-    app.include_router(scheduler_router)
-    app.include_router(handover_scheduler_router)
-    app.include_router(day_metric_upload_scheduler_router)
-    app.include_router(alarm_event_upload_scheduler_router)
-    app.include_router(wet_bulb_collection_scheduler_router)
-    app.include_router(monthly_change_report_scheduler_router)
-    app.include_router(monthly_event_report_scheduler_router)
-    app.include_router(feishu_router)
-    app.include_router(notify_router)
-    app.include_router(ocr_router)
-
 def _initialize_handover_daily_report_auth(container) -> None:
     existing_thread = getattr(container, "_handover_daily_report_auth_init_thread", None)
     if isinstance(existing_thread, threading.Thread) and existing_thread.is_alive():
@@ -302,14 +275,17 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         normalized = normalize_role_mode(role_mode)
         if normalized not in {"internal", "external"}:
             return
-        merged = copy.deepcopy(container.config if isinstance(container.config, dict) else {})
-        deployment = _ensure_config_dict_path(merged, "common", "deployment")
+        snapshot = copy.deepcopy(container.config if isinstance(container.config, dict) else {})
+        deployment = _ensure_config_dict_path(snapshot, "common", "deployment")
         if deployment.get("last_started_role_mode") == normalized:
             return
         deployment["last_started_role_mode"] = normalized
-        saved = save_settings(merged, container.config_path)
-        container.config = copy.deepcopy(saved)
-        container.runtime_config = adapt_runtime_config(container.config)
+        apply_snapshot = getattr(container, "apply_config_snapshot", None)
+        if callable(apply_snapshot):
+            apply_snapshot(snapshot, mode="light")
+        else:
+            container.config = snapshot
+            container.runtime_config = adapt_runtime_config(container.config)
 
     def _persist_startup_role_selection(role_mode: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized = normalize_role_mode(role_mode)
@@ -452,6 +428,23 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         emit_log=lambda text: container.add_system_log(text, suppress_alert_upload=True),
         refresh_interval_sec=10.0,
     )
+
+    @app.middleware("http")
+    async def internal_endpoint_surface_guard(request: Request, call_next):  # noqa: ANN001
+        path = str(request.url.path or "").strip() or "/"
+        blocked_prefixes = (
+            "/external",
+            "/handover/review",
+            "/api/handover/review",
+            "/api/runtime/external",
+            "/api/updater",
+        )
+        blocked_exact = {
+            "/api/runtime/external-dashboard-summary",
+        }
+        if path in blocked_exact or any(path.startswith(prefix) for prefix in blocked_prefixes):
+            return Response(status_code=404)
+        return await call_next(request)
     container.runtime_activation_progress_callback = lambda step: setattr(
         app.state,
         "runtime_activation_step",
@@ -475,6 +468,17 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     @app.middleware("http")
     async def guard_role_selection_only_runtime(request: Request, call_next):
         path = str(request.url.path or "").strip() or "/"
+        if path in {"/api/runtime/external-dashboard-summary"} or any(
+            path.startswith(prefix)
+            for prefix in (
+                "/external",
+                "/handover/review",
+                "/api/handover/review",
+                "/api/runtime/external",
+                "/api/updater",
+            )
+        ):
+            return Response(status_code=404)
         if _is_role_selection_allowed_path(path):
             return await call_next(request)
         if not path.startswith("/api/"):
@@ -499,6 +503,17 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     async def guard_internal_role_routes(request: Request, call_next):
         role_mode = _deployment_role_mode()
         path = str(request.url.path or "").strip() or "/"
+        if path in {"/api/runtime/external-dashboard-summary"} or any(
+            path.startswith(prefix)
+            for prefix in (
+                "/external",
+                "/handover/review",
+                "/api/handover/review",
+                "/api/runtime/external",
+                "/api/updater",
+            )
+        ):
+            return Response(status_code=404)
         if path == "/api/handover/daily-report/context":
             return await call_next(request)
         if role_mode == "internal" and any(path.startswith(prefix) for prefix in _INTERNAL_BLOCKED_PREFIXES):
@@ -1672,10 +1687,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     @app.get("/internal", response_class=HTMLResponse)
     @app.get("/internal/status", response_class=HTMLResponse)
     @app.get("/internal/config", response_class=HTMLResponse)
-    @app.get("/external", response_class=HTMLResponse)
-    @app.get("/external/status", response_class=HTMLResponse)
-    @app.get("/external/dashboard", response_class=HTMLResponse)
-    @app.get("/external/config", response_class=HTMLResponse)
     def index() -> Response:
         if str(container.frontend_mode or "").strip().lower() == "source":
             return HTMLResponse(
@@ -1726,12 +1737,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             name="assets",
         )
 
-    role_mode = _deployment_role_mode()
-
     _register_common_routes(app)
-
-    if role_mode == "external":
-        _register_external_role_routes(app)
 
     return app
 
