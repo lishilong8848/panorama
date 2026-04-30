@@ -1230,6 +1230,94 @@ class ReviewSessionService:
         output.sort(key=lambda item: str(item.get("building", "")))
         return output
 
+    def batch_generation_and_review_links_completed(
+        self,
+        *,
+        duty_date: str,
+        duty_shift: str,
+        buildings: List[str] | None = None,
+    ) -> Dict[str, Any]:
+        duty_date_text = str(duty_date or "").strip()
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        batch_key = self.build_batch_key(duty_date_text, duty_shift_text)
+        configured_buildings = [
+            str(item.get("name", "") or "").strip()
+            for item in self._building_defs()
+            if str(item.get("name", "") or "").strip()
+        ]
+        target_buildings = [
+            str(item or "").strip()
+            for item in (buildings if isinstance(buildings, list) else configured_buildings)
+            if str(item or "").strip()
+        ]
+        if not target_buildings:
+            target_buildings = configured_buildings
+        sessions_by_building = {
+            str(session.get("building", "") or "").strip(): session
+            for session in self.list_batch_sessions(batch_key)
+            if isinstance(session, dict)
+        }
+        rows: List[Dict[str, Any]] = []
+        incomplete: List[Dict[str, Any]] = []
+        for building in target_buildings:
+            session = sessions_by_building.get(building, {})
+            has_session = isinstance(session, dict) and bool(session)
+            output_file = str(session.get("output_file", "") or "").strip() if has_session else ""
+            capacity_output_file = str(session.get("capacity_output_file", "") or "").strip() if has_session else ""
+            output_exists = bool(output_file and Path(output_file).exists())
+            capacity_exists = bool(capacity_output_file and Path(capacity_output_file).exists())
+            capacity_sync = session.get("capacity_sync", {}) if has_session and isinstance(session.get("capacity_sync", {}), dict) else {}
+            capacity_sync_status = str(capacity_sync.get("status", "") or "").strip().lower()
+            capacity_status = str(session.get("capacity_status", "") or "").strip().lower() if has_session else ""
+            capacity_ready = capacity_exists and (
+                capacity_sync_status == "ready" or capacity_status in {"success", "ok"}
+            )
+            delivery = (
+                session.get("review_link_delivery", {})
+                if has_session and isinstance(session.get("review_link_delivery", {}), dict)
+                else {}
+            )
+            delivery_status = str(delivery.get("status", "") or "").strip().lower()
+            review_link_sent = delivery_status == "success" and bool(str(delivery.get("last_sent_at", "") or "").strip())
+            reason_parts: List[str] = []
+            if not has_session:
+                reason_parts.append("no_session")
+            if not output_exists:
+                reason_parts.append("handover_file_missing")
+            if not capacity_ready:
+                reason_parts.append("capacity_not_ready")
+            if not review_link_sent:
+                reason_parts.append("review_link_not_sent")
+            row = {
+                "building": building,
+                "session_id": str(session.get("session_id", "") or "").strip() if has_session else "",
+                "revision": int(session.get("revision", 0) or 0) if has_session else 0,
+                "output_file": output_file,
+                "capacity_output_file": capacity_output_file,
+                "output_exists": output_exists,
+                "capacity_exists": capacity_exists,
+                "capacity_status": capacity_status,
+                "capacity_sync_status": capacity_sync_status,
+                "review_link_delivery_status": delivery_status,
+                "review_link_last_sent_at": str(delivery.get("last_sent_at", "") or "").strip(),
+                "complete": not reason_parts,
+                "reason": ",".join(reason_parts),
+            }
+            rows.append(row)
+            if reason_parts:
+                incomplete.append(row)
+        return {
+            "complete": bool(target_buildings) and not incomplete,
+            "batch_key": batch_key,
+            "duty_date": duty_date_text,
+            "duty_shift": duty_shift_text,
+            "required_count": len(target_buildings),
+            "completed_count": len(target_buildings) - len(incomplete),
+            "target_buildings": target_buildings,
+            "rows": rows,
+            "incomplete": incomplete,
+        }
+
     def list_sessions(self) -> List[Dict[str, Any]]:
         state = self._load_state()
         sessions = state.get("review_sessions", {})

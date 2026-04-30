@@ -1100,6 +1100,19 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     from handover_log_module.service.review_session_service import ReviewSessionService
 
                     review_service = ReviewSessionService(load_handover_config(runtime_config))
+                    batch_completion = review_service.batch_generation_and_review_links_completed(
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        buildings=target_buildings,
+                    )
+                    if bool(batch_completion.get("complete", False)):
+                        detail = (
+                            "本班交接班文件、容量表和审核链接已全量完成，调度跳过："
+                            f"duty_date={duty_date}, duty_shift={duty_shift}, "
+                            f"buildings={','.join(batch_completion.get('target_buildings', []) or target_buildings)}"
+                        )
+                        container.add_system_log(f"[交接班调度] {detail}")
+                        return True, detail
                     manually_regenerated = [
                         building
                         for building in target_buildings
@@ -1146,7 +1159,13 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         bridge_service=bridge_service,
                         name=job_name,
                         worker_handler="handover_from_download",
-                        worker_payload={"buildings": target_buildings, "end_time": None, "duty_date": duty_date, "duty_shift": duty_shift},
+                        worker_payload={
+                            "buildings": target_buildings,
+                            "end_time": None,
+                            "duty_date": duty_date,
+                            "duty_shift": duty_shift,
+                            "skip_if_batch_fully_generated_and_sent": True,
+                        },
                         resource_keys=["shared_bridge:handover"],
                         priority="scheduler",
                         feature="handover_from_download",

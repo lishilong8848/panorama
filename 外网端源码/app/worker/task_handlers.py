@@ -52,6 +52,38 @@ def handle_handover_from_download(
 ) -> Dict[str, Any]:
     notify = WebhookNotifyService(config)
     try:
+        if bool(payload.get("skip_if_batch_fully_generated_and_sent", False)):
+            duty_date = str(payload.get("duty_date", "") or "").strip()
+            duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
+            if duty_date and duty_shift:
+                building_list = [
+                    str(item or "").strip()
+                    for item in (payload.get("buildings") if isinstance(payload.get("buildings"), list) else [])
+                    if str(item or "").strip()
+                ]
+                try:
+                    review_service = ReviewSessionService(load_handover_config(config))
+                    completion = review_service.batch_generation_and_review_links_completed(
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        buildings=building_list,
+                    )
+                    if bool(completion.get("complete", False)):
+                        emit_log(
+                            "[交接班调度] 后台任务恢复前检测到本班已全量完成，跳过执行: "
+                            f"duty_date={duty_date}, duty_shift={duty_shift}, "
+                            f"buildings={','.join(completion.get('target_buildings', []) or building_list)}"
+                        )
+                        return {
+                            "status": "skipped",
+                            "reason": "batch_fully_generated_and_review_links_sent",
+                            "duty_date": duty_date,
+                            "duty_shift": duty_shift,
+                            "buildings": completion.get("target_buildings", []) or building_list,
+                            "completion": completion,
+                        }
+                except Exception as exc:  # noqa: BLE001
+                    emit_log(f"[交接班调度] 检查本班全量完成状态失败，继续执行: {exc}")
         orchestrator = OrchestratorService(config)
         if str(payload.get("resume_kind", "") or "").strip() == "shared_bridge_handover":
             raw_items = list(payload.get("building_files") or [])
