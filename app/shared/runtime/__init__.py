@@ -1,2 +1,0 @@
-"""Runtime-scoped shared objects."""
-
