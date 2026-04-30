@@ -187,6 +187,7 @@ class OrchestratorService:
         end_time: str | None,
         duty_date: str | None,
         duty_shift: str | None,
+        auto_send_review_link: bool = True,
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
         emit_log(f"[交接班日志] 开始执行（已有文件） building={building}, file={file_path}")
@@ -198,6 +199,7 @@ class OrchestratorService:
             end_time=end_time,
             duty_date=duty_date,
             duty_shift=duty_shift,
+            auto_send_review_link=bool(auto_send_review_link),
             emit_log=emit_log,
         )
         emit_log(
@@ -214,6 +216,7 @@ class OrchestratorService:
         end_time: str | None,
         duty_date: str | None,
         duty_shift: str | None,
+        auto_send_review_link: bool = True,
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
         selected_buildings = [str(building or "").strip() for building, _ in building_files if str(building or "").strip()]
@@ -235,6 +238,7 @@ class OrchestratorService:
             end_time=end_time,
             duty_date=duty_date,
             duty_shift=duty_shift,
+            auto_send_review_link=bool(auto_send_review_link),
             emit_log=emit_log,
         )
         emit_log(

@@ -157,19 +157,20 @@ class HandoverXlsxWriteQueueService:
         output_file = _text(session.get("capacity_output_file"))
         if not building or not session_id:
             return {"status": "failed", "error": "审核会话缺少楼栋或 session_id"}
-        cells = {
-            cell: _text((tracked_cells or {}).get(cell, ""))
-            for cell in HandoverCapacityReportService.tracked_cells()
+        payload: Dict[str, Any] = {
+            "session_id": session_id,
+            "client_id": _text(client_id),
         }
+        if tracked_cells is not None:
+            payload["tracked_cells"] = {
+                cell: _text((tracked_cells or {}).get(cell, ""))
+                for cell in HandoverCapacityReportService.tracked_cells()
+            }
         job = self._store(building).enqueue_xlsx_write_job(
             task_type="capacity_overlay_sync",
             session_id=session_id,
             dedupe_key=f"{session_id}|{output_file}",
-            payload={
-                "session_id": session_id,
-                "tracked_cells": cells,
-                "client_id": _text(client_id),
-            },
+            payload=payload,
         )
         self.emit_log(
             f"[交接班][xlsx队列] 已入队 building={building}, task=capacity_overlay_sync, "

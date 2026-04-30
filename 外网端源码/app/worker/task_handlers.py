@@ -13,6 +13,11 @@ from app.modules.sheet_import.service.sheet_import_service import SheetImportSer
 from app.modules.shared_bridge.service import shared_bridge_runtime_service as shared_bridge_runtime_module
 from app.shared.utils.runtime_temp_workspace import cleanup_runtime_temp_dir
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
+from handover_log_module.api.facade import load_handover_config
+from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
+from handover_log_module.service.handover_xlsx_write_queue_service import HandoverXlsxWriteQueueService
+from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
+from handover_log_module.service.review_session_service import ReviewSessionService
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 from pipeline_utils import get_app_dir
 
@@ -366,6 +371,114 @@ def handle_handover_from_files(
         raise
     finally:
         _cleanup_temp_dir(config, payload)
+
+
+def handle_handover_review_regenerate(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    emit_log: Callable[[str], None],
+    runtime: Any = None,  # noqa: ANN401
+) -> Dict[str, Any]:
+    def _text(value: Any) -> str:
+        return str(value or "").strip()
+
+    building = _text(payload.get("building"))
+    session_id = _text(payload.get("session_id"))
+    duty_date = _text(payload.get("duty_date"))
+    duty_shift = _text(payload.get("duty_shift")).lower()
+    data_file = _text(payload.get("data_file"))
+    capacity_source_file = _text(payload.get("capacity_source_file"))
+    client_id = _text(payload.get("client_id"))
+    job_id = _text(payload.get("job_id"))
+    if runtime is not None:
+        runtime.raise_if_cancelled()
+    if not building or not session_id or not duty_date or duty_shift not in {"day", "night"}:
+        raise RuntimeError("重新生成参数不完整")
+    if not data_file or not Path(data_file).exists():
+        raise RuntimeError(f"交接班源文件不存在: {data_file or '-'}")
+    if not capacity_source_file or not Path(capacity_source_file).exists():
+        raise RuntimeError(f"交接班容量报表源文件不存在: {capacity_source_file or '-'}")
+
+    handover_cfg = load_handover_config(config)
+    review_service = ReviewSessionService(handover_cfg)
+    document_state = ReviewDocumentStateService(handover_cfg, emit_log=emit_log)
+    queue_service = HandoverXlsxWriteQueueService(
+        handover_cfg,
+        review_service=review_service,
+        document_state=document_state,
+        emit_log=emit_log,
+    )
+    emit_log(
+        "[交接班][审核重生成] 开始 "
+        f"building={building}, session_id={session_id}, duty={duty_date}/{duty_shift}, "
+        f"source={data_file}, capacity_source={capacity_source_file}"
+    )
+    queue_service.wait_for_barrier(
+        building=building,
+        session_id=session_id,
+        reason="review_regenerate_before",
+        timeout_sec=120,
+    )
+    if runtime is not None:
+        runtime.raise_if_cancelled()
+
+    result = OrchestratorService(config).run_handover_from_files(
+        building_files=[(building, data_file)],
+        capacity_building_files=[(building, capacity_source_file)],
+        end_time=None,
+        duty_date=duty_date,
+        duty_shift=duty_shift,
+        auto_send_review_link=False,
+        emit_log=emit_log,
+    )
+    rows = result.get("results", []) if isinstance(result.get("results", []), list) else []
+    row = next((item for item in rows if isinstance(item, dict) and _text(item.get("building")) == building), None)
+    if not isinstance(row, dict) or not bool(row.get("success", False)):
+        errors = row.get("errors", []) if isinstance(row, dict) and isinstance(row.get("errors", []), list) else []
+        error_text = "; ".join([_text(item) for item in errors if _text(item)]) or _text(result.get("errors")) or "重新生成失败"
+        raise RuntimeError(error_text)
+    review_session = row.get("review_session", {}) if isinstance(row.get("review_session", {}), dict) else {}
+    regenerated_session_id = _text(review_session.get("session_id")) or session_id
+    latest_session = review_service.get_session_by_id(regenerated_session_id)
+    if not isinstance(latest_session, dict):
+        raise RuntimeError("重新生成后未找到审核会话")
+    if runtime is not None:
+        runtime.raise_if_cancelled()
+
+    ReviewBuildingDocumentStore(config=handover_cfg, building=building).delete_document(regenerated_session_id)
+    document_state.ensure_document_for_session(latest_session)
+    queue_service.enqueue_capacity_overlay_sync(latest_session, client_id=client_id)
+    barrier = queue_service.wait_for_barrier(
+        building=building,
+        session_id=regenerated_session_id,
+        reason="review_regenerate_capacity_overlay",
+        timeout_sec=120,
+    )
+    if _text(barrier.get("status")).lower() != "success":
+        raise RuntimeError(_text(barrier.get("error")) or "重新生成后容量表补写失败")
+    latest_session = review_service.mark_manual_regenerated(
+        building=building,
+        duty_date=duty_date,
+        duty_shift=duty_shift,
+        job_id=job_id,
+        client_id=client_id,
+    )
+    emit_log(
+        "[交接班][审核重生成] 完成 "
+        f"building={building}, session_id={regenerated_session_id}, "
+        f"output={latest_session.get('output_file', '-')}, capacity={latest_session.get('capacity_output_file', '-')}"
+    )
+    return {
+        "ok": True,
+        "status": "success",
+        "building": building,
+        "session_id": regenerated_session_id,
+        "revision": int(latest_session.get("revision", 0) or 0),
+        "output_file": _text(latest_session.get("output_file")),
+        "capacity_output_file": _text(latest_session.get("capacity_output_file")),
+        "manual_regenerated": True,
+        "result": result,
+    }
 
 
 def handle_day_metric_from_file(
@@ -821,6 +934,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "manual_upload": handle_manual_upload,
     "handover_from_file": handle_handover_from_file,
     "handover_from_files": handle_handover_from_files,
+    "handover_review_regenerate": handle_handover_review_regenerate,
     "day_metric_from_file": handle_day_metric_from_file,
     "sheet_import": handle_sheet_import,
     "day_metric_retry_unit": handle_day_metric_retry_unit,

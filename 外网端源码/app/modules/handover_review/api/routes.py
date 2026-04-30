@@ -1329,6 +1329,93 @@ def _build_xlsx_write_queue_service(
     )
 
 
+def _first_existing_path(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        try:
+            if Path(text).exists():
+                return text
+        except Exception:  # noqa: BLE001
+            continue
+    return ""
+
+
+def _first_cached_file(entries: Any, building: str) -> str:
+    target = str(building or "").strip()
+    rows = entries if isinstance(entries, list) else []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("building", "") or "").strip() != target:
+            continue
+        path_text = _first_existing_path(item.get("file_path"))
+        if path_text:
+            return path_text
+    return ""
+
+
+def _derive_capacity_source_from_handover_source(handover_source: Any) -> str:
+    text = str(handover_source or "").strip()
+    if not text:
+        return ""
+    candidates: list[str] = []
+    if "交接班日志源文件" in text:
+        candidates.append(text.replace("交接班日志源文件", "交接班容量报表源文件"))
+    try:
+        path = Path(text)
+        name = path.name.replace("交接班日志源文件", "交接班容量报表源文件")
+        parent_parts = [
+            "交接班容量报表源文件" if part == "交接班日志源文件" else part
+            for part in path.parent.parts
+        ]
+        if parent_parts:
+            candidates.append(str(Path(*parent_parts) / name))
+    except Exception:  # noqa: BLE001
+        pass
+    return _first_existing_path(*candidates)
+
+
+def _resolve_regenerate_source_files(container, session: Dict[str, Any], *, building: str) -> tuple[str, str]:
+    duty_date = str(session.get("duty_date", "") or "").strip()
+    duty_shift = str(session.get("duty_shift", "") or "").strip().lower()
+    source_cache = session.get("source_file_cache", {}) if isinstance(session.get("source_file_cache", {}), dict) else {}
+    handover_source = _first_existing_path(
+        session.get("data_file"),
+        source_cache.get("stored_path"),
+    )
+    capacity_source = _first_existing_path(session.get("capacity_source_file"))
+    capacity_source = capacity_source or _derive_capacity_source_from_handover_source(handover_source)
+    bridge_service = getattr(container, "shared_bridge_service", None)
+    if bridge_service is not None and duty_date and duty_shift and (not handover_source or not capacity_source):
+        try:
+            if not handover_source:
+                handover_source = _first_cached_file(
+                    bridge_service.get_handover_by_date_cache_entries(
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        buildings=[building],
+                    ),
+                    building,
+                )
+        except Exception as exc:  # noqa: BLE001
+            container.add_system_log(f"[交接班][审核重生成] 读取交接班共享缓存失败 building={building}, error={exc}")
+        try:
+            if not capacity_source:
+                capacity_source = _first_cached_file(
+                    bridge_service.get_handover_capacity_by_date_cache_entries(
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        buildings=[building],
+                    ),
+                    building,
+                )
+        except Exception as exc:  # noqa: BLE001
+            container.add_system_log(f"[交接班][审核重生成] 读取容量共享缓存失败 building={building}, error={exc}")
+    return handover_source, capacity_source
+
+
 def _queue_capacity_overlay_after_review_save(
     *,
     container,
@@ -2294,6 +2381,18 @@ def _build_review_display_state(
         capacity_image_send_disabled_reason = "当前没有可发送的容量报表"
     elif capacity_image_sending:
         capacity_image_send_disabled_reason = "容量表图片正在发送中，请等待发送完成"
+    regenerate_allowed = bool(session_payload) and not is_history_mode and not remote_editor_active and not cloud_sheet_uploading and not confirmed
+    regenerate_disabled_reason = ""
+    if not session_payload:
+        regenerate_disabled_reason = "暂无可重新生成的交接班记录"
+    elif is_history_mode:
+        regenerate_disabled_reason = "历史交接班日志不支持重新生成"
+    elif remote_editor_active:
+        regenerate_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
+    elif cloud_sheet_uploading:
+        regenerate_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再重新生成"
+    elif confirmed:
+        regenerate_disabled_reason = "当前楼栋已确认，请先撤销确认后再重新生成"
     history_limit = max(1, int(history_payload.get("history_limit", HISTORY_CLOUD_SUCCESS_LIMIT) or HISTORY_CLOUD_SUCCESS_LIMIT))
     history_hint_rows = [f"仅显示最近 {history_limit} 条已成功上云的交接班日志。"]
     if session_payload and not bool(history_payload.get("selected_in_history_list", False)):
@@ -2461,6 +2560,14 @@ def _build_review_display_state(
                 disabled_reason=capacity_image_send_disabled_reason,
                 tone="neutral",
                 variant="secondary",
+            ),
+            "regenerate": _review_action(
+                allowed=regenerate_allowed,
+                visible=bool(session_payload) and not is_history_mode,
+                label="重新生成交接班及容量表",
+                disabled_reason=regenerate_disabled_reason,
+                tone="warning",
+                variant="warning",
             ),
             "confirm": _review_action(
                 allowed=confirm_allowed,
@@ -3721,6 +3828,77 @@ def handover_review_capacity_image_send(
             "review_link_delivery": current_session.get("review_link_delivery", {}),
         }
     return result
+
+
+@router.post("/api/handover/review/{building_code}/regenerate")
+def handover_review_regenerate(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service = _build_review_session_service(container)
+    building = _resolve_building_or_404(service, building_code)
+    session_id_text = str(payload.get("session_id", "") or "").strip()
+    client_id = str(payload.get("client_id", "") or "").strip()
+    if not session_id_text:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
+    target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    if bool(target.get("confirmed", False)):
+        raise HTTPException(status_code=409, detail="当前楼栋已确认，请先撤销确认后再重新生成")
+    cloud_sync = target.get("cloud_sheet_sync", {}) if isinstance(target.get("cloud_sheet_sync", {}), dict) else {}
+    if str(cloud_sync.get("status", "") or "").strip().lower() in {"uploading", "syncing"}:
+        raise HTTPException(status_code=409, detail="当前楼栋云文档上传中，请等待完成后再重新生成")
+
+    duty_date = str(target.get("duty_date", "") or "").strip()
+    duty_shift = str(target.get("duty_shift", "") or "").strip().lower()
+    batch_key = str(target.get("batch_key", "") or "").strip()
+    handover_source, capacity_source = _resolve_regenerate_source_files(
+        container,
+        target,
+        building=building,
+    )
+    if not handover_source:
+        raise HTTPException(status_code=409, detail="缺少可用于重新生成的交接班源文件")
+    if not capacity_source:
+        raise HTTPException(status_code=409, detail="缺少可用于重新生成的交接班容量报表源文件")
+
+    worker_payload = {
+        "building": building,
+        "session_id": session_id_text,
+        "duty_date": duty_date,
+        "duty_shift": duty_shift,
+        "data_file": handover_source,
+        "capacity_source_file": capacity_source,
+        "client_id": client_id,
+    }
+
+    def _run(emit_log):
+        from app.worker.task_handlers import handle_handover_review_regenerate
+
+        return handle_handover_review_regenerate(
+            getattr(container, "runtime_config", {}),
+            worker_payload,
+            emit_log,
+        )
+
+    job = _start_handover_background_job(
+        container,
+        name=f"重新生成交接班及容量表 {building}",
+        run_func=_run,
+        worker_handler="handover_review_regenerate",
+        worker_payload=worker_payload,
+        resource_keys=_handover_resource_keys("shared_bridge:handover", building=building, batch_key=batch_key),
+        priority="manual",
+        feature="handover_review_regenerate",
+        submitted_by="manual",
+        dedupe_key=f"handover_review_regenerate:{session_id_text}",
+    )
+    container.add_system_log(
+        f"[任务] 已提交: 重新生成交接班及容量表 building={building}, session={session_id_text} ({job.job_id})"
+    )
+    return _accepted_job_response(job)
 
 
 @router.put("/api/handover/review/{building_code}")

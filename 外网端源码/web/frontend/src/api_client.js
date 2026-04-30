@@ -579,6 +579,13 @@ export async function sendHandoverReviewCapacityImageApi(buildingCode, payload =
   });
 }
 
+export async function regenerateHandoverReviewApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/regenerate`, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export async function getHandoverReviewBatchStatusApi(batchKey) {
   return apiJson(`/api/handover/review/batch/${encodeURIComponent(batchKey)}/status`);
 }

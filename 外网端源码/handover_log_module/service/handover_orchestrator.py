@@ -715,6 +715,7 @@ class HandoverOrchestrator:
         alarm_summary_payload: Dict[str, Any] | None = None,
         capacity_source_file: str | None = None,
         source_mode: str = "from_file",
+        auto_send_review_link: bool = True,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         summary = RunSummary(mode="from_existing_file")
@@ -1043,6 +1044,7 @@ class HandoverOrchestrator:
                         source_file_cache=managed_source_file_cache,
                         source_data_attachment_export=session_source_data_attachment_export,
                         capacity_output_file=result.capacity_output_file,
+                        capacity_source_file=capacity_source_file_text,
                         capacity_status=result.capacity_status,
                         capacity_error=result.capacity_error,
                         capacity_warnings=result.capacity_warnings,
@@ -1085,19 +1087,25 @@ class HandoverOrchestrator:
                         f"building={building}, session_id={review_session.get('session_id', '-')}, "
                         f"output={result.output_file}"
                     )
-                    try:
-                        delivery_state = self._review_link_delivery_service.send_for_session(
-                            review_session,
-                            source="auto",
-                            force=True,
-                            emit_log=emit_log,
-                        )
-                        review_session["review_link_delivery"] = delivery_state
-                        result.review_session = review_session
-                    except Exception as exc:  # noqa: BLE001
+                    if auto_send_review_link:
+                        try:
+                            delivery_state = self._review_link_delivery_service.send_for_session(
+                                review_session,
+                                source="auto",
+                                force=True,
+                                emit_log=emit_log,
+                            )
+                            review_session["review_link_delivery"] = delivery_state
+                            result.review_session = review_session
+                        except Exception as exc:  # noqa: BLE001
+                            emit_log(
+                                "[交接班][审核链接发送] 自动发送失败但不阻断主流程 "
+                                f"building={building}, error={exc}"
+                            )
+                    else:
                         emit_log(
-                            "[交接班][审核链接发送] 自动发送失败但不阻断主流程 "
-                            f"building={building}, error={exc}"
+                            "[交接班][审核链接发送] 已跳过自动发送 "
+                            f"building={building}, session_id={review_session.get('session_id', '-')}"
                         )
                 except Exception as exc:  # noqa: BLE001
                     managed_stored_path = (
@@ -1147,6 +1155,7 @@ class HandoverOrchestrator:
         end_time: str | None = None,
         duty_date: str | None = None,
         duty_shift: str | None = None,
+        auto_send_review_link: bool = True,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         summary = RunSummary(mode="from_existing_files")
@@ -1217,6 +1226,7 @@ class HandoverOrchestrator:
                     alarm_document_cache=alarm_document_cache,
                     capacity_source_file=capacity_file_map.get(building),
                     source_mode="from_file",
+                    auto_send_review_link=auto_send_review_link,
                     emit_log=emit_log,
                 )
             except Exception as exc:  # noqa: BLE001

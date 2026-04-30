@@ -11,6 +11,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     downloading,
     capacityDownloading,
     capacityImageSending,
+    regenerating,
     confirming,
     retryingCloudSync,
     updatingHistoryCloudSync,
@@ -66,6 +67,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
   const downloadActionBase = computed(() => reviewDisplayState.value.actions.download);
   const capacityDownloadActionBase = computed(() => reviewDisplayState.value.actions.capacity_download);
   const capacityImageSendActionBase = computed(() => reviewDisplayState.value.actions.capacity_image_send);
+  const regenerateActionBase = computed(() => reviewDisplayState.value.actions.regenerate);
   const confirmActionBase = computed(() => reviewDisplayState.value.actions.confirm);
   const retryCloudSyncActionBase = computed(() => reviewDisplayState.value.actions.retry_cloud_sync);
   const updateHistoryCloudSyncActionBase = computed(() => reviewDisplayState.value.actions.update_history_cloud_sync);
@@ -75,6 +77,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
   const showDownloadAction = computed(() => Boolean(downloadActionBase.value.visible));
   const showCapacityDownloadAction = computed(() => Boolean(capacityDownloadActionBase.value.visible));
   const showCapacityImageSendAction = computed(() => Boolean(capacityImageSendActionBase.value.visible));
+  const showRegenerateAction = computed(() => Boolean(regenerateActionBase.value.visible));
   const showConfirmAction = computed(() => Boolean(confirmActionBase.value.visible));
   const showReturnToLatestAction = computed(() => Boolean(returnToLatestActionBase.value.visible));
 
@@ -151,6 +154,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       disabled:
         loading.value
         || saving.value
+        || regenerating.value
         || confirming.value
         || syncingRemoteRevision.value
         || cloudSyncBusy.value
@@ -167,6 +171,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       disabled:
         loading.value
         || saving.value
+        || regenerating.value
         || syncingRemoteRevision.value
         || downloading.value
         || capacityImageSending.value
@@ -184,6 +189,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       disabled:
         loading.value
         || saving.value
+        || regenerating.value
         || confirming.value
         || cloudSyncBusy.value
         || syncingRemoteRevision.value
@@ -202,6 +208,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       disabled:
         loading.value
         || saving.value
+        || regenerating.value
         || confirming.value
         || cloudSyncBusy.value
         || downloading.value
@@ -210,6 +217,27 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
         || capacityImageSending.value
         || capacityImageSendActionBase.value.pending
         || !capacityImageSendActionBase.value.allowed,
+    });
+  });
+  const regenerateActionVm = computed(() => {
+    return buildReviewActionVmBase({
+      baseAction: regenerateActionBase.value,
+      fallbackLabel: "重新生成交接班及容量表",
+      inFlight: regenerating.value,
+      inFlightText: "重新生成中...",
+      disabled:
+        loading.value
+        || saving.value
+        || regenerating.value
+        || confirming.value
+        || cloudSyncBusy.value
+        || downloading.value
+        || capacityDownloading.value
+        || capacityImageSending.value
+        || syncingRemoteRevision.value
+        || regenerating.value
+        || regenerateActionBase.value.pending
+        || !regenerateActionBase.value.allowed,
     });
   });
   const capacityDownloadDisabled = computed(() => Boolean(capacityDownloadActionVm.value.disabled));
@@ -235,6 +263,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       || downloading.value
       || capacityDownloading.value
       || capacityImageSending.value
+      || regenerating.value
       || confirming.value
       || retryingCloudSync.value
       || updatingHistoryCloudSync.value
@@ -259,6 +288,8 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       localDisabledReason = "正在加载审核内容，请稍候";
     } else if (saving.value) {
       localDisabledReason = "正在保存审核内容，请稍候";
+    } else if (regenerating.value) {
+      localDisabledReason = "正在重新生成交接班及容量表，请稍候";
     } else if (confirming.value) {
       localDisabledReason = "确认处理中，请稍候";
     } else if (downloading.value) {
@@ -312,6 +343,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       disabled:
         loading.value
         || saving.value
+        || regenerating.value
         || confirming.value
         || cloudSyncBusy.value
         || downloading.value
@@ -331,6 +363,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       disabled:
         loading.value
         || saving.value
+        || regenerating.value
         || confirming.value
         || cloudSyncBusy.value
         || retryingCloudSync.value
@@ -348,6 +381,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       disabled:
         loading.value
         || saving.value
+        || regenerating.value
         || confirming.value
         || cloudSyncBusy.value
         || updatingHistoryCloudSync.value
@@ -365,6 +399,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
       disabled:
         loading.value
         || saving.value
+        || regenerating.value
         || confirming.value
         || cloudSyncBusy.value
         || returnToLatestActionBase.value.pending
@@ -389,6 +424,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     downloadActionBase,
     capacityDownloadActionBase,
     capacityImageSendActionBase,
+    regenerateActionBase,
     confirmActionBase,
     retryCloudSyncActionBase,
     updateHistoryCloudSyncActionBase,
@@ -398,6 +434,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     showDownloadAction,
     showCapacityDownloadAction,
     showCapacityImageSendAction,
+    showRegenerateAction,
     showConfirmAction,
     showReturnToLatestAction,
     reviewSaveBadge,
@@ -408,6 +445,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     downloadActionVm,
     capacityDownloadActionVm,
     capacityImageSendActionVm,
+    regenerateActionVm,
     capacityDownloadDisabled,
     reviewStatusBanners,
     confirmActionVm,

@@ -13,6 +13,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     downloading,
     capacityDownloading,
     capacityImageSending,
+    regenerating,
     retryingCloudSync,
     updatingHistoryCloudSync,
     activeRouteSelection,
@@ -35,6 +36,8 @@ export function createHandoverReviewActionHelpers(options = {}) {
     capacityDownloadActionVm,
     capacityImageSendActionBase,
     capacityImageSendActionVm,
+    regenerateActionBase,
+    regenerateActionVm,
     refreshActionBase,
     refreshActionVm,
     clearSaveTimers,
@@ -54,6 +57,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     retryHandoverReviewCloudSyncApi,
     updateHandoverReviewCloudSyncApi,
     sendHandoverReviewCapacityImageApi,
+    regenerateHandoverReviewApi,
     buildHandoverReviewDownloadUrl,
     buildHandoverReviewCapacityDownloadUrl,
     triggerBrowserDownload,
@@ -154,6 +158,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     if (
       !session.value
       || saving.value
+      || regenerating.value
       || confirming.value
       || cloudSyncBusy.value
       || syncingRemoteRevision.value
@@ -307,7 +312,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       statusText.value = downloadActionVm.value.disabledReason || "";
       return;
     }
-    if (saving.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityImageSending.value) {
+    if (saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityImageSending.value) {
       statusText.value = "请先等待当前保存或同步完成后再下载。";
       return;
     }
@@ -348,7 +353,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       statusText.value = capacityDownloadActionVm.value.disabledReason || "";
       return;
     }
-    if (saving.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
+    if (saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
       statusText.value = "请先等待当前保存或同步完成后再下载。";
       return;
     }
@@ -400,6 +405,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       || cloudSyncBusy.value
       || downloading.value
       || capacityDownloading.value
+      || regenerating.value
       || syncingRemoteRevision.value
       || capacityImageSending.value
     ) {
@@ -456,6 +462,73 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
   }
 
+  async function regenerateCurrentHandover(getJobApi) {
+    if (!regenerateActionBase.value.allowed) {
+      statusText.value = regenerateActionVm.value.disabledReason || "";
+      return;
+    }
+    if (
+      saving.value
+      || confirming.value
+      || cloudSyncBusy.value
+      || downloading.value
+      || capacityDownloading.value
+      || capacityImageSending.value
+      || syncingRemoteRevision.value
+      || regenerating.value
+    ) {
+      statusText.value = "请先等待当前保存或同步完成后再重新生成。";
+      return;
+    }
+    const sessionId = String(session.value?.session_id || "").trim();
+    if (!buildingCode || !sessionId) {
+      statusText.value = regenerateActionVm.value.disabledReason || "";
+      return;
+    }
+    clearSaveTimers();
+    regenerating.value = true;
+    errorText.value = "";
+    statusText.value = dirty.value
+      ? "正在重新生成交接班及容量表，当前未保存修改将被覆盖..."
+      : "正在重新生成交接班及容量表...";
+    try {
+      const response = await regenerateHandoverReviewApi(buildingCode, {
+        session_id: sessionId,
+        client_id: reviewClientId,
+      });
+      const jobId = String(response?.job?.job_id || response?.job_id || "").trim();
+      if (!jobId) {
+        throw new Error("重新生成任务提交失败");
+      }
+      const job = await waitForBackgroundJob(jobId, getJobApi, { timeoutMs: 10 * 60 * 1000, intervalMs: 1500 });
+      if (!job) {
+        throw new Error("重新生成任务等待超时，请稍后刷新查看结果");
+      }
+      await loadReviewData({
+        background: false,
+        mode: shouldPreferBootstrapLoad({ forceLatest: true }) ? "bootstrap" : "full",
+      });
+      if (job.status === "success") {
+        dirty.value = false;
+        statusText.value = "交接班日志和容量表已重新生成";
+        errorText.value = "";
+      } else {
+        errorText.value = String(job?.error || job?.summary || "重新生成失败");
+        statusText.value = "重新生成失败，请处理后重试。";
+      }
+    } catch (error) {
+      errorText.value = String(error?.message || error || "重新生成失败");
+      statusText.value = "重新生成失败，请处理后重试。";
+      try {
+        await loadReviewData({ background: false, mode: shouldPreferBootstrapLoad() ? "bootstrap" : "full" });
+      } catch (_error) {
+        // Keep the original regenerate error visible.
+      }
+    } finally {
+      regenerating.value = false;
+    }
+  }
+
   async function refreshData() {
     if (!refreshActionBase.value.allowed) {
       statusText.value = refreshActionVm.value.disabledReason || "";
@@ -491,6 +564,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     downloadCurrentReviewFile,
     downloadCurrentCapacityReviewFile,
     sendCurrentCapacityImage,
+    regenerateCurrentHandover,
     refreshData,
     saveCurrentReview,
   };

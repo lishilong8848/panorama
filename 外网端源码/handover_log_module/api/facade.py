@@ -148,6 +148,7 @@ def run_from_existing_file(
     end_time: str | None = None,
     duty_date: str | None = None,
     duty_shift: str | None = None,
+    auto_send_review_link: bool = True,
     emit_log: Callable[[str], None] = print,
 ) -> Dict[str, Any]:
     cfg = load_handover_config(config)
@@ -159,6 +160,7 @@ def run_from_existing_file(
         end_time=end_time,
         duty_date=str(duty_date or "").strip() or None,
         duty_shift=str(duty_shift or "").strip().lower() or None,
+        auto_send_review_link=bool(auto_send_review_link),
         emit_log=emit_log,
     )
 
@@ -171,6 +173,7 @@ def run_from_existing_files(
     end_time: str | None = None,
     duty_date: str | None = None,
     duty_shift: str | None = None,
+    auto_send_review_link: bool = True,
     emit_log: Callable[[str], None] = print,
 ) -> Dict[str, Any]:
     cfg = load_handover_config(config)
@@ -193,6 +196,7 @@ def run_from_existing_files(
         end_time=end_time,
         duty_date=str(duty_date or "").strip() or None,
         duty_shift=str(duty_shift or "").strip().lower() or None,
+        auto_send_review_link=bool(auto_send_review_link),
         emit_log=emit_log,
     )
 

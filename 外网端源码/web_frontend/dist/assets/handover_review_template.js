@@ -46,12 +46,24 @@
           >
             {{ capacityImageSendActionVm.text }}
           </button>
+          <button
+            v-if="showRegenerateAction"
+            class="btn btn-warning btn-mini"
+            @click="regenerateCurrentReview"
+            :disabled="regenerateActionVm.disabled"
+            :title="regenerateActionVm.disabledReason || ''"
+          >
+            {{ regenerateActionVm.text }}
+          </button>
           <a
             v-if="reviewCloudSheetUrl"
             class="btn btn-secondary btn-mini"
+            :class="{ 'is-disabled': regenerating }"
             :href="reviewCloudSheetUrl"
             target="_blank"
             rel="noopener noreferrer"
+            :aria-disabled="regenerating ? 'true' : 'false'"
+            @click="regenerating && $event.preventDefault()"
           >
             打开云文档
           </a>
@@ -138,7 +150,7 @@
                 @focus="ensureHistoryLoaded()"
                 @mousedown="ensureHistoryLoaded()"
                 @change="onHistorySelectionChange($event.target.value)"
-                :disabled="loading || saving || confirming || cloudSyncBusy || historyLoading"
+                :disabled="loading || saving || regenerating || confirming || cloudSyncBusy || historyLoading"
               >
                 <option v-if="historyLoading" value="" disabled>
                   正在加载历史交接班日志...
@@ -244,6 +256,7 @@
               <input
                 class="review-input"
                 :value="row.inlet_pressure"
+                :disabled="regenerating"
                 @input="updateCoolingPumpPressure(rowIndex, 'inlet_pressure', $event.target.value)"
                 @change="updateCoolingPumpPressure(rowIndex, 'inlet_pressure', $event.target.value)"
               />
@@ -251,6 +264,7 @@
               <input
                 class="review-input"
                 :value="row.outlet_pressure"
+                :disabled="regenerating"
                 @input="updateCoolingPumpPressure(rowIndex, 'outlet_pressure', $event.target.value)"
                 @change="updateCoolingPumpPressure(rowIndex, 'outlet_pressure', $event.target.value)"
               />
@@ -272,6 +286,7 @@
               <input
                 class="review-input"
                 :value="row.cooling_tower_level"
+                :disabled="regenerating"
                 @input="updateCoolingTowerLevel(rowIndex, $event.target.value)"
                 @change="updateCoolingTowerLevel(rowIndex, $event.target.value)"
               />
@@ -287,6 +302,7 @@
               <input
                 class="review-input"
                 :value="tank.temperature"
+                :disabled="regenerating"
                 @input="updateCoolingTankValue(tank.zone, 'temperature', $event.target.value)"
                 @change="updateCoolingTankValue(tank.zone, 'temperature', $event.target.value)"
               />
@@ -294,6 +310,7 @@
               <input
                 class="review-input"
                 :value="tank.level"
+                :disabled="regenerating"
                 @input="updateCoolingTankValue(tank.zone, 'level', $event.target.value)"
                 @change="updateCoolingTankValue(tank.zone, 'level', $event.target.value)"
               />
@@ -317,6 +334,7 @@
               <input
                 class="review-input"
                 :value="field.value"
+                :disabled="regenerating"
                 @input="updateFixedField(blockIndex, fieldIndex, $event.target.value)"
                 @change="updateFixedField(blockIndex, fieldIndex, $event.target.value)"
               />
@@ -336,7 +354,7 @@
               <h2>{{ section.name }}</h2>
               <p class="review-card-subtitle">支持新增、删除、修改本分类内容，保存后回写 Excel。</p>
             </div>
-            <button class="btn btn-secondary btn-mini" @click="addSectionRow(sectionIndex)">
+            <button class="btn btn-secondary btn-mini" @click="addSectionRow(sectionIndex)" :disabled="regenerating">
               新增一行
             </button>
           </div>
@@ -363,6 +381,7 @@
                       class="review-cell-input"
                       rows="1"
                       :value="row.cells[column.key] || ''"
+                      :disabled="regenerating"
                       @input="updateSectionCell(sectionIndex, rowIndex, column.key, $event.target.value)"
                       @change="updateSectionCell(sectionIndex, rowIndex, column.key, $event.target.value)"
                     ></textarea>
@@ -373,10 +392,11 @@
                         v-if="canTransferSectionRowToOtherImportantWork(section, row)"
                         class="btn btn-secondary btn-mini"
                         @click="transferSectionRowToOtherImportantWork(sectionIndex, rowIndex)"
+                        :disabled="regenerating"
                       >
                         转到其他重要工作记录
                       </button>
-                      <button class="btn btn-danger btn-mini" @click="removeSectionRow(sectionIndex, rowIndex)">
+                      <button class="btn btn-danger btn-mini" @click="removeSectionRow(sectionIndex, rowIndex)" :disabled="regenerating">
                         删除
                       </button>
                     </div>
@@ -400,7 +420,7 @@
                 <h2>{{ block.title }}</h2>
                 <p class="review-card-subtitle">{{ block.group_title }}</p>
               </div>
-              <button class="btn btn-secondary btn-mini" @click="addFooterRow(blockIndex)">
+              <button class="btn btn-secondary btn-mini" @click="addFooterRow(blockIndex)" :disabled="regenerating">
                 新增一行
               </button>
             </div>
@@ -427,12 +447,13 @@
                         class="review-cell-input"
                         rows="1"
                         :value="row.cells[column.key] || ''"
+                        :disabled="regenerating"
                         @input="updateFooterCell(blockIndex, rowIndex, column.key, $event.target.value)"
                         @change="updateFooterCell(blockIndex, rowIndex, column.key, $event.target.value)"
                       ></textarea>
                     </td>
                     <td class="review-col-action">
-                      <button class="btn btn-danger btn-mini" @click="removeFooterRow(blockIndex, rowIndex)">
+                      <button class="btn btn-danger btn-mini" @click="removeFooterRow(blockIndex, rowIndex)" :disabled="regenerating">
                         删除
                       </button>
                     </td>

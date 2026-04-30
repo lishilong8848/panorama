@@ -1095,6 +1095,37 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 return False, detail
             try:
                 target_buildings = bridge_service.get_source_cache_buildings()
+                try:
+                    from handover_log_module.api.facade import load_handover_config
+                    from handover_log_module.service.review_session_service import ReviewSessionService
+
+                    review_service = ReviewSessionService(load_handover_config(runtime_config))
+                    manually_regenerated = [
+                        building
+                        for building in target_buildings
+                        if review_service.is_manual_regenerated_for_duty(
+                            building=building,
+                            duty_date=duty_date,
+                            duty_shift=duty_shift,
+                        )
+                    ]
+                    if manually_regenerated:
+                        target_buildings = [
+                            building for building in target_buildings if building not in set(manually_regenerated)
+                        ]
+                        container.add_system_log(
+                            "[交接班调度] 跳过已手动重新生成楼栋: "
+                            f"duty_date={duty_date}, duty_shift={duty_shift}, buildings={','.join(manually_regenerated)}"
+                        )
+                    if not target_buildings:
+                        detail = (
+                            "本班所有楼栋已在审核页手动重新生成，调度跳过："
+                            f"duty_date={duty_date}, duty_shift={duty_shift}"
+                        )
+                        container.add_system_log(f"[交接班调度] {detail}")
+                        return True, detail
+                except Exception as exc:  # noqa: BLE001
+                    container.add_system_log(f"[交接班调度] 检查手动重新生成标记失败，按原计划继续: {exc}")
                 cached_entries = bridge_service.get_handover_by_date_cache_entries(
                     duty_date=duty_date,
                     duty_shift=duty_shift,

@@ -18,6 +18,7 @@ import {
   saveHandoverReviewApi,
   saveHandoverReview110kvApi,
   sendHandoverReviewCapacityImageApi,
+  regenerateHandoverReviewApi,
   updateHandoverReviewCloudSyncApi,
   unconfirmHandoverReviewApi,
 } from "./api_client.js";
@@ -877,6 +878,7 @@ function normalizeReviewDisplayState(raw = {}) {
       download: normalizeDisplayAction(actions.download, { allowed: false, visible: false, label: "下载交接班日志", tone: "neutral", variant: "secondary" }),
       capacity_download: normalizeDisplayAction(actions.capacity_download, { allowed: false, visible: false, label: "下载交接班容量报表", tone: "neutral", variant: "secondary" }),
       capacity_image_send: normalizeDisplayAction(actions.capacity_image_send, { allowed: false, visible: false, label: "发送容量表图片", tone: "neutral", variant: "secondary" }),
+      regenerate: normalizeDisplayAction(actions.regenerate, { allowed: false, visible: false, label: "重新生成交接班及容量表", tone: "warning", variant: "warning" }),
       confirm: normalizeDisplayAction(actions.confirm, { allowed: false, visible: false, label: "确认当前楼栋", tone: "warning", variant: "warning" }),
       retry_cloud_sync: normalizeDisplayAction(actions.retry_cloud_sync, { allowed: false, visible: false, label: "重试云表上传", tone: "warning", variant: "warning" }),
       update_history_cloud_sync: normalizeDisplayAction(actions.update_history_cloud_sync, { allowed: false, visible: false, label: "更新云文档", tone: "warning", variant: "warning" }),
@@ -966,6 +968,7 @@ export function mountHandoverReviewApp(Vue) {
       const downloading = ref(false);
       const capacityDownloading = ref(false);
       const capacityImageSending = ref(false);
+      const regenerating = ref(false);
       const confirming = ref(false);
       const retryingCloudSync = ref(false);
       const updatingHistoryCloudSync = ref(false);
@@ -1043,7 +1046,7 @@ export function mountHandoverReviewApp(Vue) {
       const substation110kvBlock = computed(() => sharedBlocks.value.substation_110kv || normalizeSubstation110kvBlock({}));
       const substation110kvLock = computed(() => sharedBlockLocks.value.substation_110kv || normalizeSharedLockPayload({}, substation110kvBlock.value.revision));
       const substation110kvLockedByOther = computed(() => Boolean(substation110kvLock.value?.is_editing_elsewhere));
-      const substation110kvReadonly = computed(() => loading.value || saving.value || substation110kvLockedByOther.value);
+      const substation110kvReadonly = computed(() => loading.value || saving.value || regenerating.value || substation110kvLockedByOther.value);
       const substation110kvMetaText = computed(() => {
         const block = substation110kvBlock.value;
         const updatedAt = String(block.updated_at || "").trim();
@@ -1106,6 +1109,7 @@ export function mountHandoverReviewApp(Vue) {
         downloadActionBase,
         capacityDownloadActionBase,
         capacityImageSendActionBase,
+        regenerateActionBase,
         confirmActionBase,
         retryCloudSyncActionBase,
         updateHistoryCloudSyncActionBase,
@@ -1115,6 +1119,7 @@ export function mountHandoverReviewApp(Vue) {
         showDownloadAction,
         showCapacityDownloadAction,
         showCapacityImageSendAction,
+        showRegenerateAction,
         showConfirmAction,
         showReturnToLatestAction,
         reviewSaveBadge,
@@ -1125,6 +1130,7 @@ export function mountHandoverReviewApp(Vue) {
         downloadActionVm,
         capacityDownloadActionVm,
         capacityImageSendActionVm,
+        regenerateActionVm,
         capacityDownloadDisabled,
         reviewStatusBanners,
         confirmActionVm,
@@ -1146,6 +1152,7 @@ export function mountHandoverReviewApp(Vue) {
         downloading,
         capacityDownloading,
         capacityImageSending,
+        regenerating,
         confirming,
         retryingCloudSync,
         updatingHistoryCloudSync,
@@ -1975,7 +1982,7 @@ export function mountHandoverReviewApp(Vue) {
           }
           return false;
         }
-        if (background && (saving.value || loading.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || downloading.value || capacityDownloading.value || capacityImageSending.value)) {
+        if (background && (saving.value || loading.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || downloading.value || capacityDownloading.value || capacityImageSending.value)) {
           return false;
         }
         const resolvedMode = background ? "status" : (mode === "bootstrap" ? "bootstrap" : "full");
@@ -2217,7 +2224,7 @@ export function mountHandoverReviewApp(Vue) {
 
       async function saveDocument(options = {}) {
         const { reason = "manual" } = options || {};
-        if (saving.value || confirming.value || cloudSyncBusy.value || capacityImageSending.value || documentHydrating.value || syncingRemoteRevision.value || !session.value) return false;
+        if (saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || capacityImageSending.value || documentHydrating.value || syncingRemoteRevision.value || !session.value) return false;
         if (staleRevisionConflict.value) {
           beginRemoteSaveRefresh();
           return false;
@@ -2337,6 +2344,7 @@ export function mountHandoverReviewApp(Vue) {
         downloadCurrentReviewFile,
         downloadCurrentCapacityReviewFile,
         sendCurrentCapacityImage,
+        regenerateCurrentHandover,
         refreshData,
         saveCurrentReview,
       } = createHandoverReviewActionHelpers({
@@ -2353,6 +2361,7 @@ export function mountHandoverReviewApp(Vue) {
         downloading,
         capacityDownloading,
         capacityImageSending,
+        regenerating,
         retryingCloudSync,
         updatingHistoryCloudSync,
         activeRouteSelection,
@@ -2375,6 +2384,8 @@ export function mountHandoverReviewApp(Vue) {
         capacityDownloadActionVm,
         capacityImageSendActionBase,
         capacityImageSendActionVm,
+        regenerateActionBase,
+        regenerateActionVm,
         refreshActionBase,
         refreshActionVm,
         clearSaveTimers,
@@ -2394,6 +2405,7 @@ export function mountHandoverReviewApp(Vue) {
         retryHandoverReviewCloudSyncApi,
         updateHandoverReviewCloudSyncApi,
         sendHandoverReviewCapacityImageApi,
+        regenerateHandoverReviewApi,
         buildHandoverReviewDownloadUrl,
         buildHandoverReviewCapacityDownloadUrl,
         triggerBrowserDownload,
@@ -2444,6 +2456,7 @@ export function mountHandoverReviewApp(Vue) {
         downloading,
         capacityDownloading,
         capacityImageSending,
+        regenerating,
         confirming,
         retryingCloudSync,
         updatingHistoryCloudSync,
@@ -2473,6 +2486,7 @@ export function mountHandoverReviewApp(Vue) {
         showDownloadAction,
         showCapacityDownloadAction,
         showCapacityImageSendAction,
+        showRegenerateAction,
         showConfirmAction,
         showRetryCloudSyncAction,
         showUpdateHistoryCloudSyncAction,
@@ -2483,6 +2497,7 @@ export function mountHandoverReviewApp(Vue) {
         downloadActionVm,
         capacityDownloadActionVm,
         capacityImageSendActionVm,
+        regenerateActionVm,
         retryCloudSyncActionVm,
         updateHistoryCloudSyncActionVm,
         returnToLatestActionVm,
@@ -2526,6 +2541,7 @@ export function mountHandoverReviewApp(Vue) {
         downloadCurrentReviewFile,
         downloadCurrentCapacityReviewFile,
         sendCurrentCapacityImage: () => sendCurrentCapacityImage(getJobApi),
+        regenerateCurrentReview: () => regenerateCurrentHandover(getJobApi),
         refreshData,
       };
     },

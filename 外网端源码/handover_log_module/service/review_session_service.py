@@ -817,6 +817,7 @@ class ReviewSessionService:
             "batch_key": batch_key,
             "output_file": str(raw.get("output_file", "")).strip(),
             "capacity_output_file": str(raw.get("capacity_output_file", "")).strip(),
+            "capacity_source_file": str(raw.get("capacity_source_file", "")).strip(),
             "capacity_status": str(raw.get("capacity_status", "")).strip().lower(),
             "capacity_error": str(raw.get("capacity_error", "")).strip(),
             "capacity_warnings": [
@@ -837,6 +838,10 @@ class ReviewSessionService:
             "confirmed": bool(raw.get("confirmed", False)),
             "confirmed_at": str(raw.get("confirmed_at", "")).strip(),
             "confirmed_by": str(raw.get("confirmed_by", "")).strip(),
+            "manual_regenerated": bool(raw.get("manual_regenerated", False)),
+            "manual_regenerated_at": str(raw.get("manual_regenerated_at", "")).strip(),
+            "manual_regenerated_job_id": str(raw.get("manual_regenerated_job_id", "")).strip(),
+            "manual_regenerated_client_id": str(raw.get("manual_regenerated_client_id", "")).strip(),
             "updated_at": str(raw.get("updated_at", "")).strip(),
             "cloud_sheet_sync": self._normalize_cloud_sheet_sync(raw.get("cloud_sheet_sync", {})),
             "source_file_cache": self._normalize_source_file_cache(raw.get("source_file_cache", {})),
@@ -1921,6 +1926,7 @@ class ReviewSessionService:
         data_file: str,
         output_file: str,
         capacity_output_file: str = "",
+        capacity_source_file: str = "",
         capacity_status: str = "",
         capacity_error: str = "",
         capacity_warnings: List[str] | None = None,
@@ -1965,6 +1971,7 @@ class ReviewSessionService:
             "data_file": str(data_file or "").strip(),
             "output_file": str(output_file or "").strip(),
             "capacity_output_file": str(capacity_output_file or "").strip(),
+            "capacity_source_file": str(capacity_source_file or "").strip(),
             "capacity_status": str(capacity_status or "").strip().lower(),
             "capacity_error": str(capacity_error or "").strip(),
             "capacity_warnings": [
@@ -1993,6 +2000,10 @@ class ReviewSessionService:
             "confirmed": False,
             "confirmed_at": "",
             "confirmed_by": "",
+            "manual_regenerated": False,
+            "manual_regenerated_at": "",
+            "manual_regenerated_job_id": "",
+            "manual_regenerated_client_id": "",
             "updated_at": _now_text(),
             "cloud_sheet_sync": self._build_pending_cloud_sync(
                 building=building_name,
@@ -2167,6 +2178,41 @@ class ReviewSessionService:
         session["updated_at"] = _now_text()
         self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)
+
+    def mark_manual_regenerated(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        job_id: str = "",
+        client_id: str = "",
+    ) -> Dict[str, Any]:
+        building_name = str(building or "").strip()
+        duty_date_text = str(duty_date or "").strip()
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        session_id = self.build_session_id(building_name, duty_date_text, duty_shift_text)
+        state = self._load_state()
+        sessions = state.get("review_sessions", {})
+        if not isinstance(sessions, dict) or session_id not in sessions:
+            raise ReviewSessionNotFoundError("review session not found")
+
+        session = self._normalize_session(sessions[session_id])
+        session["manual_regenerated"] = True
+        session["manual_regenerated_at"] = _now_text()
+        session["manual_regenerated_job_id"] = str(job_id or "").strip()
+        session["manual_regenerated_client_id"] = str(client_id or "").strip()
+        session["updated_at"] = _now_text()
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
+        return dict(session)
+
+    def is_manual_regenerated_for_duty(self, *, building: str, duty_date: str, duty_shift: str) -> bool:
+        session = self.get_session_for_building_duty_fast(
+            str(building or "").strip(),
+            str(duty_date or "").strip(),
+            str(duty_shift or "").strip().lower(),
+        )
+        return bool(isinstance(session, dict) and session.get("manual_regenerated", False))
 
     def update_source_data_attachment_export(
         self,
