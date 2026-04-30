@@ -99,7 +99,7 @@ DAY_METRIC_DIRECT_BUILDING_RULE_ROWS: Dict[str, List[Dict[str, Any]]] = {
         _rule("ring_150", d_keywords=["D-150-冷冻水供水主环路温度_2"]),
     ],
     "E楼": [
-        _rule("wet_bulb", d_keywords=["E-124-DDC-100_室外温度1"]),
+        _rule("wet_bulb", d_keywords=["E-124-DDC-100_室外湿度1"]),
         _rule("ring_124", d_keywords=["E-124-DDC-100_冷冻水供水环管温度_1"]),
         _rule("ring_150", d_keywords=["E-150-DDC-100_冷冻水供水环管温度_1"]),
     ],

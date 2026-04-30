@@ -4336,7 +4336,7 @@
               "target_cell": "D7",
               "rule_type": "direct",
               "d_keywords": [
-                "E-124-DDC-100_室外温度1"
+                "E-124-DDC-100_室外湿度1"
               ],
               "match_mode": "contains_casefold",
               "agg": "first",

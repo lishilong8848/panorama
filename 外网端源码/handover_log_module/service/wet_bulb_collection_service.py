@@ -369,7 +369,7 @@ class WetBulbCollectionService:
             [
                 "室外湿球温度",
                 "室外温度1",
-                "E-124-DDC-100_室外温度1",
+                "E-124-DDC-100_室外湿度1",
                 "E-124-DDC-100_室外湿球温度",
             ]
         )
