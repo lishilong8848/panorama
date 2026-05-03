@@ -39,6 +39,26 @@ def row_texts(ws: Worksheet, row_idx: int, *, max_col: int = 9) -> List[str]:
     return [cell_text(ws, row_idx, col_idx) for col_idx in range(1, max_col + 1)]
 
 
+def _row_has_text(texts: List[str], expected: str) -> bool:
+    needle = str(expected or "").strip()
+    if not needle:
+        return False
+    return any(needle in str(text or "").strip() for text in texts)
+
+
+def _is_signoff_row(texts: List[str], *, signoff_marker: str) -> bool:
+    if _row_has_text(texts, signoff_marker):
+        return True
+    return _row_has_text(texts, "交班值班长签字") and _row_has_text(texts, "接班值班长签字")
+
+
+def _row_has_inventory_content(ws: Worksheet, row_idx: int) -> bool:
+    for col_idx in (2, 3, 5, 6, 7, 8):
+        if cell_text(ws, row_idx, col_idx):
+            return True
+    return False
+
+
 def _remove_merge_range(ws: Worksheet, merged) -> None:
     try:
         ws.unmerge_cells(str(merged))
@@ -64,20 +84,48 @@ def find_footer_inventory_layout(
     if title_row is None:
         return None
 
-    header_row = title_row + 1
-    data_start_row = title_row + 2
     signoff_start_row = None
     last_row = title_row
+    group_row = None
 
     for row_idx in range(title_row, max_row + 1):
         texts = row_texts(ws, row_idx)
         if any(texts):
             last_row = row_idx
-        if signoff_start_row is None and signoff_marker in texts:
+        if group_row is None and row_idx > title_row and _row_has_text(texts, FOOTER_GROUP_TITLE_TEXT):
+            group_row = row_idx
+        if signoff_start_row is None and row_idx > title_row and _is_signoff_row(texts, signoff_marker=signoff_marker):
             signoff_start_row = row_idx
 
-    data_end_row = signoff_start_row - 1 if signoff_start_row else last_row
-    data_end_row = max(data_start_row, data_end_row)
+    header_row = group_row if group_row is not None else title_row + 1
+    scan_end = (signoff_start_row - 1) if signoff_start_row else last_row
+    data_start_row = None
+    data_end_row = None
+    for row_idx in range(header_row + 1, scan_end + 1):
+        texts = row_texts(ws, row_idx)
+        if _is_signoff_row(texts, signoff_marker=signoff_marker):
+            break
+        if _row_has_text(texts, FOOTER_GROUP_TITLE_TEXT):
+            continue
+        if not _row_has_inventory_content(ws, row_idx):
+            continue
+        if data_start_row is None:
+            data_start_row = row_idx
+        data_end_row = row_idx
+
+    if data_start_row is None:
+        data_start_row = header_row + 1
+    if data_end_row is None:
+        data_end_row = data_start_row
+
+    if signoff_start_row is not None:
+        last_row = max(last_row, signoff_start_row)
+        for row_idx in range(signoff_start_row + 1, max_row + 1):
+            texts = row_texts(ws, row_idx)
+            if any(texts):
+                last_row = row_idx
+                continue
+            break
 
     return FooterInventoryLayout(
         title_row=title_row,

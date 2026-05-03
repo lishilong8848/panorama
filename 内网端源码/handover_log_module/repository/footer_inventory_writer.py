@@ -11,6 +11,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from handover_log_module.core.footer_layout import (
     FOOTER_GROUP_TITLE_TEXT,
     FOOTER_INVENTORY_COLUMNS,
+    FOOTER_SIGNOFF_MARKER,
     FooterInventoryLayout,
     find_footer_inventory_layout,
     trim_rows_below_footer,
@@ -90,6 +91,16 @@ def _apply_row_merges(ws: Worksheet, row_idx: int, merges: List[Tuple[int, int, 
 
 
 def _normalize_inventory_columns(columns: Any) -> List[Dict[str, Any]]:
+    def _with_receiver_column(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        keys = {str(item.get("key", "")).strip().upper() for item in items if isinstance(item, dict)}
+        if "H" in keys:
+            return items
+        receiver_column = next(
+            (dict(item) for item in FOOTER_INVENTORY_COLUMNS if str(item.get("key", "")).strip().upper() == "H"),
+            {"key": "H", "label": "清点确认人（接班）", "source_cols": ["H"], "span": 1},
+        )
+        return [*items, receiver_column]
+
     if isinstance(columns, list) and columns:
         normalized: List[Dict[str, Any]] = []
         for column in columns:
@@ -110,8 +121,8 @@ def _normalize_inventory_columns(columns: Any) -> List[Dict[str, Any]]:
                 }
             )
         if normalized:
-            return normalized
-    return [dict(item) for item in FOOTER_INVENTORY_COLUMNS]
+            return _with_receiver_column(normalized)
+    return _with_receiver_column([dict(item) for item in FOOTER_INVENTORY_COLUMNS])
 
 
 def _blank_inventory_row(columns: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -134,6 +145,30 @@ def _normalize_inventory_rows(rows: Any, columns: List[Dict[str, Any]]) -> List[
     if normalized:
         return normalized
     return [_blank_inventory_row(columns)]
+
+
+def _inventory_row_has_business_content(row_payload: Dict[str, str], columns: List[Dict[str, Any]]) -> bool:
+    for column in columns:
+        key = str(column["key"]).upper()
+        if key == "H":
+            continue
+        if str(row_payload.get(key, "") or "").strip():
+            return True
+    return False
+
+
+def _apply_inventory_receiver_fallback(
+    rows: List[Dict[str, str]],
+    columns: List[Dict[str, Any]],
+    receiver_text: str,
+) -> None:
+    if not str(receiver_text or "").strip():
+        return
+    for row_payload in rows:
+        if str(row_payload.get("H", "") or "").strip():
+            continue
+        if _inventory_row_has_business_content(row_payload, columns):
+            row_payload["H"] = str(receiver_text or "").strip()
 
 
 def _set_inventory_row_values(ws: Worksheet, row_idx: int, row_payload: Dict[str, str], columns: List[Dict[str, Any]]) -> None:
@@ -180,6 +215,75 @@ def _set_inventory_row_values(ws: Worksheet, row_idx: int, row_payload: Dict[str
                 follower_cell.value = ""
 
 
+def _set_inventory_header_values(ws: Worksheet, row_idx: int, columns: List[Dict[str, Any]]) -> None:
+    managed_col_letters: set[str] = set()
+    for column in columns:
+        source_cols = column.get("source_cols", [])
+        if not isinstance(source_cols, list):
+            continue
+        for source_col in source_cols:
+            text = str(source_col or "").strip().upper()
+            if text:
+                managed_col_letters.add(text)
+
+    for col_idx in range(2, 10):
+        column_letter = get_column_letter(col_idx).upper()
+        if column_letter not in managed_col_letters:
+            continue
+        existing = ws._cells.get((row_idx, col_idx))  # noqa: SLF001
+        if isinstance(existing, MergedCell):
+            del ws._cells[(row_idx, col_idx)]  # noqa: SLF001
+        cell = ws.cell(row=row_idx, column=col_idx)
+        if not isinstance(cell, MergedCell):
+            cell.value = ""
+
+    for column in columns:
+        label = str(column.get("label", "") or column.get("key", "") or "")
+        source_cols = column.get("source_cols", [])
+        if not isinstance(source_cols, list) or not source_cols:
+            continue
+        lead_col = str(source_cols[0] or "").strip().upper()
+        if not lead_col:
+            continue
+        lead_idx = ws[f"{lead_col}1"].column
+        existing_lead = ws._cells.get((row_idx, lead_idx))  # noqa: SLF001
+        if isinstance(existing_lead, MergedCell):
+            del ws._cells[(row_idx, lead_idx)]  # noqa: SLF001
+        lead_cell = ws.cell(row=row_idx, column=lead_idx)
+        if not isinstance(lead_cell, MergedCell):
+            lead_cell.value = label
+
+
+def _apply_inventory_header_merges(ws: Worksheet, row_idx: int, columns: List[Dict[str, Any]]) -> None:
+    for column in columns:
+        source_cols = column.get("source_cols", [])
+        if not isinstance(source_cols, list) or len(source_cols) <= 1:
+            continue
+        lead_col = str(source_cols[0] or "").strip().upper()
+        tail_col = str(source_cols[-1] or "").strip().upper()
+        if not lead_col or not tail_col:
+            continue
+        start_column = ws[f"{lead_col}1"].column
+        end_column = ws[f"{tail_col}1"].column
+        if any(
+            merged.min_row == row_idx
+            and merged.max_row == row_idx
+            and merged.min_col == start_column
+            and merged.max_col == end_column
+            for merged in ws.merged_cells.ranges
+        ):
+            continue
+        try:
+            ws.merge_cells(
+                start_row=row_idx,
+                start_column=start_column,
+                end_row=row_idx,
+                end_column=end_column,
+            )
+        except ValueError:
+            continue
+
+
 def write_footer_inventory_table(
     *,
     ws: Worksheet,
@@ -193,6 +297,19 @@ def write_footer_inventory_table(
     if layout is None:
         emit_log("[交接班][审核页][工具表写回] 跳过: 未找到交接确认区域")
         return
+    if layout.data_start_row > layout.header_row + 1:
+        gap_start = layout.header_row + 1
+        gap_count = layout.data_start_row - gap_start
+        _clear_merges_in_row_range(ws, gap_start, layout.data_start_row - 1)
+        ws.delete_rows(gap_start, amount=gap_count)
+        emit_log(
+            "[交接班][审核页][工具表写回] "
+            f"已清理表头下方空白占位行: start_row={gap_start}, count={gap_count}"
+        )
+        layout = find_footer_inventory_layout(ws)
+        if layout is None:
+            emit_log("[交接班][审核页][工具表写回] 跳过: 清理空白占位行后未找到交接确认区域")
+            return
 
     title_snapshot = _capture_row_snapshot(ws, layout.title_row)
     header_snapshot = _capture_row_snapshot(ws, layout.header_row)
@@ -204,6 +321,7 @@ def write_footer_inventory_table(
 
     columns = _normalize_inventory_columns(inventory_block.get("columns", []))
     rows = _normalize_inventory_rows(inventory_block.get("rows", []), columns)
+    _apply_inventory_receiver_fallback(rows, columns, str(ws["G3"].value or "").strip())
     current_rows = max(1, layout.data_end_row - layout.data_start_row + 1)
     target_rows = max(1, len(rows))
 
@@ -240,12 +358,16 @@ def write_footer_inventory_table(
     if signoff_start is not None:
         for offset, snapshot in enumerate(signoff_snapshots):
             _restore_row_snapshot(ws, signoff_start + offset, snapshot, restore_values=True)
+        first_signoff_cell = ws.cell(row=signoff_start, column=1)
+        if not str(first_signoff_cell.value or "").strip():
+            first_signoff_cell.value = FOOTER_SIGNOFF_MARKER
 
     for offset, row_payload in enumerate(rows):
         row_idx = layout.data_start_row + offset
         _set_inventory_row_values(ws, row_idx, row_payload, columns)
 
     ws.cell(row=layout.header_row, column=1).value = FOOTER_GROUP_TITLE_TEXT
+    _set_inventory_header_values(ws, layout.header_row, columns)
 
     _apply_row_merges(ws, layout.title_row, title_snapshot.merges)
     ws.merge_cells(
@@ -254,9 +376,10 @@ def write_footer_inventory_table(
         end_row=new_data_end,
         end_column=1,
     )
-    _apply_row_merges(ws, layout.header_row, header_snapshot.merges)
+    _apply_inventory_header_merges(ws, layout.header_row, columns)
     for row_idx in range(layout.data_start_row, new_data_end + 1):
         _apply_row_merges(ws, row_idx, template_snapshot.merges)
+        _apply_inventory_header_merges(ws, row_idx, columns)
     if signoff_start is not None:
         for offset, snapshot in enumerate(signoff_snapshots):
             _apply_row_merges(ws, signoff_start + offset, snapshot.merges)

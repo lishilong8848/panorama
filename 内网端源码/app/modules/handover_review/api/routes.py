@@ -362,6 +362,7 @@ def _build_review_bootstrap_payload(
         "document": document if isinstance(document, dict) else {},
         "review_ui": _review_ui_payload(parser),
         "prepared_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "document_revision": int(resolved_signature.get("revision", 0) or 0),
         "snapshot_revision": int(resolved_signature.get("revision", 0) or 0),
     }
     _review_bootstrap_cache_put(
@@ -644,6 +645,28 @@ def _attach_excel_sync_from_store(container, session: Dict[str, Any] | None) -> 
         }
     payload["excel_sync"] = sync_state
     return payload
+
+
+def _review_document_revision_from_store(container, session: Dict[str, Any] | None, *, fallback: int = 0) -> int:
+    payload = session if isinstance(session, dict) else {}
+    fallback_revision = int(fallback or payload.get("document_revision", 0) or payload.get("revision", 0) or 0)
+    building = str(payload.get("building", "") or "").strip()
+    session_id = str(payload.get("session_id", "") or "").strip()
+    if not building or not session_id:
+        return fallback_revision
+    try:
+        state = ReviewBuildingDocumentStore(
+            config=_handover_cfg(container),
+            building=building,
+        ).get_document(session_id)
+    except Exception:  # noqa: BLE001
+        return fallback_revision
+    if not isinstance(state, dict):
+        return fallback_revision
+    try:
+        return int(state.get("revision", fallback_revision) or fallback_revision)
+    except Exception:  # noqa: BLE001
+        return fallback_revision
 
 
 def _empty_followup_progress() -> Dict[str, Any]:
@@ -2070,7 +2093,15 @@ def _build_review_document_state(
         client_revision_value = int(client_revision or 0)
     except Exception:  # noqa: BLE001
         client_revision_value = 0
-    server_revision = int(session_payload.get("revision", 0) or 0)
+    try:
+        server_revision = int(
+            session_payload.get("document_revision")
+            or session_payload.get("snapshot_revision")
+            or session_payload.get("revision", 0)
+            or 0
+        )
+    except Exception:  # noqa: BLE001
+        server_revision = 0
     latest_session_id_text = str(latest_session_id or "").strip()
     if client_session_id_text and client_session_id_text != server_session_id:
         status = "latest_session_changed" if latest_session_id_text and server_session_id == latest_session_id_text else "session_changed"
@@ -2527,7 +2558,25 @@ def _attach_review_display_state(
             client_revision=client_revision,
         )
         return response
-    current_revision = int(session.get("revision", 0) or 0)
+    session_revision = int(session.get("revision", 0) or 0)
+    try:
+        document_revision = int(
+            response.get("document_revision")
+            or response.get("snapshot_revision")
+            or session.get("document_revision")
+            or session.get("snapshot_revision")
+            or session_revision
+            or 0
+        )
+    except Exception:  # noqa: BLE001
+        document_revision = session_revision
+    current_revision = int(document_revision or session_revision or 0)
+    session = dict(session)
+    session["document_revision"] = current_revision
+    session["session_revision"] = session_revision
+    response["session"] = session
+    response["document_revision"] = current_revision
+    response["snapshot_revision"] = current_revision
     if include_concurrency:
         concurrency = (
             response.get("concurrency")
@@ -2543,6 +2592,9 @@ def _attach_review_display_state(
         )
     else:
         concurrency = response.get("concurrency") if isinstance(response.get("concurrency"), dict) else {}
+    if isinstance(concurrency, dict):
+        concurrency = dict(concurrency)
+        concurrency["current_revision"] = current_revision
     latest_session_id = str(response.get("latest_session_id", "") or "").strip()
     if not latest_session_id:
         latest_session_id = _safe_latest_session_id(service, building=building, emit_log=emit_log)
@@ -3244,6 +3296,15 @@ def handover_review_status(
         session_id=session_id,
     )
     session = _attach_excel_sync_from_store(container, session)
+    session_revision = int(session.get("revision", 0) or 0)
+    document_revision = _review_document_revision_from_store(
+        container,
+        session,
+        fallback=session_revision,
+    )
+    session = dict(session)
+    session["document_revision"] = document_revision
+    session["session_revision"] = session_revision
     try:
         batch_status = service.get_batch_status(session["batch_key"])
     except ReviewSessionStoreUnavailableError as exc:
@@ -3265,10 +3326,12 @@ def handover_review_status(
             building=building,
             session_id=str(session.get("session_id", "")).strip(),
             client_id=str(client_id or "").strip(),
-            current_revision=int(session.get("revision", 0) or 0),
+            current_revision=document_revision,
             emit_log=container.add_system_log,
         ),
         "review_ui": {"poll_interval_sec": poll_interval_sec},
+        "document_revision": document_revision,
+        "snapshot_revision": document_revision,
     }
     return _attach_review_display_state(
         response,
@@ -3481,6 +3544,10 @@ def handover_review_save(
     if not isinstance(document, dict):
         raise HTTPException(status_code=400, detail="document 格式错误")
     target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    try:
+        session_base_revision = int(payload.get("session_base_revision") or target.get("revision", 0) or base_revision or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="session_base_revision 参数错误") from exc
     lock_concurrency = _ensure_session_lock_held_or_409(
         service,
         building=building,
@@ -3502,12 +3569,14 @@ def handover_review_save(
     queued_capacity_sync = False
     defaults_config_async = False
     defaults_config_status = "skipped"
+    saved_document_revision = int(base_revision or 0)
     with container.job_service.resource_guard(
         name=f"handover_save:{batch_key or building}:{session_id}",
         resource_keys=_handover_resource_keys(building=building),
     ):
         write_started = time.perf_counter()
         previous_document_state: Dict[str, Any] | None = None
+        saved_document_state_for_cache: Dict[str, Any] | None = None
         try:
             _saved_document_state, previous_document_state = document_state.save_document(
                 session=target,
@@ -3516,16 +3585,20 @@ def handover_review_save(
                 dirty_regions=dirty_regions,
                 ensure_ready=False,
             )
+            saved_document_for_response = document if isinstance(document, dict) else {}
             if isinstance(_saved_document_state, dict):
+                saved_document_state_for_cache = _saved_document_state
+                saved_document_revision = int(_saved_document_state.get("revision", saved_document_revision) or saved_document_revision)
+                state_document = _saved_document_state.get("document", {})
+                if isinstance(state_document, dict):
+                    saved_document_for_response = state_document
                 _review_document_cache_put(
                     building=building,
                     signature=_review_document_signature(
                         target,
                         revision_override=int(_saved_document_state.get("revision", 0) or 0),
                     ),
-                    document=_saved_document_state.get("document", {})
-                    if isinstance(_saved_document_state.get("document", {}), dict)
-                    else document,
+                    document=saved_document_for_response,
                 )
         except ReviewDocumentStateConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3585,13 +3658,13 @@ def handover_review_save(
                 session, batch_status = service.touch_session_after_save(
                     building=building,
                     session_id=session_id,
-                    base_revision=base_revision,
+                    base_revision=session_base_revision,
                 )
             else:
                 session, batch_status = service.touch_session_after_history_save(
                     building=building,
                     session_id=session_id,
-                    base_revision=base_revision,
+                    base_revision=session_base_revision,
                 )
             session_elapsed_ms = int((time.perf_counter() - session_started) * 1000)
         except ReviewSessionConflictError as exc:
@@ -3622,14 +3695,14 @@ def handover_review_save(
         try:
             excel_sync = document_state.enqueue_excel_sync(
                 session=session,
-                target_revision=int(session.get("revision", 0) or 0),
+                target_revision=saved_document_revision,
             )
             queued_excel_sync = str(excel_sync.get("status", "")).strip().lower() not in {"", "failed", "unknown"}
         except Exception as exc:  # noqa: BLE001
             excel_sync = {
                 "status": "failed",
-                "synced_revision": int(session.get("revision", 0) or 0) - 1 if int(session.get("revision", 0) or 0) > 0 else 0,
-                "pending_revision": int(session.get("revision", 0) or 0),
+                "synced_revision": saved_document_revision - 1 if saved_document_revision > 0 else 0,
+                "pending_revision": saved_document_revision,
                 "error": f"后台Excel同步排队失败: {exc}",
                 "updated_at": "",
             }
@@ -3642,15 +3715,16 @@ def handover_review_save(
         _review_history_cache_invalidate(building=building)
         _review_bootstrap_cache_put(
             building=building,
-            signature=_review_bootstrap_signature(session),
+            signature=_review_bootstrap_signature(session, revision_override=saved_document_revision),
             payload={
                 "ok": True,
                 "building": building,
                 "session": copy.deepcopy(session),
-                "document": copy.deepcopy(document if isinstance(document, dict) else {}),
+                "document": copy.deepcopy(saved_document_for_response if isinstance(saved_document_for_response, dict) else {}),
                 "review_ui": _review_ui_payload(parser),
                 "prepared_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "snapshot_revision": int(session.get("revision", 0) or 0),
+                "document_revision": saved_document_revision,
+                "snapshot_revision": saved_document_revision,
             },
         )
 
@@ -3689,7 +3763,11 @@ def handover_review_save(
     response = {
         "ok": True,
         "session": session,
+        "document": copy.deepcopy(saved_document_for_response if isinstance(saved_document_for_response, dict) else {}),
         "revision": int(session.get("revision", 0) or 0),
+        "session_revision": int(session.get("revision", 0) or 0),
+        "document_revision": saved_document_revision,
+        "snapshot_revision": saved_document_revision,
         "updated_at": str(session.get("updated_at", "")).strip(),
         "output_file": str(session.get("output_file", "")).strip(),
         "latest_session_id": str(latest_session_id or "").strip(),

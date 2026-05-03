@@ -242,6 +242,10 @@ class HandoverCapacityReportService:
         raw = self._capacity_cfg().get("template", {})
         return raw if isinstance(raw, dict) else {}
 
+    def _handover_sheet_name(self) -> str:
+        template_cfg = self.config.get("template", {})
+        return _text(template_cfg.get("sheet_name", "")) if isinstance(template_cfg, dict) else ""
+
     def _parsing_cfg(self) -> Dict[str, Any]:
         raw = self._capacity_cfg().get("parsing", {})
         return raw if isinstance(raw, dict) else {}
@@ -1145,15 +1149,99 @@ class HandoverCapacityReportService:
         )
         return summary
 
+    def _a_building_outdoor_cells_for_capacity(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        handover_cells: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, str]:
+        fallback = {
+            "B7": _text((handover_cells if isinstance(handover_cells, dict) else {}).get("B7")),
+            "D7": _text((handover_cells if isinstance(handover_cells, dict) else {}).get("D7")),
+        }
+        if _text(building) == "A楼":
+            return fallback
+
+        session_id = ReviewSessionService.build_session_id("A楼", _text(duty_date), _text(duty_shift).lower())
+        a_cells: Dict[str, str] = {}
+        if session_id:
+            try:
+                store = ReviewBuildingDocumentStore(config=self.config, building="A楼")
+                state = store.get_document(session_id)
+                document = state.get("document", {}) if isinstance(state, dict) else {}
+                fixed_cells = self._extract_fixed_cells_from_document(document if isinstance(document, dict) else {})
+                for cell_name in ("B7", "D7"):
+                    value = _text(fixed_cells.get(cell_name))
+                    if value:
+                        a_cells[cell_name] = value
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    emit_log(
+                        "[交接班][容量报表][室外温湿度] A楼审核SQLite读取失败，尝试Excel "
+                        f"building={building}, session_id={session_id}, error={exc}"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+            if not all(_text(a_cells.get(cell_name)) for cell_name in ("B7", "D7")):
+                try:
+                    session = self._review_session_service.get_or_recover_session_by_id(session_id)
+                    output_file = _text(session.get("output_file")) if isinstance(session, dict) else ""
+                    if output_file:
+                        file_cells = self._read_handover_cells(
+                            output_file,
+                            ["B7", "D7"],
+                            sheet_name=self._handover_sheet_name(),
+                        )
+                        for cell_name in ("B7", "D7"):
+                            value = _text(file_cells.get(cell_name))
+                            if value and not _text(a_cells.get(cell_name)):
+                                a_cells[cell_name] = value
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        emit_log(
+                            "[交接班][容量报表][室外温湿度] A楼Excel读取失败，回退当前楼 "
+                            f"building={building}, session_id={session_id}, error={exc}"
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        result: Dict[str, str] = {}
+        for cell_name in ("B7", "D7"):
+            value = _text(a_cells.get(cell_name))
+            if value:
+                result[cell_name] = value
+                continue
+            result[cell_name] = fallback.get(cell_name, "")
+            try:
+                emit_log(
+                    "[交接班][容量报表][室外温湿度] A楼值不可用，回退当前楼 "
+                    f"building={building}, duty={duty_date}/{duty_shift}, cell={cell_name}"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return result
+
     def _build_capacity_overlay_values(
         self,
         *,
         building: str,
         duty_date: str,
+        duty_shift: str = "",
         handover_cells: Dict[str, Any],
         emit_log: Callable[[str], None],
     ) -> Dict[str, str]:
         handover = handover_cells if isinstance(handover_cells, dict) else {}
+        outdoor_handover_cells = self._a_building_outdoor_cells_for_capacity(
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            handover_cells=handover,
+            emit_log=emit_log,
+        )
         water_summary = self._query_capacity_water_summary(
             building=building,
             duty_date=duty_date,
@@ -1181,6 +1269,8 @@ class HandoverCapacityReportService:
             "X2": weather_humidity,
             "AC25": _text(water_summary.get("month_total")),
             "O57": _text(water_summary.get("latest_daily_total")),
+            "R2": _text(outdoor_handover_cells.get("B7")),
+            "AB2": _text(outdoor_handover_cells.get("D7")),
         }
         return {cell: value for cell, value in overlay.items() if value != ""}
 
@@ -1361,6 +1451,7 @@ class HandoverCapacityReportService:
                 overlay_values = self._build_capacity_overlay_values(
                     building=building,
                     duty_date=duty_date,
+                    duty_shift=duty_shift,
                     handover_cells=handover_cells,
                     emit_log=emit_log,
                 )
@@ -1535,11 +1626,19 @@ class HandoverCapacityReportService:
                 building=building_text,
                 running_units=running_units,
             )
+            outdoor_handover_cells = self._a_building_outdoor_cells_for_capacity(
+                building=building_text,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                handover_cells=handover_cells,
+                emit_log=emit_log,
+            )
             context = {
                 "building": building_text,
                 "duty_date": duty_date_text,
                 "duty_shift": duty_shift_text,
                 "handover_cells": handover_cells,
+                "outdoor_handover_cells": outdoor_handover_cells,
                 "roster": {
                     "current_team": _text(getattr(roster_assignment, "current_team", "")),
                     "next_team": _text(getattr(roster_assignment, "next_team", "")),
@@ -1557,6 +1656,7 @@ class HandoverCapacityReportService:
                 "running_units": running_units,
                 "resolved_values_by_id": resolved_values_by_id if isinstance(resolved_values_by_id, dict) else {},
                 "template_snapshot": template_snapshot,
+                "emit_log": emit_log,
             }
             cell_values = builder(context)
             cell_values.update(_build_fixed_header_cells(building_text))
@@ -1564,6 +1664,7 @@ class HandoverCapacityReportService:
                 self._build_capacity_overlay_values(
                     building=building_text,
                     duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
                     handover_cells=handover_cells,
                     emit_log=emit_log,
                 )

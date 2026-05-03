@@ -134,6 +134,11 @@ _E_BUILDING_CHILLER_SKIP_KEYS = {
     "evaporator_delta",
     "condenser_delta",
 }
+_PRESSURE_TENTH_KEYS = {
+    "plate_cooling_in_pressure",
+    "plate_chilled_in_pressure",
+    "plate_chilled_out_pressure",
+}
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -356,6 +361,43 @@ def _format_calc_value(value: float | None) -> str:
     return format_number(value) if value is not None else ""
 
 
+def _format_pressure_tenth(value: Any) -> tuple[str, bool]:
+    text = _text(value)
+    if not text:
+        return "", True
+    normalized = text.replace(",", "").replace("，", "").strip()
+    match = re.search(r"-?\d+(?:\.\d+)?", normalized)
+    if not match:
+        return text, False
+    try:
+        number = float(match.group(0)) / 10
+    except ValueError:
+        return text, False
+    if number == -0.0:
+        number = 0.0
+    return f"{number:.2f}", True
+
+
+def _emit_pressure_format_warning(
+    context: Dict[str, Any],
+    *,
+    zone: str,
+    unit: int,
+    key: str,
+    value: str,
+) -> None:
+    emit_log = context.get("emit_log")
+    if not callable(emit_log):
+        return
+    try:
+        emit_log(
+            "[交接班][容量报表][压力换算] 跳过非数字值 "
+            f"building={_text(context.get('building')) or '-'}, zone={zone}, unit={unit}, key={key}, value={value}"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _build_redundancy_text(count: int) -> str:
     safe_count = max(0, int(count))
     return f"{safe_count}用（{max(0, 3 - safe_count)}）备"
@@ -502,6 +544,11 @@ def build_capacity_template_snapshot(sheet: Worksheet, building: str) -> Dict[st
 def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]:
     duty_shift = _text(context.get("duty_shift")).lower()
     handover_cells = context.get("handover_cells", {}) if isinstance(context.get("handover_cells", {}), dict) else {}
+    outdoor_handover_cells = (
+        context.get("outdoor_handover_cells", {})
+        if isinstance(context.get("outdoor_handover_cells", {}), dict)
+        else handover_cells
+    )
     roster = context.get("roster", {}) if isinstance(context.get("roster", {}), dict) else {}
     previous_alarm = context.get("previous_alarm_summary", {}) if isinstance(context.get("previous_alarm_summary", {}), dict) else {}
     current_alarm = context.get("current_alarm_summary", {}) if isinstance(context.get("current_alarm_summary", {}), dict) else {}
@@ -524,8 +571,8 @@ def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]
     cell_values: Dict[str, str] = {
         "D2": "白" if duty_shift == "day" else "夜",
         "M6": _text(handover_cells.get("C3")),
-        "R2": _text(handover_cells.get("B7")),
-        "AB2": _text(handover_cells.get("D7")),
+        "R2": _text(outdoor_handover_cells.get("B7")),
+        "AB2": _text(outdoor_handover_cells.get("D7")),
         "G6": _text(roster.get("current_team")),
         "P6": _text(roster.get("next_team")),
         "U6": _text(handover_cells.get("G3")),
@@ -778,6 +825,10 @@ def _build_zone_unit_values(query: CapacitySourceQuery, *, zone: str, running_un
             value_text = query.first_text_by_d_aliases(aliases, zone=zone, unit=unit_number, allow_global=False)
             if not value_text:
                 continue
+            if key in _PRESSURE_TENTH_KEYS:
+                value_text, converted = _format_pressure_tenth(value_text)
+                if not converted:
+                    _emit_pressure_format_warning(context, zone=zone, unit=unit_number, key=key, value=value_text)
             target_cell = block.get(key)
             if target_cell:
                 results[target_cell] = value_text

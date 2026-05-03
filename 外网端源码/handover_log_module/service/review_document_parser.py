@@ -206,6 +206,7 @@ class ReviewDocumentParser:
         return spans
 
     def _inventory_footer_block(self, ws, layout) -> Dict[str, Any]:
+        receiver_text = self._read_cell_text(ws, "G3")
         rows: List[Dict[str, Any]] = []
         for row_idx in range(layout.data_start_row, layout.data_end_row + 1):
             cells = {}
@@ -217,6 +218,14 @@ class ReviewDocumentParser:
                 cells[key] = text
                 if text.strip():
                     has_content = True
+            has_inventory_content = any(
+                str(cells.get(str(column["key"]), "") or "").strip()
+                for column in FOOTER_INVENTORY_COLUMNS
+                if str(column["key"]).upper() != "H"
+            )
+            if receiver_text and has_inventory_content and not str(cells.get("H", "") or "").strip():
+                cells["H"] = receiver_text
+                has_content = True
             rows.append(
                 {
                     "row_id": f"inventory:{row_idx}",

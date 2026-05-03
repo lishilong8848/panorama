@@ -995,6 +995,7 @@ export function mountHandoverReviewApp(Vue) {
       const pollTimer = ref(null);
       const heartbeatTimer = ref(null);
       const documentMutationVersion = ref(0);
+      const documentRevision = ref(0);
       const pollIntervalMs = ref(DEFAULT_POLL_INTERVAL_MS);
       const reviewClientIdentity = ensureReviewClientIdentity();
       const reviewClientId = String(reviewClientIdentity.clientId || "").trim();
@@ -1213,7 +1214,7 @@ export function mountHandoverReviewApp(Vue) {
         }
         try {
           const response = await claimHandoverReviewLockApi(buildingCode, buildLockPayload(sessionId));
-          applyConcurrencyState(response?.concurrency, session.value?.revision || 0, sessionId);
+          applyConcurrencyState(response?.concurrency, currentDocumentRevision(), sessionId);
           return Boolean(concurrency.value?.client_holds_lock);
         } catch (_error) {
           return false;
@@ -1228,7 +1229,7 @@ export function mountHandoverReviewApp(Vue) {
             session_id: sessionId,
             client_id: reviewClientId,
           });
-          applyConcurrencyState(response?.concurrency, session.value?.revision || 0, sessionId);
+          applyConcurrencyState(response?.concurrency, currentDocumentRevision(), sessionId);
         } catch (_error) {
           clearHeartbeatTimer();
         }
@@ -1248,7 +1249,7 @@ export function mountHandoverReviewApp(Vue) {
         clearHeartbeatTimer();
         heldLockSessionId.value = "";
         if (!buildingCode || !sessionId || !reviewClientId) {
-          applyConcurrencyState(null, session.value?.revision || 0, "");
+          applyConcurrencyState(null, currentDocumentRevision(), "");
           return;
         }
         const body = JSON.stringify({
@@ -1266,7 +1267,7 @@ export function mountHandoverReviewApp(Vue) {
           } catch (_error) {
             // Ignore best-effort release failures during unload.
           }
-          applyConcurrencyState(null, session.value?.revision || 0, "");
+          applyConcurrencyState(null, currentDocumentRevision(), "");
           return;
         }
         try {
@@ -1274,9 +1275,9 @@ export function mountHandoverReviewApp(Vue) {
             session_id: sessionId,
             client_id: reviewClientId,
           });
-          applyConcurrencyState(response?.concurrency, session.value?.revision || 0, "");
+          applyConcurrencyState(response?.concurrency, currentDocumentRevision(), "");
         } catch (_error) {
-          applyConcurrencyState(null, session.value?.revision || 0, "");
+          applyConcurrencyState(null, currentDocumentRevision(), "");
         }
       }
 
@@ -1362,10 +1363,46 @@ export function mountHandoverReviewApp(Vue) {
         return params;
       }
 
+      function revisionNumber(value) {
+        return Number.parseInt(String(value ?? 0), 10) || 0;
+      }
+
+      function resolveDocumentRevision(payload = {}, nextSession = null) {
+        const hasDocumentPayload = Object.prototype.hasOwnProperty.call(payload || {}, "document");
+        const candidates = [
+          payload?.document_revision,
+          payload?.snapshot_revision,
+          payload?.session?.document_revision,
+          nextSession?.document_revision,
+        ];
+        if (hasDocumentPayload) {
+          candidates.push(nextSession?.revision);
+        }
+        for (const candidate of candidates) {
+          const resolved = revisionNumber(candidate);
+          if (resolved > 0) return resolved;
+        }
+        return 0;
+      }
+
+      function updateDocumentRevisionFromPayload(payload = {}, nextSession = null) {
+        const resolved = resolveDocumentRevision(payload, nextSession);
+        if (resolved > 0) {
+          documentRevision.value = resolved;
+        }
+        return documentRevision.value;
+      }
+
+      function currentDocumentRevision() {
+        return documentRevision.value
+          || revisionNumber(session.value?.document_revision)
+          || revisionNumber(session.value?.revision);
+      }
+
       function buildStatusParams() {
         const params = buildLoadParams();
         const currentSessionId = String(session.value?.session_id || "").trim();
-        const currentRevision = Number.parseInt(String(session.value?.revision || 0), 10) || 0;
+        const currentRevision = currentDocumentRevision();
         if (currentSessionId) {
           params.client_session_id = currentSessionId;
         }
@@ -1406,6 +1443,7 @@ export function mountHandoverReviewApp(Vue) {
 
       function applyPayloadMeta(payload = {}) {
         const nextSession = payload?.session && typeof payload.session === "object" ? cloneDeep(payload.session) : null;
+        const nextDocumentRevision = updateDocumentRevisionFromPayload(payload, nextSession);
         if (nextSession) {
           session.value = nextSession;
         }
@@ -1454,7 +1492,7 @@ export function mountHandoverReviewApp(Vue) {
         syncRouteToCurrentSelection(historyState.value);
         applyConcurrencyState(
           payload?.concurrency,
-          nextSession?.revision ?? session.value?.revision ?? 0,
+          nextDocumentRevision || nextSession?.document_revision || nextSession?.revision || session.value?.document_revision || session.value?.revision || 0,
           nextSession?.session_id || session.value?.session_id || "",
         );
       }
@@ -1868,8 +1906,8 @@ export function mountHandoverReviewApp(Vue) {
         const incomingSession = payload?.session && typeof payload.session === "object" ? cloneDeep(payload.session) : {};
         const currentSessionId = String(session.value?.session_id || "").trim();
         const incomingSessionId = String(incomingSession.session_id || "").trim();
-        const incomingRevision = Number(incomingSession.revision || 0);
-        const currentRevision = Number(session.value?.revision || 0);
+        const incomingRevision = updateDocumentRevisionFromPayload(payload, incomingSession);
+        const currentRevision = currentDocumentRevision();
 
         batchStatus.value = payload?.batch_status && typeof payload.batch_status === "object"
           ? cloneDeep(payload.batch_status)
@@ -1971,6 +2009,23 @@ export function mountHandoverReviewApp(Vue) {
         window.setTimeout(() => {
           documentHydrating.value = false;
         }, 0);
+      }
+
+      function applySavedDocumentPayload(payload = {}, payloadVersion = 0) {
+        updateDocumentRevisionFromPayload(payload, payload?.session && typeof payload.session === "object" ? payload.session : null);
+        if (documentMutationVersion.value !== payloadVersion) {
+          return false;
+        }
+        const rawDocument = payload?.document && typeof payload.document === "object" ? payload.document : null;
+        if (!rawDocument) {
+          return false;
+        }
+        documentHydrating.value = true;
+        documentRef.value = normalizeDocument(rawDocument);
+        window.setTimeout(() => {
+          documentHydrating.value = false;
+        }, 0);
+        return true;
       }
 
       async function loadReviewData({ background = false, mode = "auto" } = {}) {
@@ -2261,12 +2316,13 @@ export function mountHandoverReviewApp(Vue) {
           compactDocumentSectionRows(documentRef.value);
           const response = await saveHandoverReviewApi(buildingCode, {
             session_id: session.value.session_id,
-            base_revision: session.value.revision,
+            base_revision: currentDocumentRevision(),
             client_id: reviewClientId,
             document: documentRef.value,
             dirty_regions: payloadDirtyRegions,
           });
           applyPayloadMeta(response || {});
+          applySavedDocumentPayload(response || {}, payloadVersion);
           broadcastHandoverReviewStatusChange(response || {});
           if (documentMutationVersion.value === payloadVersion) {
             dirtyRegions.value = emptyDirtyRegions();
