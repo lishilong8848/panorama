@@ -335,43 +335,43 @@
         "export_button_text": "原样导出",
         "sites": [
           {
-            "enabled": true,
-            "password": "BMS@123456",
             "building": "A楼",
-            "username": "admin",
+            "enabled": true,
             "host": "192.168.210.50",
+            "username": "admin",
+            "password": "BMS@123456",
             "url": null
           },
           {
-            "enabled": true,
-            "password": "BMS123456",
             "building": "B楼",
-            "username": "admin",
+            "enabled": true,
             "host": "192.168.220.50",
+            "username": "admin",
+            "password": "BMS123456",
             "url": null
           },
           {
-            "enabled": true,
-            "password": "BMS@123456",
             "building": "C楼",
-            "username": "admin",
+            "enabled": true,
             "host": "192.168.231.53",
-            "url": null
-          },
-          {
-            "enabled": true,
-            "password": "123456",
-            "building": "D楼",
             "username": "admin",
-            "host": "192.168.232.53",
-            "url": null
-          },
-          {
-            "enabled": true,
             "password": "BMS@123456",
-            "building": "E楼",
+            "url": null
+          },
+          {
+            "building": "D楼",
+            "enabled": true,
+            "host": "192.168.232.53",
             "username": "admin",
+            "password": "123456",
+            "url": null
+          },
+          {
+            "building": "E楼",
+            "enabled": true,
             "host": "192.168.233.57",
+            "username": "admin",
+            "password": "BMS@123456",
             "url": null
           }
         ]
@@ -1165,16 +1165,16 @@
           },
           "B楼": {
             "cells": {
-              "B13": "107600",
-              "D13": "102300",
+              "B13": "1076",
+              "D13": "1025",
               "F13": "/",
               "H13": "/"
             }
           },
           "C楼": {
             "cells": {
-              "B13": "99800",
-              "D13": "97200",
+              "B13": "998",
+              "D13": "972",
               "F13": "",
               "H13": ""
             }
@@ -1228,18 +1228,18 @@
               },
               {
                 "cells": {
-                  "B": "工具包",
-                  "C": "值班室后面办公柜",
-                  "E": "2",
+                  "B": "手电筒",
+                  "C": "值班桌面",
+                  "E": "3",
                   "F": "否",
                   "G": "无"
                 }
               },
               {
                 "cells": {
-                  "B": "手电筒",
-                  "C": "值班桌面",
-                  "E": "3",
+                  "B": "工具包",
+                  "C": "值班室后面办公柜",
+                  "E": "2",
                   "F": "否",
                   "G": "无"
                 }
@@ -1270,7 +1270,7 @@
                 "cells": {
                   "B": "钥匙",
                   "C": "钥匙箱",
-                  "E": "400",
+                  "E": "4",
                   "F": "否",
                   "G": "无"
                 }
@@ -1410,87 +1410,87 @@
         "review_link_recipients_by_building": {
           "A楼": [
             {
-              "enabled": true,
               "note": "李世龙A",
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "enabled": true
             },
             {
-              "enabled": true,
               "note": "A",
-              "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a"
+              "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a",
+              "enabled": true
             },
             {
-              "enabled": true,
               "note": "M",
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "enabled": true
             }
           ],
           "B楼": [
             {
-              "enabled": true,
               "note": "李世龙B",
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "enabled": true
             },
             {
-              "enabled": true,
               "note": "B",
-              "open_id": "ou_160e991b0fd811cda7260de056d8a363"
+              "open_id": "ou_160e991b0fd811cda7260de056d8a363",
+              "enabled": true
             },
             {
-              "enabled": true,
               "note": "m",
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "enabled": true
             }
           ],
           "C楼": [
             {
-              "enabled": true,
               "note": "李世龙C",
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "enabled": true
             },
             {
-              "enabled": true,
               "note": "C",
-              "open_id": "ou_99391b00c1406917930483d8500af400"
+              "open_id": "ou_99391b00c1406917930483d8500af400",
+              "enabled": true
             },
             {
-              "enabled": true,
               "note": "m",
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "enabled": true
             }
           ],
           "D楼": [
             {
-              "enabled": true,
               "note": "李世龙D",
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "enabled": true
             },
             {
-              "enabled": true,
               "note": "D",
-              "open_id": "ou_b9c26b4da3721c2de11ee175c707e756"
+              "open_id": "ou_b9c26b4da3721c2de11ee175c707e756",
+              "enabled": true
             },
             {
-              "enabled": true,
               "note": "m",
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "enabled": true
             }
           ],
           "E楼": [
             {
-              "enabled": true,
               "note": "李世龙E",
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "enabled": true
             },
             {
-              "enabled": true,
               "note": "E",
-              "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3"
+              "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3",
+              "enabled": true
             },
             {
-              "enabled": true,
               "note": "m",
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "enabled": true
             }
           ]
         }
@@ -4499,43 +4499,43 @@
       },
       "sites": [
         {
-          "enabled": true,
-          "password": "BMS@123456",
           "building": "A楼",
-          "username": "admin",
+          "enabled": true,
           "host": "192.168.210.50",
+          "username": "admin",
+          "password": "BMS@123456",
           "url": null
         },
         {
-          "enabled": true,
-          "password": "BMS123456",
           "building": "B楼",
-          "username": "admin",
+          "enabled": true,
           "host": "192.168.220.50",
+          "username": "admin",
+          "password": "BMS123456",
           "url": null
         },
         {
-          "enabled": true,
-          "password": "BMS@123456",
           "building": "C楼",
-          "username": "admin",
+          "enabled": true,
           "host": "192.168.231.53",
-          "url": null
-        },
-        {
-          "enabled": true,
-          "password": "123456",
-          "building": "D楼",
           "username": "admin",
-          "host": "192.168.232.53",
-          "url": null
-        },
-        {
-          "enabled": true,
           "password": "BMS@123456",
-          "building": "E楼",
+          "url": null
+        },
+        {
+          "building": "D楼",
+          "enabled": true,
+          "host": "192.168.232.53",
           "username": "admin",
+          "password": "123456",
+          "url": null
+        },
+        {
+          "building": "E楼",
+          "enabled": true,
           "host": "192.168.233.57",
+          "username": "admin",
+          "password": "BMS@123456",
           "url": null
         }
       ]
