@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List
 
 from app.config.config_adapter import adapt_runtime_config, normalize_role_mode, resolve_shared_bridge_paths
 from app.config.secret_masking import load_masked_settings
+from app.config.runtime_role import apply_forced_role_mode, forced_role_mode_from_env, role_mode_label
 from app.config.settings_loader import load_bootstrap_settings, save_settings
 from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from app.modules.report_pipeline.service.job_service import JobService
@@ -2529,7 +2530,7 @@ def _resolve_frontend_runtime() -> tuple[str, Path, Path]:
 def build_container() -> AppContainer:
     _, cfg_path = load_masked_settings()
     raw_cfg = load_bootstrap_settings(cfg_path)
-    runtime_cfg = adapt_runtime_config(raw_cfg)
+    runtime_cfg = adapt_runtime_config(apply_forced_role_mode(raw_cfg))
     frontend_mode, frontend_root, frontend_assets_dir = _resolve_frontend_runtime()
     console_cfg = raw_cfg.get("common", {}).get("console", {}) if isinstance(raw_cfg, dict) else {}
     job_service = JobService(log_buffer_size=int(console_cfg.get("log_buffer_size", 5000)))

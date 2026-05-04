@@ -24,6 +24,7 @@ warnings.filterwarnings(
 from app.modules.updater.service.runtime_dependency_sync_service import (  # noqa: E402
     RuntimeDependencySyncService,
 )
+from app.config.runtime_role import FORCE_ROLE_MODE_ENV, forced_role_mode_from_env  # noqa: E402
 
 
 _SOURCE_RUN_DISABLE_UPDATER_ENV = "QJPT_DISABLE_UPDATER_IN_SOURCE_RUN"
@@ -199,6 +200,17 @@ def _should_disable_updater_for_source_run() -> bool:
     return True
 
 
+def _apply_split_source_default_role() -> None:
+    if forced_role_mode_from_env():
+        return
+    has_external_entry = (PROJECT_ROOT / "main_external.py").exists()
+    has_internal_entry = (PROJECT_ROOT / "main_internal.py").exists()
+    if has_external_entry and not has_internal_entry:
+        os.environ[FORCE_ROLE_MODE_ENV] = "external"
+    elif has_internal_entry and not has_external_entry:
+        os.environ[FORCE_ROLE_MODE_ENV] = "internal"
+
+
 def _apply_source_run_runtime_flags() -> bool:
     if not _should_disable_updater_for_source_run():
         return False
@@ -209,6 +221,7 @@ def _apply_source_run_runtime_flags() -> bool:
 
 def main(argv: list[str] | None = None) -> None:
     _configure_console_utf8()
+    _apply_split_source_default_role()
     parser = argparse.ArgumentParser(description="全景平台月报控制台入口")
     parser.add_argument("--config", default="", help="覆盖默认配置文件路径")
     parser.add_argument("--host", default="", help="覆盖配置中的 common.console.host")
@@ -245,7 +258,7 @@ def main(argv: list[str] | None = None) -> None:
     common_cfg = settings.get("common", {}) if isinstance(settings, dict) else {}
     console_cfg = common_cfg.get("console", {}) if isinstance(common_cfg, dict) else {}
     deployment_cfg = common_cfg.get("deployment", {}) if isinstance(common_cfg, dict) else {}
-    deployment_role_mode = _normalize_role_mode(
+    deployment_role_mode = forced_role_mode_from_env() or _normalize_role_mode(
         deployment_cfg.get("role_mode") if isinstance(deployment_cfg, dict) else ""
     )
 
@@ -288,9 +301,6 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[控制台] 本机访问地址: {local_url}", flush=True)
         print("[启动] 当前未确认启动角色，仅加载最小控制台壳。", flush=True)
 
-    if auto_open:
-        _schedule_open_browser(browser_url, int(console_cfg.get("open_browser_delay_sec", 1)))
-
     bind_error = _port_bind_error(host, port)
     if bind_error is not None:
         winerror = getattr(bind_error, "winerror", None)
@@ -301,6 +311,9 @@ def main(argv: list[str] | None = None) -> None:
             return
         print(f"[控制台] 启动失败：端口 {port} 绑定失败: {bind_error}", flush=True)
         return
+
+    if auto_open:
+        _schedule_open_browser(browser_url, int(console_cfg.get("open_browser_delay_sec", 1)))
 
     app = create_app()
     run_kwargs = {

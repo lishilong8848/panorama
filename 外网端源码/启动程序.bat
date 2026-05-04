@@ -13,6 +13,7 @@ pushd "%~dp0" || (
 )
 set "QJPT_FORCE_ROLE_MODE=external"
 set "QJPT_MAIN_FILE=main_external.py"
+set "MONTHLY_REPORT_CONFIG=%CD%\表格计算配置.json"
 call "%CD%\_启动基础程序.bat" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 popd >nul 2>nul

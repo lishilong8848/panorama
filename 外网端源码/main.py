@@ -301,9 +301,6 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[控制台] 本机访问地址: {local_url}", flush=True)
         print("[启动] 当前未确认启动角色，仅加载最小控制台壳。", flush=True)
 
-    if auto_open:
-        _schedule_open_browser(browser_url, int(console_cfg.get("open_browser_delay_sec", 1)))
-
     bind_error = _port_bind_error(host, port)
     if bind_error is not None:
         winerror = getattr(bind_error, "winerror", None)
@@ -314,6 +311,9 @@ def main(argv: list[str] | None = None) -> None:
             return
         print(f"[控制台] 启动失败：端口 {port} 绑定失败: {bind_error}", flush=True)
         return
+
+    if auto_open:
+        _schedule_open_browser(browser_url, int(console_cfg.get("open_browser_delay_sec", 1)))
 
     app = create_app()
     run_kwargs = {
