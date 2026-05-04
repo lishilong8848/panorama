@@ -9,7 +9,7 @@ import socket
 import subprocess
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Callable, Dict, List
@@ -56,6 +56,7 @@ from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import
     start_waiting_bridge_job,
 )
 from app.modules.shared_bridge.service.shared_source_cache_service import (
+    FAMILY_BRANCH_POWER,
     SharedSourceCacheService,
     is_accessible_cached_file_path,
 )
@@ -85,6 +86,7 @@ from app.shared.utils.runtime_temp_workspace import (
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.event_followup_cache_store import EventFollowupCacheStore
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
+from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService
 from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
@@ -1435,6 +1437,137 @@ def _run_external_day_metric_shared_flow(
     return result
 
 
+def _default_branch_power_bucket_key() -> str:
+    bucket_dt = datetime.now().replace(minute=0, second=0, microsecond=0)
+    return bucket_dt.strftime("%Y-%m-%d %H")
+
+
+def _normalize_branch_power_buildings(payload: Dict[str, Any], bridge_service) -> List[str]:
+    raw_buildings = payload.get("buildings", []) if isinstance(payload, dict) else []
+    buildings = [
+        str(item or "").strip()
+        for item in (raw_buildings if isinstance(raw_buildings, list) else [])
+        if str(item or "").strip()
+    ]
+    if buildings:
+        return list(dict.fromkeys(buildings))
+    building_scope = str(payload.get("building_scope", "") or "").strip() if isinstance(payload, dict) else ""
+    building = str(payload.get("building", "") or "").strip() if isinstance(payload, dict) else ""
+    if building_scope == "single" and building:
+        return [building]
+    return [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
+
+
+def _run_external_branch_power_shared_flow(
+    *,
+    container,
+    config: Dict[str, Any],
+    bucket_key: str,
+    buildings: List[str],
+    emit_log: Callable[[str], None],
+) -> Dict[str, Any]:
+    bridge_service = _shared_bridge_service_or_raise(container)
+    target_buildings = [str(item or "").strip() for item in buildings if str(item or "").strip()]
+    if not target_buildings:
+        target_buildings = bridge_service.get_source_cache_buildings()
+    target_buildings = [item for item in target_buildings if item]
+    if not target_buildings:
+        raise RuntimeError("支路功率上传缺少启用楼栋")
+    target_bucket_key = str(bucket_key or "").strip() or _default_branch_power_bucket_key()
+    emit_log(
+        "[支路功率] 已进入后台共享文件处理: "
+        f"bucket={target_bucket_key}, buildings={','.join(target_buildings)}"
+    )
+    cached_entries = _filter_accessible_cached_entries(
+        bridge_service.get_latest_source_cache_entries(
+            source_family=FAMILY_BRANCH_POWER,
+            buildings=target_buildings,
+            bucket_key=target_bucket_key,
+        )
+    )
+    cached_by_building: Dict[str, Dict[str, Any]] = {}
+    for item in cached_entries:
+        if not isinstance(item, dict):
+            continue
+        building_name = str(item.get("building", "") or "").strip()
+        if building_name and building_name not in cached_by_building:
+            cached_by_building[building_name] = item
+
+    ready_buildings = [building for building in target_buildings if building in cached_by_building]
+    missing_buildings = [building for building in target_buildings if building not in cached_by_building]
+    waiting_payload: Dict[str, Any] | None = None
+    if missing_buildings:
+        dedupe_key = _job_dedupe_key(
+            "branch_power_wait_shared_bridge",
+            bucket=target_bucket_key,
+            buildings=missing_buildings,
+        )
+        waiting_job, waiting_task = start_waiting_bridge_job(
+            job_service=container.job_service,
+            bridge_service=bridge_service,
+            name="支路功率-内网下载",
+            worker_handler="branch_power_from_download",
+            worker_payload={
+                "target_bucket_key": target_bucket_key,
+                "buildings": missing_buildings,
+            },
+            resource_keys=_job_resource_keys("shared_bridge:branch_power"),
+            priority="manual",
+            feature="branch_power_upload",
+            dedupe_key=dedupe_key,
+            submitted_by="manual",
+            bridge_get_or_create_name="get_or_create_branch_power_upload_task",
+            bridge_create_name="create_branch_power_upload_task",
+            bridge_kwargs={
+                "target_bucket_key": target_bucket_key,
+                "buildings": missing_buildings,
+            },
+        )
+        emit_log(
+            "[共享桥接] 已受理支路功率共享桥接任务 "
+            f"task_id={str(waiting_task.get('task_id', '') or '-').strip() or '-'}, "
+            f"bucket={target_bucket_key}, buildings={','.join(missing_buildings)}"
+        )
+        waiting_payload = _accepted_waiting_job_response(waiting_job, waiting_task)
+        if not ready_buildings:
+            return {
+                "ok": True,
+                "mode": "waiting_shared_bridge",
+                "bucket_key": target_bucket_key,
+                "missing_buildings": missing_buildings,
+                "waiting": waiting_payload,
+            }
+
+    source_units = [
+        {
+            "bucket_key": target_bucket_key,
+            "building": building,
+            "source_file": str(cached_by_building[building].get("file_path", "") or "").strip(),
+            "metadata": cached_by_building[building].get("metadata", {})
+            if isinstance(cached_by_building[building].get("metadata", {}), dict)
+            else {},
+        }
+        for building in ready_buildings
+    ]
+    service = BranchPowerUploadService(config)
+    result = service.continue_from_source_files(
+        bucket_key=target_bucket_key,
+        source_units=source_units,
+        emit_log=emit_log,
+    )
+    if waiting_payload is not None:
+        return {
+            "ok": True,
+            "mode": "partial_ready",
+            "bucket_key": target_bucket_key,
+            "ready_buildings": ready_buildings,
+            "missing_buildings": missing_buildings,
+            "upload_result": result,
+            "waiting": waiting_payload,
+        }
+    return result
+
+
 def _run_external_monthly_auto_once_shared_flow(
     *,
     container,
@@ -2463,6 +2596,14 @@ def _augment_health_scheduler_displays(payload: Dict[str, Any], *, role_mode: st
             external_only=True,
         )
 
+    branch_power_container = payload.get("branch_power_upload")
+    if isinstance(branch_power_container, dict) and isinstance(branch_power_container.get("scheduler"), dict):
+        branch_power_container["scheduler"]["display"] = present_scheduler_state(
+            branch_power_container["scheduler"],
+            role_mode=role_mode,
+            external_only=True,
+        )
+
     alarm_container = payload.get("alarm_event_upload")
     if isinstance(alarm_container, dict) and isinstance(alarm_container.get("scheduler"), dict):
         alarm_container["scheduler"]["display"] = present_scheduler_state(
@@ -2621,6 +2762,7 @@ def health(
     monthly_event_report_scheduler_snapshot = _safe_scheduler_snapshot("monthly_event_report_scheduler_status")
     monthly_event_report_last_run = monthly_event_report_service.get_last_run_snapshot()
     day_metric_upload_scheduler_snapshot = _safe_scheduler_snapshot("day_metric_upload_scheduler_status")
+    branch_power_upload_scheduler_snapshot = _safe_scheduler_snapshot("branch_power_upload_scheduler_status")
     alarm_event_upload_scheduler_snapshot = _safe_scheduler_snapshot("alarm_event_upload_scheduler_status")
     monthly_report_delivery_service = MonthlyReportDeliveryService(runtime_cfg)
     include_monthly_delivery = role_mode != "internal" and not is_lite_mode
@@ -3133,6 +3275,27 @@ def health(
                 },
                 "target_preview": day_metric_target_preview,
                 "target_display": feature_target_displays.get("day_metric_upload", {}),
+            },
+            "branch_power_upload": {
+                "scheduler": {
+                    "enabled": bool(branch_power_upload_scheduler_snapshot.get("enabled", False)),
+                    "running": bool(branch_power_upload_scheduler_snapshot.get("running", False)),
+                    "status": str(branch_power_upload_scheduler_snapshot.get("status", "未初始化")),
+                    "next_run_time": str(branch_power_upload_scheduler_snapshot.get("next_run_time", "")),
+                    "last_check_at": str(branch_power_upload_scheduler_snapshot.get("last_check_at", "")),
+                    "last_decision": str(branch_power_upload_scheduler_snapshot.get("last_decision", "")),
+                    "last_trigger_at": str(branch_power_upload_scheduler_snapshot.get("last_trigger_at", "")),
+                    "last_trigger_result": str(branch_power_upload_scheduler_snapshot.get("last_trigger_result", "")),
+                    "state_path": str(branch_power_upload_scheduler_snapshot.get("state_path", "")),
+                    "state_exists": bool(branch_power_upload_scheduler_snapshot.get("state_exists", False)),
+                    "remembered_enabled": bool(branch_power_upload_scheduler_snapshot.get("remembered_enabled", False)),
+                    "effective_auto_start_in_gui": bool(
+                        branch_power_upload_scheduler_snapshot.get("effective_auto_start_in_gui", False)
+                    ),
+                    "memory_source": str(branch_power_upload_scheduler_snapshot.get("memory_source", "") or ""),
+                    "executor_bound": _safe_bool_method("is_branch_power_upload_scheduler_executor_bound"),
+                    "callback_name": _safe_text_method("branch_power_upload_scheduler_executor_name"),
+                },
             },
             "alarm_event_upload": {
             "enabled": bool(runtime_cfg.get("alarm_export", {}).get("enabled", True))
@@ -4735,6 +4898,66 @@ def job_day_metric_from_download(payload: Dict[str, Any], request: Request) -> D
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/api/jobs/branch-power/from-download")
+def job_branch_power_from_download(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    config = _runtime_config(container)
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起支路功率上传任务")
+
+    bridge_service = _shared_bridge_service_or_raise(container)
+    payload_obj = payload if isinstance(payload, dict) else {}
+    bucket_key = str(
+        payload_obj.get("target_bucket_key", "")
+        or payload_obj.get("bucket_key", "")
+        or ""
+    ).strip() or _default_branch_power_bucket_key()
+    try:
+        datetime.strptime(bucket_key, "%Y-%m-%d %H")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="bucket_key 格式必须为 YYYY-MM-DD HH") from exc
+    buildings = _normalize_branch_power_buildings(payload_obj, bridge_service)
+    if not buildings:
+        raise HTTPException(status_code=400, detail="支路功率上传缺少楼栋")
+
+    dedupe_key = _job_dedupe_key(
+        "branch_power_external_dispatch",
+        bucket=bucket_key,
+        buildings=buildings,
+    )
+
+    def _run_external_shared(emit_log):
+        return _run_external_branch_power_shared_flow(
+            container=container,
+            config=config,
+            bucket_key=bucket_key,
+            buildings=buildings,
+            emit_log=emit_log,
+        )
+
+    try:
+        job = _start_background_job(
+            container,
+            name="支路功率-共享文件上传",
+            run_func=_run_external_shared,
+            worker_handler="",
+            worker_payload={},
+            resource_keys=_job_resource_keys("shared_bridge:branch_power", "network:external"),
+            priority="manual",
+            feature="branch_power_external_dispatch",
+            dedupe_key=dedupe_key,
+            submitted_by="manual",
+        )
+        container.add_system_log(
+            "[任务] 已提交: 支路功率-共享文件上传 "
+            f"bucket={bucket_key}, buildings={','.join(buildings)} ({job.job_id})"
+        )
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/api/jobs/day-metric/from-file")
 async def job_day_metric_from_file(
     request: Request,
@@ -5431,6 +5654,7 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
         "handover_scheduler": _normalize_handover_scheduler(_safe_scheduler("handover_scheduler_status")),
         "wet_bulb_collection_scheduler": _safe_scheduler("wet_bulb_collection_scheduler_status"),
         "day_metric_upload_scheduler": _safe_scheduler("day_metric_upload_scheduler_status"),
+        "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
@@ -6093,6 +6317,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         "handover_scheduler": _safe_scheduler("handover_scheduler_status"),
         "wet_bulb_collection_scheduler": _safe_scheduler("wet_bulb_collection_scheduler_status"),
         "day_metric_upload_scheduler": _safe_scheduler("day_metric_upload_scheduler_status"),
+        "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),

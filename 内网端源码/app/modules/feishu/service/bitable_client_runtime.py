@@ -16,6 +16,8 @@ class FeishuBitableClient:
     GET_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
     LIST_FIELD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
     BATCH_CREATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
+    UPDATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
+    BATCH_UPDATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update"
     BATCH_DELETE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_delete"
     UPLOAD_FILE_URL = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
 
@@ -261,6 +263,75 @@ class FeishuBitableClient:
             chunk = fields_list[i : i + batch_size]
             payload = {"records": [{"fields": fields} for fields in chunk]}
             responses.append(self._post_json(url, payload))
+            uploaded += len(chunk)
+            if callable(progress_callback):
+                progress_callback(uploaded, total)
+        return responses
+
+    def update_record(
+        self,
+        table_id: str,
+        record_id: str,
+        fields: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        table_text = str(table_id or "").strip()
+        record_text = str(record_id or "").strip()
+        if not table_text:
+            raise ValueError("table_id 不能为空")
+        if not record_text:
+            raise ValueError("record_id 不能为空")
+        if not isinstance(fields, dict):
+            raise ValueError("fields 必须是对象")
+        url = self.UPDATE_RECORD_URL.format(
+            app_token=self.app_token,
+            table_id=table_text,
+            record_id=record_text,
+        )
+        return self._request_json_with_auth_retry(
+            "PUT",
+            url,
+            payload={"fields": fields},
+            content_type_json=True,
+        )
+
+    def batch_update_records(
+        self,
+        table_id: str,
+        records: List[Dict[str, Any]],
+        batch_size: int = 200,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for item in records or []:
+            if not isinstance(item, dict):
+                continue
+            record_id = str(item.get("record_id", "") or "").strip()
+            fields = item.get("fields", {})
+            if not record_id or not isinstance(fields, dict):
+                continue
+            normalized.append({"record_id": record_id, "fields": fields})
+        if not normalized:
+            return []
+        if batch_size <= 0:
+            raise ValueError("batch_size 必须大于0")
+        url = self.BATCH_UPDATE_RECORD_URL.format(app_token=self.app_token, table_id=table_id)
+        responses: List[Dict[str, Any]] = []
+        total = len(normalized)
+        uploaded = 0
+        for i in range(0, len(normalized), batch_size):
+            chunk = normalized[i : i + batch_size]
+            try:
+                responses.append(self._post_json(url, {"records": chunk}))
+            except Exception:
+                # 部分租户或旧版 API 可能未开放 batch_update，回退为逐条 PUT，保证功能可用。
+                for row in chunk:
+                    responses.append(
+                        self.update_record(
+                            table_id=table_id,
+                            record_id=str(row.get("record_id", "") or ""),
+                            fields=row.get("fields", {}) if isinstance(row.get("fields", {}), dict) else {},
+                        )
+                    )
             uploaded += len(chunk)
             if callable(progress_callback):
                 progress_callback(uploaded, total)

@@ -1215,6 +1215,107 @@ class SharedBridgeStore:
             raise RuntimeError(f"重新加载共享任务失败 {task_id}")
         return payload
 
+    def create_branch_power_upload_task(
+        self,
+        *,
+        buildings: List[str] | None,
+        resume_job_id: str | None = None,
+        target_bucket_key: str | None = None,
+        created_by_role: str,
+        created_by_node_id: str,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        task_id = uuid.uuid4().hex
+        now_text = _now_text()
+        payload: Dict[str, Any] | None = None
+        normalized_buildings = [
+            str(item or "").strip()
+            for item in (buildings or [])
+            if str(item or "").strip()
+        ]
+        request_payload = {
+            "buildings": normalized_buildings,
+            "resume_job_id": str(resume_job_id or "").strip(),
+            "target_bucket_key": str(target_bucket_key or "").strip(),
+        }
+        dedupe_key = "|".join(
+            [
+                "branch_power_upload",
+                request_payload["target_bucket_key"] or now_text[:13],
+                ",".join(normalized_buildings) or "all_enabled",
+            ]
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO bridge_tasks(
+                    task_id, feature, mode, created_by_role, created_by_node_id, requested_by,
+                    status, dedupe_key, request_json, result_json, error, created_at, updated_at, revision
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    task_id,
+                    "branch_power_upload",
+                    "bridge",
+                    str(created_by_role or "").strip(),
+                    str(created_by_node_id or "").strip(),
+                    str(requested_by or "").strip() or "manual",
+                    "queued_for_internal",
+                    dedupe_key,
+                    json.dumps(request_payload, ensure_ascii=False),
+                    "{}",
+                    "",
+                    now_text,
+                    now_text,
+                ),
+            )
+            conn.executemany(
+                """
+                INSERT INTO bridge_stages(
+                    task_id, stage_id, role_target, handler, status, input_json, result_json,
+                    claimed_by_node_id, claim_token, lease_expires_at, started_at, finished_at, error, revision
+                ) VALUES(?, ?, ?, ?, ?, ?, '{}', '', '', '', '', '', '', 0)
+                """,
+                [
+                    (
+                        task_id,
+                        "internal_download",
+                        "internal",
+                        "branch_power_from_download_internal",
+                        "pending",
+                        json.dumps(request_payload, ensure_ascii=False),
+                    ),
+                    (
+                        task_id,
+                        "external_upload",
+                        "external",
+                        "branch_power_from_shared_files_external",
+                        "pending",
+                        json.dumps(request_payload, ensure_ascii=False),
+                    ),
+                ],
+            )
+            self._insert_event(
+                conn,
+                task_id=task_id,
+                stage_id="",
+                side=str(created_by_role or "").strip(),
+                level="info",
+                event_type="created",
+                payload={
+                    "message": "已创建共享桥接任务",
+                    "feature": "branch_power_upload",
+                    "dedupe_key": dedupe_key,
+                    "request": request_payload,
+                },
+            )
+            payload = self._task_payload_and_sync_from_conn(conn, task_id)
+        if payload:
+            self._sync_task_mailbox(payload)
+        if not payload:
+            raise RuntimeError(f"重新加载共享任务失败 {task_id}")
+        return payload
+
     def create_alarm_event_upload_task(
         self,
         *,

@@ -106,6 +106,7 @@ const SOURCE_CACHE_FAMILY_LABELS = {
   handover_log_family: "交接班日志源文件",
   handover_capacity_report_family: "交接班容量报表源文件",
   monthly_report_family: "全景平台月报源文件",
+  branch_power_family: "支路功率源文件",
   alarm_event_family: "告警信息源文件",
 };
 const ENGINEER_DIRECTORY_CACHE_KEY = "handover_engineer_directory_daily_cache_v1";
@@ -1273,7 +1274,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     ) {
       merged.current_hour_refresh_overview = current.current_hour_refresh_overview;
     }
-    ["handover_log_family", "handover_capacity_report_family", "monthly_report_family", "alarm_event_family"].forEach((key) => {
+    ["handover_log_family", "handover_capacity_report_family", "monthly_report_family", "branch_power_family", "alarm_event_family"].forEach((key) => {
       merged[key] = mergeLiteSharedBridgeFamily(current[key], next[key]);
     });
     return merged;
@@ -1753,6 +1754,45 @@ export function createRuntimeHealthConfigActions(ctx) {
         });
       }
     }
+    if (data.branch_power_upload && typeof data.branch_power_upload === "object") {
+      if (data.branch_power_upload.scheduler && typeof data.branch_power_upload.scheduler === "object") {
+        Object.assign(health.branch_power_upload.scheduler, {
+          enabled: Boolean(data.branch_power_upload.scheduler.enabled),
+          running: Boolean(data.branch_power_upload.scheduler.running),
+          status: String(data.branch_power_upload.scheduler.status || ""),
+          next_run_time: String(data.branch_power_upload.scheduler.next_run_time || ""),
+          last_check_at: String(data.branch_power_upload.scheduler.last_check_at || ""),
+          last_decision: String(data.branch_power_upload.scheduler.last_decision || ""),
+          last_trigger_at: String(data.branch_power_upload.scheduler.last_trigger_at || ""),
+          last_trigger_result: String(data.branch_power_upload.scheduler.last_trigger_result || ""),
+          state_path: String(data.branch_power_upload.scheduler.state_path || ""),
+          state_exists: Boolean(data.branch_power_upload.scheduler.state_exists),
+          executor_bound: Boolean(data.branch_power_upload.scheduler.executor_bound),
+          callback_name: String(data.branch_power_upload.scheduler.callback_name || ""),
+          remembered_enabled: Boolean(data.branch_power_upload.scheduler.remembered_enabled),
+          effective_auto_start_in_gui: Boolean(data.branch_power_upload.scheduler.effective_auto_start_in_gui),
+          memory_source: String(data.branch_power_upload.scheduler.memory_source || ""),
+        });
+      } else {
+        Object.assign(health.branch_power_upload.scheduler, {
+          enabled: false,
+          running: false,
+          status: "未初始化",
+          next_run_time: "",
+          last_check_at: "",
+          last_decision: "",
+          last_trigger_at: "",
+          last_trigger_result: "",
+          state_path: "",
+          state_exists: false,
+          executor_bound: false,
+          callback_name: "",
+          remembered_enabled: false,
+          effective_auto_start_in_gui: false,
+          memory_source: "",
+        });
+      }
+    }
     if (data.alarm_event_upload && typeof data.alarm_event_upload === "object") {
       health.alarm_event_upload.enabled = Boolean(data.alarm_event_upload.enabled);
       if (data.alarm_event_upload.scheduler && typeof data.alarm_event_upload.scheduler === "object") {
@@ -2084,6 +2124,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     const dayMetric = summary.day_metric_upload_scheduler;
     if (dayMetric && typeof dayMetric === "object" && health?.day_metric_upload?.scheduler) {
       Object.assign(health.day_metric_upload.scheduler, dayMetric);
+    }
+    const branchPower = summary.branch_power_upload_scheduler;
+    if (branchPower && typeof branchPower === "object" && health?.branch_power_upload?.scheduler) {
+      Object.assign(health.branch_power_upload.scheduler, branchPower);
     }
     const alarm = summary.alarm_event_upload_scheduler;
     if (alarm && typeof alarm === "object" && health?.alarm_event_upload?.scheduler) {

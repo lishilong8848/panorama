@@ -222,6 +222,9 @@ def present_scheduler_overview_items(
     day_metric_cfg = _dict(
         _cfg_get(config_payload, ("day_metric_upload", "scheduler"), ("features", "day_metric_upload", "scheduler"))
     )
+    branch_power_cfg = _dict(
+        _cfg_get(config_payload, ("branch_power_upload", "scheduler"), ("features", "branch_power_upload", "scheduler"))
+    )
     alarm_cfg = _dict(
         _cfg_get(config_payload, ("alarm_export", "scheduler"), ("features", "alarm_export", "scheduler"))
     )
@@ -244,6 +247,7 @@ def present_scheduler_overview_items(
     handover_snapshot = _dict(summary_payload.get("handover_scheduler"))
     wet_bulb_snapshot = _dict(summary_payload.get("wet_bulb_collection_scheduler"))
     day_metric_snapshot = _dict(summary_payload.get("day_metric_upload_scheduler"))
+    branch_power_snapshot = _dict(summary_payload.get("branch_power_upload_scheduler"))
     alarm_snapshot = _dict(summary_payload.get("alarm_event_upload_scheduler"))
     monthly_event_snapshot = _dict(summary_payload.get("monthly_event_report_scheduler"))
     monthly_change_snapshot = _dict(summary_payload.get("monthly_change_report_scheduler"))
@@ -252,6 +256,7 @@ def present_scheduler_overview_items(
     handover_display = present_scheduler_state(handover_snapshot, role_mode=role_mode)
     wet_bulb_display = present_scheduler_state(wet_bulb_snapshot, role_mode=role_mode)
     day_metric_display = present_scheduler_state(day_metric_snapshot, role_mode=role_mode)
+    branch_power_display = present_scheduler_state(branch_power_snapshot, role_mode=role_mode)
     alarm_display = present_scheduler_state(alarm_snapshot, role_mode=role_mode)
     monthly_event_display = present_scheduler_state(monthly_event_snapshot, role_mode=role_mode)
     monthly_change_display = present_scheduler_state(monthly_change_snapshot, role_mode=role_mode)
@@ -343,6 +348,29 @@ def present_scheduler_overview_items(
                     next_run_time=day_metric_snapshot.get("next_run_time"),
                     last_trigger_at=day_metric_snapshot.get("last_trigger_at"),
                     result_text=_map_scheduler_trigger_text(day_metric_snapshot.get("last_trigger_result")),
+                )
+            ],
+        },
+        {
+            "key": "branch_power_upload",
+            "title": "自动上传支路功率",
+            "module_id": "branch_power_upload",
+            "focus_key": "",
+            "tone": branch_power_display.get("tone", "neutral"),
+            "status_text": branch_power_display.get("status_text", "未启动"),
+            "summary_text": _summary_choice(
+                _map_scheduler_decision_text(branch_power_snapshot.get("last_decision")),
+                _map_scheduler_trigger_text(branch_power_snapshot.get("last_trigger_result")),
+                branch_power_display.get("summary_text", ""),
+                fallback="每小时读取上一小时共享支路功率文件",
+            ),
+            "parts": [
+                _overview_part(
+                    label="循环调度",
+                    run_time_text=_interval_run_text(branch_power_cfg.get("interval_minutes")),
+                    next_run_time=branch_power_snapshot.get("next_run_time"),
+                    last_trigger_at=branch_power_snapshot.get("last_trigger_at"),
+                    result_text=_map_scheduler_trigger_text(branch_power_snapshot.get("last_trigger_result")),
                 )
             ],
         },

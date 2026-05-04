@@ -49,6 +49,7 @@ _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS: tuple[tuple[str, str, tuple[str, ...]], ...
     ("handover", "交接班调度", ("features", "handover_log", "scheduler")),
     ("wet_bulb_collection", "湿球温度定时采集", ("features", "wet_bulb_collection", "scheduler")),
     ("day_metric_upload", "12项独立上传", ("features", "day_metric_upload", "scheduler")),
+    ("branch_power_upload", "自动上传支路功率", ("features", "branch_power_upload", "scheduler")),
     ("alarm_event_upload", "告警信息上传", ("features", "alarm_export", "scheduler")),
     ("monthly_change_report", "月度变更统计表", ("features", "handover_log", "monthly_change_report", "scheduler")),
     ("monthly_event_report", "月度事件统计表", ("features", "handover_log", "monthly_event_report", "scheduler")),
@@ -61,6 +62,7 @@ _EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
     "handover": "handover_scheduler_manager",
     "wet_bulb_collection": "wet_bulb_collection_scheduler",
     "day_metric_upload": "day_metric_upload_scheduler",
+    "branch_power_upload": "branch_power_upload_scheduler",
     "alarm_event_upload": "alarm_event_upload_scheduler",
     "monthly_change_report": "monthly_change_report_scheduler",
     "monthly_event_report": "monthly_event_report_scheduler",
@@ -99,6 +101,8 @@ class AppContainer:
     wet_bulb_collection_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     day_metric_upload_scheduler: IntervalSchedulerService | None = None
     day_metric_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
+    branch_power_upload_scheduler: IntervalSchedulerService | None = None
+    branch_power_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     alarm_event_upload_scheduler: DailyAutoSchedulerService | None = None
     alarm_event_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     monthly_change_report_scheduler: MonthlySchedulerService | None = None
@@ -213,6 +217,9 @@ class AppContainer:
         if not self.day_metric_upload_scheduler:
             _report_progress("building_day_metric_scheduler")
             self.day_metric_upload_scheduler = self._build_day_metric_upload_scheduler()
+        if not self.branch_power_upload_scheduler:
+            _report_progress("building_branch_power_scheduler")
+            self.branch_power_upload_scheduler = self._build_branch_power_upload_scheduler()
         if not self.alarm_event_upload_scheduler:
             _report_progress("building_alarm_scheduler")
             self.alarm_event_upload_scheduler = self._build_alarm_event_upload_scheduler()
@@ -259,6 +266,9 @@ class AppContainer:
         if self.day_metric_upload_scheduler_callback and self.day_metric_upload_scheduler:
             _report_progress("binding_day_metric_scheduler_callback")
             self.day_metric_upload_scheduler.run_callback = self.day_metric_upload_scheduler_callback
+        if self.branch_power_upload_scheduler_callback and self.branch_power_upload_scheduler:
+            _report_progress("binding_branch_power_scheduler_callback")
+            self.branch_power_upload_scheduler.run_callback = self.branch_power_upload_scheduler_callback
         if self.alarm_event_upload_scheduler_callback and self.alarm_event_upload_scheduler:
             _report_progress("binding_alarm_scheduler_callback")
             self.alarm_event_upload_scheduler.run_callback = self.alarm_event_upload_scheduler_callback
@@ -439,6 +449,28 @@ class AppContainer:
             source_name="12项独立上传",
         )
 
+    def _build_branch_power_upload_scheduler(self) -> IntervalSchedulerService:
+        features = self.config.get("features", {}) if isinstance(self.config, dict) else {}
+        branch_cfg = features.get("branch_power_upload", {}) if isinstance(features, dict) else {}
+        if not isinstance(branch_cfg, dict):
+            branch_cfg = {}
+        paths_cfg = self.runtime_config.get("paths", {})
+        if not isinstance(paths_cfg, dict):
+            paths_cfg = {}
+        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
+        scheduler_cfg = branch_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        return IntervalSchedulerService(
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=runtime_state_root or "runtime_state",
+            emit_log=self.add_system_log,
+            run_callback=self.branch_power_upload_scheduler_callback or self._branch_power_upload_scheduler_run_callback,
+            is_busy=self.job_service.has_incomplete_jobs,
+            thread_name="branch-power-upload-interval-scheduler",
+            source_name="自动上传支路功率",
+        )
+
     def _build_alarm_event_upload_scheduler(self) -> DailyAutoSchedulerService:
         alarm_cfg = self.runtime_config.get("alarm_export", {})
         if not isinstance(alarm_cfg, dict):
@@ -534,6 +566,9 @@ class AppContainer:
     def _day_metric_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"12项独立上传调度回调尚未绑定执行器(source={source})"
 
+    def _branch_power_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
+        return False, f"自动上传支路功率调度回调尚未绑定执行器(source={source})"
+
     def _alarm_event_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"告警信息上传调度回调尚未绑定执行器(source={source})"
 
@@ -618,6 +653,27 @@ class AppContainer:
             callback = self.day_metric_upload_scheduler_callback
         if callback is None:
             callback = self._day_metric_upload_scheduler_run_callback
+        name = getattr(callback, "__name__", "")
+        if not name:
+            name = getattr(getattr(callback, "__func__", None), "__name__", "")
+        return str(name or "-")
+
+    def is_branch_power_upload_scheduler_executor_bound(self) -> bool:
+        callback = None
+        if self.branch_power_upload_scheduler:
+            callback = getattr(self.branch_power_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.branch_power_upload_scheduler_callback
+        return not self._is_placeholder_callback(callback, self._branch_power_upload_scheduler_run_callback)
+
+    def branch_power_upload_scheduler_executor_name(self) -> str:
+        callback = None
+        if self.branch_power_upload_scheduler:
+            callback = getattr(self.branch_power_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.branch_power_upload_scheduler_callback
+        if callback is None:
+            callback = self._branch_power_upload_scheduler_run_callback
         name = getattr(callback, "__name__", "")
         if not name:
             name = getattr(getattr(callback, "__func__", None), "__name__", "")
@@ -710,6 +766,11 @@ class AppContainer:
         self.day_metric_upload_scheduler_callback = callback
         if self.day_metric_upload_scheduler:
             self.day_metric_upload_scheduler.run_callback = callback
+
+    def set_branch_power_upload_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
+        self.branch_power_upload_scheduler_callback = callback
+        if self.branch_power_upload_scheduler:
+            self.branch_power_upload_scheduler.run_callback = callback
 
     def set_alarm_event_upload_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
         self.alarm_event_upload_scheduler_callback = callback
@@ -1227,6 +1288,29 @@ class AppContainer:
             self.add_system_log("[12项独立上传调度] 已禁用")
 
         self.add_system_log(
+            f"[自动上传支路功率调度] 启动阶段执行器状态: executor_bound={self.is_branch_power_upload_scheduler_executor_bound()}, "
+            f"callback={self.branch_power_upload_scheduler_executor_name()}"
+        )
+        branch_power_scheduler_status = self.branch_power_upload_scheduler_status()
+        if role_mode == "internal":
+            self.add_system_log("[自动上传支路功率调度] 当前为内网端，启动时不自动开启")
+        elif bool(branch_power_scheduler_status.get("enabled", False)):
+            features = self.config.get("features", {}) if isinstance(self.config, dict) else {}
+            branch_power_cfg = features.get("branch_power_upload", {}) if isinstance(features, dict) else {}
+            if not isinstance(branch_power_cfg, dict):
+                branch_power_cfg = {}
+            branch_power_scheduler_cfg = branch_power_cfg.get("scheduler", {})
+            if not isinstance(branch_power_scheduler_cfg, dict):
+                branch_power_scheduler_cfg = {}
+            if bool(branch_power_scheduler_cfg.get("auto_start_in_gui", False)):
+                _report_progress("starting_branch_power_scheduler")
+                self.start_branch_power_upload_scheduler(source=source)
+            else:
+                self.add_system_log("[自动上传支路功率调度] 启动时未自动开启")
+        else:
+            self.add_system_log("[自动上传支路功率调度] 已禁用")
+
+        self.add_system_log(
             f"[告警信息上传调度] 启动阶段执行器状态: executor_bound={self.is_alarm_event_upload_scheduler_executor_bound()}, "
             f"callback={self.alarm_event_upload_scheduler_executor_name()}"
         )
@@ -1356,6 +1440,12 @@ class AppContainer:
                 self.day_metric_upload_scheduler,
             ),
             (
+                "自动上传支路功率调度",
+                ("features", "branch_power_upload", "scheduler"),
+                bool(self.branch_power_upload_scheduler.is_running()) if self.branch_power_upload_scheduler else False,
+                self.branch_power_upload_scheduler,
+            ),
+            (
                 "告警信息上传调度",
                 ("features", "alarm_export", "scheduler"),
                 bool(self.alarm_event_upload_scheduler.is_running()) if self.alarm_event_upload_scheduler else False,
@@ -1464,6 +1554,7 @@ class AppContainer:
             ("handover_scheduler", self.stop_handover_scheduler),
             ("wet_bulb_collection_scheduler", self.stop_wet_bulb_collection_scheduler),
             ("day_metric_upload_scheduler", self.stop_day_metric_upload_scheduler),
+            ("branch_power_upload_scheduler", self.stop_branch_power_upload_scheduler),
             ("alarm_event_upload_scheduler", self.stop_alarm_event_upload_scheduler),
             ("monthly_change_report_scheduler", self.stop_monthly_change_report_scheduler),
             ("monthly_event_report_scheduler", self.stop_monthly_event_report_scheduler),
@@ -1576,6 +1667,29 @@ class AppContainer:
             result = {"stopped": False, "running": False, "reason": "not_initialized"}
         self.add_system_log(
             f"[12项独立上传调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def start_branch_power_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if not self.branch_power_upload_scheduler:
+            self.branch_power_upload_scheduler = self._build_branch_power_upload_scheduler()
+        result = self.branch_power_upload_scheduler.start()
+        self.add_system_log(
+            f"[自动上传支路功率调度] {source}启动请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}, "
+            f"executor_bound={self.is_branch_power_upload_scheduler_executor_bound()}, "
+            f"callback={self.branch_power_upload_scheduler_executor_name()}"
+        )
+        return result
+
+    def stop_branch_power_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if self.branch_power_upload_scheduler:
+            result = self.branch_power_upload_scheduler.stop()
+        else:
+            result = {"stopped": False, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            f"[自动上传支路功率调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
             f"running={bool(result.get('running', False))}"
         )
         return result
@@ -2153,6 +2267,31 @@ class AppContainer:
             **memory_fields,
         }
 
+    def branch_power_upload_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("branch_power_upload")
+        if not self.branch_power_upload_scheduler:
+            return {
+                "enabled": False,
+                "running": False,
+                "status": "未初始化",
+                "next_run_time": "",
+                "last_check_at": "",
+                "last_decision": "",
+                "last_trigger_at": "",
+                "last_trigger_result": "",
+                "state_path": "",
+                "state_exists": False,
+                **memory_fields,
+            }
+        runtime = self.branch_power_upload_scheduler.get_runtime_snapshot()
+        return {
+            "enabled": bool(self.branch_power_upload_scheduler.enabled),
+            "status": self.branch_power_upload_scheduler.status_text(),
+            "next_run_time": self.branch_power_upload_scheduler.next_run_text(),
+            **runtime,
+            **memory_fields,
+        }
+
     def alarm_event_upload_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("alarm_event_upload")
         if not self.alarm_event_upload_scheduler:
@@ -2275,6 +2414,9 @@ class AppContainer:
         was_day_metric_upload_running = (
             self.day_metric_upload_scheduler.is_running() if self.day_metric_upload_scheduler else False
         )
+        was_branch_power_upload_running = (
+            self.branch_power_upload_scheduler.is_running() if self.branch_power_upload_scheduler else False
+        )
         was_alarm_event_upload_running = (
             self.alarm_event_upload_scheduler.is_running() if self.alarm_event_upload_scheduler else False
         )
@@ -2299,6 +2441,8 @@ class AppContainer:
             self.wet_bulb_collection_scheduler.stop()
         if self.day_metric_upload_scheduler:
             self.day_metric_upload_scheduler.stop()
+        if self.branch_power_upload_scheduler:
+            self.branch_power_upload_scheduler.stop()
         if self.alarm_event_upload_scheduler:
             self.alarm_event_upload_scheduler.stop()
         if self.monthly_change_report_scheduler:
@@ -2315,6 +2459,7 @@ class AppContainer:
         self.handover_scheduler_manager = self._build_handover_scheduler_manager()
         self.wet_bulb_collection_scheduler = self._build_wet_bulb_collection_scheduler()
         self.day_metric_upload_scheduler = self._build_day_metric_upload_scheduler()
+        self.branch_power_upload_scheduler = self._build_branch_power_upload_scheduler()
         self.alarm_event_upload_scheduler = self._build_alarm_event_upload_scheduler()
         self.monthly_change_report_scheduler = self._build_monthly_change_report_scheduler()
         self.monthly_event_report_scheduler = self._build_monthly_event_report_scheduler()
@@ -2341,6 +2486,8 @@ class AppContainer:
             self.wet_bulb_collection_scheduler.run_callback = self.wet_bulb_collection_scheduler_callback
         if self.day_metric_upload_scheduler_callback:
             self.day_metric_upload_scheduler.run_callback = self.day_metric_upload_scheduler_callback
+        if self.branch_power_upload_scheduler_callback:
+            self.branch_power_upload_scheduler.run_callback = self.branch_power_upload_scheduler_callback
         if self.alarm_event_upload_scheduler_callback:
             self.alarm_event_upload_scheduler.run_callback = self.alarm_event_upload_scheduler_callback
         if self.monthly_change_report_scheduler_callback:
@@ -2379,6 +2526,14 @@ class AppContainer:
         if not isinstance(day_metric_scheduler_cfg, dict):
             day_metric_scheduler_cfg = {}
         day_metric_auto_start = bool(day_metric_scheduler_cfg.get("auto_start_in_gui", False))
+        features_cfg = self.config.get("features", {}) if isinstance(self.config, dict) else {}
+        branch_power_cfg = features_cfg.get("branch_power_upload", {}) if isinstance(features_cfg, dict) else {}
+        if not isinstance(branch_power_cfg, dict):
+            branch_power_cfg = {}
+        branch_power_scheduler_cfg = branch_power_cfg.get("scheduler", {})
+        if not isinstance(branch_power_scheduler_cfg, dict):
+            branch_power_scheduler_cfg = {}
+        branch_power_auto_start = bool(branch_power_scheduler_cfg.get("auto_start_in_gui", False))
         alarm_event_cfg = self.runtime_config.get("alarm_export", {})
         if not isinstance(alarm_event_cfg, dict):
             alarm_event_cfg = {}
@@ -2414,6 +2569,8 @@ class AppContainer:
             self.wet_bulb_collection_scheduler.start()
         if was_day_metric_upload_running or (self.runtime_services_armed and day_metric_auto_start):
             self.day_metric_upload_scheduler.start()
+        if was_branch_power_upload_running or (self.runtime_services_armed and branch_power_auto_start):
+            self.branch_power_upload_scheduler.start()
         if was_alarm_event_upload_running or (self.runtime_services_armed and alarm_event_auto_start):
             self.alarm_event_upload_scheduler.start()
         if was_monthly_change_report_running or (self.runtime_services_armed and monthly_change_auto_start):

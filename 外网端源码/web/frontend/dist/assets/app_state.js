@@ -98,6 +98,7 @@ const INTERNAL_SOURCE_CACHE_FAMILY_KEYS = Object.freeze([
   "handover_log_family",
   "handover_capacity_report_family",
   "monthly_report_family",
+  "branch_power_family",
   "alarm_event_family",
 ]);
 const STATE_DIAGNOSTIC_SEEN = new Set();
@@ -127,6 +128,7 @@ export function createEmptyInternalBuildingRuntimeStatusMap() {
           handover_log_family: buildSourceCachePlaceholderBuilding(building, ""),
           handover_capacity_report_family: buildSourceCachePlaceholderBuilding(building, ""),
           monthly_report_family: buildSourceCachePlaceholderBuilding(building, ""),
+          branch_power_family: buildSourceCachePlaceholderBuilding(building, ""),
           alarm_event_family: buildSourceCachePlaceholderBuilding(building, ""),
         },
         pool: {
@@ -548,6 +550,25 @@ export function createAppState(vueApi) {
         resolved_at: "",
       },
     },
+    branch_power_upload: {
+      scheduler: {
+        enabled: false,
+        running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
+        status: "未初始化",
+        next_run_time: "",
+        last_check_at: "",
+        last_decision: "",
+        last_trigger_at: "",
+        last_trigger_result: "",
+        state_path: "",
+        state_exists: false,
+        executor_bound: false,
+        callback_name: "",
+      },
+    },
     alarm_event_upload: {
       enabled: false,
       scheduler: {
@@ -657,6 +678,13 @@ export function createAppState(vueApi) {
           buildings: [],
         },
         monthly_report_family: {
+          ready_count: 0,
+          failed_buildings: [],
+          last_success_at: "",
+          current_bucket: "",
+          buildings: [],
+        },
+        branch_power_family: {
           ready_count: 0,
           failed_buildings: [],
           last_success_at: "",
@@ -804,6 +832,7 @@ export function createAppState(vueApi) {
   const handoverSchedulerQuickSaving = ref(false);
   const wetBulbSchedulerQuickSaving = ref(false);
   const dayMetricUploadSchedulerQuickSaving = ref(false);
+  const branchPowerUploadSchedulerQuickSaving = ref(false);
   const alarmEventUploadSchedulerQuickSaving = ref(false);
   const monthlyEventReportSchedulerQuickSaving = ref(false);
   const monthlyChangeReportSchedulerQuickSaving = ref(false);
@@ -812,6 +841,7 @@ export function createAppState(vueApi) {
     handover: { mode: "idle", rememberedOverride: null },
     wet_bulb: { mode: "idle", rememberedOverride: null },
     day_metric_upload: { mode: "idle", rememberedOverride: null },
+    branch_power_upload: { mode: "idle", rememberedOverride: null },
     alarm_event_upload: { mode: "idle", rememberedOverride: null },
     monthly_event_report: { mode: "idle", rememberedOverride: null },
     monthly_change_report: { mode: "idle", rememberedOverride: null },
@@ -1262,6 +1292,12 @@ export function createAppState(vueApi) {
             : {}),
           buildings: buildFamilyRows("monthly_report_family", currentHourBucket),
         },
+        branch_power_family: {
+          ...(sourceCacheSummary.branch_power_family && typeof sourceCacheSummary.branch_power_family === "object"
+            ? sourceCacheSummary.branch_power_family
+            : {}),
+          buildings: buildFamilyRows("branch_power_family", currentHourBucket),
+        },
         alarm_event_family: {
           ...(sourceCacheSummary.alarm_event_family && typeof sourceCacheSummary.alarm_event_family === "object"
             ? sourceCacheSummary.alarm_event_family
@@ -1309,6 +1345,7 @@ export function createAppState(vueApi) {
     const familyKeys = [
       "handover_log_family",
       "monthly_report_family",
+      "branch_power_family",
       "alarm_event_family",
       "handover_capacity_report_family",
     ].filter((familyKey) => payload?.[familyKey] && typeof payload[familyKey] === "object");
@@ -2316,6 +2353,12 @@ export function createAppState(vueApi) {
   const dayMetricUploadSchedulerTriggerText = computed(() =>
     readSchedulerDisplayText(health.day_metric_upload?.scheduler, "trigger_text", "暂无记录"),
   );
+  const branchPowerUploadSchedulerDecisionText = computed(() =>
+    readSchedulerDisplayText(health.branch_power_upload?.scheduler, "decision_text", "暂无记录"),
+  );
+  const branchPowerUploadSchedulerTriggerText = computed(() =>
+    readSchedulerDisplayText(health.branch_power_upload?.scheduler, "trigger_text", "暂无记录"),
+  );
   const alarmEventUploadSchedulerDecisionText = computed(() =>
     readSchedulerDisplayText(health.alarm_event_upload?.scheduler, "decision_text", "暂无记录"),
   );
@@ -2789,6 +2832,7 @@ export function createAppState(vueApi) {
     handoverSchedulerQuickSaving,
     wetBulbSchedulerQuickSaving,
     dayMetricUploadSchedulerQuickSaving,
+    branchPowerUploadSchedulerQuickSaving,
     alarmEventUploadSchedulerQuickSaving,
     monthlyEventReportSchedulerQuickSaving,
     monthlyChangeReportSchedulerQuickSaving,
@@ -2871,6 +2915,8 @@ export function createAppState(vueApi) {
     wetBulbSchedulerTriggerText,
     dayMetricUploadSchedulerDecisionText,
     dayMetricUploadSchedulerTriggerText,
+    branchPowerUploadSchedulerDecisionText,
+    branchPowerUploadSchedulerTriggerText,
     alarmEventUploadSchedulerDecisionText,
     alarmEventUploadSchedulerTriggerText,
     monthlyEventReportSchedulerDecisionText,

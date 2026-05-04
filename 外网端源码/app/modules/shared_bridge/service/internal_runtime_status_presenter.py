@@ -201,6 +201,12 @@ def build_internal_runtime_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             title="全景平台月报源文件",
             fallback_bucket=current_bucket,
         ),
+        "branch_power_family": _complete_internal_source_family(
+            raw_cache.get("branch_power_family", {}),
+            key="branch_power_family",
+            title="支路功率源文件",
+            fallback_bucket=str(raw_cache.get("branch_power_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
+        ),
         "alarm_event_family": _complete_internal_source_family(
             raw_cache.get("alarm_event_family", {}),
             key="alarm_event_family",
@@ -269,6 +275,12 @@ def build_internal_runtime_building_status(snapshot: Dict[str, Any], *, building
                 building=building,
                 fallback_bucket=current_bucket,
                 source_family="monthly_report_family",
+            ),
+            "branch_power_family": select_internal_runtime_building_row(
+                raw_cache.get("branch_power_family", {}),
+                building=building,
+                fallback_bucket=str(raw_cache.get("branch_power_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
+                source_family="branch_power_family",
             ),
             "alarm_event_family": select_internal_runtime_building_row(
                 raw_cache.get("alarm_event_family", {}),

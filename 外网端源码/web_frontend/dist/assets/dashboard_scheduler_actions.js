@@ -1,12 +1,15 @@
 import {
+  saveBranchPowerUploadSchedulerConfigApi,
   saveAlarmEventUploadSchedulerConfigApi,
   saveDayMetricUploadSchedulerConfigApi,
   saveHandoverSchedulerConfigApi,
   saveSchedulerConfigApi,
+  startBranchPowerUploadSchedulerApi,
   startAlarmEventUploadSchedulerApi,
   startDayMetricUploadSchedulerApi,
   startHandoverSchedulerApi,
   startSchedulerApi,
+  stopBranchPowerUploadSchedulerApi,
   stopAlarmEventUploadSchedulerApi,
   stopDayMetricUploadSchedulerApi,
   stopHandoverSchedulerApi,
@@ -29,6 +32,9 @@ const ACTION_KEYS = {
   dayMetricUploadSchedulerStart: "day_metric_upload_scheduler:start",
   dayMetricUploadSchedulerStop: "day_metric_upload_scheduler:stop",
   dayMetricUploadSchedulerSave: "day_metric_upload_scheduler:save",
+  branchPowerUploadSchedulerStart: "branch_power_upload_scheduler:start",
+  branchPowerUploadSchedulerStop: "branch_power_upload_scheduler:stop",
+  branchPowerUploadSchedulerSave: "branch_power_upload_scheduler:save",
   alarmEventUploadSchedulerStart: "alarm_event_upload_scheduler:start",
   alarmEventUploadSchedulerStop: "alarm_event_upload_scheduler:stop",
   alarmEventUploadSchedulerSave: "alarm_event_upload_scheduler:save",
@@ -62,6 +68,7 @@ export function createDashboardSchedulerActions(ctx) {
     schedulerQuickSaving,
     handoverSchedulerQuickSaving,
     dayMetricUploadSchedulerQuickSaving,
+    branchPowerUploadSchedulerQuickSaving,
     alarmEventUploadSchedulerQuickSaving,
     fetchExternalDashboardSummary,
     scheduleExternalDashboardRefresh,
@@ -468,6 +475,85 @@ export function createDashboardSchedulerActions(ctx) {
     );
   }
 
+  async function startBranchPowerUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.branchPowerUploadSchedulerStart,
+      async () => {
+        markSchedulerToggle("branch_power_upload", "starting", true);
+        try {
+          const data = await startBranchPowerUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.branch_power_upload?.scheduler, true, { enableOnStart: true });
+          applySchedulerSnapshot(health?.branch_power_upload?.scheduler, { ...data, enabled: true, running: true });
+          markSchedulerToggle("branch_power_upload", "idle", true);
+          triggerDashboardRefresh("branch_power_scheduler_start");
+          message.value = `自动上传支路功率调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          markSchedulerToggle("branch_power_upload", "idle", null);
+          message.value = `启动自动上传支路功率调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function stopBranchPowerUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.branchPowerUploadSchedulerStop,
+      async () => {
+        markSchedulerToggle("branch_power_upload", "stopping", false);
+        try {
+          const data = await stopBranchPowerUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.branch_power_upload?.scheduler, false);
+          applySchedulerSnapshot(health?.branch_power_upload?.scheduler, { ...data, running: false });
+          markSchedulerToggle("branch_power_upload", "idle", false);
+          triggerDashboardRefresh("branch_power_scheduler_stop");
+          message.value = `自动上传支路功率调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          markSchedulerToggle("branch_power_upload", "idle", null);
+          message.value = `停止自动上传支路功率调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function saveBranchPowerUploadSchedulerQuickConfig() {
+    if (!config.value) return;
+    const scheduler = config.value?.branch_power_upload?.scheduler || {};
+    const payload = {
+      enabled: true,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
+      interval_minutes: toPositiveInt(scheduler.interval_minutes, 60),
+      check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
+      retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,
+      state_file: String(scheduler.state_file || "branch_power_upload_scheduler_state.json").trim(),
+    };
+    if (!payload.state_file) {
+      message.value = "自动上传支路功率调度状态文件不能为空";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.branchPowerUploadSchedulerSave,
+      async () => {
+        try {
+          branchPowerUploadSchedulerQuickSaving.value = true;
+          const data = await saveBranchPowerUploadSchedulerConfigApi(payload);
+          if (data?.scheduler_config && config.value?.branch_power_upload?.scheduler) {
+            Object.assign(config.value.branch_power_upload.scheduler, data.scheduler_config);
+          }
+          applySchedulerSnapshot(health?.branch_power_upload?.scheduler, data?.scheduler_status || data);
+          triggerDashboardRefresh("branch_power_scheduler_save");
+          message.value = data?.message || "自动上传支路功率调度配置已更新";
+        } catch (err) {
+          message.value = `自动上传支路功率调度自动更新失败: ${err}`;
+        } finally {
+          branchPowerUploadSchedulerQuickSaving.value = false;
+        }
+      },
+      { cooldownMs: 0, queueLatest: true },
+    );
+  }
+
   async function startAlarmEventUploadScheduler() {
     return guardedRun(
       ACTION_KEYS.alarmEventUploadSchedulerStart,
@@ -572,6 +658,9 @@ export function createDashboardSchedulerActions(ctx) {
     startDayMetricUploadScheduler,
     stopDayMetricUploadScheduler,
     saveDayMetricUploadSchedulerQuickConfig,
+    startBranchPowerUploadScheduler,
+    stopBranchPowerUploadScheduler,
+    saveBranchPowerUploadSchedulerQuickConfig,
     startAlarmEventUploadScheduler,
     stopAlarmEventUploadScheduler,
     saveAlarmEventUploadSchedulerQuickConfig,

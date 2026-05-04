@@ -14,6 +14,7 @@ from app.shared.utils.atomic_file import (
     validate_non_empty_file,
 )
 from app.shared.utils.artifact_naming import (
+    FAMILY_BRANCH_POWER,
     FAMILY_HANDOVER_CAPACITY_REPORT,
     FAMILY_HANDOVER_LOG,
     build_source_artifact_path,
@@ -140,11 +141,16 @@ class HandoverSourceFileCacheService:
         start_time: str = "",
         end_time: str = "",
         scale_label: str = "",
+        sheet_name: str = "",
     ) -> str:
+        template_text = str(template_name or "").strip()
+        sheet_text = str(sheet_name or "").strip()
+        if sheet_text:
+            template_text = f"{template_text}#sheet={sheet_text}"
         return "|".join(
             [
                 str(building or "").strip(),
-                str(template_name or "").strip(),
+                template_text,
                 str(duty_date or "").strip(),
                 str(duty_shift or "").strip().lower(),
                 str(start_time or "").strip(),
@@ -357,6 +363,8 @@ class HandoverSourceFileCacheService:
     @staticmethod
     def _source_family_for_template_name(template_name: str) -> str:
         text = str(template_name or "").strip()
+        if "支路功率" in text or "列头柜支路电流" in text:
+            return FAMILY_BRANCH_POWER
         if "容量" in text or "每日报表合集" in text:
             return FAMILY_HANDOVER_CAPACITY_REPORT
         return FAMILY_HANDOVER_LOG

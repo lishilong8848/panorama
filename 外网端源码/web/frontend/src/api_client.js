@@ -344,6 +344,25 @@ export async function saveDayMetricUploadSchedulerConfigApi(payload) {
   });
 }
 
+export async function startBranchPowerUploadSchedulerApi() {
+  return apiJson("/api/scheduler/branch-power-upload/start", { method: "POST", body: "{}" });
+}
+
+export async function stopBranchPowerUploadSchedulerApi() {
+  return apiJson("/api/scheduler/branch-power-upload/stop", { method: "POST", body: "{}" });
+}
+
+export async function getBranchPowerUploadSchedulerStatusApi() {
+  return apiJson("/api/scheduler/branch-power-upload/status");
+}
+
+export async function saveBranchPowerUploadSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/branch-power-upload/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function startAlarmEventUploadSchedulerApi() {
   return apiJson("/api/scheduler/alarm-event-upload/start", { method: "POST", body: "{}" });
 }
@@ -722,6 +741,10 @@ export async function postHandoverFromFilesJob(form) {
 
 export async function submitDayMetricFromDownloadJob(payload = {}) {
   return startJsonJobApi("/api/jobs/day-metric/from-download", payload || {});
+}
+
+export async function submitBranchPowerFromDownloadJob(payload = {}) {
+  return startJsonJobApi("/api/jobs/branch-power/from-download", payload || {});
 }
 
 export async function submitDayMetricFromFileJob(form) {

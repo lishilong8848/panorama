@@ -109,6 +109,15 @@ def _is_timeout_error(text: str) -> bool:
     return "timeout" in str(text).lower()
 
 
+def _xpath_literal(value: Any) -> str:
+    text = str(value or "")
+    if "'" not in text:
+        return f"'{text}'"
+    if '"' not in text:
+        return f'"{text}"'
+    return "concat(" + ', "\'", '.join(f"'{part}'" for part in text.split("'")) + ")"
+
+
 @dataclass
 class StepError(Exception):
     step: str
@@ -123,6 +132,15 @@ def _template_name_candidates(template_name: str) -> List[str]:
     candidates: List[str] = []
     if base:
         candidates.append(base)
+
+    if "列头柜支路电流" in base or "支路功率" in base:
+        for alias in ("列头柜支路电流", "支路功率"):
+            if alias not in candidates:
+                candidates.append(alias)
+        return candidates
+
+    if base and "交接班日志" not in base:
+        return candidates
 
     aliases = [
         "交接班日志（李世龙）",
@@ -262,17 +280,32 @@ class DownloadGateway:
             report_locator = None
             template_wait_timeout = frame_timeout
             for name in names:
-                candidate = frame1.locator(
-                    f'div.showTemplate:has-text("{name}")'
-                ).first
-                try:
-                    await candidate.wait_for(
-                        state="visible", timeout=template_wait_timeout
-                    )
-                    report_locator = candidate
+                name_literal = _xpath_literal(name)
+                selectors = [
+                    (
+                        "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), "
+                        "' showTemplate ') and (.//span[normalize-space(.)="
+                        f"{name_literal}] or normalize-space(.)={name_literal})]"
+                    ),
+                    (
+                        "xpath=//span[normalize-space(.)="
+                        f"{name_literal}]/ancestor::div[contains(concat(' ', normalize-space(@class), ' '), "
+                        "' showTemplate ')][1]"
+                    ),
+                    f'div.showTemplate:has-text("{name}")',
+                ]
+                for selector in selectors:
+                    candidate = frame1.locator(selector).first
+                    try:
+                        await candidate.wait_for(
+                            state="visible", timeout=template_wait_timeout
+                        )
+                        report_locator = candidate
+                        break
+                    except Exception:  # noqa: BLE001
+                        continue
+                if report_locator is not None:
                     break
-                except Exception:  # noqa: BLE001
-                    continue
             if report_locator is None:
                 raise StepError("iframe", f"未找到报表模板: {template_name}")
 
@@ -300,6 +333,136 @@ class DownloadGateway:
                 raise exc
             raise StepError("iframe", str(exc)) from exc
 
+    async def _fill_text_input_by_widget_or_label(
+        self,
+        frame2,
+        *,
+        label_text: str,
+        value: str,
+        timeout_ms: int,
+    ) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        label = str(label_text or "").strip()
+        label_literal = _xpath_literal(label)
+        selectors = [
+            f'div.fr-trigger-editor[widgetname="{label}"] >> input.fr-trigger-texteditor',
+            (
+                "xpath=//div[contains(@class,'fr-trigger-editor') and contains(@widgetname,"
+                f"{label_literal})]//input[contains(@class,'fr-trigger-texteditor')]"
+            ),
+            (
+                "xpath=//*[contains(concat(' ', normalize-space(@class), ' '), ' fr-label ') "
+                f"and contains(normalize-space(.), {label_literal})]"
+                "/following::input[contains(@class,'fr-trigger-texteditor')][1]"
+            ),
+            (
+                "xpath=//*[self::pre or self::span or self::label]"
+                f"[contains(normalize-space(.), {label_literal})]"
+                "/following::input[contains(@class,'fr-trigger-texteditor')][1]"
+            ),
+        ]
+        errors: List[str] = []
+        for selector in selectors:
+            try:
+                input_locator = frame2.locator(selector)
+                if await input_locator.count() == 0:
+                    continue
+                target = input_locator.first
+                await target.wait_for(state="visible", timeout=max(1000, int(timeout_ms)))
+                await target.click()
+                await target.fill(text)
+                await target.press("Tab")
+                return
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{selector}: {exc}")
+        raise StepError(label, "; ".join(errors) if errors else "未找到输入框")
+
+    async def _fill_optional_sheet_name(
+        self,
+        frame2,
+        *,
+        sheet_name: str,
+        timeout_ms: int,
+    ) -> None:
+        await self._fill_text_input_by_widget_or_label(
+            frame2,
+            label_text="配置文件sheet名",
+            value=sheet_name,
+            timeout_ms=timeout_ms,
+        )
+
+    async def _select_combo_by_widget_or_label(
+        self,
+        frame2,
+        *,
+        label_text: str,
+        option_text: str,
+        timeout_ms: int,
+    ) -> None:
+        label = str(label_text or "").strip()
+        option = str(option_text or "").strip()
+        if not label or not option:
+            return
+        label_literal = _xpath_literal(label)
+        option_literal = _xpath_literal(option)
+        trigger_selectors = [
+            f'div.fr-trigger-editor[widgetname="{label}"] >> div.fr-trigger-btn-up',
+            (
+                "xpath=//div[contains(@class,'fr-trigger-editor') and contains(@widgetname,"
+                f"{label_literal})]//div[contains(@class,'fr-trigger-btn-up')]"
+            ),
+            (
+                "xpath=//*[contains(concat(' ', normalize-space(@class), ' '), ' fr-label ') "
+                f"and contains(normalize-space(.), {label_literal})]"
+                "/following::div[contains(@class,'fr-trigger-btn-up')][1]"
+            ),
+            (
+                "xpath=//*[self::pre or self::span or self::label]"
+                f"[contains(normalize-space(.), {label_literal})]"
+                "/following::div[contains(@class,'fr-trigger-btn-up')][1]"
+            ),
+        ]
+        errors: List[str] = []
+        for selector in trigger_selectors:
+            try:
+                trigger = frame2.locator(selector)
+                if await trigger.count() == 0:
+                    continue
+                target = trigger.first
+                await target.wait_for(state="visible", timeout=max(1000, int(timeout_ms)))
+                await target.scroll_into_view_if_needed()
+                await target.click()
+                await frame2.wait_for_selector(
+                    "div.fr-combo-list", state="visible", timeout=5000
+                )
+                option_locator = frame2.locator(
+                    "xpath=//div[contains(@class,'fr-combo-list-item') "
+                    f"and (@title={option_literal} or normalize-space(.)={option_literal})]"
+                )
+                if await option_locator.count() == 0:
+                    option_locator = frame2.locator(
+                        "xpath=//div[contains(@class,'fr-combo-list-item') "
+                        f"and contains(@title,{option_literal})]"
+                    )
+                await option_locator.first.click()
+                return
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{selector}: {exc}")
+                continue
+        try:
+            await self._fill_text_input_by_widget_or_label(
+                frame2,
+                label_text=label,
+                value=option,
+                timeout_ms=timeout_ms,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"input-fallback: {exc}")
+        raise StepError(label, "; ".join(errors) if errors else "未找到下拉控件")
+
     async def _fill_query_conditions(
         self,
         frame2,
@@ -307,50 +470,42 @@ class DownloadGateway:
         start_time: str,
         end_time: str,
         scale_label: str,
+        sheet_name: str = "",
         start_end_visible_timeout_ms: int,
     ) -> None:
         try:
-            start_input = frame2.locator(
-                'div.fr-trigger-editor[widgetname="开始时间"] >> input.fr-trigger-texteditor'
-            )
-            await start_input.wait_for(
-                state="visible", timeout=start_end_visible_timeout_ms
-            )
-            await start_input.click()
-            await start_input.fill(start_time)
-            await start_input.press("Tab")
-
-            end_input = frame2.locator(
-                'div.fr-trigger-editor[widgetname="结束时间"] >> input.fr-trigger-texteditor'
-            )
-            await end_input.wait_for(
-                state="visible", timeout=start_end_visible_timeout_ms
-            )
-            await end_input.click()
-            await end_input.fill(end_time)
-            await end_input.press("Tab")
-
-            scale_trigger = frame2.locator(
-                'div.fr-trigger-editor[widgetname="查询刻度"] >> div.fr-trigger-btn-up'
-            )
-            await scale_trigger.scroll_into_view_if_needed()
-            await scale_trigger.click()
-            await frame2.wait_for_selector(
-                "div.fr-combo-list", state="visible", timeout=5000
+            await self._fill_text_input_by_widget_or_label(
+                frame2,
+                label_text="开始时间",
+                value=start_time,
+                timeout_ms=start_end_visible_timeout_ms,
             )
 
-            option = frame2.locator(
-                f'xpath=//div[contains(@class,"fr-combo-list-item") and @title="{scale_label}" and text()="{scale_label}"]'
+            await self._fill_text_input_by_widget_or_label(
+                frame2,
+                label_text="结束时间",
+                value=end_time,
+                timeout_ms=start_end_visible_timeout_ms,
             )
-            if await option.count() == 0:
-                option = frame2.locator(
-                    f'xpath=//div[contains(@class,"fr-combo-list-item") and contains(@title,"{scale_label}")]'
-                )
-            await option.first.click()
+
+            await self._fill_optional_sheet_name(
+                frame2,
+                sheet_name=sheet_name,
+                timeout_ms=start_end_visible_timeout_ms,
+            )
+
+            await self._select_combo_by_widget_or_label(
+                frame2,
+                label_text="查询刻度",
+                option_text=scale_label,
+                timeout_ms=start_end_visible_timeout_ms,
+            )
 
             query_btn = frame2.locator('button.fr-btn-text:has-text("查询"):visible')
             await query_btn.wait_for(state="visible", timeout=8000)
             await query_btn.click(delay=100)
+        except StepError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise StepError("查询", str(exc)) from exc
 
@@ -454,6 +609,7 @@ class DownloadGateway:
         scale_label: str,
         template_name: str,
         save_dir: str,
+        sheet_name: str,
         query_result_timeout_ms: int,
         download_event_timeout_ms: int,
         login_fill_timeout_ms: int,
@@ -545,6 +701,7 @@ class DownloadGateway:
                     start_time=start_time,
                     end_time=end_time,
                     scale_label=scale_label,
+                    sheet_name=sheet_name,
                     start_end_visible_timeout_ms=start_end_visible_timeout_ms,
                 ),
             )
@@ -581,6 +738,7 @@ class DownloadGateway:
                 f"building={_normalize_text(building)}; "
                 f"url={_normalize_text(url)}; "
                 f"template={_normalize_text(template_name)}; "
+                f"sheet={_normalize_text(sheet_name)}; "
                 f"start={_normalize_text(start_time)}; "
                 f"end={_normalize_text(end_time)}; "
                 f"scale={_normalize_text(scale_label)}; "
@@ -606,6 +764,7 @@ class DownloadGateway:
         scale_label: str,
         template_name: str,
         save_dir: str,
+        sheet_name: str,
         query_result_timeout_ms: int,
         download_event_timeout_ms: int,
         login_fill_timeout_ms: int,
@@ -647,6 +806,7 @@ class DownloadGateway:
                 scale_label=scale_label,
                 template_name=template_name,
                 save_dir=save_dir,
+                sheet_name=sheet_name,
                 query_result_timeout_ms=query_result_timeout_ms,
                 download_event_timeout_ms=download_event_timeout_ms,
                 login_fill_timeout_ms=login_fill_timeout_ms,
@@ -682,6 +842,7 @@ class DownloadGateway:
         scale_label: str,
         template_name: str,
         save_dir: str,
+        sheet_name: str,
         query_result_timeout_ms: int,
         download_event_timeout_ms: int,
         login_fill_timeout_ms: int,
@@ -760,6 +921,7 @@ class DownloadGateway:
                         scale_label=scale_label,
                         template_name=template_name,
                         save_dir=save_dir,
+                        sheet_name=sheet_name,
                         query_result_timeout_ms=query_result_timeout_ms,
                         download_event_timeout_ms=download_event_timeout_ms,
                         login_fill_timeout_ms=login_fill_timeout_ms,
@@ -847,6 +1009,7 @@ class DownloadGateway:
                             scale_label=scale_label,
                             template_name=template_name,
                             save_dir=save_dir,
+                            sheet_name=sheet_name,
                             query_result_timeout_ms=query_result_timeout_ms,
                             download_event_timeout_ms=download_event_timeout_ms,
                             login_fill_timeout_ms=login_fill_timeout_ms,
@@ -911,10 +1074,11 @@ class DownloadGateway:
                                 site=site,
                                 start_time=start_time,
                                 end_time=end_time,
-                                scale_label=scale_label,
-                                template_name=template_name,
-                                save_dir=save_dir,
-                                query_result_timeout_ms=query_result_timeout_ms,
+                            scale_label=scale_label,
+                            template_name=template_name,
+                            save_dir=save_dir,
+                            sheet_name=sheet_name,
+                            query_result_timeout_ms=query_result_timeout_ms,
                                 download_event_timeout_ms=download_event_timeout_ms,
                                 login_fill_timeout_ms=login_fill_timeout_ms,
                                 menu_visible_timeout_ms=menu_visible_timeout_ms,
@@ -949,6 +1113,7 @@ class DownloadGateway:
         scale_label: str,
         template_name: str,
         save_dir: str,
+        sheet_name: str,
         query_result_timeout_ms: int,
         download_event_timeout_ms: int,
         login_fill_timeout_ms: int,
@@ -970,6 +1135,7 @@ class DownloadGateway:
             scale_label=scale_label,
             template_name=template_name,
             save_dir=save_dir,
+            sheet_name=sheet_name,
             query_result_timeout_ms=query_result_timeout_ms,
             download_event_timeout_ms=download_event_timeout_ms,
             login_fill_timeout_ms=login_fill_timeout_ms,
@@ -1006,6 +1172,7 @@ class DownloadGateway:
         scale_label: str,
         template_name: str,
         save_dir: str,
+        sheet_name: str = "",
         query_result_timeout_ms: int = 20000,
         download_event_timeout_ms: int = 120000,
         login_fill_timeout_ms: int = 5000,
@@ -1028,6 +1195,7 @@ class DownloadGateway:
                 scale_label=scale_label,
                 template_name=template_name,
                 save_dir=save_dir,
+                sheet_name=sheet_name,
                 query_result_timeout_ms=int(query_result_timeout_ms),
                 download_event_timeout_ms=int(download_event_timeout_ms),
                 login_fill_timeout_ms=int(login_fill_timeout_ms),
@@ -1056,6 +1224,7 @@ class DownloadGateway:
         scale_label: str,
         template_name: str,
         save_dir: str,
+        sheet_name: str = "",
         query_result_timeout_ms: int = 20000,
         download_event_timeout_ms: int = 120000,
         login_fill_timeout_ms: int = 5000,
@@ -1081,6 +1250,7 @@ class DownloadGateway:
                 scale_label=scale_label,
                 template_name=template_name,
                 save_dir=save_dir,
+                sheet_name=sheet_name,
                 query_result_timeout_ms=int(query_result_timeout_ms),
                 download_event_timeout_ms=int(download_event_timeout_ms),
                 login_fill_timeout_ms=int(login_fill_timeout_ms),
@@ -1111,6 +1281,7 @@ def download_handover_xlsx(
     scale_label: str,
     template_name: str,
     save_dir: str,
+    sheet_name: str = "",
     query_result_timeout_ms: int = 20000,
     download_event_timeout_ms: int = 120000,
     login_fill_timeout_ms: int = 5000,
@@ -1135,6 +1306,7 @@ def download_handover_xlsx(
         scale_label=scale_label,
         template_name=template_name,
         save_dir=save_dir,
+        sheet_name=sheet_name,
         query_result_timeout_ms=query_result_timeout_ms,
         download_event_timeout_ms=download_event_timeout_ms,
         login_fill_timeout_ms=login_fill_timeout_ms,
@@ -1158,6 +1330,7 @@ def download_handover_xlsx_batch(
     scale_label: str,
     template_name: str,
     save_dir: str,
+    sheet_name: str = "",
     query_result_timeout_ms: int = 20000,
     download_event_timeout_ms: int = 120000,
     login_fill_timeout_ms: int = 5000,
@@ -1185,6 +1358,7 @@ def download_handover_xlsx_batch(
         scale_label=scale_label,
         template_name=template_name,
         save_dir=save_dir,
+        sheet_name=sheet_name,
         query_result_timeout_ms=query_result_timeout_ms,
         download_event_timeout_ms=download_event_timeout_ms,
         login_fill_timeout_ms=login_fill_timeout_ms,

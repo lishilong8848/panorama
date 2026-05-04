@@ -51,6 +51,7 @@ FAMILY_HANDOVER_LOG = "handover_log_family"
 FAMILY_HANDOVER_CAPACITY_REPORT = "handover_capacity_report_family"
 FAMILY_MONTHLY_REPORT = "monthly_report_family"
 FAMILY_ALARM_EVENT = "alarm_event_family"
+FAMILY_BRANCH_POWER = "branch_power_family"
 LEGACY_FAMILY_ALIASES = {
     FAMILY_HANDOVER_LOG: ("handover_family",),
     FAMILY_MONTHLY_REPORT: ("monthly_family",),
@@ -60,12 +61,14 @@ FAMILY_DIR_NAMES = {
     FAMILY_HANDOVER_CAPACITY_REPORT: "handover_capacity_report",
     FAMILY_MONTHLY_REPORT: "monthly_report",
     FAMILY_ALARM_EVENT: "alarm_event",
+    FAMILY_BRANCH_POWER: "branch_power",
 }
 FAMILY_LABELS = {
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
     FAMILY_HANDOVER_CAPACITY_REPORT: "交接班容量报表源文件",
     FAMILY_MONTHLY_REPORT: "全景平台月报源文件",
     FAMILY_ALARM_EVENT: "告警信息源文件",
+    FAMILY_BRANCH_POWER: "支路功率源文件",
 }
 
 ALARM_EVENT_BITABLE_TARGET_FIELDS = {
@@ -238,12 +241,14 @@ class SharedSourceCacheService:
             FAMILY_HANDOVER_CAPACITY_REPORT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_MONTHLY_REPORT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_ALARM_EVENT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+            FAMILY_BRANCH_POWER: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
         }
         self._light_building_status: Dict[str, Dict[str, Dict[str, Any]]] = {
             FAMILY_HANDOVER_LOG: {},
             FAMILY_HANDOVER_CAPACITY_REPORT: {},
             FAMILY_MONTHLY_REPORT: {},
             FAMILY_ALARM_EVENT: {},
+            FAMILY_BRANCH_POWER: {},
         }
         self._current_hour_refresh: Dict[str, Any] = {
             "running": False,
@@ -472,6 +477,7 @@ class SharedSourceCacheService:
     def _reset_light_building_state_unlocked(self) -> None:
         buildings = self.get_enabled_buildings()
         current_bucket = self._current_hour_bucket or self.current_hour_bucket()
+        branch_bucket = self.branch_power_bucket()
         alarm_bucket = (
             str(self._family_status.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip()
             or self.current_alarm_bucket()
@@ -480,11 +486,13 @@ class SharedSourceCacheService:
         self._family_status.setdefault(FAMILY_HANDOVER_CAPACITY_REPORT, {})["current_bucket"] = current_bucket
         self._family_status.setdefault(FAMILY_MONTHLY_REPORT, {})["current_bucket"] = current_bucket
         self._family_status.setdefault(FAMILY_ALARM_EVENT, {})["current_bucket"] = alarm_bucket
+        self._family_status.setdefault(FAMILY_BRANCH_POWER, {})["current_bucket"] = branch_bucket
         for family_name, bucket_key in (
             (FAMILY_HANDOVER_LOG, current_bucket),
             (FAMILY_HANDOVER_CAPACITY_REPORT, current_bucket),
             (FAMILY_MONTHLY_REPORT, current_bucket),
             (FAMILY_ALARM_EVENT, alarm_bucket),
+            (FAMILY_BRANCH_POWER, branch_bucket),
         ):
             family_cache = self._light_building_status.setdefault(family_name, {})
             for building in buildings:
@@ -623,6 +631,35 @@ class SharedSourceCacheService:
             },
         )
 
+    def _hydrate_internal_light_status_from_store(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+    ) -> Dict[str, Any] | None:
+        status_row = self._build_building_cache_status(
+            source_family=source_family,
+            building=building,
+            bucket_key=bucket_key,
+        )
+        status_text = str(status_row.get("status", "") or "").strip().lower()
+        if status_text in {"ready", "failed", "consumed", "downloading"} or bool(status_row.get("blocked", False)):
+            payload = {
+                key: value
+                for key, value in status_row.items()
+                if key not in {"building", "bucket_key"}
+            }
+            with self._lock:
+                self._set_light_building_status_unlocked(
+                    source_family=source_family,
+                    building=building,
+                    bucket_key=bucket_key,
+                    payload=payload,
+                )
+            return status_row
+        return None
+
     def _build_internal_light_family_snapshot(
         self,
         *,
@@ -646,6 +683,14 @@ class SharedSourceCacheService:
                     "status": "downloading",
                     "started_at": active_started_at,
                 }
+            if not active_started_at and str(cached.get("status", "") or "").strip().lower() in {"", "waiting"}:
+                hydrated = self._hydrate_internal_light_status_from_store(
+                    source_family=normalized_family,
+                    building=building,
+                    bucket_key=current_bucket,
+                )
+                if hydrated is not None:
+                    cached = hydrated
             pause_info = (
                 self.download_browser_pool.get_building_pause_info(building)
                 if self.download_browser_pool is not None and hasattr(self.download_browser_pool, "get_building_pause_info")
@@ -678,9 +723,11 @@ class SharedSourceCacheService:
             "latest_selection": {},
         }
         bucket_scope_text = "本次定时" if self._normalize_source_family(source_family) == FAMILY_ALARM_EVENT else "本小时"
+        family_key = self._normalize_source_family(source_family)
         return present_source_cache_family(
             raw_family,
-            title=FAMILY_LABELS.get(self._normalize_source_family(source_family), ""),
+            key=family_key,
+            title=FAMILY_LABELS.get(family_key, ""),
             fallback_bucket=current_bucket,
             bucket_scope_text=bucket_scope_text,
         )
@@ -752,6 +799,7 @@ class SharedSourceCacheService:
             FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
             FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
             FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
+            FAMILY_BRANCH_POWER: families.get(FAMILY_BRANCH_POWER, {}),
             FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
         }
         snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
@@ -1120,6 +1168,11 @@ class SharedSourceCacheService:
                 current_bucket=current_bucket,
                 buildings=buildings,
             ),
+            FAMILY_BRANCH_POWER: self._build_fast_external_family_from_index(
+                source_family=FAMILY_BRANCH_POWER,
+                current_bucket=self.branch_power_bucket(),
+                buildings=buildings,
+            ),
             FAMILY_ALARM_EVENT: self._build_fast_alarm_external_family_from_index(buildings=buildings),
         }
         snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
@@ -1159,6 +1212,7 @@ class SharedSourceCacheService:
         self._handover_capacity_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_HANDOVER_CAPACITY_REPORT] if self.shared_root else None
         self._monthly_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_MONTHLY_REPORT] if self.shared_root else None
         self._alarm_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_ALARM_EVENT] if self.shared_root else None
+        self._branch_power_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_POWER] if self.shared_root else None
         self._tmp_root = self.shared_root / "tmp" / "source_cache" if self.shared_root else None
 
     def update_runtime_config(self, runtime_config: Dict[str, Any]) -> None:
@@ -1184,6 +1238,8 @@ class SharedSourceCacheService:
             return FAMILY_HANDOVER_CAPACITY_REPORT
         if text in {FAMILY_MONTHLY_REPORT, "monthly_family"}:
             return FAMILY_MONTHLY_REPORT
+        if text in {FAMILY_BRANCH_POWER, "branch_power"}:
+            return FAMILY_BRANCH_POWER
         return text
 
     def _source_family_candidates(self, source_family: str) -> List[str]:
@@ -1198,6 +1254,14 @@ class SharedSourceCacheService:
     def current_hour_bucket(self, when: datetime | None = None) -> str:
         now = when or datetime.now()
         return now.strftime("%Y-%m-%d %H")
+
+    def branch_power_bucket(self, when: datetime | None = None) -> str:
+        return self.current_hour_bucket(when)
+
+    def branch_power_data_bucket(self, bucket_key: str = "", when: datetime | None = None) -> str:
+        bucket_dt = _parse_hour_bucket(bucket_key) if str(bucket_key or "").strip() else None
+        base = bucket_dt or (when or datetime.now()).replace(minute=0, second=0, microsecond=0)
+        return (base - timedelta(hours=1)).strftime("%Y-%m-%d %H")
 
     def get_enabled_buildings(self) -> List[str]:
         configured_sites = self.runtime_config.get("internal_source_sites", [])
@@ -1285,6 +1349,10 @@ class SharedSourceCacheService:
             manual_alarm_refresh = copy.deepcopy(self._manual_alarm_refresh)
         if normalized_mode == "internal_light":
             alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
+            branch_bucket = (
+                str(families.get(FAMILY_BRANCH_POWER, {}).get("current_bucket", "") or "").strip()
+                or self.branch_power_bucket()
+            )
             handover_family = self._build_internal_light_family_snapshot(
                 source_family=FAMILY_HANDOVER_LOG,
                 current_bucket=current_bucket,
@@ -1303,6 +1371,12 @@ class SharedSourceCacheService:
                 cached_rows=light_building_status.get(FAMILY_MONTHLY_REPORT, {}),
                 active_downloads=active_downloads,
             )
+            branch_power_family = self._build_internal_light_family_snapshot(
+                source_family=FAMILY_BRANCH_POWER,
+                current_bucket=branch_bucket,
+                cached_rows=light_building_status.get(FAMILY_BRANCH_POWER, {}),
+                active_downloads=active_downloads,
+            )
             alarm_family = self._build_internal_light_family_snapshot(
                 source_family=FAMILY_ALARM_EVENT,
                 current_bucket=alarm_bucket,
@@ -1315,6 +1389,10 @@ class SharedSourceCacheService:
                 **handover_capacity_family,
             }
             families[FAMILY_MONTHLY_REPORT] = {**families.get(FAMILY_MONTHLY_REPORT, {}), **monthly_family}
+            families[FAMILY_BRANCH_POWER] = {
+                **families.get(FAMILY_BRANCH_POWER, {}),
+                **branch_power_family,
+            }
             families[FAMILY_ALARM_EVENT] = {
                 **families.get(FAMILY_ALARM_EVENT, {}),
                 **alarm_family,
@@ -1333,6 +1411,7 @@ class SharedSourceCacheService:
                 FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
                 FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
                 FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
+                FAMILY_BRANCH_POWER: families.get(FAMILY_BRANCH_POWER, {}),
                 FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
             }
             snapshot["overview"] = present_internal_source_cache_overview(snapshot)
@@ -1575,6 +1654,8 @@ class SharedSourceCacheService:
             self._monthly_cache_root.mkdir(parents=True, exist_ok=True)
         if self._alarm_cache_root is not None:
             self._alarm_cache_root.mkdir(parents=True, exist_ok=True)
+        if self._branch_power_cache_root is not None:
+            self._branch_power_cache_root.mkdir(parents=True, exist_ok=True)
         self._tmp_root.mkdir(parents=True, exist_ok=True)
 
     def ensure_required_directories(self) -> Dict[str, str]:
@@ -1587,6 +1668,7 @@ class SharedSourceCacheService:
             FAMILY_HANDOVER_CAPACITY_REPORT: str(self._handover_capacity_cache_root) if self._handover_capacity_cache_root is not None else "",
             FAMILY_MONTHLY_REPORT: str(self._monthly_cache_root) if self._monthly_cache_root is not None else "",
             FAMILY_ALARM_EVENT: str(self._alarm_cache_root) if self._alarm_cache_root is not None else "",
+            FAMILY_BRANCH_POWER: str(self._branch_power_cache_root) if self._branch_power_cache_root is not None else "",
             "tmp_source_cache": str(self._tmp_root) if self._tmp_root is not None else "",
         }
 
@@ -1678,6 +1760,8 @@ class SharedSourceCacheService:
             return self._monthly_cache_root
         if normalized_family == FAMILY_ALARM_EVENT and self._alarm_cache_root is not None:
             return self._alarm_cache_root
+        if normalized_family == FAMILY_BRANCH_POWER and self._branch_power_cache_root is not None:
+            return self._branch_power_cache_root
         raise RuntimeError("共享缓存根目录未配置")
 
     def _month_segment(self, value: str) -> str:
@@ -3188,6 +3272,18 @@ class SharedSourceCacheService:
         shift_segment = str(duty_shift or "all").strip().lower() or "all"
         return self._tmp_root / "handover_capacity_by_date" / str(duty_date or "manual").strip() / shift_segment
 
+    def _branch_power_temp_root(self, *, bucket_key: str, building: str) -> Path:
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存临时目录未配置")
+        return self._tmp_root / "branch_power_latest" / bucket_key / building
+
+    def _branch_power_query_window(self, bucket_key: str) -> tuple[str, str]:
+        data_bucket = self.branch_power_data_bucket(bucket_key)
+        bucket_dt = _parse_hour_bucket(data_bucket) or (datetime.now() - timedelta(hours=1))
+        start_dt = bucket_dt.replace(minute=0, second=0, microsecond=0)
+        end_dt = start_dt + timedelta(minutes=20)
+        return start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
     def fill_handover_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
         self._ensure_internal_source_writer("交接班最新源文件补采")
         cfg = load_handover_config(self.runtime_config)
@@ -3275,6 +3371,51 @@ class SharedSourceCacheService:
                 "building": building,
                 "duty_date": normalized_result_context["duty_date"],
                 "duty_shift": normalized_result_context["duty_shift"],
+            },
+        )
+
+    def fill_branch_power_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+        self._ensure_internal_source_writer("支路功率最新源文件补采")
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._branch_power_temp_root(bucket_key=bucket_key, building=building)
+        start_time, end_time = self._branch_power_query_window(bucket_key)
+        data_bucket_key = self.branch_power_data_bucket(bucket_key)
+        service = HandoverDownloadService(
+            cfg,
+            download_browser_pool=self.download_browser_pool,
+            business_root_override=temp_root,
+        )
+        result = service.run_branch_power_only(
+            buildings=[building],
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=False,
+            reuse_cached=False,
+            emit_log=emit_log,
+        )
+        success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
+        if not success_files:
+            raise RuntimeError(f"本小时支路功率缓存下载失败: {building}")
+        item = success_files[0]
+        source_path = Path(str(item.get("file_path", "") or "").strip())
+        if not source_path.exists():
+            raise FileNotFoundError(f"下载完成后的支路功率源文件不存在: {source_path}")
+        return self._store_entry(
+            source_family=FAMILY_BRANCH_POWER,
+            building=building,
+            bucket_kind="latest",
+            bucket_key=bucket_key,
+            duty_date="",
+            duty_shift="",
+            source_path=source_path,
+            status="ready",
+            metadata={
+                "family": FAMILY_BRANCH_POWER,
+                "building": building,
+                "bucket_hour": bucket_key,
+                "data_hour_bucket": data_bucket_key,
+                "query_start": start_time,
+                "query_end": end_time,
             },
         )
 
@@ -3796,6 +3937,7 @@ class SharedSourceCacheService:
             self._handover_capacity_cache_root,
             self._monthly_cache_root,
             self._alarm_cache_root,
+            self._branch_power_cache_root,
         ):
             if root is not None:
                 roots.append(root)
@@ -5226,6 +5368,7 @@ class SharedSourceCacheService:
     def _run_current_bucket_once(self) -> None:
         self._ensure_dirs()
         current_bucket = self.current_hour_bucket()
+        branch_bucket = self.branch_power_bucket()
         with self._lock:
             self._current_hour_bucket = current_bucket
         self._refresh_family_bucket(source_family=FAMILY_HANDOVER_LOG, bucket_key=current_bucket, fill_func=self.fill_handover_latest)
@@ -5235,6 +5378,11 @@ class SharedSourceCacheService:
             fill_func=self.fill_handover_capacity_latest,
         )
         self._refresh_family_bucket(source_family=FAMILY_MONTHLY_REPORT, bucket_key=current_bucket, fill_func=self.fill_monthly_latest)
+        self._refresh_family_bucket(
+            source_family=FAMILY_BRANCH_POWER,
+            bucket_key=branch_bucket,
+            fill_func=self.fill_branch_power_latest,
+        )
         with self._lock:
             self._last_run_at = _now_text()
             handover_failed = list(self._family_status.get(FAMILY_HANDOVER_LOG, {}).get("failed_buildings", []) or [])
@@ -5242,7 +5390,8 @@ class SharedSourceCacheService:
                 self._family_status.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}).get("failed_buildings", []) or []
             )
             monthly_failed = list(self._family_status.get(FAMILY_MONTHLY_REPORT, {}).get("failed_buildings", []) or [])
-            if not handover_failed and not handover_capacity_failed and not monthly_failed:
+            branch_failed = list(self._family_status.get(FAMILY_BRANCH_POWER, {}).get("failed_buildings", []) or [])
+            if not handover_failed and not handover_capacity_failed and not monthly_failed and not branch_failed:
                 self._last_error = ""
 
     def _run_alarm_bucket_if_due(self, when: datetime | None = None) -> None:
@@ -5269,6 +5418,7 @@ class SharedSourceCacheService:
     def _run_current_hour_refresh_impl(self) -> None:
         self._ensure_dirs()
         bucket_key = self.current_hour_bucket()
+        branch_bucket_key = self.branch_power_bucket()
         failed_units: List[str] = []
         blocked_units: List[str] = []
         running_units: List[str] = []
@@ -5283,7 +5433,7 @@ class SharedSourceCacheService:
             running_buildings=[],
             completed_buildings=[],
         )
-        self._emit(f"[共享缓存] 开始立即补下当前小时全部文件 bucket={bucket_key}")
+        self._emit(f"[共享缓存] 开始立即补下当前小时全部文件 bucket={bucket_key}, 支路功率bucket={branch_bucket_key}")
         handover_result = self._refresh_family_bucket(
             source_family=FAMILY_HANDOVER_LOG,
             bucket_key=bucket_key,
@@ -5300,6 +5450,12 @@ class SharedSourceCacheService:
             source_family=FAMILY_MONTHLY_REPORT,
             bucket_key=bucket_key,
             fill_func=self.fill_monthly_latest,
+            force_retry_failed=True,
+        ) or {}
+        branch_power_result = self._refresh_family_bucket(
+            source_family=FAMILY_BRANCH_POWER,
+            bucket_key=branch_bucket_key,
+            fill_func=self.fill_branch_power_latest,
             force_retry_failed=True,
         ) or {}
         alarm_result: Dict[str, Any] = {
@@ -5320,6 +5476,7 @@ class SharedSourceCacheService:
             (FAMILY_HANDOVER_LOG, handover_result),
             (FAMILY_HANDOVER_CAPACITY_REPORT, handover_capacity_result),
             (FAMILY_MONTHLY_REPORT, monthly_result),
+            (FAMILY_BRANCH_POWER, branch_power_result),
             (FAMILY_ALARM_EVENT, alarm_result),
         ):
             for building in result.get("running_buildings", []) or []:
@@ -5404,6 +5561,12 @@ class SharedSourceCacheService:
                 "source_family": normalized_family,
                 "bucket_key": self.current_hour_bucket(),
                 "fill_func": self.fill_monthly_latest,
+            }
+        if normalized_family == FAMILY_BRANCH_POWER:
+            return {
+                "source_family": normalized_family,
+                "bucket_key": self.branch_power_bucket(),
+                "fill_func": self.fill_branch_power_latest,
             }
         if normalized_family == FAMILY_ALARM_EVENT:
             bucket_key = self._auto_alarm_bucket()

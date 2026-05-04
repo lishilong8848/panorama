@@ -106,6 +106,7 @@ const SOURCE_CACHE_FAMILY_LABELS = {
   handover_log_family: "交接班日志源文件",
   handover_capacity_report_family: "交接班容量报表源文件",
   monthly_report_family: "全景平台月报源文件",
+  branch_power_family: "支路功率源文件",
   alarm_event_family: "告警信息源文件",
 };
 const ENGINEER_DIRECTORY_CACHE_KEY = "handover_engineer_directory_daily_cache_v1";
@@ -1273,7 +1274,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     ) {
       merged.current_hour_refresh_overview = current.current_hour_refresh_overview;
     }
-    ["handover_log_family", "handover_capacity_report_family", "monthly_report_family", "alarm_event_family"].forEach((key) => {
+    ["handover_log_family", "handover_capacity_report_family", "monthly_report_family", "branch_power_family", "alarm_event_family"].forEach((key) => {
       merged[key] = mergeLiteSharedBridgeFamily(current[key], next[key]);
     });
     return merged;

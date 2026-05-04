@@ -34,6 +34,7 @@ from app.modules.shared_bridge.api.routes import router as shared_bridge_router
 from app.modules.shared_bridge.service.runtime_status_coordinator import RuntimeStatusCoordinator
 from app.modules.scheduler.api.handover_routes import router as handover_scheduler_router
 from app.modules.scheduler.api.day_metric_upload_routes import router as day_metric_upload_scheduler_router
+from app.modules.scheduler.api.branch_power_upload_routes import router as branch_power_upload_scheduler_router
 from app.modules.scheduler.api.alarm_event_upload_routes import router as alarm_event_upload_scheduler_router
 from app.modules.scheduler.api.monthly_change_report_routes import router as monthly_change_report_scheduler_router
 from app.modules.scheduler.api.monthly_event_report_routes import router as monthly_event_report_scheduler_router
@@ -186,6 +187,7 @@ def _register_external_role_routes(app: FastAPI) -> None:
     app.include_router(scheduler_router)
     app.include_router(handover_scheduler_router)
     app.include_router(day_metric_upload_scheduler_router)
+    app.include_router(branch_power_upload_scheduler_router)
     app.include_router(alarm_event_upload_scheduler_router)
     app.include_router(wet_bulb_collection_scheduler_router)
     app.include_router(monthly_change_report_scheduler_router)
@@ -413,6 +415,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_wet_bulb_collection_scheduler(source="关闭自动")
             if container.day_metric_upload_scheduler:
                 container.stop_day_metric_upload_scheduler(source="关闭自动")
+            if container.branch_power_upload_scheduler:
+                container.stop_branch_power_upload_scheduler(source="关闭自动")
             if container.alarm_event_upload_scheduler:
                 container.stop_alarm_event_upload_scheduler(source="关闭自动")
             if container.monthly_change_report_scheduler:
@@ -598,6 +602,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(
                 f"[12项独立上传调度] 执行器绑定完成: {container.day_metric_upload_scheduler_executor_name()}, "
                 f"executor_bound={container.is_day_metric_upload_scheduler_executor_bound()}"
+            )
+            container.add_system_log(
+                f"[自动上传支路功率调度] 执行器绑定完成: {container.branch_power_upload_scheduler_executor_name()}, "
+                f"executor_bound={container.is_branch_power_upload_scheduler_executor_bound()}"
             )
             container.add_system_log(
                 f"[告警信息上传调度] 执行器绑定完成: {container.alarm_event_upload_scheduler_executor_name()}, "
@@ -1520,6 +1528,106 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(f"[12项独立上传调度] 提交失败：{error_text}")
             return False, error_text
 
+    def branch_power_upload_scheduler_callback(source: str) -> tuple[bool, str]:
+        from app.shared.utils.artifact_naming import FAMILY_BRANCH_POWER
+        from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService
+
+        role_mode = _deployment_role_mode()
+        if role_mode == "internal":
+            container.add_system_log("[自动上传支路功率调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+        if role_mode != "external":
+            detail = "当前未确认有效角色，无法执行自动上传支路功率调度"
+            container.add_system_log(f"[自动上传支路功率调度] {detail}")
+            return False, detail
+
+        bridge_service, bridge_error = _resolve_bridge_runtime()
+        if bridge_service is None:
+            detail = f"共享桥接未就绪，外网端无法执行自动上传支路功率调度：{_bridge_runtime_error_text(bridge_error)}"
+            container.add_system_log(f"[自动上传支路功率调度] {detail}")
+            return False, detail
+
+        target_bucket_key = datetime.now().replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H")
+        target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
+        if not target_buildings:
+            detail = "共享桥接未配置可用楼栋，无法执行自动上传支路功率调度"
+            container.add_system_log(f"[自动上传支路功率调度] {detail}")
+            return False, detail
+
+        try:
+            cached_entries = [
+                item
+                for item in bridge_service.get_latest_source_cache_entries(
+                    FAMILY_BRANCH_POWER,
+                    buildings=target_buildings,
+                    bucket_key=target_bucket_key,
+                )
+                if str(item.get("file_path", "") or "").strip()
+                and os.path.exists(str(item.get("file_path", "") or "").strip())
+            ]
+            expected_count = len(target_buildings)
+            if len(cached_entries) < expected_count:
+                dedupe_key = f"branch_power_upload:scheduler:{target_bucket_key}:{'|'.join(sorted(target_buildings))}"
+                job, bridge_task = start_waiting_bridge_job(
+                    job_service=container.job_service,
+                    bridge_service=bridge_service,
+                    name=source,
+                    worker_handler="branch_power_from_download",
+                    worker_payload={"target_bucket_key": target_bucket_key, "building_scope": "all_enabled", "building": None},
+                    resource_keys=["shared_bridge:branch_power"],
+                    priority="scheduler",
+                    feature="branch_power_upload",
+                    dedupe_key=dedupe_key,
+                    submitted_by="scheduler",
+                    bridge_get_or_create_name="get_or_create_branch_power_upload_task",
+                    bridge_create_name="create_branch_power_upload_task",
+                    bridge_kwargs={
+                        "buildings": target_buildings,
+                        "target_bucket_key": target_bucket_key,
+                        "requested_by": "scheduler",
+                    },
+                )
+                accepted_detail = (
+                    "等待内网补采同步：支路功率当前小时桶源文件尚未全部到位。"
+                    f" 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'},"
+                    f" bucket={target_bucket_key}, job_id={job.job_id}"
+                )
+                container.add_system_log(f"[自动上传支路功率调度] {accepted_detail}")
+                return True, accepted_detail
+
+            def _run_from_cache(emit_log):
+                source_units = [
+                    {
+                        "bucket_key": target_bucket_key,
+                        "building": str(item.get("building", "") or "").strip(),
+                        "source_file": str(item.get("file_path", "") or "").strip(),
+                        "metadata": item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {},
+                    }
+                    for item in cached_entries
+                ]
+                service = BranchPowerUploadService(container.runtime_config)
+                return service.continue_from_source_files(
+                    bucket_key=target_bucket_key,
+                    source_units=source_units,
+                    emit_log=emit_log,
+                )
+
+            dedupe_key = f"branch_power_cache:scheduler:{target_bucket_key}:{'|'.join(sorted(target_buildings))}"
+            job = _start_external_cache_job(
+                name="自动上传支路功率-使用共享文件",
+                feature="branch_power_cache_by_hour",
+                resource_key="shared_bridge:branch_power",
+                run_func=_run_from_cache,
+                dedupe_key=dedupe_key,
+            )
+            detail = f"已提交支路功率共享文件上传任务 job_id={job.job_id}, bucket={target_bucket_key}"
+            container.add_system_log(f"[自动上传支路功率调度] {detail}")
+            return True, detail
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            container.add_system_log(f"[自动上传支路功率调度] 提交失败：{error_text}")
+            return False, error_text
+
     def alarm_event_upload_scheduler_callback(source: str) -> tuple[bool, str]:
         role_mode = _deployment_role_mode()
         if role_mode == "internal":
@@ -1725,6 +1833,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     setter = getattr(container, "set_day_metric_upload_scheduler_callback", None)
     if callable(setter):
         setter(day_metric_upload_scheduler_callback)
+    setter = getattr(container, "set_branch_power_upload_scheduler_callback", None)
+    if callable(setter):
+        setter(branch_power_upload_scheduler_callback)
     setter = getattr(container, "set_alarm_event_upload_scheduler_callback", None)
     if callable(setter):
         setter(alarm_event_upload_scheduler_callback)

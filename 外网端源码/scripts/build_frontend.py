@@ -11,6 +11,13 @@ def _copy_if_exists(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def _copy_tree_files(src_dir: Path, dst_dir: Path, suffixes: set[str]) -> None:
+    if not src_dir.exists():
+        return
+    for src_file in sorted(path for path in src_dir.rglob("*") if path.is_file() and path.suffix in suffixes):
+        _copy_if_exists(src_file, dst_dir / src_file.relative_to(src_dir))
+
+
 def build_frontend_assets(project_dir: Path) -> None:
     src_dir = project_dir / "web" / "frontend" / "src"
     dist_dir = project_dir / "web" / "frontend" / "dist"
@@ -46,12 +53,14 @@ def build_frontend_assets(project_dir: Path) -> None:
     _copy_if_exists(src_dir / "index.html", dist_dir / "index.html")
     for src_file in asset_sources:
         _copy_if_exists(src_file, dist_assets / src_file.name)
+    _copy_tree_files(src_dir / "dashboard_template_sections", dist_assets / "dashboard_template_sections", {".js"})
 
     # 兼容旧路径引用（若存在则同步）。
     if legacy_dist_dir.exists():
         _copy_if_exists(dist_dir / "index.html", legacy_dist_dir / "index.html")
         for src_file in asset_sources:
             _copy_if_exists(dist_assets / src_file.name, legacy_dist_dir / "assets" / src_file.name)
+        _copy_tree_files(dist_assets / "dashboard_template_sections", legacy_dist_dir / "assets" / "dashboard_template_sections", {".js"})
         _copy_if_exists(vue_dist, legacy_dist_dir / "assets" / "vue.global.prod.js")
 
 

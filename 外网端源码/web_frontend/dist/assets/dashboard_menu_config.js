@@ -56,6 +56,11 @@ const SPECIAL_GROUP = {
       desc: '按日期读取共享文件并重写 12 项，不依赖交接班审核链路。',
     },
     {
+      id: 'branch_power_upload',
+      title: '自动上传支路功率',
+      desc: '按小时读取共享支路功率文件，更新机楼、包间、机列和 PDU 对应小时字段。',
+    },
+    {
       id: 'wet_bulb_collection',
       title: '湿球温度定时采集',
       desc: '复用交接班日志源文件提取湿球温度和冷源运行模式，并写入多维表。',

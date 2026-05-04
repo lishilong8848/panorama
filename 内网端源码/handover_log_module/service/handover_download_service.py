@@ -74,6 +74,45 @@ class HandoverDownloadService:
             base_cfg["query_result_timeout_ms"] = max(query_timeout_ms, e_query_timeout_ms)
         return base_cfg
 
+    def _branch_power_download_config(self) -> Dict[str, Any]:
+        base_cfg = copy.deepcopy(
+            self.config.get("download", {}) if isinstance(self.config.get("download", {}), dict) else {}
+        )
+        branch_root_cfg = (
+            self.config.get("branch_power", {})
+            if isinstance(self.config.get("branch_power", {}), dict)
+            else {}
+        )
+        branch_download_cfg = (
+            branch_root_cfg.get("download", {})
+            if isinstance(branch_root_cfg.get("download", {}), dict)
+            else {}
+        )
+        base_cfg.update(copy.deepcopy(branch_download_cfg))
+        base_cfg["template_name"] = str(
+            branch_download_cfg.get("template_name")
+            or branch_root_cfg.get("template_name")
+            or "列头柜支路电流"
+        ).strip()
+        base_cfg["sheet_name"] = str(
+            branch_download_cfg.get("sheet_name")
+            or branch_root_cfg.get("sheet_name")
+            or "支路功率"
+        ).strip()
+        base_cfg["scale_label"] = str(
+            branch_download_cfg.get("scale_label")
+            or branch_root_cfg.get("scale_label")
+            or "小时"
+        ).strip()
+        base_cfg["export_button_text"] = str(
+            branch_download_cfg.get("export_button_text")
+            or branch_root_cfg.get("export_button_text")
+            or base_cfg.get("export_button_text")
+            or "原样导出"
+        ).strip()
+        base_cfg["report_kind"] = "branch_power"
+        return base_cfg
+
     @staticmethod
     def _merge_multi_download_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         merged_results: List[Dict[str, Any]] = []
@@ -171,6 +210,27 @@ class HandoverDownloadService:
         merged = self._merge_multi_download_results(results)
         merged["report_kind"] = "capacity"
         return merged
+
+    def run_branch_power_only(
+        self,
+        buildings: List[str] | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        switch_network: bool = True,
+        reuse_cached: bool = True,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        cloned_service = self._clone_with_download_config(self._branch_power_download_config())
+        result = cloned_service.run(
+            buildings=buildings,
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=switch_network,
+            reuse_cached=reuse_cached,
+            emit_log=emit_log,
+        )
+        result["report_kind"] = "branch_power"
+        return result
 
     def run_with_capacity_report(
         self,
@@ -331,6 +391,7 @@ class HandoverDownloadService:
         download_cfg = self.config.get("download", {})
         template_name = str(download_cfg.get("template_name", "")).strip()
         scale_label = str(download_cfg.get("scale_label", "")).strip()
+        sheet_name = str(download_cfg.get("sheet_name", "") or "").strip()
         if not template_name:
             raise ValueError("配置错误: handover_log.download.template_name 不能为空")
         if not scale_label:
@@ -370,6 +431,7 @@ class HandoverDownloadService:
                     start_time=start_time,
                     end_time=end_time_text,
                     scale_label=scale_label,
+                    sheet_name=sheet_name,
                 )
                 cached_path = self._source_file_cache_service.lookup_downloaded_source(identity=identity)
                 if cached_path:
@@ -420,10 +482,13 @@ class HandoverDownloadService:
                 if is_shift_window and duty_date_text and duty_shift_text:
                     emit_log(
                         f"[交接班下载][{building}] 已入队: duty_date={duty_date_text}, duty_shift={duty_shift_text}, "
-                        f"start={start_time}, end={end_time_text}, 刻度={scale_label}"
+                        f"start={start_time}, end={end_time_text}, 刻度={scale_label}, sheet={sheet_name or '-'}"
                     )
                 else:
-                    emit_log(f"[交接班下载][{building}] 已入队: start={start_time}, end={end_time_text}, 刻度={scale_label}")
+                    emit_log(
+                        f"[交接班下载][{building}] 已入队: start={start_time}, end={end_time_text}, "
+                        f"刻度={scale_label}, sheet={sheet_name or '-'}"
+                    )
 
             downloaded_results = download_handover_xlsx_batch(
                 buildings=pending_buildings,
@@ -432,6 +497,7 @@ class HandoverDownloadService:
                 scale_label=scale_label,
                 template_name=template_name,
                 save_dir=str(download_dir),
+                sheet_name=sheet_name,
                 query_result_timeout_ms=query_result_timeout_ms,
                 download_event_timeout_ms=download_event_timeout_ms,
                 login_fill_timeout_ms=login_fill_timeout_ms,
@@ -465,6 +531,7 @@ class HandoverDownloadService:
                     start_time=start_time,
                     end_time=end_time_text,
                     scale_label=scale_label,
+                    sheet_name=sheet_name,
                 )
                 registered_file_path = self._source_file_cache_service.register_downloaded_source(
                     identity=identity,
@@ -493,6 +560,7 @@ class HandoverDownloadService:
             "duty_date": duty_date_text,
             "duty_shift": duty_shift_text,
             "is_shift_window": is_shift_window,
+            "sheet_name": sheet_name,
             "results": results,
             "success_files": success_files,
             "failed": failed,

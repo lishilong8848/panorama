@@ -135,6 +135,7 @@ function ensureRoot(cfg) {
   cfg.manual_upload_gui = cfg.manual_upload_gui || {};
   cfg.handover_log = cfg.handover_log || {};
   cfg.day_metric_upload = cfg.day_metric_upload || {};
+  cfg.branch_power_upload = cfg.branch_power_upload || {};
   cfg.wet_bulb_collection = cfg.wet_bulb_collection || {};
   cfg.handover_log.template = cfg.handover_log.template || {};
   cfg.handover_log.review_ui = cfg.handover_log.review_ui || {};
@@ -205,6 +206,7 @@ function ensureRoot(cfg) {
   cfg.day_metric_upload.target = cfg.day_metric_upload.target || {};
   cfg.day_metric_upload.target.source = cfg.day_metric_upload.target.source || {};
   cfg.day_metric_upload.target.fields = cfg.day_metric_upload.target.fields || {};
+  cfg.branch_power_upload.scheduler = cfg.branch_power_upload.scheduler || {};
 }
 
 function defaultInternalSourceSites() {
@@ -1160,6 +1162,17 @@ function applyDayMetricUploadDefaults(cfg) {
   delete target.types;
 }
 
+function applyBranchPowerUploadDefaults(cfg) {
+  const upload = cfg.branch_power_upload;
+  const scheduler = upload.scheduler;
+  setBooleanDefault(scheduler, "enabled", true);
+  setBooleanDefault(scheduler, "auto_start_in_gui", false);
+  setNumberDefault(scheduler, "interval_minutes", 60);
+  setNumberDefault(scheduler, "check_interval_sec", 30);
+  setBooleanDefault(scheduler, "retry_failed_on_next_tick", true);
+  setStringDefault(scheduler, "state_file", "branch_power_upload_scheduler_state.json");
+}
+
 function applySchedulerDefaults(cfg) {
   setBooleanDefault(cfg.scheduler, "enabled", true);
   setBooleanDefault(cfg.scheduler, "auto_start_in_gui", false);
@@ -1199,6 +1212,7 @@ export function ensureConfigShape(raw) {
   applyNetworkDefaults(cfg);
   applyWetBulbCollectionDefaults(cfg);
   applyDayMetricUploadDefaults(cfg);
+  applyBranchPowerUploadDefaults(cfg);
   setBooleanDefault(cfg.manual_upload_gui, "enabled", true);
   applySchedulerDefaults(cfg);
   applyUpdaterDefaults(cfg);

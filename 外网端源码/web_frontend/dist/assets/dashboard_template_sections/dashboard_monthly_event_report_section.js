@@ -46,28 +46,28 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                               <div class="task-grid two-col">
                                 <div class="form-row">
                                   <label class="label">每月几号</label>
-                                  <input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_event_report.scheduler.day_of_month" @change="saveMonthlyEventReportSchedulerQuickConfig" />
+                                  <input type="number" min="1" max="31" :value="config.handover_log.monthly_event_report.scheduler.day_of_month" :disabled="monthlyEventReportSchedulerQuickSaving" @change="saveMonthlyEventReportSchedulerQuickConfig({ day_of_month: $event.target.value })" />
                                 </div>
                                 <div class="form-row">
                                   <label class="label">时间（HH:mm:ss）</label>
-                                  <input type="time" step="1" v-model="config.handover_log.monthly_event_report.scheduler.run_time" @change="saveMonthlyEventReportSchedulerQuickConfig({ run_time: $event.target.value })" />
+                                  <input type="time" step="1" :value="config.handover_log.monthly_event_report.scheduler.run_time" :disabled="monthlyEventReportSchedulerQuickSaving" @change="saveMonthlyEventReportSchedulerQuickConfig({ run_time: $event.target.value })" />
                                 </div>
                               </div>
                               <div class="form-row">
                                 <label class="label">检查间隔（秒）</label>
-                                <input type="number" min="1" v-model.number="config.handover_log.monthly_event_report.scheduler.check_interval_sec" @change="saveMonthlyEventReportSchedulerQuickConfig" />
+                                <input type="number" min="1" :value="config.handover_log.monthly_event_report.scheduler.check_interval_sec" :disabled="monthlyEventReportSchedulerQuickSaving" @change="saveMonthlyEventReportSchedulerQuickConfig({ check_interval_sec: $event.target.value })" />
                               </div>
                               <div class="btn-line">
                                 <button
                                   class="btn btn-success"
-                                  :disabled="isSchedulerStartDisabled('monthly_event_report', actionKeyMonthlyEventReportSchedulerStart, actionKeyMonthlyEventReportSchedulerStop)"
+                                  :disabled="monthlyEventReportSchedulerQuickSaving || isSchedulerStartDisabled('monthly_event_report', actionKeyMonthlyEventReportSchedulerStart, actionKeyMonthlyEventReportSchedulerStop)"
                                   @click="startMonthlyEventReportScheduler"
                                 >
                                   {{ getSchedulerStartButtonText('monthly_event_report') }}
                                 </button>
                                 <button
                                   class="btn btn-danger"
-                                  :disabled="isSchedulerStopDisabled('monthly_event_report', actionKeyMonthlyEventReportSchedulerStart, actionKeyMonthlyEventReportSchedulerStop)"
+                                  :disabled="monthlyEventReportSchedulerQuickSaving || isSchedulerStopDisabled('monthly_event_report', actionKeyMonthlyEventReportSchedulerStart, actionKeyMonthlyEventReportSchedulerStop)"
                                   @click="stopMonthlyEventReportScheduler"
                                 >
                                   {{ getSchedulerStopButtonText('monthly_event_report') }}
@@ -428,28 +428,28 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                               <div class="task-grid two-col">
                                 <div class="form-row">
                                   <label class="label">每月几号</label>
-                                  <input type="number" min="1" max="31" v-model.number="config.handover_log.monthly_change_report.scheduler.day_of_month" @change="saveMonthlyChangeReportSchedulerQuickConfig" />
+                                  <input type="number" min="1" max="31" :value="config.handover_log.monthly_change_report.scheduler.day_of_month" :disabled="monthlyChangeReportSchedulerQuickSaving" @change="saveMonthlyChangeReportSchedulerQuickConfig({ day_of_month: $event.target.value })" />
                                 </div>
                                 <div class="form-row">
                                   <label class="label">时间（HH:mm:ss）</label>
-                                  <input type="time" step="1" v-model="config.handover_log.monthly_change_report.scheduler.run_time" @change="saveMonthlyChangeReportSchedulerQuickConfig({ run_time: $event.target.value })" />
+                                  <input type="time" step="1" :value="config.handover_log.monthly_change_report.scheduler.run_time" :disabled="monthlyChangeReportSchedulerQuickSaving" @change="saveMonthlyChangeReportSchedulerQuickConfig({ run_time: $event.target.value })" />
                                 </div>
                               </div>
                               <div class="form-row">
                                 <label class="label">检查间隔（秒）</label>
-                                <input type="number" min="1" v-model.number="config.handover_log.monthly_change_report.scheduler.check_interval_sec" @change="saveMonthlyChangeReportSchedulerQuickConfig" />
+                                <input type="number" min="1" :value="config.handover_log.monthly_change_report.scheduler.check_interval_sec" :disabled="monthlyChangeReportSchedulerQuickSaving" @change="saveMonthlyChangeReportSchedulerQuickConfig({ check_interval_sec: $event.target.value })" />
                               </div>
                               <div class="btn-line">
                                 <button
                                   class="btn btn-success"
-                                  :disabled="isSchedulerStartDisabled('monthly_change_report', actionKeyMonthlyChangeReportSchedulerStart, actionKeyMonthlyChangeReportSchedulerStop)"
+                                  :disabled="monthlyChangeReportSchedulerQuickSaving || isSchedulerStartDisabled('monthly_change_report', actionKeyMonthlyChangeReportSchedulerStart, actionKeyMonthlyChangeReportSchedulerStop)"
                                   @click="startMonthlyChangeReportScheduler"
                                 >
                                   {{ getSchedulerStartButtonText('monthly_change_report') }}
                                 </button>
                                 <button
                                   class="btn btn-danger"
-                                  :disabled="isSchedulerStopDisabled('monthly_change_report', actionKeyMonthlyChangeReportSchedulerStart, actionKeyMonthlyChangeReportSchedulerStop)"
+                                  :disabled="monthlyChangeReportSchedulerQuickSaving || isSchedulerStopDisabled('monthly_change_report', actionKeyMonthlyChangeReportSchedulerStart, actionKeyMonthlyChangeReportSchedulerStop)"
                                   @click="stopMonthlyChangeReportScheduler"
                                 >
                                   {{ getSchedulerStopButtonText('monthly_change_report') }}

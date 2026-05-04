@@ -98,6 +98,7 @@ const INTERNAL_SOURCE_CACHE_FAMILY_KEYS = Object.freeze([
   "handover_log_family",
   "handover_capacity_report_family",
   "monthly_report_family",
+  "branch_power_family",
   "alarm_event_family",
 ]);
 const STATE_DIAGNOSTIC_SEEN = new Set();
@@ -127,6 +128,7 @@ export function createEmptyInternalBuildingRuntimeStatusMap() {
           handover_log_family: buildSourceCachePlaceholderBuilding(building, ""),
           handover_capacity_report_family: buildSourceCachePlaceholderBuilding(building, ""),
           monthly_report_family: buildSourceCachePlaceholderBuilding(building, ""),
+          branch_power_family: buildSourceCachePlaceholderBuilding(building, ""),
           alarm_event_family: buildSourceCachePlaceholderBuilding(building, ""),
         },
         pool: {
@@ -657,6 +659,13 @@ export function createAppState(vueApi) {
           buildings: [],
         },
         monthly_report_family: {
+          ready_count: 0,
+          failed_buildings: [],
+          last_success_at: "",
+          current_bucket: "",
+          buildings: [],
+        },
+        branch_power_family: {
           ready_count: 0,
           failed_buildings: [],
           last_success_at: "",
@@ -1262,6 +1271,12 @@ export function createAppState(vueApi) {
             : {}),
           buildings: buildFamilyRows("monthly_report_family", currentHourBucket),
         },
+        branch_power_family: {
+          ...(sourceCacheSummary.branch_power_family && typeof sourceCacheSummary.branch_power_family === "object"
+            ? sourceCacheSummary.branch_power_family
+            : {}),
+          buildings: buildFamilyRows("branch_power_family", currentHourBucket),
+        },
         alarm_event_family: {
           ...(sourceCacheSummary.alarm_event_family && typeof sourceCacheSummary.alarm_event_family === "object"
             ? sourceCacheSummary.alarm_event_family
@@ -1309,6 +1324,7 @@ export function createAppState(vueApi) {
     const familyKeys = [
       "handover_log_family",
       "monthly_report_family",
+      "branch_power_family",
       "alarm_event_family",
       "handover_capacity_report_family",
     ].filter((familyKey) => payload?.[familyKey] && typeof payload[familyKey] === "object");

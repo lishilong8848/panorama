@@ -1197,6 +1197,16 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "missing_value_policy": "zero",
             },
         },
+        "branch_power_upload": {
+            "scheduler": {
+                "enabled": False,
+                "auto_start_in_gui": False,
+                "interval_minutes": 60,
+                "check_interval_sec": 30,
+                "retry_failed_on_next_tick": True,
+                "state_file": "branch_power_upload_scheduler_state.json",
+            },
+        },
         "alarm_export": {
             "scheduler": {
                 "enabled": False,

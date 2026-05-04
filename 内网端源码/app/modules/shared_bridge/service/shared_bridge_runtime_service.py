@@ -32,6 +32,7 @@ from app.modules.shared_bridge.service.shared_bridge_mailbox_store import Shared
 from app.modules.shared_bridge.service.shared_bridge_runtime_mirror_store import SharedBridgeRuntimeMirrorStore
 from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_ALARM_EVENT,
+    FAMILY_BRANCH_POWER,
     FAMILY_HANDOVER_CAPACITY_REPORT,
     FAMILY_HANDOVER_LOG,
     FAMILY_LABELS,
@@ -56,6 +57,7 @@ from handover_log_module.service.day_metric_standalone_upload_service import Day
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.excel_reader import load_rows
 from handover_log_module.service.handover_download_service import HandoverDownloadService
+from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 
 RETIRED_SHARED_BRIDGE_FEATURES: Dict[str, str] = {
@@ -2302,6 +2304,26 @@ class SharedBridgeRuntimeService:
             requested_by=requested_by,
         )
 
+    def create_branch_power_upload_task(
+        self,
+        *,
+        buildings: List[str] | None,
+        resume_job_id: str | None = None,
+        target_bucket_key: str | None = None,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        return self._store.create_branch_power_upload_task(
+            buildings=buildings,
+            resume_job_id=resume_job_id,
+            target_bucket_key=target_bucket_key,
+            created_by_role=self.role_mode,
+            created_by_node_id=self.node_id,
+            requested_by=requested_by,
+        )
+
     def create_alarm_event_upload_task(
         self,
         *,
@@ -2357,6 +2379,38 @@ class SharedBridgeRuntimeService:
             building_scope=building_scope,
             building=building,
             resume_job_id=resume_job_id,
+            requested_by=requested_by,
+        )
+
+    def get_or_create_branch_power_upload_task(
+        self,
+        *,
+        buildings: List[str] | None,
+        resume_job_id: str | None = None,
+        target_bucket_key: str | None = None,
+        requested_by: str = "manual",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        normalized_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        resolved_bucket_key = str(target_bucket_key or "").strip()
+        if not resolved_bucket_key and self._source_cache_service is not None:
+            resolved_bucket_key = self._source_cache_service.branch_power_bucket()
+        dedupe_key = "|".join(
+            [
+                "branch_power_upload",
+                resolved_bucket_key or _now_text()[:13],
+                ",".join(normalized_buildings) or "all_enabled",
+            ]
+        )
+        existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
+        if existing:
+            return existing
+        return self.create_branch_power_upload_task(
+            buildings=normalized_buildings,
+            resume_job_id=resume_job_id,
+            target_bucket_key=resolved_bucket_key,
             requested_by=requested_by,
         )
 
@@ -2657,10 +2711,20 @@ class SharedBridgeRuntimeService:
                 pass
         return self.current_source_cache_bucket()
 
-    def get_latest_source_cache_entries(self, *, source_family: str, buildings: List[str] | None = None) -> List[Dict[str, Any]]:
+    def get_latest_source_cache_entries(
+        self,
+        *,
+        source_family: str,
+        buildings: List[str] | None = None,
+        bucket_key: str | None = None,
+    ) -> List[Dict[str, Any]]:
         if self._source_cache_service is None:
             return []
-        return self._source_cache_service.get_latest_ready_entries(source_family=source_family, buildings=buildings)
+        return self._source_cache_service.get_latest_ready_entries(
+            source_family=source_family,
+            buildings=buildings,
+            bucket_key=bucket_key,
+        )
 
     def get_external_source_cache_overview_fast(self) -> Dict[str, Any]:
         if self._source_cache_service is None:
@@ -4558,6 +4622,176 @@ class SharedBridgeRuntimeService:
             )
             self._emit_system_log(f"[共享桥接][外网端] 任务={task_id} 12项外网继续失败: {error_text}")
 
+    def _run_branch_power_internal_download(self, task: Dict[str, Any]) -> None:
+        if not self._store:
+            return
+        task_id = str(task.get("task_id", "") or "").strip()
+        stage_id = "internal_download"
+        claim_token = self._stage_claim_token(task, stage_id)
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="internal", claim_token=claim_token)
+        try:
+            if self._source_cache_service is None:
+                raise RuntimeError("共享缓存服务未初始化，无法下载支路功率")
+            bucket_key = str(request.get("target_bucket_key", "") or "").strip() or self._source_cache_service.branch_power_bucket()
+            buildings = [str(item or "").strip() for item in (request.get("buildings") if isinstance(request.get("buildings"), list) else []) if str(item or "").strip()]
+            if not buildings:
+                buildings = self._source_cache_service.get_enabled_buildings()
+            source_units: List[Dict[str, Any]] = []
+            failed_buildings: List[Dict[str, Any]] = []
+            emit_log(f"[共享桥接][支路功率][内网] 开始下载 bucket={bucket_key}, buildings={len(buildings)}")
+            for building in buildings:
+                try:
+                    entry = self._source_cache_service.fill_branch_power_latest(
+                        building=building,
+                        bucket_key=bucket_key,
+                        emit_log=emit_log,
+                    )
+                    source_units.append(
+                        {
+                            "building": building,
+                            "file_path": str(entry.get("file_path", "") or "").strip(),
+                            "bucket_key": bucket_key,
+                            "metadata": entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {},
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    failed_buildings.append({"building": building, "error": str(exc)})
+                    emit_log(f"[共享桥接][支路功率][内网] 下载失败 building={building}, error={exc}")
+            stage_result = {
+                "status": "success" if source_units else "failed",
+                "bucket_key": bucket_key,
+                "source_units": source_units,
+                "failed_buildings": failed_buildings,
+                "downloaded_count": len(source_units),
+            }
+            if source_units:
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="internal",
+                    stage_result=stage_result,
+                    next_task_status="ready_for_external",
+                    task_result={"internal": stage_result, "status": "ready_for_external"},
+                    record_event=False,
+                    sync_mailbox=False,
+                )
+                self._store.append_event(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    side="internal",
+                    level="info",
+                    event_type="await_external",
+                    payload={"message": "支路功率源文件已下载，等待外网上传"},
+                )
+                self._request_runtime_status_refresh(reason=f"branch_power_internal_download_completed:{task_id}")
+                return
+            error_text = "内网下载未产生任何支路功率共享文件"
+            if failed_buildings:
+                error_text = str(failed_buildings[0].get("error", "") or error_text)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="internal",
+                stage_result=stage_result,
+                stage_error=error_text,
+                next_task_status="failed",
+                task_error=error_text,
+                stage_status="failed",
+                task_result={"internal": stage_result, "status": "failed"},
+            )
+            self._request_runtime_status_refresh(reason=f"branch_power_internal_download_failed:{task_id}")
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="internal",
+                stage_error=error_text,
+                next_task_status="failed",
+                task_error=error_text,
+                stage_status="failed",
+                task_result={"status": "failed", "error": error_text},
+            )
+
+    def _run_branch_power_external_continue(self, task: Dict[str, Any]) -> None:
+        if not self._store:
+            return
+        task_id = str(task.get("task_id", "") or "").strip()
+        stage_id = "external_upload"
+        claim_token = self._stage_claim_token(task, stage_id)
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
+        internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
+        emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
+        try:
+            bucket_key = str(internal_result.get("bucket_key", "") or request.get("target_bucket_key", "") or "").strip()
+            if not bucket_key and self._source_cache_service is not None:
+                bucket_key = self._source_cache_service.branch_power_bucket()
+            source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
+            source_units = [item for item in source_units if isinstance(item, dict)]
+            if not source_units and self._source_cache_service is not None:
+                buildings = [str(item or "").strip() for item in (request.get("buildings") if isinstance(request.get("buildings"), list) else []) if str(item or "").strip()]
+                source_units = self._source_cache_service.get_latest_ready_entries(
+                    source_family=FAMILY_BRANCH_POWER,
+                    buildings=buildings or None,
+                    bucket_key=bucket_key,
+                )
+            normalized_units: List[Dict[str, Any]] = []
+            for item in source_units:
+                building = str(item.get("building", "") or "").strip()
+                file_path = str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
+                if not building or not file_path:
+                    continue
+                if not is_accessible_cached_file_path(file_path):
+                    raise FileNotFoundError(f"共享目录中的支路功率源文件不存在或不可访问: {file_path}")
+                metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+                data_hour_bucket = str(item.get("data_hour_bucket", "") or metadata.get("data_hour_bucket", "") or "").strip()
+                normalized_units.append(
+                    {
+                        "building": building,
+                        "file_path": file_path,
+                        "metadata": metadata,
+                        "data_hour_bucket": data_hour_bucket,
+                    }
+                )
+            if not normalized_units:
+                raise RuntimeError("共享目录中没有可继续上传的支路功率源文件")
+            emit_log(f"[共享桥接][支路功率][外网] 开始上传 bucket={bucket_key}, files={len(normalized_units)}")
+            result = BranchPowerUploadService(self.runtime_config).continue_from_source_files(
+                bucket_key=bucket_key,
+                source_units=normalized_units,
+                emit_log=emit_log,
+            )
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="external",
+                stage_result=result,
+                next_task_status="success",
+                task_result={"status": "success", "bridge_task_id": task_id, "internal": internal_result, "external": result},
+            )
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            self._fail_bound_job(task, error_text=error_text, summary="支路功率上传失败")
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="external",
+                stage_error=error_text,
+                next_task_status="failed",
+                task_error=error_text,
+                stage_status="failed",
+                task_result={"status": "failed", "bridge_task_id": task_id, "internal": internal_result, "error": error_text},
+            )
+
     def _run_wet_bulb_internal_download(self, task: Dict[str, Any]) -> None:
         if not self._store:
             return
@@ -5857,6 +6091,13 @@ class SharedBridgeRuntimeService:
                     return
                 if self.role_mode == "external":
                     self._run_day_metric_external_continue(task)
+                    return
+            if feature == "branch_power_upload":
+                if self.role_mode == "internal":
+                    self._run_branch_power_internal_download(task)
+                    return
+                if self.role_mode == "external":
+                    self._run_branch_power_external_continue(task)
                     return
             if feature == "wet_bulb_collection":
                 if self.role_mode == "internal":

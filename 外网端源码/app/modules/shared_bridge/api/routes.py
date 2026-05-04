@@ -70,6 +70,7 @@ _LATEST_REFRESHABLE_SOURCE_FAMILIES = {
     "handover_log_family": "交接班日志源文件",
     "handover_capacity_report_family": "交接班容量报表源文件",
     "monthly_report_family": "全景平台月报源文件",
+    "branch_power_family": "支路功率源文件",
     "alarm_event_family": "告警信息源文件",
 }
 
@@ -97,7 +98,7 @@ def _internal_summary_has_runtime_signal(payload: Any) -> bool:
             "expired",
         }:
             return True
-    for key in ("handover_log_family", "handover_capacity_report_family", "monthly_report_family", "alarm_event_family"):
+    for key in ("handover_log_family", "handover_capacity_report_family", "monthly_report_family", "branch_power_family", "alarm_event_family"):
         family = cache.get(key, {}) if isinstance(cache.get(key, {}), dict) else {}
         rows = family.get("buildings", []) if isinstance(family.get("buildings", []), list) else []
         if any(
@@ -134,6 +135,31 @@ def _internal_building_status_has_runtime_signal(payload: Any) -> bool:
     return False
 
 
+def _wrap_internal_light_snapshot(snapshot: Any) -> Dict[str, Any]:
+    raw = snapshot if isinstance(snapshot, dict) else {}
+    if isinstance(raw.get("internal_source_cache"), dict):
+        return raw
+    family_keys = (
+        "handover_log_family",
+        "handover_capacity_report_family",
+        "monthly_report_family",
+        "branch_power_family",
+        "alarm_event_family",
+    )
+    if not any(isinstance(raw.get(key), dict) for key in family_keys) and "current_hour_bucket" not in raw:
+        return raw
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "role_mode": "internal",
+        "agent_status": "running",
+        "db_status": "ok",
+        "last_error": str(raw.get("last_error", "") or "").strip(),
+        "last_poll_at": str(raw.get("last_run_at", "") or "").strip(),
+        "internal_source_cache": copy.deepcopy(raw),
+        "internal_download_pool": {},
+    }
+
+
 def _read_live_internal_summary(service: Any) -> Dict[str, Any] | None:
     if service is None or not hasattr(service, "get_health_snapshot"):
         return None
@@ -142,7 +168,7 @@ def _read_live_internal_summary(service: Any) -> Dict[str, Any] | None:
     except Exception:
         return None
     return presenter_build_internal_runtime_summary(
-        live_snapshot if isinstance(live_snapshot, dict) else {},
+        _wrap_internal_light_snapshot(live_snapshot),
     )
 
 
@@ -154,7 +180,7 @@ def _read_live_internal_building_status(service: Any, *, building: str, building
     except Exception:
         return None
     return presenter_build_internal_runtime_building_status(
-        live_snapshot if isinstance(live_snapshot, dict) else {},
+        _wrap_internal_light_snapshot(live_snapshot),
         building=building,
         building_code=building_code,
     )

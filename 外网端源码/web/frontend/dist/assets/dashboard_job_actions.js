@@ -6,6 +6,7 @@
   postSheetImportJob,
   retryJobApi,
   startJsonJobApi,
+  submitBranchPowerFromDownloadJob,
   submitDayMetricFromDownloadJob,
   submitDayMetricFromFileJob,
   submitHandoverFollowupContinueJob,
@@ -22,6 +23,7 @@ const ACTION_KEYS = {
   handoverFromFile: "job:handover_from_file",
   handoverFromDownload: "job:handover_from_download",
   dayMetricFromDownload: "job:day_metric_from_download",
+  branchPowerFromDownload: "job:branch_power_from_download",
   dayMetricFromFile: "job:day_metric_from_file",
   dayMetricRetryUnit: "job:day_metric_retry_unit",
   dayMetricRetryFailed: "job:day_metric_retry_failed",
@@ -521,6 +523,23 @@ export function createDashboardJobActions(ctx) {
     );
   }
 
+  async function runBranchPowerFromDownload() {
+    if (!canRun.value) return;
+    return guardedRun(
+      ACTION_KEYS.branchPowerFromDownload,
+      async () => {
+        try {
+          message.value = "自动上传支路功率任务已提交";
+          const response = await submitBranchPowerFromDownloadJob({ building_scope: "all_enabled" });
+          await applyAcceptedExecutionResponse(response, "自动上传支路功率");
+        } catch (err) {
+          message.value = `自动上传支路功率提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
   async function runDayMetricFromFile() {
     const building = String(dayMetricLocalBuilding.value || "").trim();
     const dutyDate = String(dayMetricLocalDate.value || "").trim();
@@ -672,6 +691,7 @@ export function createDashboardJobActions(ctx) {
     runHandoverFromFile,
     runHandoverFromDownload,
     runDayMetricFromDownload,
+    runBranchPowerFromDownload,
     runDayMetricFromFile,
     retryDayMetricUnit,
     retryFailedDayMetricUnits,

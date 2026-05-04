@@ -257,7 +257,7 @@
           <div class="hint" v-else>等待后端当前小时摘要。</div>
           <div class="status-subsection-head">
             <span class="status-panel-kicker">最新共享文件状态</span>
-            <span class="status-inline-note">交接班源文件、交接班容量报表源文件、月报源文件和告警信息源文件实时同步显示</span>
+            <span class="status-inline-note">交接班源文件、交接班容量报表源文件、月报源文件、支路功率源文件和告警信息源文件实时同步显示</span>
           </div>
           <div class="source-cache-family-grid" v-if="internalRuntimeOverview.families && internalRuntimeOverview.families.length">
             <div

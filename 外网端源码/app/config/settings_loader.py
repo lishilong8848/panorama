@@ -1277,6 +1277,16 @@ def _validate_day_metric_upload(cfg: Dict[str, Any]) -> None:
     )
 
 
+def _validate_branch_power_upload(cfg: Dict[str, Any]) -> None:
+    upload_cfg = cfg.get("features", {}).get("branch_power_upload", {})
+    if not isinstance(upload_cfg, dict):
+        raise ValueError("配置错误: features.branch_power_upload 缺失或格式错误")
+    _validate_feature_interval_scheduler(
+        "features.branch_power_upload.scheduler",
+        upload_cfg.get("scheduler", {}),
+    )
+
+
 def _validate_handover_source_data_attachment_export(cfg: Dict[str, Any]) -> None:
     handover = cfg.get("features", {}).get("handover_log", {})
     if not isinstance(handover, dict):
@@ -1766,6 +1776,7 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _validate_handover_maintenance_management_section(normalized_v3)
     _validate_handover_other_important_work_section(normalized_v3)
     _validate_day_metric_upload(normalized_v3)
+    _validate_branch_power_upload(normalized_v3)
     _validate_handover_source_data_attachment_export(normalized_v3)
     _validate_handover_cloud_sheet_sync(normalized_v3)
     _validate_handover_daily_report_bitable_export(normalized_v3)
