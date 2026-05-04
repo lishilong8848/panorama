@@ -3280,8 +3280,9 @@ class SharedSourceCacheService:
     def _branch_power_query_window(self, bucket_key: str) -> tuple[str, str]:
         data_bucket = self.branch_power_data_bucket(bucket_key)
         bucket_dt = _parse_hour_bucket(data_bucket) or (datetime.now() - timedelta(hours=1))
-        start_dt = bucket_dt.replace(minute=0, second=0, microsecond=0)
-        end_dt = start_dt + timedelta(minutes=20)
+        hour_dt = bucket_dt.replace(minute=0, second=0, microsecond=0)
+        start_dt = hour_dt - timedelta(minutes=10)
+        end_dt = hour_dt + timedelta(minutes=20)
         return start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     def fill_handover_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
