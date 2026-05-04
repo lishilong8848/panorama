@@ -219,6 +219,22 @@ def _apply_source_run_runtime_flags() -> bool:
     return True
 
 
+def _resolve_startup_config_path(explicit_config: str) -> str:
+    explicit = str(explicit_config or "").strip()
+    if explicit:
+        os.environ["MONTHLY_REPORT_CONFIG"] = explicit
+        return explicit
+
+    local_config = PROJECT_ROOT / "表格计算配置.json"
+    if local_config.exists():
+        resolved = str(local_config)
+        os.environ["MONTHLY_REPORT_CONFIG"] = resolved
+        return resolved
+
+    env_config = str(os.environ.get("MONTHLY_REPORT_CONFIG", "") or "").strip()
+    return env_config
+
+
 def main(argv: list[str] | None = None) -> None:
     _configure_console_utf8()
     _apply_split_source_default_role()
@@ -229,9 +245,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--no-open-browser", action="store_true", help="启动后不自动打开浏览器")
     args = parser.parse_args(argv)
 
-    config_path = str(args.config or "").strip()
-    if config_path:
-        os.environ["MONTHLY_REPORT_CONFIG"] = config_path
+    config_path = _resolve_startup_config_path(str(args.config or "").strip())
 
     bootstrap_settings = None
     try:
