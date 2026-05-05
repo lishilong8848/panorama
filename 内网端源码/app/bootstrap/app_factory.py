@@ -59,6 +59,7 @@ _ROLE_SELECTION_ALLOWED_EXACT = {
     "/",
     "/index.html",
     "/favicon.ico",
+    "/api/config",
     "/api/health/bootstrap",
     "/api/handover/daily-report/context",
     "/api/logs/system",

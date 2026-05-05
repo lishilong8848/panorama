@@ -3814,10 +3814,7 @@ export function createRuntimeHealthConfigActions(ctx) {
         if (configLoadError) {
           configLoadError.value = String(err || "").trim();
         }
-        const statusCode = Number.parseInt(String(err?.httpStatus || 0), 10) || 0;
-        if (!(statusCode === 409 && !health.runtime_activated)) {
-          scheduleConfigRetry();
-        }
+        scheduleConfigRetry();
         if (!silentMessage) {
           message.value = `读取配置失败: ${err}`;
         }
