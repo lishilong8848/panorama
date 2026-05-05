@@ -48,15 +48,16 @@
         <label class="label">启用共享桥接</label>
         <input type="checkbox" v-model="config.shared_bridge.enabled" />
       </div>
-      <div class="form-row">
+      <div v-if="isInternalDeploymentRole" class="form-row">
         <label class="label">内网共享目录</label>
         <input type="text" v-model.trim="config.shared_bridge.internal_root_dir" placeholder="请输入内网端可访问的共享目录路径" />
       </div>
-      <div class="form-row">
+      <div v-if="isExternalDeploymentRole" class="form-row">
         <label class="label">外网共享目录</label>
         <input type="text" v-model.trim="config.shared_bridge.external_root_dir" placeholder="请输入外网端可访问的共享目录路径" />
       </div>
-      <div class="hint">内网端使用本地目录，外网端使用 UNC 路径。</div>
+      <div class="hint" v-if="isInternalDeploymentRole">内网端只使用内网共享目录，不读取外网端共享路径。</div>
+      <div class="hint" v-if="isExternalDeploymentRole">外网端只使用外网共享目录，不读取内网端共享路径。</div>
     </div>
 
     <div class="content-card config-panel-card config-panel-card-wide">

@@ -165,6 +165,21 @@ def _resolve_browser_host(host: str, port: int) -> tuple[str, str, str]:
     return local_url, lan_url, browser_url
 
 
+def _browser_route_for_role(role_mode: str) -> str:
+    if role_mode == "internal":
+        return "internal/status"
+    if role_mode == "external":
+        return "external/dashboard"
+    return ""
+
+
+def _with_browser_route(base_url: str, role_mode: str) -> str:
+    route = _browser_route_for_role(role_mode)
+    if not route:
+        return base_url
+    return f"{str(base_url or '').rstrip('/')}/{route}"
+
+
 def _port_bind_error(host: str, port: int) -> OSError | None:
     bind_host = str(host or "").strip() or "127.0.0.1"
     sock = None
@@ -300,6 +315,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     local_url, lan_url, browser_url = _resolve_browser_host(host, port)
+    browser_url = _with_browser_route(browser_url, deployment_role_mode)
     if deployment_role_mode == "internal":
         print(f"[内网端] 本地管理页地址: {local_url}", flush=True)
         print("[内网端] 仅监听 127.0.0.1，不提供局域网访问入口。", flush=True)

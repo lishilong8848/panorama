@@ -223,15 +223,36 @@ function isBridgeTerminalStatus(status) {
   return text === "success" || text === "failed" || text === "partial_failed" || text === "cancelled" || text === "stale";
 }
 
-function resolveInitialDashboardModule() {
-  const defaultId = buildRoleDashboardState("external").activeModule;
+function resolveInitialBrowserRoute() {
+  if (typeof window === "undefined") {
+    return { roleMode: "external", view: "dashboard" };
+  }
+  const pathname = String(window.location?.pathname || "/").trim().toLowerCase().replace(/\/+$/, "") || "/";
+  if (pathname === "/internal" || pathname === "/internal/status") {
+    return { roleMode: "internal", view: "status" };
+  }
+  if (pathname === "/internal/config") {
+    return { roleMode: "internal", view: "config" };
+  }
+  if (pathname === "/external/status") {
+    return { roleMode: "external", view: "status" };
+  }
+  if (pathname === "/external/config") {
+    return { roleMode: "external", view: "config" };
+  }
+  return { roleMode: "external", view: "dashboard" };
+}
+
+function resolveInitialDashboardModule(roleMode = "external") {
+  const normalizedRole = normalizeDashboardRoleMode(roleMode);
+  const defaultId = buildRoleDashboardState(normalizedRole).activeModule;
   if (typeof window === "undefined" || !window.localStorage) {
     return defaultId;
   }
   try {
     const value = String(window.localStorage.getItem(DASHBOARD_MODULE_STORAGE_KEY) || "").trim();
-    const externalModules = buildRoleDashboardState("external").modules;
-    if (value && externalModules.some((item) => item.id === value)) {
+    const modules = buildRoleDashboardState(normalizedRole).modules;
+    if (value && modules.some((item) => item.id === value)) {
       return value;
     }
   } catch (_) {
@@ -748,10 +769,12 @@ export function createAppState(vueApi) {
   });
 
   const config = ref(ensureConfigShape({}));
-  const currentView = ref("dashboard");
-  const activeConfigTab = ref("common_paths");
+  const initialBrowserRoute = resolveInitialBrowserRoute();
+  const initialRoleMode = normalizeDashboardRoleMode(initialBrowserRoute.roleMode);
+  const currentView = ref(initialBrowserRoute.view || (initialRoleMode === "internal" ? "status" : "dashboard"));
+  const activeConfigTab = ref(initialRoleMode === "internal" ? "common_deployment" : "common_paths");
 
-  const initialDashboardState = buildRoleDashboardState("external", resolveInitialDashboardModule());
+  const initialDashboardState = buildRoleDashboardState(initialRoleMode, resolveInitialDashboardModule(initialRoleMode));
   const dashboardMenuGroups = ref(initialDashboardState.menuGroups);
   const dashboardModules = ref(initialDashboardState.modules);
   const dashboardActiveModule = ref(initialDashboardState.activeModule);
