@@ -229,6 +229,10 @@ def _apply_split_source_default_role() -> None:
 def _apply_source_run_runtime_flags() -> bool:
     if not _should_disable_updater_for_source_run():
         return False
+    if forced_role_mode_from_env() == "internal":
+        os.environ[_SOURCE_RUN_DISABLE_UPDATER_ENV] = "1"
+        os.environ.pop(_SOURCE_RUN_GIT_PULL_ENV, None)
+        return False
     os.environ.pop(_SOURCE_RUN_DISABLE_UPDATER_ENV, None)
     os.environ[_SOURCE_RUN_GIT_PULL_ENV] = "1"
     return True

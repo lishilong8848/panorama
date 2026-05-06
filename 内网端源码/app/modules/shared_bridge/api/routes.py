@@ -218,10 +218,10 @@ def _normalize_internal_runtime_building(building_code: str) -> tuple[str, str]:
 
 
 def _ensure_bridge_write_allowed(request: Request) -> None:
-    if _deployment_role_mode(request) == "internal":
+    if _deployment_role_mode(request) not in {"internal", "external"}:
         raise HTTPException(
             status_code=409,
-            detail="当前为内网端，本地管理页只提供共享任务只读查看，请在外网端执行重试或取消。",
+            detail="当前未进入有效端，无法操作共享任务。",
         )
 
 
@@ -708,7 +708,7 @@ def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
     if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
         return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
 
-    raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
 
 
 @router.get("/api/bridge/internal-runtime-status/buildings/{building_code}")
@@ -913,7 +913,15 @@ def bridge_internal_runtime_status_building(
             ),
         }
 
-    raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    return {
+        "ok": True,
+        "status": _attach_display(
+            build_empty_internal_runtime_building_status(
+                building=building,
+                building_code=normalized_code,
+            )
+        ),
+    }
 
 
 @router.post("/api/bridge/shared-root/self-check")

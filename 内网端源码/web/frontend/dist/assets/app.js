@@ -1,2205 +1,563 @@
-import { createLogStreamController } from "./log_stream.js";
-import { createDashboardActions } from "./dashboard_actions.js";
-import { createDateHandoverActions } from "./date_handover_actions.js";
-import { createRuntimeActions } from "./runtime_actions.js";
-import { createUiLocalActions } from "./ui_local_actions.js";
-import { createAppState, createEmptyInternalBuildingRuntimeStatusMap } from "./app_state.js";
-import { registerAppLifecycle } from "./app_lifecycle.js";
-import { APP_TEMPLATE } from "./app_template.js";
-import { isHandoverReviewPath, mountHandoverReviewApp } from "./handover_review_app.js";
-import { clone } from "./config_helpers.js";
-import { createHandoverDashboardUiHelpers } from "./handover_dashboard_ui_helpers.js";
-import { createRuntimeTaskUiHelpers } from "./runtime_task_ui_helpers.js";
-import { createSchedulerUiHelpers } from "./scheduler_ui_helpers.js";
-import { createInternalSourceCacheUiHelpers } from "./internal_source_cache_ui_helpers.js";
-import { createConfigSaveUiHelpers } from "./config_save_ui_helpers.js";
-import { createStartupRoleUiHelpers } from "./startup_role_ui_helpers.js";
-import { registerAppRuntimeWatchers } from "./app_runtime_watchers.js";
-import { createMonthlyReportUiHelpers } from "./monthly_report_ui_helpers.js";
-import { registerStartupRoleRecoveryWatcher } from "./startup_role_recovery_watcher.js";
-import { createDayMetricDateUiHelpers } from "./day_metric_date_ui_helpers.js";
-import { createHandoverDailyReportUploadUiHelpers } from "./handover_daily_report_upload_ui_helpers.js";
-import { registerSchedulerRememberedWatchers } from "./scheduler_remembered_watchers.js";
-import { createSourceCacheTargetUiHelpers } from "./source_cache_target_ui_helpers.js";
-import { createUpdaterUiHelpers } from "./updater_ui_helpers.js";
-import { createAppShellUiHelpers } from "./app_shell_ui_helpers.js";
-import { createHandoverReviewOverviewUiHelpers } from "./handover_review_overview_ui_helpers.js";
-import { createRuntimeRequestPolicyUiHelpers } from "./runtime_request_policy_ui_helpers.js";
-import { createDashboardRefreshUiHelpers } from "./dashboard_refresh_ui_helpers.js";
-import { createAppActionUiHelpers } from "./app_action_ui_helpers.js";
-import { APP_ACTION_KEYS } from "./app_action_keys.js";
-import { createRuntimeActionForwarders } from "./runtime_action_forwarders.js";
-import {
-  STARTUP_BRIDGE_DEFAULTS,
-  buildAppBrowserRoutePath,
-  buildRoleNodeIdPreview,
-  buildStartupBridgeDraft,
-  clearStartupRoleRestartPending,
-  clearStartupRoleRestartResume,
-  clearStartupRoleSession,
-  clearStartupRuntimeRecovery,
-  clearUpdaterRecoveryIntent,
-  finishAppBoot,
-  formatDateTimeFromEpoch,
-  formatDeploymentRoleLabel,
-  isStartupBridgeDraftChanged,
-  normalizeBrowserPathname,
-  normalizeDeploymentRoleMode,
-  normalizePositiveInteger,
-  normalizeReceiveIdsText,
-  normalizeUpdaterRecoveryStage,
-  parseAppBrowserRoute,
-  persistHandoverDutyContext,
-  readMatchingStartupRoleSession,
-  readStartupRuntimeRecovery,
-  readUpdaterRecoveryIntent,
-  resolveSharedBridgeRoleRoot,
-  validateStartupBridgeDraft,
-  writeUpdaterRecoveryIntent,
-  writeStartupRoleSession,
-  writeStartupRuntimeRecovery,
-} from "./startup_runtime_storage_helpers.js";
-import {
-  formatBooleanReachability,
-  formatDetectedNetworkSide,
-  formatNetworkMode,
-  formatNetworkWindowSide,
-  formatSsidSide,
-  formatWetBulbTargetKind,
-} from "./runtime_status_formatters.js";
+const BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"];
+const SOURCE_FAMILIES = [
+  ["handover_log_family", "交接班日志源文件"],
+  ["handover_capacity_report_family", "交接班容量报表源文件"],
+  ["monthly_report_family", "全景平台月报源文件"],
+  ["branch_power_family", "支路功率源文件"],
+  ["alarm_event_family", "告警信息源文件"],
+];
 
-const { createApp, onMounted, onBeforeUnmount, computed, watch, ref, nextTick } = Vue;
-if (isHandoverReviewPath(window.location.pathname)) {
-  mountHandoverReviewApp(Vue);
-  finishAppBoot();
-} else {
-createApp({
-  setup() {
-    const state = createAppState(Vue);
-    const {
-      health,
-      config,
-      currentView,
-      activeConfigTab,
-      dashboardMenuGroups,
-      dashboardModules,
-      dashboardActiveModule,
-      dashboardModuleMenuOpen,
-      applyDashboardRoleMode,
-      selectedDate,
-      rangeStartDate,
-      rangeEndDate,
-      selectedDates,
-      logs,
-      logFilter,
-      internalOpsLogs,
-      currentJob,
-      jobsList,
-      selectedJobId,
-      bridgeTasks,
-      selectedBridgeTaskId,
-      bridgeTaskDetail,
-      busy,
-      message,
-      bootstrapReady,
-      fullHealthLoaded,
-      configLoaded,
-      healthLoadError,
-      configLoadError,
-      internalRuntimeSummary,
-      internalBuildingRuntimeStatusMap,
-      runtimeWarmupReady,
-      engineerDirectoryLoaded,
-      initialLoadingPhase,
-      initialLoadingStatusText,
-      pendingResumeRuns,
-      resumeDeleteConfirmDialog,
-      schedulerQuickSaving,
-      handoverSchedulerQuickSaving,
-      wetBulbSchedulerQuickSaving,
-      dayMetricUploadSchedulerQuickSaving,
-      alarmEventUploadSchedulerQuickSaving,
-      monthlyEventReportSchedulerQuickSaving,
-      monthlyChangeReportSchedulerQuickSaving,
-      schedulerToggleState,
-      configSaveSuspendDepth,
-      configSaveStatus,
-      autoResumeState,
-      buildingsText,
-      sheetRuleRows,
-      manualBuilding,
-      manualFile,
-      manualUploadDate,
-      sheetFile,
-      dayMetricUploadScope,
-      dayMetricUploadBuilding,
-      dayMetricSelectedDate,
-      dayMetricRangeStartDate,
-      dayMetricRangeEndDate,
-      dayMetricSelectedDates,
-      dayMetricLocalBuilding,
-      dayMetricLocalDate,
-      dayMetricLocalFile,
-      handoverFile,
-      handoverFilesByBuilding,
-      handoverDutyDate,
-      handoverDutyShift,
-      handoverDownloadScope,
-      handoverEngineerDirectory,
-      handoverEngineerLoading,
-      handoverDailyReportContext,
-      handoverDailyReportCaptureAssets,
-      handoverDailyReportLastScreenshotTest,
-      handoverDailyReportPreviewModal,
-      handoverDailyReportUploadModal,
-      handoverConfigBuilding,
-      handoverRuleScope,
-      handoverConfigCommonRevision,
-      handoverConfigCommonUpdatedAt,
-      handoverConfigBuildingRevision,
-      handoverConfigBuildingUpdatedAt,
-      handoverConfigBuildingOptions,
-      handoverDutyAutoFollow,
-      handoverDutyLastAutoAt,
-      customAbsoluteStartLocal,
-      customAbsoluteEndLocal,
-      systemLogOffset,
-      streamController,
-      timers,
-      filteredLogs,
-      canRun,
-      isStatusView,
-      isDashboardView,
-      isConfigView,
-      selectedDateCount,
-      dayMetricSelectedDateCount,
-      pendingResumeCount,
-      dayMetricCurrentPayload,
-      dayMetricCurrentResultRows,
-      dayMetricRetryableFailedCount,
-      dayMetricRetryAllMode,
-      handoverGenerationBusy,
-      handoverGenerationStatusText,
-      runningJobs: baseRunningJobs,
-      waitingResourceJobs: baseWaitingResourceJobs,
-      recentFinishedJobs: baseRecentFinishedJobs,
-      bridgeTasksEnabled,
-      activeBridgeTasks,
-      displayedBridgeTasks,
-      totalBridgeHistoryCount,
-      hiddenBridgeHistoryCount,
-      bridgeTaskHistoryDisplayLimit,
-      recentFinishedBridgeTasks,
-      currentBridgeTask,
-      resourceSnapshot,
-      handoverDutyAutoLabel,
-      schedulerDecisionText,
-      schedulerTriggerText,
-      wetBulbSchedulerDecisionText,
-      wetBulbSchedulerTriggerText,
-      dayMetricUploadSchedulerDecisionText,
-      dayMetricUploadSchedulerTriggerText,
-      alarmEventUploadSchedulerDecisionText,
-      alarmEventUploadSchedulerTriggerText,
-      monthlyEventReportSchedulerDecisionText,
-      monthlyEventReportSchedulerTriggerText,
-      monthlyChangeReportSchedulerDecisionText,
-      monthlyChangeReportSchedulerTriggerText,
-      handoverMorningDecisionText,
-      handoverAfternoonDecisionText,
-      handoverReviewStatusItems,
-      handoverReviewLinks,
-      handoverReviewMatrix,
-      handoverReviewBoardRows,
-      dashboardSystemOverview,
-      dashboardSystemStatusItems,
-      dashboardScheduleOverview,
-      dashboardScheduleStatusItems,
-      schedulerOverviewItems,
-      schedulerOverviewSummary,
-      isInternalRole,
-      internalDownloadPoolOverview,
-      internalSourceCacheOverview,
-      internalRealtimeSourceFamilies,
-      externalInternalAlertOverview,
-      currentHourRefreshOverview,
-      internalRuntimeOverview,
-      internalSourceCacheHistoryOverview,
-      sharedSourceCacheReadinessOverview,
-      sharedRootDiagnosticOverview,
-      updaterMirrorOverview,
-      currentTaskOverview,
-      taskPanelOverview,
-      bridgeTaskPanelOverview,
-      homeOverview,
-      homeQuickActionsById,
-      statusDiagnosisOverview,
-      statusQuickActionsById,
-      configGuidanceOverview,
-      externalAlarmUploadOverview: externalAlarmUploadStatus,
-      monthlyEventReportLastRunOverview: monthlyEventReportLastRun,
-      monthlyChangeReportLastRunOverview: monthlyChangeReportLastRun,
-      monthlyEventReportDeliveryOverview: monthlyEventReportDeliveryStatus,
-      monthlyChangeReportDeliveryOverview: monthlyChangeReportDeliveryStatus,
-      monthlyEventReportRecipientRows: monthlyEventReportRecipientStatusByBuilding,
-      monthlyChangeReportRecipientRows: monthlyChangeReportRecipientStatusByBuilding,
-      monthlyEventReportDeliveryLastRun,
-      monthlyChangeReportDeliveryLastRun,
-      handoverReviewOverview,
-      handoverFollowupProgress,
-      handoverDailyReportAuthVm,
-      handoverDailyReportExportVm,
-      handoverDailyReportSpreadsheetUrl,
-      handoverDailyReportActions,
-      handoverDailyReportSummaryTestVm,
-      handoverDailyReportExternalTestVm,
-      canRewriteHandoverDailyReportRecord,
-      handoverConfiguredBuildings,
-      handoverSelectedBuildings,
-      handoverSelectedFileCount,
-      hasSelectedHandoverFiles,
-      handoverFileStatesByBuilding,
-      updaterResultText,
-      updaterVersionInlineText,
-      dashboardActiveModuleTitle,
-      moduleMeta,
-      dashboardActiveModuleHero,
-      handoverRuleScopeOptions,
-      syncCustomWindowLocalInputs,
-      actionGuard,
-    } = state;
-    const { runSingleFlight, isActionLocked } = actionGuard;
-    const updaterUiOverlayVisible = ref(false);
-    const updaterUiOverlayTitle = ref("");
-    const updaterUiOverlaySubtitle = ref("");
-    const updaterUiOverlayStage = ref("");
-    const updaterUiOverlayKicker = ref("");
-    const browserRouteReady = ref(false);
-    const browserRouteLastPath = ref(normalizeBrowserPathname(typeof window !== "undefined" ? window.location.pathname : "/"));
-    const dashboardSchedulerOverviewFocusKey = ref("");
-    const sharedBridgeSelfCheckResult = ref(null);
-    const dashboardSchedulerOverviewFocusTimerState = { timer: null };
-    const startupRoleHelperActionsRef = { current: null };
-    const dashboardRefreshActionsRef = { current: null };
-    let startupRouteFallbackTimer = null;
-    const externalDashboardRefreshTimerState = { timer: null };
-    const updaterAwaitingRestartRecovery = ref(false);
-    const startupRoleSelectorVisible = ref(false);
-    const startupRoleDecisionReady = ref(false);
-    const startupRoleSelectorBusy = ref(false);
-    const startupRoleSelectorSelection = ref("internal");
-    const startupRoleSelectorMessage = ref("");
-    const startupRoleSelectorHandled = ref(false);
-    const startupRoleLoadingVisible = ref(false);
-    const startupRoleLoadingTitle = ref("");
-    const startupRoleLoadingSubtitle = ref("");
-    const startupRoleLoadingStage = ref("");
-    const startupRoleAutoActivationKey = ref("");
-    const startupRoleSuppressedHandoffNonce = ref("");
-    const startupRoleFlowState = ref("selecting");
-    const startupRoleActivationInFlight = ref(false);
-    const startupRoleBridgeDraft = ref(buildStartupBridgeDraft({}));
-    const startupRoleAdvancedVisible = ref(false);
-    const startupRoleOptions = Object.freeze([
-      {
-        value: "internal",
-        label: "内网端",
-        description: "只负责内网下载、查询、采集，并把产物写入共享目录。",
-      },
-      {
-        value: "external",
-        label: "外网端",
-        description: "统一发起协同任务，优先读取共享文件；缺失时再等待内网补采。",
-      },
-    ]);
-    const initialUpdaterRecoveryIntent = readUpdaterRecoveryIntent();
-    if (initialUpdaterRecoveryIntent) {
-      const initialUpdaterStage = normalizeUpdaterRecoveryStage(initialUpdaterRecoveryIntent.stage);
-      updaterUiOverlayVisible.value = true;
-      updaterUiOverlayStage.value = initialUpdaterStage;
-      updaterUiOverlayKicker.value = initialUpdaterRecoveryIntent.source === "updater_restart"
-        ? "程序重启恢复中"
-        : "程序更新恢复中";
-      if (initialUpdaterStage === "queued") {
-        updaterUiOverlayTitle.value = "等待任务结束后自动更新";
-        updaterUiOverlaySubtitle.value = "检测到上次更新请求仍在排队，页面会自动继续恢复。";
-      } else if (initialUpdaterStage === "restarting" || initialUpdaterStage === "reloading") {
-        updaterUiOverlayTitle.value = "更新完成，正在恢复服务";
-        updaterUiOverlaySubtitle.value = "检测到程序正在恢复，服务可用后会自动继续进入当前页面。";
-        updaterAwaitingRestartRecovery.value = true;
-      } else {
-        updaterUiOverlayTitle.value = "正在更新程序";
-        updaterUiOverlaySubtitle.value = "检测到程序更新仍在进行中，请保持当前页面打开。";
-      }
-    }
-    const initialRuntimeRecoveryIntent = readStartupRuntimeRecovery();
-    if (initialRuntimeRecoveryIntent) {
-      startupRoleSelectorSelection.value = initialRuntimeRecoveryIntent.role_mode;
-      startupRoleLoadingVisible.value = true;
-      startupRoleLoadingTitle.value = `正在恢复${formatDeploymentRoleLabel(initialRuntimeRecoveryIntent.role_mode)}`;
-      startupRoleLoadingSubtitle.value = "检测到更新后的自动恢复请求，正在重新进入对应系统。";
-      startupRoleLoadingStage.value = "recovering";
-      startupRoleFlowState.value = "recovering";
-    }
-    clearStartupRoleRestartPending();
-    clearStartupRoleRestartResume();
+const state = {
+  view: location.pathname.includes("/config") ? "config" : "status",
+  health: {},
+  config: null,
+  summary: null,
+  tasks: [],
+  logs: [],
+  logOffset: 0,
+  message: "",
+  error: "",
+  saving: false,
+  busy: new Set(),
+};
 
-    const {
-      actionKeyAutoOnce,
-      actionKeyMultiDate,
-      actionKeyManualUpload,
-      actionKeySheetImport,
-      actionKeyHandoverFromFile,
-      actionKeyHandoverFromDownload,
-      actionKeyDayMetricFromDownload,
-      actionKeyDayMetricFromFile,
-      actionKeyDayMetricRetryUnit,
-      actionKeyDayMetricRetryFailed,
-      actionKeySchedulerStart,
-      actionKeySchedulerStop,
-      actionKeySchedulerSave,
-      actionKeyHandoverSchedulerStart,
-      actionKeyHandoverSchedulerStop,
-      actionKeyHandoverSchedulerSave,
-      actionKeyWetBulbCollectionRun,
-      actionKeyWetBulbSchedulerStart,
-      actionKeyWetBulbSchedulerStop,
-      actionKeyWetBulbSchedulerSave,
-      actionKeyDayMetricUploadSchedulerStart,
-      actionKeyDayMetricUploadSchedulerStop,
-      actionKeyDayMetricUploadSchedulerSave,
-      actionKeyDayMetricConfigRepair,
-      actionKeyAlarmEventUploadSchedulerStart,
-      actionKeyAlarmEventUploadSchedulerStop,
-      actionKeyAlarmEventUploadSchedulerSave,
-      actionKeyMonthlyEventReportRunAll,
-      actionKeyMonthlyEventReportRunBuildingPrefix,
-      actionKeyMonthlyChangeReportRunAll,
-      actionKeyMonthlyChangeReportRunBuildingPrefix,
-      actionKeyMonthlyEventReportSchedulerStart,
-      actionKeyMonthlyEventReportSchedulerStop,
-      actionKeyMonthlyEventReportSchedulerSave,
-      actionKeyMonthlyChangeReportSchedulerStart,
-      actionKeyMonthlyChangeReportSchedulerStop,
-      actionKeyMonthlyChangeReportSchedulerSave,
-      actionKeyMonthlyReportSendAllPrefix,
-      actionKeyMonthlyReportSendBuildingPrefix,
-      actionKeyMonthlyReportSendTestPrefix,
-      actionKeyConfigSave,
-      actionKeyUpdaterCheck,
-      actionKeyUpdaterApply,
-      actionKeyUpdaterRestart,
-      actionKeyUpdaterPublishApproved,
-      actionKeyUpdaterInternalPeerCheck,
-      actionKeyUpdaterInternalPeerApply,
-      actionKeyUpdaterInternalPeerRestart,
-      actionKeySourceCacheRefreshCurrentHour,
-      actionKeySourceCacheRefreshBuildingLatestPrefix,
-      actionKeySourceCacheRefreshAlarmManual,
-      actionKeySourceCacheDeleteAlarmManual,
-      actionKeySourceCacheUploadAlarmFull,
-      actionKeySourceCacheUploadAlarmBuildingPrefix,
-      actionKeyHandoverConfigCommonSave,
-      actionKeyHandoverConfigBuildingSave,
-      actionKeySharedBridgeSelfCheck,
-      actionKeyHandoverConfirmAll,
-      actionKeyHandoverCloudRetryAll,
-      actionKeyHandoverFollowupContinue,
-      actionKeyHandoverDailyReportAuthOpen,
-      actionKeyHandoverDailyReportScreenshotTest,
-      actionKeyHandoverReviewAccessReprobe,
-      actionKeyHandoverReviewLinkSendPrefix,
-    } = APP_ACTION_KEYS;
-    const {
-      runtimeActionsRef,
-      getSourceCacheRefreshBuildingActionKey,
-      startupRoleDraftSourceConfig,
-      uploadAlarmSourceCacheFull,
-      uploadAlarmSourceCacheBuilding,
-      checkUpdaterNow,
-      applyUpdaterPatch,
-      restartUpdaterApp,
-      publishUpdaterApproved,
-      triggerInternalPeerUpdaterCheck,
-      triggerInternalPeerUpdaterApply,
-      triggerInternalPeerUpdaterRestart,
-      refreshCurrentHourSourceCache,
-      refreshManualAlarmSourceCache,
-      getJobCancelActionKey,
-      getJobRetryActionKey,
-      cancelCurrentJob,
-      retryCurrentJob,
-      fetchJob,
-    } = createRuntimeActionForwarders({
-      configLoaded,
-      config,
-      health,
-      actionKeySourceCacheRefreshBuildingLatestPrefix,
-    });
-    const {
-      getUpdaterDisabledText,
-      updaterMainAction,
-      updaterPublishApprovedAction,
-      updaterInternalPeerCheckAction,
-      updaterInternalPeerApplyAction,
-      updaterInternalPeerRestartAction,
-      isUpdaterSourceRunDisabled,
-      updaterBadgeToneClass,
-      updaterButtonClass,
-      isUpdaterActionLocked,
-      isUpdaterPublishApprovedLocked,
-      updaterInternalPeerSnapshot,
-      updaterInternalPeerCommandActive,
-      updaterInternalPeerCommandAction,
-      updaterInternalPeerOnline,
-      isUpdaterInternalPeerCheckLocked,
-      isUpdaterInternalPeerApplyLocked,
-      isUpdaterInternalPeerRestartLocked,
-      updaterPublishApprovedButtonText,
-      updaterInternalPeerCheckButtonText,
-      updaterInternalPeerApplyButtonText,
-      updaterInternalPeerRestartButtonText,
-      updaterMainButtonText,
-    } = createUpdaterUiHelpers({
-      computed,
-      updaterMirrorOverview,
-      isActionLocked,
-      actionKeyUpdaterCheck,
-      actionKeyUpdaterApply,
-      actionKeyUpdaterRestart,
-      actionKeyUpdaterPublishApproved,
-      actionKeyUpdaterInternalPeerCheck,
-      actionKeyUpdaterInternalPeerApply,
-      actionKeyUpdaterInternalPeerRestart,
-    });
-    const externalAlarmUploadBuilding = ref("全部楼栋");
-    const monthlyReportTestReceiveIdDraftEvent = ref("");
-    const monthlyReportTestReceiveIdDraftChange = ref("");
-    const {
-      setSchedulerToggleState,
-      syncSchedulerToggleStateWithHealth,
-      getSchedulerToggleMode,
-      getSchedulerSnapshotByKey,
-      getSchedulerDisplayState,
-      getSchedulerAction,
-      getSchedulerStatusTone,
-      getSchedulerStatusText,
-      getSchedulerDisplayText,
-      getSchedulerEffectiveRunning,
-      getSchedulerEffectiveRemembered,
-      isSchedulerStartDisabled,
-      isSchedulerStopDisabled,
-      getSchedulerStartButtonText,
-      getSchedulerStopButtonText,
-      isSchedulerTogglePending,
-      syncSchedulerDraftAutoStartFromRemembered,
-    } = createSchedulerUiHelpers({
-      health,
-      config,
-      schedulerToggleState,
-      isActionLocked,
-    });
-    const {
-      getInternalSourceCacheRefreshActionKey,
-      getInternalSourceCacheRefreshAction,
-      getInternalSourceCacheRefreshDisabledReason,
-      isInternalSourceCacheRefreshLocked,
-      getInternalSourceCacheRefreshButtonText,
-    } = createInternalSourceCacheUiHelpers({
-      isActionLocked,
-      getSourceCacheRefreshBuildingActionKey,
-      refreshBuildingActionKeyPrefix: actionKeySourceCacheRefreshBuildingLatestPrefix,
-    });
-    const {
-      isSourceCacheRefreshCurrentHourLocked,
-      isSourceCacheRefreshAlarmManualLocked,
-      isSourceCacheDeleteAlarmManualLocked,
-      externalAlarmReadinessFamily,
-      isAlarmSourceCacheUploadRunning,
-      isSourceCacheUploadAlarmFullLocked,
-      isSourceCacheUploadAlarmBuildingLocked,
-      isSourceCacheUploadAlarmSelectedLocked,
-      currentHourRefreshButtonText,
-      manualAlarmRefreshButtonText,
-      manualAlarmDeleteButtonText,
-      externalAlarmUploadActionButtonText,
-      uploadSelectedAlarmSourceCache,
-      monthlyEventReportOutputDir,
-      monthlyChangeReportOutputDir,
-      monthlyEventReportSendReadyCount,
-      monthlyChangeReportSendReadyCount,
-      handoverEngineerDirectoryTarget,
-      alarmEventUploadTarget,
-      dayMetricUploadTarget,
-    } = createSourceCacheTargetUiHelpers({
-      computed,
-      health,
-      config,
-      sharedSourceCacheReadinessOverview,
-      externalAlarmUploadBuilding,
-      isActionLocked,
-      actionKeySourceCacheRefreshCurrentHour,
-      actionKeySourceCacheRefreshAlarmManual,
-      actionKeySourceCacheDeleteAlarmManual,
-      actionKeySourceCacheUploadAlarmFull,
-      actionKeySourceCacheUploadAlarmBuildingPrefix,
-      monthlyEventReportLastRun,
-      monthlyChangeReportLastRun,
-      monthlyEventReportDeliveryStatus,
-      monthlyChangeReportDeliveryStatus,
-      monthlyEventReportRecipientStatusByBuilding,
-      monthlyChangeReportRecipientStatusByBuilding,
-      uploadAlarmSourceCacheFull,
-      uploadAlarmSourceCacheBuilding,
-    });
-    const {
-      resolveMonthlyReportTargetMonth,
-      monthlyEventReportSendAllActionKey,
-      monthlyChangeReportSendAllActionKey,
-      monthlyEventReportSendTestActionKey,
-      monthlyChangeReportSendTestActionKey,
-      getMonthlyReportTestDeliveryConfig,
-      ensureMonthlyReportTestDeliveryConfig,
-      monthlyReportTestReceiveIdType,
-      monthlyReportTestReceiveIds,
-      monthlyReportTestReceiveCount,
-      addMonthlyReportTestReceiveId,
-      removeMonthlyReportTestReceiveId,
-      getMonthlyReportSendBuildingActionKey,
-    } = createMonthlyReportUiHelpers({
-      computed,
-      config,
-      message,
-      normalizeReceiveIdsText,
-      monthlyEventReportLastRun,
-      monthlyChangeReportLastRun,
-      monthlyReportTestReceiveIdDraftEvent,
-      monthlyReportTestReceiveIdDraftChange,
-      actionKeyMonthlyReportSendAllPrefix,
-      actionKeyMonthlyReportSendTestPrefix,
-      actionKeyMonthlyReportSendBuildingPrefix,
-    });
-    const initialBrowserRoute = parseAppBrowserRoute(typeof window !== "undefined" ? window.location.pathname : "/");
-    const {
-      effectiveRoleMode,
-      deploymentRoleMode,
-      isInternalDeploymentRole,
-      isExternalDeploymentRole,
-      configRoleMode,
-      showCommonPathsConfigTab,
-      showCommonSchedulerConfigTab,
-      showNotifyConfigTab,
-      showFeishuAuthConfigTab,
-      showConsoleConfigTab,
-      showFeatureMonthlyConfigTab,
-      showFeatureHandoverConfigTab,
-      showFeatureDayMetricUploadConfigTab,
-      showFeatureWetBulbCollectionConfigTab,
-      showFeatureAlarmExportConfigTab,
-      showSheetImportConfigTab,
-      showManualFeatureConfigTab,
-      showRuntimeNetworkPanel,
-      showDashboardPageNav,
-      appShellTitle,
-      statusNavLabel,
-      dashboardNavLabel,
-      configNavLabel,
-      configShellTitle,
-      configShellDescription,
-      configReturnButtonText,
-      statusHeroTitle,
-      statusHeroDescription,
-      bridgeExecutionHint,
-      externalExecutionHint,
-      resumeExecutionHint,
-      startupRoleCurrentMode,
-      startupRoleCurrentToken,
-      startupRoleCurrentNodeId,
-      startupRoleCurrentLabel,
-      startupRoleSelectedLabel,
-      startupRoleNodeIdDisplayText,
-      startupRoleNodeIdDisplayHint,
-      startupRoleRequiresBridgeConfig,
-      startupRoleBridgeValidationMessage,
-      startupRoleCurrentHasBridgeConfig,
-      startupRoleBridgeNoticeText,
-      startupRoleHasDraftChanges,
-      startupRoleHasRelevantDraftChanges,
-      startupRoleWillSaveChanges,
-      startupRoleActionButtonText,
-      startupRoleConfirmDisabled,
-      startupRoleGateReady,
-      startupRoleGateVisible,
-      shouldRenderAppShell,
-      deploymentNodeIdDisplayText,
-      deploymentNodeIdDisplayHint,
-    } = createAppShellUiHelpers({
-      computed,
-      health,
-      config,
-      bootstrapReady,
-      startupRoleSelectorVisible,
-      startupRoleSelectorBusy,
-      startupRoleDecisionReady,
-      startupRoleSelectorSelection,
-      startupRoleBridgeDraft,
-      normalizeDeploymentRoleMode,
-      formatDeploymentRoleLabel,
-      buildRoleNodeIdPreview,
-      validateStartupBridgeDraft,
-      resolveSharedBridgeRoleRoot,
-      startupRoleDraftSourceConfig,
-      isStartupBridgeDraftChanged,
-    });
-    const {
-      isHandoverConfirmAllLocked,
-      isHandoverCloudRetryAllLocked,
-      handoverConfirmAllActionBase,
-      handoverCloudRetryAllActionBase,
-      handoverFollowupContinueActionBase,
-      handoverConfirmAllButtonText,
-      isHandoverConfirmAllDisabled,
-      canShowHandoverCloudRetryAll,
-      handoverCloudRetryAllButtonText,
-      isHandoverCloudRetryAllDisabled,
-      isHandoverFollowupContinueLocked,
-      handoverFollowupBatchKey,
-      canShowHandoverFollowupContinue,
-      handoverFollowupContinueButtonText,
-      isHandoverFollowupContinueDisabled,
-    } = createHandoverReviewOverviewUiHelpers({
-      computed,
-      handoverReviewOverview,
-      isActionLocked,
-      actionKeyHandoverConfirmAll,
-      actionKeyHandoverCloudRetryAll,
-      actionKeyHandoverFollowupContinue,
-    });
-    const uiLocalActions = createUiLocalActions({
-      currentView,
-      activeConfigTab,
-      config,
-      manualFile,
-      sheetFile,
-      dayMetricLocalFile,
-      handoverFilesByBuilding,
-      sheetRuleRows,
-      logs,
-      logFilter,
-      message,
-      dashboardModules,
-      dashboardActiveModule,
-      dashboardModuleMenuOpen,
-      handoverRuleScope,
-    });
-
-    const {
-      openStatusPage,
-      openDashboardPage,
-      openConfigPage,
-      switchConfigTab,
-      setDashboardActiveModule,
-      openDashboardMenuDrawer,
-      closeDashboardMenuDrawer,
-      onManualFileChange,
-      onSheetFileChange,
-      onDayMetricLocalFileChange,
-      onHandoverBuildingFileChange,
-      addSiteRow,
-      removeSiteRow,
-      addSheetRuleRow,
-      removeSheetRuleRow,
-      previewSiteUrl,
-      clearLogs,
-      getActiveHandoverRuleRows,
-      addHandoverRuleRow,
-      removeHandoverRuleRow,
-      updateHandoverRuleKeywords,
-      getHandoverComputedPreset,
-      onHandoverComputedPresetChange,
-      copyAllDefaultRulesToCurrentBuilding,
-      clearCurrentBuildingOverrides,
-      restoreDefaultRuleForCurrentBuilding,
-    } = uiLocalActions;
-
-    const {
-      clearDashboardSchedulerOverviewFocus,
-      openDashboardSchedulerOverviewTarget,
-      runUpdaterMainAction,
-      publishUpdaterApprovedNow,
-      checkInternalPeerUpdaterNow,
-      applyInternalPeerUpdaterNow,
-      restartInternalPeerUpdaterNow,
-    } = createAppActionUiHelpers({
-      message,
-      updaterMainAction,
-      updaterPublishApprovedAction,
-      updaterInternalPeerCheckAction,
-      updaterInternalPeerApplyAction,
-      updaterInternalPeerRestartAction,
-      isUpdaterActionLocked,
-      isUpdaterPublishApprovedLocked,
-      isUpdaterInternalPeerCheckLocked,
-      isUpdaterInternalPeerApplyLocked,
-      isUpdaterInternalPeerRestartLocked,
-      getUpdaterDisabledText,
-      restartUpdaterApp,
-      applyUpdaterPatch,
-      checkUpdaterNow,
-      publishUpdaterApproved,
-      triggerInternalPeerUpdaterCheck,
-      triggerInternalPeerUpdaterApply,
-      triggerInternalPeerUpdaterRestart,
-      setDashboardActiveModule,
-      dashboardSchedulerOverviewFocusKey,
-      nextTick,
-      timerState: dashboardSchedulerOverviewFocusTimerState,
-    });
-
-    const dateHandoverActions = createDateHandoverActions({
-      config,
-      message,
-      selectedDate,
-      rangeStartDate,
-      rangeEndDate,
-      selectedDates,
-      handoverDutyDate,
-      handoverDutyShift,
-      handoverDownloadScope,
-      handoverDutyAutoFollow,
-      handoverDutyLastAutoAt,
-    });
-
-    const {
-      syncHandoverDutyFromNow,
-      onHandoverDutyDateManualChange,
-      onHandoverDutyShiftManualChange,
-      restoreAutoHandoverDuty,
-      addDate,
-      addDateRange,
-      quickRangeToday,
-      removeDate,
-      clearDates,
-    } = dateHandoverActions;
-
-    const dayMetricDateUiHelpers = createDayMetricDateUiHelpers({
-      dayMetricSelectedDates,
-      dayMetricSelectedDate,
-      dayMetricRangeStartDate,
-      dayMetricRangeEndDate,
-      message,
-    });
-
-    const {
-      appendDayMetricDate,
-      addDayMetricDate,
-      addDayMetricDateRange,
-      removeDayMetricDate,
-      clearDayMetricDates,
-    } = dayMetricDateUiHelpers;
-
-    const runtimeActions = createRuntimeActions({
-      health,
-      config,
-      logs,
-      message,
-      busy,
-      currentJob,
-      jobsList,
-      selectedJobId,
-      bridgeTasks,
-      selectedBridgeTaskId,
-      bridgeTaskDetail,
-      resourceSnapshot,
-      pendingResumeRuns,
-      resumeDeleteConfirmDialog,
-      autoResumeState,
-      buildingsText,
-      sheetRuleRows,
-      manualBuilding,
-      dayMetricUploadBuilding,
-      dayMetricLocalBuilding,
-      customAbsoluteStartLocal,
-      customAbsoluteEndLocal,
-      syncCustomWindowLocalInputs,
-      systemLogOffset,
-      handoverEngineerDirectory,
-      handoverEngineerLoading,
-      handoverDailyReportContext,
-      handoverDailyReportCaptureAssets,
-      handoverDailyReportLastScreenshotTest,
-      handoverDailyReportPreviewModal,
-      handoverDailyReportUploadModal,
-      handoverConfigBuilding,
-      handoverConfigCommonRevision,
-      handoverConfigCommonUpdatedAt,
-      handoverConfigBuildingRevision,
-      handoverConfigBuildingUpdatedAt,
-      handoverDutyDate,
-      handoverDutyShift,
-      currentView,
-      canRun,
-      timers,
-      streamController,
-      runSingleFlight,
-      bootstrapReady,
-      fullHealthLoaded,
-      configLoaded,
-      healthLoadError,
-      configLoadError,
-      internalRuntimeSummary,
-      internalBuildingRuntimeStatusMap,
-      runtimeWarmupReady,
-      engineerDirectoryLoaded,
-      updaterUiOverlayVisible,
-      updaterUiOverlayTitle,
-      updaterUiOverlaySubtitle,
-      updaterUiOverlayStage,
-      updaterUiOverlayKicker,
-      updaterAwaitingRestartRecovery,
-      startupRoleSelectorHandled,
-      startupRoleSelectorVisible,
-      startupRoleLoadingVisible,
-      startupRoleActivationInFlight,
-      markRestartRecoveryIntent,
-      clearRestartRecoveryIntent: clearStartupRuntimeRecovery,
-      readUpdaterRecoveryIntent,
-      writeUpdaterRecoveryIntent,
-      clearUpdaterRecoveryIntent,
-      nextTick,
-      scheduleExternalDashboardRefresh: queueExternalDashboardRefresh,
-      shouldPauseRuntimeRequests: () => shouldPauseRuntimeRequests.value,
-      shouldIncludeHandoverHealthContext: () => shouldIncludeHandoverHealthContext.value,
-      shouldFetchHandoverDailyReportContext: () => shouldPollHandoverDailyReportContext.value,
-      shouldLoadEngineerDirectory: () => shouldLoadEngineerDirectory.value,
-    });
-    runtimeActionsRef.current = runtimeActions;
-
-    const {
-      appendLog,
-      applyJobPanelSummary,
-      fetchBootstrapHealth,
-      fetchExternalDashboardSummary,
-      fetchHealth,
-      fetchJobs,
-      fetchBridgeTasks,
-      fetchBridgeTaskDetail,
-      cancelBridgeTask,
-      retryBridgeTask,
-      patchJobPanelActionState,
-      refreshBuildingLatestSourceCache,
-      deleteManualAlarmSourceCacheFiles,
-      openAlarmEventUploadTarget,
-      fetchRuntimeResources,
-      fetchInternalRuntimeSummary,
-      fetchInternalRuntimeBuildingRuntimeStatus,
-      fetchAllInternalBuildingRuntimeStatuses,
-      scheduleInternalRuntimeStatusRefresh,
-      resetInternalRuntimeRequestState,
-      resetExternalDashboardRequestState,
-      fetchConfig,
-      fetchHandoverCommonConfigSegment,
-      fetchHandoverBuildingConfigSegment,
-      fetchHandoverEngineerDirectory,
-      ensureHandoverEngineerDirectoryLoaded,
-      scheduleEngineerDirectoryPrefetch,
-      saveConfig,
-      savePartialConfig,
-      getPreparedConfigPayloadState,
-      repairDayMetricUploadConfig,
-      saveHandoverCommonConfig,
-      saveHandoverReviewBaseUrlQuickConfig,
-      saveHandoverBuildingConfig,
-      activateStartupRuntime,
-      exitCurrentRuntime,
-      restartApplication,
-      resumeUpdaterRecoveryIfNeeded,
-      confirmAllHandoverReview,
-      retryAllFailedHandoverCloudSync,
-      fetchHandoverDailyReportContext,
-      openHandoverDailyReportScreenshotAuth,
-      runHandoverDailyReportScreenshotTest,
-      openHandoverDailyReportPreview,
-      closeHandoverDailyReportPreview,
-      openHandoverDailyReportUploadDialog,
-      closeHandoverDailyReportUploadDialog,
-      uploadHandoverDailyReportAsset,
-      recaptureHandoverDailyReportAsset,
-      restoreHandoverDailyReportAutoAsset,
-      rewriteHandoverDailyReportRecord,
-      reprobeHandoverReviewAccess,
-      sendHandoverReviewLink: sendHandoverReviewLinkAction,
-      getBridgeTaskCancelActionKey,
-      getBridgeTaskRetryActionKey,
-      getHandoverDailyReportRecaptureActionKey,
-      getHandoverDailyReportUploadActionKey,
-      getHandoverDailyReportRestoreActionKey,
-      ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX,
-      fetchPendingResumeRuns,
-      runResumeUpload,
-      deleteResumeRun,
-      deleteAllResumeRuns,
-      confirmResumeDeleteDialog,
-      closeResumeDeleteConfirmDialog,
-      getResumeRunId,
-      getResumeRunActionKey,
-      getResumeDeleteActionKey,
-      getResumeDeleteAllActionKey,
-      getResumeDeleteConfirmActionKey,
-      formatResumeDateSummary,
-      formatResumeDateFull,
-      tryAutoResume,
-      ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE,
-      ACTION_KEY_DAY_METRIC_CONFIG_REPAIR,
-      ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,
-    } = runtimeActions;
-
-    void resumeUpdaterRecoveryIfNeeded();
-
-    const {
-      getHandoverReviewLinkSendActionKey,
-      getHandoverReviewLinkSendAction,
-      isHandoverReviewLinkSendDisabled,
-      getHandoverReviewLinkSendButtonText,
-      getHandoverReviewLinkSendDisabledReason,
-      getHandoverDailyReportActionButtonText,
-      getHandoverDailyReportActionDisabledReason,
-      isHandoverDailyReportActionDisabled,
-      getHandoverDailyReportAssetActionButtonText,
-      getHandoverDailyReportAssetActionDisabledReason,
-      isHandoverDailyReportAssetActionDisabled,
-      getStatusQuickAction,
-      runHomeQuickAction,
-      isHomeQuickActionLocked,
-      getHomeQuickActionButtonText,
-      getHomeQuickActionDisabledReason,
-    } = createHandoverDashboardUiHelpers({
-      health,
-      handoverReviewOverview,
-      handoverDailyReportActions,
-      homeQuickActionsById,
-      statusQuickActionsById,
-      isSourceCacheRefreshCurrentHourLocked,
-      isSourceCacheRefreshAlarmManualLocked,
-      isActionLocked,
-      reviewLinkSendActionKeyPrefix: ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX || actionKeyHandoverReviewLinkSendPrefix,
-      openDashboardPage,
-      setDashboardActiveModule,
-      refreshCurrentHourSourceCache,
-      refreshManualAlarmSourceCache,
-      openConfigPage,
-    });
-
-    function clearStartupRouteFallbackTimer() {
-      if (startupRouteFallbackTimer) {
-        window.clearTimeout(startupRouteFallbackTimer);
-        startupRouteFallbackTimer = null;
-      }
-    }
-
-    function markRestartRecoveryIntent(...args) {
-      const action = startupRoleHelperActionsRef.current?.persistRuntimeRecoveryIntent;
-      if (typeof action === "function") {
-        return action(...args);
-      }
-      return undefined;
-    }
-
-    function queueExternalDashboardRefresh(...args) {
-      const action = dashboardRefreshActionsRef.current?.scheduleExternalDashboardRefresh;
-      if (typeof action === "function") {
-        return action(...args);
-      }
-      return undefined;
-    }
-
-    const {
-      closeStartupRoleSelector,
-      showStartupRoleSelector,
-      showStartupRoleLoading,
-      hideStartupRoleLoading,
-      clearStartupRoleRestartPendingState,
-      clearStartupRoleRestartResumeState,
-      clearLegacyStartupRoleRestartState,
-      persistStartupRoleSession,
-      persistRuntimeRecoveryIntent,
-      applyBrowserRoute,
-      syncBrowserRoute,
-      currentStartupHandoff,
-      suppressCurrentStartupHandoff,
-      syncStartupRoleBridgeDraft,
-      selectStartupRole,
-      activateStartupRuntimeAfterSelection,
-      exitCurrentSystemToRoleSelector,
-      confirmStartupRoleSelection,
-    } = createStartupRoleUiHelpers({
-      normalizeDeploymentRoleMode,
-      parseAppBrowserRoute,
-      buildAppBrowserRoutePath,
-      formatDeploymentRoleLabel,
-      normalizePositiveInteger,
-      STARTUP_BRIDGE_DEFAULTS,
-      buildStartupBridgeDraft,
-      validateStartupBridgeDraft,
-      startupRoleSelectorVisible,
-      startupRoleSelectorBusy,
-      startupRoleSelectorMessage,
-      startupRoleDecisionReady,
-      startupRoleSelectorHandled,
-      startupRoleFlowState,
-      startupRoleLoadingVisible,
-      startupRoleLoadingTitle,
-      startupRoleLoadingSubtitle,
-      startupRoleLoadingStage,
-      startupRoleCurrentMode,
-      startupRoleCurrentToken,
-      startupRoleCurrentNodeId,
-      startupRoleSuppressedHandoffNonce,
-      startupRoleSelectorSelection,
-      startupRoleBridgeDraft,
-      startupRoleAdvancedVisible,
-      startupRoleAutoActivationKey,
-      startupRoleActivationInFlight,
-      browserRouteLastPath,
-      browserRouteReady,
-      currentView,
-      configLoaded,
-      config,
-      deploymentRoleMode,
-      health,
-      message,
-      activateStartupRuntime,
-      exitCurrentRuntime,
-      fetchBootstrapHealth,
-      fetchHealth,
-      clearStartupRoleRestartPending,
-      clearStartupRoleRestartResume,
-      clearStartupRoleSession,
-      clearStartupRuntimeRecovery,
-      clearUpdaterRecoveryIntent,
-      writeStartupRoleSession,
-      writeStartupRuntimeRecovery,
-      onRuntimeExited: () => {
-        currentJob.value = null;
-        selectedJobId.value = "";
-        selectedBridgeTaskId.value = "";
-        bridgeTaskDetail.value = null;
-        pendingResumeRuns.value = [];
-        if (streamController && typeof streamController.closeJobStream === "function") {
-          streamController.closeJobStream();
-        }
-      },
-    });
-    startupRoleHelperActionsRef.current = {
-      persistRuntimeRecoveryIntent,
-    };
-    applyBrowserRoute(initialBrowserRoute, {
-      forceLogin: initialBrowserRoute.kind === "login",
-    });
-
-    const {
-      wetBulbConfiguredTarget,
-      wetBulbLatestRunTarget,
-      scheduleExternalDashboardRefresh,
-      sharedBridgeSelfCheckOverview,
-    } = createDashboardRefreshUiHelpers({
-      computed,
-      currentJob,
-      health,
-      sharedBridgeSelfCheckResult,
-      fetchExternalDashboardSummary,
-      fetchHealth,
-      fetchBridgeTasks,
-      fetchPendingResumeRuns,
-      shouldPollExternalDashboardSummary: () => shouldPollExternalDashboardSummary.value,
-      shouldFetchHealth: () => shouldFetchHealth.value,
-      shouldPollBridgeTasks: () => shouldPollBridgeTasks.value,
-      shouldFetchPendingResumeRuns: () => shouldFetchPendingResumeRuns.value,
-      timerState: externalDashboardRefreshTimerState,
-    });
-    dashboardRefreshActionsRef.current = {
-      scheduleExternalDashboardRefresh,
-    };
-
-    const runningJobs = baseRunningJobs;
-    const waitingResourceJobs = baseWaitingResourceJobs;
-    const recentFinishedJobs = baseRecentFinishedJobs;
-
-    const {
-      isWaitingResourceItemSelected,
-      focusWaitingResourceItem,
-      focusJobInRuntimeLogs,
-      focusBridgeTaskInRuntimeLogs,
-      focusWaitingResourceItemInRuntimeLogs,
-      getRuntimeTaskAction,
-      getRuntimeTaskActionTarget,
-      isRuntimeTaskActionVisible,
-      isRuntimeTaskActionPending,
-      getRuntimeTaskActionLabel,
-      getRuntimeTaskActionDisabledReason,
-      getRuntimeTaskKind,
-      getRuntimeTaskTitle,
-      getRuntimeTaskMeta,
-      getRuntimeTaskDetail,
-      getJobRetryAction,
-      getRuntimeTaskActionKey,
-      getRuntimeTaskCancelActionKey,
-      isRuntimeTaskActionLocked,
-      cancelRuntimeTask,
-      cancelJobItem,
-      retryJobItem,
-      focusJob,
-      focusBridgeTask,
-    } = createRuntimeTaskUiHelpers({
-      currentJob,
-      jobsList,
-      selectedJobId,
-      bridgeTasks,
-      selectedBridgeTaskId,
-      bridgeTaskDetail,
-      message,
-      streamController,
-      isActionLocked,
-      getBridgeTaskCancelActionKey,
-      getBridgeTaskRetryActionKey,
-      getJobCancelActionKey,
-      getJobRetryActionKey,
-      cancelBridgeTask,
-      retryBridgeTask,
-      cancelCurrentJob,
-      retryCurrentJob,
-      fetchJob,
-      fetchBridgeTaskDetail,
-    });
-
-    const handoverDailyReportUploadUiHelpers = createHandoverDailyReportUploadUiHelpers({
-      message,
-      handoverDailyReportUploadModal,
-      uploadHandoverDailyReportAsset,
-    });
-
-    const { onHandoverDailyReportAssetFileChange, onHandoverDailyReportUploadPaste } =
-      handoverDailyReportUploadUiHelpers;
-
-    const {
-      updateConfigSaveStatus,
-      currentConfigSaveTimestamp,
-      markConfigDraftDirty,
-      buildCurrentConfigDraftSignature,
-      buildHandoverConfigDraftSignature,
-      syncConfigSaveSavedSignature,
-      markCurrentConfigDraftDirty,
-      serializeCurrentHandoverCommonDraft,
-      serializeCurrentHandoverBuildingDraft,
-      syncSavedHandoverCommonSignature,
-      syncSavedHandoverBuildingSignature,
-      hasPendingHandoverConfigChanges,
-      savePendingHandoverConfigChanges,
-      savePreparedConfigDraft,
-      configSaveStateText,
-      configSaveStateDetail,
-      configSaveButtonLocked,
-      isConfigSaveLocked,
-      configSaveButtonText,
-      saveActiveConfig,
-      sendHandoverReviewLink,
-      onHandoverConfigBuildingChange,
-      onHandoverReviewRecipientBuildingChange,
-      runSchedulerConfigQuickSave,
-    } = createConfigSaveUiHelpers({
-      computed,
-      clone,
-      config,
-      configLoaded,
-      currentView,
-      activeConfigTab,
-      handoverConfigBuilding,
-      handoverConfigBuildingRevision,
-      configSaveStatus,
-      configSaveSuspendDepth,
-      message,
-      isActionLocked,
-      getPreparedConfigPayloadState,
-      saveConfig,
-      saveHandoverCommonConfig,
-      saveHandoverBuildingConfig,
-      fetchHandoverBuildingConfigSegment,
-      sendHandoverReviewLinkAction,
-      actionKeyConfigSave,
-      actionKeyHandoverConfigCommonSave,
-      actionKeyHandoverConfigBuildingSave,
-    });
-
-    registerStartupRoleRecoveryWatcher({
-      watch,
-      parseAppBrowserRoute,
-      normalizeDeploymentRoleMode,
-      clearStartupRouteFallbackTimer,
-      readMatchingStartupRoleSession,
-      readStartupRuntimeRecovery,
-      currentStartupHandoff,
-      formatDeploymentRoleLabel,
-      bootstrapReady,
-      configLoaded,
-      startupRoleCurrentMode,
-      startupRoleCurrentToken,
-      startupRoleCurrentNodeId,
-      startupRoleFlowState,
-      updaterUiOverlayVisible,
-      startupRoleSelectorVisible,
-      startupRoleSelectorBusy,
-      startupRoleLoadingVisible,
-      startupRoleSelectorHandled,
-      startupRoleDecisionReady,
-      startupRoleSuppressedHandoffNonce,
-      startupRoleSelectorSelection,
-      startupRoleAutoActivationKey,
-      startupRoleActivationInFlight,
-      health,
-      selectStartupRole,
-      syncStartupRoleBridgeDraft,
-      showStartupRoleLoading,
-      activateStartupRuntimeAfterSelection,
-      suppressCurrentStartupHandoff,
-      clearLegacyStartupRoleRestartState,
-      clearUpdaterRecoveryIntent,
-      message,
-      showStartupRoleSelector,
-      closeStartupRoleSelector,
-      hideStartupRoleLoading,
-      persistStartupRoleSession,
-      clearStartupRuntimeRecovery,
-      clearStartupRoleSession,
-    });
-
-    const {
-      shouldPauseRuntimeRequests,
-      runtimeRequestsReady,
-      shouldFetchHealth,
-      shouldPollExternalDashboardSummary,
-      shouldPollJobPanel,
-      shouldFetchPendingResumeRuns,
-      healthPollIntervalMs,
-      shouldPollBridgeTasks,
-      shouldPollInternalRuntimeStatus,
-      shouldIncludeHandoverHealthContext,
-      shouldPollHandoverDailyReportContext,
-      shouldLoadEngineerDirectory,
-    } = createRuntimeRequestPolicyUiHelpers({
-      computed,
-      startupRoleSelectorHandled,
-      updaterUiOverlayVisible,
-      updaterAwaitingRestartRecovery,
-      startupRoleSelectorVisible,
-      startupRoleLoadingVisible,
-      startupRoleActivationInFlight,
-      bootstrapReady,
-      health,
-      currentView,
-      deploymentRoleMode,
-      fullHealthLoaded,
-      bridgeTasksEnabled,
-      dashboardActiveModule,
-      activeConfigTab,
-    });
-
-    registerAppRuntimeWatchers({
-      watch,
-      onBeforeUnmount,
-      parseAppBrowserRoute,
-      applyBrowserRoute,
-      syncBrowserRoute,
-      shouldPauseRuntimeRequests,
-      streamController,
-      runtimeRequestsReady,
-      shouldPollExternalDashboardSummary,
-      shouldFetchHealth,
-      shouldPollJobPanel,
-      shouldPollBridgeTasks,
-      shouldPollHandoverDailyReportContext,
-      shouldFetchPendingResumeRuns,
-      shouldLoadEngineerDirectory,
-      shouldPollInternalRuntimeStatus,
-      runtimeWarmupReady,
-      deploymentRoleMode,
-      health,
-      internalRuntimeSummary,
-      internalBuildingRuntimeStatusMap,
-      createEmptyInternalBuildingRuntimeStatusMap,
-      bootstrapReady,
-      configLoaded,
-      currentView,
-      activeConfigTab,
-      startupRoleSelectorVisible,
-      startupRoleGateReady,
-      browserRouteReady,
-      config,
-      buildingsText,
-      sheetRuleRows,
-      customAbsoluteStartLocal,
-      customAbsoluteEndLocal,
-      configSaveSuspendDepth,
-      markCurrentConfigDraftDirty,
-      fetchConfig,
-      fetchHandoverCommonConfigSegment,
-      fetchHandoverBuildingConfigSegment,
-      handoverConfigBuilding,
-      handoverConfigCommonRevision,
-      syncSavedHandoverCommonSignature,
-      handoverConfigBuildingRevision,
-      syncSavedHandoverBuildingSignature,
-      handoverDutyDate,
-      handoverDutyShift,
-      persistHandoverDutyContext,
-      fetchHealth,
-      fetchHandoverDailyReportContext,
-      fetchExternalDashboardSummary,
-      fetchJobs,
-      fetchBridgeTasks,
-      fetchPendingResumeRuns,
-      scheduleEngineerDirectoryPrefetch,
-      fetchInternalRuntimeSummary,
-      fetchAllInternalBuildingRuntimeStatuses,
-      resetInternalRuntimeRequestState,
-      resetExternalDashboardRequestState,
-      ensureHandoverEngineerDirectoryLoaded,
-      applyDashboardRoleMode,
-      dashboardActiveModule,
-      health,
-    });
-
-    watch(
-      () => shouldPollHandoverDailyReportContext.value,
-      (enabled) => {
-        if (!enabled || !bootstrapReady.value) return;
-        void fetchHandoverDailyReportContext({ force: true, silentTransientNetworkError: true, silentMessage: true });
-      },
-      { immediate: true },
-    );
-
-    registerSchedulerRememberedWatchers({
-      watch,
-      health,
-      syncSchedulerToggleStateWithHealth,
-      syncSchedulerDraftAutoStartFromRemembered,
-    });
-
-    watch(
-      () => shouldPollBridgeTasks.value,
-      (enabled, prevEnabled) => {
-        if (!enabled || !bootstrapReady.value || prevEnabled === enabled) return;
-        void fetchBridgeTasks({ silentMessage: true });
-      },
-      { immediate: true },
-    );
-
-    watch(
-      () => [bootstrapReady.value, currentView.value, dashboardActiveModule.value],
-      ([ready, view, activeModule], [prevReady, prevView, prevModule] = []) => {
-        if (!ready) return;
-        const currentViewText = String(view || "").trim().toLowerCase();
-        const prevViewText = String(prevView || "").trim().toLowerCase();
-        const activeModuleText = String(activeModule || "").trim();
-        const moduleChanged = activeModuleText !== String(prevModule || "").trim();
-        const becameReady = Boolean(ready) && !Boolean(prevReady);
-        const enteredDashboard = currentViewText === "dashboard" && (prevViewText !== "dashboard" || becameReady);
-        const schedulerModules = new Set([
-          "auto_flow",
-          "handover_log",
-          "wet_bulb_collection",
-          "day_metric_upload",
-          "alarm_event_upload",
-          "monthly_event_report",
-          "scheduler_overview",
-        ]);
-        if (
-          currentViewText === "dashboard"
-          && schedulerModules.has(activeModuleText)
-          && !configLoaded.value
-        ) {
-          void fetchConfig({ silentMessage: true, loadHandoverSegments: true });
-        }
-        if ((enteredDashboard || moduleChanged) && currentViewText === "dashboard" && shouldPollExternalDashboardSummary.value) {
-          void fetchExternalDashboardSummary({ force: true, silentMessage: true });
-        }
-        if ((enteredDashboard || moduleChanged) && shouldPollHandoverDailyReportContext.value) {
-          void fetchHandoverDailyReportContext({ force: true, silentTransientNetworkError: true, silentMessage: true });
-        }
-        if (enteredDashboard && shouldFetchHealth.value) {
-          void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
-        }
-        if (enteredDashboard && shouldPollBridgeTasks.value) {
-          void fetchBridgeTasks({ silentMessage: true });
-        }
-      },
-      { immediate: true },
-    );
-
-    watch(
-      () => [bootstrapReady.value, currentView.value],
-      ([ready, view]) => {
-        const currentViewText = String(view || "").trim().toLowerCase();
-        if (currentViewText !== "config" || !ready || configLoaded.value) return;
-        void fetchConfig({ silentMessage: true, loadHandoverSegments: true });
-      },
-      { immediate: true },
-    );
-
-    const dashboardActions = createDashboardActions({
-      health,
-      canRun,
-      busy,
-      message,
-      currentJob,
-      selectedJobId,
-      selectedBridgeTaskId,
-      bridgeTaskDetail,
-      config,
-      schedulerQuickSaving,
-      handoverSchedulerQuickSaving,
-      wetBulbSchedulerQuickSaving,
-      dayMetricUploadSchedulerQuickSaving,
-      alarmEventUploadSchedulerQuickSaving,
-      monthlyEventReportSchedulerQuickSaving,
-      monthlyChangeReportSchedulerQuickSaving,
-      monthlyReportTestReceiveIds,
-      monthlyReportTestReceiveIdType,
-      selectedDates,
-      manualBuilding,
-      manualFile,
-      manualUploadDate,
-      sheetFile,
-      handoverFilesByBuilding,
-      handoverConfiguredBuildings,
-      handoverDutyDate,
-      handoverDutyShift,
-      handoverDownloadScope,
-      handoverDutyAutoFollow,
-      dayMetricUploadScope,
-      dayMetricUploadBuilding,
-      dayMetricSelectedDates,
-      dayMetricLocalBuilding,
-      dayMetricLocalDate,
-      dayMetricLocalFile,
-      sharedBridgeSelfCheckResult,
-      streamController,
-      fetchHealth,
-      fetchConfig,
-      fetchExternalDashboardSummary,
-      fetchJobs,
-      fetchBridgeTasks,
-      fetchBridgeTaskDetail,
-      applyJobPanelSummary,
-      patchJobPanelActionState,
-      scheduleExternalDashboardRefresh,
-      syncHandoverDutyFromNow,
-      runSingleFlight,
-      setSchedulerToggleState,
-    });
-    runtimeActionsRef.current = {
-      ...runtimeActions,
-      ...dashboardActions,
-    };
-
-    const {
-      runAutoOnce,
-      runWetBulbCollection,
-      runMonthlyEventReport,
-      runMonthlyChangeReport,
-      sendMonthlyReport,
-      sendMonthlyReportTest,
-      runMultiDate,
-      runManualUpload,
-      runSheetImport,
-      startScheduler,
-      saveSchedulerQuickConfig: saveSchedulerQuickConfigImmediate,
-      startHandoverScheduler,
-      stopHandoverScheduler,
-      saveHandoverSchedulerQuickConfig: saveHandoverSchedulerQuickConfigImmediate,
-      startWetBulbCollectionScheduler,
-      stopWetBulbCollectionScheduler,
-      saveWetBulbCollectionSchedulerQuickConfig: saveWetBulbCollectionSchedulerQuickConfigImmediate,
-      startDayMetricUploadScheduler,
-      stopDayMetricUploadScheduler,
-      saveDayMetricUploadSchedulerQuickConfig: saveDayMetricUploadSchedulerQuickConfigImmediate,
-      startAlarmEventUploadScheduler,
-      stopAlarmEventUploadScheduler,
-      saveAlarmEventUploadSchedulerQuickConfig: saveAlarmEventUploadSchedulerQuickConfigImmediate,
-      runSharedBridgeSelfCheck,
-      startMonthlyEventReportScheduler,
-      stopMonthlyEventReportScheduler,
-      saveMonthlyEventReportSchedulerQuickConfig: saveMonthlyEventReportSchedulerQuickConfigImmediate,
-      startMonthlyChangeReportScheduler,
-      stopMonthlyChangeReportScheduler,
-      saveMonthlyChangeReportSchedulerQuickConfig: saveMonthlyChangeReportSchedulerQuickConfigImmediate,
-      runHandoverFromFile,
-      runHandoverFromDownload,
-      runDayMetricFromDownload,
-      runDayMetricFromFile,
-      retryDayMetricUnit,
-      retryFailedDayMetricUnits,
-      continueHandoverFollowupUpload,
-      stopScheduler,
-    } = dashboardActions;
-
-    const saveSchedulerQuickConfig = () => runSchedulerConfigQuickSave(saveSchedulerQuickConfigImmediate);
-    const saveHandoverSchedulerQuickConfig = (overrides = {}) =>
-      runSchedulerConfigQuickSave(() => saveHandoverSchedulerQuickConfigImmediate(overrides));
-    const saveWetBulbCollectionSchedulerQuickConfig = () =>
-      runSchedulerConfigQuickSave(saveWetBulbCollectionSchedulerQuickConfigImmediate);
-    const saveDayMetricUploadSchedulerQuickConfig = () =>
-      runSchedulerConfigQuickSave(saveDayMetricUploadSchedulerQuickConfigImmediate);
-    const saveAlarmEventUploadSchedulerQuickConfig = (overrides = {}) =>
-      runSchedulerConfigQuickSave(() => saveAlarmEventUploadSchedulerQuickConfigImmediate(overrides));
-    const saveMonthlyEventReportSchedulerQuickConfig = (overrides = {}) =>
-      runSchedulerConfigQuickSave(() => saveMonthlyEventReportSchedulerQuickConfigImmediate(overrides));
-    const saveMonthlyChangeReportSchedulerQuickConfig = (overrides = {}) =>
-      runSchedulerConfigQuickSave(() => saveMonthlyChangeReportSchedulerQuickConfigImmediate(overrides));
-    const realStreamController = createLogStreamController({
-      appendLog,
-      setMessage: (text) => {
-        message.value = String(text || "");
-      },
-      canAttachSystemStream: () => runtimeRequestsReady.value,
-      getSystemOffset: () => systemLogOffset.value,
-      setSystemOffset: (offset) => {
-        const next = Number.parseInt(String(offset), 10);
-        if (Number.isInteger(next) && next >= 0) {
-          systemLogOffset.value = next;
-        }
-      },
-      onJobDone: async (jobId) => {
-        await fetchJob(jobId);
-        scheduleExternalDashboardRefresh("job_done", { includePendingResume: true });
-        if (shouldPollInternalRuntimeStatus.value) {
-          scheduleInternalRuntimeStatusRefresh({ delayMs: 120 });
-        }
-      },
-      onJobReconnect: async (jobId) => {
-        await fetchJob(jobId);
-        scheduleExternalDashboardRefresh("job_reconnect");
-        if (shouldPollInternalRuntimeStatus.value) {
-          scheduleInternalRuntimeStatusRefresh({ delayMs: 120 });
-        }
-      },
-    });
-    Object.assign(streamController, realStreamController);
-
-    watch(
-      () => shouldPauseRuntimeRequests.value,
-      (paused) => {
-        if (!streamController || typeof streamController.pauseAll !== "function" || typeof streamController.resumeAll !== "function") {
-          return;
-        }
-        if (paused) {
-          streamController.pauseAll();
-          return;
-        }
-        streamController.resumeAll();
-      },
-    );
-
-    registerAppLifecycle(
-      { onMounted, onBeforeUnmount },
-      {
-        fetchBootstrapHealth,
-        fetchExternalDashboardSummary,
-        fetchHealth,
-        fetchJobs,
-        fetchBridgeTasks,
-        fetchRuntimeResources,
-        fetchInternalRuntimeSummary,
-        fetchAllInternalBuildingRuntimeStatuses,
-        fetchHandoverDailyReportContext,
-        fetchConfig,
-        syncHandoverDutyFromNow,
-        fetchPendingResumeRuns,
-        shouldFetchPendingResumeRuns: () => shouldFetchPendingResumeRuns.value,
-        shouldPollHandoverDailyReportContext: () => shouldPollHandoverDailyReportContext.value,
-        shouldPollBridgeTasks: () => shouldPollBridgeTasks.value,
-        shouldPollInternalRuntimeStatus: () => shouldPollInternalRuntimeStatus.value,
-        shouldPollExternalDashboardSummary: () => shouldPollExternalDashboardSummary.value,
-        shouldFetchHealth: () => shouldFetchHealth.value,
-        shouldPollJobPanel: () => shouldPollJobPanel.value,
-        shouldLoadEngineerDirectory: () => shouldLoadEngineerDirectory.value,
-        shouldPauseRuntimeRequests: () => shouldPauseRuntimeRequests.value,
-        scheduleEngineerDirectoryPrefetch,
-        tryAutoResume,
-        fetchJob,
-        currentJob,
-        streamController,
-        timers,
-        bootstrapReady,
-        runtimeWarmupReady,
-        getHealthPollIntervalMs: () => healthPollIntervalMs.value,
-      },
-    );
-
-    onBeforeUnmount(() => {
-      clearStartupRouteFallbackTimer();
-      if (dashboardSchedulerOverviewFocusTimerState.timer) {
-        window.clearTimeout(dashboardSchedulerOverviewFocusTimerState.timer);
-        dashboardSchedulerOverviewFocusTimerState.timer = null;
-      }
-      if (externalDashboardRefreshTimerState.timer) {
-        window.clearTimeout(externalDashboardRefreshTimerState.timer);
-        externalDashboardRefreshTimerState.timer = null;
-      }
-    });
-
-    return {
-      health,
-      config,
-      currentView,
-      activeConfigTab,
-      dashboardMenuGroups,
-      dashboardModules,
-      dashboardActiveModule,
-      dashboardModuleMenuOpen,
-      dashboardActiveModuleTitle,
-      moduleMeta,
-      dashboardSystemOverview,
-      dashboardScheduleOverview,
-      schedulerOverviewItems,
-      schedulerOverviewSummary,
-      sharedBridgeSelfCheckOverview,
-      dashboardSchedulerOverviewFocusKey,
-      isStatusView,
-      isDashboardView,
-      isConfigView,
-      selectedDate,
-      rangeStartDate,
-      rangeEndDate,
-      selectedDates,
-      selectedDateCount,
-      dayMetricUploadScope,
-      dayMetricUploadBuilding,
-      dayMetricSelectedDate,
-      dayMetricRangeStartDate,
-      dayMetricRangeEndDate,
-      dayMetricSelectedDates,
-      dayMetricSelectedDateCount,
-      dayMetricLocalBuilding,
-      dayMetricLocalDate,
-      dayMetricLocalFile,
-      pendingResumeRuns,
-      resumeDeleteConfirmDialog,
-      pendingResumeCount,
-      jobsList,
-      selectedJobId,
-      bridgeTasks,
-      selectedBridgeTaskId,
-      bridgeTaskDetail,
-      runningJobs,
-      waitingResourceJobs,
-      recentFinishedJobs,
-      bridgeTasksEnabled,
-      activeBridgeTasks,
-      displayedBridgeTasks,
-      totalBridgeHistoryCount,
-      hiddenBridgeHistoryCount,
-      bridgeTaskHistoryDisplayLimit,
-      recentFinishedBridgeTasks,
-      currentBridgeTask,
-      resourceSnapshot,
-      schedulerQuickSaving,
-      handoverSchedulerQuickSaving,
-      wetBulbSchedulerQuickSaving,
-      monthlyEventReportSchedulerQuickSaving,
-      monthlyChangeReportSchedulerQuickSaving,
-      schedulerDecisionText,
-      schedulerTriggerText,
-      wetBulbSchedulerDecisionText,
-      wetBulbSchedulerTriggerText,
-      monthlyEventReportSchedulerDecisionText,
-      monthlyEventReportSchedulerTriggerText,
-      monthlyChangeReportSchedulerDecisionText,
-      monthlyChangeReportSchedulerTriggerText,
-      logs,
-      filteredLogs,
-      logFilter,
-      currentJob,
-      busy,
-      message,
-      bootstrapReady,
-      fullHealthLoaded,
-      configLoaded,
-      engineerDirectoryLoaded,
-      initialLoadingPhase,
-      initialLoadingStatusText,
-      buildingsText,
-      sheetRuleRows,
-      manualBuilding,
-      manualUploadDate,
-      handoverDutyDate,
-      handoverDutyShift,
-      handoverConfigBuilding,
-      handoverConfigCommonRevision,
-      handoverConfigCommonUpdatedAt,
-      handoverConfigBuildingRevision,
-      handoverConfigBuildingUpdatedAt,
-      handoverRuleScope,
-      handoverDutyAutoFollow,
-      handoverDutyLastAutoAt,
-      handoverDutyAutoLabel,
-      handoverConfiguredBuildings,
-      handoverSelectedBuildings,
-      handoverSelectedFileCount,
-      hasSelectedHandoverFiles,
-      handoverFileStatesByBuilding,
-      handoverEngineerDirectory,
-      handoverEngineerLoading,
-      handoverDailyReportContext,
-      handoverDailyReportLastScreenshotTest,
-      handoverDailyReportPreviewModal,
-      handoverDailyReportUploadModal,
-      handoverConfigBuildingOptions,
-      handoverRuleScopeOptions,
-      handoverDownloadScope,
-      handoverMorningDecisionText,
-      handoverAfternoonDecisionText,
-      handoverReviewStatusItems,
-      handoverReviewLinks,
-      handoverReviewMatrix,
-      handoverReviewBoardRows,
-      dashboardSystemOverview,
-      dashboardSystemStatusItems,
-      dashboardScheduleOverview,
-      dashboardScheduleStatusItems,
-      isInternalRole,
-      internalDownloadPoolOverview,
-      internalSourceCacheOverview,
-      internalRealtimeSourceFamilies,
-      externalInternalAlertOverview,
-      currentHourRefreshOverview,
-      internalRuntimeOverview,
-      internalSourceCacheHistoryOverview,
-      sharedSourceCacheReadinessOverview,
-      sharedRootDiagnosticOverview,
-      updaterMirrorOverview,
-    dayMetricCurrentPayload,
-      dayMetricCurrentResultRows,
-      dayMetricRetryableFailedCount,
-      dayMetricRetryAllMode,
-      handoverReviewOverview,
-      handoverFollowupProgress,
-      handoverDailyReportAuthVm,
-      handoverDailyReportExportVm,
-      handoverDailyReportSpreadsheetUrl,
-      handoverDailyReportCaptureAssets,
-      handoverDailyReportSummaryTestVm,
-      handoverDailyReportExternalTestVm,
-      canRewriteHandoverDailyReportRecord,
-      updaterResultText,
-      updaterVersionInlineText,
-      currentTaskOverview,
-      taskPanelOverview,
-      bridgeTaskPanelOverview,
-      homeOverview,
-      statusDiagnosisOverview,
-      configGuidanceOverview,
-      dashboardActiveModuleHero,
-      updaterMainButtonText,
-      updaterBadgeToneClass,
-      updaterButtonClass,
-      isUpdaterActionLocked,
-      exitCurrentSystemToRoleSelector,
-      isUpdaterPublishApprovedLocked,
-      isUpdaterInternalPeerCheckLocked,
-      isUpdaterInternalPeerApplyLocked,
-      isUpdaterInternalPeerRestartLocked,
-      updaterPublishApprovedButtonText,
-      updaterInternalPeerCheckButtonText,
-      updaterInternalPeerApplyButtonText,
-      updaterInternalPeerRestartButtonText,
-      deploymentRoleMode,
-      deploymentNodeIdDisplayText,
-      deploymentNodeIdDisplayHint,
-      showCommonPathsConfigTab,
-      showCommonSchedulerConfigTab,
-      showNotifyConfigTab,
-      showFeishuAuthConfigTab,
-      showConsoleConfigTab,
-      showFeatureMonthlyConfigTab,
-      showFeatureHandoverConfigTab,
-      showFeatureDayMetricUploadConfigTab,
-      showFeatureWetBulbCollectionConfigTab,
-      showFeatureAlarmExportConfigTab,
-      showSheetImportConfigTab,
-      showManualFeatureConfigTab,
-      showRuntimeNetworkPanel,
-      showDashboardPageNav,
-      appShellTitle,
-      statusNavLabel,
-      dashboardNavLabel,
-      configNavLabel,
-      configShellTitle,
-      configShellDescription,
-      configReturnButtonText,
-      statusHeroTitle,
-      statusHeroDescription,
-      bridgeExecutionHint,
-      externalExecutionHint,
-      resumeExecutionHint,
-      isInternalDeploymentRole,
-      isExternalDeploymentRole,
-      startupRoleGateReady,
-      startupRoleGateVisible,
-      shouldRenderAppShell,
-      startupRoleSelectorVisible,
-      startupRoleSelectorBusy,
-      startupRoleSelectorSelection,
-      startupRoleSelectorMessage,
-      startupRoleLoadingVisible,
-      startupRoleLoadingTitle,
-      startupRoleLoadingSubtitle,
-      startupRoleLoadingStage,
-      startupRoleOptions,
-      startupRoleCurrentLabel,
-      startupRoleSelectedLabel,
-      startupRoleNodeIdDisplayText,
-      startupRoleNodeIdDisplayHint,
-      startupRoleActionButtonText,
-      startupRoleRequiresBridgeConfig,
-      startupRoleBridgeDraft,
-      startupRoleAdvancedVisible,
-      startupRoleBridgeValidationMessage,
-      startupRoleBridgeNoticeText,
-      startupRoleConfirmDisabled,
-      updaterUiOverlayVisible,
-      updaterUiOverlayTitle,
-      updaterUiOverlaySubtitle,
-      updaterUiOverlayStage,
-      updaterUiOverlayKicker,
-      customAbsoluteStartLocal,
-      customAbsoluteEndLocal,
-      canRun,
-      handoverGenerationBusy,
-      handoverGenerationStatusText,
-      schedulerToggleState,
-      getSchedulerToggleMode,
-      getSchedulerStatusTone,
-      getSchedulerStatusText,
-      getSchedulerDisplayText,
-      getSchedulerEffectiveRunning,
-      getSchedulerEffectiveRemembered,
-      isSchedulerStartDisabled,
-      isSchedulerStopDisabled,
-      getSchedulerStartButtonText,
-      getSchedulerStopButtonText,
-      isSchedulerTogglePending,
-      isActionLocked,
-      actionKeyAutoOnce,
-      actionKeyMultiDate,
-      actionKeyManualUpload,
-      actionKeySheetImport,
-      actionKeyHandoverFromFile,
-      actionKeyHandoverFromDownload,
-      actionKeyDayMetricFromDownload,
-      actionKeyDayMetricFromFile,
-      actionKeyDayMetricRetryUnit,
-      actionKeyDayMetricRetryFailed,
-      actionKeySchedulerStart,
-      actionKeySchedulerStop,
-      actionKeySchedulerSave,
-      actionKeyHandoverSchedulerStart,
-      actionKeyHandoverSchedulerStop,
-      actionKeyHandoverSchedulerSave,
-      actionKeyWetBulbCollectionRun,
-      actionKeyWetBulbSchedulerStart,
-      actionKeyWetBulbSchedulerStop,
-      actionKeyWetBulbSchedulerSave,
-      actionKeyDayMetricUploadSchedulerStart,
-      actionKeyDayMetricUploadSchedulerStop,
-      actionKeyDayMetricUploadSchedulerSave,
-      actionKeyDayMetricConfigRepair: ACTION_KEY_DAY_METRIC_CONFIG_REPAIR || actionKeyDayMetricConfigRepair,
-      actionKeyAlarmEventUploadSchedulerStart,
-      actionKeyAlarmEventUploadSchedulerStop,
-      actionKeyAlarmEventUploadSchedulerSave,
-      actionKeyConfigSave,
-      isConfigSaveLocked,
-      configSaveButtonText,
-      configSaveStateText,
-      configSaveStateDetail,
-      actionKeyUpdaterCheck,
-      actionKeyUpdaterApply,
-      actionKeySourceCacheRefreshCurrentHour,
-      actionKeySourceCacheRefreshAlarmManual,
-      actionKeySourceCacheDeleteAlarmManual,
-      actionKeyHandoverConfigCommonSave,
-      actionKeyHandoverConfigBuildingSave,
-      actionKeyHandoverConfirmAll,
-      actionKeyHandoverCloudRetryAll,
-      actionKeyHandoverDailyReportAuthOpen,
-      actionKeyHandoverDailyReportScreenshotTest,
-      actionKeyHandoverReviewAccessReprobe: ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,
-      actionKeyHandoverDailyReportRecordRewrite: ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE,
-      isHandoverConfirmAllLocked,
-      isHandoverConfirmAllDisabled,
-      isHandoverCloudRetryAllLocked,
-      handoverConfirmAllButtonText,
-      canShowHandoverCloudRetryAll,
-      handoverCloudRetryAllButtonText,
-      isHandoverCloudRetryAllDisabled,
-      isHandoverFollowupContinueLocked,
-      handoverFollowupBatchKey,
-      canShowHandoverFollowupContinue,
-      handoverFollowupContinueButtonText,
-      isHandoverFollowupContinueDisabled,
-      openStatusPage,
-      openDashboardPage,
-      openConfigPage,
-      runHomeQuickAction,
-      getStatusQuickAction,
-      isHomeQuickActionLocked,
-      getHomeQuickActionButtonText,
-      getHomeQuickActionDisabledReason,
-      switchConfigTab,
-      setDashboardActiveModule,
-      openDashboardSchedulerOverviewTarget,
-      openDashboardMenuDrawer,
-      closeDashboardMenuDrawer,
-      addDate,
-      addDateRange,
-      quickRangeToday,
-      removeDate,
-      clearDates,
-      selectStartupRole,
-      addDayMetricDate,
-      addDayMetricDateRange,
-      removeDayMetricDate,
-      clearDayMetricDates,
-      runAutoOnce,
-      runWetBulbCollection,
-      runMultiDate,
-      runResumeUpload,
-      deleteResumeRun,
-      deleteAllResumeRuns,
-      confirmResumeDeleteDialog,
-      closeResumeDeleteConfirmDialog,
-      getResumeRunId,
-      getResumeRunActionKey,
-      getResumeDeleteActionKey,
-      getResumeDeleteAllActionKey,
-      getResumeDeleteConfirmActionKey,
-      formatResumeDateSummary,
-      formatResumeDateFull,
-      runManualUpload,
-      runSheetImport,
-      runHandoverFromFile,
-      runHandoverFromDownload,
-      runDayMetricFromDownload,
-      runDayMetricFromFile,
-      retryDayMetricUnit,
-      retryFailedDayMetricUnits,
-      cancelCurrentJob,
-      retryCurrentJob,
-      getJobCancelActionKey,
-      getJobRetryActionKey,
-      onHandoverDutyDateManualChange,
-      onHandoverDutyShiftManualChange,
-      restoreAutoHandoverDuty,
-      saveConfig,
-      repairDayMetricUploadConfig,
-      saveActiveConfig,
-      saveHandoverCommonConfig,
-      saveHandoverReviewBaseUrlQuickConfig,
-      saveHandoverBuildingConfig,
-      onHandoverConfigBuildingChange,
-      onHandoverReviewRecipientBuildingChange,
-      confirmStartupRoleSelection,
-      checkUpdaterNow,
-      applyUpdaterPatch,
-      restartUpdaterApp,
-      publishUpdaterApprovedNow,
-      checkInternalPeerUpdaterNow,
-      applyInternalPeerUpdaterNow,
-      restartInternalPeerUpdaterNow,
-      confirmAllHandoverReview,
-      retryAllFailedHandoverCloudSync,
-      continueHandoverFollowupUpload,
-      formatNetworkWindowSide,
-      formatDetectedNetworkSide,
-      formatSsidSide,
-      formatNetworkMode,
-      formatBooleanReachability,
-      formatWetBulbTargetKind,
-      wetBulbConfiguredTarget,
-      wetBulbLatestRunTarget,
-      getRuntimeTaskAction,
-      isRuntimeTaskActionVisible,
-      isRuntimeTaskActionPending,
-      getRuntimeTaskActionLabel,
-      getRuntimeTaskActionDisabledReason,
-      isRuntimeTaskActionLocked,
-      getRuntimeTaskTitle,
-      getRuntimeTaskMeta,
-      getRuntimeTaskDetail,
-      getRuntimeTaskCancelActionKey,
-      isWaitingResourceItemSelected,
-      focusWaitingResourceItem,
-      focusWaitingResourceItemInRuntimeLogs,
-      focusJob,
-      focusJobInRuntimeLogs,
-      focusBridgeTask,
-      focusBridgeTaskInRuntimeLogs,
-      cancelJobItem,
-      cancelRuntimeTask,
-      retryJobItem,
-      cancelBridgeTask,
-      retryBridgeTask,
-      getBridgeTaskCancelActionKey,
-      getBridgeTaskRetryActionKey,
-      openHandoverDailyReportScreenshotAuth,
-      runHandoverDailyReportScreenshotTest,
-      openHandoverDailyReportPreview,
-      closeHandoverDailyReportPreview,
-      openHandoverDailyReportUploadDialog,
-      closeHandoverDailyReportUploadDialog,
-      onHandoverDailyReportAssetFileChange,
-      onHandoverDailyReportUploadPaste,
-      recaptureHandoverDailyReportAsset,
-      restoreHandoverDailyReportAutoAsset,
-      rewriteHandoverDailyReportRecord,
-      reprobeHandoverReviewAccess,
-      sendHandoverReviewLink,
-      getHandoverReviewLinkSendActionKey,
-      getHandoverReviewLinkSendAction,
-      isHandoverReviewLinkSendDisabled,
-      getHandoverReviewLinkSendButtonText,
-      getHandoverReviewLinkSendDisabledReason,
-      getHandoverDailyReportActionButtonText,
-      getHandoverDailyReportActionDisabledReason,
-      isHandoverDailyReportActionDisabled,
-      getHandoverDailyReportAssetActionButtonText,
-      getHandoverDailyReportAssetActionDisabledReason,
-      isHandoverDailyReportAssetActionDisabled,
-      getHandoverDailyReportRecaptureActionKey,
-      getHandoverDailyReportUploadActionKey,
-      getHandoverDailyReportRestoreActionKey,
-      runUpdaterMainAction,
-      refreshCurrentHourSourceCache,
-      refreshBuildingLatestSourceCache,
-      refreshManualAlarmSourceCache,
-      deleteManualAlarmSourceCacheFiles,
-      uploadAlarmSourceCacheFull,
-      uploadAlarmSourceCacheBuilding,
-      openAlarmEventUploadTarget,
-      runMonthlyEventReport,
-      runMonthlyChangeReport,
-      sendMonthlyReport,
-      sendMonthlyReportTest,
-      addSheetRuleRow,
-      removeSheetRuleRow,
-      startScheduler,
-      saveSchedulerQuickConfig,
-      startHandoverScheduler,
-      stopHandoverScheduler,
-      saveHandoverSchedulerQuickConfig,
-      startWetBulbCollectionScheduler,
-      stopWetBulbCollectionScheduler,
-      saveWetBulbCollectionSchedulerQuickConfig,
-      startDayMetricUploadScheduler,
-      stopDayMetricUploadScheduler,
-      saveDayMetricUploadSchedulerQuickConfig,
-      startAlarmEventUploadScheduler,
-      stopAlarmEventUploadScheduler,
-      saveAlarmEventUploadSchedulerQuickConfig,
-      startMonthlyEventReportScheduler,
-      stopMonthlyEventReportScheduler,
-      saveMonthlyEventReportSchedulerQuickConfig,
-      startMonthlyChangeReportScheduler,
-      stopMonthlyChangeReportScheduler,
-      saveMonthlyChangeReportSchedulerQuickConfig,
-      stopScheduler,
-      onManualFileChange,
-      onSheetFileChange,
-      onDayMetricLocalFileChange,
-      onHandoverBuildingFileChange,
-      addSiteRow,
-      removeSiteRow,
-      previewSiteUrl,
-      clearLogs,
-      getActiveHandoverRuleRows,
-      addHandoverRuleRow,
-      removeHandoverRuleRow,
-      updateHandoverRuleKeywords,
-      getHandoverComputedPreset,
-      onHandoverComputedPresetChange,
-      copyAllDefaultRulesToCurrentBuilding,
-      clearCurrentBuildingOverrides,
-      restoreDefaultRuleForCurrentBuilding,
-      fetchHandoverEngineerDirectory,
-      fetchHandoverCommonConfigSegment,
-      fetchHandoverBuildingConfigSegment,
-      getInternalSourceCacheRefreshActionKey,
-      getInternalSourceCacheRefreshDisabledReason,
-      isInternalSourceCacheRefreshLocked,
-      getInternalSourceCacheRefreshButtonText,
-      isSourceCacheRefreshCurrentHourLocked,
-      currentHourRefreshButtonText,
-      isSourceCacheRefreshAlarmManualLocked,
-      manualAlarmRefreshButtonText,
-      isSourceCacheDeleteAlarmManualLocked,
-      manualAlarmDeleteButtonText,
-      externalAlarmUploadBuilding,
-      isSourceCacheUploadAlarmSelectedLocked,
-      externalAlarmUploadActionButtonText,
-      actionKeySharedBridgeSelfCheck,
-      runSharedBridgeSelfCheck,
-      uploadSelectedAlarmSourceCache,
-      externalAlarmReadinessFamily,
-      externalAlarmUploadStatus,
-      monthlyEventReportLastRun,
-      monthlyChangeReportLastRun,
-      monthlyEventReportOutputDir,
-      monthlyChangeReportOutputDir,
-      monthlyEventReportDeliveryLastRun,
-      monthlyChangeReportDeliveryLastRun,
-      monthlyEventReportRecipientStatusByBuilding,
-      monthlyChangeReportRecipientStatusByBuilding,
-      monthlyEventReportSendReadyCount,
-      monthlyChangeReportSendReadyCount,
-      monthlyEventReportDeliveryStatus,
-      monthlyChangeReportDeliveryStatus,
-      monthlyEventReportSendAllActionKey,
-      monthlyChangeReportSendAllActionKey,
-      monthlyEventReportSendTestActionKey,
-      monthlyChangeReportSendTestActionKey,
-      monthlyReportTestReceiveIdDraftEvent,
-      monthlyReportTestReceiveIdDraftChange,
-      monthlyReportTestReceiveIdType,
-      monthlyReportTestReceiveIds,
-      monthlyReportTestReceiveCount,
-      addMonthlyReportTestReceiveId,
-      removeMonthlyReportTestReceiveId,
-      getMonthlyReportSendBuildingActionKey,
-      handoverEngineerDirectoryTarget,
-      alarmEventUploadTarget,
-      dayMetricUploadTarget,
-      actionKeyMonthlyEventReportRunAll,
-      actionKeyMonthlyEventReportRunBuildingPrefix,
-      actionKeyMonthlyChangeReportRunAll,
-      actionKeyMonthlyChangeReportRunBuildingPrefix,
-      dayMetricUploadSchedulerQuickSaving,
-      alarmEventUploadSchedulerQuickSaving,
-      dayMetricUploadSchedulerDecisionText,
-      dayMetricUploadSchedulerTriggerText,
-      alarmEventUploadSchedulerDecisionText,
-      alarmEventUploadSchedulerTriggerText,
-      actionKeyMonthlyEventReportSchedulerStart,
-      actionKeyMonthlyEventReportSchedulerStop,
-      actionKeyMonthlyEventReportSchedulerSave,
-      actionKeyMonthlyChangeReportSchedulerStart,
-      actionKeyMonthlyChangeReportSchedulerStop,
-      actionKeyMonthlyChangeReportSchedulerSave,
-      actionKeyMonthlyReportSendAllPrefix,
-      actionKeyMonthlyReportSendBuildingPrefix,
-      actionKeyMonthlyReportSendTestPrefix,
-    };
-  },
-  template: APP_TEMPLATE,
-}).mount("#app");
-finishAppBoot();
+function text(value, fallback = "-") {
+  const raw = value == null ? "" : String(value).trim();
+  return raw || fallback;
 }
 
+function escapeHtml(value) {
+  return text(value, "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function query(path, params = {}) {
+  const url = new URL(path, window.location.origin);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && String(value) !== "") {
+      url.searchParams.set(key, value);
+    }
+  });
+  return url.pathname + url.search;
+}
+
+async function api(path, options = {}) {
+  const { timeoutMs: requestedTimeoutMs, ...fetchOptions } = options;
+  const timeoutMs = Number(requestedTimeoutMs || 10000);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(path, {
+      headers: { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
+      ...fetchOptions,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      throw new Error(`请求超时：${path}`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = payload.detail || payload.error || JSON.stringify(payload);
+    } catch (_) {
+      detail = await response.text();
+    }
+    throw new Error(detail || `HTTP ${response.status}`);
+  }
+  const contentType = response.headers.get("content-type") || "";
+  return contentType.includes("application/json") ? response.json() : response.text();
+}
+
+async function fetchText(path, { timeoutMs = 5000 } = {}) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(path, { signal: controller.signal });
+    if (!response.ok) return "";
+    return await response.text();
+  } catch (_) {
+    return "";
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+function setMessage(message, isError = false) {
+  state.message = isError ? "" : text(message, "");
+  state.error = isError ? text(message, "") : "";
+  render();
+}
+
+async function loadHealth() {
+  try {
+    const payload = await api(`/api/health/bootstrap?_t=${Date.now()}`);
+    state.health = payload || {};
+  } catch (error) {
+    state.health = {};
+    state.error = `读取启动状态失败：${error.message}`;
+  }
+}
+
+async function loadConfig() {
+  try {
+    state.config = await api(`/api/config?_t=${Date.now()}`);
+  } catch (error) {
+    state.error = `读取配置失败：${error.message}`;
+  }
+}
+
+async function loadRuntimeStatus() {
+  try {
+    const payload = await api(`/api/bridge/internal-runtime-status?_t=${Date.now()}`);
+    state.summary = payload.summary || null;
+  } catch (error) {
+    state.summary = null;
+    state.error = `读取内网端状态失败：${error.message}`;
+  }
+}
+
+async function loadTasks() {
+  try {
+    const payload = await api(`/api/bridge/tasks?limit=50&_t=${Date.now()}`);
+    state.tasks = payload.tasks || payload.rows || payload.items || [];
+  } catch (_) {
+    state.tasks = [];
+  }
+}
+
+async function loadLogs() {
+  try {
+    const textPayload = await fetchText(`/api/logs/system?offset=${state.logOffset || 0}`, { timeoutMs: 4000 });
+    if (!textPayload) return;
+    const lines = textPayload.split(/\r?\n/).filter(Boolean);
+    if (lines.length) {
+      state.logs = [...state.logs, ...lines].slice(-160);
+      state.logOffset += lines.length;
+    }
+  } catch (_) {
+    // 日志不是关键路径，失败时保持页面可用。
+  }
+}
+
+async function refreshAll({ silent = false } = {}) {
+  if (!silent) setMessage("正在刷新内网端状态...");
+  await Promise.allSettled([loadHealth(), loadConfig(), loadRuntimeStatus(), loadTasks(), loadLogs()]);
+  if (!silent) setMessage("状态已刷新");
+  render();
+}
+
+function statusClass(tone) {
+  const normalized = text(tone, "neutral").toLowerCase();
+  if (["success", "ready", "ok"].includes(normalized)) return "is-success";
+  if (["danger", "failed", "error"].includes(normalized)) return "is-danger";
+  if (["info", "running", "downloading"].includes(normalized)) return "is-info";
+  return "is-warning";
+}
+
+function summaryCards() {
+  const summary = state.summary || {};
+  const pool = summary.pool || {};
+  const cache = summary.source_cache || {};
+  const queue = summary.queue || {};
+  return `
+    <section class="card-grid">
+      <div class="metric-card">
+        <span>运行角色</span>
+        <strong>内网端</strong>
+        <small>${escapeHtml(summary.updated_at || state.health.started_at || "")}</small>
+      </div>
+      <div class="metric-card">
+        <span>共享桥接</span>
+        <strong>${summary.bridge_enabled ? "已启用" : "未启用"}</strong>
+        <small>${escapeHtml(summary.last_error || summary.agent_status || "等待后端状态")}</small>
+      </div>
+      <div class="metric-card">
+        <span>浏览器池</span>
+        <strong>${pool.browser_ready ? "已就绪" : "准备中"}</strong>
+        <small>${escapeHtml(pool.last_error || `活跃楼栋：${(pool.active_buildings || []).join("、") || "-"}`)}</small>
+      </div>
+      <div class="metric-card">
+        <span>共享目录</span>
+        <strong>${cache.enabled ? "已启用" : "未启用"}</strong>
+        <small>${escapeHtml(cache.cache_root || "-")}</small>
+      </div>
+      <div class="metric-card">
+        <span>任务队列</span>
+        <strong>${Number(queue.task_count || 0)}</strong>
+        <small>待内网：${Number(queue.pending_internal || 0)} / 异常：${Number(queue.problematic || 0)}</small>
+      </div>
+    </section>
+  `;
+}
+
+function renderPageSlots() {
+  const slots = ((state.summary || {}).pool || {}).page_slots || [];
+  const byBuilding = Object.fromEntries(slots.map((slot) => [slot.building, slot]));
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>浏览器状态</h2>
+          <p>内网端只负责打开和管理 A-E 楼下载页面。</p>
+        </div>
+      </div>
+      <div class="building-grid">
+        ${BUILDINGS.map((building) => {
+          const slot = byBuilding[building] || { building };
+          return `
+            <article class="mini-card">
+              <div class="row-between">
+                <strong>${building}</strong>
+                <span class="pill ${statusClass(slot.tone)}">${escapeHtml(slot.status_text || "等待中")}</span>
+              </div>
+              <p>${escapeHtml(slot.detail_text || "等待后端状态")}</p>
+              <small>登录态：${escapeHtml(slot.login_text || slot.login_state || "-")}</small>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderSourceFamily(key, fallbackTitle) {
+  const cache = ((state.summary || {}).source_cache || {});
+  const family = cache[key] || {};
+  const rows = family.buildings || [];
+  const rowByBuilding = Object.fromEntries(rows.map((row) => [row.building, row]));
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>${escapeHtml(family.title || fallbackTitle)}</h2>
+          <p>${escapeHtml(family.status_text || "等待后端状态")}</p>
+          <p class="muted">${(family.meta_lines || []).map(escapeHtml).join("　")}</p>
+        </div>
+      </div>
+      <div class="source-list">
+        ${BUILDINGS.map((building) => {
+          const row = rowByBuilding[building] || { building, source_family: key };
+          const action = ((row.actions || {}).refresh || {});
+          const busyKey = `${key}:${building}`;
+          const disabled = state.busy.has(busyKey) || action.pending || action.allowed === false;
+          return `
+            <article class="source-row">
+              <div>
+                <div class="row-title">
+                  <strong>${building}</strong>
+                  <span class="pill ${statusClass(row.tone)}">${escapeHtml(row.status_text || "等待中")}</span>
+                </div>
+                <p>${escapeHtml(row.detail_text || "等待共享文件就绪")}</p>
+                ${(row.meta_lines || []).map((line) => `<small>${escapeHtml(line)}</small>`).join("")}
+              </div>
+              <button
+                class="btn btn-secondary"
+                data-action="refresh-building"
+                data-family="${escapeHtml(key)}"
+                data-building="${escapeHtml(building)}"
+                ${disabled ? "disabled" : ""}
+                title="${escapeHtml(action.disabled_reason || "")}"
+              >${state.busy.has(busyKey) ? "提交中..." : escapeHtml(action.label || "重新拉取")}</button>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderTasks() {
+  const tasks = state.tasks || [];
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>共享任务</h2>
+          <p>只展示内网共享文件相关任务。</p>
+        </div>
+      </div>
+      <div class="task-list">
+        ${tasks.length ? tasks.map((task) => {
+          const id = task.task_id || task.job_id || task.id || "";
+          const status = task.status_text || task.status || "-";
+          return `
+            <article class="task-row">
+              <div>
+                <strong>${escapeHtml(task.name || task.title || task.feature || "共享任务")}</strong>
+                <p>${escapeHtml(task.summary || task.detail_text || task.error || "")}</p>
+                <small>${escapeHtml(status)}　${escapeHtml(task.created_at || task.updated_at || "")}</small>
+              </div>
+              ${id ? `<button class="btn btn-ghost" data-action="cancel-task" data-task-id="${escapeHtml(id)}">取消任务</button>` : ""}
+            </article>
+          `;
+        }).join("") : `<div class="empty">暂无共享任务</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderLogs() {
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>系统日志</h2></div>
+      <pre class="log-box">${escapeHtml((state.logs || []).slice(-120).join("\n") || "等待日志...")}</pre>
+    </section>
+  `;
+}
+
+function renderStatus() {
+  return `
+    ${summaryCards()}
+    <section class="action-bar">
+      <button class="btn btn-primary" data-action="refresh-all">刷新状态</button>
+      <button class="btn btn-secondary" data-action="refresh-current-hour">立即下载当前小时全部文件</button>
+      <button class="btn btn-secondary" data-action="self-check">共享目录自检</button>
+    </section>
+    ${renderPageSlots()}
+    ${SOURCE_FAMILIES.map(([key, title]) => renderSourceFamily(key, title)).join("")}
+    ${renderTasks()}
+    ${renderLogs()}
+  `;
+}
+
+function siteRows() {
+  const sites = (((state.config || {}).common || {}).internal_source_sites || []);
+  const byBuilding = Object.fromEntries(sites.map((site) => [site.building, site]));
+  return BUILDINGS.map((building) => byBuilding[building] || { building, enabled: false, host: "", username: "", password: "" });
+}
+
+function renderConfig() {
+  const config = state.config || {};
+  const common = config.common || {};
+  const bridge = common.shared_bridge || {};
+  const cache = common.internal_source_cache || {};
+  const paths = common.paths || {};
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>内网端配置</h2>
+          <p>仅保留内网采集端所需配置。保存后立即重新加载后端配置。</p>
+        </div>
+      </div>
+      <form id="config-form" class="config-form">
+        <label>
+          <span>共享目录</span>
+          <input name="sharedRoot" value="${escapeHtml(bridge.internal_root_dir || bridge.root_dir || "")}" />
+        </label>
+        <label>
+          <span>业务下载目录</span>
+          <input name="businessRoot" value="${escapeHtml(paths.business_root_dir || "")}" />
+        </label>
+        <label>
+          <span>运行数据目录</span>
+          <input name="runtimeRoot" value="${escapeHtml(paths.runtime_state_root || ".runtime")}" />
+        </label>
+        <div class="inline-fields">
+          <label>
+            <span>启用共享下载</span>
+            <select name="cacheEnabled">
+              <option value="true" ${cache.enabled !== false ? "selected" : ""}>启用</option>
+              <option value="false" ${cache.enabled === false ? "selected" : ""}>停用</option>
+            </select>
+          </label>
+          <label>
+            <span>启动后自动拉取</span>
+            <select name="runOnStartup">
+              <option value="true" ${cache.run_on_startup !== false ? "selected" : ""}>启用</option>
+              <option value="false" ${cache.run_on_startup === false ? "selected" : ""}>停用</option>
+            </select>
+          </label>
+          <label>
+            <span>状态检查间隔秒</span>
+            <input name="checkInterval" type="number" min="5" value="${escapeHtml(cache.check_interval_sec || 30)}" />
+          </label>
+        </div>
+        <h3>五楼内网页面</h3>
+        <div class="site-table">
+          <div class="site-head">楼栋</div>
+          <div class="site-head">启用</div>
+          <div class="site-head">IP / 主机地址</div>
+          <div class="site-head">账号</div>
+          <div class="site-head">密码</div>
+          ${siteRows().map((site, index) => `
+            <input type="hidden" name="siteBuilding${index}" value="${escapeHtml(site.building)}" />
+            <div class="site-building">${escapeHtml(site.building)}</div>
+            <label class="checkbox-cell"><input name="siteEnabled${index}" type="checkbox" ${site.enabled !== false ? "checked" : ""} /></label>
+            <input name="siteHost${index}" value="${escapeHtml(site.host || site.url || "")}" />
+            <input name="siteUsername${index}" value="${escapeHtml(site.username || "")}" />
+            <input name="sitePassword${index}" value="${escapeHtml(site.password || "")}" />
+          `).join("")}
+        </div>
+        <div class="action-bar">
+          <button class="btn btn-primary" type="submit" ${state.saving ? "disabled" : ""}>${state.saving ? "保存中..." : "保存配置"}</button>
+          <button class="btn btn-secondary" type="button" data-action="reload-config">重新读取</button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+function render() {
+  const app = document.getElementById("app");
+  if (!app) return;
+  app.innerHTML = `
+    <div class="app-shell internal-shell">
+      <header class="ops-top-nav">
+        <div class="ops-top-nav-main">
+          <div class="ops-top-nav-brand">
+            <span class="ops-top-nav-kicker">QJPT 内网采集端</span>
+            <div class="ops-top-nav-title-row">
+              <h1 class="ops-top-nav-title">内网源文件采集控制台</h1>
+              <span class="version-inline">固定内网端</span>
+            </div>
+          </div>
+          <nav class="ops-page-nav">
+            <button class="btn ${state.view === "status" ? "btn-primary is-active" : "btn-ghost"}" data-action="nav" data-view="status">状态</button>
+            <button class="btn ${state.view === "config" ? "btn-primary is-active" : "btn-ghost"}" data-action="nav" data-view="config">配置</button>
+          </nav>
+        </div>
+      </header>
+      ${state.message ? `<div class="global-message global-message-info">${escapeHtml(state.message)}</div>` : ""}
+      ${state.error ? `<div class="global-message global-message-danger">${escapeHtml(state.error)}</div>` : ""}
+      <main class="internal-main">${state.view === "config" ? renderConfig() : renderStatus()}</main>
+    </div>
+  `;
+  document.body.classList.remove("app-boot-pending");
+  const overlay = document.getElementById("app-boot-overlay");
+  if (overlay) overlay.classList.add("is-hidden");
+}
+
+function collectConfigPayload() {
+  const form = document.getElementById("config-form");
+  const field = (name) => form.elements[name];
+  const current = state.config || { version: 3, common: {} };
+  const common = current.common || {};
+  const sites = BUILDINGS.map((_, index) => ({
+    building: field(`siteBuilding${index}`).value,
+    enabled: field(`siteEnabled${index}`).checked,
+    host: field(`siteHost${index}`).value.trim(),
+    username: field(`siteUsername${index}`).value.trim(),
+    password: field(`sitePassword${index}`).value,
+    url: null,
+  }));
+  const sharedRoot = field("sharedRoot").value.trim();
+  return {
+    version: current.version || 3,
+    common: {
+      console: common.console || {},
+      deployment: {
+        ...(common.deployment || {}),
+        role_mode: "internal",
+        last_started_role_mode: "internal",
+        node_label: "内网端",
+      },
+      paths: {
+        ...(common.paths || {}),
+        business_root_dir: field("businessRoot").value.trim(),
+        runtime_state_root: field("runtimeRoot").value.trim() || ".runtime",
+      },
+      internal_source_sites: sites,
+      internal_source_cache: {
+        ...(common.internal_source_cache || {}),
+        enabled: field("cacheEnabled").value === "true",
+        run_on_startup: field("runOnStartup").value === "true",
+        check_interval_sec: Math.max(5, Number(field("checkInterval").value || 30)),
+      },
+      shared_bridge: {
+        ...(common.shared_bridge || {}),
+        enabled: true,
+        root_dir: sharedRoot,
+        internal_root_dir: sharedRoot,
+      },
+    },
+  };
+}
+
+async function handleAction(event) {
+  const target = event.target.closest("[data-action]");
+  if (!target) return;
+  const action = target.dataset.action;
+  if (action === "nav") {
+    state.view = target.dataset.view || "status";
+    history.replaceState(null, "", state.view === "config" ? "/internal/config" : "/internal/status");
+    render();
+    return;
+  }
+  try {
+    if (action === "refresh-all" || action === "reload-config") {
+      await refreshAll();
+    } else if (action === "self-check") {
+      setMessage("正在执行共享目录自检...");
+      const payload = await api("/api/bridge/shared-root/self-check", { method: "POST", body: "{}" });
+      setMessage(payload.status_text || payload.message || "共享目录自检完成");
+      await refreshAll({ silent: true });
+    } else if (action === "refresh-current-hour") {
+      setMessage("已提交当前小时全部文件下载...");
+      const payload = await api("/api/bridge/source-cache/refresh-current-hour", { method: "POST", body: "{}" });
+      setMessage(payload.message || "已开始下载当前小时全部文件");
+      await refreshAll({ silent: true });
+    } else if (action === "refresh-building") {
+      const family = target.dataset.family || "";
+      const building = target.dataset.building || "";
+      const busyKey = `${family}:${building}`;
+      state.busy.add(busyKey);
+      render();
+      const payload = await api(query("/api/bridge/source-cache/refresh-building-latest", { source_family: family, building }), {
+        method: "POST",
+        body: "{}",
+      });
+      state.busy.delete(busyKey);
+      setMessage(payload.message || `已开始重新拉取 ${building}`);
+      await refreshAll({ silent: true });
+    } else if (action === "cancel-task") {
+      const taskId = target.dataset.taskId || "";
+      if (!taskId) return;
+      const payload = await api(`/api/bridge/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: "{}" });
+      setMessage(payload.accepted ? "任务取消请求已提交" : "任务取消完成");
+      await refreshAll({ silent: true });
+    }
+  } catch (error) {
+    state.busy.clear();
+    setMessage(error.message, true);
+  }
+}
+
+async function handleSubmit(event) {
+  if (event.target.id !== "config-form") return;
+  event.preventDefault();
+  try {
+    state.saving = true;
+    render();
+    const payload = collectConfigPayload();
+    const result = await api("/api/config", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    state.config = result.config || payload;
+    setMessage("内网端配置已保存");
+    await refreshAll({ silent: true });
+  } catch (error) {
+    setMessage(`保存配置失败：${error.message}`, true);
+  } finally {
+    state.saving = false;
+    render();
+  }
+}
+
+document.addEventListener("click", handleAction);
+document.addEventListener("submit", handleSubmit);
+
+render();
+refreshAll({ silent: true });
+setInterval(() => refreshAll({ silent: true }), 5000);

@@ -27,7 +27,14 @@ def build_frontend_assets(project_dir: Path) -> None:
     asset_sources = sorted([path for path in src_dir.iterdir() if path.is_file() and path.suffix in {".js", ".css"}])
 
     dist_assets = dist_dir / "assets"
+    if dist_assets.exists():
+        shutil.rmtree(dist_assets)
     dist_assets.mkdir(parents=True, exist_ok=True)
+    if legacy_dist_dir.exists():
+        legacy_assets = legacy_dist_dir / "assets"
+        if legacy_assets.exists():
+            shutil.rmtree(legacy_assets)
+        legacy_assets.mkdir(parents=True, exist_ok=True)
 
     # Vue runtime 优先使用 src 内置文件，缺失时回退到 legacy dist。
     vue_src = src_dir / "vue.global.prod.js"

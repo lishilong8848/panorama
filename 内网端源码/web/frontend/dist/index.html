@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>全景月报 Web 控制台</title>
+  <title>QJPT 内网采集端</title>
   <style>
     html,
     body {
@@ -208,14 +208,25 @@
   <div id="app-boot-overlay" aria-live="polite" aria-busy="true" role="status">
     <div class="app-boot-card">
       <div class="app-boot-kicker">启动中</div>
-      <div class="app-boot-title">正在打开中</div>
-      <div class="app-boot-subtitle">前端资源加载完成后将自动进入对应角色页面。</div>
+      <div class="app-boot-title">正在打开内网采集端</div>
+      <div class="app-boot-subtitle">正在加载浏览器状态、源文件状态与共享目录配置。</div>
       <div class="app-boot-progress" aria-hidden="true"></div>
     </div>
   </div>
   <div id="app"></div>
+  <script>
+    window.addEventListener("error", function (event) {
+      var overlay = document.getElementById("app-boot-overlay");
+      if (overlay && !overlay.classList.contains("is-hidden")) {
+        var subtitle = overlay.querySelector(".app-boot-subtitle");
+        if (subtitle) {
+          subtitle.textContent = "页面脚本加载失败：" + (event.message || "请刷新重试");
+        }
+      }
+    });
+  </script>
   <script src="/assets/vue.global.prod.js"></script>
-  <script type="module" src="/assets/app.js"></script>
+  <script defer src="/assets/app.js"></script>
 </body>
 </html>
 

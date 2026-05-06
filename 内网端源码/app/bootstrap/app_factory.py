@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import json
 from contextlib import asynccontextmanager
 import os
 import subprocess
@@ -13,7 +14,7 @@ from ipaddress import ip_address
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.bootstrap.container import build_container
@@ -35,6 +36,7 @@ from app.shared.utils.frontend_cache import (
     resolve_source_frontend_asset_path,
     source_frontend_no_cache_headers,
 )
+from app.shared.utils.atomic_file import atomic_write_text
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.handover_daily_report_screenshot_service import (
@@ -61,6 +63,8 @@ _ROLE_SELECTION_ALLOWED_EXACT = {
     "/favicon.ico",
     "/api/config",
     "/api/health/bootstrap",
+    "/api/bridge/internal-runtime-status",
+    "/api/bridge/tasks",
     "/api/handover/daily-report/context",
     "/api/logs/system",
     "/api/runtime/activate-startup",
@@ -69,6 +73,7 @@ _ROLE_SELECTION_ALLOWED_EXACT = {
 _ROLE_SELECTION_ALLOWED_PREFIXES = (
     "/assets/",
     "/assets-src/",
+    "/api/bridge/internal-runtime-status/buildings/",
 )
 
 
@@ -167,6 +172,100 @@ def _register_common_routes(app: FastAPI) -> None:
     app.include_router(logs_router)
     app.include_router(shared_bridge_router)
     app.include_router(user_router)
+
+
+def _internal_config_payload(config: Dict[str, Any]) -> Dict[str, Any]:
+    root = config if isinstance(config, dict) else {}
+    common = root.get("common", {}) if isinstance(root.get("common", {}), dict) else {}
+    return {
+        "version": int(root.get("version", 3) or 3),
+        "common": {
+            "console": copy.deepcopy(common.get("console", {}) if isinstance(common.get("console", {}), dict) else {}),
+            "deployment": {
+                **copy.deepcopy(common.get("deployment", {}) if isinstance(common.get("deployment", {}), dict) else {}),
+                "role_mode": "internal",
+                "last_started_role_mode": "internal",
+                "node_label": "内网端",
+            },
+            "paths": copy.deepcopy(common.get("paths", {}) if isinstance(common.get("paths", {}), dict) else {}),
+            "internal_source_sites": copy.deepcopy(
+                common.get("internal_source_sites", []) if isinstance(common.get("internal_source_sites", []), list) else []
+            ),
+            "internal_source_cache": copy.deepcopy(
+                common.get("internal_source_cache", {}) if isinstance(common.get("internal_source_cache", {}), dict) else {}
+            ),
+            "shared_bridge": {
+                key: copy.deepcopy(value)
+                for key, value in (
+                    common.get("shared_bridge", {}) if isinstance(common.get("shared_bridge", {}), dict) else {}
+                ).items()
+                if key
+                in {
+                    "enabled",
+                    "root_dir",
+                    "internal_root_dir",
+                    "poll_interval_sec",
+                    "heartbeat_interval_sec",
+                    "claim_lease_sec",
+                    "stale_task_timeout_sec",
+                    "artifact_retention_days",
+                    "sqlite_busy_timeout_ms",
+                }
+            },
+        },
+    }
+
+
+def _merge_internal_config_payload(current: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+    incoming_common = payload.get("common", {}) if isinstance(payload.get("common", {}), dict) else {}
+    merged = copy.deepcopy(current if isinstance(current, dict) else {})
+    common = merged.setdefault("common", {})
+    if not isinstance(common, dict):
+        common = {}
+        merged["common"] = common
+
+    for key in ("console", "paths", "internal_source_cache"):
+        value = incoming_common.get(key)
+        if isinstance(value, dict):
+            common[key] = copy.deepcopy(value)
+    sites = incoming_common.get("internal_source_sites")
+    if isinstance(sites, list):
+        common["internal_source_sites"] = copy.deepcopy(sites)
+
+    deployment = common.get("deployment", {}) if isinstance(common.get("deployment", {}), dict) else {}
+    deployment.update(
+        {
+            "role_mode": "internal",
+            "last_started_role_mode": "internal",
+            "node_label": "内网端",
+        }
+    )
+    common["deployment"] = deployment
+
+    bridge_payload = incoming_common.get("shared_bridge", {}) if isinstance(incoming_common.get("shared_bridge", {}), dict) else {}
+    bridge = common.get("shared_bridge", {}) if isinstance(common.get("shared_bridge", {}), dict) else {}
+    for key in (
+        "enabled",
+        "root_dir",
+        "internal_root_dir",
+        "poll_interval_sec",
+        "heartbeat_interval_sec",
+        "claim_lease_sec",
+        "stale_task_timeout_sec",
+        "artifact_retention_days",
+        "sqlite_busy_timeout_ms",
+    ):
+        if key in bridge_payload:
+            bridge[key] = copy.deepcopy(bridge_payload[key])
+    root_dir = str(bridge.get("internal_root_dir") or bridge.get("root_dir") or "").strip()
+    if root_dir:
+        bridge["root_dir"] = root_dir
+        bridge["internal_root_dir"] = root_dir
+    bridge["enabled"] = bool(bridge.get("enabled", True))
+    common["shared_bridge"] = bridge
+    return merged
 
 def _initialize_handover_daily_report_auth(container) -> None:
     existing_thread = getattr(container, "_handover_daily_report_auth_init_thread", None)
@@ -436,9 +535,22 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         blocked_prefixes = (
             "/external",
             "/handover/review",
+            "/handover",
+            "/login",
             "/api/handover/review",
+            "/api/handover/",
+            "/api/jobs",
+            "/api/scheduler",
+            "/api/handover-scheduler",
+            "/api/wet-bulb-collection-scheduler",
+            "/api/runtime/alarm",
             "/api/runtime/external",
+            "/api/runtime/resources",
             "/api/updater",
+            "/api/config-repair",
+            "/api/config-segments",
+            "/api/app/restart",
+            "/api/bridge/source-cache/alarm/upload",
         )
         blocked_exact = {
             "/api/runtime/external-dashboard-summary",
@@ -474,9 +586,22 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             for prefix in (
                 "/external",
                 "/handover/review",
+                "/handover",
+                "/login",
                 "/api/handover/review",
+                "/api/handover/",
+                "/api/jobs",
+                "/api/scheduler",
+                "/api/handover-scheduler",
+                "/api/wet-bulb-collection-scheduler",
+                "/api/runtime/alarm",
                 "/api/runtime/external",
+                "/api/runtime/resources",
                 "/api/updater",
+                "/api/config-repair",
+                "/api/config-segments",
+                "/api/app/restart",
+                "/api/bridge/source-cache/alarm/upload",
             )
         ):
             return Response(status_code=404)
@@ -493,11 +618,24 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
     _INTERNAL_BLOCKED_PREFIXES = (
         "/api/jobs/",
+        "/api/jobs",
         "/api/handover/",
+        "/api/handover",
+        "/handover/",
+        "/handover",
         "/handover/review/",
         "/api/scheduler/",
+        "/api/scheduler",
         "/api/handover-scheduler/",
+        "/api/handover-scheduler",
         "/api/wet-bulb-collection-scheduler/",
+        "/api/wet-bulb-collection-scheduler",
+        "/api/runtime/alarm",
+        "/api/runtime/resources",
+        "/api/config-repair",
+        "/api/config-segments",
+        "/api/app/restart",
+        "/api/bridge/source-cache/alarm/upload",
     )
 
     @app.middleware("http")
@@ -509,9 +647,22 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             for prefix in (
                 "/external",
                 "/handover/review",
+                "/handover",
+                "/login",
                 "/api/handover/review",
+                "/api/handover/",
+                "/api/jobs",
+                "/api/scheduler",
+                "/api/handover-scheduler",
+                "/api/wet-bulb-collection-scheduler",
+                "/api/runtime/alarm",
                 "/api/runtime/external",
+                "/api/runtime/resources",
                 "/api/updater",
+                "/api/config-repair",
+                "/api/config-segments",
+                "/api/app/restart",
+                "/api/bridge/source-cache/alarm/upload",
             )
         ):
             return Response(status_code=404)
@@ -1682,8 +1833,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     setter = getattr(container, "set_updater_restart_callback", None)
     if callable(setter):
         setter(updater_restart_callback)
-    @app.get("/", response_class=HTMLResponse)
-    @app.get("/login", response_class=HTMLResponse)
+    @app.get("/")
+    def root_redirect() -> Response:
+        return RedirectResponse(url="/internal/status", status_code=307)
+
     @app.get("/index.html", response_class=HTMLResponse)
     @app.get("/internal", response_class=HTMLResponse)
     @app.get("/internal/status", response_class=HTMLResponse)
@@ -1713,6 +1866,32 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             if path.exists():
                 return FileResponse(path)
         return Response(status_code=204)
+
+    @app.get("/api/config")
+    def internal_get_config() -> Dict[str, Any]:
+        return _internal_config_payload(container.config)
+
+    @app.put("/api/config")
+    def internal_put_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            merged = _merge_internal_config_payload(container.config, payload)
+            saved = save_settings(merged, container.config_path)
+            atomic_write_text(
+                container.config_path,
+                json.dumps(_internal_config_payload(saved), ensure_ascii=False, indent=2) + "\n",
+            )
+            container.reload_config(saved)
+            container.add_system_log("[配置] 已保存内网端配置并重新加载")
+            return {
+                "ok": True,
+                "config": _internal_config_payload(saved),
+                "restart_required": False,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                content={"detail": str(exc) or "保存内网端配置失败"},
+                status_code=400,
+            )
 
     if container.frontend_assets_dir.exists():
         @app.get("/assets-src/{asset_version}/{asset_path:path}")
