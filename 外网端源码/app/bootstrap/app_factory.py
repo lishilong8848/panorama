@@ -1559,7 +1559,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             cached_entries = [
                 item
                 for item in bridge_service.get_latest_source_cache_entries(
-                    FAMILY_BRANCH_POWER,
+                    source_family=FAMILY_BRANCH_POWER,
                     buildings=target_buildings,
                     bucket_key=target_bucket_key,
                 )
