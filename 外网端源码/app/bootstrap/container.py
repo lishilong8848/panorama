@@ -93,7 +93,7 @@ class AppContainer:
     frontend_assets_dir: Path
     job_service: JobService
     wifi_service: WifiSwitchService | None = None
-    scheduler: IntervalSchedulerService | None = None
+    scheduler: DailyAutoSchedulerService | None = None
     scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     handover_scheduler_manager: HandoverSchedulerManager | None = None
     handover_scheduler_callback: Callable[[str, str], tuple[bool, str]] | None = None
@@ -385,21 +385,19 @@ class AppContainer:
                 if int(item.get("id", 0) or 0) in target_ids:
                     item["uploaded"] = True
 
-    def _build_scheduler(self) -> IntervalSchedulerService:
+    def _build_scheduler(self) -> DailyAutoSchedulerService:
         scheduler_cfg = self.runtime_config.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
         paths_cfg = self.runtime_config.get("paths", {})
         if not isinstance(paths_cfg, dict):
             paths_cfg = {}
-        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
-        return IntervalSchedulerService(
-            scheduler_cfg=scheduler_cfg,
-            runtime_state_root=runtime_state_root or "runtime_state",
+        return DailyAutoSchedulerService(
+            config={"scheduler": scheduler_cfg, "paths": paths_cfg},
             emit_log=self.add_system_log,
             run_callback=self.scheduler_callback or self._scheduler_run_callback,
             is_busy=lambda: False,
-            thread_name="daily-auto-flow-interval-scheduler",
+            thread_name="daily-auto-flow-daily-scheduler",
             source_name="每日用电明细自动流程",
         )
 
@@ -415,12 +413,16 @@ class AppContainer:
         wet_cfg = self.runtime_config.get("wet_bulb_collection", {})
         if not isinstance(wet_cfg, dict):
             wet_cfg = {}
+        paths_cfg = self.runtime_config.get("paths", {})
+        if not isinstance(paths_cfg, dict):
+            paths_cfg = {}
+        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
         scheduler_cfg = wet_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
         return IntervalSchedulerService(
             scheduler_cfg=scheduler_cfg,
-            runtime_state_root="runtime_state",
+            runtime_state_root=runtime_state_root or "runtime_state",
             emit_log=self.add_system_log,
             run_callback=self.wet_bulb_collection_scheduler_callback or self._wet_bulb_collection_scheduler_run_callback,
             is_busy=lambda: False,
@@ -444,7 +446,7 @@ class AppContainer:
             runtime_state_root=runtime_state_root or "runtime_state",
             emit_log=self.add_system_log,
             run_callback=self.day_metric_upload_scheduler_callback or self._day_metric_upload_scheduler_run_callback,
-            is_busy=self.job_service.has_incomplete_jobs,
+            is_busy=self.job_service.has_running_jobs,
             thread_name="day-metric-upload-interval-scheduler",
             source_name="12项独立上传",
         )
@@ -466,7 +468,7 @@ class AppContainer:
             runtime_state_root=runtime_state_root or "runtime_state",
             emit_log=self.add_system_log,
             run_callback=self.branch_power_upload_scheduler_callback or self._branch_power_upload_scheduler_run_callback,
-            is_busy=self.job_service.has_incomplete_jobs,
+            is_busy=self.job_service.has_running_jobs,
             thread_name="branch-power-upload-interval-scheduler",
             source_name="自动上传支路功率",
         )
@@ -485,7 +487,7 @@ class AppContainer:
             },
             emit_log=self.add_system_log,
             run_callback=self.alarm_event_upload_scheduler_callback or self._alarm_event_upload_scheduler_run_callback,
-            is_busy=self.job_service.has_incomplete_jobs,
+            is_busy=self.job_service.has_running_jobs,
         )
 
     def _build_monthly_change_report_scheduler(self) -> MonthlySchedulerService:
@@ -505,7 +507,7 @@ class AppContainer:
             runtime_state_root=runtime_state_root,
             emit_log=self.add_system_log,
             run_callback=self.monthly_change_report_scheduler_callback or self._monthly_change_report_scheduler_run_callback,
-            is_busy=self.job_service.has_incomplete_jobs,
+            is_busy=self.job_service.has_running_jobs,
             thread_name="monthly-change-report-scheduler",
             source_name="月度变更统计表处理",
         )
@@ -527,7 +529,7 @@ class AppContainer:
             runtime_state_root=runtime_state_root,
             emit_log=self.add_system_log,
             run_callback=self.monthly_event_report_scheduler_callback or self._monthly_event_report_scheduler_run_callback,
-            is_busy=self.job_service.has_incomplete_jobs,
+            is_busy=self.job_service.has_running_jobs,
             thread_name="monthly-event-report-scheduler",
             source_name="月度事件统计表处理",
         )
@@ -876,6 +878,15 @@ class AppContainer:
             "states": self._normalize_external_scheduler_states(raw.get("states")),
         }
 
+    @staticmethod
+    def _safe_file_mtime(path: Path | str | None) -> float:
+        if path is None:
+            return 0.0
+        try:
+            return Path(path).stat().st_mtime
+        except Exception:
+            return 0.0
+
     def resolve_external_scheduler_autostart_state(self, *, force_refresh: bool = False) -> Dict[str, Any]:
         cached = self.external_scheduler_autostart_runtime_state
         if not force_refresh and isinstance(cached, dict) and isinstance(cached.get("states"), dict):
@@ -888,6 +899,10 @@ class AppContainer:
         if not payload:
             loaded_states = dict(config_snapshot)
             memory_source = "config_fallback"
+            changed = True
+        elif self._safe_file_mtime(self.config_path) > self._safe_file_mtime(self._external_scheduler_autostart_path()) + 1:
+            loaded_states = dict(config_snapshot)
+            memory_source = "config_newer_repair"
             changed = True
         elif self._is_external_scheduler_legacy_exit_source(memory_source):
             all_disabled = all(not bool(loaded_states.get(key, False)) for key in loaded_states)

@@ -24,7 +24,7 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
                 <strong class="status-metric-value">{{ dayMetricUploadSchedulerDecisionText || '-' }}</strong>
               </div>
             </div>
-            <div class="hint">调度固定处理当天、全部启用楼栋；缺共享文件时会显示等待内网补采同步。</div>
+          <div class="hint">调度固定处理当天、全部启用楼栋；缺共享文件时会显示等待采集端补采。</div>
             <div class="task-grid two-col">
               <div class="form-row">
                 <label class="label">执行间隔（分钟）</label>
@@ -63,14 +63,7 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
                   </div>
                 <div class="btn-line">
                     <span class="status-badge status-badge-soft tone-info">不区分班次</span>
-                    <span
-                      class="status-badge status-badge-soft"
-                      :class="deploymentRoleMode === 'external' ? 'tone-success' : 'tone-neutral'"
-                    >
-                      {{
-                        deploymentRoleMode === 'internal' ? '内网端' : '外网端'
-                      }}
-                    </span>
+                    <span class="status-badge status-badge-soft tone-success">外网端</span>
                   </div>
                 </div>
                 <div class="status-metric-grid status-metric-grid-compact">
@@ -83,19 +76,13 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
                     <strong class="status-metric-value">{{ dayMetricSelectedDateCount }} 天</strong>
                   </div>
                   <div class="status-metric">
-                    <div class="status-metric-label">运行角色</div>
-                    <strong class="status-metric-value">{{ deploymentRoleMode === 'internal' ? '内网端' : '外网端' }}</strong>
+                    <div class="status-metric-label">运行端</div>
+                    <strong class="status-metric-value">外网端</strong>
                   </div>
                 </div>
 
                 <div class="hint">该模块只上传 12 项，不生成交接班日志，不进入审核流程。</div>
-                <div class="hint">
-                  {{
-                    deploymentRoleMode === 'internal'
-                      ? '当前为内网端，请在外网端发起；内网端只负责准备共享文件。'
-                      : '当前为外网端，默认优先读取共享文件；缺失时再等待内网端补采。'
-                  }}
-                </div>
+                <div class="hint">默认优先读取共享文件；缺失时再等待采集端补采。</div>
 
                 <div class="task-grid two-col" style="margin-top:8px;">
                   <div class="form-row">
@@ -203,14 +190,13 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
                 <div class="btn-stack" style="margin-top:8px;">
                   <button
                     class="btn btn-primary"
-                    :disabled="isInternalDeploymentRole || !canRun || isActionLocked(actionKeyDayMetricFromDownload)"
+                    :disabled="!canRun || isActionLocked(actionKeyDayMetricFromDownload)"
                     @click="runDayMetricFromDownload"
                   >
                     {{ isActionLocked(actionKeyDayMetricFromDownload) ? '执行中...' : '使用共享文件上传12项' }}
                   </button>
                 </div>
                 <div class="hint">当前选择：{{ dayMetricUploadScope === 'all_enabled' ? '全部启用楼栋' : (dayMetricUploadBuilding || '-') }} / {{ dayMetricSelectedDateCount }} 天</div>
-                <div class="hint" v-if="isInternalDeploymentRole">当前为内网端，12项任务请在外网端发起；内网端只负责共享桥接下载阶段。</div>
               </article>
             </div>
 
@@ -239,7 +225,7 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
                   <strong class="status-metric-value">默认启用</strong>
                 </div>
               </div>
-              <div class="hint">仅用于单日期单楼补救，不走内网下载。{{ externalExecutionHint }}</div>
+                  <div class="hint">仅用于单日期单楼补救，不触发采集端下载。{{ externalExecutionHint }}</div>
               <div class="task-grid day-metric-local-grid">
                 <div class="form-row">
                   <label class="label">楼栋</label>
@@ -259,13 +245,12 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
               <div class="btn-line">
                 <button
                   class="btn btn-secondary"
-                  :disabled="isInternalDeploymentRole || !canRun || isActionLocked(actionKeyDayMetricFromFile)"
+                  :disabled="!canRun || isActionLocked(actionKeyDayMetricFromFile)"
                   @click="runDayMetricFromFile"
                 >
                   {{ isActionLocked(actionKeyDayMetricFromFile) ? '补录中...' : '开始补录12项' }}
                 </button>
               </div>
-              <div class="hint" v-if="isInternalDeploymentRole">当前为内网端，本地文件补录也请在外网端执行。</div>
             </article>
               </div>
             </details>
@@ -357,4 +342,5 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
           </div>
         </section>
 `;
+
 

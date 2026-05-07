@@ -4,6 +4,8 @@ const SOURCE_FAMILIES = [
   ["handover_capacity_report_family", "交接班容量报表源文件"],
   ["monthly_report_family", "全景平台月报源文件"],
   ["branch_power_family", "支路功率源文件"],
+  ["branch_current_family", "支路电流源文件"],
+  ["branch_switch_family", "支路开关源文件"],
   ["alarm_event_family", "告警信息源文件"],
 ];
 
@@ -20,6 +22,9 @@ const state = {
   saving: false,
   busy: new Set(),
 };
+
+let refreshInFlight = false;
+const RUNTIME_STATUS_ERROR_PREFIX = "读取内网端状态失败";
 
 function text(value, fallback = "-") {
   const raw = value == null ? "" : String(value).trim();
@@ -118,11 +123,16 @@ async function loadConfig() {
 
 async function loadRuntimeStatus() {
   try {
-    const payload = await api(`/api/bridge/internal-runtime-status?_t=${Date.now()}`);
+    const payload = await api(`/api/bridge/internal-runtime-status?_t=${Date.now()}`, { timeoutMs: 20000 });
     state.summary = payload.summary || null;
+    if (state.error.startsWith(RUNTIME_STATUS_ERROR_PREFIX)) {
+      state.error = "";
+    }
   } catch (error) {
-    state.summary = null;
-    state.error = `读取内网端状态失败：${error.message}`;
+    if (!state.summary) {
+      state.summary = null;
+      state.error = `${RUNTIME_STATUS_ERROR_PREFIX}：${error.message}`;
+    }
   }
 }
 
@@ -150,10 +160,16 @@ async function loadLogs() {
 }
 
 async function refreshAll({ silent = false } = {}) {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
   if (!silent) setMessage("正在刷新内网端状态...");
-  await Promise.allSettled([loadHealth(), loadConfig(), loadRuntimeStatus(), loadTasks(), loadLogs()]);
-  if (!silent) setMessage("状态已刷新");
-  render();
+  try {
+    await Promise.allSettled([loadHealth(), loadConfig(), loadRuntimeStatus(), loadTasks(), loadLogs()]);
+    if (!silent) setMessage("状态已刷新");
+    render();
+  } finally {
+    refreshInFlight = false;
+  }
 }
 
 function statusClass(tone) {
@@ -162,6 +178,17 @@ function statusClass(tone) {
   if (["danger", "failed", "error"].includes(normalized)) return "is-danger";
   if (["info", "running", "downloading"].includes(normalized)) return "is-info";
   return "is-warning";
+}
+
+function shortLine(value, maxLength = 30) {
+  let raw = text(value, "");
+  const match = raw.match(/^(缓存文件|文件|路径|错误|原因)：(.+)$/);
+  if (match) {
+    const fileName = match[2].split(/[\\/]/).filter(Boolean).pop() || match[2];
+    raw = `${match[1]}：${fileName}`;
+  }
+  if (raw.length <= maxLength) return raw;
+  return `${raw.slice(0, Math.max(8, maxLength - 1))}…`;
 }
 
 function summaryCards() {
@@ -276,6 +303,72 @@ function renderSourceFamily(key, fallbackTitle) {
   `;
 }
 
+function renderSourceMatrix() {
+  const cache = ((state.summary || {}).source_cache || {});
+  return `
+    <section class="panel source-overview-panel">
+      <div class="panel-head">
+        <div>
+          <h2>源文件状态总览</h2>
+          <p>按源文件类型和楼栋集中展示，便于快速确认下载中、失败或已就绪状态。</p>
+        </div>
+      </div>
+      <div class="source-matrix-wrap">
+        <div class="source-matrix" style="--building-count:${BUILDINGS.length}">
+          <div class="source-matrix-head source-matrix-family-head">源文件</div>
+          ${BUILDINGS.map((building) => `<div class="source-matrix-head">${escapeHtml(building)}</div>`).join("")}
+          ${SOURCE_FAMILIES.map(([key, fallbackTitle]) => {
+            const family = cache[key] || {};
+            const rows = family.buildings || [];
+            const rowByBuilding = Object.fromEntries(rows.map((row) => [row.building, row]));
+            const familyTitle = family.title || fallbackTitle;
+            return `
+              <div class="source-family-cell">
+                <div class="row-title">
+                  <strong>${escapeHtml(familyTitle)}</strong>
+                  <span class="pill ${statusClass(family.tone)}">${escapeHtml(family.status_text || "等待中")}</span>
+                </div>
+                <small>${(family.meta_lines || []).map((line) => escapeHtml(shortLine(line, 42))).join("<br>") || "等待后端状态"}</small>
+              </div>
+              ${BUILDINGS.map((building) => {
+                const row = rowByBuilding[building] || { building, source_family: key };
+                const action = ((row.actions || {}).refresh || {});
+                const busyKey = `${key}:${building}`;
+                const disabled = state.busy.has(busyKey) || action.pending || action.allowed === false;
+                const title = [
+                  row.status_text || "等待中",
+                  row.detail_text || "",
+                  ...(row.meta_lines || []),
+                  action.disabled_reason || "",
+                ].filter(Boolean).join("\\n");
+                const detail = shortLine(row.detail_text || "等待共享文件就绪", 34);
+                const meta = (row.meta_lines || []).slice(0, 1).map((line) => shortLine(line, 34)).join("");
+                return `
+                  <div class="source-status-cell" title="${escapeHtml(title)}">
+                    <div class="source-status-top">
+                      <span class="pill ${statusClass(row.tone)}">${escapeHtml(row.status_text || "等待中")}</span>
+                    </div>
+                    <p>${escapeHtml(detail)}</p>
+                    ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+                    <button
+                      class="btn btn-secondary btn-compact"
+                      data-action="refresh-building"
+                      data-family="${escapeHtml(key)}"
+                      data-building="${escapeHtml(building)}"
+                      ${disabled ? "disabled" : ""}
+                      title="${escapeHtml(action.disabled_reason || title)}"
+                    >${state.busy.has(busyKey) ? "提交中" : "重新拉取"}</button>
+                  </div>
+                `;
+              }).join("")}
+            `;
+          }).join("")}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderTasks() {
   const tasks = state.tasks || [];
   return `
@@ -324,7 +417,7 @@ function renderStatus() {
       <button class="btn btn-secondary" data-action="self-check">共享目录自检</button>
     </section>
     ${renderPageSlots()}
-    ${SOURCE_FAMILIES.map(([key, title]) => renderSourceFamily(key, title)).join("")}
+    ${renderSourceMatrix()}
     ${renderTasks()}
     ${renderLogs()}
   `;

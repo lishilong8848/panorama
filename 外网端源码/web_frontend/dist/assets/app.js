@@ -3,7 +3,7 @@ import { createDashboardActions } from "./dashboard_actions.js";
 import { createDateHandoverActions } from "./date_handover_actions.js";
 import { createRuntimeActions } from "./runtime_actions.js";
 import { createUiLocalActions } from "./ui_local_actions.js";
-import { createAppState, createEmptyInternalBuildingRuntimeStatusMap } from "./app_state.js";
+import { createAppState } from "./app_state.js";
 import { registerAppLifecycle } from "./app_lifecycle.js";
 import { APP_TEMPLATE } from "./app_template.js";
 import { isHandoverReviewPath, mountHandoverReviewApp } from "./handover_review_app.js";
@@ -11,7 +11,6 @@ import { clone } from "./config_helpers.js";
 import { createHandoverDashboardUiHelpers } from "./handover_dashboard_ui_helpers.js";
 import { createRuntimeTaskUiHelpers } from "./runtime_task_ui_helpers.js";
 import { createSchedulerUiHelpers } from "./scheduler_ui_helpers.js";
-import { createInternalSourceCacheUiHelpers } from "./internal_source_cache_ui_helpers.js";
 import { createConfigSaveUiHelpers } from "./config_save_ui_helpers.js";
 import { createStartupRoleUiHelpers } from "./startup_role_ui_helpers.js";
 import { registerAppRuntimeWatchers } from "./app_runtime_watchers.js";
@@ -92,7 +91,6 @@ createApp({
       selectedDates,
       logs,
       logFilter,
-      internalOpsLogs,
       currentJob,
       jobsList,
       selectedJobId,
@@ -106,8 +104,6 @@ createApp({
       configLoaded,
       healthLoadError,
       configLoadError,
-      internalRuntimeSummary,
-      internalBuildingRuntimeStatusMap,
       runtimeWarmupReady,
       engineerDirectoryLoaded,
       initialLoadingPhase,
@@ -141,6 +137,16 @@ createApp({
       dayMetricLocalBuilding,
       dayMetricLocalDate,
       dayMetricLocalFile,
+      branchPowerManualDate,
+      branchPowerManualHour,
+      branchPowerManualHourOptions,
+      branchPowerManualBucketKey,
+      branchPowerManualBuilding,
+      branchPowerBackfillDate,
+      branchPowerBackfillBuilding,
+      branchPowerHourStatus,
+      branchPowerHourStatusLoading,
+      branchPowerHourStatusMessage,
       handoverFile,
       handoverFilesByBuilding,
       handoverDutyDate,
@@ -220,14 +226,7 @@ createApp({
       dashboardScheduleStatusItems,
       schedulerOverviewItems,
       schedulerOverviewSummary,
-      isInternalRole,
-      internalDownloadPoolOverview,
-      internalSourceCacheOverview,
-      internalRealtimeSourceFamilies,
-      externalInternalAlertOverview,
       currentHourRefreshOverview,
-      internalRuntimeOverview,
-      internalSourceCacheHistoryOverview,
       sharedSourceCacheReadinessOverview,
       sharedRootDiagnosticOverview,
       updaterMirrorOverview,
@@ -290,7 +289,7 @@ createApp({
     const startupRoleSelectorVisible = ref(false);
     const startupRoleDecisionReady = ref(false);
     const startupRoleSelectorBusy = ref(false);
-    const startupRoleSelectorSelection = ref("internal");
+    const startupRoleSelectorSelection = ref("external");
     const startupRoleSelectorMessage = ref("");
     const startupRoleSelectorHandled = ref(false);
     const startupRoleLoadingVisible = ref(false);
@@ -305,14 +304,9 @@ createApp({
     const startupRoleAdvancedVisible = ref(false);
     const startupRoleOptions = Object.freeze([
       {
-        value: "internal",
-        label: "内网端",
-        description: "只负责内网下载、查询、采集，并把产物写入共享目录。",
-      },
-      {
         value: "external",
         label: "外网端",
-        description: "统一发起协同任务，优先读取共享文件；缺失时再等待内网补采。",
+        description: "统一发起协同任务，优先读取共享文件；缺失时再等待采集端补采。",
       },
     ]);
     const initialUpdaterRecoveryIntent = readUpdaterRecoveryIntent();
@@ -356,6 +350,8 @@ createApp({
       actionKeyHandoverFromDownload,
       actionKeyDayMetricFromDownload,
       actionKeyBranchPowerFromDownload,
+      actionKeyBranchPowerBackfillMissing,
+      actionKeyBranchPowerManualHour,
       actionKeyDayMetricFromFile,
       actionKeyDayMetricRetryUnit,
       actionKeyDayMetricRetryFailed,
@@ -396,12 +392,7 @@ createApp({
       actionKeyUpdaterCheck,
       actionKeyUpdaterApply,
       actionKeyUpdaterRestart,
-      actionKeyUpdaterPublishApproved,
-      actionKeyUpdaterInternalPeerCheck,
-      actionKeyUpdaterInternalPeerApply,
-      actionKeyUpdaterInternalPeerRestart,
       actionKeySourceCacheRefreshCurrentHour,
-      actionKeySourceCacheRefreshBuildingLatestPrefix,
       actionKeySourceCacheRefreshAlarmManual,
       actionKeySourceCacheDeleteAlarmManual,
       actionKeySourceCacheUploadAlarmFull,
@@ -419,17 +410,12 @@ createApp({
     } = APP_ACTION_KEYS;
     const {
       runtimeActionsRef,
-      getSourceCacheRefreshBuildingActionKey,
       startupRoleDraftSourceConfig,
       uploadAlarmSourceCacheFull,
       uploadAlarmSourceCacheBuilding,
       checkUpdaterNow,
       applyUpdaterPatch,
       restartUpdaterApp,
-      publishUpdaterApproved,
-      triggerInternalPeerUpdaterCheck,
-      triggerInternalPeerUpdaterApply,
-      triggerInternalPeerUpdaterRestart,
       refreshCurrentHourSourceCache,
       refreshManualAlarmSourceCache,
       getJobCancelActionKey,
@@ -441,31 +427,14 @@ createApp({
       configLoaded,
       config,
       health,
-      actionKeySourceCacheRefreshBuildingLatestPrefix,
     });
     const {
       getUpdaterDisabledText,
       updaterMainAction,
-      updaterPublishApprovedAction,
-      updaterInternalPeerCheckAction,
-      updaterInternalPeerApplyAction,
-      updaterInternalPeerRestartAction,
       isUpdaterSourceRunDisabled,
       updaterBadgeToneClass,
       updaterButtonClass,
       isUpdaterActionLocked,
-      isUpdaterPublishApprovedLocked,
-      updaterInternalPeerSnapshot,
-      updaterInternalPeerCommandActive,
-      updaterInternalPeerCommandAction,
-      updaterInternalPeerOnline,
-      isUpdaterInternalPeerCheckLocked,
-      isUpdaterInternalPeerApplyLocked,
-      isUpdaterInternalPeerRestartLocked,
-      updaterPublishApprovedButtonText,
-      updaterInternalPeerCheckButtonText,
-      updaterInternalPeerApplyButtonText,
-      updaterInternalPeerRestartButtonText,
       updaterMainButtonText,
     } = createUpdaterUiHelpers({
       computed,
@@ -474,10 +443,6 @@ createApp({
       actionKeyUpdaterCheck,
       actionKeyUpdaterApply,
       actionKeyUpdaterRestart,
-      actionKeyUpdaterPublishApproved,
-      actionKeyUpdaterInternalPeerCheck,
-      actionKeyUpdaterInternalPeerApply,
-      actionKeyUpdaterInternalPeerRestart,
     });
     const externalAlarmUploadBuilding = ref("全部楼栋");
     const monthlyReportTestReceiveIdDraftEvent = ref("");
@@ -505,17 +470,6 @@ createApp({
       config,
       schedulerToggleState,
       isActionLocked,
-    });
-    const {
-      getInternalSourceCacheRefreshActionKey,
-      getInternalSourceCacheRefreshAction,
-      getInternalSourceCacheRefreshDisabledReason,
-      isInternalSourceCacheRefreshLocked,
-      getInternalSourceCacheRefreshButtonText,
-    } = createInternalSourceCacheUiHelpers({
-      isActionLocked,
-      getSourceCacheRefreshBuildingActionKey,
-      refreshBuildingActionKeyPrefix: actionKeySourceCacheRefreshBuildingLatestPrefix,
     });
     const {
       isSourceCacheRefreshCurrentHourLocked,
@@ -590,8 +544,6 @@ createApp({
     const {
       effectiveRoleMode,
       deploymentRoleMode,
-      isInternalDeploymentRole,
-      isExternalDeploymentRole,
       configRoleMode,
       showCommonPathsConfigTab,
       showCommonSchedulerConfigTab,
@@ -733,30 +685,14 @@ createApp({
       clearDashboardSchedulerOverviewFocus,
       openDashboardSchedulerOverviewTarget,
       runUpdaterMainAction,
-      publishUpdaterApprovedNow,
-      checkInternalPeerUpdaterNow,
-      applyInternalPeerUpdaterNow,
-      restartInternalPeerUpdaterNow,
     } = createAppActionUiHelpers({
       message,
       updaterMainAction,
-      updaterPublishApprovedAction,
-      updaterInternalPeerCheckAction,
-      updaterInternalPeerApplyAction,
-      updaterInternalPeerRestartAction,
       isUpdaterActionLocked,
-      isUpdaterPublishApprovedLocked,
-      isUpdaterInternalPeerCheckLocked,
-      isUpdaterInternalPeerApplyLocked,
-      isUpdaterInternalPeerRestartLocked,
       getUpdaterDisabledText,
       restartUpdaterApp,
       applyUpdaterPatch,
       checkUpdaterNow,
-      publishUpdaterApproved,
-      triggerInternalPeerUpdaterCheck,
-      triggerInternalPeerUpdaterApply,
-      triggerInternalPeerUpdaterRestart,
       setDashboardActiveModule,
       dashboardSchedulerOverviewFocusKey,
       nextTick,
@@ -854,8 +790,6 @@ createApp({
       configLoaded,
       healthLoadError,
       configLoadError,
-      internalRuntimeSummary,
-      internalBuildingRuntimeStatusMap,
       runtimeWarmupReady,
       engineerDirectoryLoaded,
       updaterUiOverlayVisible,
@@ -894,15 +828,9 @@ createApp({
       cancelBridgeTask,
       retryBridgeTask,
       patchJobPanelActionState,
-      refreshBuildingLatestSourceCache,
       deleteManualAlarmSourceCacheFiles,
       openAlarmEventUploadTarget,
       fetchRuntimeResources,
-      fetchInternalRuntimeSummary,
-      fetchInternalRuntimeBuildingRuntimeStatus,
-      fetchAllInternalBuildingRuntimeStatuses,
-      scheduleInternalRuntimeStatusRefresh,
-      resetInternalRuntimeRequestState,
       resetExternalDashboardRequestState,
       fetchConfig,
       fetchHandoverCommonConfigSegment,
@@ -1288,7 +1216,6 @@ createApp({
       shouldFetchPendingResumeRuns,
       healthPollIntervalMs,
       shouldPollBridgeTasks,
-      shouldPollInternalRuntimeStatus,
       shouldIncludeHandoverHealthContext,
       shouldPollHandoverDailyReportContext,
       shouldLoadEngineerDirectory,
@@ -1326,13 +1253,9 @@ createApp({
       shouldPollHandoverDailyReportContext,
       shouldFetchPendingResumeRuns,
       shouldLoadEngineerDirectory,
-      shouldPollInternalRuntimeStatus,
       runtimeWarmupReady,
       deploymentRoleMode,
       health,
-      internalRuntimeSummary,
-      internalBuildingRuntimeStatusMap,
-      createEmptyInternalBuildingRuntimeStatusMap,
       bootstrapReady,
       configLoaded,
       currentView,
@@ -1365,9 +1288,6 @@ createApp({
       fetchBridgeTasks,
       fetchPendingResumeRuns,
       scheduleEngineerDirectoryPrefetch,
-      fetchInternalRuntimeSummary,
-      fetchAllInternalBuildingRuntimeStatuses,
-      resetInternalRuntimeRequestState,
       resetExternalDashboardRequestState,
       ensureHandoverEngineerDirectoryLoaded,
       applyDashboardRoleMode,
@@ -1424,7 +1344,10 @@ createApp({
           && schedulerModules.has(activeModuleText)
           && !configLoaded.value
         ) {
-          void fetchConfig({ silentMessage: true, loadHandoverSegments: true });
+          void fetchConfig({
+            silentMessage: true,
+            loadHandoverSegments: runtimeRequestsReady.value && activeModuleText === "handover_log",
+          });
         }
         if ((enteredDashboard || moduleChanged) && currentViewText === "dashboard" && shouldPollExternalDashboardSummary.value) {
           void fetchExternalDashboardSummary({ force: true, silentMessage: true });
@@ -1447,7 +1370,7 @@ createApp({
       ([ready, view]) => {
         const currentViewText = String(view || "").trim().toLowerCase();
         if (currentViewText !== "config" || !ready || configLoaded.value) return;
-        void fetchConfig({ silentMessage: true, loadHandoverSegments: true });
+        void fetchConfig({ silentMessage: true, loadHandoverSegments: runtimeRequestsReady.value });
       },
       { immediate: true },
     );
@@ -1489,6 +1412,15 @@ createApp({
       dayMetricLocalBuilding,
       dayMetricLocalDate,
       dayMetricLocalFile,
+      branchPowerManualDate,
+      branchPowerManualHour,
+      branchPowerManualBucketKey,
+      branchPowerManualBuilding,
+      branchPowerBackfillDate,
+      branchPowerBackfillBuilding,
+      branchPowerHourStatus,
+      branchPowerHourStatusLoading,
+      branchPowerHourStatusMessage,
       sharedBridgeSelfCheckResult,
       streamController,
       fetchHealth,
@@ -1547,6 +1479,9 @@ createApp({
       runHandoverFromDownload,
       runDayMetricFromDownload,
       runBranchPowerFromDownload,
+      refreshBranchPowerHourStatus,
+      runBranchPowerBackfillMissing,
+      runBranchPowerManualHour,
       runDayMetricFromFile,
       retryDayMetricUnit,
       retryFailedDayMetricUnits,
@@ -1585,16 +1520,10 @@ createApp({
       onJobDone: async (jobId) => {
         await fetchJob(jobId);
         scheduleExternalDashboardRefresh("job_done", { includePendingResume: true });
-        if (shouldPollInternalRuntimeStatus.value) {
-          scheduleInternalRuntimeStatusRefresh({ delayMs: 120 });
-        }
       },
       onJobReconnect: async (jobId) => {
         await fetchJob(jobId);
         scheduleExternalDashboardRefresh("job_reconnect");
-        if (shouldPollInternalRuntimeStatus.value) {
-          scheduleInternalRuntimeStatusRefresh({ delayMs: 120 });
-        }
       },
     });
     Object.assign(streamController, realStreamController);
@@ -1622,8 +1551,6 @@ createApp({
         fetchJobs,
         fetchBridgeTasks,
         fetchRuntimeResources,
-        fetchInternalRuntimeSummary,
-        fetchAllInternalBuildingRuntimeStatuses,
         fetchHandoverDailyReportContext,
         fetchConfig,
         syncHandoverDutyFromNow,
@@ -1631,7 +1558,6 @@ createApp({
         shouldFetchPendingResumeRuns: () => shouldFetchPendingResumeRuns.value,
         shouldPollHandoverDailyReportContext: () => shouldPollHandoverDailyReportContext.value,
         shouldPollBridgeTasks: () => shouldPollBridgeTasks.value,
-        shouldPollInternalRuntimeStatus: () => shouldPollInternalRuntimeStatus.value,
         shouldPollExternalDashboardSummary: () => shouldPollExternalDashboardSummary.value,
         shouldFetchHealth: () => shouldFetchHealth.value,
         shouldPollJobPanel: () => shouldPollJobPanel.value,
@@ -1696,6 +1622,16 @@ createApp({
       dayMetricLocalBuilding,
       dayMetricLocalDate,
       dayMetricLocalFile,
+      branchPowerManualDate,
+      branchPowerManualHour,
+      branchPowerManualHourOptions,
+      branchPowerManualBucketKey,
+      branchPowerManualBuilding,
+      branchPowerBackfillDate,
+      branchPowerBackfillBuilding,
+      branchPowerHourStatus,
+      branchPowerHourStatusLoading,
+      branchPowerHourStatusMessage,
       pendingResumeRuns,
       resumeDeleteConfirmDialog,
       pendingResumeCount,
@@ -1780,14 +1716,7 @@ createApp({
       dashboardSystemStatusItems,
       dashboardScheduleOverview,
       dashboardScheduleStatusItems,
-      isInternalRole,
-      internalDownloadPoolOverview,
-      internalSourceCacheOverview,
-      internalRealtimeSourceFamilies,
-      externalInternalAlertOverview,
       currentHourRefreshOverview,
-      internalRuntimeOverview,
-      internalSourceCacheHistoryOverview,
       sharedSourceCacheReadinessOverview,
       sharedRootDiagnosticOverview,
       updaterMirrorOverview,
@@ -1818,14 +1747,6 @@ createApp({
       updaterButtonClass,
       isUpdaterActionLocked,
       exitCurrentSystemToRoleSelector,
-      isUpdaterPublishApprovedLocked,
-      isUpdaterInternalPeerCheckLocked,
-      isUpdaterInternalPeerApplyLocked,
-      isUpdaterInternalPeerRestartLocked,
-      updaterPublishApprovedButtonText,
-      updaterInternalPeerCheckButtonText,
-      updaterInternalPeerApplyButtonText,
-      updaterInternalPeerRestartButtonText,
       deploymentRoleMode,
       deploymentNodeIdDisplayText,
       deploymentNodeIdDisplayHint,
@@ -1855,8 +1776,6 @@ createApp({
       bridgeExecutionHint,
       externalExecutionHint,
       resumeExecutionHint,
-      isInternalDeploymentRole,
-      isExternalDeploymentRole,
       startupRoleGateReady,
       startupRoleGateVisible,
       shouldRenderAppShell,
@@ -1911,6 +1830,8 @@ createApp({
       actionKeyHandoverFromDownload,
       actionKeyDayMetricFromDownload,
       actionKeyBranchPowerFromDownload,
+      actionKeyBranchPowerBackfillMissing,
+      actionKeyBranchPowerManualHour,
       actionKeyDayMetricFromFile,
       actionKeyDayMetricRetryUnit,
       actionKeyDayMetricRetryFailed,
@@ -2008,6 +1929,9 @@ createApp({
       runHandoverFromDownload,
       runDayMetricFromDownload,
       runBranchPowerFromDownload,
+      refreshBranchPowerHourStatus,
+      runBranchPowerBackfillMissing,
+      runBranchPowerManualHour,
       runDayMetricFromFile,
       retryDayMetricUnit,
       retryFailedDayMetricUnits,
@@ -2030,10 +1954,6 @@ createApp({
       checkUpdaterNow,
       applyUpdaterPatch,
       restartUpdaterApp,
-      publishUpdaterApprovedNow,
-      checkInternalPeerUpdaterNow,
-      applyInternalPeerUpdaterNow,
-      restartInternalPeerUpdaterNow,
       confirmAllHandoverReview,
       retryAllFailedHandoverCloudSync,
       continueHandoverFollowupUpload,
@@ -2098,7 +2018,6 @@ createApp({
       getHandoverDailyReportRestoreActionKey,
       runUpdaterMainAction,
       refreshCurrentHourSourceCache,
-      refreshBuildingLatestSourceCache,
       refreshManualAlarmSourceCache,
       deleteManualAlarmSourceCacheFiles,
       uploadAlarmSourceCacheFull,
@@ -2154,10 +2073,6 @@ createApp({
       fetchHandoverEngineerDirectory,
       fetchHandoverCommonConfigSegment,
       fetchHandoverBuildingConfigSegment,
-      getInternalSourceCacheRefreshActionKey,
-      getInternalSourceCacheRefreshDisabledReason,
-      isInternalSourceCacheRefreshLocked,
-      getInternalSourceCacheRefreshButtonText,
       isSourceCacheRefreshCurrentHourLocked,
       currentHourRefreshButtonText,
       isSourceCacheRefreshAlarmManualLocked,

@@ -21,6 +21,8 @@ class DailyAutoSchedulerService:
         emit_log: Callable[[str], None],
         run_callback: Callable[[str], Tuple[bool, str]],
         is_busy: Callable[[], bool],
+        thread_name: str = "web-daily-auto-scheduler",
+        source_name: str = "内置每日调度",
     ) -> None:
         scheduler_cfg = config.get("scheduler")
         paths_cfg = config.get("paths", {})
@@ -69,6 +71,8 @@ class DailyAutoSchedulerService:
         self.emit_log = emit_log
         self.run_callback = run_callback
         self.is_busy = is_busy
+        self.thread_name = str(thread_name or "web-daily-auto-scheduler")
+        self.source_name = str(source_name or "内置每日调度")
 
         self.started_at = datetime.now()
         self._stop = threading.Event()
@@ -237,7 +241,7 @@ class DailyAutoSchedulerService:
         self.started_at = datetime.now()
         self.runtime["started_at"] = self.started_at.strftime("%Y-%m-%d %H:%M:%S")
         self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="web-daily-auto-scheduler")
+        self._thread = threading.Thread(target=self._loop, daemon=True, name=self.thread_name)
         self._thread.start()
         return {"started": True, "running": True, "reason": "started"}
 
@@ -303,9 +307,13 @@ class DailyAutoSchedulerService:
                         self.state.get("last_attempt_period", "") == period
                         and self.state.get("last_status", "") == "failed"
                     )
-                    source = "内置每日调度补跑" if is_retry else "内置每日调度"
+                    source = f"{self.source_name}补跑" if is_retry else self.source_name
                     self._diag(f"触发执行: source={source}, period={period}")
-                    ok, detail = self.run_callback(source)
+                    try:
+                        ok, detail = self.run_callback(source)
+                    except Exception as exc:  # noqa: BLE001
+                        ok, detail = False, str(exc)
+                        self._diag(f"触发异常: {detail}")
 
                     self.state["last_attempt_period"] = period
                     self.state["last_run_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -320,6 +328,15 @@ class DailyAutoSchedulerService:
                     self.runtime["last_trigger_result"] = "success" if ok else "failed"
                     self._diag(f"触发结果: {'success' if ok else 'failed'} {'' if ok else detail}")
 
-            self._stop.wait(interval)
+            wait_seconds = interval
+            if not should_run:
+                try:
+                    next_run = self.next_run_time(now)
+                    seconds_until_next = (next_run - now).total_seconds()
+                    if seconds_until_next > 0:
+                        wait_seconds = min(interval, max(0.2, seconds_until_next))
+                except Exception:  # noqa: BLE001
+                    wait_seconds = interval
+            self._stop.wait(wait_seconds)
 
 

@@ -51,6 +51,7 @@ async def _await_ready_browser_pool(*, browser_pool: Any | None) -> Any | None:
     download_cfg = config.get("download", {}) if isinstance(config.get("download", {}), dict) else {}
     deployment_cfg = config.get("deployment", {}) if isinstance(config.get("deployment", {}), dict) else {}
     role_mode = str(deployment_cfg.get("role_mode", "") or "").strip().lower()
+    internal_mode = role_mode == "internal"
     wait_timeout_sec = 0.0
     try:
         configured_timeout = float(download_cfg.get("browser_pool_wait_timeout_sec", 0) or 0)
@@ -58,14 +59,15 @@ async def _await_ready_browser_pool(*, browser_pool: Any | None) -> Any | None:
         configured_timeout = 0.0
     if configured_timeout > 0:
         wait_timeout_sec = configured_timeout
-    elif role_mode == "internal":
-        wait_timeout_sec = 30.0
+    elif internal_mode:
+        wait_timeout_sec = 120.0
     if wait_timeout_sec <= 0:
         return browser_pool or get_internal_download_browser_pool()
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + wait_timeout_sec
     candidate = browser_pool
+    last_ready_result: Dict[str, Any] = {}
     while loop.time() < deadline:
         candidate = candidate or get_internal_download_browser_pool()
         if candidate is None:
@@ -80,16 +82,28 @@ async def _await_ready_browser_pool(*, browser_pool: Any | None) -> Any | None:
                 ready_result = await asyncio.to_thread(wait_until_ready, remaining)
             except Exception:  # noqa: BLE001
                 ready_result = {}
+            last_ready_result = ready_result if isinstance(ready_result, dict) else {}
             if bool(ready_result.get("ready", False)):
                 return candidate
+            if internal_mode:
+                break
         is_running = getattr(candidate, "is_running", None)
-        if callable(is_running):
+        if callable(is_running) and not internal_mode:
             try:
                 if bool(is_running()):
                     return candidate
             except Exception:  # noqa: BLE001
                 pass
         await asyncio.sleep(0.25)
+    if internal_mode:
+        reason = ""
+        if isinstance(last_ready_result, dict):
+            reason = str(
+                last_ready_result.get("error")
+                or last_ready_result.get("reason")
+                or ""
+            ).strip()
+        raise RuntimeError(reason or "内网下载浏览器池未就绪")
     return candidate
 
 
@@ -164,6 +178,79 @@ class DownloadGateway:
             full_config.get("handover_log", {}) if isinstance(full_config, dict) else {}
         )
 
+    @staticmethod
+    def _report_template_selectors(name: str) -> List[str]:
+        name_literal = _xpath_literal(name)
+        return [
+            (
+                "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), "
+                "' showTemplate ') and (.//span[normalize-space(.)="
+                f"{name_literal}] or normalize-space(.)={name_literal})]"
+            ),
+            (
+                "xpath=//span[normalize-space(.)="
+                f"{name_literal}]/ancestor::div[contains(concat(' ', normalize-space(@class), ' '), "
+                "' showTemplate ')][1]"
+            ),
+            f'div.showTemplate:has-text("{name}")',
+        ]
+
+    @staticmethod
+    def _is_branch_source_download(*, template_name: str, sheet_name: str) -> bool:
+        text = f"{template_name or ''} {sheet_name or ''}"
+        return any(
+            token in text
+            for token in (
+                "支路功率",
+                "支路电流",
+                "支路开关",
+                "列头柜支路电流",
+                "列头柜支路开关",
+            )
+        )
+
+    async def _report_template_visible(
+        self,
+        page: Page,
+        *,
+        template_name: str,
+        timeout_ms: int,
+    ) -> bool:
+        names = _template_name_candidates(template_name)
+        if not names:
+            return True
+
+        deadline = time.monotonic() + max(0.5, int(timeout_ms) / 1000)
+        while time.monotonic() < deadline:
+            remaining_ms = max(50, int((deadline - time.monotonic()) * 1000))
+            frame1 = None
+            try:
+                level1 = await page.wait_for_selector(
+                    "iframe#right-content",
+                    state="attached",
+                    timeout=min(500, remaining_ms),
+                )
+                frame1 = await level1.content_frame()
+            except Exception:  # noqa: BLE001
+                frame1 = None
+
+            if frame1 is not None:
+                for name in names:
+                    for selector in self._report_template_selectors(name):
+                        try:
+                            await frame1.locator(selector).first.wait_for(
+                                state="visible",
+                                timeout=min(150, remaining_ms),
+                            )
+                            return True
+                        except Exception:  # noqa: BLE001
+                            continue
+
+            sleep_seconds = min(0.25, max(0.05, deadline - time.monotonic()))
+            await asyncio.sleep(sleep_seconds)
+
+        return False
+
     def _find_site(self, building: str) -> Dict[str, Any]:
         sites = self.handover_cfg.get("sites")
         if not isinstance(sites, list) or not sites:
@@ -219,7 +306,10 @@ class DownloadGateway:
         page: Page,
         menu_path: List[str],
         *,
+        template_name: str,
         menu_visible_timeout_ms: int,
+        debug_step_log: bool = False,
+        building: str = "",
     ) -> None:
         items = [str(x).strip() for x in menu_path if str(x).strip()]
         if len(items) < 3:
@@ -246,16 +336,42 @@ class DownloadGateway:
                 f'span.c-leftMenu__level-1__item-title:has-text("{level1_menu}")'
             ).first.click()
             await asyncio.sleep(0.2)
-            await page.locator(
+            level2_locator = page.locator(
                 f'li.c-leftMenu__level-2__item:has-text("{level2_menu}")'
-            ).first.wait_for(
+            ).first
+            await level2_locator.wait_for(
                 state="visible",
                 timeout=menu_visible_timeout_ms,
             )
-            await page.locator(
-                f'li.c-leftMenu__level-2__item:has-text("{level2_menu}")'
-            ).first.click()
+            for attempt in range(1, 11):
+                await level2_locator.click()
+                if await self._report_template_visible(
+                    page, template_name=template_name, timeout_ms=3000
+                ):
+                    if attempt > 1:
+                        self._debug_log(
+                            debug_step_log,
+                            building,
+                            f"重复点击{level2_menu}后模板已显示 click={attempt}/10 template={template_name}",
+                        )
+                    return
+                if attempt < 10:
+                    self._debug_log(
+                        debug_step_log,
+                        building,
+                        f"{level2_menu}点击后3秒未显示模板，准备重试 click={attempt}/10 template={template_name}",
+                    )
+                    await level2_locator.wait_for(
+                        state="visible",
+                        timeout=menu_visible_timeout_ms,
+                    )
+            raise StepError(
+                "菜单",
+                f"点击{level2_menu} 10次后仍未显示报表模板: {template_name}",
+            )
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, StepError):
+                raise exc
             raise StepError("菜单", str(exc)) from exc
 
     async def _resolve_report_frames(
@@ -280,21 +396,7 @@ class DownloadGateway:
             report_locator = None
             template_wait_timeout = frame_timeout
             for name in names:
-                name_literal = _xpath_literal(name)
-                selectors = [
-                    (
-                        "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), "
-                        "' showTemplate ') and (.//span[normalize-space(.)="
-                        f"{name_literal}] or normalize-space(.)={name_literal})]"
-                    ),
-                    (
-                        "xpath=//span[normalize-space(.)="
-                        f"{name_literal}]/ancestor::div[contains(concat(' ', normalize-space(@class), ' '), "
-                        "' showTemplate ')][1]"
-                    ),
-                    f'div.showTemplate:has-text("{name}")',
-                ]
-                for selector in selectors:
+                for selector in self._report_template_selectors(name):
                     candidate = frame1.locator(selector).first
                     try:
                         await candidate.wait_for(
@@ -363,21 +465,45 @@ class DownloadGateway:
                 "/following::input[contains(@class,'fr-trigger-texteditor')][1]"
             ),
         ]
-        errors: List[str] = []
-        for selector in selectors:
-            try:
-                input_locator = frame2.locator(selector)
-                if await input_locator.count() == 0:
-                    continue
-                target = input_locator.first
-                await target.wait_for(state="visible", timeout=max(1000, int(timeout_ms)))
-                await target.click()
-                await target.fill(text)
-                await target.press("Tab")
-                return
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{selector}: {exc}")
-        raise StepError(label, "; ".join(errors) if errors else "未找到输入框")
+        errors: Dict[str, str] = {}
+        timeout_seconds = max(1.0, int(timeout_ms) / 1000)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            remaining_ms = max(100, int((deadline - time.monotonic()) * 1000))
+            for selector in selectors:
+                try:
+                    input_locator = frame2.locator(selector)
+                    if await input_locator.count() == 0:
+                        continue
+                    target = input_locator.first
+                    await target.wait_for(
+                        state="visible",
+                        timeout=min(1000, remaining_ms),
+                    )
+                    await target.scroll_into_view_if_needed()
+                    for _ in range(2):
+                        await target.click()
+                        await target.fill(text)
+                        await target.press("Tab")
+                        try:
+                            actual = await target.input_value(timeout=500)
+                        except Exception:  # noqa: BLE001
+                            actual = await target.evaluate(
+                                "(el) => el.value || el.getAttribute('value') || ''"
+                            )
+                        if str(actual or "").strip() == text:
+                            return
+                        await asyncio.sleep(0.1)
+                    raise RuntimeError(
+                        f"写入后值不一致: expected={text}, actual={actual}"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors[selector] = str(exc)
+            await asyncio.sleep(0.2)
+        detail = "; ".join(
+            f"{selector}: {error}" for selector, error in errors.items()
+        )
+        raise StepError(label, detail if detail else "未找到输入框")
 
     async def _fill_optional_sheet_name(
         self,
@@ -677,40 +803,79 @@ class DownloadGateway:
                     login_fill_timeout_ms=int(login_fill_timeout_ms),
                 ),
             )
-            await _run_step(
-                "菜单进入",
-                lambda: self._open_report_query_page(
-                    page,
-                    menu_path,
-                    menu_visible_timeout_ms=int(menu_visible_timeout_ms),
-                ),
+            is_branch_source = self._is_branch_source_download(
+                template_name=template_name,
+                sheet_name=sheet_name,
             )
-            frame2 = await _run_step(
-                "iframe定位",
-                lambda: self._resolve_report_frames(
-                    page,
-                    template_name=template_name,
-                    force_iframe_reopen_each_task=force_iframe_reopen_each_task,
-                    iframe_timeout_ms=int(iframe_timeout_ms),
-                ),
-            )
-            await _run_step(
-                "填参查询",
-                lambda: self._fill_query_conditions(
-                    frame2,
-                    start_time=start_time,
-                    end_time=end_time,
-                    scale_label=scale_label,
-                    sheet_name=sheet_name,
-                    start_end_visible_timeout_ms=start_end_visible_timeout_ms,
-                ),
-            )
-            await _run_step(
-                "查询等待",
-                lambda: self._wait_query_ready(
-                    frame2, timeout_ms=int(query_result_timeout_ms)
-                ),
-            )
+            query_session_attempts = 3 if is_branch_source else 1
+            query_wait_timeout_ms = 15000 if is_branch_source else int(query_result_timeout_ms)
+            frame2 = None
+            for query_attempt in range(1, query_session_attempts + 1):
+                step_suffix = (
+                    f" query={query_attempt}/{query_session_attempts}"
+                    if query_session_attempts > 1
+                    else ""
+                )
+                if is_branch_source and query_attempt > 1:
+                    self._debug_log(
+                        debug_step_log,
+                        building,
+                        "支路源文件查询15秒内未加载出数据，重新进入即时报表并重新填参查询 "
+                        f"query={query_attempt}/{query_session_attempts}, "
+                        f"template={template_name}, sheet={sheet_name}",
+                    )
+                try:
+                    await _run_step(
+                        f"菜单进入{step_suffix}",
+                        lambda: self._open_report_query_page(
+                            page,
+                            menu_path,
+                            template_name=template_name,
+                            menu_visible_timeout_ms=int(menu_visible_timeout_ms),
+                            debug_step_log=debug_step_log,
+                            building=building,
+                        ),
+                    )
+                    frame2 = await _run_step(
+                        f"iframe定位{step_suffix}",
+                        lambda: self._resolve_report_frames(
+                            page,
+                            template_name=template_name,
+                            force_iframe_reopen_each_task=force_iframe_reopen_each_task,
+                            iframe_timeout_ms=int(iframe_timeout_ms),
+                        ),
+                    )
+                    await _run_step(
+                        f"填参查询{step_suffix}",
+                        lambda: self._fill_query_conditions(
+                            frame2,
+                            start_time=start_time,
+                            end_time=end_time,
+                            scale_label=scale_label,
+                            sheet_name=sheet_name,
+                            start_end_visible_timeout_ms=start_end_visible_timeout_ms,
+                        ),
+                    )
+                    await _run_step(
+                        f"查询等待{step_suffix}",
+                        lambda: self._wait_query_ready(
+                            frame2,
+                            timeout_ms=query_wait_timeout_ms,
+                        ),
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if query_attempt >= query_session_attempts:
+                        raise
+                    self._debug_log(
+                        debug_step_log,
+                        building,
+                        "支路源文件参数区未就绪或查询等待超时，准备重新进入即时报表 "
+                        f"query={query_attempt}/{query_session_attempts}, error={exc}",
+                    )
+                    await asyncio.sleep(0.5)
+            if frame2 is None:
+                raise StepError("iframe", "未获取到查询报表iframe")
             await _run_step(
                 "导出下载",
                 lambda: self._export_with_download(

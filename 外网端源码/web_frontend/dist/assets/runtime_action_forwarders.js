@@ -14,14 +14,9 @@ export function createRuntimeActionForwarders(options = {}) {
     configLoaded,
     config,
     health,
-    actionKeySourceCacheRefreshBuildingLatestPrefix = "",
   } = options;
 
   const runtimeActionsRef = { current: null };
-
-  function getSourceCacheRefreshBuildingActionKey(sourceFamily, building) {
-    return `${String(actionKeySourceCacheRefreshBuildingLatestPrefix || "").trim()}${String(sourceFamily || "").trim()}:${String(building || "").trim()}`;
-  }
 
   function startupRoleDraftSourceConfig() {
     if (configLoaded?.value && config?.value && typeof config.value === "object") {
@@ -55,26 +50,6 @@ export function createRuntimeActionForwarders(options = {}) {
 
   function restartUpdaterApp(...args) {
     const action = resolveRuntimeAction(runtimeActionsRef, "restartUpdaterApp", async () => null);
-    return action(...args);
-  }
-
-  function publishUpdaterApproved(...args) {
-    const action = resolveRuntimeAction(runtimeActionsRef, "publishUpdaterApproved", async () => null);
-    return action(...args);
-  }
-
-  function triggerInternalPeerUpdaterCheck(...args) {
-    const action = resolveRuntimeAction(runtimeActionsRef, "triggerInternalPeerUpdaterCheck", async () => null);
-    return action(...args);
-  }
-
-  function triggerInternalPeerUpdaterApply(...args) {
-    const action = resolveRuntimeAction(runtimeActionsRef, "triggerInternalPeerUpdaterApply", async () => null);
-    return action(...args);
-  }
-
-  function triggerInternalPeerUpdaterRestart(...args) {
-    const action = resolveRuntimeAction(runtimeActionsRef, "triggerInternalPeerUpdaterRestart", async () => null);
     return action(...args);
   }
 
@@ -123,17 +98,12 @@ export function createRuntimeActionForwarders(options = {}) {
 
   return {
     runtimeActionsRef,
-    getSourceCacheRefreshBuildingActionKey,
     startupRoleDraftSourceConfig,
     uploadAlarmSourceCacheFull,
     uploadAlarmSourceCacheBuilding,
     checkUpdaterNow,
     applyUpdaterPatch,
     restartUpdaterApp,
-    publishUpdaterApproved,
-    triggerInternalPeerUpdaterCheck,
-    triggerInternalPeerUpdaterApply,
-    triggerInternalPeerUpdaterRestart,
     refreshCurrentHourSourceCache,
     refreshManualAlarmSourceCache,
     getJobCancelActionKey,

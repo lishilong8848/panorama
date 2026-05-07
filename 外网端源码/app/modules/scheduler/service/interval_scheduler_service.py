@@ -63,6 +63,7 @@ class IntervalSchedulerService:
             "interval_minutes": interval_minutes,
             "check_interval_sec": check_interval_sec,
             "retry_failed_on_next_tick": bool(raw.get("retry_failed_on_next_tick", True)),
+            "align_to_wall_clock": bool(raw.get("align_to_wall_clock", True)),
             "state_file": state_file,
         }
 
@@ -137,6 +138,26 @@ class IntervalSchedulerService:
         except ValueError:
             return None
 
+    @staticmethod
+    def _strip_microseconds(value: datetime) -> datetime:
+        return value.replace(microsecond=0)
+
+    def _aligned_boundary_at_or_before(self, value: datetime) -> datetime:
+        interval_minutes = max(1, int(self.cfg["interval_minutes"]))
+        current = self._strip_microseconds(value)
+        day_start = current.replace(hour=0, minute=0, second=0)
+        elapsed_minutes = int((current - day_start).total_seconds() // 60)
+        slot_minutes = (elapsed_minutes // interval_minutes) * interval_minutes
+        return day_start + timedelta(minutes=slot_minutes)
+
+    def _aligned_boundary_at_or_after(self, value: datetime) -> datetime:
+        interval = timedelta(minutes=max(1, int(self.cfg["interval_minutes"])))
+        current = self._strip_microseconds(value)
+        boundary = self._aligned_boundary_at_or_before(current)
+        if current == boundary:
+            return boundary
+        return boundary + interval
+
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
@@ -144,11 +165,26 @@ class IntervalSchedulerService:
         return "运行中" if self.is_running() else "未启动"
 
     def next_run_time(self, now: datetime | None = None) -> datetime:
+        current = self._strip_microseconds(now or datetime.now())
+        if (
+            bool(self.cfg.get("retry_failed_on_next_tick", True))
+            and str(self.state.get("last_status", "") or "").strip().lower() == "failed"
+        ):
+            return current
         interval = timedelta(minutes=int(self.cfg["interval_minutes"]))
         last_attempt = self._parse_time(str(self.state.get("last_attempt_at", "")))
-        if last_attempt is not None:
-            return last_attempt + interval
-        return (now or self.started_at) + interval if not self.runtime.get("started_at") else self.started_at + interval
+        if not bool(self.cfg.get("align_to_wall_clock", True)):
+            if last_attempt is not None:
+                return last_attempt + interval
+            return current + interval if not self.runtime.get("started_at") else self.started_at + interval
+
+        if last_attempt is None:
+            return self._aligned_boundary_at_or_after(self.started_at)
+
+        latest_due = self._aligned_boundary_at_or_before(current)
+        if last_attempt < latest_due:
+            return latest_due
+        return self._aligned_boundary_at_or_after(latest_due + timedelta(seconds=1))
 
     def next_run_text(self) -> str:
         return self.next_run_time().strftime("%Y-%m-%d %H:%M:%S")
@@ -165,7 +201,8 @@ class IntervalSchedulerService:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name=self.thread_name, daemon=True)
         self._thread.start()
-        self._log(f"调度已启动，间隔={self.cfg['interval_minutes']}分钟")
+        align_text = "自然时间桶" if bool(self.cfg.get("align_to_wall_clock", True)) else "启动时间滚动"
+        self._log(f"调度已启动，间隔={self.cfg['interval_minutes']}分钟, 对齐={align_text}")
         return {"started": True, "running": True, "reason": "started"}
 
     def stop(self) -> Dict[str, Any]:
@@ -237,7 +274,8 @@ class IntervalSchedulerService:
             next_run = self.next_run_time(now)
             if now < next_run:
                 self.runtime["last_decision"] = "skip:before_next_run"
-                self._stop.wait(interval_sec)
+                wait_seconds = min(interval_sec, max(0.2, (next_run - now).total_seconds()))
+                self._stop.wait(wait_seconds)
                 continue
             if self.is_busy():
                 self.runtime["last_decision"] = "skip:busy"

@@ -521,12 +521,6 @@ export function mapBackendUpdaterMirrorOverview(raw) {
     }))
     : [];
   if (!statusText && !items.length) return null;
-  const internalPeerRaw = overview.internal_peer && typeof overview.internal_peer === "object"
-    ? overview.internal_peer
-    : {};
-  const internalPeerCommand = internalPeerRaw.command && typeof internalPeerRaw.command === "object"
-    ? internalPeerRaw.command
-    : {};
   const syncRaw = overview.sync && typeof overview.sync === "object" ? overview.sync : {};
   const businessActionsRaw = overview.business_actions && typeof overview.business_actions === "object"
     ? overview.business_actions
@@ -549,10 +543,6 @@ export function mapBackendUpdaterMirrorOverview(raw) {
       publishedCommit: String(syncRaw.published_commit || syncRaw.publishedCommit || "").trim(),
       pendingSyncCommit: String(syncRaw.pending_sync_commit || syncRaw.pendingSyncCommit || "").trim(),
       deferredCommit: String(syncRaw.deferred_commit || syncRaw.deferredCommit || "").trim(),
-      internalPeerCommit: String(syncRaw.internal_peer_commit || syncRaw.internalPeerCommit || "").trim(),
-      internalPeerCommandSourceCommit: String(
-        syncRaw.internal_peer_command_source_commit || syncRaw.internalPeerCommandSourceCommit || "",
-      ).trim(),
     },
     actions: mapBackendActionsState(overview.actions),
     businessActions: {
@@ -560,24 +550,6 @@ export function mapBackendUpdaterMirrorOverview(raw) {
       reasonCode: String(businessActionsRaw.reason_code || businessActionsRaw.reasonCode || "").trim().toLowerCase(),
       disabledReason: String(businessActionsRaw.disabled_reason || businessActionsRaw.disabledReason || "").trim(),
       statusText: String(businessActionsRaw.status_text || businessActionsRaw.statusText || "").trim(),
-    },
-    internalPeer: {
-      available: Boolean(internalPeerRaw.available),
-      online: Boolean(internalPeerRaw.online),
-      updateAvailable: Boolean(internalPeerRaw.update_available ?? internalPeerRaw.updateAvailable),
-      restartRequired: Boolean(internalPeerRaw.restart_required ?? internalPeerRaw.restartRequired),
-      statusText: String(internalPeerRaw.status_text || internalPeerRaw.statusText || "").trim(),
-      localCommit: String(internalPeerRaw.local_commit || internalPeerRaw.localCommit || "").trim(),
-      lastCommandSourceCommit: String(
-        internalPeerRaw.last_command_source_commit || internalPeerRaw.lastCommandSourceCommit || "",
-      ).trim(),
-      command: {
-        active: Boolean(internalPeerCommand.active),
-        action: String(internalPeerCommand.action || "").trim().toLowerCase(),
-        status: String(internalPeerCommand.status || "").trim().toLowerCase(),
-        sourceCommit: String(internalPeerCommand.source_commit || internalPeerCommand.sourceCommit || "").trim(),
-        message: String(internalPeerCommand.message || "").trim(),
-      },
     },
   };
 }

@@ -30,6 +30,7 @@ async def _await_ready_browser_pool(
     download_cfg = config.get("download", {}) if isinstance(config.get("download", {}), dict) else {}
     deployment_cfg = config.get("deployment", {}) if isinstance(config.get("deployment", {}), dict) else {}
     role_mode = str(deployment_cfg.get("role_mode", "") or "").strip().lower()
+    internal_mode = role_mode == "internal"
     wait_timeout_sec = 0.0
     try:
         configured_timeout = float(download_cfg.get("browser_pool_wait_timeout_sec", 0) or 0)
@@ -37,14 +38,15 @@ async def _await_ready_browser_pool(
         configured_timeout = 0.0
     if configured_timeout > 0:
         wait_timeout_sec = configured_timeout
-    elif role_mode == "internal":
-        wait_timeout_sec = 30.0
+    elif internal_mode:
+        wait_timeout_sec = 120.0
     if wait_timeout_sec <= 0:
         return browser_pool or get_internal_download_browser_pool()
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + wait_timeout_sec
     candidate = browser_pool
+    last_ready_result: Dict[str, Any] = {}
     while loop.time() < deadline:
         candidate = candidate or get_internal_download_browser_pool()
         if candidate is None:
@@ -59,16 +61,28 @@ async def _await_ready_browser_pool(
                 ready_result = await asyncio.to_thread(wait_until_ready, remaining)
             except Exception:  # noqa: BLE001
                 ready_result = {}
+            last_ready_result = ready_result if isinstance(ready_result, dict) else {}
             if bool(ready_result.get("ready", False)):
                 return candidate
+            if internal_mode:
+                break
         is_running = getattr(candidate, "is_running", None)
-        if callable(is_running):
+        if callable(is_running) and not internal_mode:
             try:
                 if bool(is_running()):
                     return candidate
             except Exception:  # noqa: BLE001
                 pass
         await asyncio.sleep(0.25)
+    if internal_mode:
+        reason = ""
+        if isinstance(last_ready_result, dict):
+            reason = str(
+                last_ready_result.get("error")
+                or last_ready_result.get("reason")
+                or ""
+            ).strip()
+        raise RuntimeError(reason or "内网下载浏览器池未就绪")
     return candidate
 
 

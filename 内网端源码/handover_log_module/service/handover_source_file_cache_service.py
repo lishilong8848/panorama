@@ -14,6 +14,7 @@ from app.shared.utils.atomic_file import (
     validate_non_empty_file,
 )
 from app.shared.utils.artifact_naming import (
+    FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_POWER,
     FAMILY_HANDOVER_CAPACITY_REPORT,
     FAMILY_HANDOVER_LOG,
@@ -363,6 +364,13 @@ class HandoverSourceFileCacheService:
     @staticmethod
     def _source_family_for_template_name(template_name: str) -> str:
         text = str(template_name or "").strip()
+        sheet_marker = "#sheet="
+        if sheet_marker in text:
+            sheet_name = text.split(sheet_marker, 1)[1].strip()
+            if sheet_name == "支路电流":
+                return FAMILY_BRANCH_CURRENT
+            if sheet_name == "支路功率":
+                return FAMILY_BRANCH_POWER
         if "支路功率" in text or "列头柜支路电流" in text:
             return FAMILY_BRANCH_POWER
         if "容量" in text or "每日报表合集" in text:

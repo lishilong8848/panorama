@@ -1,4 +1,4 @@
-﻿{
+{
   "revision": 6,
   "updated_at": "2026-04-30T20:11:06+08:00",
   "data": {
@@ -43,48 +43,7 @@
       "site_start_delay_sec": 1,
       "debug_step_log": true,
       "export_button_text": "原样导出",
-      "sites": [
-        {
-          "building": "A楼",
-          "enabled": true,
-          "host": "192.168.210.50",
-          "username": "admin",
-          "password": "BMS@123456",
-          "url": null
-        },
-        {
-          "building": "B楼",
-          "enabled": true,
-          "host": "192.168.220.50",
-          "username": "admin",
-          "password": "BMS123456",
-          "url": null
-        },
-        {
-          "building": "C楼",
-          "enabled": true,
-          "host": "192.168.231.53",
-          "username": "admin",
-          "password": "BMS@123456",
-          "url": null
-        },
-        {
-          "building": "D楼",
-          "enabled": true,
-          "host": "192.168.232.53",
-          "username": "admin",
-          "password": "123456",
-          "url": null
-        },
-        {
-          "building": "E楼",
-          "enabled": true,
-          "host": "192.168.233.57",
-          "username": "admin",
-          "password": "BMS@123456",
-          "url": null
-        }
-      ]
+      "sites": []
     },
     "capacity_report": {
       "download": {
@@ -1481,47 +1440,6 @@
       ],
       "building_rows": {}
     },
-    "sites": [
-      {
-        "building": "A楼",
-        "enabled": true,
-        "host": "192.168.210.50",
-        "username": "admin",
-        "password": "BMS@123456",
-        "url": null
-      },
-      {
-        "building": "B楼",
-        "enabled": true,
-        "host": "192.168.220.50",
-        "username": "admin",
-        "password": "BMS123456",
-        "url": null
-      },
-      {
-        "building": "C楼",
-        "enabled": true,
-        "host": "192.168.231.53",
-        "username": "admin",
-        "password": "BMS@123456",
-        "url": null
-      },
-      {
-        "building": "D楼",
-        "enabled": true,
-        "host": "192.168.232.53",
-        "username": "admin",
-        "password": "123456",
-        "url": null
-      },
-      {
-        "building": "E楼",
-        "enabled": true,
-        "host": "192.168.233.57",
-        "username": "admin",
-        "password": "BMS@123456",
-        "url": null
-      }
-    ]
+    "sites": []
   }
 }

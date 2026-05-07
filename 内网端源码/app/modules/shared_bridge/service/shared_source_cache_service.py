@@ -52,6 +52,8 @@ FAMILY_HANDOVER_CAPACITY_REPORT = "handover_capacity_report_family"
 FAMILY_MONTHLY_REPORT = "monthly_report_family"
 FAMILY_ALARM_EVENT = "alarm_event_family"
 FAMILY_BRANCH_POWER = "branch_power_family"
+FAMILY_BRANCH_CURRENT = "branch_current_family"
+FAMILY_BRANCH_SWITCH = "branch_switch_family"
 LEGACY_FAMILY_ALIASES = {
     FAMILY_HANDOVER_LOG: ("handover_family",),
     FAMILY_MONTHLY_REPORT: ("monthly_family",),
@@ -62,6 +64,8 @@ FAMILY_DIR_NAMES = {
     FAMILY_MONTHLY_REPORT: "monthly_report",
     FAMILY_ALARM_EVENT: "alarm_event",
     FAMILY_BRANCH_POWER: "branch_power",
+    FAMILY_BRANCH_CURRENT: "branch_current",
+    FAMILY_BRANCH_SWITCH: "branch_switch",
 }
 FAMILY_LABELS = {
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
@@ -69,6 +73,8 @@ FAMILY_LABELS = {
     FAMILY_MONTHLY_REPORT: "全景平台月报源文件",
     FAMILY_ALARM_EVENT: "告警信息源文件",
     FAMILY_BRANCH_POWER: "支路功率源文件",
+    FAMILY_BRANCH_CURRENT: "支路电流源文件",
+    FAMILY_BRANCH_SWITCH: "支路开关源文件",
 }
 
 ALARM_EVENT_BITABLE_TARGET_FIELDS = {
@@ -242,6 +248,8 @@ class SharedSourceCacheService:
             FAMILY_MONTHLY_REPORT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_ALARM_EVENT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_BRANCH_POWER: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+            FAMILY_BRANCH_CURRENT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+            FAMILY_BRANCH_SWITCH: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
         }
         self._light_building_status: Dict[str, Dict[str, Dict[str, Any]]] = {
             FAMILY_HANDOVER_LOG: {},
@@ -249,6 +257,8 @@ class SharedSourceCacheService:
             FAMILY_MONTHLY_REPORT: {},
             FAMILY_ALARM_EVENT: {},
             FAMILY_BRANCH_POWER: {},
+            FAMILY_BRANCH_CURRENT: {},
+            FAMILY_BRANCH_SWITCH: {},
         }
         self._current_hour_refresh: Dict[str, Any] = {
             "running": False,
@@ -478,6 +488,8 @@ class SharedSourceCacheService:
         buildings = self.get_enabled_buildings()
         current_bucket = self._current_hour_bucket or self.current_hour_bucket()
         branch_bucket = self.branch_power_bucket()
+        branch_current_bucket = self.branch_power_bucket()
+        branch_switch_bucket = self.branch_power_bucket()
         alarm_bucket = (
             str(self._family_status.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip()
             or self.current_alarm_bucket()
@@ -487,12 +499,16 @@ class SharedSourceCacheService:
         self._family_status.setdefault(FAMILY_MONTHLY_REPORT, {})["current_bucket"] = current_bucket
         self._family_status.setdefault(FAMILY_ALARM_EVENT, {})["current_bucket"] = alarm_bucket
         self._family_status.setdefault(FAMILY_BRANCH_POWER, {})["current_bucket"] = branch_bucket
+        self._family_status.setdefault(FAMILY_BRANCH_CURRENT, {})["current_bucket"] = branch_current_bucket
+        self._family_status.setdefault(FAMILY_BRANCH_SWITCH, {})["current_bucket"] = branch_switch_bucket
         for family_name, bucket_key in (
             (FAMILY_HANDOVER_LOG, current_bucket),
             (FAMILY_HANDOVER_CAPACITY_REPORT, current_bucket),
             (FAMILY_MONTHLY_REPORT, current_bucket),
             (FAMILY_ALARM_EVENT, alarm_bucket),
             (FAMILY_BRANCH_POWER, branch_bucket),
+            (FAMILY_BRANCH_CURRENT, branch_current_bucket),
+            (FAMILY_BRANCH_SWITCH, branch_switch_bucket),
         ):
             family_cache = self._light_building_status.setdefault(family_name, {})
             for building in buildings:
@@ -743,6 +759,7 @@ class SharedSourceCacheService:
             alarm_external_upload = copy.deepcopy(self._alarm_external_upload_state)
         include_latest_selection = True
         alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
+        branch_bucket = self.branch_power_bucket()
         snapshot_error = ""
         try:
             handover_family = self._build_family_health_snapshot(
@@ -776,6 +793,24 @@ class SharedSourceCacheService:
         except Exception as exc:  # noqa: BLE001
             alarm_family = {"current_bucket": alarm_bucket, "buildings": []}
             snapshot_error = snapshot_error or str(exc)
+        try:
+            branch_current_family = self._build_family_health_snapshot(
+                source_family=FAMILY_BRANCH_CURRENT,
+                current_bucket=branch_bucket,
+                include_latest_selection=include_latest_selection,
+            )
+        except Exception as exc:  # noqa: BLE001
+            branch_current_family = {"current_bucket": branch_bucket, "buildings": []}
+            snapshot_error = snapshot_error or str(exc)
+        try:
+            branch_switch_family = self._build_family_health_snapshot(
+                source_family=FAMILY_BRANCH_SWITCH,
+                current_bucket=branch_bucket,
+                include_latest_selection=include_latest_selection,
+            )
+        except Exception as exc:  # noqa: BLE001
+            branch_switch_family = {"current_bucket": branch_bucket, "buildings": []}
+            snapshot_error = snapshot_error or str(exc)
         families[FAMILY_HANDOVER_LOG] = {**families.get(FAMILY_HANDOVER_LOG, {}), **handover_family}
         families[FAMILY_HANDOVER_CAPACITY_REPORT] = {
             **families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
@@ -786,6 +821,14 @@ class SharedSourceCacheService:
             **families.get(FAMILY_ALARM_EVENT, {}),
             **alarm_family,
             "external_upload": alarm_external_upload,
+        }
+        families[FAMILY_BRANCH_CURRENT] = {
+            **families.get(FAMILY_BRANCH_CURRENT, {}),
+            **branch_current_family,
+        }
+        families[FAMILY_BRANCH_SWITCH] = {
+            **families.get(FAMILY_BRANCH_SWITCH, {}),
+            **branch_switch_family,
         }
         snapshot = {
             "enabled": bool(self.enabled and self.role_mode in {"internal", "external"}),
@@ -800,6 +843,8 @@ class SharedSourceCacheService:
             FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
             FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
             FAMILY_BRANCH_POWER: families.get(FAMILY_BRANCH_POWER, {}),
+            FAMILY_BRANCH_CURRENT: families.get(FAMILY_BRANCH_CURRENT, {}),
+            FAMILY_BRANCH_SWITCH: families.get(FAMILY_BRANCH_SWITCH, {}),
             FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
         }
         snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
@@ -1173,6 +1218,16 @@ class SharedSourceCacheService:
                 current_bucket=self.branch_power_bucket(),
                 buildings=buildings,
             ),
+            FAMILY_BRANCH_CURRENT: self._build_fast_external_family_from_index(
+                source_family=FAMILY_BRANCH_CURRENT,
+                current_bucket=self.branch_power_bucket(),
+                buildings=buildings,
+            ),
+            FAMILY_BRANCH_SWITCH: self._build_fast_external_family_from_index(
+                source_family=FAMILY_BRANCH_SWITCH,
+                current_bucket=self.branch_power_bucket(),
+                buildings=buildings,
+            ),
             FAMILY_ALARM_EVENT: self._build_fast_alarm_external_family_from_index(buildings=buildings),
         }
         snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
@@ -1213,6 +1268,8 @@ class SharedSourceCacheService:
         self._monthly_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_MONTHLY_REPORT] if self.shared_root else None
         self._alarm_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_ALARM_EVENT] if self.shared_root else None
         self._branch_power_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_POWER] if self.shared_root else None
+        self._branch_current_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_CURRENT] if self.shared_root else None
+        self._branch_switch_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_SWITCH] if self.shared_root else None
         self._tmp_root = self.shared_root / "tmp" / "source_cache" if self.shared_root else None
 
     def update_runtime_config(self, runtime_config: Dict[str, Any]) -> None:
@@ -1240,6 +1297,10 @@ class SharedSourceCacheService:
             return FAMILY_MONTHLY_REPORT
         if text in {FAMILY_BRANCH_POWER, "branch_power"}:
             return FAMILY_BRANCH_POWER
+        if text in {FAMILY_BRANCH_CURRENT, "branch_current"}:
+            return FAMILY_BRANCH_CURRENT
+        if text in {FAMILY_BRANCH_SWITCH, "branch_switch"}:
+            return FAMILY_BRANCH_SWITCH
         return text
 
     def _source_family_candidates(self, source_family: str) -> List[str]:
@@ -1353,6 +1414,14 @@ class SharedSourceCacheService:
                 str(families.get(FAMILY_BRANCH_POWER, {}).get("current_bucket", "") or "").strip()
                 or self.branch_power_bucket()
             )
+            branch_current_bucket = (
+                str(families.get(FAMILY_BRANCH_CURRENT, {}).get("current_bucket", "") or "").strip()
+                or self.branch_power_bucket()
+            )
+            branch_switch_bucket = (
+                str(families.get(FAMILY_BRANCH_SWITCH, {}).get("current_bucket", "") or "").strip()
+                or self.branch_power_bucket()
+            )
             handover_family = self._build_internal_light_family_snapshot(
                 source_family=FAMILY_HANDOVER_LOG,
                 current_bucket=current_bucket,
@@ -1377,6 +1446,18 @@ class SharedSourceCacheService:
                 cached_rows=light_building_status.get(FAMILY_BRANCH_POWER, {}),
                 active_downloads=active_downloads,
             )
+            branch_current_family = self._build_internal_light_family_snapshot(
+                source_family=FAMILY_BRANCH_CURRENT,
+                current_bucket=branch_current_bucket,
+                cached_rows=light_building_status.get(FAMILY_BRANCH_CURRENT, {}),
+                active_downloads=active_downloads,
+            )
+            branch_switch_family = self._build_internal_light_family_snapshot(
+                source_family=FAMILY_BRANCH_SWITCH,
+                current_bucket=branch_switch_bucket,
+                cached_rows=light_building_status.get(FAMILY_BRANCH_SWITCH, {}),
+                active_downloads=active_downloads,
+            )
             alarm_family = self._build_internal_light_family_snapshot(
                 source_family=FAMILY_ALARM_EVENT,
                 current_bucket=alarm_bucket,
@@ -1392,6 +1473,14 @@ class SharedSourceCacheService:
             families[FAMILY_BRANCH_POWER] = {
                 **families.get(FAMILY_BRANCH_POWER, {}),
                 **branch_power_family,
+            }
+            families[FAMILY_BRANCH_CURRENT] = {
+                **families.get(FAMILY_BRANCH_CURRENT, {}),
+                **branch_current_family,
+            }
+            families[FAMILY_BRANCH_SWITCH] = {
+                **families.get(FAMILY_BRANCH_SWITCH, {}),
+                **branch_switch_family,
             }
             families[FAMILY_ALARM_EVENT] = {
                 **families.get(FAMILY_ALARM_EVENT, {}),
@@ -1412,6 +1501,8 @@ class SharedSourceCacheService:
                 FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
                 FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
                 FAMILY_BRANCH_POWER: families.get(FAMILY_BRANCH_POWER, {}),
+                FAMILY_BRANCH_CURRENT: families.get(FAMILY_BRANCH_CURRENT, {}),
+                FAMILY_BRANCH_SWITCH: families.get(FAMILY_BRANCH_SWITCH, {}),
                 FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
             }
             snapshot["overview"] = present_internal_source_cache_overview(snapshot)
@@ -1656,6 +1747,10 @@ class SharedSourceCacheService:
             self._alarm_cache_root.mkdir(parents=True, exist_ok=True)
         if self._branch_power_cache_root is not None:
             self._branch_power_cache_root.mkdir(parents=True, exist_ok=True)
+        if self._branch_current_cache_root is not None:
+            self._branch_current_cache_root.mkdir(parents=True, exist_ok=True)
+        if self._branch_switch_cache_root is not None:
+            self._branch_switch_cache_root.mkdir(parents=True, exist_ok=True)
         self._tmp_root.mkdir(parents=True, exist_ok=True)
 
     def ensure_required_directories(self) -> Dict[str, str]:
@@ -1669,6 +1764,8 @@ class SharedSourceCacheService:
             FAMILY_MONTHLY_REPORT: str(self._monthly_cache_root) if self._monthly_cache_root is not None else "",
             FAMILY_ALARM_EVENT: str(self._alarm_cache_root) if self._alarm_cache_root is not None else "",
             FAMILY_BRANCH_POWER: str(self._branch_power_cache_root) if self._branch_power_cache_root is not None else "",
+            FAMILY_BRANCH_CURRENT: str(self._branch_current_cache_root) if self._branch_current_cache_root is not None else "",
+            FAMILY_BRANCH_SWITCH: str(self._branch_switch_cache_root) if self._branch_switch_cache_root is not None else "",
             "tmp_source_cache": str(self._tmp_root) if self._tmp_root is not None else "",
         }
 
@@ -1762,6 +1859,10 @@ class SharedSourceCacheService:
             return self._alarm_cache_root
         if normalized_family == FAMILY_BRANCH_POWER and self._branch_power_cache_root is not None:
             return self._branch_power_cache_root
+        if normalized_family == FAMILY_BRANCH_CURRENT and self._branch_current_cache_root is not None:
+            return self._branch_current_cache_root
+        if normalized_family == FAMILY_BRANCH_SWITCH and self._branch_switch_cache_root is not None:
+            return self._branch_switch_cache_root
         raise RuntimeError("共享缓存根目录未配置")
 
     def _month_segment(self, value: str) -> str:
@@ -1916,6 +2017,7 @@ class SharedSourceCacheService:
             if self.shared_root is not None
             else target_path.name
         )
+        entry_metadata.setdefault("canonical_relative_path", target_relative_path)
         self._log_source_cache_event(
             f"开始刷新共享文件: family={normalized_family}, building={building}, "
             f"bucket={bucket_kind}/{bucket_key}, target={target_relative_path}"
@@ -3277,13 +3379,125 @@ class SharedSourceCacheService:
             raise RuntimeError("共享缓存临时目录未配置")
         return self._tmp_root / "branch_power_latest" / bucket_key / building
 
-    def _branch_power_query_window(self, bucket_key: str) -> tuple[str, str]:
-        data_bucket = self.branch_power_data_bucket(bucket_key)
-        bucket_dt = _parse_hour_bucket(data_bucket) or (datetime.now() - timedelta(hours=1))
+    def _branch_current_temp_root(self, *, bucket_key: str, building: str) -> Path:
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存临时目录未配置")
+        return self._tmp_root / "branch_current_latest" / bucket_key / building
+
+    def _branch_switch_temp_root(self, *, bucket_key: str, building: str) -> Path:
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存临时目录未配置")
+        return self._tmp_root / "branch_switch_latest" / bucket_key / building
+
+    def _branch_query_window_for_data_bucket(self, data_bucket_key: str) -> tuple[str, str]:
+        bucket_dt = _parse_hour_bucket(data_bucket_key)
+        if bucket_dt is None:
+            raise RuntimeError(f"支路源文件数据小时无效: {data_bucket_key}")
         hour_dt = bucket_dt.replace(minute=0, second=0, microsecond=0)
         start_dt = hour_dt - timedelta(minutes=10)
         end_dt = hour_dt + timedelta(minutes=20)
         return start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _normalize_branch_data_bucket_keys(self, bucket_keys: List[str] | None) -> List[str]:
+        parsed_items: List[tuple[datetime, str]] = []
+        for raw_value in bucket_keys or []:
+            text = str(raw_value or "").strip()
+            if not text:
+                continue
+            bucket_dt = _parse_hour_bucket(text)
+            if bucket_dt is None:
+                raise RuntimeError(f"支路源文件数据小时无效: {text}")
+            normalized = bucket_dt.replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H")
+            if normalized not in [item[1] for item in parsed_items]:
+                parsed_items.append((bucket_dt.replace(minute=0, second=0, microsecond=0), normalized))
+        parsed_items.sort(key=lambda item: item[0])
+        return [item[1] for item in parsed_items]
+
+    def _branch_range_query_window(self, bucket_keys: List[str] | None) -> tuple[List[str], str, str]:
+        normalized_keys = self._normalize_branch_data_bucket_keys(bucket_keys)
+        if not normalized_keys:
+            raise RuntimeError("支路源文件范围下载缺少数据小时")
+        first_dt = _parse_hour_bucket(normalized_keys[0])
+        last_dt = _parse_hour_bucket(normalized_keys[-1])
+        if first_dt is None or last_dt is None:
+            raise RuntimeError("支路源文件范围下载数据小时无效")
+        start_dt = first_dt.replace(minute=0, second=0, microsecond=0) - timedelta(minutes=10)
+        end_dt = last_dt.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=20)
+        return normalized_keys, start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _branch_range_temp_segment(bucket_keys: List[str]) -> str:
+        if not bucket_keys:
+            return "range"
+        first = str(bucket_keys[0] or "").strip().replace(" ", "_").replace(":", "")
+        last = str(bucket_keys[-1] or "").strip().replace(" ", "_").replace(":", "")
+        return f"range_{first}_{last}" if first != last else first
+
+    def _branch_power_query_window(self, bucket_key: str) -> tuple[str, str]:
+        data_bucket = self.branch_power_data_bucket(bucket_key)
+        if _parse_hour_bucket(data_bucket) is None:
+            data_bucket = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H")
+        return self._branch_query_window_for_data_bucket(data_bucket)
+
+    def _store_branch_range_aliases(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        canonical_entry: Dict[str, Any],
+        data_bucket_keys: List[str],
+        query_start: str,
+        query_end: str,
+    ) -> List[Dict[str, Any]]:
+        if not data_bucket_keys:
+            return [canonical_entry]
+        output = [canonical_entry]
+        covered = list(data_bucket_keys)
+        canonical_file_path = self._resolve_entry_file_path(canonical_entry)
+        if canonical_file_path is None:
+            raise RuntimeError("支路范围源文件 canonical 文件不可用，无法复制到各小时目录")
+        canonical_metadata = (
+            canonical_entry.get("metadata", {})
+            if isinstance(canonical_entry.get("metadata", {}), dict)
+            else {}
+        )
+        canonical_relative_path = str(canonical_metadata.get("canonical_relative_path", "") or "").replace("\\", "/").strip()
+        if not canonical_relative_path:
+            canonical_relative_path = str(canonical_entry.get("relative_path", "") or "").replace("\\", "/").strip()
+        if not canonical_relative_path:
+            canonical_relative_path = (
+                canonical_file_path.relative_to(self.shared_root).as_posix()
+                if self.shared_root is not None
+                else str(canonical_file_path)
+            )
+        for data_bucket_key in data_bucket_keys[1:]:
+            output.append(
+                self._store_entry(
+                    source_family=source_family,
+                    building=building,
+                    bucket_kind="latest",
+                    bucket_key=data_bucket_key,
+                    duty_date="",
+                    duty_shift="",
+                    source_path=canonical_file_path,
+                    status="ready",
+                    metadata={
+                        "family": source_family,
+                        "building": building,
+                        "bucket_hour": data_bucket_key,
+                        "data_hour_bucket": data_bucket_key,
+                        "covered_data_hour_buckets": covered,
+                        "query_start": query_start,
+                        "query_end": query_end,
+                        "range_query": len(covered) > 1,
+                        "canonical": False,
+                        "alias_only": False,
+                        "range_copy": True,
+                        "canonical_relative_path": canonical_relative_path,
+                    },
+                )
+            )
+        return output
 
     def fill_handover_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
         self._ensure_internal_source_writer("交接班最新源文件补采")
@@ -3375,12 +3589,23 @@ class SharedSourceCacheService:
             },
         )
 
-    def fill_branch_power_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+    def fill_branch_power_latest(
+        self,
+        *,
+        building: str,
+        bucket_key: str,
+        emit_log: Callable[[str], None],
+        data_bucket_key: str | None = None,
+    ) -> Dict[str, Any]:
         self._ensure_internal_source_writer("支路功率最新源文件补采")
         cfg = load_handover_config(self.runtime_config)
         temp_root = self._branch_power_temp_root(bucket_key=bucket_key, building=building)
-        start_time, end_time = self._branch_power_query_window(bucket_key)
-        data_bucket_key = self.branch_power_data_bucket(bucket_key)
+        resolved_data_bucket_key = str(data_bucket_key or "").strip()
+        if resolved_data_bucket_key:
+            start_time, end_time = self._branch_query_window_for_data_bucket(resolved_data_bucket_key)
+        else:
+            start_time, end_time = self._branch_power_query_window(bucket_key)
+            resolved_data_bucket_key = self.branch_power_data_bucket(bucket_key)
         service = HandoverDownloadService(
             cfg,
             download_browser_pool=self.download_browser_pool,
@@ -3414,10 +3639,326 @@ class SharedSourceCacheService:
                 "family": FAMILY_BRANCH_POWER,
                 "building": building,
                 "bucket_hour": bucket_key,
-                "data_hour_bucket": data_bucket_key,
+                "data_hour_bucket": resolved_data_bucket_key,
+                "covered_data_hour_buckets": [resolved_data_bucket_key],
                 "query_start": start_time,
                 "query_end": end_time,
             },
+        )
+
+    def fill_branch_power_range_latest(
+        self,
+        *,
+        building: str,
+        bucket_keys: List[str],
+        emit_log: Callable[[str], None],
+    ) -> List[Dict[str, Any]]:
+        self._ensure_internal_source_writer("支路功率范围源文件补采")
+        data_bucket_keys, start_time, end_time = self._branch_range_query_window(bucket_keys)
+        anchor_bucket_key = data_bucket_keys[0]
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存临时目录未配置")
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._tmp_root / "branch_power_latest" / self._branch_range_temp_segment(data_bucket_keys) / building
+        service = HandoverDownloadService(
+            cfg,
+            download_browser_pool=self.download_browser_pool,
+            business_root_override=temp_root,
+        )
+        emit_log(
+            f"[支路功率范围源文件补采] 开始 building={building}, "
+            f"hours={','.join(data_bucket_keys)}, query={start_time}~{end_time}"
+        )
+        result = service.run_branch_power_only(
+            buildings=[building],
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=False,
+            reuse_cached=False,
+            emit_log=emit_log,
+        )
+        success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
+        if not success_files:
+            raise RuntimeError(f"支路功率范围缓存下载失败: {building}")
+        item = success_files[0]
+        source_path = Path(str(item.get("file_path", "") or "").strip())
+        if not source_path.exists():
+            raise FileNotFoundError(f"下载完成后的支路功率范围源文件不存在: {source_path}")
+        canonical_entry = self._store_entry(
+            source_family=FAMILY_BRANCH_POWER,
+            building=building,
+            bucket_kind="latest",
+            bucket_key=anchor_bucket_key,
+            duty_date="",
+            duty_shift="",
+            source_path=source_path,
+            status="ready",
+            metadata={
+                "family": FAMILY_BRANCH_POWER,
+                "building": building,
+                "bucket_hour": anchor_bucket_key,
+                "data_hour_bucket": anchor_bucket_key,
+                "covered_data_hour_buckets": data_bucket_keys,
+                "query_start": start_time,
+                "query_end": end_time,
+                "range_query": len(data_bucket_keys) > 1,
+            },
+        )
+        return self._store_branch_range_aliases(
+            source_family=FAMILY_BRANCH_POWER,
+            building=building,
+            canonical_entry=canonical_entry,
+            data_bucket_keys=data_bucket_keys,
+            query_start=start_time,
+            query_end=end_time,
+        )
+
+    def fill_branch_current_latest(
+        self,
+        *,
+        building: str,
+        bucket_key: str,
+        emit_log: Callable[[str], None],
+        data_bucket_key: str | None = None,
+    ) -> Dict[str, Any]:
+        self._ensure_internal_source_writer("支路电流最新源文件补采")
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._branch_current_temp_root(bucket_key=bucket_key, building=building)
+        resolved_data_bucket_key = str(data_bucket_key or "").strip()
+        if resolved_data_bucket_key:
+            start_time, end_time = self._branch_query_window_for_data_bucket(resolved_data_bucket_key)
+        else:
+            start_time, end_time = self._branch_power_query_window(bucket_key)
+            resolved_data_bucket_key = self.branch_power_data_bucket(bucket_key)
+        service = HandoverDownloadService(
+            cfg,
+            download_browser_pool=self.download_browser_pool,
+            business_root_override=temp_root,
+        )
+        result = service.run_branch_current_only(
+            buildings=[building],
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=False,
+            reuse_cached=False,
+            emit_log=emit_log,
+        )
+        success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
+        if not success_files:
+            raise RuntimeError(f"本小时支路电流缓存下载失败: {building}")
+        item = success_files[0]
+        source_path = Path(str(item.get("file_path", "") or "").strip())
+        if not source_path.exists():
+            raise FileNotFoundError(f"下载完成后的支路电流源文件不存在: {source_path}")
+        return self._store_entry(
+            source_family=FAMILY_BRANCH_CURRENT,
+            building=building,
+            bucket_kind="latest",
+            bucket_key=bucket_key,
+            duty_date="",
+            duty_shift="",
+            source_path=source_path,
+            status="ready",
+            metadata={
+                "family": FAMILY_BRANCH_CURRENT,
+                "building": building,
+                "bucket_hour": bucket_key,
+                "data_hour_bucket": resolved_data_bucket_key,
+                "covered_data_hour_buckets": [resolved_data_bucket_key],
+                "query_start": start_time,
+                "query_end": end_time,
+            },
+        )
+
+    def fill_branch_current_range_latest(
+        self,
+        *,
+        building: str,
+        bucket_keys: List[str],
+        emit_log: Callable[[str], None],
+    ) -> List[Dict[str, Any]]:
+        self._ensure_internal_source_writer("支路电流范围源文件补采")
+        data_bucket_keys, start_time, end_time = self._branch_range_query_window(bucket_keys)
+        anchor_bucket_key = data_bucket_keys[0]
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存临时目录未配置")
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._tmp_root / "branch_current_latest" / self._branch_range_temp_segment(data_bucket_keys) / building
+        service = HandoverDownloadService(
+            cfg,
+            download_browser_pool=self.download_browser_pool,
+            business_root_override=temp_root,
+        )
+        emit_log(
+            f"[支路电流范围源文件补采] 开始 building={building}, "
+            f"hours={','.join(data_bucket_keys)}, query={start_time}~{end_time}"
+        )
+        result = service.run_branch_current_only(
+            buildings=[building],
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=False,
+            reuse_cached=False,
+            emit_log=emit_log,
+        )
+        success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
+        if not success_files:
+            raise RuntimeError(f"支路电流范围缓存下载失败: {building}")
+        item = success_files[0]
+        source_path = Path(str(item.get("file_path", "") or "").strip())
+        if not source_path.exists():
+            raise FileNotFoundError(f"下载完成后的支路电流范围源文件不存在: {source_path}")
+        canonical_entry = self._store_entry(
+            source_family=FAMILY_BRANCH_CURRENT,
+            building=building,
+            bucket_kind="latest",
+            bucket_key=anchor_bucket_key,
+            duty_date="",
+            duty_shift="",
+            source_path=source_path,
+            status="ready",
+            metadata={
+                "family": FAMILY_BRANCH_CURRENT,
+                "building": building,
+                "bucket_hour": anchor_bucket_key,
+                "data_hour_bucket": anchor_bucket_key,
+                "covered_data_hour_buckets": data_bucket_keys,
+                "query_start": start_time,
+                "query_end": end_time,
+                "range_query": len(data_bucket_keys) > 1,
+            },
+        )
+        return self._store_branch_range_aliases(
+            source_family=FAMILY_BRANCH_CURRENT,
+            building=building,
+            canonical_entry=canonical_entry,
+            data_bucket_keys=data_bucket_keys,
+            query_start=start_time,
+            query_end=end_time,
+        )
+
+    def fill_branch_switch_latest(
+        self,
+        *,
+        building: str,
+        bucket_key: str,
+        emit_log: Callable[[str], None],
+        data_bucket_key: str | None = None,
+    ) -> Dict[str, Any]:
+        self._ensure_internal_source_writer("支路开关源文件最新补采")
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._branch_switch_temp_root(bucket_key=bucket_key, building=building)
+        resolved_data_bucket_key = str(data_bucket_key or "").strip()
+        if resolved_data_bucket_key:
+            start_time, end_time = self._branch_query_window_for_data_bucket(resolved_data_bucket_key)
+        else:
+            start_time, end_time = self._branch_power_query_window(bucket_key)
+            resolved_data_bucket_key = self.branch_power_data_bucket(bucket_key)
+        service = HandoverDownloadService(
+            cfg,
+            download_browser_pool=self.download_browser_pool,
+            business_root_override=temp_root,
+        )
+        result = service.run_branch_switch_only(
+            buildings=[building],
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=False,
+            reuse_cached=False,
+            emit_log=emit_log,
+        )
+        success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
+        if not success_files:
+            raise RuntimeError(f"本小时支路开关源文件缓存下载失败: {building}")
+        item = success_files[0]
+        source_path = Path(str(item.get("file_path", "") or "").strip())
+        if not source_path.exists():
+            raise FileNotFoundError(f"下载完成后的支路开关源文件不存在: {source_path}")
+        return self._store_entry(
+            source_family=FAMILY_BRANCH_SWITCH,
+            building=building,
+            bucket_kind="latest",
+            bucket_key=bucket_key,
+            duty_date="",
+            duty_shift="",
+            source_path=source_path,
+            status="ready",
+            metadata={
+                "family": FAMILY_BRANCH_SWITCH,
+                "building": building,
+                "bucket_hour": bucket_key,
+                "data_hour_bucket": resolved_data_bucket_key,
+                "covered_data_hour_buckets": [resolved_data_bucket_key],
+                "query_start": start_time,
+                "query_end": end_time,
+            },
+        )
+
+    def fill_branch_switch_range_latest(
+        self,
+        *,
+        building: str,
+        bucket_keys: List[str],
+        emit_log: Callable[[str], None],
+    ) -> List[Dict[str, Any]]:
+        self._ensure_internal_source_writer("支路开关源文件范围补采")
+        data_bucket_keys, start_time, end_time = self._branch_range_query_window(bucket_keys)
+        anchor_bucket_key = data_bucket_keys[0]
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存临时目录未配置")
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._tmp_root / "branch_switch_latest" / self._branch_range_temp_segment(data_bucket_keys) / building
+        service = HandoverDownloadService(
+            cfg,
+            download_browser_pool=self.download_browser_pool,
+            business_root_override=temp_root,
+        )
+        emit_log(
+            f"[支路开关源文件范围补采] 开始 building={building}, "
+            f"hours={','.join(data_bucket_keys)}, query={start_time}~{end_time}"
+        )
+        result = service.run_branch_switch_only(
+            buildings=[building],
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=False,
+            reuse_cached=False,
+            emit_log=emit_log,
+        )
+        success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
+        if not success_files:
+            raise RuntimeError(f"支路开关源文件范围缓存下载失败: {building}")
+        item = success_files[0]
+        source_path = Path(str(item.get("file_path", "") or "").strip())
+        if not source_path.exists():
+            raise FileNotFoundError(f"下载完成后的支路开关范围源文件不存在: {source_path}")
+        canonical_entry = self._store_entry(
+            source_family=FAMILY_BRANCH_SWITCH,
+            building=building,
+            bucket_kind="latest",
+            bucket_key=anchor_bucket_key,
+            duty_date="",
+            duty_shift="",
+            source_path=source_path,
+            status="ready",
+            metadata={
+                "family": FAMILY_BRANCH_SWITCH,
+                "building": building,
+                "bucket_hour": anchor_bucket_key,
+                "data_hour_bucket": anchor_bucket_key,
+                "covered_data_hour_buckets": data_bucket_keys,
+                "query_start": start_time,
+                "query_end": end_time,
+                "range_query": len(data_bucket_keys) > 1,
+            },
+        )
+        return self._store_branch_range_aliases(
+            source_family=FAMILY_BRANCH_SWITCH,
+            building=building,
+            canonical_entry=canonical_entry,
+            data_bucket_keys=data_bucket_keys,
+            query_start=start_time,
+            query_end=end_time,
         )
 
     def fill_handover_history(self, *, buildings: List[str], duty_date: str, duty_shift: str, emit_log: Callable[[str], None]) -> List[Dict[str, Any]]:
@@ -5366,23 +5907,151 @@ class SharedSourceCacheService:
             "current_bucket": bucket_key,
         }
 
+    def _current_hour_source_steps(
+        self,
+        *,
+        bucket_key: str,
+        branch_bucket_key: str,
+        alarm_bucket_key: str = "",
+    ) -> List[tuple[str, str, Callable[..., Any]]]:
+        steps: List[tuple[str, str, Callable[..., Any]]] = [
+            (FAMILY_HANDOVER_LOG, bucket_key, self.fill_handover_latest),
+            (FAMILY_HANDOVER_CAPACITY_REPORT, bucket_key, self.fill_handover_capacity_latest),
+            (FAMILY_MONTHLY_REPORT, bucket_key, self.fill_monthly_latest),
+            (FAMILY_BRANCH_POWER, branch_bucket_key, self.fill_branch_power_latest),
+            (FAMILY_BRANCH_CURRENT, branch_bucket_key, self.fill_branch_current_latest),
+            (FAMILY_BRANCH_SWITCH, branch_bucket_key, self.fill_branch_switch_latest),
+        ]
+        if alarm_bucket_key:
+            steps.append((FAMILY_ALARM_EVENT, alarm_bucket_key, self.fill_alarm_event_latest))
+        return steps
+
+    def _prepare_latest_source_steps_state(
+        self,
+        steps: List[tuple[str, str, Callable[..., Any]]],
+        *,
+        buildings: List[str],
+    ) -> None:
+        with self._lock:
+            for source_family, bucket_key, _fill_func in steps:
+                self._ensure_light_family_cache_unlocked(
+                    source_family=source_family,
+                    bucket_key=bucket_key,
+                    buildings=buildings,
+                )
+                self._recompute_family_status_from_light_unlocked(
+                    source_family=source_family,
+                    bucket_key=bucket_key,
+                )
+
+    def _run_building_latest_source_steps(
+        self,
+        *,
+        building: str,
+        steps: List[tuple[str, str, Callable[..., Any]]],
+        force_retry_failed: bool,
+        force_refresh_existing: bool = False,
+    ) -> Dict[str, Any]:
+        failed_units: List[str] = []
+        blocked_units: List[str] = []
+        running_units: List[str] = []
+        completed_units: List[str] = []
+        results: Dict[str, Any] = {}
+        step_names = " -> ".join(FAMILY_LABELS.get(source_family, source_family) for source_family, _bucket_key, _fill_func in steps)
+        self._emit(f"[共享缓存] 楼栋流水线开始 building={building}, steps={step_names}")
+        for source_family, bucket_key, fill_func in steps:
+            result = self._refresh_family_bucket(
+                source_family=source_family,
+                bucket_key=bucket_key,
+                fill_func=fill_func,
+                force_retry_failed=force_retry_failed,
+                buildings=[building],
+                force_refresh_existing=force_refresh_existing,
+            ) or {}
+            results[source_family] = result
+            for item in result.get("running_buildings", []) or []:
+                running_units.append(f"{item}/{source_family}")
+            for item in result.get("completed_buildings", []) or []:
+                completed_units.append(f"{item}/{source_family}")
+            for item in result.get("failed_buildings", []) or []:
+                failed_units.append(f"{item}/{source_family}")
+            for item in result.get("blocked_buildings", []) or []:
+                blocked_units.append(f"{item}/{source_family}")
+        if failed_units:
+            self._emit(f"[共享缓存] 楼栋流水线结束 building={building}: 失败 {', '.join(failed_units)}")
+        elif blocked_units:
+            self._emit(f"[共享缓存] 楼栋流水线结束 building={building}: 等待恢复 {', '.join(blocked_units)}")
+        else:
+            self._emit(f"[共享缓存] 楼栋流水线完成 building={building}")
+        return {
+            "building": building,
+            "results": results,
+            "failed_units": failed_units,
+            "blocked_units": blocked_units,
+            "running_units": running_units,
+            "completed_units": completed_units,
+        }
+
+    def _run_latest_source_steps_by_building(
+        self,
+        *,
+        steps: List[tuple[str, str, Callable[..., Any]]],
+        force_retry_failed: bool,
+        force_refresh_existing: bool = False,
+    ) -> Dict[str, Any]:
+        buildings = self.get_enabled_buildings()
+        self._prepare_latest_source_steps_state(steps, buildings=buildings)
+        aggregate: Dict[str, Any] = {
+            "failed_units": [],
+            "blocked_units": [],
+            "running_units": [],
+            "completed_units": [],
+            "building_results": {},
+        }
+        if not buildings:
+            return aggregate
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(buildings), len(_DEFAULT_BUILDINGS))) as executor:
+            future_map = {
+                executor.submit(
+                    self._run_building_latest_source_steps,
+                    building=building,
+                    steps=steps,
+                    force_retry_failed=force_retry_failed,
+                    force_refresh_existing=force_refresh_existing,
+                ): building
+                for building in buildings
+            }
+            for future in concurrent.futures.as_completed(future_map):
+                building = future_map[future]
+                try:
+                    result = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    error_text = str(exc)
+                    with self._lock:
+                        self._last_error = error_text
+                    aggregate["failed_units"].append(f"{building}/pipeline")
+                    self._emit(f"[共享缓存] 楼栋流水线异常 building={building}: {error_text}")
+                    continue
+                aggregate["building_results"][building] = result
+                aggregate["failed_units"].extend(result.get("failed_units", []) or [])
+                aggregate["blocked_units"].extend(result.get("blocked_units", []) or [])
+                aggregate["running_units"].extend(result.get("running_units", []) or [])
+                aggregate["completed_units"].extend(result.get("completed_units", []) or [])
+        return aggregate
+
     def _run_current_bucket_once(self) -> None:
         self._ensure_dirs()
         current_bucket = self.current_hour_bucket()
         branch_bucket = self.branch_power_bucket()
         with self._lock:
             self._current_hour_bucket = current_bucket
-        self._refresh_family_bucket(source_family=FAMILY_HANDOVER_LOG, bucket_key=current_bucket, fill_func=self.fill_handover_latest)
-        self._refresh_family_bucket(
-            source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
-            bucket_key=current_bucket,
-            fill_func=self.fill_handover_capacity_latest,
-        )
-        self._refresh_family_bucket(source_family=FAMILY_MONTHLY_REPORT, bucket_key=current_bucket, fill_func=self.fill_monthly_latest)
-        self._refresh_family_bucket(
-            source_family=FAMILY_BRANCH_POWER,
-            bucket_key=branch_bucket,
-            fill_func=self.fill_branch_power_latest,
+        self._run_latest_source_steps_by_building(
+            steps=self._current_hour_source_steps(
+                bucket_key=current_bucket,
+                branch_bucket_key=branch_bucket,
+            ),
+            force_retry_failed=False,
+            force_refresh_existing=False,
         )
         with self._lock:
             self._last_run_at = _now_text()
@@ -5392,7 +6061,16 @@ class SharedSourceCacheService:
             )
             monthly_failed = list(self._family_status.get(FAMILY_MONTHLY_REPORT, {}).get("failed_buildings", []) or [])
             branch_failed = list(self._family_status.get(FAMILY_BRANCH_POWER, {}).get("failed_buildings", []) or [])
-            if not handover_failed and not handover_capacity_failed and not monthly_failed and not branch_failed:
+            branch_current_failed = list(self._family_status.get(FAMILY_BRANCH_CURRENT, {}).get("failed_buildings", []) or [])
+            branch_switch_failed = list(self._family_status.get(FAMILY_BRANCH_SWITCH, {}).get("failed_buildings", []) or [])
+            if (
+                not handover_failed
+                and not handover_capacity_failed
+                and not monthly_failed
+                and not branch_failed
+                and not branch_current_failed
+                and not branch_switch_failed
+            ):
                 self._last_error = ""
 
     def _run_alarm_bucket_if_due(self, when: datetime | None = None) -> None:
@@ -5420,6 +6098,8 @@ class SharedSourceCacheService:
         self._ensure_dirs()
         bucket_key = self.current_hour_bucket()
         branch_bucket_key = self.branch_power_bucket()
+        with self._lock:
+            self._current_hour_bucket = bucket_key
         failed_units: List[str] = []
         blocked_units: List[str] = []
         running_units: List[str] = []
@@ -5434,60 +6114,24 @@ class SharedSourceCacheService:
             running_buildings=[],
             completed_buildings=[],
         )
-        self._emit(f"[共享缓存] 开始立即补下当前小时全部文件 bucket={bucket_key}, 支路功率bucket={branch_bucket_key}")
-        handover_result = self._refresh_family_bucket(
-            source_family=FAMILY_HANDOVER_LOG,
-            bucket_key=bucket_key,
-            fill_func=self.fill_handover_latest,
-            force_retry_failed=True,
-        ) or {}
-        handover_capacity_result = self._refresh_family_bucket(
-            source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
-            bucket_key=bucket_key,
-            fill_func=self.fill_handover_capacity_latest,
-            force_retry_failed=True,
-        ) or {}
-        monthly_result = self._refresh_family_bucket(
-            source_family=FAMILY_MONTHLY_REPORT,
-            bucket_key=bucket_key,
-            fill_func=self.fill_monthly_latest,
-            force_retry_failed=True,
-        ) or {}
-        branch_power_result = self._refresh_family_bucket(
-            source_family=FAMILY_BRANCH_POWER,
-            bucket_key=branch_bucket_key,
-            fill_func=self.fill_branch_power_latest,
-            force_retry_failed=True,
-        ) or {}
-        alarm_result: Dict[str, Any] = {
-            "failed_buildings": [],
-            "blocked_buildings": [],
-            "running_buildings": [],
-            "completed_buildings": [],
-        }
         alarm_bucket_key = self.current_alarm_bucket()
-        if alarm_bucket_key:
-            alarm_result = self._refresh_family_bucket(
-                source_family=FAMILY_ALARM_EVENT,
-                bucket_key=alarm_bucket_key,
-                fill_func=self.fill_alarm_event_latest,
-                force_retry_failed=True,
-            ) or {}
-        for family_key, result in (
-            (FAMILY_HANDOVER_LOG, handover_result),
-            (FAMILY_HANDOVER_CAPACITY_REPORT, handover_capacity_result),
-            (FAMILY_MONTHLY_REPORT, monthly_result),
-            (FAMILY_BRANCH_POWER, branch_power_result),
-            (FAMILY_ALARM_EVENT, alarm_result),
-        ):
-            for building in result.get("running_buildings", []) or []:
-                running_units.append(f"{building}/{family_key}")
-            for building in result.get("completed_buildings", []) or []:
-                completed_units.append(f"{building}/{family_key}")
-            for building in result.get("failed_buildings", []) or []:
-                failed_units.append(f"{building}/{family_key}")
-            for building in result.get("blocked_buildings", []) or []:
-                blocked_units.append(f"{building}/{family_key}")
+        self._emit(
+            f"[共享缓存] 开始立即补下当前小时全部文件（按楼栋流水线） "
+            f"bucket={bucket_key}, 支路功率bucket={branch_bucket_key}, 告警bucket={alarm_bucket_key or '-'}"
+        )
+        pipeline_result = self._run_latest_source_steps_by_building(
+            steps=self._current_hour_source_steps(
+                bucket_key=bucket_key,
+                branch_bucket_key=branch_bucket_key,
+                alarm_bucket_key=alarm_bucket_key,
+            ),
+            force_retry_failed=True,
+            force_refresh_existing=True,
+        )
+        failed_units.extend(pipeline_result.get("failed_units", []) or [])
+        blocked_units.extend(pipeline_result.get("blocked_units", []) or [])
+        running_units.extend(pipeline_result.get("running_units", []) or [])
+        completed_units.extend(pipeline_result.get("completed_units", []) or [])
         success_at = _now_text() if not failed_units else ""
         last_error = self._last_error if (failed_units or blocked_units) else ""
         with self._lock:
@@ -5568,6 +6212,18 @@ class SharedSourceCacheService:
                 "source_family": normalized_family,
                 "bucket_key": self.branch_power_bucket(),
                 "fill_func": self.fill_branch_power_latest,
+            }
+        if normalized_family == FAMILY_BRANCH_CURRENT:
+            return {
+                "source_family": normalized_family,
+                "bucket_key": self.branch_power_bucket(),
+                "fill_func": self.fill_branch_current_latest,
+            }
+        if normalized_family == FAMILY_BRANCH_SWITCH:
+            return {
+                "source_family": normalized_family,
+                "bucket_key": self.branch_power_bucket(),
+                "fill_func": self.fill_branch_switch_latest,
             }
         if normalized_family == FAMILY_ALARM_EVENT:
             bucket_key = self._auto_alarm_bucket()

@@ -1,4 +1,4 @@
-﻿function cloneItems(items = []) {
+function cloneItems(items = []) {
   return items.map((item) => ({ ...item }));
 }
 
@@ -31,7 +31,7 @@ const MANUAL_GROUP = {
     {
       id: 'manual_upload',
       title: '手动补传（月报）',
-      desc: '使用已有文件补传单个楼栋，不重新执行内网下载。',
+      desc: '使用已有文件补传单个楼栋，不触发采集端下载。',
     },
     {
       id: 'sheet_import',
@@ -58,7 +58,7 @@ const SPECIAL_GROUP = {
     {
       id: 'branch_power_upload',
       title: '自动上传支路功率',
-      desc: '按小时读取共享支路功率文件，更新机楼、包间、机列和 PDU 对应小时字段。',
+      desc: '每小时读取支路功率、电流、开关源文件入库，23点齐全后整日上传多维表。',
     },
     {
       id: 'wet_bulb_collection',
@@ -78,22 +78,16 @@ const SPECIAL_GROUP = {
   ],
 };
 
-const ROLE_MENU_GROUPS = {
-  external: [AUTO_GROUP, MANUAL_GROUP, SPECIAL_GROUP],
-  internal: [],
-};
-
-export const DASHBOARD_MENU_GROUPS = ROLE_MENU_GROUPS.external.map((group) => ({
+export const DASHBOARD_MENU_GROUPS = [AUTO_GROUP, MANUAL_GROUP, SPECIAL_GROUP].map((group) => ({
   ...group,
   items: cloneItems(group.items),
 }));
 
-export function getDashboardMenuGroupsForRole(roleMode) {
-  const normalized = String(roleMode || '').trim().toLowerCase();
-  const key = ['internal', 'external'].includes(normalized) ? normalized : 'external';
-  return (ROLE_MENU_GROUPS[key] || ROLE_MENU_GROUPS.external).map((group) => ({
+export function getDashboardMenuGroupsForRole() {
+  return [AUTO_GROUP, MANUAL_GROUP, SPECIAL_GROUP].map((group) => ({
     ...group,
     items: cloneItems(group.items),
   }));
 }
+
 

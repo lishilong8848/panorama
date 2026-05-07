@@ -1,4 +1,4 @@
-﻿export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
+export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
 <div v-if="activeConfigTab==='feature_handover'" class="config-tab-shell">
   <div class="config-tab-hero">
     <div class="section-title">交接班日志</div>
@@ -22,7 +22,7 @@
       <a class="btn btn-secondary" href="#handover-config-review">审核与模板规则</a>
     </div>
     <div class="hint-stack">
-      <div class="hint">外网端只保留交接班日志本身的来源、同步和审核配置，不再维护内网下载楼栋与班次下载参数。</div>
+      <div class="hint">外网端只保留交接班日志本身的来源、同步和审核配置，不再维护采集端楼栋与班次下载参数。</div>
       <div class="hint">组内仍保留原有字段顺序，方便沿用现有配置经验和历史说明。</div>
     </div>
   </div>
@@ -440,7 +440,7 @@
           <div class="form-row"><label class="label">重试次数</label><input type="number" v-model.number="config.handover_log.cloud_sheet_sync.request.max_retries" /></div>
           <div class="form-row"><label class="label">重试退避（秒）</label><input type="number" step="0.5" v-model.number="config.handover_log.cloud_sheet_sync.request.retry_backoff_sec" /></div>
           <div class="hint" style="margin-bottom:8px;">当前楼栋 Sheet 名按楼独立保存；不同楼可以并行修改，互不覆盖。</div>
-          <div class="hint" style="margin-bottom:8px;">下载完内网源表并切回外网后，系统只会为当前日期班次预创建一份云电子表格，并确保存在 A-E 楼 5 个固定 Sheet。五楼全部确认后，系统会把每个楼本地交接班成品 Excel 的“交接班日志”页覆盖写入同名 Sheet。审核保存本身不会立即同步云表；若最终上传失败，可按楼重试，也可一键重试全部失败楼栋。</div>
+          <div class="hint" style="margin-bottom:8px;">采集端源表到达共享目录后，系统只会为当前日期班次预创建一份云电子表格，并确保存在 A-E 楼 5 个固定 Sheet。五楼全部确认后，系统会把每个楼本地交接班成品 Excel 的“交接班日志”页覆盖写入同名 Sheet。审核保存本身不会立即同步云表；若最终上传失败，可按楼重试，也可一键重试全部失败楼栋。</div>
       </section>
 
       <section
@@ -716,6 +716,7 @@
   </details>
 </div>
 `;
+
 
 
 

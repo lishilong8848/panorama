@@ -1,4 +1,4 @@
-﻿export const DASHBOARD_MULTI_DATE_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'multi_date'">
+export const DASHBOARD_MULTI_DATE_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'multi_date'">
           <div class="dashboard-module-shell">
             <div class="dashboard-module-primary-grid">
               <article class="task-block">
@@ -80,9 +80,8 @@
                   <div class="ops-focus-card-title">适合补跑连续日期，保持标准下载与上传链路</div>
                   <div class="ops-focus-card-meta">日期按升序执行。若某一天失败，不会中断其他日期。</div>
                 </div>
-                <div class="hint" v-if="isInternalDeploymentRole">当前为内网端，多日用电明细自动流程请在外网端发起。</div>
                 <div class="btn-line">
-                  <button class="btn btn-primary" :disabled="isInternalDeploymentRole || !canRun || isActionLocked(actionKeyMultiDate)" @click="runMultiDate">
+                  <button class="btn btn-primary" :disabled="!canRun || isActionLocked(actionKeyMultiDate)" @click="runMultiDate">
                     {{ isActionLocked(actionKeyMultiDate) ? '执行中...' : '执行多日用电明细自动流程' }}
                   </button>
                 </div>
@@ -107,10 +106,10 @@
                   </div>
                 </div>
                 <div class="btn-line">
-                  <button class="btn btn-primary" :disabled="isInternalDeploymentRole || !canRun || pendingResumeCount === 0 || isActionLocked(getResumeRunActionKey())" @click="runResumeUpload()">
+                  <button class="btn btn-primary" :disabled="!canRun || pendingResumeCount === 0 || isActionLocked(getResumeRunActionKey())" @click="runResumeUpload()">
                     {{ isActionLocked(getResumeRunActionKey()) ? '处理中...' : '继续上传（不重下）' }}
                   </button>
-                  <button class="btn btn-danger" :disabled="isInternalDeploymentRole || pendingResumeCount === 0 || isActionLocked(getResumeDeleteAllActionKey())" @click="deleteAllResumeRuns">
+                  <button class="btn btn-danger" :disabled="pendingResumeCount === 0 || isActionLocked(getResumeDeleteAllActionKey())" @click="deleteAllResumeRuns">
                     {{ isActionLocked(getResumeDeleteAllActionKey()) ? '删除中...' : '删除全部待续传任务' }}
                   </button>
                 </div>
@@ -143,14 +142,14 @@
                     <div class="btn-line" style="margin-top:6px;">
                       <button
                         class="btn btn-secondary"
-                        :disabled="isInternalDeploymentRole || !canRun || !getResumeRunId(run) || isActionLocked(getResumeRunActionKey(getResumeRunId(run)))"
+                        :disabled="!canRun || !getResumeRunId(run) || isActionLocked(getResumeRunActionKey(getResumeRunId(run)))"
                         @click="runResumeUpload(getResumeRunId(run), false)"
                       >
                         {{ isActionLocked(getResumeRunActionKey(getResumeRunId(run))) ? '处理中...' : '继续该任务' }}
                       </button>
                       <button
                         class="btn btn-danger"
-                        :disabled="isInternalDeploymentRole || !getResumeRunId(run) || isActionLocked(getResumeDeleteActionKey(getResumeRunId(run)))"
+                        :disabled="!getResumeRunId(run) || isActionLocked(getResumeDeleteActionKey(getResumeRunId(run)))"
                         @click="deleteResumeRun(getResumeRunId(run))"
                       >
                         {{ isActionLocked(getResumeDeleteActionKey(getResumeRunId(run))) ? '删除中...' : '删除任务' }}
@@ -164,3 +163,4 @@
         </section>
 
 `;
+

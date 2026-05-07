@@ -37,19 +37,14 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "latest_required": True,
             "history_fill_timeout_sec": 1800,
         },
-        "internal_source_sites": [
-            {"building": "A楼", "enabled": False, "host": "", "username": "", "password": ""},
-            {"building": "B楼", "enabled": False, "host": "", "username": "", "password": ""},
-            {"building": "C楼", "enabled": False, "host": "", "username": "", "password": ""},
-            {"building": "D楼", "enabled": False, "host": "", "username": "", "password": ""},
-            {"building": "E楼", "enabled": False, "host": "", "username": "", "password": ""},
-        ],
+        "internal_source_sites": [],
         "scheduler": {
             "enabled": True,
             "auto_start_in_gui": False,
-            "interval_minutes": 60,
+            "run_time": "00:10:00",
             "check_interval_sec": 30,
-            "retry_failed_on_next_tick": True,
+            "catch_up_if_missed": False,
+            "retry_failed_in_same_period": True,
             "state_file": "daily_scheduler_state.json",
         },
         "notify": {

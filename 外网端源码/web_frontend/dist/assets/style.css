@@ -2058,6 +2058,52 @@ a {
   padding: 12px 14px;
 }
 
+.branch-hour-status-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.branch-hour-status-pill {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: center;
+  justify-items: center;
+  min-height: 58px;
+  padding: 8px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.branch-hour-status-pill strong {
+  color: var(--text-1);
+  font-size: 13px;
+}
+
+.branch-hour-status-pill small {
+  color: var(--text-3);
+}
+
+.branch-hour-status-pill.is-complete {
+  border-color: rgba(28, 140, 75, 0.24);
+  background: rgba(28, 140, 75, 0.08);
+}
+
+.branch-hour-status-pill.is-partial {
+  border-color: rgba(187, 127, 31, 0.28);
+  background: rgba(187, 127, 31, 0.09);
+}
+
+.branch-hour-status-pill.is-failed {
+  border-color: rgba(191, 61, 48, 0.26);
+  background: rgba(191, 61, 48, 0.08);
+}
+
 .readonly-token-card {
   display: grid;
   align-items: start;
@@ -3316,6 +3362,10 @@ button:disabled,
 
   .review-history-control {
     grid-template-columns: 1fr;
+  }
+
+  .branch-hour-status-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .review-current-view-fields {

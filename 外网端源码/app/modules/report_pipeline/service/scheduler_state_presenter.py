@@ -290,8 +290,8 @@ def present_scheduler_overview_items(
             ),
             "parts": [
                 _overview_part(
-                    label="循环调度",
-                    run_time_text=_interval_run_text(common_scheduler_cfg.get("interval_minutes")),
+                    label="每日调度",
+                    run_time_text=_text(common_scheduler_cfg.get("run_time")) or "未设置",
                     next_run_time=scheduler_snapshot.get("next_run_time"),
                     last_trigger_at=scheduler_snapshot.get("last_trigger_at"),
                     result_text=_map_scheduler_trigger_text(scheduler_snapshot.get("last_trigger_result")),

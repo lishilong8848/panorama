@@ -52,6 +52,8 @@ FAMILY_HANDOVER_CAPACITY_REPORT = "handover_capacity_report_family"
 FAMILY_MONTHLY_REPORT = "monthly_report_family"
 FAMILY_ALARM_EVENT = "alarm_event_family"
 FAMILY_BRANCH_POWER = "branch_power_family"
+FAMILY_BRANCH_CURRENT = "branch_current_family"
+FAMILY_BRANCH_SWITCH = "branch_switch_family"
 LEGACY_FAMILY_ALIASES = {
     FAMILY_HANDOVER_LOG: ("handover_family",),
     FAMILY_MONTHLY_REPORT: ("monthly_family",),
@@ -62,6 +64,8 @@ FAMILY_DIR_NAMES = {
     FAMILY_MONTHLY_REPORT: "monthly_report",
     FAMILY_ALARM_EVENT: "alarm_event",
     FAMILY_BRANCH_POWER: "branch_power",
+    FAMILY_BRANCH_CURRENT: "branch_current",
+    FAMILY_BRANCH_SWITCH: "branch_switch",
 }
 FAMILY_LABELS = {
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
@@ -69,6 +73,8 @@ FAMILY_LABELS = {
     FAMILY_MONTHLY_REPORT: "全景平台月报源文件",
     FAMILY_ALARM_EVENT: "告警信息源文件",
     FAMILY_BRANCH_POWER: "支路功率源文件",
+    FAMILY_BRANCH_CURRENT: "支路电流源文件",
+    FAMILY_BRANCH_SWITCH: "支路开关源文件",
 }
 
 ALARM_EVENT_BITABLE_TARGET_FIELDS = {
@@ -242,6 +248,8 @@ class SharedSourceCacheService:
             FAMILY_MONTHLY_REPORT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_ALARM_EVENT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_BRANCH_POWER: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+            FAMILY_BRANCH_CURRENT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+            FAMILY_BRANCH_SWITCH: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
         }
         self._light_building_status: Dict[str, Dict[str, Dict[str, Any]]] = {
             FAMILY_HANDOVER_LOG: {},
@@ -249,6 +257,8 @@ class SharedSourceCacheService:
             FAMILY_MONTHLY_REPORT: {},
             FAMILY_ALARM_EVENT: {},
             FAMILY_BRANCH_POWER: {},
+            FAMILY_BRANCH_CURRENT: {},
+            FAMILY_BRANCH_SWITCH: {},
         }
         self._current_hour_refresh: Dict[str, Any] = {
             "running": False,
@@ -487,12 +497,16 @@ class SharedSourceCacheService:
         self._family_status.setdefault(FAMILY_MONTHLY_REPORT, {})["current_bucket"] = current_bucket
         self._family_status.setdefault(FAMILY_ALARM_EVENT, {})["current_bucket"] = alarm_bucket
         self._family_status.setdefault(FAMILY_BRANCH_POWER, {})["current_bucket"] = branch_bucket
+        self._family_status.setdefault(FAMILY_BRANCH_CURRENT, {})["current_bucket"] = branch_bucket
+        self._family_status.setdefault(FAMILY_BRANCH_SWITCH, {})["current_bucket"] = branch_bucket
         for family_name, bucket_key in (
             (FAMILY_HANDOVER_LOG, current_bucket),
             (FAMILY_HANDOVER_CAPACITY_REPORT, current_bucket),
             (FAMILY_MONTHLY_REPORT, current_bucket),
             (FAMILY_ALARM_EVENT, alarm_bucket),
             (FAMILY_BRANCH_POWER, branch_bucket),
+            (FAMILY_BRANCH_CURRENT, branch_bucket),
+            (FAMILY_BRANCH_SWITCH, branch_bucket),
         ):
             family_cache = self._light_building_status.setdefault(family_name, {})
             for building in buildings:
@@ -800,6 +814,8 @@ class SharedSourceCacheService:
             FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
             FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
             FAMILY_BRANCH_POWER: families.get(FAMILY_BRANCH_POWER, {}),
+            FAMILY_BRANCH_CURRENT: families.get(FAMILY_BRANCH_CURRENT, {}),
+            FAMILY_BRANCH_SWITCH: families.get(FAMILY_BRANCH_SWITCH, {}),
             FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
         }
         snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
@@ -1173,6 +1189,16 @@ class SharedSourceCacheService:
                 current_bucket=self.branch_power_bucket(),
                 buildings=buildings,
             ),
+            FAMILY_BRANCH_CURRENT: self._build_fast_external_family_from_index(
+                source_family=FAMILY_BRANCH_CURRENT,
+                current_bucket=self.branch_power_bucket(),
+                buildings=buildings,
+            ),
+            FAMILY_BRANCH_SWITCH: self._build_fast_external_family_from_index(
+                source_family=FAMILY_BRANCH_SWITCH,
+                current_bucket=self.branch_power_bucket(),
+                buildings=buildings,
+            ),
             FAMILY_ALARM_EVENT: self._build_fast_alarm_external_family_from_index(buildings=buildings),
         }
         snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
@@ -1213,6 +1239,8 @@ class SharedSourceCacheService:
         self._monthly_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_MONTHLY_REPORT] if self.shared_root else None
         self._alarm_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_ALARM_EVENT] if self.shared_root else None
         self._branch_power_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_POWER] if self.shared_root else None
+        self._branch_current_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_CURRENT] if self.shared_root else None
+        self._branch_switch_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_SWITCH] if self.shared_root else None
         self._tmp_root = self.shared_root / "tmp" / "source_cache" if self.shared_root else None
 
     def update_runtime_config(self, runtime_config: Dict[str, Any]) -> None:
@@ -1656,6 +1684,10 @@ class SharedSourceCacheService:
             self._alarm_cache_root.mkdir(parents=True, exist_ok=True)
         if self._branch_power_cache_root is not None:
             self._branch_power_cache_root.mkdir(parents=True, exist_ok=True)
+        if self._branch_current_cache_root is not None:
+            self._branch_current_cache_root.mkdir(parents=True, exist_ok=True)
+        if self._branch_switch_cache_root is not None:
+            self._branch_switch_cache_root.mkdir(parents=True, exist_ok=True)
         self._tmp_root.mkdir(parents=True, exist_ok=True)
 
     def ensure_required_directories(self) -> Dict[str, str]:
@@ -1669,6 +1701,8 @@ class SharedSourceCacheService:
             FAMILY_MONTHLY_REPORT: str(self._monthly_cache_root) if self._monthly_cache_root is not None else "",
             FAMILY_ALARM_EVENT: str(self._alarm_cache_root) if self._alarm_cache_root is not None else "",
             FAMILY_BRANCH_POWER: str(self._branch_power_cache_root) if self._branch_power_cache_root is not None else "",
+            FAMILY_BRANCH_CURRENT: str(self._branch_current_cache_root) if self._branch_current_cache_root is not None else "",
+            FAMILY_BRANCH_SWITCH: str(self._branch_switch_cache_root) if self._branch_switch_cache_root is not None else "",
             "tmp_source_cache": str(self._tmp_root) if self._tmp_root is not None else "",
         }
 
@@ -1762,6 +1796,10 @@ class SharedSourceCacheService:
             return self._alarm_cache_root
         if normalized_family == FAMILY_BRANCH_POWER and self._branch_power_cache_root is not None:
             return self._branch_power_cache_root
+        if normalized_family == FAMILY_BRANCH_CURRENT and self._branch_current_cache_root is not None:
+            return self._branch_current_cache_root
+        if normalized_family == FAMILY_BRANCH_SWITCH and self._branch_switch_cache_root is not None:
+            return self._branch_switch_cache_root
         raise RuntimeError("共享缓存根目录未配置")
 
     def _month_segment(self, value: str) -> str:
@@ -1916,6 +1954,7 @@ class SharedSourceCacheService:
             if self.shared_root is not None
             else target_path.name
         )
+        entry_metadata.setdefault("canonical_relative_path", target_relative_path)
         self._log_source_cache_event(
             f"开始刷新共享文件: family={normalized_family}, building={building}, "
             f"bucket={bucket_kind}/{bucket_key}, target={target_relative_path}"
@@ -3939,6 +3978,8 @@ class SharedSourceCacheService:
             self._monthly_cache_root,
             self._alarm_cache_root,
             self._branch_power_cache_root,
+            self._branch_current_cache_root,
+            self._branch_switch_cache_root,
         ):
             if root is not None:
                 roots.append(root)

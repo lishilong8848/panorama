@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
@@ -13,6 +14,21 @@ from app.modules.scheduler.api._config_persistence import (
 
 
 router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
+
+
+ALLOWED_KEYS = {
+    "enabled",
+    "auto_start_in_gui",
+    "run_time",
+    "check_interval_sec",
+    "catch_up_if_missed",
+    "retry_failed_in_same_period",
+    "state_file",
+}
+
+
+def _valid_time(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{2}:\d{2}:\d{2}", str(value or "").strip()))
 
 
 def _scheduler_cfg_from_v3(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -65,6 +81,8 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
         raise HTTPException(status_code=400, detail="请求体必须是JSON对象")
 
     container = request.app.state.container
+    old_cfg = _scheduler_cfg_from_v3(container.config)
+    old_run_time = str(old_cfg.get("run_time", "") or "").strip()
 
     merged = copy.deepcopy(container.config)
     common_cfg = merged.get("common")
@@ -76,33 +94,32 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
         scheduler_cfg = {}
         common_cfg["scheduler"] = scheduler_cfg
 
-    allowed = {
-        "enabled",
-        "auto_start_in_gui",
-        "interval_minutes",
-        "check_interval_sec",
-        "retry_failed_on_next_tick",
-        "state_file",
-    }
-    for key in allowed:
+    for key in ALLOWED_KEYS:
         if key not in payload:
             continue
         value = payload.get(key)
-        if key in {"interval_minutes", "check_interval_sec"}:
+        if key in {"enabled", "auto_start_in_gui"}:
+            scheduler_cfg[key] = bool(value)
+        elif key == "check_interval_sec":
             try:
                 number = int(value)
             except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=400, detail=f"{key} 必须是整数") from exc
+                raise HTTPException(status_code=400, detail="check_interval_sec 必须是整数") from exc
             if number < 1:
-                raise HTTPException(status_code=400, detail=f"{key} 必须大于等于1")
+                raise HTTPException(status_code=400, detail="check_interval_sec 必须大于等于1")
             scheduler_cfg[key] = number
+        elif key in {"catch_up_if_missed", "retry_failed_in_same_period"}:
+            scheduler_cfg[key] = bool(value)
+        elif key == "run_time":
+            text = str(value or "").strip()
+            if not _valid_time(text):
+                raise HTTPException(status_code=400, detail="run_time 必须是 HH:MM:SS")
+            scheduler_cfg[key] = text
         elif key == "state_file":
             text = str(value or "").strip()
             if not text:
                 raise HTTPException(status_code=400, detail="state_file 不能为空")
             scheduler_cfg[key] = text
-        else:
-            scheduler_cfg[key] = bool(value)
 
     try:
         saved = save_settings(merged, container.config_path)
@@ -116,18 +133,25 @@ def scheduler_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any
         path=("common", "scheduler"),
         scheduler_cfg=new_scheduler_cfg,
     )
+    new_run_time = str(new_scheduler_cfg.get("run_time", "") or "").strip()
+    run_time_changed = bool(old_run_time and new_run_time and old_run_time != new_run_time)
+    reset_result: Dict[str, Any] = {"changed": False, "period": "", "reset_keys": [], "state_path": ""}
+    if run_time_changed and container.scheduler:
+        reset_result = container.scheduler.reset_today_state_for_run_time_change()
     runtime = container.scheduler.get_runtime_snapshot() if container.scheduler else {}
+    status_payload = _build_scheduler_payload(container)
     executor_bound = bool(container.is_scheduler_executor_bound())
     message = "调度配置已更新并热重载"
 
     return {
         "ok": True,
         "message": message,
-        "run_time_changed": False,
-        "state_reset": {"changed": False, "period": "", "reset_keys": [], "state_path": ""},
+        "run_time_changed": run_time_changed,
+        "state_reset": reset_result,
         "executor_bound_after_reload": executor_bound,
         "callback_name": container.scheduler_executor_name(),
-        "scheduler_config": {k: new_scheduler_cfg.get(k) for k in sorted(allowed)},
+        "scheduler_config": {k: new_scheduler_cfg.get(k) for k in sorted(ALLOWED_KEYS)},
+        "scheduler_status": status_payload,
         "runtime": runtime,
     }
 

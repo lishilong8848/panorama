@@ -8,7 +8,7 @@ function normalizeLegacyNetworkMode(mode) {
 
 export function formatNetworkWindowSide(side) {
   const normalized = normalizeLegacyNetworkSide(side);
-  if (normalized === "internal") return "内网";
+  if (normalized === "internal") return "采集端网络";
   if (normalized === "external") return "外网";
   if (normalized === "pipeline") return "流水线";
   return "空闲";
@@ -16,7 +16,7 @@ export function formatNetworkWindowSide(side) {
 
 export function formatDetectedNetworkSide(side) {
   const normalized = normalizeLegacyNetworkSide(side);
-  if (normalized === "internal") return "当前在内网";
+  if (normalized === "internal") return "当前在采集端网络";
   if (normalized === "external") return "当前在外网";
   if (normalized === "other") return "当前不在目标网络";
   if (normalized === "none") return "当前未连接 WiFi";
@@ -25,7 +25,7 @@ export function formatDetectedNetworkSide(side) {
 
 export function formatSsidSide(side) {
   const normalized = String(side || "").trim().toLowerCase();
-  if (normalized === "internal") return "内网";
+  if (normalized === "internal") return "采集端网络";
   if (normalized === "external") return "外网";
   if (normalized === "other") return "其他";
   if (normalized === "none") return "未连接";
@@ -34,7 +34,7 @@ export function formatSsidSide(side) {
 
 export function formatNetworkMode(mode) {
   const normalized = normalizeLegacyNetworkMode(mode);
-  if (normalized === "internal_only") return "仅内网可达";
+  if (normalized === "internal_only") return "仅采集端网络可达";
   if (normalized === "external_only") return "仅外网可达";
   if (normalized === "none_reachable") return "当前均不可达";
   return String(mode || "").trim() || "-";

@@ -68,7 +68,7 @@ export function buildAppBrowserRoutePath(roleMode, view, selectorVisible = false
 
 export function formatDeploymentRoleLabel(value) {
   const role = normalizeDeploymentRoleMode(value);
-  if (role === "internal") return "内网端";
+  if (role === "internal") return "采集端";
   if (role === "external") return "外网端";
   return "待选择角色";
 }

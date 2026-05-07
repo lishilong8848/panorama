@@ -16,6 +16,7 @@ from handover_log_module.service.day_metric_standalone_upload_service import Day
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.handover_xlsx_write_queue_service import HandoverXlsxWriteQueueService
+from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
@@ -170,6 +171,50 @@ def handle_day_metric_from_download(
             emit_log=emit_log,
         )
         raise
+
+
+def handle_branch_power_from_download(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    emit_log: Callable[[str], None],
+) -> Dict[str, Any]:
+    service = BranchPowerUploadService(config)
+    source_units = [item for item in list(payload.get("source_units") or []) if isinstance(item, dict)]
+    target_bucket_key = str(payload.get("target_bucket_key", "") or payload.get("bucket_key", "") or "").strip()
+    target_bucket_keys = [
+        str(item or "").strip()
+        for item in (payload.get("target_bucket_keys") if isinstance(payload.get("target_bucket_keys"), list) else [])
+        if str(item or "").strip()
+    ]
+    if not target_bucket_key and target_bucket_keys:
+        target_bucket_key = target_bucket_keys[0]
+    if not target_bucket_key:
+        raise RuntimeError("支路信息恢复任务缺少 target_bucket_key")
+    if not source_units:
+        raise RuntimeError("支路信息恢复任务缺少共享源文件")
+    if target_bucket_keys:
+        if len(target_bucket_keys) >= 2:
+            return service.continue_range_from_source_files(
+                bucket_keys=target_bucket_keys,
+                source_units=source_units,
+                emit_log=emit_log,
+            )
+        bucket_key = target_bucket_keys[0]
+        bucket_units = [
+            item
+            for item in source_units
+            if str(item.get("data_hour_bucket", "") or item.get("bucket_key", "") or "").strip() == bucket_key
+        ] or source_units
+        return service.continue_manual_hour_from_source_files(
+            bucket_key=bucket_key,
+            source_units=bucket_units,
+            emit_log=emit_log,
+        )
+    return service.continue_from_source_files(
+        bucket_key=target_bucket_key,
+        source_units=source_units,
+        emit_log=emit_log,
+    )
 
 
 def handle_wet_bulb_collection_run(
@@ -958,6 +1003,7 @@ def handle_test_sleep(
 HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[str], None]], Dict[str, Any]]] = {
     "handover_from_download": handle_handover_from_download,
     "day_metric_from_download": handle_day_metric_from_download,
+    "branch_power_from_download": handle_branch_power_from_download,
     "wet_bulb_collection_run": handle_wet_bulb_collection_run,
     "auto_once": handle_auto_once,
     "multi_date": handle_multi_date,

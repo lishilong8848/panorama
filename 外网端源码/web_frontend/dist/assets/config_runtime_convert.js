@@ -31,7 +31,6 @@ export function convertV3ConfigToLegacy(v3) {
       internal_root_dir: String(common.shared_bridge?.internal_root_dir || common.shared_bridge?.root_dir || "").trim(),
       external_root_dir: String(common.shared_bridge?.external_root_dir || common.shared_bridge?.root_dir || "").trim(),
     },
-    internal_source_sites: clone(common.internal_source_sites || []),
     input: {
       excel_dir: pathRoot,
       buildings: Array.isArray(monthly.buildings) ? clone(monthly.buildings) : [],
@@ -111,7 +110,6 @@ export function convertLegacyConfigToV3(legacy) {
         internal_root_dir: String(src.shared_bridge?.internal_root_dir || src.shared_bridge?.root_dir || "").trim(),
         external_root_dir: String(src.shared_bridge?.external_root_dir || src.shared_bridge?.root_dir || "").trim(),
       },
-      internal_source_sites: clone(src.internal_source_sites || src.download?.sites || src.handover_log?.sites || []),
       scheduler: clone(src.scheduler || {}),
       updater: clone(src.updater || {}),
       notify: clone(src.notify || {}),

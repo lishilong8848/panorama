@@ -2312,6 +2312,8 @@ def present_internal_runtime_building_display(status: Any) -> Dict[str, Any]:
         "handover_capacity_report_family": "交接班容量报表源文件",
         "monthly_report_family": "全景平台月报源文件",
         "branch_power_family": "支路功率源文件",
+        "branch_current_family": "支路电流源文件",
+        "branch_switch_family": "支路开关源文件",
         "alarm_event_family": "告警信息源文件",
     }
     family_items = []

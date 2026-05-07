@@ -1,4 +1,4 @@
-﻿export const DASHBOARD_SHEET_IMPORT_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'sheet_import'">
+export const DASHBOARD_SHEET_IMPORT_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'sheet_import'">
           <div class="dashboard-module-shell">
             <div class="dashboard-module-primary-grid">
               <article class="task-block task-block-accent">
@@ -17,11 +17,10 @@
                 </div>
                 <div class="hint">{{ externalExecutionHint }}</div>
                 <div class="btn-line">
-                  <button class="btn btn-primary" :disabled="isInternalDeploymentRole || !canRun || isActionLocked(actionKeySheetImport)" @click="runSheetImport">
+                  <button class="btn btn-primary" :disabled="!canRun || isActionLocked(actionKeySheetImport)" @click="runSheetImport">
                     {{ isActionLocked(actionKeySheetImport) ? '提交中...' : '清空并上传 5 个工作表' }}
                   </button>
                 </div>
-                <div class="hint" v-if="isInternalDeploymentRole">当前为内网端，5Sheet 导入请在外网端执行。</div>
               </article>
 
               <article class="task-block task-block-compact dashboard-module-status-card">
@@ -45,7 +44,7 @@
                   </div>
                   <div class="status-metric">
                     <div class="status-metric-label">执行角色</div>
-                    <strong class="status-metric-value">{{ isInternalDeploymentRole ? '内网端' : '外网端' }}</strong>
+                    <strong class="status-metric-value">外网端</strong>
                   </div>
                 </div>
                 <div class="hint">当前文件：{{ sheetFile ? sheetFile.name : '尚未选择 5Sheet 文件' }}</div>
@@ -56,3 +55,4 @@
         </section>
 
 `;
+

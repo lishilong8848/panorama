@@ -8,6 +8,7 @@ import socket
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
@@ -156,6 +157,7 @@ class SharedBridgeRuntimeService:
         self._background_task_next_due_monotonic: Dict[str, float] = {}
         self._last_foreground_busy_monotonic = 0.0
         self._source_cache_start_thread: threading.Thread | None = None
+        self._internal_pool_wait_logged = False
         self._refresh_config()
 
     @classmethod
@@ -384,6 +386,73 @@ class SharedBridgeRuntimeService:
             },
             "summary": "共享文件已到位，正在继续上传12项数据",
             "log_text": f"[共享桥接] 任务={task_id} 已完成文件准备，正在自动恢复12项原任务",
+        }
+
+    def _build_branch_power_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        task_id = str(task.get("task_id", "") or "").strip()
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
+        internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
+        target_bucket_keys = self._normalize_text_list(internal_result.get("target_bucket_keys", []))
+        if not target_bucket_keys:
+            target_bucket_keys = self._normalize_text_list(request.get("target_bucket_keys", []))
+        bucket_key = (
+            str(internal_result.get("bucket_key", "") or "").strip()
+            or str(request.get("target_bucket_key", "") or "").strip()
+            or (target_bucket_keys[0] if target_bucket_keys else "")
+        )
+        source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
+        normalized_units: List[Dict[str, Any]] = []
+        for item in source_units:
+            if not isinstance(item, dict):
+                continue
+            building = str(item.get("building", "") or "").strip()
+            source_files = item.get("source_files", {}) if isinstance(item.get("source_files", {}), dict) else {}
+            power_file = str(
+                item.get("power_file", "")
+                or source_files.get("power_file", "")
+                or item.get("file_path", "")
+                or item.get("source_file", "")
+                or ""
+            ).strip()
+            if not building or not power_file:
+                continue
+            if not is_accessible_cached_file_path(power_file):
+                raise FileNotFoundError(f"共享目录中的支路功率源文件不存在或不可访问: {power_file}")
+            metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+            data_hour_bucket = str(item.get("data_hour_bucket", "") or metadata.get("data_hour_bucket", "") or "").strip()
+            normalized_unit: Dict[str, Any] = {
+                "building": building,
+                "file_path": power_file,
+                "power_file": power_file,
+                "metadata": metadata,
+                "data_hour_bucket": data_hour_bucket,
+                "source_files": {"power_file": power_file},
+            }
+            unit_bucket = str(item.get("bucket_key", "") or metadata.get("bucket_hour", "") or "").strip()
+            if unit_bucket:
+                normalized_unit["bucket_key"] = unit_bucket
+            for key, label in (("current_file", "支路电流源文件"), ("switch_file", "支路开关源文件")):
+                companion = str(item.get(key, "") or source_files.get(key, "") or "").strip()
+                if not companion:
+                    continue
+                if not is_accessible_cached_file_path(companion):
+                    raise FileNotFoundError(f"共享目录中的{label}不存在或不可访问: {companion}")
+                normalized_unit[key] = companion
+                normalized_unit["source_files"][key] = companion
+            normalized_units.append(normalized_unit)
+        if not normalized_units:
+            raise RuntimeError("共享目录中没有可继续上传的支路信息源文件")
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_branch_power",
+                "target_bucket_key": bucket_key,
+                "target_bucket_keys": target_bucket_keys,
+                "source_units": normalized_units,
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续处理支路信息",
+            "log_text": f"[共享桥接] 任务={task_id} 支路信息共享文件已齐全，正在自动恢复原任务",
         }
 
     def _build_wet_bulb_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
@@ -677,6 +746,8 @@ class SharedBridgeRuntimeService:
             return self._build_handover_resume_binding_from_artifacts(task)
         if feature == "day_metric_from_download":
             return self._build_day_metric_resume_binding_from_artifacts(task)
+        if feature == "branch_power_upload":
+            return self._build_branch_power_resume_binding(task)
         if feature == "wet_bulb_collection":
             return self._build_wet_bulb_resume_binding_from_artifacts(task)
         if feature == "alarm_event_upload":
@@ -1224,6 +1295,57 @@ class SharedBridgeRuntimeService:
         )
         self._source_cache_start_thread.start()
 
+    def _wait_internal_download_pool_ready(
+        self,
+        *,
+        emit_log: Callable[[str], None] | None = None,
+        timeout_sec: float = 120.0,
+    ) -> None:
+        if self.role_mode != "internal":
+            return
+        pool = self._internal_download_pool
+        if pool is None:
+            raise RuntimeError("内网下载浏览器池未创建，无法开始源文件下载")
+        try:
+            health = pool.get_health_snapshot() if hasattr(pool, "get_health_snapshot") else {}
+        except Exception:  # noqa: BLE001
+            health = {}
+        if isinstance(health, dict) and bool(health.get("browser_ready", False)):
+            if self._source_cache_service is not None:
+                self._source_cache_service.update_download_browser_pool(pool)
+            return
+        if callable(emit_log):
+            emit_log("[共享桥接][内网] 等待内网下载浏览器池就绪后再开始源文件下载")
+        wait_ready = getattr(pool, "wait_until_ready", None)
+        if callable(wait_ready):
+            ready_result = wait_ready(timeout_sec=max(1.0, float(timeout_sec or 1.0)))
+        else:
+            ready_result = {
+                "ready": bool(health.get("browser_ready", False)) if isinstance(health, dict) else False,
+                "reason": "health_snapshot",
+            }
+        if not bool(ready_result.get("ready", False)):
+            reason = str(
+                ready_result.get("error")
+                or ready_result.get("reason")
+                or "内网下载浏览器池未就绪"
+            ).strip()
+            raise RuntimeError(f"内网下载浏览器池未就绪: {reason}")
+        if self._source_cache_service is not None:
+            self._source_cache_service.update_download_browser_pool(pool)
+
+    def _is_internal_download_pool_ready(self) -> bool:
+        if self.role_mode != "internal":
+            return True
+        pool = self._internal_download_pool
+        if pool is None:
+            return False
+        try:
+            health = pool.get_health_snapshot() if hasattr(pool, "get_health_snapshot") else {}
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(health.get("browser_ready", False)) if isinstance(health, dict) else False
+
     def start(self) -> Dict[str, Any]:
         with self._lock:
             if self._thread and self._thread.is_alive():
@@ -1238,6 +1360,7 @@ class SharedBridgeRuntimeService:
             self._cleanup_deleted_tasks = 0
             self._cleanup_deleted_entries = 0
             self._cleanup_deleted_files = 0
+            self._internal_pool_wait_logged = False
             if not self._should_run():
                 self._db_status = "disabled"
                 self._counts = {"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0, "node_count": 0}
@@ -1802,6 +1925,9 @@ class SharedBridgeRuntimeService:
             "handover_log_family": {},
             "handover_capacity_report_family": {},
             "monthly_report_family": {},
+            "branch_power_family": {},
+            "branch_current_family": {},
+            "branch_switch_family": {},
             "alarm_event_family": {},
         }
 
@@ -2310,6 +2436,9 @@ class SharedBridgeRuntimeService:
         buildings: List[str] | None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
+        target_bucket_keys: List[str] | None = None,
+        range_query_start: str | None = None,
+        range_query_end: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -2319,6 +2448,9 @@ class SharedBridgeRuntimeService:
             buildings=buildings,
             resume_job_id=resume_job_id,
             target_bucket_key=target_bucket_key,
+            target_bucket_keys=target_bucket_keys,
+            range_query_start=range_query_start,
+            range_query_end=range_query_end,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -2388,19 +2520,26 @@ class SharedBridgeRuntimeService:
         buildings: List[str] | None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
+        target_bucket_keys: List[str] | None = None,
+        range_query_start: str | None = None,
+        range_query_end: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
         normalized_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        normalized_bucket_keys = [str(item or "").strip() for item in (target_bucket_keys or []) if str(item or "").strip()]
         resolved_bucket_key = str(target_bucket_key or "").strip()
+        if not resolved_bucket_key and normalized_bucket_keys:
+            resolved_bucket_key = normalized_bucket_keys[0]
         if not resolved_bucket_key and self._source_cache_service is not None:
             resolved_bucket_key = self._source_cache_service.branch_power_bucket()
+        bucket_dedupe = ",".join(normalized_bucket_keys) or resolved_bucket_key
         dedupe_key = "|".join(
             [
                 "branch_power_upload",
-                resolved_bucket_key or _now_text()[:13],
+                bucket_dedupe or _now_text()[:13],
                 ",".join(normalized_buildings) or "all_enabled",
             ]
         )
@@ -2411,6 +2550,9 @@ class SharedBridgeRuntimeService:
             buildings=normalized_buildings,
             resume_job_id=resume_job_id,
             target_bucket_key=resolved_bucket_key,
+            target_bucket_keys=normalized_bucket_keys,
+            range_query_start=range_query_start,
+            range_query_end=range_query_end,
             requested_by=requested_by,
         )
 
@@ -4633,39 +4775,155 @@ class SharedBridgeRuntimeService:
         try:
             if self._source_cache_service is None:
                 raise RuntimeError("共享缓存服务未初始化，无法下载支路功率")
-            bucket_key = str(request.get("target_bucket_key", "") or "").strip() or self._source_cache_service.branch_power_bucket()
+            self._wait_internal_download_pool_ready(emit_log=emit_log)
+            requested_bucket_keys = [
+                str(item or "").strip()
+                for item in (request.get("target_bucket_keys") if isinstance(request.get("target_bucket_keys"), list) else [])
+                if str(item or "").strip()
+            ]
+            bucket_key = (
+                str(request.get("target_bucket_key", "") or "").strip()
+                or (requested_bucket_keys[0] if requested_bucket_keys else "")
+                or self._source_cache_service.branch_power_bucket()
+            )
+            explicit_data_buckets = bool(requested_bucket_keys)
+            target_bucket_keys = requested_bucket_keys or [bucket_key]
             buildings = [str(item or "").strip() for item in (request.get("buildings") if isinstance(request.get("buildings"), list) else []) if str(item or "").strip()]
             if not buildings:
                 buildings = self._source_cache_service.get_enabled_buildings()
             source_units: List[Dict[str, Any]] = []
             failed_buildings: List[Dict[str, Any]] = []
-            emit_log(f"[共享桥接][支路功率][内网] 开始下载 bucket={bucket_key}, buildings={len(buildings)}")
-            for building in buildings:
+            emit_log(
+                "[共享桥接][支路信息][内网] 开始下载三源文件 "
+                f"bucket={bucket_key}, data_buckets={','.join(target_bucket_keys)}, buildings={len(buildings)}"
+            )
+
+            def download_building(building: str) -> Dict[str, Any]:
+                building_start = time.perf_counter()
+                building_units: List[Dict[str, Any]] = []
                 try:
-                    entry = self._source_cache_service.fill_branch_power_latest(
-                        building=building,
-                        bucket_key=bucket_key,
-                        emit_log=emit_log,
+                    emit_log(
+                        "[共享桥接][支路信息][内网] 楼栋下载开始 "
+                        f"building={building}, data_buckets={','.join(target_bucket_keys)}"
                     )
-                    source_units.append(
-                        {
-                            "building": building,
-                            "file_path": str(entry.get("file_path", "") or "").strip(),
-                            "bucket_key": bucket_key,
-                            "metadata": entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {},
-                        }
+                    if len(target_bucket_keys) >= 2:
+                        power_entries = self._source_cache_service.fill_branch_power_range_latest(
+                            building=building,
+                            bucket_keys=target_bucket_keys,
+                            emit_log=emit_log,
+                        )
+                        current_entries = self._source_cache_service.fill_branch_current_range_latest(
+                            building=building,
+                            bucket_keys=target_bucket_keys,
+                            emit_log=emit_log,
+                        )
+                        switch_entries = self._source_cache_service.fill_branch_switch_range_latest(
+                            building=building,
+                            bucket_keys=target_bucket_keys,
+                            emit_log=emit_log,
+                        )
+                    else:
+                        data_bucket_key = target_bucket_keys[0] if explicit_data_buckets else None
+                        power_entries = [
+                            self._source_cache_service.fill_branch_power_latest(
+                                building=building,
+                                bucket_key=bucket_key,
+                                data_bucket_key=data_bucket_key,
+                                emit_log=emit_log,
+                            )
+                        ]
+                        current_entries = [
+                            self._source_cache_service.fill_branch_current_latest(
+                                building=building,
+                                bucket_key=bucket_key,
+                                data_bucket_key=data_bucket_key,
+                                emit_log=emit_log,
+                            )
+                        ]
+                        switch_entries = [
+                            self._source_cache_service.fill_branch_switch_latest(
+                                building=building,
+                                bucket_key=bucket_key,
+                                data_bucket_key=data_bucket_key,
+                                emit_log=emit_log,
+                            )
+                        ]
+                    if not power_entries or not current_entries or not switch_entries:
+                        raise RuntimeError(f"{building} 支路三源文件下载结果不完整")
+                    power_by_bucket = {str(item.get("bucket_key", "") or "").strip(): item for item in power_entries if isinstance(item, dict)}
+                    current_by_bucket = {str(item.get("bucket_key", "") or "").strip(): item for item in current_entries if isinstance(item, dict)}
+                    switch_by_bucket = {str(item.get("bucket_key", "") or "").strip(): item for item in switch_entries if isinstance(item, dict)}
+                    for data_bucket in target_bucket_keys:
+                        unit_bucket = data_bucket if explicit_data_buckets else bucket_key
+                        power_entry = power_by_bucket.get(unit_bucket) or power_entries[0]
+                        current_entry = current_by_bucket.get(unit_bucket) or current_entries[0]
+                        switch_entry = switch_by_bucket.get(unit_bucket) or switch_entries[0]
+                        power_path = str(power_entry.get("file_path", "") or "").strip()
+                        current_path = str(current_entry.get("file_path", "") or "").strip()
+                        switch_path = str(switch_entry.get("file_path", "") or "").strip()
+                        metadata = power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {}
+                        building_units.append(
+                            {
+                                "building": building,
+                                "file_path": power_path,
+                                "power_file": power_path,
+                                "current_file": current_path,
+                                "switch_file": switch_path,
+                                "source_files": {
+                                    "power_file": power_path,
+                                    "current_file": current_path,
+                                    "switch_file": switch_path,
+                                },
+                                "bucket_key": unit_bucket,
+                                "data_hour_bucket": str(metadata.get("data_hour_bucket", "") or data_bucket).strip(),
+                                "metadata": metadata,
+                            }
+                        )
+                    emit_log(
+                        "[共享桥接][支路信息][内网] 楼栋下载完成 "
+                        f"building={building}, units={len(building_units)}, elapsed_ms={int((time.perf_counter() - building_start) * 1000)}"
                     )
+                    return {"building": building, "source_units": building_units, "error": ""}
                 except Exception as exc:  # noqa: BLE001
-                    failed_buildings.append({"building": building, "error": str(exc)})
-                    emit_log(f"[共享桥接][支路功率][内网] 下载失败 building={building}, error={exc}")
+                    emit_log(f"[共享桥接][支路信息][内网] 下载失败 building={building}, error={exc}")
+                    return {"building": building, "source_units": [], "error": str(exc)}
+
+            building_results: Dict[str, Dict[str, Any]] = {}
+            worker_count = max(1, min(5, len(buildings)))
+            if worker_count == 1:
+                for building in buildings:
+                    building_results[building] = download_building(building)
+            else:
+                with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="branch-source-download") as executor:
+                    future_by_building = {executor.submit(download_building, building): building for building in buildings}
+                    for future in as_completed(future_by_building):
+                        building = future_by_building[future]
+                        try:
+                            building_results[building] = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            error_text = str(exc)
+                            emit_log(f"[共享桥接][支路信息][内网] 下载失败 building={building}, error={error_text}")
+                            building_results[building] = {"building": building, "source_units": [], "error": error_text}
+
+            for building in buildings:
+                result = building_results.get(building, {"building": building, "source_units": [], "error": "楼栋下载未返回结果"})
+                building_units = result.get("source_units", []) if isinstance(result.get("source_units", []), list) else []
+                source_units.extend([item for item in building_units if isinstance(item, dict)])
+                error_text = str(result.get("error", "") or "").strip()
+                if error_text:
+                    failed_buildings.append({"building": building, "error": error_text})
             stage_result = {
-                "status": "success" if source_units else "failed",
+                "status": "success" if source_units and not failed_buildings else "failed",
                 "bucket_key": bucket_key,
+                "target_bucket_key": bucket_key,
+                "target_bucket_keys": target_bucket_keys if explicit_data_buckets else [],
+                "range_query_start": str(request.get("range_query_start", "") or "").strip(),
+                "range_query_end": str(request.get("range_query_end", "") or "").strip(),
                 "source_units": source_units,
                 "failed_buildings": failed_buildings,
                 "downloaded_count": len(source_units),
             }
-            if source_units:
+            if source_units and not failed_buildings:
                 self._store.complete_stage(
                     task_id=task_id,
                     stage_id=stage_id,
@@ -4683,13 +4941,18 @@ class SharedBridgeRuntimeService:
                     side="internal",
                     level="info",
                     event_type="await_external",
-                    payload={"message": "支路功率源文件已下载，等待外网上传"},
+                    payload={"message": "支路功率/电流/开关源文件已下载，等待外网上传"},
                 )
                 self._request_runtime_status_refresh(reason=f"branch_power_internal_download_completed:{task_id}")
                 return
-            error_text = "内网下载未产生任何支路功率共享文件"
+            error_text = "内网下载未产生任何支路信息共享文件"
             if failed_buildings:
-                error_text = str(failed_buildings[0].get("error", "") or error_text)
+                failed_text = ", ".join(
+                    f"{str(item.get('building', '') or '').strip()}: {str(item.get('error', '') or '').strip()}"
+                    for item in failed_buildings
+                    if isinstance(item, dict)
+                )
+                error_text = f"内网下载支路信息存在失败楼栋: {failed_text or failed_buildings}"
             self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
             self._store.complete_stage(
                 task_id=task_id,
@@ -6173,33 +6436,42 @@ class SharedBridgeRuntimeService:
                     if now_monotonic >= next_cleanup:
                         self._run_housekeeping()
                         next_cleanup = now_monotonic + self.CLEANUP_INTERVAL_SEC
-                    if now_monotonic >= next_source_cache_sweep:
+                    internal_pool_ready = self._is_internal_download_pool_ready()
+                    if self.role_mode == "internal" and not internal_pool_ready:
+                        if not self._internal_pool_wait_logged:
+                            self._emit_system_log("[共享桥接] 等待内网下载浏览器池就绪，暂不领取共享任务")
+                            self._internal_pool_wait_logged = True
+                    elif self._internal_pool_wait_logged:
+                        self._emit_system_log("[共享桥接] 内网下载浏览器池已就绪，开始领取共享任务")
+                        self._internal_pool_wait_logged = False
+                    if internal_pool_ready and now_monotonic >= next_source_cache_sweep:
                         next_source_cache_sweep = self._schedule_background_task_if_due(
                             task_key="source_cache_sweep",
                             target=self._run_source_cache_background_sweep,
                             interval_sec=self.BACKGROUND_SELF_HEAL_INTERVAL_SEC,
                         )
-                    if now_monotonic >= next_source_cache_prewarm:
+                    if internal_pool_ready and now_monotonic >= next_source_cache_prewarm:
                         next_source_cache_prewarm = self._schedule_background_task_if_due(
                             task_key="source_cache_prewarm",
                             target=self._run_source_cache_prewarm,
                             interval_sec=self.SOURCE_CACHE_PREWARM_INTERVAL_SEC,
                         )
-                    if now_monotonic >= next_artifact_self_heal:
+                    if internal_pool_ready and now_monotonic >= next_artifact_self_heal:
                         next_artifact_self_heal = self._schedule_background_task_if_due(
                             task_key="artifact_self_heal",
                             target=self._run_artifact_background_self_heal,
                             interval_sec=self.BACKGROUND_SELF_HEAL_INTERVAL_SEC,
                         )
-                    if now_monotonic >= next_internal_alert_refresh:
+                    if internal_pool_ready and now_monotonic >= next_internal_alert_refresh:
                         self._refresh_internal_alert_status_cache()
                         next_internal_alert_refresh = now_monotonic + self.INTERNAL_ALERT_STATUS_REFRESH_INTERVAL_SEC
-                    if now_monotonic >= next_waiting_job_reconcile:
+                    if internal_pool_ready and now_monotonic >= next_waiting_job_reconcile:
                         self._reconcile_waiting_jobs()
                         next_waiting_job_reconcile = now_monotonic + self.WAITING_JOB_RECONCILE_INTERVAL_SEC
-                    if self.role_mode == "internal":
+                    if internal_pool_ready and self.role_mode == "internal":
                         self._process_internal_browser_alerts()
-                    self._process_one_task_if_needed()
+                    if internal_pool_ready:
+                        self._process_one_task_if_needed()
                     mailbox_tasks = self._list_mailbox_tasks(limit=500)
                     if mailbox_tasks:
                         self._counts.update(self._task_counts_from_tasks(mailbox_tasks))
@@ -6210,8 +6482,12 @@ class SharedBridgeRuntimeService:
                             self._counts.update(self._task_counts_from_tasks(mirrored_tasks))
                         else:
                             self._counts.update({"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0})
-                    self._db_status = "ok"
-                    self._last_error = ""
+                    if internal_pool_ready:
+                        self._db_status = "ok"
+                        self._last_error = ""
+                    else:
+                        self._db_status = "starting"
+                        self._last_error = "等待内网下载浏览器池就绪，暂不领取共享任务"
                     self._last_poll_at = _now_text()
                     if not self._startup_logged:
                         self._emit_system_log(

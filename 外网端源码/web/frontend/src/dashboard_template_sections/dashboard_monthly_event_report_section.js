@@ -1,4 +1,4 @@
-export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'monthly_event_report'">
+export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'monthly_event_report'">
           <div class="dashboard-module-shell">
             <div class="dashboard-module-intro">
               <h3 class="card-title">体系月度统计表</h3>
@@ -769,4 +769,5 @@ export const DASHBOARD_MONTHLY_EVENT_REPORT_SECTION = `        <section class="c
                       </section>
 
 `;
+
 

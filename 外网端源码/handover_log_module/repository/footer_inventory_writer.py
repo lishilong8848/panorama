@@ -16,7 +16,7 @@ from handover_log_module.core.footer_layout import (
     find_footer_inventory_layout,
     trim_rows_below_footer,
 )
-from handover_log_module.repository.section_writer import _insert_rows_like_excel
+from handover_log_module.repository.section_writer import _delete_rows_like_excel, _insert_rows_like_excel
 
 
 @dataclass
@@ -300,8 +300,12 @@ def write_footer_inventory_table(
     if layout.data_start_row > layout.header_row + 1:
         gap_start = layout.header_row + 1
         gap_count = layout.data_start_row - gap_start
-        _clear_merges_in_row_range(ws, gap_start, layout.data_start_row - 1)
-        ws.delete_rows(gap_start, amount=gap_count)
+        _delete_rows_like_excel(
+            ws,
+            delete_at=gap_start,
+            amount=gap_count,
+            emit_log=lambda message: emit_log(f"[交接班][审核页][工具表写回] {message}"),
+        )
         emit_log(
             "[交接班][审核页][工具表写回] "
             f"已清理表头下方空白占位行: start_row={gap_start}, count={gap_count}"
@@ -335,7 +339,12 @@ def write_footer_inventory_table(
             emit_log=lambda message: emit_log(f"[交接班][审核页][工具表写回] {message}"),
         )
     elif target_rows < current_rows:
-        ws.delete_rows(layout.data_start_row + target_rows, amount=current_rows - target_rows)
+        _delete_rows_like_excel(
+            ws,
+            delete_at=layout.data_start_row + target_rows,
+            amount=current_rows - target_rows,
+            emit_log=lambda message: emit_log(f"[交接班][审核页][工具表写回] {message}"),
+        )
 
     layout = find_footer_inventory_layout(ws)
     if layout is None:

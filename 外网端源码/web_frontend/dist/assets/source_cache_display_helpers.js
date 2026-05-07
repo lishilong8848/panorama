@@ -9,6 +9,8 @@ function resolveSourceCacheFamilyTitle(key) {
   if (text === "handover_capacity_report_family") return "交接班容量报表源文件";
   if (text === "monthly_report_family") return "全景平台月报源文件";
   if (text === "branch_power_family") return "支路功率源文件";
+  if (text === "branch_current_family") return "支路电流源文件";
+  if (text === "branch_switch_family") return "支路开关源文件";
   if (text === "alarm_event_family") return "告警信息源文件";
   return "";
 }
@@ -19,6 +21,8 @@ function resolveSourceCacheFamilyKeyByTitle(title) {
   if (text === "交接班容量报表源文件") return "handover_capacity_report_family";
   if (text === "全景平台月报源文件") return "monthly_report_family";
   if (text === "支路功率源文件") return "branch_power_family";
+  if (text === "支路电流源文件") return "branch_current_family";
+  if (text === "支路开关源文件") return "branch_switch_family";
   if (text === "告警信息源文件") return "alarm_event_family";
   return "";
 }
@@ -110,7 +114,7 @@ function normalizeSourceCacheBuildingStatus(raw, fallbackBucket, formatSharedBri
       let tone = "neutral";
       let stateText = "等待中";
       let detailText = blocked
-        ? (blockedReason || "等待内网恢复")
+      ? (blockedReason || "等待采集端恢复")
         : (lastError || downloadedAt || startedAt || resolvedFilePath || relativePath || "等待共享文件就绪");
       if (explicitStatusKey === "ready" && (explicitReady !== false)) {
         if (usingFallback) {
@@ -140,7 +144,7 @@ function normalizeSourceCacheBuildingStatus(raw, fallbackBucket, formatSharedBri
         stateText = "失败";
       } else if (blocked) {
         tone = "warning";
-        stateText = "等待内网恢复";
+      stateText = "等待采集端恢复";
       }
       return {
         building,
@@ -260,7 +264,7 @@ function normalizeAlarmEventReadinessBuilding(raw, fallbackBucket, formatSharedB
         stateText = "失败";
       } else if (blocked) {
         tone = "warning";
-        stateText = "等待内网恢复";
+      stateText = "等待采集端恢复";
       } else if (selectionScope === "missing") {
         tone = "warning";
         stateText = "今天和昨天都缺文件";
@@ -288,7 +292,7 @@ function normalizeAlarmEventReadinessBuilding(raw, fallbackBucket, formatSharedB
         selectionScopeText,
         selectedDownloadedAt,
         detailText: blocked
-          ? (blockedReason || "等待内网恢复")
+      ? (blockedReason || "等待采集端恢复")
           : (selectionScope === "missing"
             ? "今天和昨天都缺文件"
             : (lastError || selectedDownloadedAt || "等待共享文件就绪")),

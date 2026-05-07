@@ -127,14 +127,20 @@ export function createDashboardSchedulerActions(ctx) {
   async function saveSchedulerQuickConfig() {
     if (!config.value) return;
     const scheduler = config.value.scheduler || {};
+    const runTime = normalizeRunTimeText(scheduler.run_time) || "00:10:00";
     const payload = {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
-      interval_minutes: toPositiveInt(scheduler.interval_minutes, 60),
+      run_time: runTime,
       check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
-      retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,
+      catch_up_if_missed: Boolean(scheduler.catch_up_if_missed),
+      retry_failed_in_same_period: scheduler.retry_failed_in_same_period !== false,
       state_file: String(scheduler.state_file || "daily_scheduler_state.json").trim(),
     };
+    if (!payload.run_time) {
+      message.value = "每日执行时间格式错误";
+      return;
+    }
     if (!payload.state_file) {
       message.value = "调度状态文件不能为空";
       return;

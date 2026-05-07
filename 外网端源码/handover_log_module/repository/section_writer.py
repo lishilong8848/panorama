@@ -146,6 +146,10 @@ def _insert_rows_like_excel(
     original_merged = list(ws.merged_cells.ranges)
     old_count = len(original_merged)
 
+    # Clear merges before rows move. If stale merged ranges are unmerged after
+    # insert_rows, openpyxl may delete values that have already shifted into the
+    # old follower cells.
+    _unmerge_all_safely(ws, emit_log)
     ws.insert_rows(insert_at, amount=amount)
 
     src_row = template_row if template_row < insert_at else template_row + amount
@@ -185,6 +189,56 @@ def _insert_rows_like_excel(
     )
     emit_log(
         f"[交接班][插行] 合并重建: old={old_count}, new={applied_count}, skipped_conflict={skipped}"
+    )
+
+
+def _delete_rows_like_excel(
+    ws: Worksheet,
+    *,
+    delete_at: int,
+    amount: int,
+    emit_log: Callable[[str], None],
+) -> None:
+    if amount <= 0:
+        return
+
+    original_merged = list(ws.merged_cells.ranges)
+    old_count = len(original_merged)
+    delete_end = int(delete_at) + int(amount) - 1
+
+    _unmerge_all_safely(ws, emit_log)
+    ws.delete_rows(delete_at, amount=amount)
+
+    merged_defs: List[Tuple[int, int, int, int]] = []
+    for merged in original_merged:
+        min_col, min_row, max_col_merged, max_row_merged = (
+            merged.min_col,
+            merged.min_row,
+            merged.max_col,
+            merged.max_row,
+        )
+        if max_row_merged < delete_at:
+            pass
+        elif min_row > delete_end:
+            min_row -= amount
+            max_row_merged -= amount
+        elif min_row < delete_at and max_row_merged > delete_end:
+            max_row_merged -= amount
+        elif min_row < delete_at <= max_row_merged <= delete_end:
+            max_row_merged = delete_at - 1
+        elif delete_at <= min_row <= delete_end < max_row_merged:
+            min_row = delete_at
+            max_row_merged -= amount
+        else:
+            continue
+        if min_row > max_row_merged:
+            continue
+        merged_defs.append((min_col, min_row, max_col_merged, max_row_merged))
+
+    applied_count, skipped = _apply_merge_defs(ws, merged_defs, emit_log=emit_log)
+    emit_log(f"[交接班][删行] delete_at={delete_at}, amount={amount}")
+    emit_log(
+        f"[交接班][删行] 合并重建: old={old_count}, new={applied_count}, skipped_conflict={skipped}"
     )
 
 
@@ -281,7 +335,12 @@ def write_category_sections(
             op = f"insert+{delta}"
         elif target_n < current_n:
             delta = current_n - target_n
-            ws.delete_rows(section.template_data_row + target_n, amount=delta)
+            _delete_rows_like_excel(
+                ws,
+                delete_at=section.template_data_row + target_n,
+                amount=delta,
+                emit_log=emit_log,
+            )
             op = f"delete-{delta}"
 
         snapshot = snapshots.get(section.title_row)

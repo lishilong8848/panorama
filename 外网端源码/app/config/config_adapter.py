@@ -428,7 +428,10 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
         _dict(features.get("wet_bulb_collection"))
     )
-    common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
+    if _is_external_deployment(common):
+        _strip_external_source_site_config(common, features)
+    else:
+        common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
 
     _discard_deprecated_alarm_db(common, features)
     _normalize_handover_rules(features)
@@ -461,7 +464,10 @@ def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
         deployment["last_started_role_mode"] = normalize_role_mode(deployment.get("last_started_role_mode"))
         common["deployment"] = deployment
         common["shared_bridge"] = _resolve_shared_bridge_paths(common, deployment)
-        common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
+        if _is_external_deployment(common):
+            _strip_external_source_site_config(common, features)
+        else:
+            common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
         features["day_metric_upload"] = sanitize_day_metric_upload_config(_dict(features.get("day_metric_upload")))
         features["alarm_export"] = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
         features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
@@ -539,6 +545,22 @@ def _resolve_internal_source_sites(common: Dict[str, Any], features: Dict[str, A
     return _default_internal_source_sites()
 
 
+def _is_external_deployment(common: Dict[str, Any]) -> bool:
+    return _normalize_role_mode(_dict(common.get("deployment")).get("role_mode")) == "external"
+
+
+def _strip_external_source_site_config(common: Dict[str, Any], features: Dict[str, Any]) -> None:
+    common.pop("internal_source_sites", None)
+    monthly = _dict(features.get("monthly_report"))
+    monthly["sites"] = []
+    features["monthly_report"] = monthly
+    handover = _dict(features.get("handover_log"))
+    handover["sites"] = []
+    handover["download"] = _dict(handover.get("download"))
+    handover["download"]["sites"] = []
+    features["handover_log"] = handover
+
+
 def _has_day_metric_target_config(target: Dict[str, Any]) -> bool:
     source = _dict(target.get("source"))
     return bool(
@@ -585,7 +607,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         _dict(common.get("internal_source_cache")),
         _dict(DEFAULT_CONFIG_V3["common"].get("internal_source_cache")),
     )
-    internal_source_sites = _resolve_internal_source_sites(common, features)
+    internal_source_sites = [] if _is_external_deployment(common) else _resolve_internal_source_sites(common, features)
     scheduler = _dict(common.get("scheduler"))
     updater = _dict(common.get("updater"))
     notify = _dict(common.get("notify"))
@@ -602,6 +624,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         )
     )
     alarm_export = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
+    wet_bulb_collection = sanitize_wet_bulb_collection_config(_dict(features.get("wet_bulb_collection")))
     manual_upload_gui = _dict(features.get("manual_upload_gui"))
     runtime_download = {
         "save_dir": monthly_download_dir,
@@ -718,6 +741,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "handover_log": runtime_handover_log,
         "day_metric_upload": copy.deepcopy(day_metric_upload),
         "alarm_export": copy.deepcopy(alarm_export),
+        "wet_bulb_collection": copy.deepcopy(wet_bulb_collection),
         "manual_upload_gui": copy.deepcopy(manual_upload_gui),
         "web": copy.deepcopy(console),
     }
@@ -730,22 +754,24 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
     common = _dict(cfg.get("common"))
     features = _dict(cfg.get("features"))
     runtime_paths = _dict(runtime.get("paths"))
-    runtime_internal_source_sites = _clean_sites(runtime.get("internal_source_sites"))
-
-    monthly = _dict(features.get("monthly_report"))
-    if not runtime_internal_source_sites:
-        runtime_internal_source_sites = _clean_sites(_dict(runtime.get("download", {})).get("sites", []))
-    if not runtime_internal_source_sites:
-        runtime_internal_source_sites = _clean_sites(_dict(_dict(runtime.get("handover_log")).get("download")).get("sites", []))
-    if not runtime_internal_source_sites:
-        runtime_internal_source_sites = _default_internal_source_sites()
-    monthly["sites"] = copy.deepcopy(runtime_internal_source_sites)
-    features["monthly_report"] = monthly
 
     deployment = deep_merge_defaults(_dict(runtime.get("deployment")), _dict(common.get("deployment")))
     deployment["role_mode"] = _normalize_role_mode(deployment.get("role_mode"))
     deployment["last_started_role_mode"] = _normalize_role_mode(deployment.get("last_started_role_mode"))
     common["deployment"] = deployment
+    external_deployment = deployment["role_mode"] == "external"
+    runtime_internal_source_sites = [] if external_deployment else _clean_sites(runtime.get("internal_source_sites"))
+
+    monthly = _dict(features.get("monthly_report"))
+    if not external_deployment:
+        if not runtime_internal_source_sites:
+            runtime_internal_source_sites = _clean_sites(_dict(runtime.get("download", {})).get("sites", []))
+        if not runtime_internal_source_sites:
+            runtime_internal_source_sites = _clean_sites(_dict(_dict(runtime.get("handover_log")).get("download")).get("sites", []))
+        if not runtime_internal_source_sites:
+            runtime_internal_source_sites = _default_internal_source_sites()
+    monthly["sites"] = copy.deepcopy(runtime_internal_source_sites)
+    features["monthly_report"] = monthly
     shared_bridge = deep_merge_defaults(_dict(runtime.get("shared_bridge")), _dict(common.get("shared_bridge")))
     active_root = str(shared_bridge.get("root_dir", "") or "").strip()
     internal_root = str(shared_bridge.get("internal_root_dir", "") or "").strip()
@@ -765,7 +791,10 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         _dict(runtime.get("internal_source_cache")),
         _dict(common.get("internal_source_cache")),
     )
-    common["internal_source_sites"] = copy.deepcopy(runtime_internal_source_sites)
+    if external_deployment:
+        common.pop("internal_source_sites", None)
+    else:
+        common["internal_source_sites"] = copy.deepcopy(runtime_internal_source_sites)
     common["scheduler"] = deep_merge_defaults(_dict(runtime.get("scheduler")), _dict(common.get("scheduler")))
     common["updater"] = deep_merge_defaults(_dict(runtime.get("updater")), _dict(common.get("updater")))
     common["notify"] = deep_merge_defaults(_dict(runtime.get("notify")), _dict(common.get("notify")))
@@ -824,7 +853,10 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         _dict(features.get("alarm_export")),
     ))
     features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
-        _dict(features.get("wet_bulb_collection"))
+        deep_merge_defaults(
+            _dict(runtime.get("wet_bulb_collection")),
+            _dict(features.get("wet_bulb_collection")),
+        )
     )
     _apply_single_root_paths(common, features)
 

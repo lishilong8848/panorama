@@ -74,7 +74,7 @@ class HandoverDownloadService:
             base_cfg["query_result_timeout_ms"] = max(query_timeout_ms, e_query_timeout_ms)
         return base_cfg
 
-    def _branch_power_download_config(self) -> Dict[str, Any]:
+    def _branch_meter_download_config(self, *, sheet_name: str, report_kind: str, template_name: str = "") -> Dict[str, Any]:
         base_cfg = copy.deepcopy(
             self.config.get("download", {}) if isinstance(self.config.get("download", {}), dict) else {}
         )
@@ -90,12 +90,14 @@ class HandoverDownloadService:
         )
         base_cfg.update(copy.deepcopy(branch_download_cfg))
         base_cfg["template_name"] = str(
-            branch_download_cfg.get("template_name")
+            template_name
+            or branch_download_cfg.get("template_name")
             or branch_root_cfg.get("template_name")
             or "列头柜支路电流"
         ).strip()
         base_cfg["sheet_name"] = str(
-            branch_download_cfg.get("sheet_name")
+            sheet_name
+            or branch_download_cfg.get("sheet_name")
             or branch_root_cfg.get("sheet_name")
             or "支路功率"
         ).strip()
@@ -110,8 +112,21 @@ class HandoverDownloadService:
             or base_cfg.get("export_button_text")
             or "原样导出"
         ).strip()
-        base_cfg["report_kind"] = "branch_power"
+        base_cfg["report_kind"] = str(report_kind or "branch_power").strip() or "branch_power"
         return base_cfg
+
+    def _branch_power_download_config(self) -> Dict[str, Any]:
+        return self._branch_meter_download_config(sheet_name="支路功率", report_kind="branch_power")
+
+    def _branch_current_download_config(self) -> Dict[str, Any]:
+        return self._branch_meter_download_config(sheet_name="支路电流", report_kind="branch_current")
+
+    def _branch_switch_download_config(self, *, template_name: str = "列头柜支路开关状态") -> Dict[str, Any]:
+        return self._branch_meter_download_config(
+            template_name=template_name,
+            sheet_name="开关",
+            report_kind="branch_switch",
+        )
 
     @staticmethod
     def _merge_multi_download_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -231,6 +246,73 @@ class HandoverDownloadService:
         )
         result["report_kind"] = "branch_power"
         return result
+
+    def run_branch_current_only(
+        self,
+        buildings: List[str] | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        switch_network: bool = True,
+        reuse_cached: bool = True,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        cloned_service = self._clone_with_download_config(self._branch_current_download_config())
+        result = cloned_service.run(
+            buildings=buildings,
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=switch_network,
+            reuse_cached=reuse_cached,
+            emit_log=emit_log,
+        )
+        result["report_kind"] = "branch_current"
+        return result
+
+    def run_branch_switch_only(
+        self,
+        buildings: List[str] | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        switch_network: bool = True,
+        reuse_cached: bool = True,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        target_buildings = buildings[:] if buildings else self._enabled_buildings()
+        target_buildings = [str(item or "").strip() for item in target_buildings if str(item or "").strip()]
+        if not target_buildings:
+            raise ValueError("没有可下载的楼栋，请检查 handover_log.sites 或传入 buildings 参数")
+
+        abc_buildings = [building for building in target_buildings if building in {"A楼", "B楼", "C楼"}]
+        de_buildings = [building for building in target_buildings if building in {"D楼", "E楼"}]
+        other_buildings = [building for building in target_buildings if building not in {"A楼", "B楼", "C楼", "D楼", "E楼"}]
+        grouped_buildings: List[tuple[List[str], str]] = []
+        if abc_buildings:
+            grouped_buildings.append((abc_buildings, "列头柜支路开关状态"))
+        if de_buildings:
+            grouped_buildings.append((de_buildings, "列头柜支路开关"))
+        if other_buildings:
+            grouped_buildings.append((other_buildings, "列头柜支路开关状态"))
+
+        results: List[Dict[str, Any]] = []
+        switched = False
+        for group_buildings, template_name in grouped_buildings:
+            cloned_service = self._clone_with_download_config(
+                self._branch_switch_download_config(template_name=template_name)
+            )
+            emit_log(f"[交接班下载][支路开关] 使用报表: {template_name}, buildings={','.join(group_buildings)}")
+            result = cloned_service.run(
+                buildings=group_buildings,
+                start_time=start_time,
+                end_time=end_time,
+                switch_network=bool(switch_network and not switched),
+                reuse_cached=reuse_cached,
+                emit_log=emit_log,
+            )
+            switched = bool(switched or cloned_service.did_switch_internal_this_run)
+            results.append(result)
+        merged = self._merge_multi_download_results(results)
+        merged["report_kind"] = "branch_switch"
+        return merged
 
     def run_with_capacity_report(
         self,

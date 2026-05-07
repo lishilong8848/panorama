@@ -1,4 +1,4 @@
-﻿import {
+import {
   saveWetBulbCollectionSchedulerConfigApi,
   startWetBulbCollectionJobApi,
   startWetBulbCollectionSchedulerApi,
@@ -66,13 +66,8 @@ export function createDashboardWetBulbCollectionActions(ctx) {
   function markSchedulerToggle(mode, rememberedOverride) {
     if (typeof setSchedulerToggleState !== "function") return;
     setSchedulerToggleState("wet_bulb", { mode, rememberedOverride });
-  }
-
-  function isInternalRole() {
-    return String(config?.value?.deployment?.role_mode || "").trim().toLowerCase() === "internal";
-  }
-
-  async function guardedRun(actionKey, taskFn, options = {}) {
+  }
+async function guardedRun(actionKey, taskFn, options = {}) {
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(actionKey, taskFn, {
         ...options,
@@ -126,12 +121,8 @@ export function createDashboardWetBulbCollectionActions(ctx) {
     return `${actionLabel}失败: ${text}`;
   }
 
-  async function runWetBulbCollection() {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供该业务入口，请在外网端发起。";
-      return;
-    }
-    if (!canRun.value) return;
+  async function runWetBulbCollection() {
+if (!canRun.value) return;
     return guardedRun(
       ACTION_KEYS.run,
       async () => {
@@ -169,7 +160,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
             if (bridgeTaskId && typeof fetchBridgeTaskDetail === "function") {
               await fetchBridgeTaskDetail(bridgeTaskId, { silentMessage: true });
             }
-            message.value = "湿球温度定时采集已进入内外网同步处理";
+            message.value = "湿球温度定时采集已进入共享补采处理";
             return;
           }
 
@@ -184,7 +175,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
             await fetchJobs({ silentMessage: true });
           }
           if (isWaitingSharedBridge) {
-            message.value = "湿球温度定时采集已进入等待内网补采同步，共享文件到位后会自动继续";
+            message.value = "湿球温度定时采集已进入等待采集端补采，共享文件到位后会自动继续";
           }
         } catch (err) {
           message.value = formatWetBulbCollectionError(err, "湿球温度定时采集提交");
@@ -195,11 +186,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
   }
 
   async function startWetBulbCollectionScheduler() {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供该业务入口，请在外网端发起。";
-      return;
-    }
-    return guardedRun(
+return guardedRun(
       ACTION_KEYS.schedulerStart,
       async () => {
         markSchedulerToggle("starting", true);
@@ -219,12 +206,8 @@ export function createDashboardWetBulbCollectionActions(ctx) {
     );
   }
 
-  async function stopWetBulbCollectionScheduler() {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供该业务入口，请在外网端发起。";
-      return;
-    }
-    return guardedRun(
+  async function stopWetBulbCollectionScheduler() {
+return guardedRun(
       ACTION_KEYS.schedulerStop,
       async () => {
         markSchedulerToggle("stopping", false);
@@ -245,11 +228,7 @@ export function createDashboardWetBulbCollectionActions(ctx) {
   }
 
   async function saveWetBulbCollectionSchedulerQuickConfig() {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供该业务入口，请在外网端发起。";
-      return;
-    }
-    if (!config.value) return;
+if (!config.value) return;
     const wet = config.value.wet_bulb_collection || {};
     const scheduler = wet.scheduler || {};
     const payload = {
@@ -302,3 +281,5 @@ export function createDashboardWetBulbCollectionActions(ctx) {
     saveWetBulbCollectionSchedulerQuickConfig,
   };
 }
+
+

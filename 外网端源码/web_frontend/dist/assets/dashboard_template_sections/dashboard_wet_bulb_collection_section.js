@@ -1,4 +1,4 @@
-export const DASHBOARD_WET_BULB_COLLECTION_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'wet_bulb_collection'">
+export const DASHBOARD_WET_BULB_COLLECTION_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'wet_bulb_collection'">
           <div class="dashboard-module-shell">
           <article class="task-block dashboard-module-scheduler-card">
             <div class="task-block-head">
@@ -163,4 +163,5 @@ export const DASHBOARD_WET_BULB_COLLECTION_SECTION = `        <section class="co
         </section>
 
 `;
+
 

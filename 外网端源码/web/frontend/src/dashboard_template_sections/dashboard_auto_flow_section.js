@@ -1,4 +1,4 @@
-export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'auto_flow'">
+export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'auto_flow'">
           <div class="dashboard-module-shell">
             <article class="task-block task-block-compact dashboard-module-scheduler-card">
               <div class="task-block-head">
@@ -12,8 +12,8 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
               </div>
               <div class="status-metric-grid status-metric-grid-compact">
                 <div class="status-metric">
-                  <div class="status-metric-label">执行间隔</div>
-                  <strong class="status-metric-value">{{ Number(config.scheduler.interval_minutes || 0) > 0 ? ('每 ' + config.scheduler.interval_minutes + ' 分钟') : '-' }}</strong>
+                  <div class="status-metric-label">执行时间</div>
+                  <strong class="status-metric-value">{{ config.scheduler.run_time || '-' }}</strong>
                 </div>
                 <div class="status-metric">
                   <div class="status-metric-label">下次执行</div>
@@ -29,8 +29,8 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
                 </div>
               </div>
               <div class="btn-line">
-                <label class="label" style="min-width:unset;">执行间隔（分钟）</label>
-                <input style="width:120px" type="number" min="1" step="1" v-model.number="config.scheduler.interval_minutes" @change="saveSchedulerQuickConfig" />
+                <label class="label" style="min-width:unset;">每日执行时间</label>
+                <input style="width:140px" type="time" step="1" v-model="config.scheduler.run_time" @change="saveSchedulerQuickConfig" />
               </div>
               <div class="btn-line">
                 <button class="btn btn-success" :disabled="isSchedulerStartDisabled('scheduler', actionKeySchedulerStart, actionKeySchedulerStop)" @click="startScheduler">
@@ -40,7 +40,7 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
                   {{ getSchedulerStopButtonText('scheduler') }}
                 </button>
               </div>
-              <div class="hint">{{ schedulerQuickSaving ? '调度配置同步中...' : '修改执行间隔后立即生效。' }}</div>
+              <div class="hint">{{ schedulerQuickSaving ? '调度配置同步中...' : '修改每日执行时间后立即生效。' }}</div>
             </article>
 
             <div class="dashboard-module-primary-grid">
@@ -154,4 +154,5 @@ export const DASHBOARD_AUTO_FLOW_SECTION = `        <section class="content-card
         </section>
 
 `;
+
 

@@ -166,11 +166,7 @@ def _resolve_browser_host(host: str, port: int) -> tuple[str, str, str]:
 
 
 def _browser_route_for_role(role_mode: str) -> str:
-    if role_mode == "internal":
-        return "internal/status"
-    if role_mode == "external":
-        return "external/dashboard"
-    return ""
+    return "external/dashboard"
 
 
 def _with_browser_route(base_url: str, role_mode: str) -> str:
@@ -216,14 +212,7 @@ def _should_disable_updater_for_source_run() -> bool:
 
 
 def _apply_split_source_default_role() -> None:
-    if forced_role_mode_from_env():
-        return
-    has_external_entry = (PROJECT_ROOT / "main_external.py").exists()
-    has_internal_entry = (PROJECT_ROOT / "main_internal.py").exists()
-    if has_external_entry and not has_internal_entry:
-        os.environ[FORCE_ROLE_MODE_ENV] = "external"
-    elif has_internal_entry and not has_external_entry:
-        os.environ[FORCE_ROLE_MODE_ENV] = "internal"
+    os.environ[FORCE_ROLE_MODE_ENV] = "external"
 
 
 def _apply_source_run_runtime_flags() -> bool:
@@ -286,10 +275,8 @@ def main(argv: list[str] | None = None) -> None:
     settings = bootstrap_settings or {}
     common_cfg = settings.get("common", {}) if isinstance(settings, dict) else {}
     console_cfg = common_cfg.get("console", {}) if isinstance(common_cfg, dict) else {}
-    deployment_cfg = common_cfg.get("deployment", {}) if isinstance(common_cfg, dict) else {}
-    deployment_role_mode = forced_role_mode_from_env() or _normalize_role_mode(
-        deployment_cfg.get("role_mode") if isinstance(deployment_cfg, dict) else ""
-    )
+    deployment_role_mode = "external"
+    os.environ[FORCE_ROLE_MODE_ENV] = "external"
 
     if not bool(console_cfg.get("enabled", True)):
         print("common.console.enabled=false，Web 控制台已禁用")
@@ -297,12 +284,8 @@ def main(argv: list[str] | None = None) -> None:
 
     host = str(args.host).strip() or str(console_cfg.get("host", "127.0.0.1")).strip() or "127.0.0.1"
     port = int(args.port) if args.port else int(console_cfg.get("port", 18765))
-    if deployment_role_mode == "internal":
-        host = "127.0.0.1"
-    elif deployment_role_mode == "external" and _is_loopback_host(host):
+    if _is_loopback_host(host):
         host = "0.0.0.0"
-    elif not deployment_role_mode:
-        host = "127.0.0.1"
 
     os.environ["QJPT_CONSOLE_BIND_HOST"] = host
     os.environ["QJPT_CONSOLE_BIND_PORT"] = str(port)
@@ -316,20 +299,13 @@ def main(argv: list[str] | None = None) -> None:
 
     local_url, lan_url, browser_url = _resolve_browser_host(host, port)
     browser_url = _with_browser_route(browser_url, deployment_role_mode)
-    if deployment_role_mode == "internal":
-        print(f"[内网端] 本地管理页地址: {local_url}", flush=True)
-        print("[内网端] 仅监听 127.0.0.1，不提供局域网访问入口。", flush=True)
-    elif deployment_role_mode == "external":
-        print(f"[控制台] 本机访问地址: {local_url}", flush=True)
-        if lan_url:
-            print(f"[控制台] 局域网访问地址: {lan_url}", flush=True)
-        elif host == "0.0.0.0":
-            print("[控制台] 未检测到可用局域网 IPv4，浏览器将回退为本机地址。", flush=True)
-        else:
-            print("[控制台] 当前外网端未开放局域网监听，请检查监听 host 配置。", flush=True)
+    print(f"[控制台] 本机访问地址: {local_url}", flush=True)
+    if lan_url:
+        print(f"[控制台] 局域网访问地址: {lan_url}", flush=True)
+    elif host == "0.0.0.0":
+        print("[控制台] 未检测到可用局域网 IPv4，浏览器将回退为本机地址。", flush=True)
     else:
-        print(f"[控制台] 本机访问地址: {local_url}", flush=True)
-        print("[启动] 当前未确认启动角色，仅加载最小控制台壳。", flush=True)
+        print("[控制台] 当前外网端未开放局域网监听，请检查监听 host 配置。", flush=True)
 
     bind_error = _port_bind_error(host, port)
     if bind_error is not None:

@@ -36,7 +36,7 @@ export function buildSharedBridgeSelfCheckOverview(raw, healthSharedBridge = {},
   const roleMode = normalizeText(payload.role_mode || deployment.role_mode).toLowerCase();
   const roleLabel = normalizeText(
     payload.role_label,
-    roleMode === "internal" ? "内网端" : roleMode === "external" ? "外网端" : "当前角色",
+    roleMode === "internal" ? "采集端" : roleMode === "external" ? "外网端" : "当前角色",
   );
   const rootDirText = normalizeText(payload.root_dir || healthSharedBridge.root_dir, "未配置");
   const dbPathText = normalizeText(

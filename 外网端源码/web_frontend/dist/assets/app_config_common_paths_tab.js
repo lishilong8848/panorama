@@ -1,4 +1,4 @@
-﻿export const CONFIG_COMMON_PATHS_TAB_TEMPLATE = `
+export const CONFIG_COMMON_PATHS_TAB_TEMPLATE = `
 <div v-if="activeConfigTab==='common_paths' && showCommonPathsConfigTab" class="config-tab-shell">
   <div class="config-tab-hero">
     <div class="section-title">路径与目录</div>
@@ -13,12 +13,12 @@
       </div>
       <div class="status-metric-card compact">
         <div class="status-metric-label">当前角色</div>
-        <div class="status-metric-value">{{ config.deployment.role_mode === 'internal' ? '内网端' : (config.deployment.role_mode === 'external' ? '外网端' : '未设置') }}</div>
+        <div class="status-metric-value">外网端</div>
       </div>
     </div>
     <div class="hint-stack">
       <div class="hint">业务根目录会派生月报下载目录、交接班日志输出目录和部分本地缓存目录。</div>
-      <div class="hint">交接班共享源文件目录仅用于内网下载缓存和内部复用；外网主链直接读取共享文件夹。</div>
+      <div class="hint">交接班共享源文件目录仅用于采集端下载缓存和外网端复用；外网主链直接读取共享文件夹。</div>
       <div class="hint">运行时状态目录固定为程序目录下 .runtime。</div>
     </div>
   </div>
@@ -52,3 +52,4 @@
   </div>
 </div>
 `;
+

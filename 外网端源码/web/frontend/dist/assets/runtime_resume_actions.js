@@ -254,7 +254,7 @@ export function createRuntimeResumeActions(ctx) {
           if (bridgeTaskId && typeof fetchBridgeTaskDetail === "function") {
             await fetchBridgeTaskDetail(bridgeTaskId, { silentMessage: true });
           }
-          message.value = "断点续传已进入内外网同步处理";
+        message.value = "断点续传已进入共享补采处理";
         } else {
           currentJob.value = wrappedJob;
           if (selectedJobId) {
@@ -264,7 +264,7 @@ export function createRuntimeResumeActions(ctx) {
             streamController.attachJobStream(wrappedJob.job_id);
           }
           if (isWaitingSharedBridge) {
-            message.value = "断点续传已进入等待内网补采同步，共享文件到位后会自动继续";
+        message.value = "断点续传已进入等待采集端补采，共享文件到位后会自动继续";
           } else {
             message.value = autoTrigger ? "已自动触发断点续传" : "已提交断点续传任务";
           }

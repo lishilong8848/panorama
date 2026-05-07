@@ -209,38 +209,6 @@ function ensureRoot(cfg) {
   cfg.branch_power_upload.scheduler = cfg.branch_power_upload.scheduler || {};
 }
 
-function defaultInternalSourceSites() {
-  return ["A楼", "B楼", "C楼", "D楼", "E楼"].map((building) => ({
-    building,
-    enabled: false,
-    host: "",
-    username: "",
-    password: "",
-  }));
-}
-
-function normalizeInternalSourceSites(rawSites) {
-  const defaultsByBuilding = new Map(defaultInternalSourceSites().map((row) => [row.building, row]));
-  const sourceRows = Array.isArray(rawSites) ? rawSites : [];
-  for (const rawSite of sourceRows) {
-    if (!rawSite || typeof rawSite !== "object" || Array.isArray(rawSite)) continue;
-    const building = String(rawSite.building || "").trim();
-    if (!defaultsByBuilding.has(building)) continue;
-    const host = String(rawSite.host || rawSite.ip || rawSite.base_url || "").trim();
-    const username = String(rawSite.username || rawSite.user || "").trim();
-    const password = String(rawSite.password || "").trim();
-    const enabled = typeof rawSite.enabled === "boolean" ? rawSite.enabled : true;
-    defaultsByBuilding.set(building, {
-      building,
-      enabled: enabled && Boolean(host && username && password),
-      host,
-      username,
-      password,
-    });
-  }
-  return Array.from(defaultsByBuilding.values());
-}
-
 function applyDeploymentDefaults(cfg) {
   const roleText = String(cfg.deployment.role_mode || "").trim().toLowerCase();
   cfg.deployment.role_mode =
@@ -298,15 +266,14 @@ function applyDownloadDefaults(cfg) {
 }
 
 function applyInternalSourceSiteDefaults(cfg) {
-  const fallbackSites =
-    cfg.internal_source_sites.length
-      ? cfg.internal_source_sites
-      : Array.isArray(cfg.download?.sites) && cfg.download.sites.length
-        ? cfg.download.sites
-        : Array.isArray(cfg.handover_log?.sites) && cfg.handover_log.sites.length
-          ? cfg.handover_log.sites
-          : cfg.handover_log?.download?.sites;
-  cfg.internal_source_sites = normalizeInternalSourceSites(fallbackSites);
+  cfg.internal_source_sites = [];
+  if (cfg.download && typeof cfg.download === "object") cfg.download.sites = [];
+  if (cfg.handover_log && typeof cfg.handover_log === "object") {
+    cfg.handover_log.sites = [];
+    if (cfg.handover_log.download && typeof cfg.handover_log.download === "object") {
+      cfg.handover_log.download.sites = [];
+    }
+  }
 }
 
 function buildDefaultHandoverRows() {
@@ -1176,9 +1143,10 @@ function applyBranchPowerUploadDefaults(cfg) {
 function applySchedulerDefaults(cfg) {
   setBooleanDefault(cfg.scheduler, "enabled", true);
   setBooleanDefault(cfg.scheduler, "auto_start_in_gui", false);
-  setNumberDefault(cfg.scheduler, "interval_minutes", 60);
+  setStringDefault(cfg.scheduler, "run_time", "00:10:00");
   setNumberDefault(cfg.scheduler, "check_interval_sec", 30);
-  setBooleanDefault(cfg.scheduler, "retry_failed_on_next_tick", true);
+  setBooleanDefault(cfg.scheduler, "catch_up_if_missed", false);
+  setBooleanDefault(cfg.scheduler, "retry_failed_in_same_period", true);
   setStringDefault(cfg.scheduler, "state_file", "daily_scheduler_state.json");
 }
 

@@ -1221,6 +1221,9 @@ class SharedBridgeStore:
         buildings: List[str] | None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
+        target_bucket_keys: List[str] | None = None,
+        range_query_start: str | None = None,
+        range_query_end: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
         requested_by: str = "manual",
@@ -1233,15 +1236,25 @@ class SharedBridgeStore:
             for item in (buildings or [])
             if str(item or "").strip()
         ]
+        normalized_bucket_keys = [
+            str(item or "").strip()
+            for item in (target_bucket_keys or [])
+            if str(item or "").strip()
+        ]
+        resolved_target_bucket_key = str(target_bucket_key or "").strip() or (normalized_bucket_keys[0] if normalized_bucket_keys else "")
         request_payload = {
             "buildings": normalized_buildings,
             "resume_job_id": str(resume_job_id or "").strip(),
-            "target_bucket_key": str(target_bucket_key or "").strip(),
+            "target_bucket_key": resolved_target_bucket_key,
+            "target_bucket_keys": normalized_bucket_keys,
+            "range_query_start": str(range_query_start or "").strip(),
+            "range_query_end": str(range_query_end or "").strip(),
         }
+        bucket_dedupe = ",".join(normalized_bucket_keys) or request_payload["target_bucket_key"]
         dedupe_key = "|".join(
             [
                 "branch_power_upload",
-                request_payload["target_bucket_key"] or now_text[:13],
+                bucket_dedupe or now_text[:13],
                 ",".join(normalized_buildings) or "all_enabled",
             ]
         )

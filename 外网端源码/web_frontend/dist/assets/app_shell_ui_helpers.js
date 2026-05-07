@@ -24,83 +24,36 @@ export function createAppShellUiHelpers(options = {}) {
     ),
   );
   const deploymentRoleMode = computed(() => effectiveRoleMode.value);
-  const isInternalDeploymentRole = computed(() => deploymentRoleMode.value === "internal");
-  const isExternalDeploymentRole = computed(() => deploymentRoleMode.value === "external");
   const configRoleMode = computed(() =>
     normalizeDeploymentRoleMode(config.value?.deployment?.role_mode || deploymentRoleMode.value),
   );
-  const showCommonPathsConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showCommonSchedulerConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showNotifyConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showFeishuAuthConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showConsoleConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showFeatureMonthlyConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showFeatureHandoverConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showFeatureDayMetricUploadConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showFeatureWetBulbCollectionConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showFeatureAlarmExportConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showSheetImportConfigTab = computed(() => configRoleMode.value !== "internal");
-  const showManualFeatureConfigTab = computed(() => configRoleMode.value !== "internal");
+  const showCommonPathsConfigTab = computed(() => true);
+  const showCommonSchedulerConfigTab = computed(() => true);
+  const showNotifyConfigTab = computed(() => true);
+  const showFeishuAuthConfigTab = computed(() => true);
+  const showConsoleConfigTab = computed(() => true);
+  const showFeatureMonthlyConfigTab = computed(() => true);
+  const showFeatureHandoverConfigTab = computed(() => true);
+  const showFeatureDayMetricUploadConfigTab = computed(() => true);
+  const showFeatureWetBulbCollectionConfigTab = computed(() => true);
+  const showFeatureAlarmExportConfigTab = computed(() => true);
+  const showSheetImportConfigTab = computed(() => true);
+  const showManualFeatureConfigTab = computed(() => true);
   const showRuntimeNetworkPanel = computed(() => false);
-  const showDashboardPageNav = computed(() => deploymentRoleMode.value !== "internal");
+  const showDashboardPageNav = computed(() => true);
 
-  const appShellTitle = computed(() => {
-    if (deploymentRoleMode.value === "internal") return "内网端本地管理页";
-    if (deploymentRoleMode.value === "external") return "外网业务控制台";
-    return "全景月报平台";
-  });
-  const statusNavLabel = computed(() => (deploymentRoleMode.value === "internal" ? "内网下载中心" : "状态总览"));
-  const dashboardNavLabel = computed(() => (deploymentRoleMode.value === "internal" ? "运行日志" : "业务控制台"));
-  const configNavLabel = computed(() => (deploymentRoleMode.value === "internal" ? "本地配置" : "配置中心"));
-  const configShellTitle = computed(() => (
-    deploymentRoleMode.value === "internal"
-      ? "本地管理配置"
-      : "配置中心（公共 + 功能分组）"
-  ));
-  const configShellDescription = computed(() => {
-    if (deploymentRoleMode.value === "internal") {
-      return "这里只保留内网端下载中心需要的部署、桥接、共享文件和楼栋站点配置。";
-    }
-    if (deploymentRoleMode.value === "external") {
-      return "左侧切换配置分组，右侧仅显示当前分组内容；外网端不展示内网下载细节配置。";
-    }
-    return "请选择内网端或外网端后进入对应页面。";
-  });
-  const configReturnButtonText = computed(() => (
-    deploymentRoleMode.value === "internal" ? "返回内网状态页" : "返回业务控制台"
-  ));
-  const statusHeroTitle = computed(() => {
-    if (deploymentRoleMode.value === "internal") return "共享桥接与下载页池";
-    if (deploymentRoleMode.value === "external") return "外网业务状态与共享任务";
-    return "运行状态";
-  });
-  const statusHeroDescription = computed(() => {
-    if (deploymentRoleMode.value === "internal") {
-      return "这一页只显示内网端本地管理能力：共享桥接、5个常驻下载页签、更新镜像和诊断日志。";
-    }
-    if (deploymentRoleMode.value === "external") {
-      return "这一页负责查看外网业务运行状态，并保留共享任务、审核与后续上传入口。";
-    }
-    return "这一页负责查看当前运行状态，并保留交接班批次级确认与云表重试入口。";
-  });
-  const bridgeExecutionHint = computed(() => {
-    if (deploymentRoleMode.value === "internal") {
-      return "当前为内网端，请在外网端发起；内网端只负责共享桥接前置阶段。";
-    }
-    return "当前为外网端，默认优先读取共享文件；缺失时再等待内网端补采。";
-  });
-  const externalExecutionHint = computed(() => {
-    if (deploymentRoleMode.value === "internal") {
-      return "当前为内网端，本模块不在本机执行上传。";
-    }
-    return "当前为外网端，按当前网络直接执行。";
-  });
-  const resumeExecutionHint = computed(() => {
-    if (deploymentRoleMode.value === "internal") {
-      return "当前为内网端，断点续传请在外网端执行。";
-    }
-    return "外网端会从共享文件继续上传，不重新触发共享文件准备。";
-  });
+  const appShellTitle = computed(() => "外网业务控制台");
+  const statusNavLabel = computed(() => "状态总览");
+  const dashboardNavLabel = computed(() => "业务控制台");
+  const configNavLabel = computed(() => "配置中心");
+  const configShellTitle = computed(() => "配置中心（公共 + 功能分组）");
+  const configShellDescription = computed(() => "左侧切换配置分组，右侧仅显示当前分组内容；外网端不展示采集端下载细节配置。");
+  const configReturnButtonText = computed(() => "返回业务控制台");
+  const statusHeroTitle = computed(() => "外网业务状态与共享任务");
+  const statusHeroDescription = computed(() => "这一页负责查看外网业务运行状态，并保留共享任务、审核与后续上传入口。");
+  const bridgeExecutionHint = computed(() => "当前为外网端，默认优先读取共享文件；缺失时再等待采集端补采。");
+  const externalExecutionHint = computed(() => "当前为外网端，按当前网络直接执行。");
+  const resumeExecutionHint = computed(() => "外网端会从共享文件继续上传，不重新触发共享文件准备。");
 
   const startupRoleCurrentMode = computed(() => effectiveRoleMode.value);
   const startupRoleCurrentToken = computed(() => String(health.startup_time || "").trim());
@@ -190,8 +143,6 @@ export function createAppShellUiHelpers(options = {}) {
   return {
     effectiveRoleMode,
     deploymentRoleMode,
-    isInternalDeploymentRole,
-    isExternalDeploymentRole,
     configRoleMode,
     showCommonPathsConfigTab,
     showCommonSchedulerConfigTab,

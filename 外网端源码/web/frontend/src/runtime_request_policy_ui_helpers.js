@@ -85,13 +85,6 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
     return view === "status";
   });
 
-  const shouldPollInternalRuntimeStatus = computed(() => {
-    if (!runtimeRequestsReady.value) return false;
-    if (runningRoleMode.value !== "internal") return false;
-    const view = String(currentView.value || "").trim().toLowerCase();
-    return view === "dashboard" || view === "status";
-  });
-
   const shouldIncludeHandoverHealthContext = computed(() => {
     if (!runtimeRequestsReady.value) return false;
     if (runningRoleMode.value !== "external") return false;
@@ -143,7 +136,6 @@ export function createRuntimeRequestPolicyUiHelpers(options = {}) {
     shouldFetchPendingResumeRuns,
     healthPollIntervalMs,
     shouldPollBridgeTasks,
-    shouldPollInternalRuntimeStatus,
     shouldIncludeHandoverHealthContext,
     shouldPollHandoverDailyReportContext,
     shouldLoadEngineerDirectory,

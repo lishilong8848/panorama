@@ -164,15 +164,12 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                   <div class="ops-focus-card-meta">共享文件路径更适合标准班次流程；已有数据表适合单楼修复和历史回补。</div>
                 </div>
                 <div class="btn-stack">
-                  <button class="btn btn-primary" :disabled="isInternalDeploymentRole || !canRun || handoverGenerationBusy || isActionLocked(actionKeyHandoverFromDownload) || isActionLocked(actionKeyHandoverFromFile)" @click="runHandoverFromDownload">
+                  <button class="btn btn-primary" :disabled="!canRun || handoverGenerationBusy || isActionLocked(actionKeyHandoverFromDownload) || isActionLocked(actionKeyHandoverFromFile)" @click="runHandoverFromDownload">
                     {{ handoverGenerationBusy || isActionLocked(actionKeyHandoverFromDownload) || isActionLocked(actionKeyHandoverFromFile) ? '执行中...' : '使用共享文件生成' }}
                   </button>
-                  <button class="btn btn-secondary" :disabled="isInternalDeploymentRole || !canRun || handoverGenerationBusy || !hasSelectedHandoverFiles || isActionLocked(actionKeyHandoverFromFile) || isActionLocked(actionKeyHandoverFromDownload)" @click="runHandoverFromFile">
+                  <button class="btn btn-secondary" :disabled="!canRun || handoverGenerationBusy || !hasSelectedHandoverFiles || isActionLocked(actionKeyHandoverFromFile) || isActionLocked(actionKeyHandoverFromDownload)" @click="runHandoverFromFile">
                     {{ handoverGenerationBusy || isActionLocked(actionKeyHandoverFromFile) || isActionLocked(actionKeyHandoverFromDownload) ? '执行中...' : '从已有数据表生成' }}
                   </button>
-                </div>
-                <div class="action-reason action-reason-warning" v-if="isInternalDeploymentRole">
-                  当前为内网端，该模块请在外网端发起；内网端只消费共享桥接任务。
                 </div>
                 <div class="action-reason action-reason-warning" v-if="handoverGenerationBusy">
                   {{ handoverGenerationStatusText || '当前已有交接班日志生成任务在执行或排队，请等待任务完成后再发起新的交接班生成。' }}
@@ -587,4 +584,5 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
         </section>
 
 `;
+
 

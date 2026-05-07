@@ -1,4 +1,4 @@
-﻿export const DASHBOARD_MANUAL_UPLOAD_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'manual_upload'">
+export const DASHBOARD_MANUAL_UPLOAD_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'manual_upload'">
           <div class="dashboard-module-shell">
             <div class="dashboard-module-primary-grid">
               <article class="task-block task-block-accent">
@@ -11,7 +11,7 @@
                     {{ manualFile ? '已选择文件' : '待选择文件' }}
                   </span>
                 </div>
-                <div class="hint">手动补传仅使用已选择文件，不执行内网下载。</div>
+                <div class="hint">手动补传仅使用已选择文件，不触发采集端下载。</div>
                 <div class="task-grid two-col">
                   <div class="form-row">
                     <label class="label">楼栋</label>
@@ -30,11 +30,10 @@
                 </div>
                 <div class="hint">{{ externalExecutionHint }}</div>
                 <div class="btn-line">
-                  <button class="btn btn-primary" :disabled="isInternalDeploymentRole || !canRun || isActionLocked(actionKeyManualUpload)" @click="runManualUpload">
+                  <button class="btn btn-primary" :disabled="!canRun || isActionLocked(actionKeyManualUpload)" @click="runManualUpload">
                     {{ isActionLocked(actionKeyManualUpload) ? '提交中...' : '开始手动补传' }}
                   </button>
                 </div>
-                <div class="hint" v-if="isInternalDeploymentRole">当前为内网端，手动补传请在外网端执行。</div>
               </article>
 
               <article class="task-block task-block-compact dashboard-module-status-card">
@@ -69,3 +68,4 @@
         </section>
 
 `;
+

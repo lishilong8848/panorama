@@ -65,10 +65,10 @@ export function buildUpdaterApplyMessage(raw) {
     return "检测到本地版本高于远端正式版本，如需覆盖回远端正式版本，可继续执行更新。";
   }
   if (key === "ahead_of_mirror") {
-    return "当前内网端本地版本高于共享目录同步包，不会自动回退。";
+    return "当前本地版本高于共享目录同步包，不会自动回退。";
   }
   if (key === "mirror_pending_publish") {
-    return "共享目录中还没有代码和前端静态资源同步包，等待外网端发布后会自动跟随更新。";
+    return "共享目录中还没有代码和前端静态资源同步包。";
   }
   if (key === "failed" && String(payload?.dependency_sync_status || "").trim() === "rolled_back") {
     return "更新失败：运行依赖同步失败，已自动回滚到旧版本。";

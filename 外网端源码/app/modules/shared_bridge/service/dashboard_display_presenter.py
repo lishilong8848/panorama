@@ -1286,7 +1286,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         publish_reason_code = "not_git_remote"
     elif not internal_peer_available:
         publish_allowed = False
-        publish_disabled_reason = "共享目录未配置，无法同步内网代码。"
+        publish_disabled_reason = "共享目录未配置，无法发布代码同步包。"
         publish_reason_code = "shared_root_missing"
     elif internal_peer_command_active:
         publish_allowed = False
@@ -1295,7 +1295,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         publish_label = "等待内网命令完成"
     elif worktree_dirty:
         publish_allowed = False
-        publish_disabled_reason = "存在本地代码改动，无法同步内网代码。"
+        publish_disabled_reason = "存在本地代码改动，无法发布代码同步包。"
         publish_reason_code = "dirty_worktree"
     internal_peer_check_allowed = bool(updater_enabled and internal_peer_available and not internal_peer_command_active)
     internal_peer_check_label = "远程更新已移除"
@@ -1305,7 +1305,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         internal_peer_check_disabled_reason = main_action_disabled_reason or "当前运行模式已跳过更新。"
         internal_peer_check_reason_code = main_action_reason_code or "updater_disabled"
     elif not internal_peer_available:
-        internal_peer_check_disabled_reason = "当前未接入内网端远程更新能力"
+        internal_peer_check_disabled_reason = "远程更新功能已移除"
         internal_peer_check_reason_code = "internal_peer_unavailable"
     elif internal_peer_command_active:
         internal_peer_check_disabled_reason = "当前已有待执行远程命令"
@@ -1329,7 +1329,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         internal_peer_apply_disabled_reason = main_action_disabled_reason or "当前运行模式已跳过更新。"
         internal_peer_apply_reason_code = main_action_reason_code or "updater_disabled"
     elif not internal_peer_available:
-        internal_peer_apply_disabled_reason = "当前未接入内网端远程更新能力"
+        internal_peer_apply_disabled_reason = "远程更新功能已移除"
         internal_peer_apply_reason_code = "internal_peer_unavailable"
     elif internal_peer_command_active:
         internal_peer_apply_disabled_reason = "当前已有待执行远程命令"
@@ -1371,7 +1371,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         internal_peer_restart_disabled_reason = main_action_disabled_reason or "当前运行模式已跳过更新。"
         internal_peer_restart_reason_code = main_action_reason_code or "updater_disabled"
     elif not internal_peer_available:
-        internal_peer_restart_disabled_reason = "当前未接入内网端远程更新能力"
+        internal_peer_restart_disabled_reason = "远程更新功能已移除"
         internal_peer_restart_reason_code = "internal_peer_unavailable"
     elif internal_peer_command_active:
         internal_peer_restart_disabled_reason = "当前已有待执行远程命令"

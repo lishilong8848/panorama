@@ -24,6 +24,7 @@ from app.modules.feishu.api.routes import router as feishu_router
 from app.modules.notify.api.routes import router as notify_router
 from app.modules.ocr.api.routes import router as ocr_router
 from app.modules.report_pipeline.api.routes import (
+    _run_external_branch_power_backfill_missing_flow,
     router as pipeline_router,
     schedule_handover_review_access_startup_probe,
 )
@@ -199,12 +200,7 @@ def _register_external_role_routes(app: FastAPI) -> None:
 
 
 def _default_role_route(role_mode: str) -> str:
-    normalized = normalize_role_mode(role_mode)
-    if normalized == "internal":
-        return "/internal/status"
-    if normalized == "external":
-        return "/external/dashboard"
-    return "/"
+    return "/external/dashboard"
 
 def _initialize_handover_daily_report_auth(container) -> None:
     existing_thread = getattr(container, "_handover_daily_report_auth_init_thread", None)
@@ -1530,7 +1526,12 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             return False, error_text
 
     def branch_power_upload_scheduler_callback(source: str) -> tuple[bool, str]:
-        from app.shared.utils.artifact_naming import FAMILY_BRANCH_POWER
+        from app.shared.utils.artifact_naming import (
+            FAMILY_BRANCH_CURRENT,
+            FAMILY_BRANCH_POWER,
+            FAMILY_BRANCH_SWITCH,
+            build_source_artifact_path,
+        )
         from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService
 
         role_mode = _deployment_role_mode()
@@ -1556,25 +1557,75 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             return False, detail
 
         try:
-            cached_entries = [
-                item
-                for item in bridge_service.get_latest_source_cache_entries(
-                    source_family=FAMILY_BRANCH_POWER,
+            def _ready_entries(source_family: str) -> list[dict]:
+                entries = bridge_service.get_latest_source_cache_entries(
+                    source_family=source_family,
                     buildings=target_buildings,
                     bucket_key=target_bucket_key,
                 )
-                if str(item.get("file_path", "") or "").strip()
-                and os.path.exists(str(item.get("file_path", "") or "").strip())
-            ]
-            expected_count = len(target_buildings)
-            if len(cached_entries) < expected_count:
+                output = [
+                    item
+                    for item in (entries if isinstance(entries, list) else [])
+                    if isinstance(item, dict)
+                    and str(item.get("file_path", "") or "").strip()
+                    and os.path.exists(str(item.get("file_path", "") or "").strip())
+                ]
+                indexed_buildings = {
+                    str(item.get("building", "") or "").strip()
+                    for item in output
+                    if str(item.get("building", "") or "").strip()
+                }
+                root_text = str(getattr(bridge_service, "shared_bridge_root", "") or "").strip()
+                if root_text:
+                    for building in target_buildings:
+                        if building in indexed_buildings:
+                            continue
+                        try:
+                            artifact = build_source_artifact_path(
+                                source_family=source_family,
+                                building=building,
+                                suffix=".xlsx",
+                                bucket_kind="latest",
+                                bucket_key=target_bucket_key,
+                            )
+                        except Exception:
+                            continue
+                        candidate = os.path.join(root_text, str(artifact.relative_path))
+                        if os.path.exists(candidate):
+                            output.append({"building": building, "file_path": candidate, "metadata": {"family": source_family}})
+                            indexed_buildings.add(building)
+                return output
+
+            def _ready_building_set(entries: list[dict]) -> set[str]:
+                return {
+                    str(item.get("building", "") or "").strip()
+                    for item in entries
+                    if str(item.get("building", "") or "").strip()
+                }
+
+            cached_entries = _ready_entries(FAMILY_BRANCH_POWER)
+            power_ready = _ready_building_set(cached_entries)
+            current_ready = _ready_building_set(_ready_entries(FAMILY_BRANCH_CURRENT))
+            switch_ready = _ready_building_set(_ready_entries(FAMILY_BRANCH_SWITCH))
+            missing_power = [building for building in target_buildings if building not in power_ready]
+            missing_current = [building for building in target_buildings if building not in current_ready]
+            missing_switch = [building for building in target_buildings if building not in switch_ready]
+            missing_buildings = list(dict.fromkeys([*missing_power, *missing_current, *missing_switch]))
+            if missing_buildings:
                 dedupe_key = f"branch_power_upload:scheduler:{target_bucket_key}:{'|'.join(sorted(target_buildings))}"
                 job, bridge_task = start_waiting_bridge_job(
                     job_service=container.job_service,
                     bridge_service=bridge_service,
                     name=source,
                     worker_handler="branch_power_from_download",
-                    worker_payload={"target_bucket_key": target_bucket_key, "building_scope": "all_enabled", "building": None},
+                    worker_payload={
+                        "target_bucket_key": target_bucket_key,
+                        "building_scope": "all_enabled",
+                        "building": None,
+                        "buildings": missing_buildings,
+                        "requested_by": "scheduler",
+                        "submitted_by": "scheduler",
+                    },
                     resource_keys=["shared_bridge:branch_power"],
                     priority="scheduler",
                     feature="branch_power_upload",
@@ -1583,35 +1634,119 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     bridge_get_or_create_name="get_or_create_branch_power_upload_task",
                     bridge_create_name="create_branch_power_upload_task",
                     bridge_kwargs={
-                        "buildings": target_buildings,
+                        "buildings": missing_buildings,
                         "target_bucket_key": target_bucket_key,
                         "requested_by": "scheduler",
                     },
                 )
                 accepted_detail = (
-                    "等待内网补采同步：支路功率当前小时桶源文件尚未全部到位。"
+                    "等待内网补采同步：支路功率/电流/开关当前小时桶源文件尚未全部到位。"
                     f" 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'},"
-                    f" bucket={target_bucket_key}, job_id={job.job_id}"
+                    f" bucket={target_bucket_key}, missing={','.join(missing_buildings)}, job_id={job.job_id}"
                 )
                 container.add_system_log(f"[自动上传支路功率调度] {accepted_detail}")
                 return True, accepted_detail
 
             def _run_from_cache(emit_log):
-                source_units = [
-                    {
+                def _entry_map(source_family: str) -> dict[str, dict]:
+                    entries = bridge_service.get_latest_source_cache_entries(
+                        source_family=source_family,
+                        buildings=target_buildings,
+                        bucket_key=target_bucket_key,
+                    )
+                    output: dict[str, dict] = {}
+                    for item in entries if isinstance(entries, list) else []:
+                        if not isinstance(item, dict):
+                            continue
+                        building = str(item.get("building", "") or "").strip()
+                        file_path = str(item.get("file_path", "") or "").strip()
+                        if building and file_path and os.path.exists(file_path) and building not in output:
+                            output[building] = item
+                    return output
+
+                def _canonical_entry(source_family: str, building: str) -> dict | None:
+                    root_text = str(getattr(bridge_service, "shared_bridge_root", "") or "").strip()
+                    if not root_text:
+                        return None
+                    artifact = build_source_artifact_path(
+                        source_family=source_family,
+                        building=building,
+                        suffix=".xlsx",
+                        bucket_kind="latest",
+                        bucket_key=target_bucket_key,
+                    )
+                    candidate = os.path.join(root_text, str(artifact.relative_path))
+                    if not os.path.exists(candidate):
+                        return None
+                    return {"building": building, "file_path": candidate, "metadata": {"family": source_family}}
+
+                def _entry_for(source_family: str, building: str, entry_map: dict[str, dict]) -> dict | None:
+                    return entry_map.get(building) or _canonical_entry(source_family, building)
+
+                power_map = _entry_map(FAMILY_BRANCH_POWER)
+                current_map = _entry_map(FAMILY_BRANCH_CURRENT)
+                switch_map = _entry_map(FAMILY_BRANCH_SWITCH)
+                missing_current: list[str] = []
+                missing_switch: list[str] = []
+                source_units: list[dict] = []
+                for item in cached_entries:
+                    building = str(item.get("building", "") or "").strip()
+                    power_entry = power_map.get(building) or item
+                    current_entry = _entry_for(FAMILY_BRANCH_CURRENT, building, current_map)
+                    switch_entry = _entry_for(FAMILY_BRANCH_SWITCH, building, switch_map)
+                    if not current_entry:
+                        missing_current.append(building)
+                    if not switch_entry:
+                        missing_switch.append(building)
+                    metadata = power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {}
+                    unit = {
                         "bucket_key": target_bucket_key,
-                        "building": str(item.get("building", "") or "").strip(),
-                        "source_file": str(item.get("file_path", "") or "").strip(),
-                        "metadata": item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {},
+                        "building": building,
+                        "power_file": str(power_entry.get("file_path", "") or "").strip(),
+                        "metadata": metadata,
                     }
-                    for item in cached_entries
-                ]
+                    source_files = {"power_file": unit["power_file"]}
+                    if current_entry:
+                        current_file = str(current_entry.get("file_path", "") or "").strip()
+                        unit["current_file"] = current_file
+                        source_files["current_file"] = current_file
+                    if switch_entry:
+                        switch_file = str(switch_entry.get("file_path", "") or "").strip()
+                        unit["switch_file"] = switch_file
+                        source_files["switch_file"] = switch_file
+                    unit["source_files"] = source_files
+                    source_units.append(unit)
+                if missing_current or missing_switch:
+                    emit_log(
+                        "[支路功率上传] 部分源文件未命中共享索引，将按功率源文件同目录同命名规则兜底: "
+                        f"电流索引缺失={','.join(missing_current) or '-'}, "
+                        f"开关索引缺失={','.join(missing_switch) or '-'}"
+                    )
                 service = BranchPowerUploadService(container.runtime_config)
-                return service.continue_from_source_files(
+                result = service.continue_from_source_files(
                     bucket_key=target_bucket_key,
                     source_units=source_units,
                     emit_log=emit_log,
                 )
+                upload_result = result.get("upload_result", {}) if isinstance(result, dict) else {}
+                upload_reason = str(upload_result.get("reason", "") or "").strip()
+                if target_bucket_key.endswith(" 23") and upload_reason in {"day_incomplete", "row_fields_incomplete"}:
+                    business_date = datetime.strptime(target_bucket_key, "%Y-%m-%d %H").date()
+                    emit_log(
+                        "[自动上传支路功率调度] 23点末次上传发现库中少数据，开始派发内网补缺口 "
+                        f"business_date={business_date.strftime('%Y-%m-%d')}, reason={upload_reason}"
+                    )
+                    result["backfill_missing"] = _run_external_branch_power_backfill_missing_flow(
+                        container=container,
+                        config=container.runtime_config,
+                        business_date=business_date,
+                        buildings=target_buildings,
+                        max_hour=23,
+                        emit_log=emit_log,
+                        priority="scheduler",
+                        submitted_by="scheduler",
+                    )
+                return result
 
             dedupe_key = f"branch_power_cache:scheduler:{target_bucket_key}:{'|'.join(sorted(target_buildings))}"
             job = _start_external_cache_job(
@@ -1621,7 +1756,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 run_func=_run_from_cache,
                 dedupe_key=dedupe_key,
             )
-            detail = f"已提交支路功率共享文件上传任务 job_id={job.job_id}, bucket={target_bucket_key}"
+            detail = f"已提交支路信息共享文件入库任务 job_id={job.job_id}, bucket={target_bucket_key}"
             container.add_system_log(f"[自动上传支路功率调度] {detail}")
             return True, detail
         except Exception as exc:  # noqa: BLE001

@@ -4,7 +4,6 @@
   isValidHms,
   normalizeDatetimeLocalToApi,
   normalizeRunTimeText,
-  normalizeSiteHost,
   normalizeSheetRules,
 } from "./config_helpers.js";
 import {
@@ -27,38 +26,6 @@ function hasMeaningfulSheetRuleRows(rows) {
     const sheetName = String(row?.sheet_name || "").trim();
     const tableId = String(row?.table_id || "").trim();
     return Boolean(sheetName || tableId);
-  });
-}
-
-function normalizeInternalSourceSites(sites) {
-  const defaultBuildings = ["A楼", "B楼", "C楼", "D楼", "E楼"];
-  const inputRows = Array.isArray(sites) ? sites : [];
-  const byBuilding = new Map();
-  inputRows.forEach((raw) => {
-    const building = String(raw?.building || "").trim();
-    if (!building) return;
-    const host = normalizeSiteHost(raw?.host || raw?.url || "");
-    const username = String(raw?.username || raw?.user || "").trim();
-    const password = String(raw?.password || "").trim();
-    const enabled = Boolean(raw?.enabled ?? true);
-    byBuilding.set(building, {
-      building,
-      enabled: enabled && Boolean(host && username && password),
-      host,
-      username,
-      password,
-    });
-  });
-  return defaultBuildings.map((building) => {
-    const existing = byBuilding.get(building);
-    if (existing) return existing;
-    return {
-      building,
-      enabled: false,
-      host: "",
-      username: "",
-      password: "",
-    };
   });
 }
 
@@ -1597,11 +1564,12 @@ export function prepareConfigPayloadForSave({
   payload.download.save_dir = businessRoot;
 
   payload.scheduler = payload.scheduler || {};
-  payload.scheduler.interval_minutes = Number.parseInt(payload.scheduler.interval_minutes ?? 60, 10);
+  payload.scheduler.run_time = normalizeRunTimeText(payload.scheduler.run_time) || "00:10:00";
   payload.scheduler.enabled = true;
   payload.scheduler.auto_start_in_gui = Boolean(payload.scheduler.auto_start_in_gui);
   payload.scheduler.check_interval_sec = Number.parseInt(payload.scheduler.check_interval_sec ?? 30, 10);
-  payload.scheduler.retry_failed_on_next_tick = payload.scheduler.retry_failed_on_next_tick !== false;
+  payload.scheduler.catch_up_if_missed = Boolean(payload.scheduler.catch_up_if_missed);
+  payload.scheduler.retry_failed_in_same_period = payload.scheduler.retry_failed_in_same_period !== false;
 
   // 路径收敛：调度状态/续传/告警恢复统一使用内部固定 .runtime 子路径
   payload.scheduler.state_file = "daily_scheduler_state.json";
@@ -1628,8 +1596,8 @@ export function prepareConfigPayloadForSave({
   payload.day_metric_upload.scheduler.state_file = String(
     payload.day_metric_upload.scheduler.state_file || "day_metric_upload_scheduler_state.json",
   ).trim();
-  if (!Number.isInteger(payload.scheduler.interval_minutes) || payload.scheduler.interval_minutes < 1) {
-    return { ok: false, error: "自动流程调度间隔必须大于0分钟" };
+  if (!payload.scheduler.run_time) {
+    return { ok: false, error: "自动流程每日执行时间必须是 HH:MM 或 HH:MM:SS" };
   }
   if (!Number.isInteger(payload.scheduler.check_interval_sec) || payload.scheduler.check_interval_sec <= 0) {
     return { ok: false, error: "自动流程调度检查间隔必须大于0秒" };
@@ -1650,16 +1618,10 @@ export function prepareConfigPayloadForSave({
     return { ok: false, error: "12项独立上传调度状态文件不能为空" };
   }
 
-  if (Array.isArray(payload.download.sites)) {
-    payload.download.sites = payload.download.sites.map((site) => {
-      const host = normalizeSiteHost(site?.host || site?.url || "");
-      const next = { ...site, host };
-      delete next.url;
-      return next;
-    });
-  }
-
-  payload.internal_source_sites = normalizeInternalSourceSites(payload.internal_source_sites);
+  payload.internal_source_sites = [];
+  if (Array.isArray(payload.download?.sites)) payload.download.sites = [];
+  if (Array.isArray(payload.handover_log?.sites)) payload.handover_log.sites = [];
+  if (Array.isArray(payload.handover_log?.download?.sites)) payload.handover_log.download.sites = [];
 
   payload.network = payload.network || {};
   delete payload.network.enable_auto_switch_wifi;
@@ -1719,7 +1681,7 @@ export function prepareConfigPayloadForSave({
     return { ok: false, error: "稳定探测重试间隔必须大于0" };
   }
   if (!Number.isInteger(payload.network.post_switch_probe_internal_port) || payload.network.post_switch_probe_internal_port <= 0) {
-    return { ok: false, error: "内网探测端口必须大于0" };
+    return { ok: false, error: "采集端探测端口必须大于0" };
   }
   if (!Number.isInteger(payload.network.post_switch_probe_external_port) || payload.network.post_switch_probe_external_port <= 0) {
     return { ok: false, error: "外网探测端口必须大于0" };

@@ -1,4 +1,4 @@
-﻿export const CONFIG_FEATURE_WET_BULB_COLLECTION_TAB_TEMPLATE = `
+export const CONFIG_FEATURE_WET_BULB_COLLECTION_TAB_TEMPLATE = `
 <div v-if="activeConfigTab==='feature_wet_bulb_collection'" class="config-tab-shell">
   <div class="config-tab-hero">
     <div class="section-title">湿球温度定时采集</div>
@@ -36,7 +36,7 @@
       <div class="section-title">网络说明</div>
       <div class="hint-stack">
         <div class="hint">湿球温度流程现在统一按当前角色网络执行，不再切换网络。</div>
-        <div class="hint">内网端只负责前置源数据，外网端只负责后续提取和上传。</div>
+        <div class="hint">采集端只负责前置源数据，外网端只负责后续提取和上传。</div>
       </div>
     </div>
 
@@ -82,3 +82,4 @@
   </div>
 </div>
 `;
+

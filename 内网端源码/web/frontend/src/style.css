@@ -261,11 +261,11 @@ small,
 }
 
 .metric-card {
-  min-height: 124px;
+  min-height: 94px;
   display: grid;
   align-content: center;
-  gap: 7px;
-  padding: 16px;
+  gap: 5px;
+  padding: 12px;
   background: linear-gradient(180deg, #ffffff 0%, #f6faff 100%);
   overflow: hidden;
 }
@@ -278,7 +278,7 @@ small,
 
 .metric-card strong {
   color: var(--text-1);
-  font-size: 26px;
+  font-size: 22px;
   line-height: 1.15;
   font-weight: 900;
 }
@@ -409,6 +409,105 @@ small,
 .source-row small {
   display: block;
   margin-top: 3px;
+}
+
+.source-overview-panel {
+  gap: 12px;
+}
+
+.source-matrix-wrap {
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.source-matrix {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.18fr) repeat(var(--building-count), minmax(126px, 1fr));
+  gap: 8px;
+  min-width: 860px;
+}
+
+.source-matrix-head,
+.source-family-cell,
+.source-status-cell {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.92);
+  min-width: 0;
+}
+
+.source-matrix-head {
+  min-height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 7px 8px;
+  color: var(--text-3);
+  background: #f0f5fa;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.source-matrix-family-head {
+  justify-content: start;
+  place-items: center start;
+}
+
+.source-family-cell {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  background: linear-gradient(180deg, #ffffff 0%, #f6faff 100%);
+}
+
+.source-family-cell strong {
+  font-size: 13px;
+}
+
+.source-family-cell small,
+.source-status-cell small {
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.source-status-cell {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-height: 118px;
+  padding: 8px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(243, 247, 250, 0.96) 100%);
+}
+
+.source-status-top {
+  display: flex;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
+.source-status-cell .pill {
+  min-height: 22px;
+  min-width: 48px;
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.source-status-cell p {
+  min-height: 34px;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.btn-compact {
+  min-height: 30px;
+  width: 100%;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 12px;
 }
 
 .log-box {

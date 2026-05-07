@@ -292,12 +292,18 @@ def _validate_scheduler(cfg: Dict[str, Any]) -> None:
     scheduler_cfg = cfg.get("common", {}).get("scheduler", {})
     if not isinstance(scheduler_cfg, dict):
         raise ValueError("配置错误: common.scheduler 缺失或格式错误")
-    if int(scheduler_cfg.get("interval_minutes", 0)) <= 0:
-        raise ValueError("配置错误: common.scheduler.interval_minutes 必须大于0")
+    if not isinstance(scheduler_cfg.get("enabled", True), bool):
+        raise ValueError("配置错误: common.scheduler.enabled 必须是布尔值")
+    if not isinstance(scheduler_cfg.get("auto_start_in_gui", False), bool):
+        raise ValueError("配置错误: common.scheduler.auto_start_in_gui 必须是布尔值")
+    if not _valid_time(str(scheduler_cfg.get("run_time", ""))):
+        raise ValueError("配置错误: common.scheduler.run_time 必须是 HH:MM:SS")
     if int(scheduler_cfg.get("check_interval_sec", 0)) <= 0:
         raise ValueError("配置错误: common.scheduler.check_interval_sec 必须大于0")
-    if not isinstance(scheduler_cfg.get("retry_failed_on_next_tick", True), bool):
-        raise ValueError("配置错误: common.scheduler.retry_failed_on_next_tick 必须是布尔值")
+    if not isinstance(scheduler_cfg.get("catch_up_if_missed", False), bool):
+        raise ValueError("配置错误: common.scheduler.catch_up_if_missed 必须是布尔值")
+    if not isinstance(scheduler_cfg.get("retry_failed_in_same_period", True), bool):
+        raise ValueError("配置错误: common.scheduler.retry_failed_in_same_period 必须是布尔值")
     if not str(scheduler_cfg.get("state_file", "")).strip():
         raise ValueError("配置错误: common.scheduler.state_file 不能为空")
 

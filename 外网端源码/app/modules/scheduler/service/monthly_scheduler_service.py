@@ -166,6 +166,9 @@ class MonthlySchedulerService:
         current = now or datetime.now()
         current_period = self._period(current)
         scheduled_current = self._scheduled_datetime_for_month(current.year, current.month)
+        should_run, _, _ = self._should_trigger(current)
+        if should_run:
+            return current
         if current < scheduled_current and self.state.get("last_success_period", "") != current_period:
             return scheduled_current
         if current.month == 12:
@@ -238,7 +241,12 @@ class MonthlySchedulerService:
             should_run, period, reason = self._should_trigger(now)
             if not should_run:
                 self.runtime["last_decision"] = f"skip:{reason}"
-                self._stop.wait(interval_sec)
+                try:
+                    next_run = self.next_run_time(now)
+                    wait_seconds = min(interval_sec, max(0.2, (next_run - now).total_seconds()))
+                except Exception:
+                    wait_seconds = interval_sec
+                self._stop.wait(wait_seconds)
                 continue
             if self.is_busy():
                 self.runtime["last_decision"] = "skip:busy"

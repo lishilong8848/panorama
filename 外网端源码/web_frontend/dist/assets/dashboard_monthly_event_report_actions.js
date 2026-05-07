@@ -1,4 +1,4 @@
-﻿import {
+import {
   saveMonthlyChangeReportSchedulerConfigApi,
   saveMonthlyEventReportSchedulerConfigApi,
   startMonthlyChangeReportJobApi,
@@ -79,13 +79,8 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   function markSchedulerToggle(key, mode, rememberedOverride) {
     if (typeof setSchedulerToggleState !== "function") return;
     setSchedulerToggleState(key, { mode, rememberedOverride });
-  }
-
-  function isInternalRole() {
-    return String(config?.value?.deployment?.role_mode || "").trim().toLowerCase() === "internal";
-  }
-
-  function guardedRun(actionKey, taskFn, options = {}) {
+  }
+function guardedRun(actionKey, taskFn, options = {}) {
     if (typeof runSingleFlight === "function") {
       return runSingleFlight(actionKey, taskFn, {
         ...options,
@@ -148,10 +143,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   }
 
   async function runMonthlyEventReport(scope, building = "") {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供体系月度统计表入口，请在外网端发起。";
-      return;
-    }
     if (!canRun.value) return;
     const normalizedBuilding = String(building || "").trim();
     const actionKey =
@@ -186,10 +177,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   }
 
   async function runMonthlyChangeReport(scope, building = "") {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供体系月度统计表入口，请在外网端发起。";
-      return;
-    }
     if (!canRun.value) return;
     const normalizedBuilding = String(building || "").trim();
     const actionKey =
@@ -224,10 +211,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   }
 
   async function sendMonthlyReport(reportType, scope, building = "") {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表发送入口，请在外网端发起。";
-      return;
-    }
     if (!canRun.value) return;
     const normalizedReportType = String(reportType || "event").trim().toLowerCase() || "event";
     const normalizedBuilding = String(building || "").trim();
@@ -264,10 +247,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   }
 
   async function sendMonthlyReportTest(reportType = "event") {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表发送入口，请在外网端发起。";
-      return;
-    }
     if (!canRun.value) return;
     const normalizedReportType = String(reportType || "event").trim().toLowerCase() || "event";
     const targetMonth = resolveTargetMonth(normalizedReportType);
@@ -301,10 +280,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   }
 
   async function startMonthlyEventReportScheduler() {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
-      return;
-    }
     return guardedRun(
       ACTION_KEYS.schedulerStart,
       async () => {
@@ -326,10 +301,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   }
 
   async function stopMonthlyEventReportScheduler() {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
-      return;
-    }
     return guardedRun(
       ACTION_KEYS.schedulerStop,
       async () => {
@@ -351,10 +322,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   }
 
   async function saveMonthlyEventReportSchedulerQuickConfig(overrides = {}) {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
-      return;
-    }
     if (!config.value) return;
     const monthly = config.value.handover_log?.monthly_event_report || {};
     const scheduler = monthly.scheduler || {};
@@ -423,10 +390,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   }
 
   async function startMonthlyChangeReportScheduler() {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
-      return;
-    }
     return guardedRun(
       ACTION_KEYS.changeSchedulerStart,
       async () => {
@@ -448,10 +411,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   }
 
   async function stopMonthlyChangeReportScheduler() {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
-      return;
-    }
     return guardedRun(
       ACTION_KEYS.changeSchedulerStop,
       async () => {
@@ -473,10 +432,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
   }
 
   async function saveMonthlyChangeReportSchedulerQuickConfig(overrides = {}) {
-    if (isInternalRole()) {
-      message.value = "当前为内网端，本地管理页不提供月度统计表调度入口，请在外网端发起。";
-      return;
-    }
     if (!config.value) return;
     const monthly = config.value.handover_log?.monthly_change_report || {};
     const scheduler = monthly.scheduler || {};
@@ -557,4 +512,6 @@ export function createDashboardMonthlyEventReportActions(ctx) {
     saveMonthlyChangeReportSchedulerQuickConfig,
   };
 }
+
+
 

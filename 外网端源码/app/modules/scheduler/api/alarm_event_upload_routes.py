@@ -95,6 +95,9 @@ def alarm_event_upload_scheduler_config(payload: Dict[str, Any], request: Reques
         raise HTTPException(status_code=400, detail="请求体必须是JSON对象")
 
     container = request.app.state.container
+    old_cfg = _scheduler_cfg_from_v3(container.config)
+    old_run_time = str(old_cfg.get("run_time", "") or "").strip()
+
     merged = copy.deepcopy(container.config)
     features = merged.get("features")
     if not isinstance(features, dict):
@@ -148,12 +151,18 @@ def alarm_event_upload_scheduler_config(payload: Dict[str, Any], request: Reques
         path=("features", "alarm_export", "scheduler"),
         scheduler_cfg=new_cfg,
     )
+    new_run_time = str(new_cfg.get("run_time", "") or "").strip()
+    run_time_changed = bool(old_run_time and new_run_time and old_run_time != new_run_time)
+    reset_result: Dict[str, Any] = {}
+    if run_time_changed and container.alarm_event_upload_scheduler:
+        reset_result = container.alarm_event_upload_scheduler.reset_today_state_for_run_time_change()
     status_payload = _build_payload(container)
     data = dict(status_payload)
     data.update(
         {
             "message": "告警信息上传调度配置已更新并热重载",
-            "state_reset": {},
+            "run_time_changed": run_time_changed,
+            "state_reset": reset_result,
             "scheduler_status": status_payload,
             "scheduler_config": {key: new_cfg.get(key) for key in sorted(ALLOWED_KEYS)},
             "updated_at": "",

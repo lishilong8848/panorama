@@ -2,16 +2,13 @@ import { apiDatetimeToLocal, ensureConfigShape, todayText } from "./config_helpe
 import { createActionGuard } from "./action_guard.js";
 import { getDashboardMenuGroupsForRole } from "./dashboard_menu_config.js";
 import {
-  buildSourceCachePlaceholderBuilding,
   mapBackendActionListById,
   mapBackendActionState,
   mapBackendActionsState,
   normalizeBackendTaskItem,
 } from "./backend_action_display_helpers.js";
 import {
-  mapPresentedInternalAlertOverview,
   mapPresentedSourceCacheFamilyOverview,
-  normalizeInternalDownloadPoolSlot,
 } from "./source_cache_display_helpers.js";
 import {
   createEmptyBridgeTasksDisplay,
@@ -22,7 +19,6 @@ import {
   mapBackendSchedulerOverviewItem,
   mapBackendSchedulerOverviewSummary,
   mapBackendUpdaterMirrorOverview,
-  mapCurrentHourRefreshOverview,
   normalizeBridgeTasksDisplayPayload,
   normalizeHandoverReviewOverview,
   normalizeJobPanelDisplayPayload,
@@ -93,14 +89,7 @@ function buildRoleDashboardState(roleMode, preferredId = "") {
 }
 
 const DASHBOARD_MODULE_STORAGE_KEY = "dashboard_active_module";
-const INTERNAL_BUILDINGS = Object.freeze(["A楼", "B楼", "C楼", "D楼", "E楼"]);
-const INTERNAL_SOURCE_CACHE_FAMILY_KEYS = Object.freeze([
-  "handover_log_family",
-  "handover_capacity_report_family",
-  "monthly_report_family",
-  "branch_power_family",
-  "alarm_event_family",
-]);
+const BUILDING_NAMES = Object.freeze(["A楼", "B楼", "C楼", "D楼", "E楼"]);
 const STATE_DIAGNOSTIC_SEEN = new Set();
 
 function warnStateDiagnostic(kind, detail) {
@@ -113,31 +102,6 @@ function warnStateDiagnostic(kind, detail) {
   if (typeof console !== "undefined" && typeof console.warn === "function") {
     console.warn(`[状态诊断] ${detail}`);
   }
-}
-
-export function createEmptyInternalBuildingRuntimeStatusMap() {
-  return Object.fromEntries(
-    INTERNAL_BUILDINGS.map((building) => [
-      building,
-      {
-        updated_at: "",
-        building,
-        building_code: building.replace("楼", "").toLowerCase(),
-        page_slot: { building },
-        source_families: {
-          handover_log_family: buildSourceCachePlaceholderBuilding(building, ""),
-          handover_capacity_report_family: buildSourceCachePlaceholderBuilding(building, ""),
-          monthly_report_family: buildSourceCachePlaceholderBuilding(building, ""),
-          branch_power_family: buildSourceCachePlaceholderBuilding(building, ""),
-          alarm_event_family: buildSourceCachePlaceholderBuilding(building, ""),
-        },
-        pool: {
-          browser_ready: false,
-          last_error: "",
-        },
-      },
-    ]),
-  );
 }
 
 function basenameFromPath(input) {
@@ -168,21 +132,6 @@ function readSchedulerDisplayText(scheduler, field, fallback = "-") {
   const display = scheduler && typeof scheduler.display === "object" ? scheduler.display : {};
   const text = String(display?.[field] || "").trim();
   return text || fallback;
-}
-
-function hasSuccessfulCurrentHourRefreshSnapshot(raw) {
-  const payload = raw && typeof raw === "object" ? raw : {};
-  const failedBuildings = Array.isArray(payload.failed_buildings) ? payload.failed_buildings : [];
-  const blockedBuildings = Array.isArray(payload.blocked_buildings) ? payload.blocked_buildings : [];
-  const runningBuildings = Array.isArray(payload.running_buildings) ? payload.running_buildings : [];
-  const completedBuildings = Array.isArray(payload.completed_buildings) ? payload.completed_buildings : [];
-  return (
-    !Boolean(payload.running)
-    && failedBuildings.length === 0
-    && blockedBuildings.length === 0
-    && runningBuildings.length === 0
-    && completedBuildings.length > 0
-  );
 }
 
 function normalizeDayMetricUnitTone(status) {
@@ -658,73 +607,6 @@ export function createAppState(vueApi) {
       background_tasks: [],
       heartbeat_interval_sec: 5,
       poll_interval_sec: 2,
-      internal_download_pool: {
-        enabled: false,
-        browser_ready: false,
-        page_slots: [],
-        active_buildings: [],
-        last_error: "",
-      },
-      internal_source_cache: {
-        enabled: false,
-        scheduler_running: false,
-        current_hour_bucket: "",
-        last_run_at: "",
-        last_success_at: "",
-        last_error: "",
-        cache_root: "",
-        current_hour_refresh: {
-          running: false,
-          last_run_at: "",
-          last_success_at: "",
-          last_error: "",
-          failed_buildings: [],
-          blocked_buildings: [],
-          running_buildings: [],
-          completed_buildings: [],
-          scope_text: "当前小时",
-        },
-        handover_log_family: {
-          ready_count: 0,
-          failed_buildings: [],
-          last_success_at: "",
-          current_bucket: "",
-          buildings: [],
-        },
-        handover_capacity_report_family: {
-          ready_count: 0,
-          failed_buildings: [],
-          last_success_at: "",
-          current_bucket: "",
-          buildings: [],
-        },
-        monthly_report_family: {
-          ready_count: 0,
-          failed_buildings: [],
-          last_success_at: "",
-          current_bucket: "",
-          buildings: [],
-        },
-        branch_power_family: {
-          ready_count: 0,
-          failed_buildings: [],
-          last_success_at: "",
-          current_bucket: "",
-          buildings: [],
-        },
-        alarm_event_family: {
-          ready_count: 0,
-          failed_buildings: [],
-          last_success_at: "",
-          current_bucket: "",
-          buildings: [],
-        },
-      },
-      internal_alert_status: {
-        buildings: [],
-        active_count: 0,
-        last_notified_at: "",
-      },
     },
     network: { current_ssid: "-" },
     updater: {
@@ -758,31 +640,6 @@ export function createAppState(vueApi) {
       mirror_manifest_path: "",
       last_publish_at: "",
       last_publish_error: "",
-      internal_peer: {
-        available: false,
-        online: false,
-        heartbeat_at: "",
-        node_id: "",
-        node_label: "",
-        local_version: "",
-        local_release_revision: 0,
-        last_check_at: "",
-        last_result: "",
-        last_error: "",
-        update_available: false,
-        restart_required: false,
-        command: {
-          exists: false,
-          command_id: "",
-          action: "",
-          status: "",
-          requested_at: "",
-          consumed_at: "",
-          finished_at: "",
-          message: "",
-          active: false,
-        },
-      },
     },
     system_logs: [],
   });
@@ -832,8 +689,6 @@ export function createAppState(vueApi) {
   const configLoaded = ref(false);
   const healthLoadError = ref("");
   const configLoadError = ref("");
-  const internalRuntimeSummary = ref(null);
-  const internalBuildingRuntimeStatusMap = ref(createEmptyInternalBuildingRuntimeStatusMap());
   const runtimeWarmupReady = ref(false);
   const engineerDirectoryLoaded = ref(false);
   const pendingResumeRuns = ref([]);
@@ -899,6 +754,24 @@ export function createAppState(vueApi) {
   const dayMetricLocalBuilding = ref("");
   const dayMetricLocalDate = ref(todayText());
   const dayMetricLocalFile = ref(null);
+  const branchPowerManualDate = ref(todayText());
+  const branchPowerManualHour = ref(String(new Date().getHours()).padStart(2, "0"));
+  const branchPowerManualHourOptions = Array.from({ length: 24 }, (_, hour) => {
+    const value = String(hour).padStart(2, "0");
+    return { value, label: `${value}:00` };
+  });
+  const branchPowerManualBucketKey = computed(() => {
+    const dateText = String(branchPowerManualDate.value || "").trim();
+    const hourText = String(branchPowerManualHour.value || "").trim();
+    if (!dateText || !/^(?:[01]\d|2[0-3])$/.test(hourText)) return "";
+    return `${dateText} ${hourText}`;
+  });
+  const branchPowerManualBuilding = ref("");
+  const branchPowerBackfillDate = ref(todayText());
+  const branchPowerBackfillBuilding = ref("");
+  const branchPowerHourStatus = ref(null);
+  const branchPowerHourStatusLoading = ref(false);
+  const branchPowerHourStatusMessage = ref("");
   const handoverFile = ref(null);
   const handoverFilesByBuilding = reactive({});
   const handoverDutyDate = ref(todayText());
@@ -1000,7 +873,6 @@ export function createAppState(vueApi) {
     externalDashboardSummaryTimer: null,
     healthWarmupTimer: null,
     configRetryTimer: null,
-    internalRuntimeTimer: null,
     jobsTimer: null,
     bridgeTasksTimer: null,
     dailyReportContextTimer: null,
@@ -1022,24 +894,6 @@ export function createAppState(vueApi) {
       ? logs.value
       : logs.value.filter((entry) => String(entry?.line || "").includes(keyword));
     return filteredEntries.map((entry) => String(entry?.line || "").trim()).filter(Boolean);
-  });
-  const internalOpsLogs = computed(() => {
-    const keyword = logFilter.value.trim();
-    if (keyword) {
-      return filteredLogs.value;
-    }
-    return logs.value
-      .map((entry) => String(entry?.line || "").trim())
-      .filter(Boolean)
-      .filter((line) => (
-        line.includes("[共享桥接]")
-        || line.includes("内网下载")
-        || line.includes("浏览器池")
-        || line.includes("页池")
-        || line.includes("共享目录更新")
-        || line.includes("更新镜像")
-        || line.includes("代码同步")
-      ));
   });
 
   const canRun = computed(() => {
@@ -1175,7 +1029,6 @@ export function createAppState(vueApi) {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
     return Boolean(health.shared_bridge?.enabled) && (roleMode === "internal" || roleMode === "external");
   });
-  const isInternalRole = computed(() => resolveDeploymentRoleMode(health.deployment?.role_mode || "") === "internal");
   const BRIDGE_HISTORY_DISPLAY_LIMIT = 30;
   const activeBridgeTasks = computed(() =>
     Array.isArray(bridgeTasksDisplay.value?.active_tasks)
@@ -1195,173 +1048,6 @@ export function createAppState(vueApi) {
       ? bridgeTasksDisplay.value.recent_finished_tasks.map((item) => normalizeBackendTaskItem(item, "bridge"))
       : [],
   );
-  const internalRuntimeBridgeSnapshot = computed(() => {
-    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    if (roleMode !== "internal" || !internalRuntimeSummary.value || typeof internalRuntimeSummary.value !== "object") {
-      return {};
-    }
-    const summary = internalRuntimeSummary.value;
-    const buildingMap = internalBuildingRuntimeStatusMap.value && typeof internalBuildingRuntimeStatusMap.value === "object"
-      ? internalBuildingRuntimeStatusMap.value
-      : {};
-    const sourceCacheSummary = summary.source_cache && typeof summary.source_cache === "object" ? summary.source_cache : {};
-    const poolSummary = summary.pool && typeof summary.pool === "object" ? summary.pool : {};
-    const summarySlotRows = Array.isArray(poolSummary?.page_slots) ? poolSummary.page_slots : [];
-    const summarySlotMap = new Map(
-      summarySlotRows
-        .filter((item) => item && typeof item === "object")
-        .map((item) => [String(item.building || "").trim(), item]),
-    );
-    const buildFamilyRows = (familyKey, fallbackBucket = "") => {
-      const summaryFamily = sourceCacheSummary?.[familyKey] && typeof sourceCacheSummary[familyKey] === "object"
-        ? sourceCacheSummary[familyKey]
-        : {};
-      const summaryRows = Array.isArray(summaryFamily?.buildings) ? summaryFamily.buildings : [];
-      const summaryRowMap = new Map(
-        summaryRows
-          .filter((item) => item && typeof item === "object")
-          .map((item) => [String(item.building || "").trim(), item]),
-      );
-      return INTERNAL_BUILDINGS.map((building) => {
-        const summaryRow = summaryRowMap.get(building);
-        const buildingStatus = buildingMap?.[building] && typeof buildingMap[building] === "object"
-          ? buildingMap[building]
-          : {};
-        const buildingDisplay = buildingStatus?.display && typeof buildingStatus.display === "object"
-          ? buildingStatus.display
-          : {};
-        const displayFamilies = buildingDisplay?.source_families && typeof buildingDisplay.source_families === "object"
-          ? buildingDisplay.source_families
-          : {};
-        const buildingFamilyRow = displayFamilies?.[familyKey] && typeof displayFamilies[familyKey] === "object"
-          ? displayFamilies[familyKey]
-          : null;
-        if (buildingFamilyRow) {
-          return {
-            ...(summaryRow && typeof summaryRow === "object"
-              ? summaryRow
-              : buildSourceCachePlaceholderBuilding(building, fallbackBucket)),
-            ...buildingFamilyRow,
-          };
-        }
-        return summaryRow && typeof summaryRow === "object"
-          ? summaryRow
-          : buildSourceCachePlaceholderBuilding(building, fallbackBucket);
-      });
-    };
-    const currentHourBucket = String(sourceCacheSummary.current_hour_bucket || "").trim();
-    const alarmBucket = String(sourceCacheSummary.alarm_event_family?.current_bucket || "").trim() || currentHourBucket;
-    return {
-      enabled: Boolean(summary.enabled ?? health.shared_bridge?.enabled),
-      role_mode: "internal",
-      root_dir: String(summary.root_dir || health.shared_bridge?.root_dir || "").trim(),
-      internal_download_pool: {
-        enabled: Boolean(poolSummary.enabled),
-        browser_ready: Boolean(poolSummary.browser_ready),
-        overview: poolSummary.overview && typeof poolSummary.overview === "object" ? poolSummary.overview : {},
-        page_slots: INTERNAL_BUILDINGS.map((building) => {
-          const summarySlot = summarySlotMap.get(building);
-          const buildingStatus = buildingMap?.[building] && typeof buildingMap[building] === "object"
-            ? buildingMap[building]
-            : {};
-          const buildingDisplay = buildingStatus?.display && typeof buildingStatus.display === "object"
-            ? buildingStatus.display
-            : {};
-          const rawSlot = buildingDisplay?.page_slot && typeof buildingDisplay.page_slot === "object"
-            ? buildingDisplay.page_slot
-            : null;
-          if (rawSlot && typeof rawSlot === "object") {
-            return {
-              ...(summarySlot && typeof summarySlot === "object" ? summarySlot : { building }),
-              ...rawSlot,
-            };
-          }
-          return summarySlot && typeof summarySlot === "object" ? summarySlot : { building };
-        }),
-        active_buildings: Array.isArray(poolSummary.active_buildings) ? poolSummary.active_buildings : [],
-        last_error: String(poolSummary.last_error || "").trim(),
-      },
-      internal_source_cache: {
-        enabled: Boolean(sourceCacheSummary.enabled),
-        scheduler_running: Boolean(sourceCacheSummary.scheduler_running),
-        overview: sourceCacheSummary.overview && typeof sourceCacheSummary.overview === "object" ? sourceCacheSummary.overview : {},
-        current_hour_bucket: currentHourBucket,
-        last_run_at: String(sourceCacheSummary.last_run_at || "").trim(),
-        last_success_at: String(sourceCacheSummary.last_success_at || "").trim(),
-        last_error: String(sourceCacheSummary.last_error || "").trim(),
-        cache_root: String(sourceCacheSummary.cache_root || "").trim(),
-        current_hour_refresh: sourceCacheSummary.current_hour_refresh && typeof sourceCacheSummary.current_hour_refresh === "object"
-          ? sourceCacheSummary.current_hour_refresh
-          : {},
-        current_hour_refresh_overview:
-          sourceCacheSummary.current_hour_refresh_overview && typeof sourceCacheSummary.current_hour_refresh_overview === "object"
-            ? sourceCacheSummary.current_hour_refresh_overview
-            : {},
-        handover_log_family: {
-          ...(sourceCacheSummary.handover_log_family && typeof sourceCacheSummary.handover_log_family === "object"
-            ? sourceCacheSummary.handover_log_family
-            : {}),
-          buildings: buildFamilyRows("handover_log_family", currentHourBucket),
-        },
-        handover_capacity_report_family: {
-          ...(sourceCacheSummary.handover_capacity_report_family && typeof sourceCacheSummary.handover_capacity_report_family === "object"
-            ? sourceCacheSummary.handover_capacity_report_family
-            : {}),
-          buildings: buildFamilyRows("handover_capacity_report_family", currentHourBucket),
-        },
-        monthly_report_family: {
-          ...(sourceCacheSummary.monthly_report_family && typeof sourceCacheSummary.monthly_report_family === "object"
-            ? sourceCacheSummary.monthly_report_family
-            : {}),
-          buildings: buildFamilyRows("monthly_report_family", currentHourBucket),
-        },
-        branch_power_family: {
-          ...(sourceCacheSummary.branch_power_family && typeof sourceCacheSummary.branch_power_family === "object"
-            ? sourceCacheSummary.branch_power_family
-            : {}),
-          buildings: buildFamilyRows("branch_power_family", currentHourBucket),
-        },
-        alarm_event_family: {
-          ...(sourceCacheSummary.alarm_event_family && typeof sourceCacheSummary.alarm_event_family === "object"
-            ? sourceCacheSummary.alarm_event_family
-            : {}),
-          buildings: buildFamilyRows("alarm_event_family", alarmBucket),
-        },
-      },
-    };
-  });
-
-  function buildLegacyInternalDownloadPoolOverview(rawPool) {
-    const payload = rawPool && typeof rawPool === "object" ? rawPool : {};
-    const slotRows = Array.isArray(payload.page_slots) ? payload.page_slots : [];
-    const slotMap = new Map(
-      slotRows
-        .filter((item) => item && typeof item === "object")
-        .map((item) => [String(item.building || "").trim(), item]),
-    );
-    const slots = INTERNAL_BUILDINGS.map((building) =>
-      normalizeInternalDownloadPoolSlot(
-        slotMap.get(building) || { building },
-        { formatInternalDownloadPoolError },
-      )
-    );
-    const abnormalCount = slots.filter((item) =>
-      ["warning", "danger"].includes(String(item?.tone || "").trim().toLowerCase())
-      || ["已暂停等待恢复", "最近失败"].includes(String(item?.stateText || "").trim()),
-    ).length;
-    return {
-      tone: abnormalCount > 0 ? "warning" : "neutral",
-      statusText: abnormalCount > 0 ? "存在异常楼栋页签" : "等待后端页池状态",
-      summaryText:
-        abnormalCount > 0
-          ? `当前有 ${abnormalCount} 个楼栋页签存在异常或等待恢复。`
-          : "页池展示状态由后端汇总后返回，当前等待首轮状态快照。",
-      errorText: formatInternalDownloadPoolError(payload.last_error),
-      items: [],
-      slots,
-    };
-  }
-
   function buildLegacyExternalSharedSourceCacheOverview(rawCache) {
     const payload = rawCache && typeof rawCache === "object" ? rawCache : {};
     const currentHourBucket = String(payload.current_hour_bucket || payload.currentHourBucket || "").trim();
@@ -1448,42 +1134,6 @@ export function createAppState(vueApi) {
     };
   }
 
-  function buildLegacyExternalInternalAlertOverview(rawAlert) {
-    const payload = rawAlert && typeof rawAlert === "object" ? rawAlert : {};
-    const rawBuildings = Array.isArray(payload.buildings) ? payload.buildings : [];
-    const buildingMap = new Map(
-      rawBuildings
-        .filter((item) => item && typeof item === "object")
-        .map((item) => [String(item.building || "").trim(), item]),
-    );
-    const activeCount = Number.parseInt(String(payload.active_count ?? payload.activeCount ?? 0), 10) || 0;
-    const buildings = INTERNAL_BUILDINGS.map((building) => {
-      const raw = buildingMap.get(building) || { building, status: "normal" };
-      const status = String(raw.status || "").trim().toLowerCase();
-      const isProblem = status === "problem" || (Number.parseInt(String(raw.active_count ?? raw.activeCount ?? 0), 10) || 0) > 0;
-      return {
-        building,
-        tone: isProblem ? "warning" : "success",
-        statusText: isProblem ? "异常" : "正常",
-        summaryText: isProblem
-          ? String(raw.summary || "").trim() || "存在未恢复告警"
-          : (String(raw.summary || "").trim() === "正常" ? "已恢复正常" : (String(raw.summary || "").trim() || "已恢复正常")),
-        detailText: String(raw.detail || "").trim(),
-        timeText: String(raw.last_problem_at || raw.lastProblemAt || raw.last_recovered_at || raw.lastRecoveredAt || "").trim(),
-        activeCount: Number.parseInt(String(raw.active_count ?? raw.activeCount ?? 0), 10) || 0,
-      };
-    });
-    return {
-      tone: activeCount > 0 ? "warning" : "success",
-      statusText: activeCount > 0 ? "存在异常楼栋" : "全部正常",
-      summaryText: activeCount > 0
-        ? `当前有 ${activeCount} 个楼栋存在未恢复的内网告警。`
-        : "当前 5 个楼栋都处于正常状态。",
-      items: [],
-      buildings,
-    };
-  }
-
   function buildLegacyHandoverReviewOverview() {
     const reviewStatus = health.handover?.review_status && typeof health.handover.review_status === "object"
       ? health.handover.review_status
@@ -1500,7 +1150,7 @@ export function createAppState(vueApi) {
         .filter((item) => item && typeof item === "object")
         .map((item) => [String(item.building || "").trim(), item]),
     );
-    const buildings = [...INTERNAL_BUILDINGS];
+    const buildings = [...BUILDING_NAMES];
     for (const item of [...rowMap.keys(), ...linkMap.keys()]) {
       const building = String(item || "").trim();
       if (building && !buildings.includes(building)) buildings.push(building);
@@ -1538,10 +1188,10 @@ export function createAppState(vueApi) {
       duty_shift: String(reviewStatus.duty_shift || "").trim().toLowerCase(),
       has_any_session: Boolean(reviewStatus.has_any_session ?? reviewStatus.hasAnySession),
       confirmed: Number(reviewStatus.confirmed_count ?? reviewStatus.confirmedCount ?? 0),
-      required: Number(reviewStatus.required_count ?? reviewStatus.requiredCount ?? INTERNAL_BUILDINGS.length),
+      required: Number(reviewStatus.required_count ?? reviewStatus.requiredCount ?? BUILDING_NAMES.length),
       pending: Math.max(
         0,
-        Number(reviewStatus.required_count ?? reviewStatus.requiredCount ?? INTERNAL_BUILDINGS.length)
+        Number(reviewStatus.required_count ?? reviewStatus.requiredCount ?? BUILDING_NAMES.length)
           - Number(reviewStatus.confirmed_count ?? reviewStatus.confirmedCount ?? 0),
       ),
       all_confirmed: Boolean(reviewStatus.all_confirmed ?? reviewStatus.allConfirmed),
@@ -1551,421 +1201,6 @@ export function createAppState(vueApi) {
       summary_text: "交接班审核状态由后端返回。",
     });
   }
-  const internalDownloadPoolOverview = computed(() => {
-    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    if (roleMode !== "internal") {
-      return {
-        tone: "neutral",
-        statusText: "仅内网端启用",
-        summaryText: "常驻 5 个楼栋页签的内网下载页池只在内网端运行。",
-        errorText: "",
-        items: [
-          { label: "页池状态", value: "当前角色未启用", tone: "neutral" },
-          { label: "固定楼栋页签", value: "A楼 / B楼 / C楼 / D楼 / E楼", tone: "neutral" },
-        ],
-        slots: [],
-      };
-    }
-    const rawPool = internalRuntimeBridgeSnapshot.value?.internal_download_pool || {};
-    const backendOverview =
-      rawPool.overview && typeof rawPool.overview === "object" && Object.keys(rawPool.overview).length > 0
-        ? rawPool.overview
-        : null;
-    if (backendOverview) {
-      return {
-        tone: String(backendOverview.tone || "").trim() || "neutral",
-        statusText: String(backendOverview.status_text || backendOverview.statusText || "").trim() || "未初始化",
-        summaryText: String(backendOverview.summary_text || backendOverview.summaryText || "").trim(),
-        errorText: String(backendOverview.error_text || backendOverview.errorText || "").trim(),
-        items: Array.isArray(backendOverview.items) ? backendOverview.items : [],
-        slots: Array.isArray(backendOverview.slots)
-          ? backendOverview.slots.map((slot) => normalizeInternalDownloadPoolSlot(slot, {
-            formatInternalDownloadPoolError,
-          }))
-          : [],
-      };
-    }
-    return buildLegacyInternalDownloadPoolOverview(rawPool);
-  });
-  const internalSourceCacheOverview = computed(() => {
-    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    if (roleMode !== "internal") {
-      return {
-        tone: "neutral",
-        statusText: "仅内网端启用",
-        summaryText: "共享缓存仓只在内网端运行，外网端默认只消费共享目录中的最新有效文件。",
-        currentHourBucket: "-",
-        lastRunAt: "",
-        lastSuccessAt: "",
-        errorText: "",
-        cacheRoot: "",
-        items: [],
-        families: [],
-      };
-    }
-    const rawCache = internalRuntimeBridgeSnapshot.value?.internal_source_cache || {};
-    const backendOverview =
-      rawCache.overview && typeof rawCache.overview === "object" && Object.keys(rawCache.overview).length > 0
-        ? rawCache.overview
-        : null;
-    if (backendOverview) {
-      const backendFamilies = Array.isArray(backendOverview.families) ? backendOverview.families : [];
-      return {
-        tone: String(backendOverview.tone || "").trim() || "neutral",
-        statusText: String(backendOverview.status_text || backendOverview.statusText || "").trim() || "准备中",
-        summaryText: String(backendOverview.summary_text || backendOverview.summaryText || "").trim(),
-        currentHourBucket: String(backendOverview.current_hour_bucket || backendOverview.currentHourBucket || "").trim() || "-",
-        lastRunAt: String(backendOverview.last_run_at || backendOverview.lastRunAt || "").trim(),
-        lastSuccessAt: String(backendOverview.last_success_at || backendOverview.lastSuccessAt || "").trim(),
-        errorText: String(backendOverview.error_text || backendOverview.errorText || "").trim(),
-        cacheRoot: String(backendOverview.cache_root || backendOverview.cacheRoot || "").trim(),
-        items: Array.isArray(backendOverview.items) ? backendOverview.items : [],
-        families: backendFamilies.map((family) =>
-          mapPresentedSourceCacheFamilyOverview(
-            family,
-            {
-              fallbackBucket: String(family.current_bucket || family.currentBucket || "").trim(),
-              internalBuildings: INTERNAL_BUILDINGS,
-              formatSharedBridgeRuntimeError,
-              formatInternalDownloadPoolError,
-            },
-          )
-        ),
-      };
-    }
-    const currentHourBucket = String(rawCache.current_hour_bucket || "").trim();
-    const lastRunAt = String(rawCache.last_run_at || "").trim();
-    const lastSuccessAt = String(rawCache.last_success_at || "").trim();
-    const rawFamilies = INTERNAL_SOURCE_CACHE_FAMILY_KEYS
-      .map((familyKey) => {
-        const family = rawCache?.[familyKey];
-        if (!family || typeof family !== "object") return null;
-        return mapPresentedSourceCacheFamilyOverview(
-          { key: familyKey, ...family },
-          {
-            fallbackBucket: String(family.current_bucket || family.currentBucket || currentHourBucket || "").trim(),
-            internalBuildings: INTERNAL_BUILDINGS,
-            formatSharedBridgeRuntimeError,
-            formatInternalDownloadPoolError,
-          },
-        );
-      })
-      .filter(Boolean);
-    const allKnownFamiliesReady = rawFamilies.length > 0
-      && rawFamilies.every((family) => {
-        const buildingRows = Array.isArray(family?.buildings) ? family.buildings : [];
-        return buildingRows.length > 0 && buildingRows.every((row) => String(row?.statusKey || "").trim().toLowerCase() === "ready");
-      });
-    const hasSuccessfulRefresh = hasSuccessfulCurrentHourRefreshSnapshot(rawCache.current_hour_refresh);
-    const shouldSuppressLastError = allKnownFamiliesReady || hasSuccessfulRefresh;
-    const lastError = shouldSuppressLastError ? "" : formatSharedBridgeRuntimeError(rawCache.last_error);
-    const cacheRoot = String(rawCache.cache_root || "").trim();
-    if (allKnownFamiliesReady) {
-      return {
-        tone: "success",
-        statusText: "本轮共享文件已全部就绪",
-        summaryText: "共享缓存状态以后端快照为准，当前各文件族已完成本轮同步。",
-        currentHourBucket: currentHourBucket || "-",
-        lastRunAt,
-        lastSuccessAt,
-        errorText: "",
-        cacheRoot,
-        items: [],
-        families: rawFamilies,
-      };
-    }
-    return {
-      tone: lastError ? "warning" : "neutral",
-      statusText: "等待后端源文件状态",
-      summaryText: "源文件总览由后端聚合后返回，当前等待首轮状态快照。",
-      currentHourBucket: currentHourBucket || "-",
-      lastRunAt,
-      lastSuccessAt,
-      errorText: lastError,
-      cacheRoot,
-      items: [],
-      families: rawFamilies,
-    };
-  });
-  const internalRealtimeSourceFamilies = computed(() => {
-    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    if (roleMode !== "internal") {
-      return [];
-    }
-    const families = Array.isArray(internalSourceCacheOverview.value?.families)
-      ? internalSourceCacheOverview.value.families
-      : [];
-    return families.map((family) => ({
-      ...family,
-      key: String(family?.key || "").trim(),
-      title: String(family?.title || "").trim(),
-      tone: family.tone,
-      statusText: family.statusText,
-      currentBucket: family.currentBucket || internalSourceCacheOverview.value?.currentHourBucket || "-",
-      lastSuccessAt: family.lastSuccessAt || "",
-      buildings: Array.isArray(family.buildings) ? family.buildings : [],
-      actions: family?.actions && typeof family.actions === "object" ? family.actions : {},
-    }));
-  });
-  const externalInternalAlertOverview = computed(() => {
-    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    if (roleMode !== "external") {
-      return {
-        tone: "neutral",
-        statusText: "仅外网端展示",
-        summaryText: "外网端通过内网环境告警状态展示 5 楼状态。",
-        items: [],
-        buildings: [],
-      };
-    }
-    const displayOverview = health.dashboard_display?.internal_alert_overview
-      && typeof health.dashboard_display.internal_alert_overview === "object"
-      ? health.dashboard_display.internal_alert_overview
-      : null;
-    if (displayOverview) {
-      return mapPresentedInternalAlertOverview(displayOverview, {
-        internalBuildings: INTERNAL_BUILDINGS,
-      });
-    }
-    return {
-      tone: "neutral",
-      statusText: "等待后端内网告警状态",
-      summaryText: "内网告警状态由外网聚合接口返回，当前等待首轮状态快照。",
-      items: [],
-      buildings: [],
-    };
-  });
-  const currentHourRefreshOverview = computed(() => {
-    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    const rawCache = internalRuntimeBridgeSnapshot.value?.internal_source_cache || {};
-    const backendOverview = rawCache.current_hour_refresh_overview && typeof rawCache.current_hour_refresh_overview === "object"
-      ? rawCache.current_hour_refresh_overview
-      : null;
-    if (roleMode === "internal" && backendOverview) {
-      return mapCurrentHourRefreshOverview(backendOverview);
-    }
-    if (roleMode !== "internal") {
-      return {
-        reasonCode: "role_mismatch",
-        tone: "neutral",
-        statusText: "当前角色未启用",
-        summaryText: "",
-        detailText: "",
-        lastRunAt: "",
-        lastSuccessAt: "",
-        lastError: "",
-        failedBuildings: [],
-        blockedBuildings: [],
-        runningBuildings: [],
-        completedBuildings: [],
-        items: [],
-        actions: {},
-      };
-    }
-    const rawRefresh = rawCache.current_hour_refresh && typeof rawCache.current_hour_refresh === "object"
-      ? rawCache.current_hour_refresh
-      : {};
-    const failedBuildings = Array.isArray(rawRefresh.failed_buildings) ? rawRefresh.failed_buildings : [];
-    const blockedBuildings = Array.isArray(rawRefresh.blocked_buildings) ? rawRefresh.blocked_buildings : [];
-    const runningBuildings = Array.isArray(rawRefresh.running_buildings) ? rawRefresh.running_buildings : [];
-    const completedBuildings = Array.isArray(rawRefresh.completed_buildings) ? rawRefresh.completed_buildings : [];
-    const hasSuccessfulRefresh = hasSuccessfulCurrentHourRefreshSnapshot(rawRefresh);
-    if (hasSuccessfulRefresh) {
-      return {
-        reasonCode: "success",
-        tone: "success",
-        statusText: "最近一轮已完成",
-        summaryText: "当前小时共享文件补拉已完成，本轮没有失败或阻塞楼栋。",
-        detailText: "",
-        lastRunAt: String(rawRefresh.last_run_at || "").trim(),
-        lastSuccessAt: String(rawRefresh.last_success_at || "").trim(),
-        lastError: "",
-        failedBuildings: [],
-        blockedBuildings: [],
-        runningBuildings: [],
-        completedBuildings,
-        items: [],
-        actions: {},
-      };
-    }
-    return {
-      reasonCode: "pending_backend",
-      tone: "neutral",
-      statusText: "等待后端补拉状态",
-      summaryText: "当前小时即时补拉状态由后端汇总后返回，当前等待首轮状态快照。",
-      detailText: "",
-      lastRunAt: String(rawRefresh.last_run_at || "").trim(),
-      lastSuccessAt: String(rawRefresh.last_success_at || "").trim(),
-      lastError: "",
-      failedBuildings,
-      blockedBuildings,
-      runningBuildings,
-      completedBuildings,
-      items: [],
-      actions: {},
-    };
-  });
-  const internalRuntimeOverview = computed(() => {
-    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    if (roleMode !== "internal") {
-      return {
-        tone: "neutral",
-        statusText: "仅内网端启用",
-        summaryText: "",
-        items: [],
-        cacheRoot: "",
-        errorText: "",
-        poolStatusText: "",
-        poolSummaryText: "",
-        poolItems: [],
-        poolErrorText: "",
-        slots: [],
-        currentHourRefresh: {
-          tone: "neutral",
-          statusText: "",
-          summaryText: "",
-          lastRunAt: "",
-          lastSuccessAt: "",
-          lastError: "",
-          failedBuildings: [],
-          blockedBuildings: [],
-          runningBuildings: [],
-          completedBuildings: [],
-          items: [],
-          actions: {},
-        },
-        families: [],
-      };
-    }
-    const backendOverview = internalRuntimeSummary.value?.display?.runtime_overview
-      && typeof internalRuntimeSummary.value.display.runtime_overview === "object"
-      ? internalRuntimeSummary.value.display.runtime_overview
-      : null;
-    if (backendOverview) {
-      const backendCurrentHour = backendOverview.current_hour_refresh && typeof backendOverview.current_hour_refresh === "object"
-        ? backendOverview.current_hour_refresh
-        : (backendOverview.currentHourRefresh && typeof backendOverview.currentHourRefresh === "object" ? backendOverview.currentHourRefresh : null);
-      return {
-        tone: String(backendOverview.tone || "").trim() || "neutral",
-        statusText: String(backendOverview.status_text || backendOverview.statusText || "").trim() || "等待内网运行态",
-        summaryText: String(backendOverview.summary_text || backendOverview.summaryText || "").trim(),
-        items: Array.isArray(backendOverview.items) ? backendOverview.items : [],
-        cacheRoot: String(backendOverview.cache_root || backendOverview.cacheRoot || "").trim(),
-        errorText: String(backendOverview.error_text || backendOverview.errorText || "").trim(),
-        poolStatusText: String(backendOverview.pool_status_text || backendOverview.poolStatusText || "").trim(),
-        poolSummaryText: String(backendOverview.pool_summary_text || backendOverview.poolSummaryText || "").trim(),
-        poolItems: Array.isArray(backendOverview.pool_items) ? backendOverview.pool_items : (Array.isArray(backendOverview.poolItems) ? backendOverview.poolItems : []),
-        poolErrorText: String(backendOverview.pool_error_text || backendOverview.poolErrorText || "").trim(),
-        slots: Array.isArray(backendOverview.slots)
-          ? backendOverview.slots.map((slot) => normalizeInternalDownloadPoolSlot(slot, {
-            formatInternalDownloadPoolError,
-          }))
-          : [],
-        currentHourRefresh: backendCurrentHour ? mapCurrentHourRefreshOverview(backendCurrentHour) : {
-          tone: "neutral",
-          statusText: "",
-          summaryText: "",
-          lastRunAt: "",
-          lastSuccessAt: "",
-          lastError: "",
-          failedBuildings: [],
-          blockedBuildings: [],
-          runningBuildings: [],
-          completedBuildings: [],
-          items: [],
-          actions: {},
-        },
-        families: Array.isArray(backendOverview.families)
-          ? backendOverview.families.map((family) =>
-            mapPresentedSourceCacheFamilyOverview(
-              family,
-              {
-                fallbackBucket: String(
-                  family?.current_bucket
-                  || family?.currentBucket
-                  || family?.best_bucket_key
-                  || family?.bestBucketKey
-                  || "",
-                ).trim(),
-                internalBuildings: INTERNAL_BUILDINGS,
-                formatSharedBridgeRuntimeError,
-                formatInternalDownloadPoolError,
-              },
-            )
-          )
-          : [],
-      };
-    }
-    return {
-      tone: "neutral",
-      statusText: "等待后端运行概览",
-      summaryText: "内网运行概览由后端聚合后返回，当前等待首轮状态快照。",
-      items: [],
-      cacheRoot: "",
-      errorText: "",
-      poolStatusText: "",
-      poolSummaryText: "",
-      poolItems: [],
-      poolErrorText: "",
-      slots: [],
-      currentHourRefresh: {
-        tone: "neutral",
-        statusText: "",
-        summaryText: "",
-        lastRunAt: "",
-        lastSuccessAt: "",
-        lastError: "",
-        failedBuildings: [],
-        blockedBuildings: [],
-        runningBuildings: [],
-        completedBuildings: [],
-        items: [],
-        actions: {},
-      },
-      families: [],
-    };
-  });
-  const internalSourceCacheHistoryOverview = computed(() => {
-    const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
-    if (roleMode !== "internal") {
-      return {
-        reasonCode: "role_mismatch",
-        tone: "neutral",
-        statusText: "",
-        summaryText: "",
-        items: [],
-        detailText: "",
-        lastError: "",
-        actions: {},
-      };
-    }
-    const backendOverview = internalRuntimeSummary.value?.display?.history_overview
-      && typeof internalRuntimeSummary.value.display.history_overview === "object"
-      ? internalRuntimeSummary.value.display.history_overview
-      : null;
-    if (backendOverview) {
-      return {
-        reasonCode: String(backendOverview.reason_code || backendOverview.reasonCode || "").trim().toLowerCase() || "unknown",
-        tone: String(backendOverview.tone || "").trim() || "neutral",
-        statusText: String(backendOverview.status_text || backendOverview.statusText || "").trim() || "等待后端历史摘要",
-        summaryText: String(backendOverview.summary_text || backendOverview.summaryText || "").trim() || "历史摘要由后端状态快照补齐。",
-        items: Array.isArray(backendOverview.items) ? backendOverview.items : [],
-        detailText: String(backendOverview.detail_text || backendOverview.detailText || "").trim(),
-        lastError: String(backendOverview.last_error || backendOverview.lastError || "").trim(),
-        actions: mapBackendActionsState(backendOverview.actions),
-      };
-    }
-    return {
-      reasonCode: "pending_backend",
-      tone: "neutral",
-      statusText: "等待后端历史摘要",
-      summaryText: "历史摘要由后端状态快照补齐。",
-      items: [],
-      detailText: "",
-      lastError: "",
-      actions: {},
-    };
-  });
   const sharedSourceCacheReadinessOverview = computed(() => {
     const roleMode = resolveDeploymentRoleMode(health.deployment?.role_mode || "");
     const backendOverview = health.dashboard_display?.shared_source_cache_overview
@@ -1999,7 +1234,7 @@ export function createAppState(vueApi) {
                 fallbackBucket: String(
                   family.current_bucket || family.currentBucket || family.best_bucket_key || family.bestBucketKey || "",
                 ).trim(),
-                internalBuildings: INTERNAL_BUILDINGS,
+                internalBuildings: BUILDING_NAMES,
                 formatSharedBridgeRuntimeError,
                 formatInternalDownloadPoolError,
               },
@@ -2076,8 +1311,6 @@ export function createAppState(vueApi) {
         publishedCommit: "",
         pendingSyncCommit: "",
         deferredCommit: "",
-        internalPeerCommit: "",
-        internalPeerCommandSourceCommit: "",
       },
       actions: {},
       businessActions: {
@@ -2085,22 +1318,6 @@ export function createAppState(vueApi) {
         reasonCode: "pending_backend",
         disabledReason: "等待后端更新状态。",
         statusText: "等待后端更新状态",
-      },
-      internalPeer: {
-        available: false,
-        online: false,
-        updateAvailable: false,
-        restartRequired: false,
-        statusText: "等待后端状态",
-        localCommit: "",
-        lastCommandSourceCommit: "",
-        command: {
-          active: false,
-          action: "",
-          status: "",
-          sourceCommit: "",
-          message: "",
-        },
       },
     };
   });
@@ -2168,9 +1385,7 @@ export function createAppState(vueApi) {
       items: [],
       actions: [],
     };
-    const backendDisplay = resolveDeploymentRoleMode(health.deployment?.role_mode || "") === "internal"
-      ? internalRuntimeSummary.value?.display?.current_task_overview
-      : health.dashboard_display?.current_task_overview;
+    const backendDisplay = health.dashboard_display?.current_task_overview;
     return resolveBackendOverviewCard(backendDisplay, null, defaults);
   });
   const taskPanelOverview = computed(() => {
@@ -2208,12 +1423,10 @@ export function createAppState(vueApi) {
     return resolveBackendOverviewCard(health.dashboard_display?.bridge_task_panel_overview, null, defaults);
   });
   const homeOverview = computed(() => {
-    const backendDisplay = resolveDeploymentRoleMode(health.deployment?.role_mode || "") === "internal"
-      ? internalRuntimeSummary.value?.display?.home_overview
-      : health.dashboard_display?.home_overview;
+    const backendDisplay = health.dashboard_display?.home_overview;
     const defaults = {
       tone: "neutral",
-      statusText: resolveDeploymentRoleMode(health.deployment?.role_mode || "") === "internal" ? "等待内网运行态" : "等待外网运行态",
+      statusText: "等待外网运行态",
       summaryText: "",
       nextActionText: "",
       items: [],
@@ -2223,12 +1436,10 @@ export function createAppState(vueApi) {
   });
   const homeQuickActionsById = computed(() => mapBackendActionListById(homeOverview.value?.actions));
   const statusDiagnosisOverview = computed(() => {
-    const backendDisplay = resolveDeploymentRoleMode(health.deployment?.role_mode || "") === "internal"
-      ? internalRuntimeSummary.value?.display?.status_diagnosis_overview
-      : health.dashboard_display?.status_diagnosis_overview;
+    const backendDisplay = health.dashboard_display?.status_diagnosis_overview;
     const defaults = {
       tone: "neutral",
-      statusText: resolveDeploymentRoleMode(health.deployment?.role_mode || "") === "internal" ? "等待内网运行态" : "等待外网运行态",
+      statusText: "等待外网运行态",
       reasonText: "",
       actionText: "",
       items: [],
@@ -2305,7 +1516,7 @@ export function createAppState(vueApi) {
           return [row.building, row];
         }),
     );
-    return INTERNAL_BUILDINGS.map((building) => rowMap.get(building) || createNeutralMonthlyReportDeliveryRow(building));
+    return BUILDING_NAMES.map((building) => rowMap.get(building) || createNeutralMonthlyReportDeliveryRow(building));
   });
   const monthlyChangeReportRecipientRows = computed(() => {
     const backendRows = Array.isArray(health.monthly_change_report?.delivery?.display?.rows)
@@ -2319,7 +1530,7 @@ export function createAppState(vueApi) {
           return [row.building, row];
         }),
     );
-    return INTERNAL_BUILDINGS.map((building) => rowMap.get(building) || createNeutralMonthlyReportDeliveryRow(building));
+    return BUILDING_NAMES.map((building) => rowMap.get(building) || createNeutralMonthlyReportDeliveryRow(building));
   });
   const monthlyEventReportDeliveryLastRun = computed(() =>
     normalizeMonthlyReportDeliveryLastRun(
@@ -2829,7 +2040,6 @@ export function createAppState(vueApi) {
     selectedDates,
     logs,
     logFilter,
-    internalOpsLogs,
     currentJob,
     jobsList,
     selectedJobId,
@@ -2845,8 +2055,6 @@ export function createAppState(vueApi) {
     configLoaded,
     healthLoadError,
     configLoadError,
-    internalRuntimeSummary,
-    internalBuildingRuntimeStatusMap,
     runtimeWarmupReady,
     engineerDirectoryLoaded,
     pendingResumeRuns,
@@ -2878,6 +2086,16 @@ export function createAppState(vueApi) {
     dayMetricLocalBuilding,
     dayMetricLocalDate,
     dayMetricLocalFile,
+    branchPowerManualDate,
+    branchPowerManualHour,
+    branchPowerManualHourOptions,
+    branchPowerManualBucketKey,
+    branchPowerManualBuilding,
+    branchPowerBackfillDate,
+    branchPowerBackfillBuilding,
+    branchPowerHourStatus,
+    branchPowerHourStatusLoading,
+    branchPowerHourStatusMessage,
     handoverFile,
     handoverFilesByBuilding,
     handoverDutyDate,
@@ -2923,7 +2141,6 @@ export function createAppState(vueApi) {
     waitingResourceJobs,
     recentFinishedJobs,
     bridgeTasksEnabled,
-    isInternalRole,
     activeBridgeTasks,
     displayedBridgeTasks,
     totalBridgeHistoryCount,
@@ -2956,14 +2173,6 @@ export function createAppState(vueApi) {
     dashboardSystemStatusItems,
     schedulerOverviewItems,
     schedulerOverviewSummary,
-    internalRuntimeBridgeSnapshot,
-    internalDownloadPoolOverview,
-    internalSourceCacheOverview,
-    internalRealtimeSourceFamilies,
-    externalInternalAlertOverview,
-    currentHourRefreshOverview,
-    internalRuntimeOverview,
-    internalSourceCacheHistoryOverview,
     sharedSourceCacheReadinessOverview,
     sharedRootDiagnosticOverview,
     updaterMirrorOverview,
@@ -3013,6 +2222,7 @@ export function createAppState(vueApi) {
     actionGuard,
   };
 }
+
 
 
 

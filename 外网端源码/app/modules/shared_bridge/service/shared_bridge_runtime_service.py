@@ -390,6 +390,73 @@ class SharedBridgeRuntimeService:
             "log_text": f"[共享桥接] 任务={task_id} 已完成文件准备，正在自动恢复12项原任务",
         }
 
+    def _build_branch_power_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        task_id = str(task.get("task_id", "") or "").strip()
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
+        internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
+        target_bucket_keys = self._normalize_text_list(internal_result.get("target_bucket_keys", []))
+        if not target_bucket_keys:
+            target_bucket_keys = self._normalize_text_list(request.get("target_bucket_keys", []))
+        bucket_key = (
+            str(internal_result.get("bucket_key", "") or "").strip()
+            or str(request.get("target_bucket_key", "") or "").strip()
+            or (target_bucket_keys[0] if target_bucket_keys else "")
+        )
+        source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
+        normalized_units: List[Dict[str, Any]] = []
+        for item in source_units:
+            if not isinstance(item, dict):
+                continue
+            building = str(item.get("building", "") or "").strip()
+            source_files = item.get("source_files", {}) if isinstance(item.get("source_files", {}), dict) else {}
+            power_file = str(
+                item.get("power_file", "")
+                or source_files.get("power_file", "")
+                or item.get("file_path", "")
+                or item.get("source_file", "")
+                or ""
+            ).strip()
+            if not building or not power_file:
+                continue
+            if not is_accessible_cached_file_path(power_file):
+                raise FileNotFoundError(f"共享目录中的支路功率源文件不存在或不可访问: {power_file}")
+            metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+            data_hour_bucket = str(item.get("data_hour_bucket", "") or metadata.get("data_hour_bucket", "") or "").strip()
+            normalized_unit: Dict[str, Any] = {
+                "building": building,
+                "file_path": power_file,
+                "power_file": power_file,
+                "metadata": metadata,
+                "data_hour_bucket": data_hour_bucket,
+                "source_files": {"power_file": power_file},
+            }
+            unit_bucket = str(item.get("bucket_key", "") or metadata.get("bucket_hour", "") or "").strip()
+            if unit_bucket:
+                normalized_unit["bucket_key"] = unit_bucket
+            for key, label in (("current_file", "支路电流源文件"), ("switch_file", "支路开关源文件")):
+                companion = str(item.get(key, "") or source_files.get(key, "") or "").strip()
+                if not companion:
+                    continue
+                if not is_accessible_cached_file_path(companion):
+                    raise FileNotFoundError(f"共享目录中的{label}不存在或不可访问: {companion}")
+                normalized_unit[key] = companion
+                normalized_unit["source_files"][key] = companion
+            normalized_units.append(normalized_unit)
+        if not normalized_units:
+            raise RuntimeError("共享目录中没有可继续上传的支路信息源文件")
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_branch_power",
+                "target_bucket_key": bucket_key,
+                "target_bucket_keys": target_bucket_keys,
+                "source_units": normalized_units,
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续处理支路信息",
+            "log_text": f"[共享桥接] 任务={task_id} 支路信息共享文件已齐全，正在自动恢复原任务",
+        }
+
     def _build_wet_bulb_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
         if not self._store:
             raise RuntimeError("共享桥接存储未初始化")
@@ -681,6 +748,8 @@ class SharedBridgeRuntimeService:
             return self._build_handover_resume_binding_from_artifacts(task)
         if feature == "day_metric_from_download":
             return self._build_day_metric_resume_binding_from_artifacts(task)
+        if feature == "branch_power_upload":
+            return self._build_branch_power_resume_binding(task)
         if feature == "wet_bulb_collection":
             return self._build_wet_bulb_resume_binding_from_artifacts(task)
         if feature == "alarm_event_upload":
@@ -962,9 +1031,9 @@ class SharedBridgeRuntimeService:
 
     def _has_active_foreground_work(self) -> bool:
         busy = self._has_active_business_task()
-        if self._job_service is not None and hasattr(self._job_service, "has_incomplete_jobs"):
+        if self._job_service is not None and hasattr(self._job_service, "has_running_jobs"):
             try:
-                busy = bool(busy or self._job_service.has_incomplete_jobs())
+                busy = bool(busy or self._job_service.has_running_jobs())
             except Exception:
                 busy = bool(busy)
         if busy:
@@ -2314,6 +2383,9 @@ class SharedBridgeRuntimeService:
         buildings: List[str] | None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
+        target_bucket_keys: List[str] | None = None,
+        range_query_start: str | None = None,
+        range_query_end: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -2323,6 +2395,9 @@ class SharedBridgeRuntimeService:
             buildings=buildings,
             resume_job_id=resume_job_id,
             target_bucket_key=target_bucket_key,
+            target_bucket_keys=target_bucket_keys,
+            range_query_start=range_query_start,
+            range_query_end=range_query_end,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -2392,19 +2467,26 @@ class SharedBridgeRuntimeService:
         buildings: List[str] | None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
+        target_bucket_keys: List[str] | None = None,
+        range_query_start: str | None = None,
+        range_query_end: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
         normalized_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        normalized_bucket_keys = [str(item or "").strip() for item in (target_bucket_keys or []) if str(item or "").strip()]
         resolved_bucket_key = str(target_bucket_key or "").strip()
+        if not resolved_bucket_key and normalized_bucket_keys:
+            resolved_bucket_key = normalized_bucket_keys[0]
         if not resolved_bucket_key and self._source_cache_service is not None:
             resolved_bucket_key = self._source_cache_service.branch_power_bucket()
+        bucket_dedupe = ",".join(normalized_bucket_keys) or resolved_bucket_key
         dedupe_key = "|".join(
             [
                 "branch_power_upload",
-                resolved_bucket_key or _now_text()[:13],
+                bucket_dedupe or _now_text()[:13],
                 ",".join(normalized_buildings) or "all_enabled",
             ]
         )
@@ -2415,6 +2497,9 @@ class SharedBridgeRuntimeService:
             buildings=normalized_buildings,
             resume_job_id=resume_job_id,
             target_bucket_key=resolved_bucket_key,
+            target_bucket_keys=normalized_bucket_keys,
+            range_query_start=range_query_start,
+            range_query_end=range_query_end,
             requested_by=requested_by,
         )
 
@@ -4734,9 +4819,32 @@ class SharedBridgeRuntimeService:
         internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
         try:
-            bucket_key = str(internal_result.get("bucket_key", "") or request.get("target_bucket_key", "") or "").strip()
+            requested_bucket_keys = [
+                str(item or "").strip()
+                for item in (
+                    internal_result.get("target_bucket_keys")
+                    if isinstance(internal_result.get("target_bucket_keys"), list)
+                    else request.get("target_bucket_keys")
+                    if isinstance(request.get("target_bucket_keys"), list)
+                    else []
+                )
+                if str(item or "").strip()
+            ]
+            bucket_key = str(
+                internal_result.get("bucket_key", "")
+                or request.get("target_bucket_key", "")
+                or (requested_bucket_keys[0] if requested_bucket_keys else "")
+                or ""
+            ).strip()
             if not bucket_key and self._source_cache_service is not None:
                 bucket_key = self._source_cache_service.branch_power_bucket()
+            failed_internal_buildings = (
+                internal_result.get("failed_buildings", [])
+                if isinstance(internal_result.get("failed_buildings", []), list)
+                else []
+            )
+            if failed_internal_buildings:
+                raise RuntimeError(f"内网下载支路信息存在失败楼栋，外网端停止入库: {failed_internal_buildings}")
             source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
             source_units = [item for item in source_units if isinstance(item, dict)]
             if not source_units and self._source_cache_service is not None:
@@ -4749,29 +4857,118 @@ class SharedBridgeRuntimeService:
             normalized_units: List[Dict[str, Any]] = []
             for item in source_units:
                 building = str(item.get("building", "") or "").strip()
-                file_path = str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
+                source_files = item.get("source_files", {}) if isinstance(item.get("source_files", {}), dict) else {}
+                file_path = str(
+                    item.get("power_file", "")
+                    or source_files.get("power_file", "")
+                    or item.get("file_path", "")
+                    or item.get("source_file", "")
+                    or ""
+                ).strip()
                 if not building or not file_path:
                     continue
                 if not is_accessible_cached_file_path(file_path):
                     raise FileNotFoundError(f"共享目录中的支路功率源文件不存在或不可访问: {file_path}")
                 metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
                 data_hour_bucket = str(item.get("data_hour_bucket", "") or metadata.get("data_hour_bucket", "") or "").strip()
-                normalized_units.append(
-                    {
-                        "building": building,
-                        "file_path": file_path,
-                        "metadata": metadata,
-                        "data_hour_bucket": data_hour_bucket,
-                    }
-                )
+                normalized_unit = {
+                    "building": building,
+                    "file_path": file_path,
+                    "power_file": file_path,
+                    "metadata": metadata,
+                    "data_hour_bucket": data_hour_bucket,
+                    "source_files": {"power_file": file_path},
+                }
+                current_file = str(item.get("current_file", "") or source_files.get("current_file", "") or "").strip()
+                switch_file = str(item.get("switch_file", "") or source_files.get("switch_file", "") or "").strip()
+                if current_file:
+                    normalized_unit["current_file"] = current_file
+                    normalized_unit["source_files"]["current_file"] = current_file
+                if switch_file:
+                    normalized_unit["switch_file"] = switch_file
+                    normalized_unit["source_files"]["switch_file"] = switch_file
+                unit_bucket = str(item.get("bucket_key", "") or metadata.get("bucket_hour", "") or "").strip()
+                if unit_bucket:
+                    normalized_unit["bucket_key"] = unit_bucket
+                normalized_units.append(normalized_unit)
             if not normalized_units:
                 raise RuntimeError("共享目录中没有可继续上传的支路功率源文件")
-            emit_log(f"[共享桥接][支路功率][外网] 开始上传 bucket={bucket_key}, files={len(normalized_units)}")
-            result = BranchPowerUploadService(self.runtime_config).continue_from_source_files(
-                bucket_key=bucket_key,
-                source_units=normalized_units,
-                emit_log=emit_log,
+            expected_buildings = [
+                str(item or "").strip()
+                for item in (request.get("buildings") if isinstance(request.get("buildings"), list) else [])
+                if str(item or "").strip()
+            ]
+            if expected_buildings:
+                ready_buildings = {
+                    str(item.get("building", "") or "").strip()
+                    for item in normalized_units
+                    if str(item.get("building", "") or "").strip()
+                }
+                missing_buildings = [building for building in expected_buildings if building not in ready_buildings]
+                if missing_buildings:
+                    raise RuntimeError(f"支路信息共享源文件缺少楼栋，外网端停止入库: {','.join(missing_buildings)}")
+            if not requested_bucket_keys:
+                requested_bucket_keys = [
+                    str(item.get("data_hour_bucket", "") or item.get("bucket_key", "") or "").strip()
+                    for item in normalized_units
+                    if str(item.get("data_hour_bucket", "") or item.get("bucket_key", "") or "").strip()
+                ]
+                requested_bucket_keys = list(dict.fromkeys(requested_bucket_keys))
+                if len(requested_bucket_keys) <= 1 and requested_bucket_keys and requested_bucket_keys[0] != bucket_key:
+                    requested_bucket_keys = []
+            resume_job_id = self._resume_job_id_from_task(task)
+            if resume_job_id:
+                self._resume_bound_job(
+                    task,
+                    worker_payload={
+                        "resume_kind": "shared_bridge_branch_power",
+                        "target_bucket_key": bucket_key,
+                        "target_bucket_keys": requested_bucket_keys,
+                        "source_units": normalized_units,
+                        "bridge_task_id": task_id,
+                    },
+                    summary="共享文件已到位，正在继续处理支路信息",
+                )
+                self._store.complete_stage(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    claim_token=claim_token,
+                    side="external",
+                    stage_result={"status": "resumed", "resume_job_id": resume_job_id},
+                    next_task_status="success",
+                    task_result={"status": "success", "bridge_task_id": task_id, "resume_job_id": resume_job_id, "internal": internal_result},
+                )
+                return
+            emit_log(
+                f"[共享桥接][支路功率][外网] 开始上传 bucket={bucket_key}, "
+                f"target_buckets={','.join(requested_bucket_keys) or '-'}, files={len(normalized_units)}"
             )
+            service = BranchPowerUploadService(self.runtime_config)
+            if requested_bucket_keys:
+                if len(requested_bucket_keys) >= 2:
+                    result = service.continue_range_from_source_files(
+                        bucket_keys=requested_bucket_keys,
+                        source_units=normalized_units,
+                        emit_log=emit_log,
+                    )
+                else:
+                    target_bucket = requested_bucket_keys[0]
+                    bucket_units = [
+                        item
+                        for item in normalized_units
+                        if str(item.get("data_hour_bucket", "") or item.get("bucket_key", "") or "").strip() == target_bucket
+                    ] or normalized_units
+                    result = service.continue_manual_hour_from_source_files(
+                        bucket_key=target_bucket,
+                        source_units=bucket_units,
+                        emit_log=emit_log,
+                    )
+            else:
+                result = service.continue_from_source_files(
+                    bucket_key=bucket_key,
+                    source_units=normalized_units,
+                    emit_log=emit_log,
+                )
             self._store.complete_stage(
                 task_id=task_id,
                 stage_id=stage_id,

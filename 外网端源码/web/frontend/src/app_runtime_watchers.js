@@ -15,13 +15,9 @@ export function registerAppRuntimeWatchers(options = {}) {
     shouldPollHandoverDailyReportContext,
     shouldFetchPendingResumeRuns,
     shouldLoadEngineerDirectory,
-    shouldPollInternalRuntimeStatus,
     runtimeWarmupReady,
     deploymentRoleMode,
     health,
-    internalRuntimeSummary,
-    internalBuildingRuntimeStatusMap,
-    createEmptyInternalBuildingRuntimeStatusMap,
     bootstrapReady,
     configLoaded,
     currentView,
@@ -54,9 +50,6 @@ export function registerAppRuntimeWatchers(options = {}) {
     fetchBridgeTasks,
     fetchPendingResumeRuns,
     scheduleEngineerDirectoryPrefetch,
-    fetchInternalRuntimeSummary,
-    fetchAllInternalBuildingRuntimeStatuses,
-    resetInternalRuntimeRequestState,
     resetExternalDashboardRequestState,
     ensureHandoverEngineerDirectoryLoaded,
     applyDashboardRoleMode,
@@ -128,6 +121,7 @@ export function registerAppRuntimeWatchers(options = {}) {
     ([view, tab]) => {
       const isHandoverTab = view === "config" && tab === "feature_handover";
       if (!isHandoverTab) return;
+      if (!runtimeRequestsReady.value) return;
       if (!configLoaded.value) return;
       void fetchHandoverCommonConfigSegment({ silentMessage: true });
       void fetchHandoverBuildingConfigSegment(handoverConfigBuilding.value, { silentMessage: true });
@@ -146,11 +140,13 @@ export function registerAppRuntimeWatchers(options = {}) {
   watch(
     () => ({
       loaded: Boolean(configLoaded.value),
+      runtimeReady: Boolean(runtimeRequestsReady.value),
       view: String(currentView.value || "").trim(),
       tab: String(activeConfigTab.value || "").trim(),
     }),
     (state) => {
       if (!state.loaded) return;
+      if (!state.runtimeReady) return;
       if (state.view !== "config" || state.tab !== "feature_handover") return;
       void fetchHandoverCommonConfigSegment({ silentMessage: true });
       void fetchHandoverBuildingConfigSegment(handoverConfigBuilding.value, { silentMessage: true });
@@ -194,19 +190,11 @@ export function registerAppRuntimeWatchers(options = {}) {
       shouldPollDailyReport: shouldPollHandoverDailyReportContext.value,
       shouldFetchPendingResumeRuns: shouldFetchPendingResumeRuns.value,
       shouldLoadEngineerDirectory: shouldLoadEngineerDirectory.value,
-      shouldPollInternalRuntime: shouldPollInternalRuntimeStatus.value,
     }),
     (state, prevState) => {
       const previous = prevState && typeof prevState === "object" ? prevState : {};
       const wasRuntimeReady = Boolean(previous.runtimeReady);
-      runtimeWarmupReady.value = Boolean(state.runtimeReady && state.role === "internal");
-      if (state.role !== "internal") {
-        if (typeof resetInternalRuntimeRequestState === "function") {
-          resetInternalRuntimeRequestState();
-        }
-        internalRuntimeSummary.value = null;
-        internalBuildingRuntimeStatusMap.value = createEmptyInternalBuildingRuntimeStatusMap();
-      }
+      runtimeWarmupReady.value = Boolean(state.runtimeReady);
       if (state.role !== "external" && typeof resetExternalDashboardRequestState === "function") {
         resetExternalDashboardRequestState();
       }
@@ -214,6 +202,11 @@ export function registerAppRuntimeWatchers(options = {}) {
         return;
       }
       const justReady = !wasRuntimeReady && Boolean(state.runtimeReady);
+      if (justReady && state.role === "external") {
+        void fetchExternalDashboardSummary({ force: true, silentMessage: true });
+      } else if (justReady && state.role === "internal") {
+        void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+      }
       if (state.shouldPollExternalDashboardSummary && (justReady || !Boolean(previous.shouldPollExternalDashboardSummary))) {
         void fetchExternalDashboardSummary({ force: true, silentMessage: true });
       }
@@ -234,10 +227,6 @@ export function registerAppRuntimeWatchers(options = {}) {
       }
       if (state.shouldLoadEngineerDirectory && (justReady || !Boolean(previous.shouldLoadEngineerDirectory))) {
         scheduleEngineerDirectoryPrefetch(300);
-      }
-      if (state.shouldPollInternalRuntime && (justReady || !Boolean(previous.shouldPollInternalRuntime))) {
-        void fetchInternalRuntimeSummary({ silentMessage: true });
-        void fetchAllInternalBuildingRuntimeStatuses({ silentMessage: true });
       }
     },
     { immediate: true, deep: false },

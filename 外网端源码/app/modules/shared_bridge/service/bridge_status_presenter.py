@@ -941,11 +941,35 @@ def present_internal_source_cache_overview(payload: Any) -> Dict[str, Any]:
         fallback_bucket=branch_power_bucket,
         bucket_scope_text="本小时",
     )
-    families = [handover_family, handover_capacity_family, monthly_family, branch_power_family, alarm_family]
+    branch_current_bucket = _string(source_cache.get("branch_current_family", {}).get("current_bucket", "")) or branch_power_bucket
+    branch_current_family = present_source_cache_family(
+        source_cache.get("branch_current_family", {}),
+        key="branch_current_family",
+        title="支路电流源文件",
+        fallback_bucket=branch_current_bucket,
+        bucket_scope_text="本小时",
+    )
+    branch_switch_bucket = _string(source_cache.get("branch_switch_family", {}).get("current_bucket", "")) or branch_power_bucket
+    branch_switch_family = present_source_cache_family(
+        source_cache.get("branch_switch_family", {}),
+        key="branch_switch_family",
+        title="支路开关源文件",
+        fallback_bucket=branch_switch_bucket,
+        bucket_scope_text="本小时",
+    )
+    families = [
+        handover_family,
+        handover_capacity_family,
+        monthly_family,
+        branch_power_family,
+        branch_current_family,
+        branch_switch_family,
+        alarm_family,
+    ]
 
     tone = "warning"
     status_text = "准备中"
-    summary_text = "内网端会维护五组共享源文件：交接班日志源文件、交接班容量报表源文件、支路功率源文件、全景平台月报源文件，以及按策略拉取的告警信息源文件。"
+    summary_text = "内网端会维护七组共享源文件：交接班日志源文件、交接班容量报表源文件、支路功率源文件、支路电流源文件、支路开关源文件、全景平台月报源文件，以及按策略拉取的告警信息源文件。"
     if not enabled:
         tone = "warning"
         status_text = "未启用"
@@ -957,11 +981,11 @@ def present_internal_source_cache_overview(payload: Any) -> Dict[str, Any]:
     elif families and all(bool(item.get("all_ready", False)) and bool(item.get("buildings")) for item in families):
         tone = "success"
         status_text = "本轮共享文件已全部就绪"
-        summary_text = "交接班、容量报表、支路功率、月报和告警信息五组共享文件都已就绪。"
+        summary_text = "交接班、容量报表、支路功率、支路电流、支路开关、月报和告警信息七组共享文件都已就绪。"
     elif scheduler_running:
         tone = "warning"
         status_text = "运行中"
-        summary_text = "共享缓存仓正在维护交接班、容量报表、支路功率、月报和最近应执行的告警信息文件。"
+        summary_text = "共享缓存仓正在维护交接班、容量报表、支路功率、支路电流、支路开关、月报和最近应执行的告警信息文件。"
     reason_code = "waiting"
     if not enabled:
         reason_code = "disabled"
@@ -1095,6 +1119,8 @@ def present_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
         ("handover_log_family", "交接班日志源文件"),
         ("handover_capacity_report_family", "交接班容量报表源文件"),
         ("branch_power_family", "支路功率源文件"),
+        ("branch_current_family", "支路电流源文件"),
+        ("branch_switch_family", "支路开关源文件"),
         ("monthly_report_family", "全景平台月报源文件"),
     ):
         family_payload = source_cache.get(key, {}) if isinstance(source_cache.get(key, {}), dict) else {}

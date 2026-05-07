@@ -1,4 +1,4 @@
-export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'alarm_event_upload'">
+export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'alarm_event_upload'">
           <div class="dashboard-module-shell">
                       <article class="task-block dashboard-module-scheduler-card">
                         <div class="task-block-head">
@@ -285,4 +285,5 @@ export const DASHBOARD_ALARM_EVENT_UPLOAD_SECTION = `        <section class="con
         </section>
 
 `;
+
 

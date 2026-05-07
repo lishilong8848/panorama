@@ -7,8 +7,6 @@
     fetchJobs,
     fetchBridgeTasks,
     fetchRuntimeResources,
-    fetchInternalRuntimeSummary,
-    fetchAllInternalBuildingRuntimeStatuses,
     fetchHandoverDailyReportContext,
     fetchConfig,
     syncHandoverDutyFromNow,
@@ -16,7 +14,6 @@
     shouldFetchPendingResumeRuns,
     shouldPollHandoverDailyReportContext,
     shouldPollBridgeTasks,
-    shouldPollInternalRuntimeStatus,
     shouldFetchHealth,
     shouldPollJobPanel,
     shouldLoadEngineerDirectory,
@@ -53,10 +50,6 @@
     const canPollBridgeTasks = () =>
       typeof shouldPollBridgeTasks === "function"
         ? Boolean(shouldPollBridgeTasks())
-        : false;
-    const canPollInternalRuntimeStatus = () =>
-      typeof shouldPollInternalRuntimeStatus === "function"
-        ? Boolean(shouldPollInternalRuntimeStatus())
         : false;
     const canFetchPendingResumeRuns = () =>
       typeof shouldFetchPendingResumeRuns === "function"
@@ -154,27 +147,6 @@
         scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
       }, delayMs);
     };
-    const internalRuntimePollIntervalMs = 3000;
-    const scheduleInternalRuntimePoll = (delayMs = internalRuntimePollIntervalMs) => {
-      if (timers.internalRuntimeTimer) clearTimeout(timers.internalRuntimeTimer);
-      timers.internalRuntimeTimer = window.setTimeout(async () => {
-        if (!isBootstrapReady()) {
-          scheduleInternalRuntimePoll(internalRuntimePollIntervalMs);
-          return;
-        }
-        if (isRuntimeTrafficPaused()) {
-          scheduleInternalRuntimePoll(internalRuntimePollIntervalMs);
-          return;
-        }
-        if (canPollInternalRuntimeStatus()) {
-          await Promise.all([
-            fetchInternalRuntimeSummary({ silentMessage: true }),
-            fetchAllInternalBuildingRuntimeStatuses({ silentMessage: true }),
-          ]);
-        }
-        scheduleInternalRuntimePoll(internalRuntimePollIntervalMs);
-      }, delayMs);
-    };
     const scheduleDailyReportContextPoll = (delayMs = 30000) => {
       if (timers.dailyReportContextTimer) clearTimeout(timers.dailyReportContextTimer);
       timers.dailyReportContextTimer = window.setTimeout(async () => {
@@ -205,7 +177,6 @@
     scheduleDashboardSummaryPoll(dashboardSummaryPollIntervalMs);
     scheduleJobPanelPoll(jobPanelPollIntervalMs);
     scheduleBridgeTasksPoll(bridgeTasksPollIntervalMs);
-    scheduleInternalRuntimePoll(internalRuntimePollIntervalMs);
     scheduleDailyReportContextPoll(30000);
     timers.handoverDutyTimer = setInterval(() => {
       syncHandoverDutyFromNow(false);
@@ -237,7 +208,6 @@
     if (timers.externalDashboardSummaryTimer) clearTimeout(timers.externalDashboardSummaryTimer);
     if (timers.healthWarmupTimer) clearTimeout(timers.healthWarmupTimer);
     if (timers.configRetryTimer) clearTimeout(timers.configRetryTimer);
-    if (timers.internalRuntimeTimer) clearTimeout(timers.internalRuntimeTimer);
     if (timers.jobsTimer) clearTimeout(timers.jobsTimer);
     if (timers.bridgeTasksTimer) clearTimeout(timers.bridgeTasksTimer);
     if (timers.dailyReportContextTimer) clearTimeout(timers.dailyReportContextTimer);

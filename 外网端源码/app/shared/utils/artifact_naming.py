@@ -11,6 +11,8 @@ FAMILY_HANDOVER_CAPACITY_REPORT = "handover_capacity_report_family"
 FAMILY_MONTHLY_REPORT = "monthly_report_family"
 FAMILY_ALARM_EVENT = "alarm_event_family"
 FAMILY_BRANCH_POWER = "branch_power_family"
+FAMILY_BRANCH_CURRENT = "branch_current_family"
+FAMILY_BRANCH_SWITCH = "branch_switch_family"
 
 SOURCE_TYPE_FOLDERS = {
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
@@ -18,6 +20,8 @@ SOURCE_TYPE_FOLDERS = {
     FAMILY_MONTHLY_REPORT: "全景平台月报源文件",
     FAMILY_ALARM_EVENT: "告警信息源文件",
     FAMILY_BRANCH_POWER: "支路功率源文件",
+    FAMILY_BRANCH_CURRENT: "支路电流源文件",
+    FAMILY_BRANCH_SWITCH: "支路开关源文件",
 }
 
 OUTPUT_TYPE_HANDOVER_LOG = "handover_log_output"

@@ -44,6 +44,7 @@ class InternalDownloadBrowserPool:
     BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
     MAX_RECOVERY_ATTEMPTS = 3
     MAX_JOB_ATTEMPTS = 3
+    SUBMIT_READY_TIMEOUT_SEC = 120.0
     RECOVERY_PROBE_INTERVAL_SEC = 60
     RECYCLE_AFTER_AGE_SEC = 12 * 60 * 60
     RECYCLE_AFTER_JOB_COUNT = 100
@@ -61,6 +62,7 @@ class InternalDownloadBrowserPool:
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready_event = threading.Event()
+        self._initial_prelogin_done_event = threading.Event()
         self._startup_error = ""
         self._playwright: Playwright | None = None
         self._browser_slots: Dict[str, Dict[str, Any]] = {}
@@ -209,6 +211,35 @@ class InternalDownloadBrowserPool:
         self._log(f"[共享桥接] 楼栋浏览器已滚动回收: {building}")
 
     @staticmethod
+    def _is_stale_page_error(raw: Any) -> bool:
+        normalized = str(raw or "").strip().lower()
+        return any(
+            token in normalized
+            for token in (
+                "not attached to an active page",
+                "target page, context or browser has been closed",
+                "target closed",
+                "page closed",
+                "context closed",
+                "execution context was destroyed",
+            )
+        )
+
+    async def _probe_page_usable(self, page: Page | None) -> bool:
+        if page is None:
+            return False
+        try:
+            if page.is_closed():
+                return False
+        except Exception:
+            return False
+        try:
+            await asyncio.wait_for(page.evaluate("() => 1"), timeout=1.5)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
     def _classify_failure_kind(error_text: Any, *, login_state: str = "") -> str:
         normalized = str(error_text or "").strip().lower()
         state = str(login_state or "").strip().lower()
@@ -231,6 +262,8 @@ class InternalDownloadBrowserPool:
             return "page_address_invalid"
         if "err_internet_disconnected" in normalized:
             return "network_disconnected"
+        if "not attached to an active page" in normalized or "target closed" in normalized:
+            return "page_closed"
         if "target page, context or browser has been closed" in normalized or "browser has been closed" in normalized:
             return "browser_closed"
         if "page closed" in normalized or "context closed" in normalized or "execution context was destroyed" in normalized:
@@ -316,6 +349,8 @@ class InternalDownloadBrowserPool:
         if not text:
             return "登录失败，请检查楼栋页面和账号状态"
         normalized = text.lower()
+        if "not attached to an active page" in normalized:
+            return "浏览器页面句柄失效，正在重新绑定页面"
         if "net::err_empty_response" in normalized:
             return "页面无响应，请检查楼栋页面服务或网络"
         if "net::err_connection_refused" in normalized:
@@ -546,20 +581,22 @@ class InternalDownloadBrowserPool:
                 self._update_slot(building, login_state="failed", login_error=reason, last_error=error_text)
             raise
 
-    async def _try_recovery_refresh(self, building: str, page: Page) -> tuple[bool, str]:
+    async def _try_recovery_refresh(self, building: str) -> tuple[bool, str]:
         try:
+            page = await self._ensure_page(building)
             await page.reload(wait_until="domcontentloaded", timeout=self._resolve_refresh_timeout_ms())
             await self._ensure_logged_in(building, page)
             return True, ""
         except Exception as exc:  # noqa: BLE001
             return False, self._format_login_error(exc)
 
-    async def _try_recovery_reopen(self, building: str, page: Page) -> tuple[bool, str]:
+    async def _try_recovery_reopen(self, building: str) -> tuple[bool, str]:
         site = self._find_site(building)
         target_url = self._resolve_site_url(site or {}) if site else ""
         if not target_url:
             return False, "页面地址未配置，请检查楼栋配置"
         try:
+            page = await self._ensure_page(building)
             await page.goto(target_url, wait_until="domcontentloaded", timeout=self._resolve_refresh_timeout_ms())
             await self._ensure_logged_in(building, page)
             return True, ""
@@ -584,15 +621,13 @@ class InternalDownloadBrowserPool:
     ) -> bool:
         latest_reason = self._format_login_error(base_reason)
         recovery_attempts = 0
-        try:
-            page = await self._ensure_page(building)
-        except Exception as exc:  # noqa: BLE001
-            page = None
-            latest_reason = self._format_login_error(exc)
         attempts: list[tuple[str, Callable[[], Awaitable[tuple[bool, str]]]]] = []
-        if page is not None:
-            attempts.append(("刷新页面", lambda: self._try_recovery_refresh(building, page)))
-            attempts.append(("重新进入页面", lambda: self._try_recovery_reopen(building, page)))
+        try:
+            await self._ensure_page(building)
+            attempts.append(("刷新页面", lambda: self._try_recovery_refresh(building)))
+            attempts.append(("重新进入页面", lambda: self._try_recovery_reopen(building)))
+        except Exception as exc:  # noqa: BLE001
+            latest_reason = self._format_login_error(exc)
         attempts.append(("重建浏览器", lambda: self._try_recovery_rebuild(building)))
         for _label, step in attempts[: self.MAX_RECOVERY_ATTEMPTS]:
             recovery_attempts += 1
@@ -717,6 +752,23 @@ class InternalDownloadBrowserPool:
         except asyncio.CancelledError:
             return
 
+    async def _async_initial_prelogin_all(self) -> None:
+        tasks = [
+            asyncio.create_task(self._async_prelogin_building(building))
+            for building in self.BUILDINGS
+        ]
+        try:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            self._initial_prelogin_done_event.set()
+
     def _track_async_task(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
         self._prelogin_tasks.add(task)
 
@@ -840,7 +892,37 @@ class InternalDownloadBrowserPool:
             page_closed = True
         if not browser_connected or context is None or page_closed:
             return await self._create_or_replace_slot(building)
-        return page
+        if await self._probe_page_usable(page):
+            return page
+        if isinstance(context, BrowserContext):
+            for candidate in list(context.pages):
+                if candidate is page:
+                    continue
+                if await self._probe_page_usable(candidate):
+                    slot["page"] = candidate
+                    self._update_slot(
+                        building,
+                        page_ready=True,
+                        login_error="",
+                        last_error="",
+                    )
+                    self._log(f"[共享桥接] 楼栋浏览器页面句柄已重新绑定: {building}")
+                    return candidate
+            try:
+                new_page = await context.new_page()
+                slot["page"] = new_page
+                self._update_slot(
+                    building,
+                    page_ready=True,
+                    login_state="waiting",
+                    login_error="",
+                    last_error="",
+                )
+                self._log(f"[共享桥接] 楼栋浏览器页面句柄失效，已新建页面: {building}")
+                return new_page
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"[共享桥接] 楼栋浏览器新建页面失败，将重建槽位: {building}, error={exc}")
+        return await self._create_or_replace_slot(building)
 
     async def _create_alarm_api_request_context(self, building: str) -> tuple[APIRequestContext, str]:
         slot = self._browser_slots.get(building)
@@ -910,6 +992,7 @@ class InternalDownloadBrowserPool:
             self._startup_error = str(exc)
             self._last_error = self._startup_error
             self._ready_event.set()
+            self._initial_prelogin_done_event.set()
             try:
                 loop.run_until_complete(self._async_stop())
             except Exception:
@@ -918,8 +1001,7 @@ class InternalDownloadBrowserPool:
             self._loop = None
             return
         self._ready_event.set()
-        for building in self.BUILDINGS:
-            self._track_async_task(loop.create_task(self._async_prelogin_building(building)))
+        self._track_async_task(loop.create_task(self._async_initial_prelogin_all()))
         try:
             loop.run_forever()
         finally:
@@ -935,6 +1017,7 @@ class InternalDownloadBrowserPool:
             return {"started": False, "running": True, "reason": "already_running"}
         self._startup_error = ""
         self._ready_event.clear()
+        self._initial_prelogin_done_event.clear()
         self._thread = threading.Thread(
             target=self._thread_main,
             name="internal-download-browser-pool",
@@ -954,7 +1037,9 @@ class InternalDownloadBrowserPool:
         return {"started": True, "running": True, "reason": "started"}
 
     def wait_until_ready(self, *, timeout_sec: float = 120.0) -> Dict[str, Any]:
-        self._ready_event.wait(timeout=max(0.0, float(timeout_sec or 0.0)))
+        wait_seconds = max(0.0, float(timeout_sec or 0.0))
+        started = time.monotonic()
+        self._ready_event.wait(timeout=wait_seconds)
         if self._startup_error:
             return {
                 "ready": False,
@@ -968,6 +1053,15 @@ class InternalDownloadBrowserPool:
                 "running": self.is_running(),
                 "reason": "timeout",
                 "error": "内网下载浏览器池启动仍在进行",
+            }
+        remaining = max(0.0, wait_seconds - (time.monotonic() - started))
+        self._initial_prelogin_done_event.wait(timeout=remaining)
+        if not self._initial_prelogin_done_event.is_set():
+            return {
+                "ready": False,
+                "running": self.is_running(),
+                "reason": "prelogin_timeout",
+                "error": "内网下载浏览器池首轮预登录仍在进行",
             }
         return {"ready": True, "running": self.is_running(), "reason": "ready"}
 
@@ -986,6 +1080,26 @@ class InternalDownloadBrowserPool:
     def is_running(self) -> bool:
         thread = self._thread
         return bool(thread and thread.is_alive() and self._loop is not None and not self._startup_error)
+
+    @staticmethod
+    def _future_with_error(error_text: str) -> concurrent.futures.Future[Any]:
+        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+        future.set_exception(RuntimeError(str(error_text or "").strip() or "内网下载浏览器池未就绪"))
+        return future
+
+    def _ensure_ready_for_submit(self) -> str:
+        if self._thread is None and self._loop is None:
+            return "内网下载浏览器池未启动"
+        if self._ready_event.is_set() and self._initial_prelogin_done_event.is_set():
+            return ""
+        ready_result = self.wait_until_ready(timeout_sec=self.SUBMIT_READY_TIMEOUT_SEC)
+        if bool(ready_result.get("ready", False)):
+            return ""
+        return str(
+            ready_result.get("error")
+            or ready_result.get("reason")
+            or "内网下载浏览器池启动仍在进行"
+        ).strip()
 
     async def _run_building_job(
         self,
@@ -1212,11 +1326,14 @@ class InternalDownloadBrowserPool:
         building: str,
         runner: Callable[[Page], Awaitable[Any]],
     ) -> concurrent.futures.Future[Any]:
+        not_ready_reason = self._ensure_ready_for_submit()
+        if not_ready_reason:
+            return self._future_with_error(f"内网下载浏览器池未就绪: {not_ready_reason}")
         loop = self._loop
         if not self.is_running() or loop is None:
-            future: concurrent.futures.Future[Any] = concurrent.futures.Future()
-            future.set_exception(RuntimeError("内网下载浏览器池未启动"))
-            return future
+            return self._future_with_error("内网下载浏览器池未启动")
+        if self._locks.get(building) is None:
+            return self._future_with_error(f"楼栋浏览器锁未初始化: {building}")
         return asyncio.run_coroutine_threadsafe(
             self._run_building_job(building, runner),
             loop,
@@ -1227,11 +1344,14 @@ class InternalDownloadBrowserPool:
         building: str,
         runner: Callable[[APIRequestContext, str], Awaitable[Any]],
     ) -> concurrent.futures.Future[Any]:
+        not_ready_reason = self._ensure_ready_for_submit()
+        if not_ready_reason:
+            return self._future_with_error(f"内网下载浏览器池未就绪: {not_ready_reason}")
         loop = self._loop
         if not self.is_running() or loop is None:
-            future: concurrent.futures.Future[Any] = concurrent.futures.Future()
-            future.set_exception(RuntimeError("内网下载浏览器池未启动"))
-            return future
+            return self._future_with_error("内网下载浏览器池未启动")
+        if self._locks.get(building) is None:
+            return self._future_with_error(f"楼栋浏览器锁未初始化: {building}")
         return asyncio.run_coroutine_threadsafe(
             self._run_building_alarm_job(building, runner),
             loop,
@@ -1250,9 +1370,13 @@ class InternalDownloadBrowserPool:
             slot["jobs_since_recycle"] = int(slot.get("jobs_since_recycle", 0) or 0)
             slot["pending_recycle"] = bool(slot.get("pending_recycle", False))
         active_buildings = [slot["building"] for slot in page_slots if bool(slot.get("in_use", False))]
+        startup_ready = self._ready_event.is_set() and self.is_running()
+        initial_prelogin_done = self._initial_prelogin_done_event.is_set()
         return {
             "enabled": True,
-            "browser_ready": self.is_running(),
+            "browser_ready": startup_ready and initial_prelogin_done,
+            "startup_ready": startup_ready,
+            "initial_prelogin_done": initial_prelogin_done,
             "page_slots": page_slots,
             "active_buildings": active_buildings,
             "last_error": self._last_error,

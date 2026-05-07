@@ -165,19 +165,6 @@ export async function getBridgeTasksApi(params = {}) {
   return apiJson(appendQuery("/api/bridge/tasks", params));
 }
 
-export async function getInternalRuntimeStatusApi() {
-  return apiJsonWithTimeout("/api/bridge/internal-runtime-status", {}, 8000);
-}
-
-export async function getInternalRuntimeBuildingStatusApi(buildingCode) {
-  const codeText = String(buildingCode || "").trim();
-  return apiJsonWithTimeout(
-    `/api/bridge/internal-runtime-status/buildings/${encodeURIComponent(codeText)}`,
-    {},
-    8000,
-  );
-}
-
 export async function getBridgeTaskApi(taskId) {
   return apiJson(`/api/bridge/tasks/${encodeURIComponent(String(taskId || "").trim())}`);
 }
@@ -215,21 +202,6 @@ export async function refreshManualAlarmSourceCacheApi() {
     method: "POST",
     body: "{}",
   });
-}
-
-export async function refreshBuildingLatestSourceCacheApi(sourceFamily, building) {
-  const sourceFamilyText = String(sourceFamily || "").trim();
-  const buildingText = String(building || "").trim();
-  return apiJson(
-    appendQuery("/api/bridge/source-cache/refresh-building-latest", {
-      source_family: sourceFamilyText,
-      building: buildingText,
-    }),
-    {
-      method: "POST",
-      body: "{}",
-    },
-  );
 }
 
 export async function deleteManualAlarmSourceCacheFilesApi() {
@@ -466,22 +438,6 @@ export async function applyUpdaterApi(payload = {}) {
 
 export async function restartUpdaterApi() {
   return apiJson("/api/updater/restart", { method: "POST", body: "{}" });
-}
-
-export async function publishUpdaterApprovedApi() {
-  throw new Error("外网端远程更新内网端功能已移除");
-}
-
-export async function triggerInternalPeerUpdaterCheckApi() {
-  throw new Error("外网端远程更新内网端功能已移除");
-}
-
-export async function triggerInternalPeerUpdaterApplyApi() {
-  throw new Error("外网端远程更新内网端功能已移除");
-}
-
-export async function triggerInternalPeerUpdaterRestartApi() {
-  throw new Error("外网端远程更新内网端功能已移除");
 }
 
 export async function restartAppApi(payload = {}) {
@@ -745,6 +701,26 @@ export async function submitDayMetricFromDownloadJob(payload = {}) {
 
 export async function submitBranchPowerFromDownloadJob(payload = {}) {
   return startJsonJobApi("/api/jobs/branch-power/from-download", payload || {});
+}
+
+export async function getBranchPowerHourStatusApi(payload = {}) {
+  const params = new URLSearchParams();
+  const dateText = String(payload.business_date || payload.date || "").trim();
+  const buildingScope = String(payload.building_scope || "").trim();
+  const building = String(payload.building || "").trim();
+  if (dateText) params.set("business_date", dateText);
+  if (buildingScope) params.set("building_scope", buildingScope);
+  if (building) params.set("building", building);
+  const qs = params.toString();
+  return apiJson(`/api/branch-power/hour-status${qs ? `?${qs}` : ""}`);
+}
+
+export async function submitBranchPowerBackfillMissingJob(payload = {}) {
+  return startJsonJobApi("/api/jobs/branch-power/backfill-missing", payload || {});
+}
+
+export async function submitBranchPowerManualHourJob(payload = {}) {
+  return startJsonJobApi("/api/jobs/branch-power/manual-hour", payload || {});
 }
 
 export async function submitDayMetricFromFileJob(form) {

@@ -1,4 +1,4 @@
-export const DASHBOARD_SCHEDULER_OVERVIEW_SECTION = `        <section class="content-card" v-if="!isInternalDeploymentRole && dashboardActiveModule === 'scheduler_overview'">
+export const DASHBOARD_SCHEDULER_OVERVIEW_SECTION = `        <section class="content-card" v-if="dashboardActiveModule === 'scheduler_overview'">
           <div class="dashboard-module-shell">
             <article class="task-block task-block-compact dashboard-scheduler-overview-summary-card">
               <div class="task-block-head">
@@ -135,4 +135,5 @@ export const DASHBOARD_SCHEDULER_OVERVIEW_SECTION = `        <section class="con
         </section>
 
 `;
+
 

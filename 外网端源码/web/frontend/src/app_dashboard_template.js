@@ -1,4 +1,4 @@
-﻿import { DASHBOARD_AUTO_FLOW_SECTION } from "./dashboard_template_sections/dashboard_auto_flow_section.js";
+import { DASHBOARD_AUTO_FLOW_SECTION } from "./dashboard_template_sections/dashboard_auto_flow_section.js";
 import { DASHBOARD_MULTI_DATE_SECTION } from "./dashboard_template_sections/dashboard_multi_date_section.js";
 import { DASHBOARD_SCHEDULER_OVERVIEW_SECTION } from "./dashboard_template_sections/dashboard_scheduler_overview_section.js";
 import { DASHBOARD_MANUAL_UPLOAD_SECTION } from "./dashboard_template_sections/dashboard_manual_upload_section.js";
@@ -212,7 +212,7 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                   SSID 侧：{{ formatSsidSide(resourceSnapshot.network?.ssid_side) }}
                 </div>
                 <div class="readonly-inline-card">
-                  内网可达：{{ formatBooleanReachability(resourceSnapshot.network?.internal_reachable) }}
+                  采集端网络可达：{{ formatBooleanReachability(resourceSnapshot.network?.internal_reachable) }}
                 </div>
                 <div class="readonly-inline-card">
                   外网可达：{{ formatBooleanReachability(resourceSnapshot.network?.external_reachable) }}
@@ -221,7 +221,7 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                   网络模式：{{ formatNetworkMode(resourceSnapshot.network?.mode) }}
                 </div>
                 <div class="readonly-inline-card">
-                  内网队列：{{ resourceSnapshot.network?.queued_internal || 0 }}
+                  采集端队列：{{ resourceSnapshot.network?.queued_internal || 0 }}
                 </div>
                 <div class="readonly-inline-card">
                   外网队列：{{ resourceSnapshot.network?.queued_external || 0 }}
@@ -235,7 +235,7 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
           <article class="task-block task-block-compact" v-if="bridgeTasksEnabled" style="margin-top:12px;">
             <div class="task-block-head">
               <div>
-                <div class="task-block-kicker">内外网同步</div>
+                <div class="task-block-kicker">共享补采</div>
                 <h4 class="card-title">补采同步任务</h4>
               </div>
               <span class="status-badge status-badge-soft" :class="'tone-' + (bridgeTaskPanelOverview?.tone || 'neutral')">
@@ -243,7 +243,7 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
               </span>
             </div>
             <div class="hint">{{ bridgeTaskPanelOverview?.summaryText || '暂无共享桥接任务。' }}</div>
-            <div class="hint">缺文件任务会先由内网补采，再由原任务自动继续处理。</div>
+            <div class="hint">缺文件任务会先由采集端补采，再由原任务自动继续处理。</div>
             <div class="hint">这里只保留任务摘要和操作入口，详细排障信息不再占用首页区域。</div>
             <div class="ops-job-list" v-if="displayedBridgeTasks.length">
               <div
@@ -261,7 +261,7 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                   <span class="ops-job-list-meta">{{ getRuntimeTaskMeta(task) }}</span>
                   <span class="ops-job-list-meta" v-if="getRuntimeTaskDetail(task)">{{ getRuntimeTaskDetail(task) }}</span>
                 </button>
-                <div v-if="isExternalDeploymentRole" class="ops-job-inline-action-slot">
+                <div class="ops-job-inline-action-slot">
                   <button
                     v-if="isRuntimeTaskActionVisible(task, 'cancel')"
                     class="btn btn-secondary btn-mini ops-job-inline-action"
@@ -343,6 +343,7 @@ ${DASHBOARD_ALARM_EVENT_UPLOAD_SECTION}
         </div>
       </div>
     </section>`;
+
 
 
 

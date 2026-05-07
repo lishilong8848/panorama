@@ -2,23 +2,11 @@ export function createAppActionUiHelpers(options = {}) {
   const {
     message,
     updaterMainAction,
-    updaterPublishApprovedAction,
-    updaterInternalPeerCheckAction,
-    updaterInternalPeerApplyAction,
-    updaterInternalPeerRestartAction,
     isUpdaterActionLocked,
-    isUpdaterPublishApprovedLocked,
-    isUpdaterInternalPeerCheckLocked,
-    isUpdaterInternalPeerApplyLocked,
-    isUpdaterInternalPeerRestartLocked,
     getUpdaterDisabledText,
     restartUpdaterApp,
     applyUpdaterPatch,
     checkUpdaterNow,
-    publishUpdaterApproved,
-    triggerInternalPeerUpdaterCheck,
-    triggerInternalPeerUpdaterApply,
-    triggerInternalPeerUpdaterRestart,
     setDashboardActiveModule,
     dashboardSchedulerOverviewFocusKey,
     nextTick,
@@ -76,49 +64,9 @@ export function createAppActionUiHelpers(options = {}) {
     await checkUpdaterNow({ autoApplyIfAvailable: updaterMainAction.value.id !== "check" });
   }
 
-  async function checkInternalPeerUpdaterNow() {
-    if (!updaterInternalPeerCheckAction.value.allowed) {
-      message.value = getUpdaterDisabledText(updaterInternalPeerCheckAction.value);
-      return;
-    }
-    if (isUpdaterInternalPeerCheckLocked.value) return;
-    await triggerInternalPeerUpdaterCheck();
-  }
-
-  async function publishUpdaterApprovedNow() {
-    if (!updaterPublishApprovedAction.value.allowed) {
-      message.value = getUpdaterDisabledText(updaterPublishApprovedAction.value);
-      return;
-    }
-    if (isUpdaterPublishApprovedLocked.value) return;
-    await publishUpdaterApproved();
-  }
-
-  async function applyInternalPeerUpdaterNow() {
-    if (!updaterInternalPeerApplyAction.value.allowed) {
-      message.value = getUpdaterDisabledText(updaterInternalPeerApplyAction.value);
-      return;
-    }
-    if (isUpdaterInternalPeerApplyLocked.value) return;
-    await triggerInternalPeerUpdaterApply();
-  }
-
-  async function restartInternalPeerUpdaterNow() {
-    if (!updaterInternalPeerRestartAction.value.allowed) {
-      message.value = getUpdaterDisabledText(updaterInternalPeerRestartAction.value);
-      return;
-    }
-    if (isUpdaterInternalPeerRestartLocked.value) return;
-    await triggerInternalPeerUpdaterRestart();
-  }
-
   return {
     clearDashboardSchedulerOverviewFocus,
     openDashboardSchedulerOverviewTarget,
     runUpdaterMainAction,
-    publishUpdaterApprovedNow,
-    checkInternalPeerUpdaterNow,
-    applyInternalPeerUpdaterNow,
-    restartInternalPeerUpdaterNow,
   };
 }
