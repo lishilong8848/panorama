@@ -1020,7 +1020,7 @@ def _cache_wait_detail(message: str) -> HTTPException:
     return HTTPException(status_code=409, detail=message)
 
 
-def _filter_accessible_cached_entries(entries: Any) -> list[Dict[str, Any]]:
+def _filter_accessible_cached_entries(entries: Any, *, verify_files: bool = True) -> list[Dict[str, Any]]:
     output: list[Dict[str, Any]] = []
     for item in entries if isinstance(entries, list) else []:
         if not isinstance(item, dict):
@@ -1029,7 +1029,7 @@ def _filter_accessible_cached_entries(entries: Any) -> list[Dict[str, Any]]:
         file_path = str(item.get("file_path", "") or "").strip()
         if not building or not file_path:
             continue
-        if not is_accessible_cached_file_path(file_path):
+        if verify_files and not is_accessible_cached_file_path(file_path):
             continue
         output.append(item)
     return output
@@ -1048,7 +1048,7 @@ def _format_bucket_age_hours_text(value: Any) -> str:
     return f"{rounded:.1f} 小时"
 
 
-def _normalize_latest_cache_selection(selection: Any) -> Dict[str, Any]:
+def _normalize_latest_cache_selection(selection: Any, *, verify_files: bool = True) -> Dict[str, Any]:
     payload = selection if isinstance(selection, dict) else {}
     best_bucket_age_hours_raw = payload.get("best_bucket_age_hours")
     try:
@@ -1060,7 +1060,7 @@ def _normalize_latest_cache_selection(selection: Any) -> Dict[str, Any]:
         "best_bucket_key": str(payload.get("best_bucket_key", "") or "").strip(),
         "best_bucket_age_hours": best_bucket_age_hours,
         "is_best_bucket_too_old": is_best_bucket_too_old,
-        "selected_entries": _filter_accessible_cached_entries(payload.get("selected_entries", [])),
+        "selected_entries": _filter_accessible_cached_entries(payload.get("selected_entries", []), verify_files=verify_files),
         "fallback_buildings": [
             str(item or "").strip()
             for item in payload.get("fallback_buildings", [])
@@ -1335,7 +1335,7 @@ def _run_external_day_metric_shared_flow(
     cached_entries = _filter_accessible_cached_entries(bridge_service.get_day_metric_by_date_cache_entries(
         selected_dates=selected_dates,
         buildings=target_buildings,
-    ))
+    ), verify_files=False)
     expected_count = len(selected_dates) * len(target_buildings)
     if len(cached_entries) < expected_count:
         emit_log("[共享缓存][12项] 外网端只读取内网端已登记索引，缺失项将交由内网端补采")
@@ -1726,7 +1726,8 @@ def _cached_branch_source_by_building(
             source_family=source_family,
             buildings=buildings,
             bucket_key=bucket_key,
-        )
+        ),
+        verify_files=False,
     )
     output: Dict[str, Dict[str, Any]] = {}
     for item in entries:
@@ -1743,6 +1744,8 @@ def _canonical_branch_source_entry(
     building: str,
     bucket_key: str,
 ) -> Dict[str, Any] | None:
+    if str(getattr(bridge_service, "role_mode", "") or "").strip().lower() == "external":
+        return None
     root_text = str(getattr(bridge_service, "shared_bridge_root", "") or "").strip()
     if not root_text:
         return None
@@ -1869,14 +1872,19 @@ def _resolve_branch_companion_entry(
     power_entry: Dict[str, Any] | None,
     emit_log: Callable[[str], None] | None = None,
 ) -> Dict[str, Any] | None:
-    return _resolve_branch_source_entry(
+    resolved = _resolve_branch_source_entry(
         bridge_service,
         source_family=source_family,
         building=building,
         bucket_key=bucket_key,
         cached_by_building=cached_by_building,
         emit_log=emit_log,
-    ) or _derived_branch_source_entry(
+    )
+    if resolved is not None:
+        return resolved
+    if str(getattr(bridge_service, "role_mode", "") or "").strip().lower() == "external":
+        return None
+    return _derived_branch_source_entry(
         source_family=source_family,
         building=building,
         bucket_key=bucket_key,
@@ -2241,11 +2249,20 @@ def _run_external_monthly_auto_once_shared_flow(
     bridge_service = _shared_bridge_service_or_raise(container)
     target_buildings = bridge_service.get_source_cache_buildings()
     emit_log("[月报自动流程] 已进入后台共享文件处理")
+    emit_log(
+        "[月报自动流程] 读取共享缓存最新索引: "
+        f"family=monthly_report_family, buildings={','.join(target_buildings) or '-'}"
+    )
     selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
         source_family="monthly_report_family",
         buildings=target_buildings,
-    ))
+    ), verify_files=False)
     cached_entries = selection["selected_entries"]
+    emit_log(
+        "[月报自动流程] 共享缓存最新索引读取完成: "
+        f"bucket={selection.get('best_bucket_key') or '-'}, "
+        f"ready={len(cached_entries)}/{len(target_buildings)}"
+    )
     if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
         dedupe_key = _job_dedupe_key(
             "monthly_auto_once_wait_shared_bridge",
@@ -2303,11 +2320,20 @@ def _run_external_wet_bulb_shared_flow(
     bridge_service = _shared_bridge_service_or_raise(container)
     target_buildings = bridge_service.get_source_cache_buildings()
     emit_log("[湿球温度定时采集] 已进入后台共享文件处理")
+    emit_log(
+        "[湿球温度定时采集] 读取共享缓存最新索引: "
+        f"family=handover_log_family, buildings={','.join(target_buildings) or '-'}"
+    )
     selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
         source_family="handover_log_family",
         buildings=target_buildings,
-    ))
+    ), verify_files=False)
     cached_entries = selection["selected_entries"]
+    emit_log(
+        "[湿球温度定时采集] 共享缓存最新索引读取完成: "
+        f"bucket={selection.get('best_bucket_key') or '-'}, "
+        f"ready={len(cached_entries)}/{len(target_buildings)}"
+    )
     if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
         dedupe_key = _job_dedupe_key(
             "wet_bulb_wait_shared_bridge",
@@ -2347,6 +2373,13 @@ def _run_external_wet_bulb_shared_flow(
         }
         for item in cached_entries
     ]
+    emit_log(
+        "[湿球温度定时采集] 已选择共享源文件，开始处理: "
+        + "; ".join(
+            f"{item.get('building') or '-'}={Path(str(item.get('file_path', '') or '')).name or '-'}"
+            for item in source_units
+        )
+    )
     service = WetBulbCollectionService(config)
     return service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
 
@@ -2364,7 +2397,7 @@ def _run_external_multi_date_shared_flow(
     cached_entries = _filter_accessible_cached_entries(bridge_service.get_monthly_by_date_cache_entries(
         selected_dates=selected_dates,
         buildings=target_buildings,
-    ))
+    ), verify_files=False)
     expected_count = len(selected_dates) * len(target_buildings)
     if len(cached_entries) < expected_count:
         dedupe_key = _job_dedupe_key(
@@ -2436,13 +2469,14 @@ def _run_external_handover_shared_flow(
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
             buildings=target_buildings,
-        ))
+        ), verify_files=False)
         capacity_cached_entries = _filter_accessible_cached_entries(
             bridge_service.get_handover_capacity_by_date_cache_entries(
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
                 buildings=target_buildings,
-            )
+            ),
+            verify_files=False,
         )
         if len(cached_entries) < len(target_buildings) or len(capacity_cached_entries) < len(target_buildings):
             dedupe_key = _job_dedupe_key(
@@ -2499,7 +2533,7 @@ def _run_external_handover_shared_flow(
         selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
             source_family="handover_log_family",
             buildings=target_buildings,
-        ))
+        ), verify_files=False)
         cached_entries = selection["selected_entries"]
         capacity_building_files = []
         for item in cached_entries:
@@ -2513,7 +2547,8 @@ def _run_external_handover_shared_flow(
                     duty_date=duty_date_value,
                     duty_shift=duty_shift_value,
                     buildings=[building],
-                )
+                ),
+                verify_files=False,
             )
             if not matched:
                 continue
@@ -5152,7 +5187,8 @@ async def job_handover_from_file(
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     buildings=[building],
-                )
+                ),
+                verify_files=False,
             )
             if matched_capacity:
                 capacity_source_file = str(matched_capacity[0].get("file_path", "") or "").strip()
@@ -5265,7 +5301,8 @@ async def job_handover_from_files(
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     buildings=building_list,
-                )
+                ),
+                verify_files=False,
             )
             capacity_building_files = [
                 (str(item.get("building", "") or "").strip(), str(item.get("file_path", "") or "").strip())

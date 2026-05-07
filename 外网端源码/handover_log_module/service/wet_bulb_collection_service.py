@@ -599,9 +599,25 @@ class WetBulbCollectionService:
         run_date = datetime.now().strftime("%Y-%m-%d")
         deleted_count = 0
         created_count = 0
+        source_summary = [
+            f"{str(item.get('building', '')).strip() or '-'}={str(item.get('file_path', '') or item.get('source_file', '')).strip() or '-'}"
+            for item in source_units
+            if isinstance(item, dict)
+        ] if isinstance(source_units, list) else []
+        emit_log(
+            "[湿球温度定时采集] 共享源文件继续处理开始: "
+            f"count={len(source_summary)}, files={'; '.join(source_summary) or '-'}"
+        )
+        emit_log("[湿球温度定时采集] 开始解析目标多维表")
         resolved_target = dict(target_descriptor or self.build_target_descriptor(normalized_cfg, force_refresh=True))
+        emit_log(
+            "[湿球温度定时采集] 目标多维表解析完成: "
+            f"target_kind={str(resolved_target.get('target_kind', '') or '-').strip() or '-'}, "
+            f"table_id={str(resolved_target.get('table_id', '') or '-').strip() or '-'}"
+        )
 
         if not normalized_cfg.get("enabled", True):
+            emit_log("[湿球温度定时采集] 功能未启用，跳过本次共享文件处理")
             return {
                 "status": "skipped",
                 "run_date": run_date,
@@ -646,6 +662,7 @@ class WetBulbCollectionService:
             if not building or not file_path:
                 continue
             try:
+                emit_log(f"[湿球温度定时采集][{building}] 开始读取共享源文件: {file_path}")
                 extracted = self._extract_metrics_from_source(
                     extract_service=extract_service,
                     building=building,

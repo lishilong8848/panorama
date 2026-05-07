@@ -1453,7 +1453,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     buildings=target_buildings,
                 )
                 if str(item.get("file_path", "") or "").strip()
-                and os.path.exists(str(item.get("file_path", "") or "").strip())
             ]
             expected_count = len(target_buildings)
             if len(cached_entries) < expected_count:
@@ -1530,7 +1529,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             FAMILY_BRANCH_CURRENT,
             FAMILY_BRANCH_POWER,
             FAMILY_BRANCH_SWITCH,
-            build_source_artifact_path,
         )
         from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService
 
@@ -1568,32 +1566,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     for item in (entries if isinstance(entries, list) else [])
                     if isinstance(item, dict)
                     and str(item.get("file_path", "") or "").strip()
-                    and os.path.exists(str(item.get("file_path", "") or "").strip())
                 ]
-                indexed_buildings = {
-                    str(item.get("building", "") or "").strip()
-                    for item in output
-                    if str(item.get("building", "") or "").strip()
-                }
-                root_text = str(getattr(bridge_service, "shared_bridge_root", "") or "").strip()
-                if root_text:
-                    for building in target_buildings:
-                        if building in indexed_buildings:
-                            continue
-                        try:
-                            artifact = build_source_artifact_path(
-                                source_family=source_family,
-                                building=building,
-                                suffix=".xlsx",
-                                bucket_kind="latest",
-                                bucket_key=target_bucket_key,
-                            )
-                        except Exception:
-                            continue
-                        candidate = os.path.join(root_text, str(artifact.relative_path))
-                        if os.path.exists(candidate):
-                            output.append({"building": building, "file_path": candidate, "metadata": {"family": source_family}})
-                            indexed_buildings.add(building)
                 return output
 
             def _ready_building_set(entries: list[dict]) -> set[str]:
@@ -1660,28 +1633,12 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                             continue
                         building = str(item.get("building", "") or "").strip()
                         file_path = str(item.get("file_path", "") or "").strip()
-                        if building and file_path and os.path.exists(file_path) and building not in output:
+                        if building and file_path and building not in output:
                             output[building] = item
                     return output
 
-                def _canonical_entry(source_family: str, building: str) -> dict | None:
-                    root_text = str(getattr(bridge_service, "shared_bridge_root", "") or "").strip()
-                    if not root_text:
-                        return None
-                    artifact = build_source_artifact_path(
-                        source_family=source_family,
-                        building=building,
-                        suffix=".xlsx",
-                        bucket_kind="latest",
-                        bucket_key=target_bucket_key,
-                    )
-                    candidate = os.path.join(root_text, str(artifact.relative_path))
-                    if not os.path.exists(candidate):
-                        return None
-                    return {"building": building, "file_path": candidate, "metadata": {"family": source_family}}
-
-                def _entry_for(source_family: str, building: str, entry_map: dict[str, dict]) -> dict | None:
-                    return entry_map.get(building) or _canonical_entry(source_family, building)
+                def _entry_for(building: str, entry_map: dict[str, dict]) -> dict | None:
+                    return entry_map.get(building)
 
                 power_map = _entry_map(FAMILY_BRANCH_POWER)
                 current_map = _entry_map(FAMILY_BRANCH_CURRENT)
@@ -1692,8 +1649,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 for item in cached_entries:
                     building = str(item.get("building", "") or "").strip()
                     power_entry = power_map.get(building) or item
-                    current_entry = _entry_for(FAMILY_BRANCH_CURRENT, building, current_map)
-                    switch_entry = _entry_for(FAMILY_BRANCH_SWITCH, building, switch_map)
+                    current_entry = _entry_for(building, current_map)
+                    switch_entry = _entry_for(building, switch_map)
                     if not current_entry:
                         missing_current.append(building)
                     if not switch_entry:

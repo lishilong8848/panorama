@@ -27,10 +27,15 @@ def _resolve_entry_file_path(shared_root: Path, entry: Dict[str, Any]) -> Path |
     relative_path = str(entry.get("relative_path", "") or "").replace("\\", "/").strip()
     if not relative_path:
         return None
-    file_path = shared_root / relative_path
-    if not file_path.exists() or not file_path.is_file():
+    relative_candidate = Path(relative_path)
+    if (
+        relative_candidate.is_absolute()
+        or relative_candidate.drive
+        or relative_candidate.root
+        or any(part == ".." for part in relative_candidate.parts)
+    ):
         return None
-    return file_path
+    return shared_root / relative_candidate
 
 
 def build_alarm_external_selection(

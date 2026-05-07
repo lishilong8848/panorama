@@ -266,7 +266,9 @@ class SharedBridgeRuntimeService:
 
     def _require_accessible_cached_file(self, file_path: Any, *, description: str) -> str:
         file_text = str(file_path or "").strip()
-        if not file_text or not is_accessible_cached_file_path(file_text):
+        if not file_text:
+            raise FileNotFoundError(f"{description}不存在或不可访问: {file_text or '-'}")
+        if self.role_mode != "external" and not is_accessible_cached_file_path(file_text):
             raise FileNotFoundError(f"{description}不存在或不可访问: {file_text or '-'}")
         return file_text
 
@@ -419,7 +421,7 @@ class SharedBridgeRuntimeService:
             ).strip()
             if not building or not power_file:
                 continue
-            if not is_accessible_cached_file_path(power_file):
+            if self.role_mode != "external" and not is_accessible_cached_file_path(power_file):
                 raise FileNotFoundError(f"共享目录中的支路功率源文件不存在或不可访问: {power_file}")
             metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
             data_hour_bucket = str(item.get("data_hour_bucket", "") or metadata.get("data_hour_bucket", "") or "").strip()
@@ -438,7 +440,7 @@ class SharedBridgeRuntimeService:
                 companion = str(item.get(key, "") or source_files.get(key, "") or "").strip()
                 if not companion:
                     continue
-                if not is_accessible_cached_file_path(companion):
+                if self.role_mode != "external" and not is_accessible_cached_file_path(companion):
                     raise FileNotFoundError(f"共享目录中的{label}不存在或不可访问: {companion}")
                 normalized_unit[key] = companion
                 normalized_unit["source_files"][key] = companion
@@ -3217,8 +3219,16 @@ class SharedBridgeRuntimeService:
         relative_text = str(relative_path or "").strip()
         if not shared_root or not relative_text:
             return None
-        candidate = Path(shared_root) / relative_text
-        if not is_accessible_cached_file_path(candidate):
+        relative_candidate = Path(relative_text)
+        if (
+            relative_candidate.is_absolute()
+            or relative_candidate.drive
+            or relative_candidate.root
+            or any(part == ".." for part in relative_candidate.parts)
+        ):
+            return None
+        candidate = Path(shared_root) / relative_candidate
+        if self.role_mode != "external" and not is_accessible_cached_file_path(candidate):
             return None
         return candidate
 
@@ -4209,7 +4219,7 @@ class SharedBridgeRuntimeService:
                 file_path = str(item.get("file_path", "") or "").strip()
                 if not building or not file_path:
                     continue
-                if not is_accessible_cached_file_path(file_path):
+                if self.role_mode != "external" and not is_accessible_cached_file_path(file_path):
                     raise FileNotFoundError(f"共享目录中的交接班源文件不存在或不可访问: {file_path}")
                 building_files.append((building, file_path))
             if not building_files:
@@ -4232,7 +4242,7 @@ class SharedBridgeRuntimeService:
                 file_path = str(item.get("file_path", "") or "").strip()
                 if not building or not file_path:
                     continue
-                if not is_accessible_cached_file_path(file_path):
+                if self.role_mode != "external" and not is_accessible_cached_file_path(file_path):
                     raise FileNotFoundError(f"共享目录中的交接班容量源文件不存在或不可访问: {file_path}")
                 capacity_building_files.append((building, file_path))
             if not capacity_building_files:
@@ -4867,7 +4877,7 @@ class SharedBridgeRuntimeService:
                 ).strip()
                 if not building or not file_path:
                     continue
-                if not is_accessible_cached_file_path(file_path):
+                if self.role_mode != "external" and not is_accessible_cached_file_path(file_path):
                     raise FileNotFoundError(f"共享目录中的支路功率源文件不存在或不可访问: {file_path}")
                 metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
                 data_hour_bucket = str(item.get("data_hour_bucket", "") or metadata.get("data_hour_bucket", "") or "").strip()
@@ -5108,7 +5118,7 @@ class SharedBridgeRuntimeService:
                 file_path = str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
                 if not building or not file_path:
                     continue
-                if not is_accessible_cached_file_path(file_path):
+                if self.role_mode != "external" and not is_accessible_cached_file_path(file_path):
                     raise FileNotFoundError(f"共享目录中的湿球温度源文件不存在或不可访问: {file_path}")
                 source_units.append({"building": building, "file_path": file_path})
             if not source_units:

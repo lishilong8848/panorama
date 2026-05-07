@@ -2279,15 +2279,11 @@ class SharedSourceCacheService:
         if not relative_text:
             return None
         relative_candidate = Path(relative_text)
-        if relative_candidate.is_absolute():
+        if relative_candidate.is_absolute() or relative_candidate.drive or relative_candidate.root:
             return None
-        root = self.shared_root.resolve(strict=False)
-        candidate = (root / relative_candidate).resolve(strict=False)
-        try:
-            candidate.relative_to(root)
-        except ValueError:
+        if any(part == ".." for part in relative_candidate.parts):
             return None
-        return candidate
+        return self.shared_root / relative_candidate
 
     def _resolve_entry_file_path(self, entry: Dict[str, Any] | None) -> Path | None:
         if not isinstance(entry, dict):
@@ -2302,7 +2298,7 @@ class SharedSourceCacheService:
         if file_path is None:
             return None
         normalized_family = self._normalize_source_family(entry.get("source_family", ""))
-        if not _is_accessible_cached_file(file_path):
+        if self.role_mode != "external" and not _is_accessible_cached_file(file_path):
             status_text = str(entry.get("status", "") or "").strip().lower()
             if self.role_mode == "internal" and status_text == "ready":
                 self._repair_entry_to_failed(
