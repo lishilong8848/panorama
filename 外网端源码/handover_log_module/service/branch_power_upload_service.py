@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List
 
 import openpyxl
 
+from app.config.config_adapter import normalize_role_mode
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
@@ -66,6 +67,10 @@ class BranchPowerUploadService:
             emit_log(text)
         except Exception:  # noqa: BLE001
             pass
+
+    def _is_external_role(self) -> bool:
+        deployment = self.config.get("deployment", {}) if isinstance(self.config.get("deployment", {}), dict) else {}
+        return normalize_role_mode(deployment.get("role_mode")) == "external"
 
     @staticmethod
     def _elapsed_ms(start: float) -> int:
@@ -351,9 +356,10 @@ class BranchPowerUploadService:
 
     @classmethod
     def _detect_single_header_datetime(cls, file_path: Path) -> datetime | None:
-        if not file_path.exists():
+        try:
+            workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        except OSError:
             return None
-        workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
         try:
             sheet = workbook.active
             if hasattr(sheet, "reset_dimensions"):
@@ -370,9 +376,10 @@ class BranchPowerUploadService:
 
     @classmethod
     def _detect_header_bucket_keys(cls, file_path: Path) -> List[str]:
-        if not file_path.exists():
+        try:
+            workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        except OSError:
             return []
-        workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
         try:
             sheet = workbook.active
             if hasattr(sheet, "reset_dimensions"):
@@ -675,6 +682,8 @@ class BranchPowerUploadService:
 
     def _derive_sibling_file(self, power_file: Path, *, target_label: str) -> Path:
         candidate = self._replace_label_path(power_file, target_label)
+        if self._is_external_role():
+            return candidate
         if candidate.exists():
             return candidate
         short_name = "支路电流" if target_label == "支路电流源文件" else "支路开关"

@@ -684,6 +684,8 @@ class SharedBridgeRuntimeService:
                 raise RuntimeError("月报共享桥接缺少可继续处理的 canonical 源文件")
         if not source_root:
             raise RuntimeError("月报共享桥接缺少 source_root")
+        if self.role_mode == "external":
+            raise RuntimeError("月报共享桥接缺少 canonical 共享缓存索引，外网端不扫描共享目录 source_root")
         file_items = []
         source_root_path = Path(source_root)
         for file_path in sorted(source_root_path.rglob("*.xlsx")):
@@ -1631,6 +1633,8 @@ class SharedBridgeRuntimeService:
         ]
 
         def _path_exists(path: Path, kind: str) -> bool:
+            if self.role_mode == "external":
+                return True
             try:
                 if kind == "file":
                     return path.exists() and path.is_file()
@@ -1644,7 +1648,7 @@ class SharedBridgeRuntimeService:
             try:
                 if self._store is not None:
                     self._store.ensure_ready()
-                else:
+                elif self.role_mode != "external":
                     root_path.mkdir(parents=True, exist_ok=True)
                     for name in ("artifacts", "logs", "tmp"):
                         (root_path / name).mkdir(parents=True, exist_ok=True)
@@ -1710,7 +1714,11 @@ class SharedBridgeRuntimeService:
                     latest_downloaded_at = downloaded_at
                 relative_path = str(entry.get("relative_path", "") or "").strip()
                 resolved_path = root_path / relative_path if relative_path else None
-                if resolved_path is not None and is_accessible_cached_file_path(resolved_path):
+                if self.role_mode == "external" and resolved_path is not None:
+                    family_accessible += 1
+                    if not sample_ready_path:
+                        sample_ready_path = str(resolved_path)
+                elif resolved_path is not None and is_accessible_cached_file_path(resolved_path):
                     family_accessible += 1
                     if not sample_ready_path:
                         sample_ready_path = str(resolved_path)
@@ -1729,6 +1737,10 @@ class SharedBridgeRuntimeService:
                 tone = "neutral"
                 status_text = "无就绪记录"
                 summary_text = "当前还没有 ready 记录。"
+            elif self.role_mode == "external":
+                tone = "success"
+                status_text = "索引就绪"
+                summary_text = "外网端按共享缓存索引选择文件，未做 UNC 物理探测。"
             elif family_missing <= 0:
                 tone = "success"
                 status_text = "记录与文件一致"
@@ -3622,6 +3634,9 @@ class SharedBridgeRuntimeService:
         }
 
     def _run_background_self_heal_scan(self) -> None:
+        if self.role_mode == "external":
+            self._emit_system_log("[共享桥接][后台任务] 外网端跳过共享文件物理自愈扫描，按共享缓存索引选择源文件")
+            return
         self._run_source_cache_background_sweep()
         self._run_artifact_background_self_heal()
 
@@ -6103,6 +6118,8 @@ class SharedBridgeRuntimeService:
                 source_root = str(internal_result.get("source_root", "") or "").strip()
                 if not source_root:
                     raise RuntimeError("月报共享桥接缺少 source_root")
+                if self.role_mode == "external":
+                    raise RuntimeError("月报共享桥接缺少 canonical 共享缓存索引，外网端不扫描共享目录 source_root")
                 source_root_path = Path(source_root)
                 for file_path in sorted(source_root_path.rglob("*.xlsx")):
                     if not file_path.is_file():

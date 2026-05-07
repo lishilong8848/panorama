@@ -1046,7 +1046,7 @@ class DayMetricStandaloneUploadService:
             source_file = str(item.get("source_file", "") or "").strip()
             if not duty_date or not building_name:
                 continue
-            if not source_file or not Path(source_file).exists():
+            if not source_file:
                 row = self._empty_result_row(
                     mode="from_download",
                     duty_date=duty_date,

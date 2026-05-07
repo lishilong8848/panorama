@@ -617,18 +617,10 @@ class WetBulbCollectionService:
         )
 
         if not normalized_cfg.get("enabled", True):
-            emit_log("[湿球温度定时采集] 功能未启用，跳过本次共享文件处理")
-            return {
-                "status": "skipped",
-                "run_date": run_date,
-                "uploaded_buildings": [],
-                "failed_buildings": [],
-                "skipped_buildings": [],
-                "details": {},
-                "deleted_count": deleted_count,
-                "created_count": created_count,
-                "target": resolved_target,
-            }
+            emit_log(
+                "[湿球温度定时采集] 检测到旧配置 enabled=false；"
+                "本次共享源文件处理已由用户/调度明确触发，继续执行"
+            )
         if str(resolved_target.get("target_kind", "")).strip() not in {"base_token_pair", "wiki_token_pair"}:
             code = "target_invalid" if str(resolved_target.get("target_kind", "")).strip() == "invalid" else "target_probe_error"
             message = str(resolved_target.get("message", "")).strip() or "湿球温度目标多维表不可用"

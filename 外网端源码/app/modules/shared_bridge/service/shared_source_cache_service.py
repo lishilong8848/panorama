@@ -444,6 +444,8 @@ class SharedSourceCacheService:
         source_family: str,
         limit: int = 2000,
     ) -> int:
+        if self.role_mode == "external":
+            return 0
         if self.store is None or self.shared_root is None:
             return 0
         repaired = 0
@@ -1691,6 +1693,8 @@ class SharedSourceCacheService:
         self._tmp_root.mkdir(parents=True, exist_ok=True)
 
     def ensure_required_directories(self) -> Dict[str, str]:
+        if self.role_mode == "external":
+            return self.get_required_directory_paths()
         self._ensure_dirs()
         return self.get_required_directory_paths()
 
@@ -3081,6 +3085,8 @@ class SharedSourceCacheService:
         return False
 
     def list_background_sweep_candidates(self, *, recent_hours: int = 3, limit: int = 5000) -> List[Dict[str, Any]]:
+        if self.role_mode == "external":
+            return []
         if self.store is None:
             return []
         cutoff = datetime.now() - timedelta(hours=max(1, int(recent_hours or 1)))
@@ -3113,6 +3119,18 @@ class SharedSourceCacheService:
         initial_counts: Dict[str, int] | None = None,
         should_pause: Callable[[], bool] | None = None,
     ) -> Dict[str, Any]:
+        if self.role_mode == "external":
+            rows = list(candidates) if isinstance(candidates, list) else []
+            return {
+                "status": "success",
+                "scanned": 0,
+                "downgraded": 0,
+                "kept": 0,
+                "skipped": len(rows),
+                "next_index": len(rows),
+                "total_candidates": len(rows),
+                "paused": False,
+            }
         if self.store is None:
             return {
                 "status": "success",
@@ -4002,6 +4020,8 @@ class SharedSourceCacheService:
         }
 
     def _cleanup_orphan_cached_files(self, *, limit: int = 1000) -> Dict[str, int]:
+        if self.role_mode != "internal":
+            return {"deleted_files": 0, "scanned_files": 0}
         if self.shared_root is None:
             return {"deleted_files": 0, "scanned_files": 0}
         referenced_paths = self._collect_referenced_relative_paths(limit=max(50000, int(limit or 1) * 10))
@@ -4036,6 +4056,8 @@ class SharedSourceCacheService:
         return {"deleted_files": deleted_files, "scanned_files": scanned_files}
 
     def cleanup_expired_entries(self, *, limit: int = 20000) -> Dict[str, Any]:
+        if self.role_mode != "internal":
+            return {"deleted_entries": 0, "deleted_files": 0, "deleted_orphan_files": 0}
         if self.store is None or self.shared_root is None or not hasattr(self.store, "list_cleanup_candidate_source_cache_entries"):
             return {"deleted_entries": 0, "deleted_files": 0}
         now_dt = datetime.now()
