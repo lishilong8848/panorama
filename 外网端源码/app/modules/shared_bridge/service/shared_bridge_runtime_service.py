@@ -450,11 +450,16 @@ class SharedBridgeRuntimeService:
             normalized_units.append(normalized_unit)
         if not normalized_units:
             raise RuntimeError("共享目录中没有可继续上传的支路信息源文件")
+        requested_by = str(task.get("requested_by", "") or request.get("requested_by", "") or "").strip()
+        submitted_by = str(task.get("requested_by", "") or request.get("submitted_by", "") or requested_by).strip()
         return {
             "worker_payload": {
                 "resume_kind": "shared_bridge_branch_power",
                 "target_bucket_key": bucket_key,
                 "target_bucket_keys": target_bucket_keys,
+                "buildings": self._normalize_text_list(request.get("buildings", [])),
+                "requested_by": requested_by,
+                "submitted_by": submitted_by,
                 "source_units": normalized_units,
                 "bridge_task_id": task_id,
             },
@@ -652,11 +657,17 @@ class SharedBridgeRuntimeService:
             raise RuntimeError(f"支路信息共享缓存尚未齐全: {sample}{suffix}")
         if not normalized_units:
             raise RuntimeError("支路信息共享缓存没有可恢复的源文件")
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        requested_by = str(task.get("requested_by", "") or request.get("requested_by", "") or "").strip()
+        submitted_by = str(task.get("requested_by", "") or request.get("submitted_by", "") or requested_by).strip()
         return {
             "worker_payload": {
                 "resume_kind": "shared_bridge_branch_power",
                 "target_bucket_key": bucket_key or target_bucket_keys[0],
                 "target_bucket_keys": target_bucket_keys,
+                "buildings": buildings,
+                "requested_by": requested_by,
+                "submitted_by": submitted_by,
                 "source_units": normalized_units,
                 "bridge_task_id": task_id,
             },
@@ -5188,12 +5199,17 @@ class SharedBridgeRuntimeService:
                     requested_bucket_keys = []
             resume_job_id = self._resume_job_id_from_task(task)
             if resume_job_id:
+                requested_by = str(task.get("requested_by", "") or request.get("requested_by", "") or "").strip()
+                submitted_by = str(task.get("requested_by", "") or request.get("submitted_by", "") or requested_by).strip()
                 self._resume_bound_job(
                     task,
                     worker_payload={
                         "resume_kind": "shared_bridge_branch_power",
                         "target_bucket_key": bucket_key,
                         "target_bucket_keys": requested_bucket_keys,
+                        "buildings": expected_buildings,
+                        "requested_by": requested_by,
+                        "submitted_by": submitted_by,
                         "source_units": normalized_units,
                         "bridge_task_id": task_id,
                     },

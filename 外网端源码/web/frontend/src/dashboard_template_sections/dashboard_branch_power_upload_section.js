@@ -28,7 +28,7 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                   <strong class="status-metric-value">{{ branchPowerUploadScheduleText || '-' }}</strong>
                 </div>
               </div>
-              <div class="hint">每小时约 30 分读取支路功率、支路电流、支路开关三类共享文件写入本地库；23:00 全天齐全后整表上传多维。</div>
+              <div class="hint">每小时约 30 分读取上一业务小时的支路功率、支路电流、支路开关三类共享文件写入本地库；0 点处理完前一天 23 点后整表上传多维。</div>
               <div class="task-grid two-col">
                 <div class="form-row">
                   <label class="label">执行分钟（每小时）</label>

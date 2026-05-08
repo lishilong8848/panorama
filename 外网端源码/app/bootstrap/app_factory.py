@@ -1547,7 +1547,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(f"[自动上传支路功率调度] {detail}")
             return False, detail
 
-        target_bucket_key = datetime.now().replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H")
+        target_bucket_key = (
+            datetime.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+        ).strftime("%Y-%m-%d %H")
         target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
         if not target_buildings:
             detail = "共享桥接未配置可用楼栋，无法执行自动上传支路功率调度"

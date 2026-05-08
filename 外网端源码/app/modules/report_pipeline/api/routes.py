@@ -1440,8 +1440,8 @@ def _run_external_day_metric_shared_flow(
     return result
 
 
-def _default_branch_power_bucket_key() -> str:
-    bucket_dt = datetime.now().replace(minute=0, second=0, microsecond=0)
+def _default_branch_power_bucket_key(now: datetime | None = None) -> str:
+    bucket_dt = (now or datetime.now()).replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
     return bucket_dt.strftime("%Y-%m-%d %H")
 
 
@@ -1482,9 +1482,12 @@ def _branch_power_max_hour_for_date(business_date: date, raw_max_hour: Any = "")
         if max_hour < 0 or max_hour > 23:
             raise HTTPException(status_code=400, detail="max_hour 必须是 0-23 的整数")
         return max_hour
-    if business_date == date.today():
-        return datetime.now().hour
-    return 23
+    latest_completed_dt = datetime.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+    if business_date == latest_completed_dt.date():
+        return latest_completed_dt.hour
+    if business_date < latest_completed_dt.date():
+        return 23
+    return 0
 
 
 def _normalize_branch_power_bucket_keys(raw_values: Any) -> List[str]:

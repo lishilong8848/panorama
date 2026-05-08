@@ -1317,11 +1317,14 @@ class SharedSourceCacheService:
         return now.strftime("%Y-%m-%d %H")
 
     def branch_power_bucket(self, when: datetime | None = None) -> str:
-        return self.current_hour_bucket(when)
+        base = (when or datetime.now()).replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+        return base.strftime("%Y-%m-%d %H")
 
     def branch_power_data_bucket(self, bucket_key: str = "", when: datetime | None = None) -> str:
         bucket_dt = _parse_hour_bucket(bucket_key) if str(bucket_key or "").strip() else None
-        base = bucket_dt or (when or datetime.now()).replace(minute=0, second=0, microsecond=0)
+        if bucket_dt is None:
+            return self.branch_power_bucket(when)
+        base = bucket_dt.replace(minute=0, second=0, microsecond=0)
         return base.strftime("%Y-%m-%d %H")
 
     def get_enabled_buildings(self) -> List[str]:
