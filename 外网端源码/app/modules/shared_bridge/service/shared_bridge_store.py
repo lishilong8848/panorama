@@ -14,6 +14,7 @@ from app.modules.shared_bridge.service.shared_bridge_mailbox_store import Shared
 from app.modules.shared_bridge.service.shared_source_cache_index_store import SharedSourceCacheIndexStore
 
 _TERMINAL_TASK_STATUSES = {"success", "failed", "partial_failed", "cancelled", "stale"}
+_BRANCH_SOURCE_ALLOWED_FAMILIES = {"branch_power_family", "branch_current_family", "branch_switch_family"}
 
 
 def _now_text() -> str:
@@ -28,6 +29,64 @@ def _parse_text_datetime(value: Any) -> datetime | None:
         return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
+
+
+def _normalize_branch_bucket_key(value: Any) -> str:
+    text = str(value or "").strip().replace("/", "-").replace("T", " ")
+    if not text:
+        return ""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y%m%d%H"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y-%m-%d %H")
+        except ValueError:
+            continue
+    return ""
+
+
+def _normalize_branch_requested_source_units(raw_units: Any) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for item in raw_units if isinstance(raw_units, list) else []:
+        if not isinstance(item, dict):
+            continue
+        building = str(item.get("building", "") or "").strip()
+        source_family = str(item.get("source_family", "") or "").strip()
+        if not building or source_family not in _BRANCH_SOURCE_ALLOWED_FAMILIES:
+            continue
+        bucket_keys = [
+            _normalize_branch_bucket_key(raw_value)
+            for raw_value in (item.get("target_bucket_keys") if isinstance(item.get("target_bucket_keys"), list) else [])
+        ]
+        bucket_keys = sorted({bucket_key for bucket_key in bucket_keys if bucket_key})
+        if not bucket_keys:
+            single_bucket = _normalize_branch_bucket_key(item.get("target_bucket_key", "") or item.get("bucket_key", ""))
+            if single_bucket:
+                bucket_keys = [single_bucket]
+        if not bucket_keys:
+            continue
+        key = (building, source_family, tuple(bucket_keys))
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(
+            {
+                "building": building,
+                "source_family": source_family,
+                "target_bucket_keys": bucket_keys,
+                "reason": str(item.get("reason", "") or "").strip(),
+            }
+        )
+    output.sort(key=lambda unit: (str(unit.get("building", "")), str(unit.get("source_family", "")), ",".join(unit.get("target_bucket_keys", []))))
+    return output
+
+
+def _branch_requested_units_dedupe(units: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for unit in _normalize_branch_requested_source_units(units):
+        parts.append(
+            f"{unit.get('building')}|{unit.get('source_family')}|{','.join(unit.get('target_bucket_keys', []))}"
+        )
+    return ";".join(parts)
 
 
 class SharedBridgeStore:
@@ -1224,6 +1283,7 @@ class SharedBridgeStore:
         target_bucket_keys: List[str] | None = None,
         range_query_start: str | None = None,
         range_query_end: str | None = None,
+        requested_source_units: List[Dict[str, Any]] | None = None,
         created_by_role: str,
         created_by_node_id: str,
         requested_by: str = "manual",
@@ -1241,7 +1301,29 @@ class SharedBridgeStore:
             for item in (target_bucket_keys or [])
             if str(item or "").strip()
         ]
+        normalized_requested_source_units = _normalize_branch_requested_source_units(requested_source_units)
         resolved_target_bucket_key = str(target_bucket_key or "").strip() or (normalized_bucket_keys[0] if normalized_bucket_keys else "")
+        if not resolved_target_bucket_key and normalized_requested_source_units:
+            first_unit_keys = normalized_requested_source_units[0].get("target_bucket_keys", [])
+            if isinstance(first_unit_keys, list) and first_unit_keys:
+                resolved_target_bucket_key = str(first_unit_keys[0] or "").strip()
+        if not normalized_bucket_keys and normalized_requested_source_units:
+            normalized_bucket_keys = sorted(
+                {
+                    str(bucket_key or "").strip()
+                    for unit in normalized_requested_source_units
+                    for bucket_key in (unit.get("target_bucket_keys", []) if isinstance(unit.get("target_bucket_keys", []), list) else [])
+                    if str(bucket_key or "").strip()
+                }
+            )
+        if not normalized_buildings and normalized_requested_source_units:
+            normalized_buildings = sorted(
+                {
+                    str(unit.get("building", "") or "").strip()
+                    for unit in normalized_requested_source_units
+                    if str(unit.get("building", "") or "").strip()
+                }
+            )
         request_payload = {
             "buildings": normalized_buildings,
             "resume_job_id": str(resume_job_id or "").strip(),
@@ -1249,15 +1331,18 @@ class SharedBridgeStore:
             "target_bucket_keys": normalized_bucket_keys,
             "range_query_start": str(range_query_start or "").strip(),
             "range_query_end": str(range_query_end or "").strip(),
+            "requested_source_units": normalized_requested_source_units,
         }
         bucket_dedupe = ",".join(normalized_bucket_keys) or request_payload["target_bucket_key"]
-        dedupe_key = "|".join(
-            [
-                "branch_power_upload",
-                bucket_dedupe or now_text[:13],
-                ",".join(normalized_buildings) or "all_enabled",
-            ]
-        )
+        dedupe_parts = [
+            "branch_power_upload",
+            bucket_dedupe or now_text[:13],
+            ",".join(normalized_buildings) or "all_enabled",
+        ]
+        unit_dedupe = _branch_requested_units_dedupe(normalized_requested_source_units)
+        if unit_dedupe:
+            dedupe_parts.append(unit_dedupe)
+        dedupe_key = "|".join(dedupe_parts)
         with self.connect() as conn:
             conn.execute(
                 """

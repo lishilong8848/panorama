@@ -102,6 +102,31 @@ def _branch_power_result_touches_final_hour(result: Dict[str, Any], *, fallback_
     return any(item.endswith(" 23") for item in candidates if item)
 
 
+def _raise_if_branch_power_backfill_still_no_data(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+    requested_by = str(payload.get("requested_by", "") or "").strip().lower()
+    requested_units = payload.get("requested_source_units") if isinstance(payload.get("requested_source_units"), list) else []
+    if requested_by != "backfill_missing" and not requested_units:
+        return
+    no_data_items: List[Dict[str, Any]] = []
+    if str(result.get("status", "") or "").strip().lower() == "no_data":
+        no_data_items.extend(
+            item for item in (result.get("no_data_buildings") if isinstance(result.get("no_data_buildings"), list) else []) if isinstance(item, dict)
+        )
+    no_data_items.extend(
+        item for item in (result.get("no_data") if isinstance(result.get("no_data"), list) else []) if isinstance(item, dict)
+    )
+    if not no_data_items:
+        return
+    details = []
+    for item in no_data_items[:20]:
+        bucket_key = str(item.get("bucket_key", "") or result.get("data_bucket_key", "") or result.get("bucket_key", "") or "").strip()
+        building = str(item.get("building", "") or "").strip()
+        reason = str(item.get("reason", "") or "").strip()
+        details.append(f"{bucket_key or '-'}/{building or '-'}: {reason or '目标小时无有效数据'}")
+    suffix = f" 等{len(no_data_items)}项" if len(no_data_items) > 20 else ""
+    raise RuntimeError(f"内网补采后支路信息目标小时仍为空: {', '.join(details)}{suffix}")
+
+
 def _dispatch_branch_power_day_end_backfill_if_needed(
     *,
     config: Dict[str, Any],
@@ -387,6 +412,7 @@ def handle_branch_power_from_download(
                 source_units=source_units,
                 emit_log=emit_log,
             )
+            _raise_if_branch_power_backfill_still_no_data(payload, result)
             backfill = _dispatch_branch_power_day_end_backfill_if_needed(
                 config=config,
                 payload=payload,
@@ -410,6 +436,7 @@ def handle_branch_power_from_download(
             source_units=bucket_units,
             emit_log=emit_log,
         )
+        _raise_if_branch_power_backfill_still_no_data(payload, result)
         backfill = _dispatch_branch_power_day_end_backfill_if_needed(
             config=config,
             payload=payload,
@@ -427,6 +454,7 @@ def handle_branch_power_from_download(
         source_units=source_units,
         emit_log=emit_log,
     )
+    _raise_if_branch_power_backfill_still_no_data(payload, result)
     backfill = _dispatch_branch_power_day_end_backfill_if_needed(
         config=config,
         payload=payload,

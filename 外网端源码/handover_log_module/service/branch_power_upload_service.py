@@ -550,6 +550,116 @@ class BranchPowerUploadService:
             workbook.close()
         return rows_by_bucket
 
+    def inspect_source_family_file_hours(
+        self,
+        *,
+        file_path: Any,
+        source_family: str,
+        bucket_keys: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        path = Path(str(file_path or "").strip())
+        normalized_bucket_keys: List[str] = []
+        for raw_key in bucket_keys or []:
+            text = str(raw_key or "").strip()
+            if not text:
+                continue
+            normalized = self._parse_bucket_datetime(text).strftime("%Y-%m-%d %H")
+            if normalized not in normalized_bucket_keys:
+                normalized_bucket_keys.append(normalized)
+        result: Dict[str, Dict[str, Any]] = {
+            bucket_key: {
+                "status": "parse_failed",
+                "row_count": 0,
+                "file_path": str(path),
+                "error": "缺少目标小时",
+            }
+            for bucket_key in normalized_bucket_keys
+        }
+        if not normalized_bucket_keys:
+            return result
+        family = self._norm_text(source_family)
+        metric_label_by_family = {
+            self.FAMILY_POWER: "功率",
+            self.FAMILY_CURRENT: "电流",
+            self.FAMILY_SWITCH: "开关状态",
+        }
+        metric_label = metric_label_by_family.get(family)
+        if not metric_label:
+            for bucket_key in normalized_bucket_keys:
+                result[bucket_key] = {
+                    "status": "parse_failed",
+                    "row_count": 0,
+                    "file_path": str(path),
+                    "error": f"不支持的支路源文件类型: {family or '-'}",
+                }
+            return result
+        if not str(path).strip() or not path.is_file():
+            for bucket_key in normalized_bucket_keys:
+                result[bucket_key] = {
+                    "status": "missing_file",
+                    "row_count": 0,
+                    "file_path": str(path),
+                    "error": f"源文件不存在或不可访问: {path or '-'}",
+                }
+            return result
+        try:
+            data_bucket_dts = [self._parse_bucket_datetime(bucket_key) for bucket_key in normalized_bucket_keys]
+            header_bucket_keys = set(self._detect_header_bucket_keys(path))
+            rows_by_bucket = self._load_metric_rows_by_hour(
+                file_path=path,
+                data_bucket_dts=data_bucket_dts,
+                metric_label=metric_label,
+            )
+            for bucket_key in normalized_bucket_keys:
+                if bucket_key not in header_bucket_keys:
+                    result[bucket_key] = {
+                        "status": "parse_failed",
+                        "row_count": 0,
+                        "file_path": str(path),
+                        "error": f"{path.name} 未找到数据小时列 {bucket_key}",
+                    }
+                    continue
+                row_count = len(rows_by_bucket.get(bucket_key, []))
+                if row_count <= 0:
+                    result[bucket_key] = {
+                        "status": "empty_data",
+                        "row_count": 0,
+                        "file_path": str(path),
+                        "error": f"{path.name} {bucket_key} {metric_label}数据为空",
+                    }
+                    continue
+                result[bucket_key] = {
+                    "status": "valid",
+                    "row_count": row_count,
+                    "file_path": str(path),
+                    "error": "",
+                }
+        except FileNotFoundError as exc:
+            for bucket_key in normalized_bucket_keys:
+                result[bucket_key] = {
+                    "status": "missing_file",
+                    "row_count": 0,
+                    "file_path": str(path),
+                    "error": str(exc),
+                }
+        except OSError as exc:
+            for bucket_key in normalized_bucket_keys:
+                result[bucket_key] = {
+                    "status": "missing_file",
+                    "row_count": 0,
+                    "file_path": str(path),
+                    "error": str(exc),
+                }
+        except Exception as exc:  # noqa: BLE001
+            for bucket_key in normalized_bucket_keys:
+                result[bucket_key] = {
+                    "status": "parse_failed",
+                    "row_count": 0,
+                    "file_path": str(path),
+                    "error": str(exc),
+                }
+        return result
+
     @staticmethod
     def _number_value(value: Any, *, label: str, source_row: int) -> float:
         if isinstance(value, (int, float)):
@@ -1154,6 +1264,91 @@ class BranchPowerUploadService:
                 max_hour=max_hour,
             )
         return sorted({hour for hour, _building in units})
+
+    def get_missing_source_family_units(
+        self,
+        *,
+        business_date: str,
+        expected_buildings: List[str],
+        max_hour: int = 23,
+    ) -> List[Dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            self._ensure_schema(conn)
+            max_hour = max(0, min(23, int(max_hour)))
+            buildings = [self._norm_text(item) for item in expected_buildings if self._norm_text(item)]
+            value_columns = {
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({self._q(self.TABLE_VALUES)})").fetchall()
+            }
+            row_counts = {
+                self._norm_text(row["building"]): int(row["row_count"] or 0)
+                for row in conn.execute(
+                    f"""
+                    SELECT {self._q(self.FIELD_BUILDING)} AS building, COUNT(*) AS row_count
+                    FROM {self._q(self.TABLE_VALUES)}
+                    WHERE {self._q('business_date')}=?
+                    GROUP BY {self._q(self.FIELD_BUILDING)}
+                    """,
+                    (business_date,),
+                ).fetchall()
+            }
+            output: List[Dict[str, Any]] = []
+            for hour in range(max_hour + 1):
+                power_field, current_field, switch_field = self._hour_fields(hour)
+                family_fields = (
+                    (self.FAMILY_POWER, power_field),
+                    (self.FAMILY_CURRENT, current_field),
+                    (self.FAMILY_SWITCH, switch_field),
+                )
+                for building in buildings:
+                    total_rows = int(row_counts.get(building, 0) or 0)
+                    if total_rows <= 0:
+                        for source_family, _field_name in family_fields:
+                            output.append(
+                                {
+                                    "hour": hour,
+                                    "bucket_key": f"{business_date} {hour:02d}",
+                                    "building": building,
+                                    "source_family": source_family,
+                                    "reason": "missing_local_rows",
+                                }
+                            )
+                        continue
+                    for source_family, field_name in family_fields:
+                        if field_name not in value_columns:
+                            output.append(
+                                {
+                                    "hour": hour,
+                                    "bucket_key": f"{business_date} {hour:02d}",
+                                    "building": building,
+                                    "source_family": source_family,
+                                    "reason": "missing_local_column",
+                                }
+                            )
+                            continue
+                        row = conn.execute(
+                            f"""
+                            SELECT COUNT(*) AS complete_rows
+                            FROM {self._q(self.TABLE_VALUES)}
+                            WHERE {self._q('business_date')}=?
+                              AND {self._q(self.FIELD_BUILDING)}=?
+                              AND {self._q(field_name)} IS NOT NULL
+                              AND TRIM(CAST({self._q(field_name)} AS TEXT)) != ''
+                            """,
+                            (business_date, building),
+                        ).fetchone()
+                        complete_rows = int(row["complete_rows"] if row else 0)
+                        if complete_rows != total_rows:
+                            output.append(
+                                {
+                                    "hour": hour,
+                                    "bucket_key": f"{business_date} {hour:02d}",
+                                    "building": building,
+                                    "source_family": source_family,
+                                    "reason": f"incomplete_local_values:{complete_rows}/{total_rows}",
+                                }
+                            )
+        return output
 
     def _target_fields_from_bitable(
         self,

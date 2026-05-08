@@ -1611,10 +1611,39 @@ def _enqueue_branch_power_missing_download(
     emit_log: Callable[[str], None],
     priority: str = "manual",
     submitted_by: str = "manual",
+    requested_source_units: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
-    target_hours = [hour for hour in sorted({int(item) for item in hours}) if 0 <= hour <= 23]
+    normalized_requested_units = _normalize_branch_requested_source_units(requested_source_units)
+    if normalized_requested_units:
+        unit_bucket_keys = sorted(
+            {
+                bucket_key
+                for unit in normalized_requested_units
+                for bucket_key in unit.get("target_bucket_keys", [])
+                if str(bucket_key or "").strip()
+            },
+            key=lambda item: datetime.strptime(item, "%Y-%m-%d %H"),
+        )
+        target_hours = [
+            datetime.strptime(bucket_key, "%Y-%m-%d %H").hour
+            for bucket_key in unit_bucket_keys
+            if bucket_key.startswith(f"{date_text} ")
+        ]
+    else:
+        target_hours = [hour for hour in sorted({int(item) for item in hours}) if 0 <= hour <= 23]
     if not target_hours:
         raise RuntimeError("支路信息补缺口缺少小时")
+    target_buildings = [str(item or "").strip() for item in buildings if str(item or "").strip()]
+    if normalized_requested_units:
+        target_buildings = sorted(
+            {
+                str(unit.get("building", "") or "").strip()
+                for unit in normalized_requested_units
+                if str(unit.get("building", "") or "").strip()
+            }
+        )
+    if not target_buildings:
+        raise RuntimeError("支路信息补缺口缺少楼栋")
     bucket_keys = [f"{date_text} {hour:02d}" for hour in target_hours]
     is_range = len(bucket_keys) >= 2
     range_query_start = ""
@@ -1626,7 +1655,8 @@ def _enqueue_branch_power_missing_download(
     dedupe_key = _job_dedupe_key(
         "branch_power_backfill_missing_wait_shared_bridge",
         bucket=",".join(bucket_keys),
-        buildings=buildings,
+        buildings=target_buildings,
+        units=_branch_requested_units_dedupe(normalized_requested_units),
     )
     waiting_job, waiting_task = start_waiting_bridge_job(
         job_service=container.job_service,
@@ -1638,7 +1668,8 @@ def _enqueue_branch_power_missing_download(
             "target_bucket_keys": target_bucket_keys,
             "range_query_start": range_query_start,
             "range_query_end": range_query_end,
-            "buildings": buildings,
+            "buildings": target_buildings,
+            "requested_source_units": normalized_requested_units,
             "requested_by": "backfill_missing",
             "submitted_by": submitted_by,
         },
@@ -1654,22 +1685,27 @@ def _enqueue_branch_power_missing_download(
             "target_bucket_keys": target_bucket_keys,
             "range_query_start": range_query_start,
             "range_query_end": range_query_end,
-            "buildings": buildings,
+            "buildings": target_buildings,
+            "requested_source_units": normalized_requested_units,
             "requested_by": "backfill_missing",
         },
     )
+    unit_summary = _branch_requested_units_summary(normalized_requested_units)
     emit_log(
         "[支路信息补处理] 已派发内网补缺口任务 "
         f"task_id={str(waiting_task.get('task_id', '') or '-').strip() or '-'}, "
         f"buckets={','.join(bucket_keys)}, mode={'range' if is_range else 'single'}, "
-        f"query={range_query_start or '-'}~{range_query_end or '-'}, buildings={','.join(buildings)}"
+        f"query={range_query_start or '-'}~{range_query_end or '-'}, buildings={','.join(target_buildings)}, "
+        f"units={unit_summary or '-'}"
     )
     return {
         "hours": target_hours,
         "bucket_keys": bucket_keys,
         "mode": "range_download" if is_range else "single_download",
+        "buildings": target_buildings,
         "range_query_start": range_query_start,
         "range_query_end": range_query_end,
+        "requested_source_units": normalized_requested_units,
         "waiting": _accepted_waiting_job_response(waiting_job, waiting_task),
     }
 
@@ -1695,6 +1731,158 @@ _BRANCH_SOURCE_FAMILY_LABELS = {
     FAMILY_BRANCH_CURRENT: "支路电流",
     FAMILY_BRANCH_SWITCH: "支路开关",
 }
+_BRANCH_SOURCE_ALLOWED_FAMILIES = {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH}
+_BRANCH_SOURCE_FAMILY_FILE_KEYS = {
+    FAMILY_BRANCH_POWER: "power_file",
+    FAMILY_BRANCH_CURRENT: "current_file",
+    FAMILY_BRANCH_SWITCH: "switch_file",
+}
+_BRANCH_BRIDGE_TERMINAL_STATUSES = {"success", "failed", "partial_failed", "cancelled", "stale"}
+
+
+def _branch_source_unit_key(bucket_key: str, building: str, source_family: str) -> tuple[str, str, str]:
+    return (
+        _normalize_branch_source_bucket_key(bucket_key),
+        str(building or "").strip(),
+        str(source_family or "").strip(),
+    )
+
+
+def _normalize_branch_requested_source_units(raw_units: Any) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for item in raw_units if isinstance(raw_units, list) else []:
+        if not isinstance(item, dict):
+            continue
+        building = str(item.get("building", "") or "").strip()
+        source_family = str(item.get("source_family", "") or "").strip()
+        if not building or source_family not in _BRANCH_SOURCE_ALLOWED_FAMILIES:
+            continue
+        bucket_keys = [
+            _normalize_branch_source_bucket_key(raw_value)
+            for raw_value in (item.get("target_bucket_keys") if isinstance(item.get("target_bucket_keys"), list) else [])
+        ]
+        bucket_keys = sorted(
+            {bucket_key for bucket_key in bucket_keys if bucket_key},
+            key=lambda value: datetime.strptime(value, "%Y-%m-%d %H"),
+        )
+        if not bucket_keys:
+            single_bucket = _normalize_branch_source_bucket_key(
+                item.get("target_bucket_key", "") or item.get("bucket_key", "")
+            )
+            if single_bucket:
+                bucket_keys = [single_bucket]
+        if not bucket_keys:
+            continue
+        key = (building, source_family, tuple(bucket_keys))
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(
+            {
+                "building": building,
+                "source_family": source_family,
+                "target_bucket_keys": bucket_keys,
+                "reason": str(item.get("reason", "") or "").strip(),
+            }
+        )
+    output.sort(key=lambda unit: (str(unit.get("building", "")), str(unit.get("source_family", "")), ",".join(unit.get("target_bucket_keys", []))))
+    return output
+
+
+def _branch_requested_units_to_keys(units: List[Dict[str, Any]]) -> set[tuple[str, str, str]]:
+    keys: set[tuple[str, str, str]] = set()
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        building = str(unit.get("building", "") or "").strip()
+        source_family = str(unit.get("source_family", "") or "").strip()
+        for bucket_key in unit.get("target_bucket_keys", []) if isinstance(unit.get("target_bucket_keys", []), list) else []:
+            normalized_bucket = _normalize_branch_source_bucket_key(bucket_key)
+            if normalized_bucket and building and source_family:
+                keys.add((normalized_bucket, building, source_family))
+    return keys
+
+
+def _branch_requested_units_dedupe(units: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for unit in _normalize_branch_requested_source_units(units):
+        parts.append(
+            f"{unit.get('building')}|{unit.get('source_family')}|{','.join(unit.get('target_bucket_keys', []))}"
+        )
+    return ";".join(parts)
+
+
+def _branch_requested_units_summary(units: List[Dict[str, Any]], *, limit: int = 10) -> str:
+    parts = []
+    for unit in _normalize_branch_requested_source_units(units):
+        family_label = _BRANCH_SOURCE_FAMILY_LABELS.get(str(unit.get("source_family", "")), str(unit.get("source_family", "")))
+        buckets = [
+            datetime.strptime(item, "%Y-%m-%d %H").strftime("%H")
+            for item in unit.get("target_bucket_keys", [])
+            if str(item or "").strip()
+        ]
+        parts.append(f"{unit.get('building')}/{family_label}/{','.join(buckets)}")
+    if len(parts) > limit:
+        return ",".join(parts[:limit]) + f" 等{len(parts)}项"
+    return ",".join(parts)
+
+
+def _branch_requested_units_from_legacy_request(request: Dict[str, Any], *, enabled_buildings: List[str] | None = None) -> List[Dict[str, Any]]:
+    if not isinstance(request, dict):
+        return []
+    bucket_keys = [
+        _normalize_branch_source_bucket_key(item)
+        for item in (request.get("target_bucket_keys") if isinstance(request.get("target_bucket_keys"), list) else [])
+    ]
+    bucket_keys = [item for item in bucket_keys if item]
+    if not bucket_keys:
+        single_bucket = _normalize_branch_source_bucket_key(request.get("target_bucket_key", "") or request.get("bucket_key", ""))
+        if single_bucket:
+            bucket_keys = [single_bucket]
+    buildings = [
+        str(item or "").strip()
+        for item in (request.get("buildings") if isinstance(request.get("buildings"), list) else [])
+        if str(item or "").strip()
+    ]
+    if not buildings:
+        buildings = [str(item or "").strip() for item in (enabled_buildings or []) if str(item or "").strip()]
+    if not bucket_keys or not buildings:
+        return []
+    return [
+        {
+            "building": building,
+            "source_family": source_family,
+            "target_bucket_keys": list(bucket_keys),
+            "reason": "active_legacy_task",
+        }
+        for building in buildings
+        for source_family in (FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH)
+    ]
+
+
+def _active_branch_requested_unit_keys(bridge_service, *, enabled_buildings: List[str]) -> set[tuple[str, str, str]]:
+    list_tasks = getattr(bridge_service, "list_tasks", None)
+    if not callable(list_tasks):
+        return set()
+    try:
+        tasks = list_tasks(limit=500)
+    except Exception:
+        return set()
+    active_keys: set[tuple[str, str, str]] = set()
+    for task in tasks if isinstance(tasks, list) else []:
+        if not isinstance(task, dict):
+            continue
+        if str(task.get("feature", "") or "").strip().lower() != "branch_power_upload":
+            continue
+        if str(task.get("status", "") or "").strip().lower() in _BRANCH_BRIDGE_TERMINAL_STATUSES:
+            continue
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        units = _normalize_branch_requested_source_units(request.get("requested_source_units"))
+        if not units:
+            units = _branch_requested_units_from_legacy_request(request, enabled_buildings=enabled_buildings)
+        active_keys.update(_branch_requested_units_to_keys(units))
+    return active_keys
 
 
 def _normalize_branch_source_bucket_key(value: Any) -> str:
@@ -2003,6 +2191,200 @@ def _collect_indexed_branch_source_units(
     }
 
 
+def _collect_indexed_branch_family_entries(
+    bridge_service,
+    *,
+    bucket_keys: List[str],
+    buildings: List[str],
+    emit_log: Callable[[str], None] | None = None,
+) -> Dict[str, Any]:
+    target_buildings = [str(item or "").strip() for item in buildings if str(item or "").strip()]
+    target_bucket_keys = [_normalize_branch_source_bucket_key(item) for item in bucket_keys]
+    target_bucket_keys = [item for item in target_bucket_keys if item]
+    entries_by_unit: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    missing_by_bucket: Dict[str, List[str]] = {}
+    for current_bucket_key in target_bucket_keys:
+        entries_by_family = {
+            source_family: _cached_branch_source_by_building(
+                bridge_service,
+                source_family=source_family,
+                buildings=target_buildings,
+                bucket_key=current_bucket_key,
+            )
+            for source_family in (FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH)
+        }
+        missing: List[str] = []
+        for building in target_buildings:
+            for source_family in (FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH):
+                entry = _resolve_indexed_branch_source_entry(
+                    source_family=source_family,
+                    building=building,
+                    bucket_key=current_bucket_key,
+                    cached_by_building=entries_by_family.get(source_family, {}),
+                    emit_log=emit_log,
+                )
+                key = _branch_source_unit_key(current_bucket_key, building, source_family)
+                if entry:
+                    entries_by_unit[key] = entry
+                else:
+                    missing.append(f"{building}/{_BRANCH_SOURCE_FAMILY_LABELS.get(source_family, source_family)}")
+        missing_by_bucket[current_bucket_key] = missing
+    return {
+        "entries_by_unit": entries_by_unit,
+        "missing_by_bucket": missing_by_bucket,
+    }
+
+
+def _validate_branch_family_entries(
+    service: BranchPowerUploadService,
+    *,
+    entries_by_unit: Dict[tuple[str, str, str], Dict[str, Any]],
+    bucket_keys: List[str],
+    buildings: List[str],
+    emit_log: Callable[[str], None] | None = None,
+) -> Dict[tuple[str, str, str], Dict[str, Any]]:
+    normalized_bucket_keys = [_normalize_branch_source_bucket_key(item) for item in bucket_keys]
+    normalized_bucket_keys = [item for item in normalized_bucket_keys if item]
+    target_buildings = [str(item or "").strip() for item in buildings if str(item or "").strip()]
+    output: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    requests_by_file_family: Dict[tuple[str, str], set[str]] = {}
+    for bucket_key in normalized_bucket_keys:
+        for building in target_buildings:
+            for source_family in (FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH):
+                unit_key = _branch_source_unit_key(bucket_key, building, source_family)
+                entry = entries_by_unit.get(unit_key)
+                if not entry:
+                    output[unit_key] = {
+                        "status": "missing_index",
+                        "row_count": 0,
+                        "file_path": "",
+                        "error": "共享索引缺失",
+                    }
+                    continue
+                file_path = _branch_file_path(entry)
+                if not file_path:
+                    output[unit_key] = {
+                        "status": "missing_file",
+                        "row_count": 0,
+                        "file_path": "",
+                        "error": "共享索引缺少文件路径",
+                    }
+                    continue
+                requests_by_file_family.setdefault((file_path, source_family), set()).add(bucket_key)
+
+    for (file_path, source_family), request_bucket_keys in requests_by_file_family.items():
+        try:
+            file_result = service.inspect_source_family_file_hours(
+                file_path=file_path,
+                source_family=source_family,
+                bucket_keys=sorted(request_bucket_keys, key=lambda item: datetime.strptime(item, "%Y-%m-%d %H")),
+            )
+        except Exception as exc:  # noqa: BLE001
+            file_result = {
+                bucket_key: {
+                    "status": "parse_failed",
+                    "row_count": 0,
+                    "file_path": file_path,
+                    "error": str(exc),
+                }
+                for bucket_key in request_bucket_keys
+            }
+        for bucket_key, item in file_result.items():
+            for building in target_buildings:
+                unit_key = _branch_source_unit_key(bucket_key, building, source_family)
+                entry = entries_by_unit.get(unit_key)
+                if not entry or _branch_file_path(entry) != file_path:
+                    continue
+                status_item = dict(item if isinstance(item, dict) else {})
+                status_item.setdefault("status", "parse_failed")
+                status_item.setdefault("row_count", 0)
+                status_item.setdefault("file_path", file_path)
+                status_item.setdefault("error", "")
+                output[unit_key] = status_item
+
+    if callable(emit_log):
+        invalid = [
+            f"{bucket}/{building}/{_BRANCH_SOURCE_FAMILY_LABELS.get(source_family, source_family)}={item.get('status')}"
+            for (bucket, building, source_family), item in output.items()
+            if str(item.get("status", "") or "").strip() != "valid"
+        ]
+        if invalid:
+            sample = ",".join(invalid[:12])
+            suffix = f" 等{len(invalid)}项" if len(invalid) > 12 else ""
+            emit_log(f"[支路信息补处理] 共享索引源文件有效性校验发现无效单元: {sample}{suffix}")
+    return output
+
+
+def _branch_source_unit_from_family_entries(
+    *,
+    entries_by_unit: Dict[tuple[str, str, str], Dict[str, Any]],
+    bucket_key: str,
+    building: str,
+) -> Dict[str, Any] | None:
+    power_entry = entries_by_unit.get(_branch_source_unit_key(bucket_key, building, FAMILY_BRANCH_POWER))
+    current_entry = entries_by_unit.get(_branch_source_unit_key(bucket_key, building, FAMILY_BRANCH_CURRENT))
+    switch_entry = entries_by_unit.get(_branch_source_unit_key(bucket_key, building, FAMILY_BRANCH_SWITCH))
+    if not power_entry or not current_entry or not switch_entry:
+        return None
+    power_file = _branch_file_path(power_entry)
+    current_file = _branch_file_path(current_entry)
+    switch_file = _branch_file_path(switch_entry)
+    if not power_file or not current_file or not switch_file:
+        return None
+    metadata = dict(power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {})
+    metadata["bucket_hour"] = bucket_key
+    metadata["source_bucket_key"] = bucket_key
+    metadata.setdefault("data_hour_bucket", bucket_key)
+    metadata.setdefault("data_bucket_key", metadata.get("data_hour_bucket", bucket_key))
+    source_files = {
+        "power_file": power_file,
+        "current_file": current_file,
+        "switch_file": switch_file,
+    }
+    return {
+        "bucket_key": bucket_key,
+        "data_hour_bucket": str(metadata.get("data_hour_bucket", "") or bucket_key).strip(),
+        "building": building,
+        "power_file": power_file,
+        "current_file": current_file,
+        "switch_file": switch_file,
+        "metadata": metadata,
+        "source_files": source_files,
+    }
+
+
+def _branch_units_to_requested_source_units(
+    unit_keys: set[tuple[str, str, str]],
+    *,
+    reason_by_key: Dict[tuple[str, str, str], str] | None = None,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[tuple[str, str, str], List[str]] = {}
+    reason_lookup = reason_by_key or {}
+    for bucket_key, building, source_family in sorted(
+        unit_keys,
+        key=lambda item: (item[1], item[2], datetime.strptime(item[0], "%Y-%m-%d %H")),
+    ):
+        reason = str(reason_lookup.get((bucket_key, building, source_family), "") or "").strip()
+        grouped.setdefault((building, source_family, reason), []).append(bucket_key)
+    units: List[Dict[str, Any]] = []
+    for (building, source_family, reason), bucket_group in grouped.items():
+        hours = [datetime.strptime(bucket_key, "%Y-%m-%d %H").hour for bucket_key in bucket_group]
+        by_date: Dict[str, List[int]] = {}
+        for bucket_key, hour in zip(bucket_group, hours):
+            by_date.setdefault(bucket_key[:10], []).append(hour)
+        for date_text, date_hours in by_date.items():
+            for group in _branch_power_consecutive_hour_groups(date_hours):
+                units.append(
+                    {
+                        "building": building,
+                        "source_family": source_family,
+                        "target_bucket_keys": [f"{date_text} {hour:02d}" for hour in group],
+                        "reason": reason,
+                    }
+                )
+    return _normalize_branch_requested_source_units(units)
+
+
 def _branch_file_path(entry: Dict[str, Any] | None) -> str:
     if not isinstance(entry, dict):
         return ""
@@ -2030,12 +2412,6 @@ def _derive_branch_sibling_file_path(power_file: str, *, target_family: str) -> 
     candidate = Path(text)
     if is_accessible_cached_file_path(candidate):
         return str(candidate)
-    try:
-        for item in sorted(power_path.parent.glob(f"*{short_name}*.xlsx")):
-            if is_accessible_cached_file_path(item):
-                return str(item)
-    except OSError:
-        return ""
     return ""
 
 
@@ -2369,15 +2745,27 @@ def _run_external_branch_power_backfill_missing_flow(
         expected_buildings=target_buildings,
         max_hour=max_hour,
     )
-    target_hours = service.get_missing_hour_numbers(
+    missing_family_units = service.get_missing_source_family_units(
         business_date=date_text,
         expected_buildings=target_buildings,
         max_hour=max_hour,
     )
+    target_hour_set: set[int] = set()
+    for item in missing_family_units:
+        if not isinstance(item, dict):
+            continue
+        try:
+            hour = int(item.get("hour", -1))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour <= 23:
+            target_hour_set.add(hour)
+    target_hours = sorted(target_hour_set)
     emit_log(
         "[支路信息补处理] 小时缺口扫描完成 "
         f"date={date_text}, max_hour={max_hour}, buildings={','.join(target_buildings)}, "
-        f"missing_hours={','.join(f'{hour:02d}' for hour in target_hours) or '-'}"
+        f"missing_hours={','.join(f'{hour:02d}' for hour in target_hours) or '-'}, "
+        f"missing_family_units={len(missing_family_units)}"
     )
     if not target_hours:
         return {
@@ -2397,115 +2785,152 @@ def _run_external_branch_power_backfill_missing_flow(
     waiting: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
     bridge_service = _shared_bridge_service_or_raise(container)
-    for group in _branch_power_consecutive_hour_groups(target_hours):
-        group_bucket_keys = [f"{date_text} {hour:02d}" for hour in group]
-        indexed_sources = _collect_indexed_branch_source_units(
-            bridge_service,
-            bucket_keys=group_bucket_keys,
-            buildings=target_buildings,
-            emit_log=emit_log,
+    target_bucket_keys = [f"{date_text} {hour:02d}" for hour in target_hours]
+    indexed_sources = _collect_indexed_branch_family_entries(
+        bridge_service,
+        bucket_keys=target_bucket_keys,
+        buildings=target_buildings,
+        emit_log=emit_log,
+    )
+    entries_by_unit = indexed_sources.get("entries_by_unit", {}) if isinstance(indexed_sources, dict) else {}
+    validation_by_unit = _validate_branch_family_entries(
+        service,
+        entries_by_unit=entries_by_unit if isinstance(entries_by_unit, dict) else {},
+        bucket_keys=target_bucket_keys,
+        buildings=target_buildings,
+        emit_log=emit_log,
+    )
+    target_pairs = {
+        (
+            str(item.get("bucket_key", "") or f"{date_text} {int(item.get('hour', 0)):02d}").strip(),
+            str(item.get("building", "") or "").strip(),
         )
-        bucket_source_units = indexed_sources.get("bucket_source_units", {}) if isinstance(indexed_sources, dict) else {}
-        missing_by_bucket = indexed_sources.get("missing_by_bucket", {}) if isinstance(indexed_sources, dict) else {}
+        for item in missing_family_units
+        if isinstance(item, dict) and str(item.get("building", "") or "").strip()
+    }
+    ready_pairs: set[tuple[str, str]] = set()
+    invalid_unit_keys: set[tuple[str, str, str]] = set()
+    invalid_reason_by_key: Dict[tuple[str, str, str], str] = {}
+    for bucket_key, building in sorted(target_pairs, key=lambda item: (item[0], item[1])):
+        family_statuses = {
+            source_family: validation_by_unit.get(
+                _branch_source_unit_key(bucket_key, building, source_family),
+                {"status": "missing_index", "error": "共享索引缺失"},
+            )
+            for source_family in (FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH)
+        }
+        if all(str(item.get("status", "") or "").strip() == "valid" for item in family_statuses.values()):
+            ready_pairs.add((bucket_key, building))
+            continue
+        for source_family, status_item in family_statuses.items():
+            if str(status_item.get("status", "") or "").strip() == "valid":
+                continue
+            unit_key = _branch_source_unit_key(bucket_key, building, source_family)
+            invalid_unit_keys.add(unit_key)
+            invalid_reason_by_key[unit_key] = str(status_item.get("status", "") or "").strip() or "invalid"
 
-        ready_hours: List[int] = []
-        missing_hours: List[int] = []
-        for hour in group:
-            bucket_key = f"{date_text} {hour:02d}"
-            bucket_units = bucket_source_units.get(bucket_key, []) if isinstance(bucket_source_units, dict) else []
-            bucket_missing = missing_by_bucket.get(bucket_key, []) if isinstance(missing_by_bucket, dict) else []
-            if not bucket_missing and len(bucket_units) >= len(target_buildings):
-                ready_hours.append(hour)
-            else:
-                missing_hours.append(hour)
+    skipped_valid_family_units = max(0, len(target_pairs) * 3 - len(invalid_unit_keys))
+    emit_log(
+        "[支路信息补处理] 缺口源文件规划完成 "
+        f"pairs={len(target_pairs)}, ready_pairs={len(ready_pairs)}, "
+        f"invalid_units={len(invalid_unit_keys)}, skipped_valid_units={skipped_valid_family_units}"
+    )
 
-        for ready_group in _branch_power_consecutive_hour_groups(ready_hours):
-            bucket_keys = [f"{date_text} {hour:02d}" for hour in ready_group]
-            source_units: List[Dict[str, Any]] = []
-            for bucket_key in bucket_keys:
-                source_units.extend(bucket_source_units.get(bucket_key, []))
-            try:
-                emit_log(
-                    "[支路信息补处理] 发现共享索引已有源文件，直接入库 "
-                    f"buckets={','.join(bucket_keys)}, buildings={','.join(target_buildings)}, units={len(source_units)}"
+    for bucket_key in sorted({bucket for bucket, _building in ready_pairs}, key=lambda item: datetime.strptime(item, "%Y-%m-%d %H")):
+        ready_buildings = sorted({building for current_bucket, building in ready_pairs if current_bucket == bucket_key})
+        source_units = [
+            unit
+            for unit in (
+                _branch_source_unit_from_family_entries(
+                    entries_by_unit=entries_by_unit if isinstance(entries_by_unit, dict) else {},
+                    bucket_key=bucket_key,
+                    building=building,
                 )
-                if len(bucket_keys) >= 2:
-                    ingest_result = service.continue_range_from_source_files(
-                        bucket_keys=bucket_keys,
-                        source_units=source_units,
-                        emit_log=emit_log,
-                    )
-                    mode = "range_from_existing_shared_index"
-                else:
-                    ingest_result = service.continue_manual_hour_from_source_files(
-                        bucket_key=bucket_keys[0],
-                        source_units=source_units,
-                        emit_log=emit_log,
-                    )
-                    mode = "single_from_existing_shared_index"
-                processed.append(
-                    {
-                        "hours": ready_group,
-                        "bucket_keys": bucket_keys,
-                        "mode": mode,
-                        "result": ingest_result,
-                    }
-                )
-                empty_hours = _branch_power_empty_data_hours_from_result(
-                    ingest_result,
-                    bucket_keys=bucket_keys,
-                    expected_buildings=target_buildings,
-                )
-                if empty_hours:
-                    missing_hours.extend(empty_hours)
-                    emit_log(
-                        "[支路信息补处理] 共享索引已有源文件但目标小时数据列全空，派发内网重采 "
-                        f"buckets={','.join(f'{date_text} {hour:02d}' for hour in empty_hours)}"
-                    )
-            except Exception as exc:  # noqa: BLE001
-                error_text = str(exc)
-                failed.append(
-                    {
-                        "hours": ready_group,
-                        "bucket_keys": bucket_keys,
-                        "phase": "existing_shared_index_ingest",
-                        "error": error_text,
-                    }
-                )
-                emit_log(
-                    "[支路信息补处理][失败] 共享索引已有源文件直接入库失败，将派发内网重采 "
-                    f"buckets={','.join(bucket_keys)}, error={error_text}"
-                )
-                missing_hours.extend(ready_group)
+                for building in ready_buildings
+            )
+            if isinstance(unit, dict)
+        ]
+        if not source_units:
+            continue
+        try:
+            emit_log(
+                "[支路信息补处理] 共享索引已有有效源文件，直接入库 "
+                f"bucket={bucket_key}, buildings={','.join(ready_buildings)}, units={len(source_units)}"
+            )
+            ingest_result = service.continue_manual_hour_from_source_files(
+                bucket_key=bucket_key,
+                source_units=source_units,
+                emit_log=emit_log,
+            )
+            processed.append(
+                {
+                    "hours": [datetime.strptime(bucket_key, "%Y-%m-%d %H").hour],
+                    "bucket_keys": [bucket_key],
+                    "buildings": ready_buildings,
+                    "mode": "single_from_valid_shared_index",
+                    "result": ingest_result,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            emit_log(
+                "[支路信息补处理][失败] 共享索引有效源文件直接入库失败，将派发该小时三源文件重采 "
+                f"bucket={bucket_key}, buildings={','.join(ready_buildings)}, error={error_text}"
+            )
+            for building in ready_buildings:
+                for source_family in (FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH):
+                    unit_key = _branch_source_unit_key(bucket_key, building, source_family)
+                    invalid_unit_keys.add(unit_key)
+                    invalid_reason_by_key[unit_key] = "existing_valid_ingest_failed"
 
-        for dispatch_hours in _branch_power_consecutive_hour_groups(missing_hours):
-            bucket_keys = [f"{date_text} {hour:02d}" for hour in dispatch_hours]
-            try:
-                missing_details: List[str] = []
-                for bucket_key in bucket_keys:
-                    missing_details.extend(missing_by_bucket.get(bucket_key, []) if isinstance(missing_by_bucket, dict) else [])
-                if missing_details:
-                    sample = ",".join(missing_details[:12])
-                    suffix = f" 等{len(missing_details)}项" if len(missing_details) > 12 else ""
-                    emit_log(
-                        "[支路信息补处理] 共享索引未齐全，派发内网补缺口 "
-                        f"buckets={','.join(bucket_keys)}, missing={sample}{suffix}"
-                    )
-                waiting_item = _enqueue_branch_power_missing_download(
-                    container=container,
-                    bridge_service=bridge_service,
-                    date_text=date_text,
-                    buildings=target_buildings,
-                    hours=dispatch_hours,
-                    emit_log=emit_log,
-                    priority=priority,
-                    submitted_by=submitted_by,
-                )
-                waiting.append(waiting_item)
-            except Exception as exc:  # noqa: BLE001
-                error_text = str(exc)
-                failed.append({"hours": dispatch_hours, "bucket_keys": bucket_keys, "error": error_text})
-                emit_log(f"[支路信息补处理][失败] 内网补缺口任务派发失败 buckets={','.join(bucket_keys)}, error={error_text}")
+    active_unit_keys = _active_branch_requested_unit_keys(bridge_service, enabled_buildings=target_buildings)
+    reused_active_keys = invalid_unit_keys.intersection(active_unit_keys)
+    dispatch_unit_keys = invalid_unit_keys.difference(active_unit_keys)
+    if reused_active_keys:
+        reused_units = _branch_units_to_requested_source_units(reused_active_keys, reason_by_key=invalid_reason_by_key)
+        emit_log(
+            "[支路信息补处理] 已存在等待/运行中的内网补采单元，本次不重复派发 "
+            f"units={_branch_requested_units_summary(reused_units) or '-'}"
+        )
+        waiting.append(
+            {
+                "mode": "active_bridge_task_reused",
+                "requested_source_units": reused_units,
+                "unit_count": len(reused_active_keys),
+            }
+        )
+    requested_units = _branch_units_to_requested_source_units(dispatch_unit_keys, reason_by_key=invalid_reason_by_key)
+    if requested_units:
+        try:
+            dispatch_hours = sorted(
+                {
+                    datetime.strptime(bucket_key, "%Y-%m-%d %H").hour
+                    for bucket_key, _building, _family in dispatch_unit_keys
+                    if bucket_key.startswith(f"{date_text} ")
+                }
+            )
+            dispatch_buildings = sorted({building for _bucket, building, _family in dispatch_unit_keys})
+            emit_log(
+                "[支路信息补处理] 派发内网精细补采 "
+                f"hours={','.join(f'{hour:02d}' for hour in dispatch_hours) or '-'}, "
+                f"units={_branch_requested_units_summary(requested_units) or '-'}"
+            )
+            waiting_item = _enqueue_branch_power_missing_download(
+                container=container,
+                bridge_service=bridge_service,
+                date_text=date_text,
+                buildings=dispatch_buildings or target_buildings,
+                hours=dispatch_hours,
+                emit_log=emit_log,
+                priority=priority,
+                submitted_by=submitted_by,
+                requested_source_units=requested_units,
+            )
+            waiting.append(waiting_item)
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            failed.append({"requested_source_units": requested_units, "error": error_text})
+            emit_log(f"[支路信息补处理][失败] 内网精细补采任务派发失败 error={error_text}")
 
     after_summary = service.get_hour_status_summary(
         business_date=date_text,
