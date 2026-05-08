@@ -1520,7 +1520,15 @@ def _branch_power_range_query_window(bucket_keys: List[str]) -> tuple[str, str]:
 
 
 def _branch_power_consecutive_hour_groups(hours: List[int]) -> List[List[int]]:
-    normalized = sorted({hour for hour in hours if 0 <= int(hour) <= 23})
+    normalized_hours = set()
+    for raw_hour in hours:
+        try:
+            hour = int(raw_hour)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour <= 23:
+            normalized_hours.add(hour)
+    normalized = sorted(normalized_hours)
     groups: List[List[int]] = []
     for hour in normalized:
         if not groups or hour != groups[-1][-1] + 1:
@@ -1528,6 +1536,69 @@ def _branch_power_consecutive_hour_groups(hours: List[int]) -> List[List[int]]:
         else:
             groups[-1].append(hour)
     return groups
+
+
+def _branch_power_empty_data_hours_from_result(
+    ingest_result: Dict[str, Any],
+    *,
+    bucket_keys: List[str],
+    expected_buildings: List[str],
+) -> List[int]:
+    if not isinstance(ingest_result, dict):
+        return []
+    bucket_set = {str(item or "").strip() for item in bucket_keys if str(item or "").strip()}
+    expected_count = len([item for item in expected_buildings if str(item or "").strip()])
+
+    def _hour_from_bucket(value: str) -> int | None:
+        try:
+            return datetime.strptime(str(value or "").strip(), "%Y-%m-%d %H").hour
+        except (TypeError, ValueError):
+            return None
+
+    processed_counts: Dict[str, int] = {}
+    for item in ingest_result.get("processed", []) if isinstance(ingest_result.get("processed", []), list) else []:
+        if not isinstance(item, dict):
+            continue
+        bucket_key = str(item.get("bucket_key", "") or "").strip()
+        if bucket_key in bucket_set:
+            processed_counts[bucket_key] = processed_counts.get(bucket_key, 0) + 1
+    for item in ingest_result.get("ingested_buildings", []) if isinstance(ingest_result.get("ingested_buildings", []), list) else []:
+        if not isinstance(item, dict):
+            continue
+        bucket_key = str(ingest_result.get("data_bucket_key", "") or ingest_result.get("bucket_key", "") or "").strip()
+        if bucket_key in bucket_set:
+            processed_counts[bucket_key] = processed_counts.get(bucket_key, 0) + 1
+
+    no_data_by_bucket: Dict[str, set[str]] = {}
+    for item in ingest_result.get("no_data", []) if isinstance(ingest_result.get("no_data", []), list) else []:
+        if not isinstance(item, dict):
+            continue
+        bucket_key = str(item.get("bucket_key", "") or "").strip()
+        building = str(item.get("building", "") or "").strip()
+        if bucket_key in bucket_set:
+            no_data_by_bucket.setdefault(bucket_key, set()).add(building or "-")
+    single_no_data = ingest_result.get("no_data_buildings", [])
+    if isinstance(single_no_data, list) and single_no_data:
+        bucket_key = str(ingest_result.get("data_bucket_key", "") or ingest_result.get("bucket_key", "") or "").strip()
+        if bucket_key in bucket_set:
+            for item in single_no_data:
+                building = str(item.get("building", "") or "").strip() if isinstance(item, dict) else ""
+                no_data_by_bucket.setdefault(bucket_key, set()).add(building or "-")
+
+    empty_hours: List[int] = []
+    for bucket_key in bucket_keys:
+        bucket_key = str(bucket_key or "").strip()
+        if not bucket_key:
+            continue
+        if processed_counts.get(bucket_key, 0) > 0:
+            continue
+        no_data_count = len(no_data_by_bucket.get(bucket_key, set()))
+        status_text = str(ingest_result.get("status", "") or "").strip().lower()
+        if status_text == "no_data" or (no_data_count > 0 and (expected_count <= 0 or no_data_count >= expected_count)):
+            hour = _hour_from_bucket(bucket_key)
+            if hour is not None:
+                empty_hours.append(hour)
+    return sorted(set(empty_hours))
 
 
 def _enqueue_branch_power_missing_download(
@@ -2380,6 +2451,17 @@ def _run_external_branch_power_backfill_missing_flow(
                         "result": ingest_result,
                     }
                 )
+                empty_hours = _branch_power_empty_data_hours_from_result(
+                    ingest_result,
+                    bucket_keys=bucket_keys,
+                    expected_buildings=target_buildings,
+                )
+                if empty_hours:
+                    missing_hours.extend(empty_hours)
+                    emit_log(
+                        "[支路信息补处理] 共享索引已有源文件但目标小时数据列全空，派发内网重采 "
+                        f"buckets={','.join(f'{date_text} {hour:02d}' for hour in empty_hours)}"
+                    )
             except Exception as exc:  # noqa: BLE001
                 error_text = str(exc)
                 failed.append(
