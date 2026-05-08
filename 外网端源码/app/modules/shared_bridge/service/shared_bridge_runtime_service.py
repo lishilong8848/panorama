@@ -29,7 +29,9 @@ from app.modules.shared_bridge.service.shared_bridge_mailbox_store import Shared
 from app.modules.shared_bridge.service.shared_bridge_runtime_mirror_store import SharedBridgeRuntimeMirrorStore
 from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_ALARM_EVENT,
+    FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_POWER,
+    FAMILY_BRANCH_SWITCH,
     FAMILY_HANDOVER_CAPACITY_REPORT,
     FAMILY_HANDOVER_LOG,
     FAMILY_LABELS,
@@ -158,6 +160,7 @@ class SharedBridgeRuntimeService:
         self._background_task_state = self._build_initial_background_task_state()
         self._background_scan_sessions: Dict[str, Dict[str, Any]] = {}
         self._background_task_next_due_monotonic: Dict[str, float] = {}
+        self._waiting_job_cache_probe_log_markers: Dict[str, float] = {}
         self._last_foreground_busy_monotonic = 0.0
         self._source_cache_start_thread: threading.Thread | None = None
         self._refresh_config()
@@ -458,6 +461,188 @@ class SharedBridgeRuntimeService:
             "summary": "共享文件已到位，正在继续处理支路信息",
             "log_text": f"[共享桥接] 任务={task_id} 支路信息共享文件已齐全，正在自动恢复原任务",
         }
+
+    def _branch_power_request_scope(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
+        internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
+        target_bucket_keys = self._normalize_text_list(internal_result.get("target_bucket_keys", []))
+        if not target_bucket_keys:
+            target_bucket_keys = self._normalize_text_list(request.get("target_bucket_keys", []))
+        bucket_key = (
+            str(internal_result.get("bucket_key", "") or "").strip()
+            or str(request.get("target_bucket_key", "") or "").strip()
+            or (target_bucket_keys[0] if target_bucket_keys else "")
+        )
+        if not target_bucket_keys and bucket_key:
+            target_bucket_keys = [bucket_key]
+        buildings = self._normalize_text_list(request.get("buildings", []))
+        if not buildings and self._source_cache_service is not None:
+            buildings = [
+                str(item or "").strip()
+                for item in self._source_cache_service.get_enabled_buildings()
+                if str(item or "").strip()
+            ]
+        return {
+            "bucket_key": bucket_key,
+            "target_bucket_keys": target_bucket_keys,
+            "buildings": buildings,
+        }
+
+    def _branch_power_ready_entries_by_building(
+        self,
+        *,
+        source_family: str,
+        bucket_key: str,
+        buildings: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        if self._source_cache_service is None:
+            return {}
+        entries = self._source_cache_service.get_latest_ready_entries(
+            source_family=source_family,
+            buildings=buildings or None,
+            bucket_key=bucket_key,
+        )
+        output: Dict[str, Dict[str, Any]] = {}
+        for item in entries if isinstance(entries, list) else []:
+            if not isinstance(item, dict):
+                continue
+            building = str(item.get("building", "") or "").strip()
+            file_path = str(item.get("file_path", "") or "").strip()
+            if building and file_path:
+                output[building] = item
+        return output
+
+    def _build_branch_power_cache_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        if self._source_cache_service is None:
+            raise RuntimeError("共享源缓存服务未初始化")
+        task_id = str(task.get("task_id", "") or "").strip()
+        scope = self._branch_power_request_scope(task)
+        bucket_key = str(scope.get("bucket_key", "") or "").strip()
+        target_bucket_keys = [str(item or "").strip() for item in list(scope.get("target_bucket_keys") or []) if str(item or "").strip()]
+        buildings = [str(item or "").strip() for item in list(scope.get("buildings") or []) if str(item or "").strip()]
+        if not target_bucket_keys:
+            raise RuntimeError("支路信息等待任务缺少目标小时")
+        if not buildings:
+            raise RuntimeError("支路信息等待任务缺少楼栋")
+
+        normalized_units: List[Dict[str, Any]] = []
+        missing: List[str] = []
+        for data_bucket in target_bucket_keys:
+            power_by_building = self._branch_power_ready_entries_by_building(
+                source_family=FAMILY_BRANCH_POWER,
+                bucket_key=data_bucket,
+                buildings=buildings,
+            )
+            current_by_building = self._branch_power_ready_entries_by_building(
+                source_family=FAMILY_BRANCH_CURRENT,
+                bucket_key=data_bucket,
+                buildings=buildings,
+            )
+            switch_by_building = self._branch_power_ready_entries_by_building(
+                source_family=FAMILY_BRANCH_SWITCH,
+                bucket_key=data_bucket,
+                buildings=buildings,
+            )
+            for building in buildings:
+                power_entry = power_by_building.get(building)
+                current_entry = current_by_building.get(building)
+                switch_entry = switch_by_building.get(building)
+                if not power_entry:
+                    missing.append(f"{data_bucket}/{building}/支路功率")
+                if not current_entry:
+                    missing.append(f"{data_bucket}/{building}/支路电流")
+                if not switch_entry:
+                    missing.append(f"{data_bucket}/{building}/支路开关")
+                if not power_entry or not current_entry or not switch_entry:
+                    continue
+                power_file = self._require_accessible_cached_file(
+                    power_entry.get("file_path", ""),
+                    description="支路功率共享源文件",
+                )
+                current_file = self._require_accessible_cached_file(
+                    current_entry.get("file_path", ""),
+                    description="支路电流共享源文件",
+                )
+                switch_file = self._require_accessible_cached_file(
+                    switch_entry.get("file_path", ""),
+                    description="支路开关共享源文件",
+                )
+                metadata = power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {}
+                normalized_units.append(
+                    {
+                        "building": building,
+                        "file_path": power_file,
+                        "power_file": power_file,
+                        "current_file": current_file,
+                        "switch_file": switch_file,
+                        "source_files": {
+                            "power_file": power_file,
+                            "current_file": current_file,
+                            "switch_file": switch_file,
+                        },
+                        "bucket_key": data_bucket,
+                        "data_hour_bucket": str(metadata.get("data_hour_bucket", "") or data_bucket).strip(),
+                        "metadata": metadata,
+                    }
+                )
+        if missing:
+            sample = ", ".join(missing[:8])
+            suffix = f" 等{len(missing)}项" if len(missing) > 8 else ""
+            raise RuntimeError(f"支路信息共享缓存尚未齐全: {sample}{suffix}")
+        if not normalized_units:
+            raise RuntimeError("支路信息共享缓存没有可恢复的源文件")
+        return {
+            "worker_payload": {
+                "resume_kind": "shared_bridge_branch_power",
+                "target_bucket_key": bucket_key or target_bucket_keys[0],
+                "target_bucket_keys": target_bucket_keys,
+                "source_units": normalized_units,
+                "bridge_task_id": task_id,
+            },
+            "summary": "共享文件已到位，正在继续处理支路信息",
+            "log_text": f"[共享桥接] 任务={task_id} 支路信息共享缓存已齐全，正在自动恢复原任务",
+        }
+
+    def _try_resume_branch_power_waiting_job_from_cache(self, *, job_id: str, task: Dict[str, Any], status: str) -> bool:
+        if self._job_service is None:
+            return False
+        if str(task.get("feature", "") or "").strip().lower() != "branch_power_upload":
+            return False
+        task_id = str(task.get("task_id", "") or "").strip()
+        try:
+            binding = self._build_branch_power_cache_resume_binding(task)
+        except Exception as exc:  # noqa: BLE001
+            marker = task_id or job_id
+            now_monotonic = time.monotonic()
+            previous = float(self._waiting_job_cache_probe_log_markers.get(marker, 0.0) or 0.0)
+            if now_monotonic - previous >= 120:
+                self._waiting_job_cache_probe_log_markers[marker] = now_monotonic
+                self._emit_system_log(
+                    f"[共享桥接] 任务={task_id or '-'} 支路信息等待中: bridge_status={status or '-'}, {exc}"
+                )
+            return False
+        if binding.get("log_text"):
+            self._emit_system_log(str(binding.get("log_text", "")).strip() + f"（bridge_status={status or '-'}）")
+        self._job_service.resume_waiting_worker_job(
+            job_id,
+            worker_payload=binding.get("worker_payload") if isinstance(binding.get("worker_payload"), dict) else {},
+            summary=str(binding.get("summary", "") or "共享文件已到位，正在继续处理").strip() or "共享文件已到位，正在继续处理",
+        )
+        if self._store and task_id:
+            self._store.append_event(
+                task_id=task_id,
+                stage_id="",
+                side="external",
+                level="info",
+                event_type="waiting_job_cache_resume",
+                payload={
+                    "message": "支路信息共享缓存已齐全，已直接恢复等待任务",
+                    "job_id": job_id,
+                    "bridge_status": status,
+                },
+            )
+        return True
 
     def _build_wet_bulb_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
         if not self._store:
@@ -6284,6 +6469,8 @@ class SharedBridgeRuntimeService:
                         error_text=f"共享桥接已完成，但自动恢复原任务失败: {exc}",
                         summary="等待内网补采同步失败",
                     )
+                continue
+            if self._try_resume_branch_power_waiting_job_from_cache(job_id=job_id, task=task, status=status):
                 continue
             if status in {"failed", "partial_failed", "cancelled"}:
                 error_text = str(task.get("error", "") or "").strip() or f"绑定补采任务已{status}"

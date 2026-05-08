@@ -2413,7 +2413,11 @@ class JobService:
                 raise KeyError(f"任务不存在: {job_id}")
             if str(job.status or "").strip().lower() in {"success", "failed", "cancelled", "partial_failed"}:
                 return job
+            if str(job.status or "").strip().lower() != "waiting_resource":
+                return job
             stage = self._get_primary_stage(job)
+            if str(job.wait_reason or "").strip().lower() != "waiting:shared_bridge":
+                return job
             payload_path = self._task_engine_store.resolve_stage_payload_path(job.job_id, stage.stage_id)
             if isinstance(worker_payload, dict):
                 self._task_engine_store.persist_stage_payload(job.job_id, stage.stage_id, self._json_ready(worker_payload))
