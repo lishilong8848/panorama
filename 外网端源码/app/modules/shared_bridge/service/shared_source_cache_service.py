@@ -1291,7 +1291,7 @@ class SharedSourceCacheService:
     def branch_power_data_bucket(self, bucket_key: str = "", when: datetime | None = None) -> str:
         bucket_dt = _parse_hour_bucket(bucket_key) if str(bucket_key or "").strip() else None
         base = bucket_dt or (when or datetime.now()).replace(minute=0, second=0, microsecond=0)
-        return (base - timedelta(hours=1)).strftime("%Y-%m-%d %H")
+        return base.strftime("%Y-%m-%d %H")
 
     def get_enabled_buildings(self) -> List[str]:
         configured_sites = self.runtime_config.get("internal_source_sites", [])

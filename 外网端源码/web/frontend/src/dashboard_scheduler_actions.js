@@ -22,6 +22,11 @@ function toPositiveInt(value, fallback) {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
+function toNonNegativeInt(value, fallback) {
+  const n = Number.parseInt(String(value ?? ""), 10);
+  return Number.isInteger(n) && n >= 0 ? n : fallback;
+}
+
 const ACTION_KEYS = {
   schedulerStart: "scheduler:start",
   schedulerStop: "scheduler:stop",
@@ -331,6 +336,12 @@ export function createDashboardSchedulerActions(ctx) {
       next_run_time: Object.prototype.hasOwnProperty.call(data, "next_run_time")
         ? String(data.next_run_time || "")
         : String(targetScheduler.next_run_time || ""),
+      interval_minutes: Object.prototype.hasOwnProperty.call(data, "interval_minutes")
+        ? toPositiveInt(data.interval_minutes, toPositiveInt(targetScheduler.interval_minutes, 60))
+        : toPositiveInt(targetScheduler.interval_minutes, 60),
+      minute_offset: Object.prototype.hasOwnProperty.call(data, "minute_offset")
+        ? toNonNegativeInt(data.minute_offset, toNonNegativeInt(targetScheduler.minute_offset, 30))
+        : toNonNegativeInt(targetScheduler.minute_offset, 30),
       last_check_at: Object.prototype.hasOwnProperty.call(data, "last_check_at")
         ? String(data.last_check_at || "")
         : String(targetScheduler.last_check_at || ""),
@@ -529,11 +540,13 @@ export function createDashboardSchedulerActions(ctx) {
     const payload = {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
-      interval_minutes: toPositiveInt(scheduler.interval_minutes, 60),
+      interval_minutes: 60,
+      minute_offset: toNonNegativeInt(scheduler.minute_offset, 30),
       check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
       retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,
       state_file: String(scheduler.state_file || "branch_power_upload_scheduler_state.json").trim(),
     };
+    payload.minute_offset = payload.minute_offset % 60;
     if (!payload.state_file) {
       message.value = "自动上传支路功率调度状态文件不能为空";
       return;

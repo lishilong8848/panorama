@@ -53,14 +53,19 @@ class IntervalSchedulerService:
         interval_minutes = int(raw.get("interval_minutes", 60) or 60)
         check_interval_sec = int(raw.get("check_interval_sec", 30) or 30)
         state_file = str(raw.get("state_file", "")).strip() or "interval_scheduler_state.json"
+        minute_offset = int(raw.get("minute_offset", raw.get("start_minute", raw.get("run_minute", 0))) or 0)
         if interval_minutes < 1:
             raise ValueError("配置错误: interval_minutes 必须大于等于1")
         if check_interval_sec < 1:
             raise ValueError("配置错误: check_interval_sec 必须大于0")
+        if minute_offset < 0:
+            minute_offset = 0
+        minute_offset = minute_offset % interval_minutes
         return {
             "enabled": bool(raw.get("enabled", True)),
             "auto_start_in_gui": bool(raw.get("auto_start_in_gui", False)),
             "interval_minutes": interval_minutes,
+            "minute_offset": minute_offset,
             "check_interval_sec": check_interval_sec,
             "retry_failed_on_next_tick": bool(raw.get("retry_failed_on_next_tick", True)),
             "align_to_wall_clock": bool(raw.get("align_to_wall_clock", True)),
@@ -146,9 +151,12 @@ class IntervalSchedulerService:
         interval_minutes = max(1, int(self.cfg["interval_minutes"]))
         current = self._strip_microseconds(value)
         day_start = current.replace(hour=0, minute=0, second=0)
-        elapsed_minutes = int((current - day_start).total_seconds() // 60)
+        anchor = day_start + timedelta(minutes=max(0, int(self.cfg.get("minute_offset", 0) or 0)))
+        if current < anchor:
+            return anchor - timedelta(minutes=interval_minutes)
+        elapsed_minutes = int((current - anchor).total_seconds() // 60)
         slot_minutes = (elapsed_minutes // interval_minutes) * interval_minutes
-        return day_start + timedelta(minutes=slot_minutes)
+        return anchor + timedelta(minutes=slot_minutes)
 
     def _aligned_boundary_at_or_after(self, value: datetime) -> datetime:
         interval = timedelta(minutes=max(1, int(self.cfg["interval_minutes"])))
@@ -202,7 +210,10 @@ class IntervalSchedulerService:
         self._thread = threading.Thread(target=self._loop, name=self.thread_name, daemon=True)
         self._thread.start()
         align_text = "自然时间桶" if bool(self.cfg.get("align_to_wall_clock", True)) else "启动时间滚动"
-        self._log(f"调度已启动，间隔={self.cfg['interval_minutes']}分钟, 对齐={align_text}")
+        offset_text = ""
+        if bool(self.cfg.get("align_to_wall_clock", True)) and int(self.cfg.get("minute_offset", 0) or 0) > 0:
+            offset_text = f", 起始分钟={int(self.cfg.get('minute_offset', 0) or 0):02d}"
+        self._log(f"调度已启动，间隔={self.cfg['interval_minutes']}分钟, 对齐={align_text}{offset_text}")
         return {"started": True, "running": True, "reason": "started"}
 
     def stop(self) -> Dict[str, Any]:

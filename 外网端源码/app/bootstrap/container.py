@@ -463,6 +463,10 @@ class AppContainer:
         scheduler_cfg = branch_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
+        scheduler_cfg = dict(scheduler_cfg)
+        scheduler_cfg["interval_minutes"] = 60
+        if "minute_offset" not in scheduler_cfg and "start_minute" not in scheduler_cfg and "run_minute" not in scheduler_cfg:
+            scheduler_cfg["minute_offset"] = 30
         return IntervalSchedulerService(
             scheduler_cfg=scheduler_cfg,
             runtime_state_root=runtime_state_root or "runtime_state",
@@ -2299,10 +2303,14 @@ class AppContainer:
                 **memory_fields,
             }
         runtime = self.branch_power_upload_scheduler.get_runtime_snapshot()
+        scheduler_cfg = dict(getattr(self.branch_power_upload_scheduler, "cfg", {}) or {})
         return {
             "enabled": bool(self.branch_power_upload_scheduler.enabled),
             "status": self.branch_power_upload_scheduler.status_text(),
             "next_run_time": self.branch_power_upload_scheduler.next_run_text(),
+            "interval_minutes": int(scheduler_cfg.get("interval_minutes", 0) or 0),
+            "minute_offset": int(scheduler_cfg.get("minute_offset", 0) or 0),
+            "check_interval_sec": int(scheduler_cfg.get("check_interval_sec", 0) or 0),
             **runtime,
             **memory_fields,
         }

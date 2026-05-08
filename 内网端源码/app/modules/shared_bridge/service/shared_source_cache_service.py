@@ -1322,7 +1322,7 @@ class SharedSourceCacheService:
     def branch_power_data_bucket(self, bucket_key: str = "", when: datetime | None = None) -> str:
         bucket_dt = _parse_hour_bucket(bucket_key) if str(bucket_key or "").strip() else None
         base = bucket_dt or (when or datetime.now()).replace(minute=0, second=0, microsecond=0)
-        return (base - timedelta(hours=1)).strftime("%Y-%m-%d %H")
+        return base.strftime("%Y-%m-%d %H")
 
     def get_enabled_buildings(self) -> List[str]:
         configured_sites = self.runtime_config.get("internal_source_sites", [])
@@ -3598,14 +3598,14 @@ class SharedSourceCacheService:
         data_bucket_key: str | None = None,
     ) -> Dict[str, Any]:
         self._ensure_internal_source_writer("支路功率最新源文件补采")
-        cfg = load_handover_config(self.runtime_config)
-        temp_root = self._branch_power_temp_root(bucket_key=bucket_key, building=building)
         resolved_data_bucket_key = str(data_bucket_key or "").strip()
         if resolved_data_bucket_key:
             start_time, end_time = self._branch_query_window_for_data_bucket(resolved_data_bucket_key)
         else:
             start_time, end_time = self._branch_power_query_window(bucket_key)
             resolved_data_bucket_key = self.branch_power_data_bucket(bucket_key)
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._branch_power_temp_root(bucket_key=resolved_data_bucket_key, building=building)
         service = HandoverDownloadService(
             cfg,
             download_browser_pool=self.download_browser_pool,
@@ -3630,7 +3630,7 @@ class SharedSourceCacheService:
             source_family=FAMILY_BRANCH_POWER,
             building=building,
             bucket_kind="latest",
-            bucket_key=bucket_key,
+            bucket_key=resolved_data_bucket_key,
             duty_date="",
             duty_shift="",
             source_path=source_path,
@@ -3638,7 +3638,7 @@ class SharedSourceCacheService:
             metadata={
                 "family": FAMILY_BRANCH_POWER,
                 "building": building,
-                "bucket_hour": bucket_key,
+                "bucket_hour": resolved_data_bucket_key,
                 "data_hour_bucket": resolved_data_bucket_key,
                 "covered_data_hour_buckets": [resolved_data_bucket_key],
                 "query_start": start_time,
@@ -3722,14 +3722,14 @@ class SharedSourceCacheService:
         data_bucket_key: str | None = None,
     ) -> Dict[str, Any]:
         self._ensure_internal_source_writer("支路电流最新源文件补采")
-        cfg = load_handover_config(self.runtime_config)
-        temp_root = self._branch_current_temp_root(bucket_key=bucket_key, building=building)
         resolved_data_bucket_key = str(data_bucket_key or "").strip()
         if resolved_data_bucket_key:
             start_time, end_time = self._branch_query_window_for_data_bucket(resolved_data_bucket_key)
         else:
             start_time, end_time = self._branch_power_query_window(bucket_key)
             resolved_data_bucket_key = self.branch_power_data_bucket(bucket_key)
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._branch_current_temp_root(bucket_key=resolved_data_bucket_key, building=building)
         service = HandoverDownloadService(
             cfg,
             download_browser_pool=self.download_browser_pool,
@@ -3754,7 +3754,7 @@ class SharedSourceCacheService:
             source_family=FAMILY_BRANCH_CURRENT,
             building=building,
             bucket_kind="latest",
-            bucket_key=bucket_key,
+            bucket_key=resolved_data_bucket_key,
             duty_date="",
             duty_shift="",
             source_path=source_path,
@@ -3762,7 +3762,7 @@ class SharedSourceCacheService:
             metadata={
                 "family": FAMILY_BRANCH_CURRENT,
                 "building": building,
-                "bucket_hour": bucket_key,
+                "bucket_hour": resolved_data_bucket_key,
                 "data_hour_bucket": resolved_data_bucket_key,
                 "covered_data_hour_buckets": [resolved_data_bucket_key],
                 "query_start": start_time,
@@ -3846,14 +3846,14 @@ class SharedSourceCacheService:
         data_bucket_key: str | None = None,
     ) -> Dict[str, Any]:
         self._ensure_internal_source_writer("支路开关源文件最新补采")
-        cfg = load_handover_config(self.runtime_config)
-        temp_root = self._branch_switch_temp_root(bucket_key=bucket_key, building=building)
         resolved_data_bucket_key = str(data_bucket_key or "").strip()
         if resolved_data_bucket_key:
             start_time, end_time = self._branch_query_window_for_data_bucket(resolved_data_bucket_key)
         else:
             start_time, end_time = self._branch_power_query_window(bucket_key)
             resolved_data_bucket_key = self.branch_power_data_bucket(bucket_key)
+        cfg = load_handover_config(self.runtime_config)
+        temp_root = self._branch_switch_temp_root(bucket_key=resolved_data_bucket_key, building=building)
         service = HandoverDownloadService(
             cfg,
             download_browser_pool=self.download_browser_pool,
@@ -3878,7 +3878,7 @@ class SharedSourceCacheService:
             source_family=FAMILY_BRANCH_SWITCH,
             building=building,
             bucket_kind="latest",
-            bucket_key=bucket_key,
+            bucket_key=resolved_data_bucket_key,
             duty_date="",
             duty_shift="",
             source_path=source_path,
@@ -3886,7 +3886,7 @@ class SharedSourceCacheService:
             metadata={
                 "family": FAMILY_BRANCH_SWITCH,
                 "building": building,
-                "bucket_hour": bucket_key,
+                "bucket_hour": resolved_data_bucket_key,
                 "data_hour_bucket": resolved_data_bucket_key,
                 "covered_data_hour_buckets": [resolved_data_bucket_key],
                 "query_start": start_time,
@@ -6407,7 +6407,11 @@ class SharedSourceCacheService:
                     startup_done = True
                 else:
                     bucket = self.current_hour_bucket()
-                    if bucket != self._current_hour_bucket:
+                    branch_bucket = self.branch_power_bucket()
+                    current_branch_bucket = str(
+                        self._family_status.get(FAMILY_BRANCH_POWER, {}).get("current_bucket", "") or ""
+                    ).strip()
+                    if bucket != self._current_hour_bucket or branch_bucket != current_branch_bucket:
                         self._run_current_bucket_once()
                     self._run_alarm_bucket_if_due()
                 if startup_done:

@@ -1134,7 +1134,8 @@ function applyBranchPowerUploadDefaults(cfg) {
   const scheduler = upload.scheduler;
   setBooleanDefault(scheduler, "enabled", true);
   setBooleanDefault(scheduler, "auto_start_in_gui", false);
-  setNumberDefault(scheduler, "interval_minutes", 60);
+  scheduler.interval_minutes = 60;
+  setNumberDefault(scheduler, "minute_offset", 30);
   setNumberDefault(scheduler, "check_interval_sec", 30);
   setBooleanDefault(scheduler, "retry_failed_on_next_tick", true);
   setStringDefault(scheduler, "state_file", "branch_power_upload_scheduler_state.json");

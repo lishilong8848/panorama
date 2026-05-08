@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/scheduler/branch-power-upload", tags=["scheduler
 ALLOWED_KEYS = {
     "enabled",
     "auto_start_in_gui",
-    "interval_minutes",
+    "minute_offset",
     "check_interval_sec",
     "retry_failed_on_next_tick",
     "state_file",
@@ -47,6 +47,9 @@ def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Di
         "running": bool(snapshot.get("running", False)),
         "status": str(snapshot.get("status", "未初始化")),
         "next_run_time": str(snapshot.get("next_run_time", "")),
+        "interval_minutes": int(snapshot.get("interval_minutes", 0) or 0),
+        "minute_offset": int(snapshot.get("minute_offset", 0) or 0),
+        "check_interval_sec": int(snapshot.get("check_interval_sec", 0) or 0),
         "last_check_at": str(snapshot.get("last_check_at", "")),
         "last_decision": str(snapshot.get("last_decision", "")),
         "last_trigger_at": str(snapshot.get("last_trigger_at", "")),
@@ -109,12 +112,15 @@ def branch_power_upload_scheduler_config(payload: Dict[str, Any], request: Reque
         value = payload.get(key)
         if key in {"enabled", "auto_start_in_gui", "retry_failed_on_next_tick"}:
             scheduler_cfg[key] = bool(value)
-        elif key in {"interval_minutes", "check_interval_sec"}:
+        elif key in {"check_interval_sec", "minute_offset"}:
             try:
                 number = int(value)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=400, detail=f"{key} 必须是整数") from exc
-            if number < 1:
+            if key == "minute_offset":
+                if number < 0:
+                    raise HTTPException(status_code=400, detail="minute_offset 必须大于等于0")
+            elif number < 1:
                 raise HTTPException(status_code=400, detail=f"{key} 必须大于等于1")
             scheduler_cfg[key] = number
         elif key == "state_file":
@@ -122,6 +128,8 @@ def branch_power_upload_scheduler_config(payload: Dict[str, Any], request: Reque
             if not text:
                 raise HTTPException(status_code=400, detail="state_file 不能为空")
             scheduler_cfg[key] = text
+
+    scheduler_cfg["interval_minutes"] = 60
 
     try:
         saved = save_settings(merged, container.config_path)

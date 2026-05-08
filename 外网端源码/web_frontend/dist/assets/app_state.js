@@ -348,12 +348,14 @@ export function createAppState(vueApi) {
         effective_auto_start_in_gui: false,
         memory_source: "",
         status: "-",
-        next_run_time: "",
-        last_check_at: "",
-        last_decision: "",
-        last_trigger_at: "",
-        last_trigger_result: "",
-        state_path: "",
+          next_run_time: "",
+          last_check_at: "",
+          last_decision: "",
+          last_trigger_at: "",
+          last_trigger_result: "",
+          interval_minutes: 60,
+          minute_offset: 30,
+          state_path: "",
         state_exists: false,
         executor_bound: false,
         callback_name: "-",
@@ -1593,6 +1595,14 @@ export function createAppState(vueApi) {
   const branchPowerUploadSchedulerTriggerText = computed(() =>
     readSchedulerDisplayText(health.branch_power_upload?.scheduler, "trigger_text", "暂无记录"),
   );
+  const branchPowerUploadScheduleText = computed(() => {
+    const scheduler = config.value?.branch_power_upload?.scheduler || {};
+    const healthScheduler = health.branch_power_upload?.scheduler || {};
+    const minute = Number.parseInt(String(scheduler.minute_offset ?? healthScheduler.minute_offset ?? 30), 10);
+    const safeMinute = Number.isInteger(minute) && minute >= 0 ? minute % 60 : 30;
+    const minuteText = String(safeMinute).padStart(2, "0");
+    return `每小时 ${minuteText} 分左右`;
+  });
   const alarmEventUploadSchedulerDecisionText = computed(() =>
     readSchedulerDisplayText(health.alarm_event_upload?.scheduler, "decision_text", "暂无记录"),
   );
@@ -2157,6 +2167,7 @@ export function createAppState(vueApi) {
     dayMetricUploadSchedulerTriggerText,
     branchPowerUploadSchedulerDecisionText,
     branchPowerUploadSchedulerTriggerText,
+    branchPowerUploadScheduleText,
     alarmEventUploadSchedulerDecisionText,
     alarmEventUploadSchedulerTriggerText,
     monthlyEventReportSchedulerDecisionText,

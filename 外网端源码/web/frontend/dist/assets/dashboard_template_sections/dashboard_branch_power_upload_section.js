@@ -23,16 +23,21 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                   <div class="status-metric-label">最近结果</div>
                   <strong class="status-metric-value">{{ branchPowerUploadSchedulerTriggerText || '-' }}</strong>
                 </div>
+                <div class="status-metric">
+                  <div class="status-metric-label">执行计划</div>
+                  <strong class="status-metric-value">{{ branchPowerUploadScheduleText || '-' }}</strong>
+                </div>
               </div>
-              <div class="hint">每小时读取支路功率、支路电流、支路开关三类共享文件写入本地库；23:00 全天齐全后整表上传多维。</div>
+              <div class="hint">每小时约 30 分读取支路功率、支路电流、支路开关三类共享文件写入本地库；23:00 全天齐全后整表上传多维。</div>
               <div class="task-grid two-col">
                 <div class="form-row">
-                  <label class="label">执行间隔（分钟）</label>
+                  <label class="label">执行分钟（每小时）</label>
                   <input
                     type="number"
-                    min="1"
+                    min="0"
+                    max="59"
                     step="1"
-                    v-model.number="config.branch_power_upload.scheduler.interval_minutes"
+                    v-model.number="config.branch_power_upload.scheduler.minute_offset"
                     :disabled="branchPowerUploadSchedulerQuickSaving"
                     @change="saveBranchPowerUploadSchedulerQuickConfig"
                   />
@@ -58,7 +63,7 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                   {{ getSchedulerStopButtonText('branch_power_upload') }}
                 </button>
               </div>
-              <div class="hint">{{ branchPowerUploadSchedulerQuickSaving ? '支路三源表调度配置同步中...' : '修改执行间隔后立即生效。' }}</div>
+              <div class="hint">{{ branchPowerUploadSchedulerQuickSaving ? '支路三源表调度配置同步中...' : '修改每小时执行分钟后立即生效。' }}</div>
             </article>
 
             <div class="day-metric-top-grid dashboard-module-primary-grid">
