@@ -1802,6 +1802,133 @@ def _resolve_branch_source_entry(
     )
 
 
+def _resolve_indexed_branch_source_entry(
+    *,
+    source_family: str,
+    building: str,
+    bucket_key: str,
+    cached_by_building: Dict[str, Dict[str, Any]],
+    emit_log: Callable[[str], None] | None = None,
+) -> Dict[str, Any] | None:
+    cached = cached_by_building.get(building)
+    if isinstance(cached, dict) and str(cached.get("file_path", "") or "").strip():
+        mismatch_reason = _branch_source_entry_bucket_mismatch_reason(cached, requested_bucket_key=bucket_key)
+        if not mismatch_reason:
+            return cached
+        _log_branch_source_entry_skipped(
+            emit_log,
+            source_family=source_family,
+            building=building,
+            bucket_key=bucket_key,
+            entry=cached,
+            reason=mismatch_reason,
+        )
+    return None
+
+
+def _collect_indexed_branch_source_units(
+    bridge_service,
+    *,
+    bucket_keys: List[str],
+    buildings: List[str],
+    emit_log: Callable[[str], None] | None = None,
+) -> Dict[str, Any]:
+    """Collect branch source units from the bridge index only.
+
+    This deliberately avoids directory scans or canonical path probing on the
+    shared UNC root. The external side should only trust ready entries written
+    by the internal side into the shared bridge index.
+    """
+    target_buildings = [str(item or "").strip() for item in buildings if str(item or "").strip()]
+    bucket_source_units: Dict[str, List[Dict[str, Any]]] = {}
+    missing_by_bucket: Dict[str, List[str]] = {}
+    for current_bucket_key in [str(item or "").strip() for item in bucket_keys if str(item or "").strip()]:
+        power_by_building = _cached_branch_source_by_building(
+            bridge_service,
+            source_family=FAMILY_BRANCH_POWER,
+            buildings=target_buildings,
+            bucket_key=current_bucket_key,
+        )
+        current_by_building = _cached_branch_source_by_building(
+            bridge_service,
+            source_family=FAMILY_BRANCH_CURRENT,
+            buildings=target_buildings,
+            bucket_key=current_bucket_key,
+        )
+        switch_by_building = _cached_branch_source_by_building(
+            bridge_service,
+            source_family=FAMILY_BRANCH_SWITCH,
+            buildings=target_buildings,
+            bucket_key=current_bucket_key,
+        )
+        units: List[Dict[str, Any]] = []
+        missing: List[str] = []
+        for building in target_buildings:
+            power_entry = _resolve_indexed_branch_source_entry(
+                source_family=FAMILY_BRANCH_POWER,
+                building=building,
+                bucket_key=current_bucket_key,
+                cached_by_building=power_by_building,
+                emit_log=emit_log,
+            )
+            current_entry = _resolve_indexed_branch_source_entry(
+                source_family=FAMILY_BRANCH_CURRENT,
+                building=building,
+                bucket_key=current_bucket_key,
+                cached_by_building=current_by_building,
+                emit_log=emit_log,
+            )
+            switch_entry = _resolve_indexed_branch_source_entry(
+                source_family=FAMILY_BRANCH_SWITCH,
+                building=building,
+                bucket_key=current_bucket_key,
+                cached_by_building=switch_by_building,
+                emit_log=emit_log,
+            )
+            if not power_entry:
+                missing.append(f"{building}/支路功率")
+            if not current_entry:
+                missing.append(f"{building}/支路电流")
+            if not switch_entry:
+                missing.append(f"{building}/支路开关")
+            if not power_entry or not current_entry or not switch_entry:
+                continue
+            metadata = dict(power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {})
+            metadata["bucket_hour"] = current_bucket_key
+            metadata["source_bucket_key"] = current_bucket_key
+            metadata.setdefault("data_hour_bucket", current_bucket_key)
+            metadata.setdefault("data_bucket_key", metadata.get("data_hour_bucket", current_bucket_key))
+            source_files = {
+                "power_file": _branch_file_path(power_entry),
+                "current_file": _branch_file_path(current_entry),
+                "switch_file": _branch_file_path(switch_entry),
+            }
+            units.append(
+                {
+                    "bucket_key": current_bucket_key,
+                    "data_hour_bucket": str(metadata.get("data_hour_bucket", "") or current_bucket_key).strip(),
+                    "building": building,
+                    "power_file": source_files["power_file"],
+                    "current_file": source_files["current_file"],
+                    "switch_file": source_files["switch_file"],
+                    "metadata": metadata,
+                    "source_files": source_files,
+                }
+            )
+        bucket_source_units[current_bucket_key] = units
+        missing_by_bucket[current_bucket_key] = missing
+    ready_bucket_keys = [
+        bucket_key
+        for bucket_key in bucket_source_units
+        if not missing_by_bucket.get(bucket_key) and len(bucket_source_units.get(bucket_key, [])) >= len(target_buildings)
+    ]
+    return {
+        "bucket_source_units": bucket_source_units,
+        "missing_by_bucket": missing_by_bucket,
+        "ready_bucket_keys": ready_bucket_keys,
+    }
+
+
 def _branch_file_path(entry: Dict[str, Any] | None) -> str:
     if not isinstance(entry, dict):
         return ""
@@ -2192,14 +2319,93 @@ def _run_external_branch_power_backfill_missing_flow(
             "failed": [],
         }
 
+    processed: List[Dict[str, Any]] = []
     waiting: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
     bridge_service = _shared_bridge_service_or_raise(container)
     for group in _branch_power_consecutive_hour_groups(target_hours):
-        dispatch_groups = [group] if len(group) >= 2 else [[hour] for hour in group]
-        for dispatch_hours in dispatch_groups:
+        group_bucket_keys = [f"{date_text} {hour:02d}" for hour in group]
+        indexed_sources = _collect_indexed_branch_source_units(
+            bridge_service,
+            bucket_keys=group_bucket_keys,
+            buildings=target_buildings,
+            emit_log=emit_log,
+        )
+        bucket_source_units = indexed_sources.get("bucket_source_units", {}) if isinstance(indexed_sources, dict) else {}
+        missing_by_bucket = indexed_sources.get("missing_by_bucket", {}) if isinstance(indexed_sources, dict) else {}
+
+        ready_hours: List[int] = []
+        missing_hours: List[int] = []
+        for hour in group:
+            bucket_key = f"{date_text} {hour:02d}"
+            bucket_units = bucket_source_units.get(bucket_key, []) if isinstance(bucket_source_units, dict) else []
+            bucket_missing = missing_by_bucket.get(bucket_key, []) if isinstance(missing_by_bucket, dict) else []
+            if not bucket_missing and len(bucket_units) >= len(target_buildings):
+                ready_hours.append(hour)
+            else:
+                missing_hours.append(hour)
+
+        for ready_group in _branch_power_consecutive_hour_groups(ready_hours):
+            bucket_keys = [f"{date_text} {hour:02d}" for hour in ready_group]
+            source_units: List[Dict[str, Any]] = []
+            for bucket_key in bucket_keys:
+                source_units.extend(bucket_source_units.get(bucket_key, []))
+            try:
+                emit_log(
+                    "[支路信息补处理] 发现共享索引已有源文件，直接入库 "
+                    f"buckets={','.join(bucket_keys)}, buildings={','.join(target_buildings)}, units={len(source_units)}"
+                )
+                if len(bucket_keys) >= 2:
+                    ingest_result = service.continue_range_from_source_files(
+                        bucket_keys=bucket_keys,
+                        source_units=source_units,
+                        emit_log=emit_log,
+                    )
+                    mode = "range_from_existing_shared_index"
+                else:
+                    ingest_result = service.continue_manual_hour_from_source_files(
+                        bucket_key=bucket_keys[0],
+                        source_units=source_units,
+                        emit_log=emit_log,
+                    )
+                    mode = "single_from_existing_shared_index"
+                processed.append(
+                    {
+                        "hours": ready_group,
+                        "bucket_keys": bucket_keys,
+                        "mode": mode,
+                        "result": ingest_result,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                error_text = str(exc)
+                failed.append(
+                    {
+                        "hours": ready_group,
+                        "bucket_keys": bucket_keys,
+                        "phase": "existing_shared_index_ingest",
+                        "error": error_text,
+                    }
+                )
+                emit_log(
+                    "[支路信息补处理][失败] 共享索引已有源文件直接入库失败，将派发内网重采 "
+                    f"buckets={','.join(bucket_keys)}, error={error_text}"
+                )
+                missing_hours.extend(ready_group)
+
+        for dispatch_hours in _branch_power_consecutive_hour_groups(missing_hours):
             bucket_keys = [f"{date_text} {hour:02d}" for hour in dispatch_hours]
             try:
+                missing_details: List[str] = []
+                for bucket_key in bucket_keys:
+                    missing_details.extend(missing_by_bucket.get(bucket_key, []) if isinstance(missing_by_bucket, dict) else [])
+                if missing_details:
+                    sample = ",".join(missing_details[:12])
+                    suffix = f" 等{len(missing_details)}项" if len(missing_details) > 12 else ""
+                    emit_log(
+                        "[支路信息补处理] 共享索引未齐全，派发内网补缺口 "
+                        f"buckets={','.join(bucket_keys)}, missing={sample}{suffix}"
+                    )
                 waiting_item = _enqueue_branch_power_missing_download(
                     container=container,
                     bridge_service=bridge_service,
@@ -2223,18 +2429,24 @@ def _run_external_branch_power_backfill_missing_flow(
     )
     emit_log(
         "[支路信息补处理] 批量处理完成 "
-        f"date={date_text}, dispatched={len(waiting)}, failed={len(failed)}, "
+        f"date={date_text}, processed={len(processed)}, dispatched={len(waiting)}, failed={len(failed)}, "
         f"remaining={after_summary.get('summary', {}).get('incomplete_count', 0)}"
     )
+    if processed and waiting:
+        mode = "backfill_missing_mixed_shared_index_and_download"
+    elif processed:
+        mode = "backfill_missing_processed_from_shared_index"
+    else:
+        mode = "backfill_missing_download_requested"
     return {
         "ok": not failed,
-        "mode": "backfill_missing_download_requested",
+        "mode": mode,
         "business_date": date_text,
         "max_hour": max_hour,
         "buildings": target_buildings,
         "before": before_summary,
         "after": after_summary,
-        "processed": [],
+        "processed": processed,
         "waiting": waiting,
         "failed": failed,
     }

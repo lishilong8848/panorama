@@ -513,6 +513,51 @@ class SharedBridgeRuntimeService:
                 output[building] = item
         return output
 
+    @staticmethod
+    def _normalize_branch_bucket_key(value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H")
+        text = str(value or "").strip().replace("/", "-").replace("T", " ")
+        if not text:
+            return ""
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y%m%d%H"):
+            try:
+                return datetime.strptime(text, fmt).replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H")
+            except ValueError:
+                continue
+        match = re.search(r"(?<!\d)(?P<date>\d{8})--(?P<hour>\d{2})(?!\d)", text.replace("\\", "/"))
+        if match:
+            date_part = match.group("date")
+            return f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]} {match.group('hour')}"
+        return ""
+
+    def _require_branch_entry_claims_bucket(self, entry: Dict[str, Any], *, bucket_key: str, description: str) -> None:
+        target = self._normalize_branch_bucket_key(bucket_key)
+        if not target:
+            raise RuntimeError(f"{description}缺少目标小时")
+        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+        covered = [
+            self._normalize_branch_bucket_key(item)
+            for item in (metadata.get("covered_data_hour_buckets") if isinstance(metadata.get("covered_data_hour_buckets"), list) else [])
+        ]
+        if target in [item for item in covered if item]:
+            return
+        candidates = (
+            metadata.get("data_hour_bucket", ""),
+            metadata.get("data_bucket_key", ""),
+            entry.get("bucket_key", ""),
+            metadata.get("bucket_hour", ""),
+            metadata.get("source_bucket_key", ""),
+            metadata.get("storage_bucket_key", ""),
+            metadata.get("bucket_key", ""),
+            entry.get("relative_path", ""),
+        )
+        for raw_value in candidates:
+            normalized = self._normalize_branch_bucket_key(raw_value)
+            if normalized == target:
+                return
+        raise RuntimeError(f"{description}索引未声明覆盖目标小时 {target}")
+
     def _build_branch_power_cache_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
         if self._source_cache_service is None:
             raise RuntimeError("共享源缓存服务未初始化")
@@ -567,6 +612,21 @@ class SharedBridgeRuntimeService:
                 switch_file = self._require_accessible_cached_file(
                     switch_entry.get("file_path", ""),
                     description="支路开关共享源文件",
+                )
+                self._require_branch_entry_claims_bucket(
+                    power_entry,
+                    bucket_key=data_bucket,
+                    description=f"{data_bucket}/{building}/支路功率共享源文件",
+                )
+                self._require_branch_entry_claims_bucket(
+                    current_entry,
+                    bucket_key=data_bucket,
+                    description=f"{data_bucket}/{building}/支路电流共享源文件",
+                )
+                self._require_branch_entry_claims_bucket(
+                    switch_entry,
+                    bucket_key=data_bucket,
+                    description=f"{data_bucket}/{building}/支路开关共享源文件",
                 )
                 metadata = power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {}
                 normalized_units.append(
