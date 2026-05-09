@@ -29,6 +29,10 @@ def _looks_like_factory_vendor(item_text: str) -> bool:
     return ("厂家" in text) or ("厂商" in text)
 
 
+def _is_equalizing_charge_notice(item_text: str) -> bool:
+    return "均充" in str(item_text or "").strip()
+
+
 def _dedupe_text(value: Any) -> str:
     return "".join(str(value or "").split()).casefold()
 
@@ -223,11 +227,15 @@ class MaintenanceManagementPayloadBuilder:
         matched_supervisor = 0
         unmatched_supervisor = 0
         deduped_count = 0
+        equalizing_charge_skipped = 0
         seen_items: set[str] = set()
 
         for row in rows:
             maintenance_item = str(row.item_text or "").strip()
             if not maintenance_item:
+                continue
+            if _is_equalizing_charge_notice(maintenance_item):
+                equalizing_charge_skipped += 1
                 continue
             dedupe_key = _dedupe_text(maintenance_item)
             if dedupe_key and dedupe_key in seen_items:
@@ -253,7 +261,8 @@ class MaintenanceManagementPayloadBuilder:
         output_rows = [{"cells": self._to_cells(row_payload, col_map)} for row_payload in payload_rows]
         emit_log(
             f"[交接班][维护管理] 构建完成: building={building}, count={len(output_rows)}, "
-            f"deduped={deduped_count}, matched_supervisor={matched_supervisor}, "
+            f"deduped={deduped_count}, equalizing_charge_moved={equalizing_charge_skipped}, "
+            f"matched_supervisor={matched_supervisor}, "
             f"unmatched_supervisor={unmatched_supervisor}"
         )
         return {section_name: output_rows}

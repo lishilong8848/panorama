@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 import openpyxl
 
 from handover_log_module.core.models import RawRow
-from handover_log_module.core.normalizers import normalize_b, normalize_c, to_float
+from handover_log_module.core.normalizers import format_extracted_value, normalize_b, normalize_c, to_float
 
 
 def _pick_sheet(
@@ -84,6 +84,8 @@ def load_rows(
             c_raw = ws.cell(row_idx, col_c).value
             d_raw = ws.cell(row_idx, col_d).value
             e_raw = ws.cell(row_idx, col_e).value
+            e_value = to_float(e_raw)
+            e_display = format_extracted_value(e_raw)
 
             b_text = str(b_raw).strip() if b_raw is not None else ""
             c_text = str(c_raw).strip() if c_raw is not None else ""
@@ -107,8 +109,8 @@ def load_rows(
                     b_text=b_text,
                     c_text=c_text,
                     d_name=d_name,
-                    e_raw=e_raw,
-                    value=to_float(e_raw),
+                    e_raw=e_display,
+                    value=e_value,
                     b_norm=normalize_b(b_text, b_regex),
                     c_norm=normalize_c(c_text, c_regex),
                 )

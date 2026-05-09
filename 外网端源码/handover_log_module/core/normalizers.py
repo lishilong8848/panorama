@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Optional
 
 
@@ -70,11 +71,65 @@ def _normalize_c_channel(text: str) -> str:
     return ""
 
 
+def _decimal_from_value(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        decimal_value = Decimal(str(value).replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+    if not decimal_value.is_finite():
+        return None
+    return decimal_value
+
+
+def _format_decimal(decimal_value: Decimal, max_decimals: int = 2, *, force_decimals: bool = False) -> str:
+    places = max(0, int(max_decimals))
+    quant = Decimal("1").scaleb(-places)
+    rounded = decimal_value.quantize(quant, rounding=ROUND_HALF_UP)
+    if rounded == 0:
+        rounded = abs(rounded)
+    if not force_decimals and rounded == rounded.to_integral_value():
+        return str(int(rounded))
+    return f"{rounded:.{places}f}"
+
+
+def format_extracted_value(value: Any, max_decimals: int = 2) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value).strip()
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        decimal_value = _decimal_from_value(value)
+        if decimal_value is None:
+            return str(value).strip()
+        return _format_decimal(
+            decimal_value,
+            max_decimals,
+            force_decimals=decimal_value != decimal_value.to_integral_value(),
+        )
+
+    text = str(value).strip()
+    if not text:
+        return ""
+    normalized = text.replace(",", "")
+    if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", normalized):
+        decimal_value = _decimal_from_value(normalized)
+        if decimal_value is not None:
+            return _format_decimal(decimal_value, max_decimals, force_decimals="." in normalized)
+    return text
+
+
 def format_number(value: Optional[float], max_decimals: int = 2) -> str:
     if value is None:
         return ""
-    rounded = round(float(value), int(max_decimals))
-    text = f"{rounded:.{int(max_decimals)}f}".rstrip("0").rstrip(".")
-    if text == "-0":
-        return "0"
-    return text
+    decimal_value = _decimal_from_value(value)
+    if decimal_value is None:
+        return ""
+    return _format_decimal(
+        decimal_value,
+        max_decimals,
+        force_decimals=decimal_value != decimal_value.to_integral_value(),
+    )

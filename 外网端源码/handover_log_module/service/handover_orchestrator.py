@@ -859,6 +859,7 @@ class HandoverOrchestrator:
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     preloaded_rows_by_building=other_important_work_rows_by_building,
+                    preloaded_maintenance_rows_by_building=maintenance_rows_by_building,
                     preloaded_engineers=engineer_directory_records,
                     emit_log=emit_log,
                 )

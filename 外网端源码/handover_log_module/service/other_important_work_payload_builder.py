@@ -15,6 +15,10 @@ from handover_log_module.repository.other_important_work_repository import (
     OtherImportantWorkRow,
     OtherImportantWorkRowsByBuilding,
 )
+from handover_log_module.repository.maintenance_management_repository import (
+    MaintenanceManagementRow,
+    MaintenanceRowsByBuilding,
+)
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
 
 
@@ -24,6 +28,10 @@ def _norm_header(value: Any) -> str:
 
 def _dedupe_text(value: Any) -> str:
     return "".join(str(value or "").split()).casefold()
+
+
+def _is_equalizing_charge_notice(value: Any) -> bool:
+    return "均充" in str(value or "").strip()
 
 
 class OtherImportantWorkPayloadBuilder:
@@ -163,6 +171,55 @@ class OtherImportantWorkPayloadBuilder:
         )
         return "/"
 
+    def _resolve_executor_for_specialty(
+        self,
+        *,
+        source: str,
+        record_id: str,
+        specialty_text: str,
+        building: str,
+        engineers: List[Dict[str, str]],
+        emit_log: Callable[[str], None],
+    ) -> str:
+        supervisor = self._pick_supervisor(
+            engineers,
+            building=building,
+            specialty_text=specialty_text,
+        )
+        if supervisor:
+            emit_log(
+                "[交接班][其他重要工作] 执行人匹配: "
+                f"source={source}, record_id={record_id}, building={building}, "
+                f"specialty={specialty_text or '-'}, supervisor={supervisor}"
+            )
+            return supervisor
+
+        emit_log(
+            "[交接班][其他重要工作] 执行人未匹配: "
+            f"source={source}, record_id={record_id}, building={building}, "
+            f"specialty={specialty_text or '-'}"
+        )
+        return "/"
+
+    def _maintenance_equalizing_charge_rows(
+        self,
+        *,
+        building: str,
+        preloaded_rows_by_building: MaintenanceRowsByBuilding | None,
+    ) -> List[MaintenanceManagementRow]:
+        if preloaded_rows_by_building is None:
+            return []
+        return [
+            row
+            for row in list(preloaded_rows_by_building.get(building, []))
+            if isinstance(row, MaintenanceManagementRow) and _is_equalizing_charge_notice(row.item_text)
+        ]
+
+    def _maintenance_completion_text(self) -> str:
+        cfg = self.handover_cfg.get("maintenance_management_section", {})
+        fixed_values = cfg.get("fixed_values", {}) if isinstance(cfg, dict) else {}
+        return str(fixed_values.get("completion", "已完成")).strip() or "已完成"
+
     def build(
         self,
         *,
@@ -170,6 +227,7 @@ class OtherImportantWorkPayloadBuilder:
         duty_date: str,
         duty_shift: str,
         preloaded_rows_by_building: OtherImportantWorkRowsByBuilding | None = None,
+        preloaded_maintenance_rows_by_building: MaintenanceRowsByBuilding | None = None,
         preloaded_engineers: List[Dict[str, str]] | None = None,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
@@ -213,6 +271,7 @@ class OtherImportantWorkPayloadBuilder:
         matched_supervisor = 0
         unmatched_supervisor = 0
         deduped_count = 0
+        maintenance_equalizing_charge_count = 0
         seen_descriptions: set[str] = set()
         for row in rows:
             description_text = str(row.description_text or "").strip()
@@ -237,10 +296,46 @@ class OtherImportantWorkPayloadBuilder:
                 }
             )
 
+        maintenance_completion = self._maintenance_completion_text()
+        for row in self._maintenance_equalizing_charge_rows(
+            building=building,
+            preloaded_rows_by_building=preloaded_maintenance_rows_by_building,
+        ):
+            description_text = str(row.item_text or "").strip()
+            if not description_text:
+                continue
+            dedupe_key = _dedupe_text(description_text)
+            if dedupe_key and dedupe_key in seen_descriptions:
+                deduped_count += 1
+                continue
+            if dedupe_key:
+                seen_descriptions.add(dedupe_key)
+            executor = self._resolve_executor_for_specialty(
+                source="maintenance_equalizing_charge",
+                record_id=row.record_id,
+                specialty_text=row.specialty_text,
+                building=building,
+                engineers=engineers,
+                emit_log=emit_log,
+            )
+            if executor == "/":
+                unmatched_supervisor += 1
+            else:
+                matched_supervisor += 1
+            maintenance_equalizing_charge_count += 1
+            payload_rows.append(
+                {
+                    "description": description_text,
+                    "completion": maintenance_completion,
+                    "executor": executor,
+                }
+            )
+
         output_rows = [{"cells": self._to_cells(row_payload, col_map)} for row_payload in payload_rows]
         emit_log(
             f"[交接班][其他重要工作] 构建完成: building={building}, count={len(output_rows)}, "
-            f"deduped={deduped_count}, matched_supervisor={matched_supervisor}, "
+            f"deduped={deduped_count}, maintenance_equalizing_charge={maintenance_equalizing_charge_count}, "
+            f"matched_supervisor={matched_supervisor}, "
             f"unmatched_supervisor={unmatched_supervisor}"
         )
         return {section_name: output_rows}
