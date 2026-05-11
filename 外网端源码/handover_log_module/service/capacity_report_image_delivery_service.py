@@ -9,11 +9,14 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List
+from urllib.parse import urlparse
 
 from app.shared.utils.atomic_file import atomic_write_bytes, validate_image_file
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
@@ -27,11 +30,39 @@ from pipeline_utils import get_app_dir, get_app_root_dir
 _SCREENSHOT_QUEUE_TIMEOUT_SEC = 600
 _LIBREOFFICE_CONVERT_TIMEOUT_SEC = 180
 _DEPENDENCY_INSTALL_TIMEOUT_SEC = 900
+_LIBREOFFICE_DOWNLOAD_READ_TIMEOUT_SEC = 120
 _PDF_RENDER_SCALE = 2.0
 _CAPACITY_REPORT_SHEET_NAME = "本班组"
 _PYPI_MIRRORS: tuple[tuple[str, str, str], ...] = (
     ("清华源", "https://pypi.tuna.tsinghua.edu.cn/simple", "pypi.tuna.tsinghua.edu.cn"),
     ("阿里云源", "https://mirrors.aliyun.com/pypi/simple", "mirrors.aliyun.com"),
+)
+_LIBREOFFICE_INSTALLER_URL_ENV = "LIBREOFFICE_INSTALLER_URLS"
+_LIBREOFFICE_ONLINE_INSTALLERS: tuple[tuple[str, str], ...] = (
+    (
+        "清华源 LibreOffice 26.2.3",
+        "https://mirrors.tuna.tsinghua.edu.cn/tdf/libreoffice/stable/26.2.3/win/x86_64/LibreOffice_26.2.3_Win_x86-64.msi",
+    ),
+    (
+        "中科大源 LibreOffice 26.2.3",
+        "https://mirrors.ustc.edu.cn/tdf/libreoffice/stable/26.2.3/win/x86_64/LibreOffice_26.2.3_Win_x86-64.msi",
+    ),
+    (
+        "南京大学源 LibreOffice 26.2.3",
+        "https://mirrors.nju.edu.cn/tdf/libreoffice/stable/26.2.3/win/x86_64/LibreOffice_26.2.3_Win_x86-64.msi",
+    ),
+    (
+        "官方源 LibreOffice 26.2.3",
+        "https://download.documentfoundation.org/libreoffice/stable/26.2.3/win/x86_64/LibreOffice_26.2.3_Win_x86-64.msi",
+    ),
+    (
+        "清华源 LibreOffice 25.8.6",
+        "https://mirrors.tuna.tsinghua.edu.cn/tdf/libreoffice/stable/25.8.6/win/x86_64/LibreOffice_25.8.6_Win_x86-64.msi",
+    ),
+    (
+        "官方源 LibreOffice 25.8.6",
+        "https://download.documentfoundation.org/libreoffice/stable/25.8.6/win/x86_64/LibreOffice_25.8.6_Win_x86-64.msi",
+    ),
 )
 
 
@@ -182,38 +213,20 @@ def _install_pypdfium2(*, emit_log: Callable[[str], None]) -> bool:
     return False
 
 
-def _find_local_libreoffice_installer() -> Path | None:
-    patterns = (
-        "LibreOffice*.msi",
-        "libreoffice*.msi",
-        "LibreOffice*.exe",
-        "libreoffice*.exe",
-    )
-    candidates: List[Path] = []
-    for root in _dependency_search_roots():
-        for dirname in ("runtime_dependencies", "dependencies", "tools", "installers"):
-            directory = root / dirname
-            if not directory.exists() or not directory.is_dir():
-                continue
-            for pattern in patterns:
-                candidates.extend(path for path in directory.glob(pattern) if path.is_file())
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True)[0]
-
-
-def _install_libreoffice_from_local_installer(*, emit_log: Callable[[str], None]) -> bool:
-    installer = _find_local_libreoffice_installer()
-    if installer is None:
-        return False
+def _run_libreoffice_installer(
+    installer: Path,
+    *,
+    emit_log: Callable[[str], None],
+    source_label: str,
+) -> bool:
     suffix = installer.suffix.lower()
     if suffix == ".msi":
         commands = [["msiexec.exe", "/i", str(installer), "/qn", "/norestart"]]
     elif suffix == ".exe":
         commands = [[str(installer), "/S"], [str(installer), "/quiet", "/norestart"]]
     else:
+        emit_log(f"[交接班][容量表图片发送] LibreOffice 安装包格式不支持 source={source_label}, installer={installer}")
         return False
-    emit_log(f"[交接班][容量表图片发送] LibreOffice 未安装，开始使用本地安装包 installer={installer}")
     last_error = ""
     for command in commands:
         try:
@@ -230,66 +243,187 @@ def _install_libreoffice_from_local_installer(*, emit_log: Callable[[str], None]
             last_error = str(exc)
             continue
         if result.returncode == 0 and _find_soffice_executable() is not None:
-            emit_log("[交接班][容量表图片发送] LibreOffice 本地安装包安装完成")
+            emit_log(f"[交接班][容量表图片发送] LibreOffice 安装完成 source={source_label}")
             return True
         last_error = _tail_process_output(result.stderr or result.stdout)
-    emit_log(f"[交接班][容量表图片发送] LibreOffice 本地安装包安装失败: {last_error or 'unknown'}")
+    emit_log(
+        "[交接班][容量表图片发送] LibreOffice 安装失败 "
+        f"source={source_label}, installer={installer}, error={last_error or 'unknown'}"
+    )
     return False
 
 
-def _local_libreoffice_hint() -> str:
-    root = _dependency_search_roots()[0]
-    return str(root / "runtime_dependencies" / "LibreOffice_*.msi")
+def _dependency_download_dir() -> Path:
+    env_dir = _text(os.environ.get("QJPT_DEPENDENCY_DOWNLOAD_DIR"))
+    if env_dir:
+        return Path(env_dir)
+    return _dependency_search_roots()[0] / ".runtime" / "dependency_downloads"
+
+
+def _libreoffice_online_installers() -> List[tuple[str, str]]:
+    output: List[tuple[str, str]] = []
+    raw_env = _text(os.environ.get(_LIBREOFFICE_INSTALLER_URL_ENV))
+    if raw_env:
+        for index, item in enumerate(re.split(r"[\r\n;,]+", raw_env), start=1):
+            url = _text(item)
+            if url:
+                output.append((f"环境变量{index}", url))
+    seen: set[str] = set()
+    deduped: List[tuple[str, str]] = []
+    for label, url in [*output, *_LIBREOFFICE_ONLINE_INSTALLERS]:
+        cleaned = _text(url)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append((label, cleaned))
+    return deduped
+
+
+def _libreoffice_installer_filename(url: str) -> str:
+    parsed_name = Path(urlparse(url).path).name
+    if parsed_name.lower().endswith((".msi", ".exe")):
+        return parsed_name
+    digest = hashlib.sha256(url.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"LibreOffice_online_{digest}.msi"
+
+
+def _download_libreoffice_installer(
+    url: str,
+    *,
+    source_label: str,
+    emit_log: Callable[[str], None],
+) -> Path:
+    download_dir = _dependency_download_dir()
+    download_dir.mkdir(parents=True, exist_ok=True)
+    target = download_dir / _libreoffice_installer_filename(url)
+    if target.exists() and target.stat().st_size >= 100 * 1024 * 1024:
+        emit_log(
+            "[交接班][容量表图片发送] LibreOffice 在线安装包已存在，复用缓存 "
+            f"source={source_label}, path={target}, size_mb={target.stat().st_size // 1024 // 1024}"
+        )
+        return target
+    temp_path = target.with_name(target.name + ".part")
+    if temp_path.exists():
+        try:
+            temp_path.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+    emit_log(
+        "[交接班][容量表图片发送] LibreOffice 未安装，开始在线下载安装包 "
+        f"source={source_label}, url={url}"
+    )
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 QJPT-AutoInstaller/1.0"},
+    )
+    downloaded = 0
+    total = 0
+    last_log_at = 0
+    try:
+        with urllib.request.urlopen(request, timeout=_LIBREOFFICE_DOWNLOAD_READ_TIMEOUT_SEC) as response:
+            total_text = response.headers.get("Content-Length", "")
+            if str(total_text).isdigit():
+                total = int(total_text)
+            with temp_path.open("wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    downloaded += len(chunk)
+                    if downloaded - last_log_at >= 50 * 1024 * 1024:
+                        last_log_at = downloaded
+                        if total > 0:
+                            emit_log(
+                                "[交接班][容量表图片发送] LibreOffice 安装包下载中 "
+                                f"source={source_label}, downloaded_mb={downloaded // 1024 // 1024}, "
+                                f"total_mb={total // 1024 // 1024}"
+                            )
+                        else:
+                            emit_log(
+                                "[交接班][容量表图片发送] LibreOffice 安装包下载中 "
+                                f"source={source_label}, downloaded_mb={downloaded // 1024 // 1024}"
+                            )
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"下载安装包失败: {exc}") from exc
+    except Exception:
+        raise
+    if downloaded < 100 * 1024 * 1024:
+        try:
+            temp_path.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError(f"下载安装包大小异常: {downloaded} bytes")
+    os.replace(temp_path, target)
+    emit_log(
+        "[交接班][容量表图片发送] LibreOffice 安装包下载完成 "
+        f"source={source_label}, path={target}, size_mb={downloaded // 1024 // 1024}"
+    )
+    return target
+
+
+def _install_libreoffice_from_online_download(*, emit_log: Callable[[str], None]) -> bool:
+    last_error = ""
+    for source_label, url in _libreoffice_online_installers():
+        try:
+            installer = _download_libreoffice_installer(url, source_label=source_label, emit_log=emit_log)
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+            emit_log(
+                "[交接班][容量表图片发送] LibreOffice 在线安装包下载失败 "
+                f"source={source_label}, error={exc}"
+            )
+            continue
+        if _run_libreoffice_installer(installer, emit_log=emit_log, source_label=source_label):
+            return True
+        last_error = f"{source_label} 安装失败"
+    emit_log(f"[交接班][容量表图片发送] LibreOffice 在线下载安装失败: {last_error or 'unknown'}")
+    return False
 
 
 def _install_libreoffice_windows(*, emit_log: Callable[[str], None]) -> bool:
     if os.name != "nt":
         emit_log("[交接班][容量表图片发送] 非 Windows 环境，无法自动安装 LibreOffice")
         return False
-    if _install_libreoffice_from_local_installer(emit_log=emit_log):
+    if _install_libreoffice_from_online_download(emit_log=emit_log):
         return True
     winget = shutil.which("winget")
-    if not winget:
-        emit_log(
-            "[交接班][容量表图片发送] 未找到 winget，且未发现本地 LibreOffice 安装包 "
-            f"hint={_local_libreoffice_hint()}"
-        )
-        return False
-    base_command = [
-        winget,
-        "install",
-        "--id",
-        "TheDocumentFoundation.LibreOffice",
-        "-e",
-        "--accept-package-agreements",
-        "--accept-source-agreements",
-        "--silent",
-    ]
-    commands = [base_command + ["--disable-interactivity"], base_command]
-    emit_log(
-        "[交接班][容量表图片发送] LibreOffice 未安装，开始通过 winget 自动安装 "
-        f"hint={_local_libreoffice_hint()}"
-    )
-    last_error = ""
-    for command in commands:
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=_DEPENDENCY_INSTALL_TIMEOUT_SEC,
-                creationflags=_subprocess_creation_flags(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            last_error = str(exc)
-            continue
-        if result.returncode == 0 and _find_soffice_executable() is not None:
-            emit_log("[交接班][容量表图片发送] LibreOffice 自动安装完成")
-            return True
-        last_error = _tail_process_output(result.stderr or result.stdout)
-    emit_log(f"[交接班][容量表图片发送] LibreOffice 自动安装失败: {last_error or 'unknown'}")
+    if winget:
+        base_command = [
+            winget,
+            "install",
+            "--id",
+            "TheDocumentFoundation.LibreOffice",
+            "-e",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--silent",
+        ]
+        commands = [base_command + ["--disable-interactivity"], base_command]
+        emit_log("[交接班][容量表图片发送] LibreOffice 在线下载失败，开始通过 winget 自动安装")
+        last_error = ""
+        for command in commands:
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=_DEPENDENCY_INSTALL_TIMEOUT_SEC,
+                    creationflags=_subprocess_creation_flags(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                continue
+            if result.returncode == 0 and _find_soffice_executable() is not None:
+                emit_log("[交接班][容量表图片发送] LibreOffice winget 自动安装完成")
+                return True
+            last_error = _tail_process_output(result.stderr or result.stdout)
+        emit_log(f"[交接班][容量表图片发送] LibreOffice winget 自动安装失败: {last_error or 'unknown'}")
+    else:
+        emit_log("[交接班][容量表图片发送] 未找到 winget，跳过 winget 自动安装兜底")
+    emit_log("[交接班][容量表图片发送] LibreOffice 自动安装失败，请检查网络、管理员权限或杀毒软件拦截")
     return False
 
 
@@ -316,7 +450,7 @@ def ensure_capacity_report_image_runtime_dependencies(
             soffice = _find_soffice_executable()
     if soffice is None:
         result["ok"] = False
-        result["errors"].append(f"LibreOffice未安装，可放置离线安装包到: {_local_libreoffice_hint()}")
+        result["errors"].append("LibreOffice未安装或自动安装失败，请检查网络、管理员权限或杀毒软件拦截")
     else:
         result["soffice_path"] = str(soffice)
 
