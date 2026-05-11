@@ -464,7 +464,7 @@ class AppContainer:
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
         scheduler_cfg = dict(scheduler_cfg)
-        scheduler_cfg["interval_minutes"] = 60
+        scheduler_cfg["interval_minutes"] = 1440
         if "minute_offset" not in scheduler_cfg and "start_minute" not in scheduler_cfg and "run_minute" not in scheduler_cfg:
             scheduler_cfg["minute_offset"] = 30
         return IntervalSchedulerService(

@@ -16,7 +16,7 @@ from app.shared.utils.atomic_file import atomic_write_bytes, atomic_write_file, 
 class HandoverDailyReportAssetService:
     ASSET_ROOT = Path("handover") / "daily_report_assets"
     RETENTION_DAYS = 30
-    VALID_TARGETS = {"summary_sheet", "external_page"}
+    VALID_TARGETS = {"summary_sheet"}
     VALID_VARIANTS = {"auto", "manual", "effective"}
     THUMBNAIL_MAX_WIDTH = 480
 
@@ -58,9 +58,6 @@ class HandoverDailyReportAssetService:
     def get_summary_sheet_path(self, *, duty_date: str, duty_shift: str) -> Path:
         return self.get_asset_path(duty_date=duty_date, duty_shift=duty_shift, target="summary_sheet", variant="auto")
 
-    def get_external_page_path(self, *, duty_date: str, duty_shift: str) -> Path:
-        return self.get_asset_path(duty_date=duty_date, duty_shift=duty_shift, target="external_page", variant="auto")
-
     @staticmethod
     def _now_text() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -70,17 +67,9 @@ class HandoverDailyReportAssetService:
         atomic_write_bytes(path, content, validator=validate_image_file, temp_suffix=".tmp")
         return path
 
-    def save_auto_external_page_image(self, *, duty_date: str, duty_shift: str, content: bytes) -> Path:
-        path = self.get_asset_path(duty_date=duty_date, duty_shift=duty_shift, target="external_page", variant="auto")
-        atomic_write_bytes(path, content, validator=validate_image_file, temp_suffix=".tmp")
-        return path
-
     # backward-compatible aliases
     def save_summary_sheet_image(self, *, duty_date: str, duty_shift: str, content: bytes) -> Path:
         return self.save_auto_summary_sheet_image(duty_date=duty_date, duty_shift=duty_shift, content=content)
-
-    def save_external_page_image(self, *, duty_date: str, duty_shift: str, content: bytes) -> Path:
-        return self.save_auto_external_page_image(duty_date=duty_date, duty_shift=duty_shift, content=content)
 
     def save_manual_image(
         self,
@@ -333,11 +322,6 @@ class HandoverDailyReportAssetService:
                 duty_date=duty_date,
                 duty_shift=duty_shift,
                 target="summary_sheet",
-            ),
-            "external_page_image": self.resolve_effective_asset(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                target="external_page",
             ),
         }
 

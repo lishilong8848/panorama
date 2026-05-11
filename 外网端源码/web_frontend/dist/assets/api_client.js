@@ -703,26 +703,6 @@ export async function submitBranchPowerFromDownloadJob(payload = {}) {
   return startJsonJobApi("/api/jobs/branch-power/from-download", payload || {});
 }
 
-export async function getBranchPowerHourStatusApi(payload = {}) {
-  const params = new URLSearchParams();
-  const dateText = String(payload.business_date || payload.date || "").trim();
-  const buildingScope = String(payload.building_scope || "").trim();
-  const building = String(payload.building || "").trim();
-  if (dateText) params.set("business_date", dateText);
-  if (buildingScope) params.set("building_scope", buildingScope);
-  if (building) params.set("building", building);
-  const qs = params.toString();
-  return apiJson(`/api/branch-power/hour-status${qs ? `?${qs}` : ""}`);
-}
-
-export async function submitBranchPowerBackfillMissingJob(payload = {}) {
-  return startJsonJobApi("/api/jobs/branch-power/backfill-missing", payload || {});
-}
-
-export async function submitBranchPowerManualHourJob(payload = {}) {
-  return startJsonJobApi("/api/jobs/branch-power/manual-hour", payload || {});
-}
-
 export async function submitDayMetricFromFileJob(form) {
   return postFormJob("/api/jobs/day-metric/from-file", form);
 }

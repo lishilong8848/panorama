@@ -1,15 +1,12 @@
 import {
   cancelJobApi,
-  getBranchPowerHourStatusApi,
   getJobApi,
   postHandoverFromFilesJob,
   postManualUploadJob,
   postSheetImportJob,
   retryJobApi,
   startJsonJobApi,
-  submitBranchPowerBackfillMissingJob,
   submitBranchPowerFromDownloadJob,
-  submitBranchPowerManualHourJob,
   submitDayMetricFromDownloadJob,
   submitDayMetricFromFileJob,
   submitHandoverFollowupContinueJob,
@@ -27,8 +24,6 @@ const ACTION_KEYS = {
   handoverFromDownload: "job:handover_from_download",
   dayMetricFromDownload: "job:day_metric_from_download",
   branchPowerFromDownload: "job:branch_power_from_download",
-  branchPowerBackfillMissing: "job:branch_power_backfill_missing",
-  branchPowerManualHour: "job:branch_power_manual_hour",
   dayMetricFromFile: "job:day_metric_from_file",
   dayMetricRetryUnit: "job:day_metric_retry_unit",
   dayMetricRetryFailed: "job:day_metric_retry_failed",
@@ -63,15 +58,7 @@ export function createDashboardJobActions(ctx) {
     dayMetricLocalBuilding,
     dayMetricLocalDate,
     dayMetricLocalFile,
-    branchPowerManualDate,
-    branchPowerManualHour,
-    branchPowerManualBucketKey,
-    branchPowerManualBuilding,
-    branchPowerBackfillDate,
-    branchPowerBackfillBuilding,
-    branchPowerHourStatus,
-    branchPowerHourStatusLoading,
-    branchPowerHourStatusMessage,
+    branchPowerBusinessDate,
     streamController,
     fetchHealth,
     fetchJobs,
@@ -529,123 +516,26 @@ if (!canRun.value) return;
   }
 
   async function runBranchPowerFromDownload() {
+    const businessDate = String(branchPowerBusinessDate?.value || "").trim();
+    if (!parseDateText(businessDate)) {
+      message.value = "请选择有效的支路三源表业务日期";
+      return;
+    }
     if (!canRun.value) return;
     return guardedRun(
       ACTION_KEYS.branchPowerFromDownload,
       async () => {
         try {
-          message.value = "支路三源表本小时入库任务已提交";
-          const response = await submitBranchPowerFromDownloadJob({ building_scope: "all_enabled" });
-          await applyAcceptedExecutionResponse(response, "支路三源表本小时入库");
-        } catch (err) {
-          message.value = `支路三源表本小时入库提交失败: ${err}`;
-        }
-      },
-      { cooldownMs: 0 },
-    );
-  }
-
-  function buildBranchPowerScopePayload(building) {
-    if (building) {
-      return {
-        building_scope: "single",
-        building,
-        buildings: [building],
-      };
-    }
-    return { building_scope: "all_enabled" };
-  }
-
-  async function refreshBranchPowerHourStatus(options = {}) {
-    const dateText = String(branchPowerBackfillDate?.value || "").trim();
-    if (!parseDateText(dateText)) {
-      message.value = "请选择有效的支路三源表状态日期";
-      return null;
-    }
-    const building = String(branchPowerBackfillBuilding?.value || "").trim();
-    branchPowerHourStatusLoading.value = true;
-    try {
-      const payload = {
-        business_date: dateText,
-        ...buildBranchPowerScopePayload(building),
-      };
-      const data = await getBranchPowerHourStatusApi(payload);
-      branchPowerHourStatus.value = data || null;
-      const summary = data?.summary || {};
-      const complete = Number(summary.complete_hours || 0);
-      const total = Number(summary.total_hours || 0);
-      const incomplete = Number(summary.incomplete_count || 0);
-      branchPowerHourStatusMessage.value = `已入库 ${complete}/${total} 小时，缺口 ${incomplete} 小时`;
-      if (!options.silent) {
-        message.value = `支路三源表小时状态已刷新：${branchPowerHourStatusMessage.value}`;
-      }
-      return data;
-    } catch (err) {
-      branchPowerHourStatusMessage.value = `刷新失败: ${err}`;
-      message.value = `刷新支路三源表小时状态失败: ${err}`;
-      return null;
-    } finally {
-      branchPowerHourStatusLoading.value = false;
-    }
-  }
-
-  async function runBranchPowerBackfillMissing() {
-    const dateText = String(branchPowerBackfillDate?.value || "").trim();
-    if (!parseDateText(dateText)) {
-      message.value = "请选择有效的支路三源表补处理日期";
-      return;
-    }
-    const building = String(branchPowerBackfillBuilding?.value || "").trim();
-    if (!canRun.value) return;
-    return guardedRun(
-      ACTION_KEYS.branchPowerBackfillMissing,
-      async () => {
-        try {
           const payload = {
-            business_date: dateText,
-            ...buildBranchPowerScopePayload(building),
+            business_date: businessDate,
+            target_business_date: businessDate,
+            building_scope: "all_enabled",
           };
-          message.value = "支路三源表一键补入库任务已提交";
-          const response = await submitBranchPowerBackfillMissingJob(payload);
-          await applyAcceptedExecutionResponse(response, "支路三源表一键补入库");
-          await refreshBranchPowerHourStatus({ silent: true });
+          message.value = `支路三源表整日直传任务已提交: ${businessDate}`;
+          const response = await submitBranchPowerFromDownloadJob(payload);
+          await applyAcceptedExecutionResponse(response, "支路三源表整日直传");
         } catch (err) {
-          message.value = `支路三源表一键补入库提交失败: ${err}`;
-        }
-      },
-      { cooldownMs: 0 },
-    );
-  }
-
-  async function runBranchPowerManualHour() {
-    const dateText = String(branchPowerManualDate?.value || "").trim();
-    if (!parseDateText(dateText)) {
-      message.value = "请选择有效的支路三源表日期";
-      return;
-    }
-    const hourText = String(branchPowerManualHour?.value || "").trim();
-    const hourNumber = Number(hourText);
-    if (!/^\d{1,2}$/.test(hourText) || !Number.isInteger(hourNumber) || hourNumber < 0 || hourNumber > 23) {
-      message.value = "请选择有效的支路三源表小时";
-      return;
-    }
-    const bucketKey = `${dateText} ${String(hourNumber).padStart(2, "0")}`;
-    if (String(branchPowerManualBucketKey?.value || "").trim() && String(branchPowerManualBucketKey.value).trim() !== bucketKey) {
-      message.value = "支路三源表时间桶状态不同步，请重新选择日期和小时";
-      return;
-    }
-    const building = String(branchPowerManualBuilding?.value || "").trim();
-    if (!canRun.value) return;
-    return guardedRun(
-      ACTION_KEYS.branchPowerManualHour,
-      async () => {
-        try {
-          const payload = { target_bucket_key: bucketKey, ...buildBranchPowerScopePayload(building) };
-          message.value = "支路三源表指定小时处理任务已提交";
-          const response = await submitBranchPowerManualHourJob(payload);
-          await applyAcceptedExecutionResponse(response, "支路三源表指定小时处理");
-        } catch (err) {
-          message.value = `支路三源表指定小时处理提交失败: ${err}`;
+          message.value = `支路三源表整日直传提交失败: ${err}`;
         }
       },
       { cooldownMs: 0 },
@@ -804,9 +694,6 @@ if (!canRun.value) return;
     runHandoverFromDownload,
     runDayMetricFromDownload,
     runBranchPowerFromDownload,
-    refreshBranchPowerHourStatus,
-    runBranchPowerBackfillMissing,
-    runBranchPowerManualHour,
     runDayMetricFromFile,
     retryDayMetricUnit,
     retryFailedDayMetricUnits,

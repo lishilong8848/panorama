@@ -1,4 +1,4 @@
-import { apiDatetimeToLocal, ensureConfigShape, todayText } from "./config_helpers.js";
+import { apiDatetimeToLocal, ensureConfigShape, formatDateObj, todayText } from "./config_helpers.js";
 import { createActionGuard } from "./action_guard.js";
 import { getDashboardMenuGroupsForRole } from "./dashboard_menu_config.js";
 import {
@@ -75,6 +75,12 @@ function filterDashboardMenuGroupsByRole(roleMode) {
       group_title: group.title,
     })),
   }));
+}
+
+function yesterdayText() {
+  const date = new Date();
+  date.setDate(date.getDate() - 1);
+  return formatDateObj(date);
 }
 
 function buildRoleDashboardState(roleMode, preferredId = "") {
@@ -756,24 +762,7 @@ export function createAppState(vueApi) {
   const dayMetricLocalBuilding = ref("");
   const dayMetricLocalDate = ref(todayText());
   const dayMetricLocalFile = ref(null);
-  const branchPowerManualDate = ref(todayText());
-  const branchPowerManualHour = ref(String(new Date().getHours()).padStart(2, "0"));
-  const branchPowerManualHourOptions = Array.from({ length: 24 }, (_, hour) => {
-    const value = String(hour).padStart(2, "0");
-    return { value, label: `${value}:00` };
-  });
-  const branchPowerManualBucketKey = computed(() => {
-    const dateText = String(branchPowerManualDate.value || "").trim();
-    const hourText = String(branchPowerManualHour.value || "").trim();
-    if (!dateText || !/^(?:[01]\d|2[0-3])$/.test(hourText)) return "";
-    return `${dateText} ${hourText}`;
-  });
-  const branchPowerManualBuilding = ref("");
-  const branchPowerBackfillDate = ref(todayText());
-  const branchPowerBackfillBuilding = ref("");
-  const branchPowerHourStatus = ref(null);
-  const branchPowerHourStatusLoading = ref(false);
-  const branchPowerHourStatusMessage = ref("");
+  const branchPowerBusinessDate = ref(yesterdayText());
   const handoverFile = ref(null);
   const handoverFilesByBuilding = reactive({});
   const handoverDutyDate = ref(todayText());
@@ -794,9 +783,7 @@ export function createAppState(vueApi) {
       spreadsheet_url: "",
       error: "",
       summary_screenshot_path: "",
-      external_screenshot_path: "",
       summary_screenshot_source_used: "",
-      external_screenshot_source_used: "",
     },
     screenshot_auth: {
       status: "missing_login",
@@ -809,17 +796,6 @@ export function createAppState(vueApi) {
     },
     capture_assets: {
       summary_sheet_image: {
-        exists: false,
-        source: "none",
-        stored_path: "",
-        captured_at: "",
-        preview_url: "",
-        thumbnail_url: "",
-        full_image_url: "",
-        auto: emptyDailyReportAssetVariant(),
-        manual: emptyDailyReportAssetVariant(),
-      },
-      external_page_image: {
         exists: false,
         source: "none",
         stored_path: "",
@@ -843,7 +819,6 @@ export function createAppState(vueApi) {
     status: "",
     tested_at: "",
     summary_sheet_image: { status: "", error: "", path: "" },
-    external_page_image: { status: "", error: "", path: "" },
   });
   const handoverDailyReportPreviewModal = ref({
     open: false,
@@ -1601,7 +1576,7 @@ export function createAppState(vueApi) {
     const minute = Number.parseInt(String(scheduler.minute_offset ?? healthScheduler.minute_offset ?? 30), 10);
     const safeMinute = Number.isInteger(minute) && minute >= 0 ? minute % 60 : 30;
     const minuteText = String(safeMinute).padStart(2, "0");
-    return `每小时 ${minuteText} 分左右`;
+    return `每天 00:${minuteText} 左右`;
   });
   const alarmEventUploadSchedulerDecisionText = computed(() =>
     readSchedulerDisplayText(health.alarm_event_upload?.scheduler, "decision_text", "暂无记录"),
@@ -1832,45 +1807,29 @@ export function createAppState(vueApi) {
     const summaryLastWrittenSource = String(
       handoverDailyReportContext.value?.daily_report_record_export?.summary_screenshot_source_used || "",
     ).trim();
-    const externalLastWrittenSource = String(
-      handoverDailyReportContext.value?.daily_report_record_export?.external_screenshot_source_used || "",
-    ).trim();
     const backendDisplay = handoverDailyReportContext.value?.display?.capture_assets;
     if (backendDisplay && typeof backendDisplay === "object") {
       return {
         summarySheetImage: backendDisplay.summary_sheet_image && typeof backendDisplay.summary_sheet_image === "object"
-          ? mapBackendDailyReportAssetCard(backendDisplay.summary_sheet_image, "今日航图截图")
-          : normalizeDailyReportAssetCard({}, "今日航图截图"),
-        externalPageImage: backendDisplay.external_page_image && typeof backendDisplay.external_page_image === "object"
-          ? mapBackendDailyReportAssetCard(backendDisplay.external_page_image, "排班截图")
-          : normalizeDailyReportAssetCard({}, "排班截图"),
+          ? mapBackendDailyReportAssetCard(backendDisplay.summary_sheet_image, "日报截图")
+          : normalizeDailyReportAssetCard({}, "日报截图"),
       };
     }
     if (rawAssets && typeof rawAssets === "object") {
       return {
         summarySheetImage: normalizeDailyReportAssetCard(
           rawAssets.summary_sheet_image || {},
-          "今日航图截图",
+          "日报截图",
           {
             dutyDate,
             dutyShift,
             lastWrittenSource: summaryLastWrittenSource,
           },
         ),
-        externalPageImage: normalizeDailyReportAssetCard(
-          rawAssets.external_page_image || {},
-          "排班截图",
-          {
-            dutyDate,
-            dutyShift,
-            lastWrittenSource: externalLastWrittenSource,
-          },
-        ),
       };
     }
     return {
-      summarySheetImage: normalizeDailyReportAssetCard({}, "今日航图截图"),
-      externalPageImage: normalizeDailyReportAssetCard({}, "排班截图"),
+      summarySheetImage: normalizeDailyReportAssetCard({}, "日报截图"),
     };
   });
   const handoverDailyReportSummaryTestVm = computed(() => {
@@ -1882,19 +1841,6 @@ export function createAppState(vueApi) {
       fallbackExists: Boolean(handoverDailyReportCaptureAssets.value.summarySheetImage.exists),
       fallbackPath: String(handoverDailyReportCaptureAssets.value.summarySheetImage.stored_path || ""),
       fallbackCapturedAt: String(handoverDailyReportCaptureAssets.value.summarySheetImage.captured_at || ""),
-      skippedText: "本次测试已跳过",
-      browserLabel: getDailyReportBrowserLabel(handoverDailyReportContext.value?.screenshot_auth || {}),
-    });
-  });
-  const handoverDailyReportExternalTestVm = computed(() => {
-    const currentBatchKey = String(handoverDailyReportContext.value?.batch_key || "").trim();
-    const testState = handoverDailyReportLastScreenshotTest.value || {};
-    const raw =
-      String(testState.batch_key || "").trim() === currentBatchKey ? testState.external_page_image || {} : {};
-    return mapDailyReportScreenshotTestVm(raw, {
-      fallbackExists: Boolean(handoverDailyReportCaptureAssets.value.externalPageImage.exists),
-      fallbackPath: String(handoverDailyReportCaptureAssets.value.externalPageImage.stored_path || ""),
-      fallbackCapturedAt: String(handoverDailyReportCaptureAssets.value.externalPageImage.captured_at || ""),
       skippedText: "本次测试已跳过",
       browserLabel: getDailyReportBrowserLabel(handoverDailyReportContext.value?.screenshot_auth || {}),
     });
@@ -2096,16 +2042,7 @@ export function createAppState(vueApi) {
     dayMetricLocalBuilding,
     dayMetricLocalDate,
     dayMetricLocalFile,
-    branchPowerManualDate,
-    branchPowerManualHour,
-    branchPowerManualHourOptions,
-    branchPowerManualBucketKey,
-    branchPowerManualBuilding,
-    branchPowerBackfillDate,
-    branchPowerBackfillBuilding,
-    branchPowerHourStatus,
-    branchPowerHourStatusLoading,
-    branchPowerHourStatusMessage,
+    branchPowerBusinessDate,
     handoverFile,
     handoverFilesByBuilding,
     handoverDutyDate,
@@ -2214,7 +2151,6 @@ export function createAppState(vueApi) {
     handoverDailyReportActions,
     handoverDailyReportCaptureAssets,
     handoverDailyReportSummaryTestVm,
-    handoverDailyReportExternalTestVm,
     canRewriteHandoverDailyReportRecord,
     handoverConfiguredBuildings,
     handoverSelectedBuildings,

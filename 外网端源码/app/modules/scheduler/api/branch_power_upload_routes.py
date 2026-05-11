@@ -129,7 +129,7 @@ def branch_power_upload_scheduler_config(payload: Dict[str, Any], request: Reque
                 raise HTTPException(status_code=400, detail="state_file 不能为空")
             scheduler_cfg[key] = text
 
-    scheduler_cfg["interval_minutes"] = 60
+    scheduler_cfg["interval_minutes"] = 1440
 
     try:
         saved = save_settings(merged, container.config_path)

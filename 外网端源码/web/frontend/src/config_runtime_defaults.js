@@ -837,13 +837,8 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(dailyReportExport.fields, "screenshots", "日报截图");
   setStringDefault(
     dailyReportExport,
-    "summary_page_url",
-    "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgeZUMIpMDuIIfLA",
-  );
-  setStringDefault(
-    dailyReportExport,
-    "external_page_url",
-    "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgecZCUXaEtvP9Yl",
+    "screenshot_page_url",
+    "https://124.222.19.16:3001/",
   );
 
   setBooleanDefault(reviewUi, "enabled", true);
@@ -1134,7 +1129,7 @@ function applyBranchPowerUploadDefaults(cfg) {
   const scheduler = upload.scheduler;
   setBooleanDefault(scheduler, "enabled", true);
   setBooleanDefault(scheduler, "auto_start_in_gui", false);
-  scheduler.interval_minutes = 60;
+  scheduler.interval_minutes = 1440;
   setNumberDefault(scheduler, "minute_offset", 30);
   setNumberDefault(scheduler, "check_interval_sec", 30);
   setBooleanDefault(scheduler, "retry_failed_on_next_tick", true);

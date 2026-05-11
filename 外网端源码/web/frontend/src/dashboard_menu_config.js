@@ -58,7 +58,7 @@ const SPECIAL_GROUP = {
     {
       id: 'branch_power_upload',
       title: '自动上传支路功率',
-      desc: '每小时读取支路功率、电流、开关源文件入库，23点齐全后整日上传多维表。',
+      desc: '每天读取支路功率、电流、开关整日源文件，解析 24 小时后直接上传多维表。',
     },
     {
       id: 'wet_bulb_collection',

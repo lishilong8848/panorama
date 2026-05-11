@@ -839,18 +839,21 @@ def _start_handover_followup_job_after_confirm(
     *,
     batch_key: str,
     submitted_by: str = "confirm",
+    dedupe_key: str = "",
+    task_label: str = "确认后上传",
 ) -> Dict[str, Any]:
     target_batch = str(batch_key or "").strip()
+    label_text = str(task_label or "").strip() or "确认后上传"
     followup = _build_review_followup_service(container)
     if not target_batch:
         return _build_followup_failure_result(followup, batch_key=target_batch, error="batch_key 不能为空")
 
     def _run(emit_log) -> Dict[str, Any]:
         service = _build_review_followup_service(container)
-        emit_log(f"[交接班][确认后上传] 后台任务开始 batch={target_batch}")
+        emit_log(f"[交接班][{label_text}] 后台任务开始 batch={target_batch}")
         result = service.continue_batch(target_batch, emit_log=emit_log)
         emit_log(
-            f"[交接班][确认后上传] 后台任务完成 batch={target_batch}, "
+            f"[交接班][{label_text}] 后台任务完成 batch={target_batch}, "
             f"状态={_followup_status_text(result.get('status'))}, "
             f"已上传={len(result.get('uploaded_buildings', []) or [])}, "
             f"已失败={len(result.get('failed_buildings', []) or [])}, "
@@ -860,7 +863,7 @@ def _start_handover_followup_job_after_confirm(
 
     job = _start_handover_background_job(
         container,
-        name=f"交接班确认后上传-{target_batch}",
+        name=f"交接班{label_text}-{target_batch}",
         run_func=_run,
         worker_handler="handover_followup_continue",
         worker_payload={"batch_key": target_batch},
@@ -868,18 +871,63 @@ def _start_handover_followup_job_after_confirm(
         priority="manual",
         feature="handover_followup_continue",
         submitted_by=submitted_by,
-        dedupe_key=f"handover_followup_continue:{target_batch}",
+        dedupe_key=str(dedupe_key or "").strip() or f"handover_followup_continue:{target_batch}",
     )
     job_id = str(getattr(job, "job_id", "") or (job.get("job_id", "") if isinstance(job, dict) else "")).strip()
-    container.add_system_log(f"[任务] 已提交: 交接班确认后上传 batch={target_batch} ({job_id or '-'})")
+    container.add_system_log(f"[任务] 已提交: 交接班{label_text} batch={target_batch} ({job_id or '-'})")
     return _build_followup_queued_result(followup, batch_key=target_batch, job=job)
+
+
+def _maybe_start_handover_followup_job_after_review_save(
+    container,
+    *,
+    followup: ReviewFollowupTriggerService,
+    session: Dict[str, Any],
+    batch_status: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(session, dict) or not bool(session.get("confirmed", False)):
+        return {}
+    target_batch = str(session.get("batch_key", "") or "").strip()
+    if not target_batch:
+        return {}
+    cloud_state = ReviewSessionService._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
+    if str(cloud_state.get("status", "")).strip().lower() == "disabled":
+        return {}
+    revision = int(session.get("revision", 0) or 0)
+    synced_revision = int(cloud_state.get("synced_revision", 0) or 0)
+    if str(cloud_state.get("status", "")).strip().lower() == "success" and synced_revision == revision:
+        return {}
+    gate = followup.evaluate(batch_status if isinstance(batch_status, dict) else {})
+    if not followup.is_first_full_cloud_sync_completed(target_batch) and not bool(gate.get("ready_for_followup_upload", False)):
+        return {}
+    session_id = str(session.get("session_id", "") or "").strip()
+    building = str(session.get("building", "") or "").strip()
+    dedupe_key = f"handover_followup_continue:{target_batch}:review_save:{session_id or building}:{revision}"
+    try:
+        result = _start_handover_followup_job_after_confirm(
+            container,
+            batch_key=target_batch,
+            submitted_by="review_save",
+            dedupe_key=dedupe_key,
+            task_label="审核保存后云文档重传",
+        )
+        container.add_system_log(
+            f"[交接班][审核保存后上传] 已排队云文档重传: "
+            f"batch={target_batch}, building={building or '-'}, revision={revision}"
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        container.add_system_log(
+            f"[交接班][审核保存后上传] 任务提交失败，已保留待重传状态: "
+            f"batch={target_batch}, building={building or '-'}, revision={revision}, 错误={exc}"
+        )
+        return _build_followup_failure_result(followup, batch_key=target_batch, error=str(exc))
 
 
 def _daily_report_stage_text(value: Any) -> str:
     text = str(value or "").strip().lower()
     mapping = {
-        "summary_sheet": "今日航图",
-        "external_page": "外围页面",
+        "summary_sheet": "日报截图",
         "unknown": "未知阶段",
     }
     return mapping.get(text, text or "-")
@@ -954,7 +1002,7 @@ def _build_daily_report_services(
 
 def _validate_daily_report_target_or_400(target: str) -> str:
     target_text = str(target or "").strip().lower()
-    if target_text not in {"summary_sheet", "external_page"}:
+    if target_text != "summary_sheet":
         raise HTTPException(status_code=400, detail="target 参数错误")
     return target_text
 
@@ -990,13 +1038,7 @@ def _build_daily_report_context_payload(
         duty_date=duty_date,
         duty_shift=duty_shift,
     )
-    try:
-        screenshot_auth = screenshot_service.check_auth_status(
-            emit_log=lambda *_args, **_kwargs: None,
-            ensure_browser_running=False,
-        )
-    except Exception:
-        screenshot_auth = state_service.get_screenshot_auth_state()
+    screenshot_auth = state_service.get_screenshot_auth_state()
     capture_assets = asset_service.get_capture_assets_context(
         duty_date=duty_date,
         duty_shift=duty_shift,
@@ -1026,21 +1068,7 @@ async def _build_daily_report_context_payload_async(
         duty_date=duty_date,
         duty_shift=duty_shift,
     )
-    try:
-        if hasattr(screenshot_service, 'check_auth_status_async'):
-            screenshot_auth = await screenshot_service.check_auth_status_async(
-                emit_log=lambda *_args, **_kwargs: None,
-                ensure_browser_running=False,
-            )
-        else:
-            screenshot_auth = screenshot_service.check_auth_status(
-                emit_log=lambda *_args, **_kwargs: None,
-                ensure_browser_running=False,
-            )
-            if inspect.isawaitable(screenshot_auth):
-                screenshot_auth = await screenshot_auth
-    except Exception:
-        screenshot_auth = state_service.get_screenshot_auth_state()
+    screenshot_auth = state_service.get_screenshot_auth_state()
     capture_assets = asset_service.get_capture_assets_context(
         duty_date=duty_date,
         duty_shift=duty_shift,
@@ -1080,7 +1108,7 @@ def _daily_report_error_message(error_code: str, *, fallback: str = "") -> str:
     if code == "target_page_not_open":
         return "目标网页当前没有在系统 Edge 中打开，请先打开对应页面后再重试。"
     if code == "summary_sheet_not_found":
-        return "未找到今日航图页面，请确认当前飞书页面已打开且内容可见。"
+        return "未找到日报截图页面，请确认页面可正常访问。"
     if code == "target_page_mismatch":
         return "当前打开页面与目标页面不一致，请重新打开对应飞书页面后重试。"
     if code == "capture_dom_unavailable":
@@ -1842,24 +1870,38 @@ def _safe_latest_session_id(
         return ""
 
 
-def _present_review_cloud_sheet_state(raw: Any) -> Dict[str, Any]:
+def _present_review_cloud_sheet_state(raw: Any, *, revision: int = 0) -> Dict[str, Any]:
     payload = ReviewSessionService._normalize_cloud_sheet_sync(raw)
     status = str(payload.get("status", "")).strip().lower()
     url = str(payload.get("spreadsheet_url", "")).strip()
     error = str(payload.get("error", "")).strip()
     attempted = bool(payload.get("attempted"))
+    synced_revision = int(payload.get("synced_revision", 0) or 0)
+    last_attempt_revision = int(payload.get("last_attempt_revision", 0) or 0)
+    current_revision = int(revision or 0)
+    cloud_revision_stale = (
+        current_revision > 0
+        and synced_revision > 0
+        and synced_revision < current_revision
+        and status in {"success", "pending_upload"}
+    )
     text = "云表未执行"
     tone = "neutral"
     reason_code = status or "idle"
-    if status == "success":
+    if status == "success" and cloud_revision_stale:
+        text = "云表内容已修改，待重新上传"
+        tone = "warning"
+        reason_code = "stale"
+    elif status == "success":
         text = "云表已同步"
         tone = "success"
     elif status in {"uploading", "syncing"}:
         text = "云表上传中"
         tone = "info"
     elif status == "pending_upload":
-        text = "云表待最终上传"
+        text = "云表内容已修改，待重新上传" if cloud_revision_stale else "云表待最终上传"
         tone = "warning"
+        reason_code = "stale_pending_upload" if cloud_revision_stale else reason_code
     elif status == "prepare_failed":
         text = "云表预建失败"
         tone = "danger"
@@ -1883,7 +1925,19 @@ def _present_review_cloud_sheet_state(raw: Any) -> Dict[str, Any]:
         "reason_code": reason_code,
         "url": url,
         "error": error,
+        "synced_revision": synced_revision,
+        "last_attempt_revision": last_attempt_revision,
+        "current_revision": current_revision,
     }
+
+
+def _ensure_cloud_sheet_not_uploading_or_409(session: Dict[str, Any], *, action: str = "操作确认状态") -> None:
+    cloud_sync = session.get("cloud_sheet_sync", {}) if isinstance(session, dict) else {}
+    if not isinstance(cloud_sync, dict):
+        cloud_sync = {}
+    status = str(cloud_sync.get("status", "") or "").strip().lower()
+    if status in {"uploading", "syncing"}:
+        raise HTTPException(status_code=409, detail=f"当前楼栋云文档上传中，请等待上传完成后再{action}")
 
 
 def _present_review_excel_sync_state(raw: Any) -> Dict[str, Any]:
@@ -2229,7 +2283,10 @@ def _build_review_display_state(
         and latest_session_id_text
         and selected_session_id != latest_session_id_text
     )
-    cloud_sheet_state = _present_review_cloud_sheet_state(session_payload.get("cloud_sheet_sync", {}))
+    cloud_sheet_state = _present_review_cloud_sheet_state(
+        session_payload.get("cloud_sheet_sync", {}),
+        revision=int(session_payload.get("revision", 0) or 0),
+    )
     cloud_sheet_uploading = str(cloud_sheet_state["status"]).strip().lower() in {"uploading", "syncing"}
     excel_sync_state = _present_review_excel_sync_state(session_payload.get("excel_sync", {}))
     capacity_state = _present_review_capacity_state(session_payload.get("capacity_sync", {}))
@@ -2301,6 +2358,17 @@ def _build_review_display_state(
                 "code": "cloud_sheet_uploading",
                 "text": "当前楼栋云文档上传中，上传完成前不能修改确认状态。",
                 "tone": "info",
+            }
+        )
+    elif bool(session_payload.get("confirmed", False)) and str(cloud_sheet_state.get("reason_code", "")).strip() in {
+        "stale",
+        "stale_pending_upload",
+    }:
+        status_banners.append(
+            {
+                "code": "cloud_sheet_stale",
+                "text": "审核内容已修改，云文档需要重新上传；系统会在空闲时自动处理。",
+                "tone": "warning",
             }
         )
     if excel_sync_state["status"] == "failed":
@@ -2709,6 +2777,35 @@ def _attach_review_display_state(
         response["concurrency"] = concurrency
     batch_key = str(session.get("batch_key", "") or "").strip()
     if batch_key:
+        try:
+            outdoor_state = service.get_outdoor_temperature_state(
+                batch_key=batch_key,
+                client_id=str(client_id or "").strip(),
+                preferred_document=(
+                    response.get("document", {})
+                    if isinstance(response.get("document", {}), dict)
+                    else {}
+                ),
+                preferred_session=session,
+            )
+        except ReviewSessionStoreUnavailableError as exc:
+            _raise_review_store_http_error(exc)
+        except Exception as exc:  # noqa: BLE001
+            if callable(emit_log):
+                emit_log(f"[交接班][室外温湿度共享] 读取共享状态失败: batch={batch_key}, error={exc}")
+            outdoor_state = {"shared_blocks": {}, "shared_block_locks": {}}
+        outdoor_blocks = outdoor_state.get("shared_blocks", {}) if isinstance(outdoor_state, dict) else {}
+        outdoor_locks = outdoor_state.get("shared_block_locks", {}) if isinstance(outdoor_state, dict) else {}
+        outdoor_block = (
+            outdoor_blocks.get("outdoor_temperature", {})
+            if isinstance(outdoor_blocks, dict)
+            else {}
+        )
+        if isinstance(response.get("document", {}), dict) and isinstance(outdoor_block, dict):
+            response["document"], _changed = ReviewSessionService.apply_outdoor_temperature_to_document(
+                copy.deepcopy(response.get("document", {})),
+                outdoor_block.get("cells", {}) if isinstance(outdoor_block.get("cells", {}), dict) else {},
+            )
         shared_state = _get_substation_110kv_state_safe(
             service,
             batch_key=batch_key,
@@ -2719,6 +2816,7 @@ def _attach_review_display_state(
         shared_locks = shared_state.get("shared_block_locks", {}) if isinstance(shared_state, dict) else {}
         response["shared_blocks"] = {
             **(response.get("shared_blocks", {}) if isinstance(response.get("shared_blocks", {}), dict) else {}),
+            **(outdoor_blocks if isinstance(outdoor_blocks, dict) else {}),
             **(shared_blocks if isinstance(shared_blocks, dict) else {}),
         }
         response["shared_block_locks"] = {
@@ -2727,6 +2825,7 @@ def _attach_review_display_state(
                 if isinstance(response.get("shared_block_locks", {}), dict)
                 else {}
             ),
+            **(outdoor_locks if isinstance(outdoor_locks, dict) else {}),
             **(shared_locks if isinstance(shared_locks, dict) else {}),
         }
     response["display_state"] = _build_review_display_state(
@@ -2876,18 +2975,17 @@ def handover_daily_report_open_screenshot_auth(
     batch_key = f"{duty_date_text}|{duty_shift_text}"
 
     def _run(emit_log) -> Dict[str, Any]:
-        _, _, _, screenshot_service = _build_daily_report_services(container)
-        result = screenshot_service.open_login_browser(emit_log=emit_log)
+        emit_log("[交接班][日报截图] 单截图公开页面模式，无需初始化飞书截图登录态")
         return {
-            "ok": bool(result.get("ok", False)),
-            "status": str(result.get("status", "")).strip() or "failed",
-            "message": str(result.get("message", "")).strip(),
-            "profile_dir": str(result.get("profile_dir", "")).strip(),
+            "ok": True,
+            "status": "skipped",
+            "message": "单截图公开页面模式，无需初始化飞书截图登录态",
+            "profile_dir": "",
         }
 
     job = _start_handover_background_job(
         container,
-        name=f"日报截图登录态初始化-{batch_key}",
+        name=f"日报截图登录态跳过-{batch_key}",
         run_func=_run,
         worker_handler="daily_report_auth_open",
         worker_payload={"duty_date": duty_date_text, "duty_shift": duty_shift_text},
@@ -2896,7 +2994,7 @@ def handover_daily_report_open_screenshot_auth(
         feature="daily_report_auth_open",
         submitted_by="manual",
     )
-    container.add_system_log(f"[任务] 已提交: 日报截图登录态初始化 batch={batch_key} ({job.job_id})")
+    container.add_system_log(f"[任务] 已提交: 日报截图登录态跳过 batch={batch_key} ({job.job_id})")
     return _accepted_job_response(job)
 
 
@@ -2919,32 +3017,12 @@ def handover_daily_report_screenshot_test(
         review_service, _state_service, asset_service, screenshot_service = _build_daily_report_services(container)
         cloud_batch = review_service.get_cloud_batch(batch_key) or {}
         spreadsheet_url = str(cloud_batch.get("spreadsheet_url", "")).strip() if isinstance(cloud_batch, dict) else ""
-        summary_result = screenshot_service.capture_summary_sheet(
+        summary_result = screenshot_service.capture_daily_report_page(
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
             emit_log=emit_log,
-            prefer_existing_page=True,
-            allow_open_fallback=True,
         )
-
-        external_result = screenshot_service.capture_external_page(
-            duty_date=duty_date_text,
-            duty_shift=duty_shift_text,
-            emit_log=emit_log,
-            prefer_existing_page=True,
-            allow_open_fallback=True,
-        )
-
-        statuses = {
-            "summary": str(summary_result.get("status", "")).strip().lower(),
-            "external": str(external_result.get("status", "")).strip().lower(),
-        }
-        if statuses["summary"] in {"ok", "skipped"} and statuses["external"] == "ok":
-            overall_status = "ok"
-        elif statuses["summary"] == "ok" or statuses["external"] == "ok":
-            overall_status = "partial_failed"
-        else:
-            overall_status = "failed"
+        overall_status = "ok" if str(summary_result.get("status", "")).strip().lower() in {"ok", "skipped"} else "failed"
 
         return {
             "ok": overall_status != "failed",
@@ -2952,7 +3030,6 @@ def handover_daily_report_screenshot_test(
             "batch_key": batch_key,
             "spreadsheet_url": spreadsheet_url,
             "summary_sheet_image": summary_result,
-            "external_page_image": external_result,
             "capture_assets": asset_service.get_capture_assets_context(
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
@@ -3029,26 +3106,13 @@ def handover_daily_report_recapture_asset(
     def _run(emit_log) -> Dict[str, Any]:
         review_service, state_service, asset_service, screenshot_service = _build_daily_report_services(container)
         try:
-            if target_text == "summary_sheet":
-                result = _daily_report_capture_result_payload(
-                    screenshot_service.capture_summary_sheet(
-                        duty_date=duty_date_text,
-                        duty_shift=duty_shift_text,
-                        emit_log=emit_log,
-                        prefer_existing_page=True,
-                        allow_open_fallback=True,
-                    )
+            result = _daily_report_capture_result_payload(
+                screenshot_service.capture_daily_report_page(
+                    duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
+                    emit_log=emit_log,
                 )
-            else:
-                result = _daily_report_capture_result_payload(
-                    screenshot_service.capture_external_page(
-                        duty_date=duty_date_text,
-                        duty_shift=duty_shift_text,
-                        emit_log=emit_log,
-                        prefer_existing_page=True,
-                        allow_open_fallback=True,
-                    )
-                )
+            )
         except Exception as exc:  # noqa: BLE001
             result = _daily_report_capture_result_payload(
                 fallback_stage="unknown",
@@ -3972,7 +4036,7 @@ def handover_review_save(
     payload: Dict[str, Any] = Body(...),
 ) -> Dict[str, Any]:
     container = request.app.state.container
-    service, parser, writer, _ = _build_review_services(container)
+    service, parser, writer, followup = _build_review_services(container)
     document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
     building = _resolve_building_or_404(service, building_code)
 
@@ -3994,12 +4058,58 @@ def handover_review_save(
         session_id=session_id,
         client_id=str(payload.get("client_id", "")).strip(),
     )
+    initial_document_state: Dict[str, Any] | None = None
     try:
-        document_state.ensure_document_for_session(target)
+        ensured_document_state = document_state.ensure_document_for_session(target)
+        initial_document_state = ensured_document_state if isinstance(ensured_document_state, dict) else None
     except ReviewDocumentStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     batch_key = str(target.get("batch_key", "")).strip()
     dirty_regions = _normalize_review_dirty_regions(payload.get("dirty_regions"))
+    previous_document = (
+        initial_document_state.get("document", {})
+        if isinstance(initial_document_state, dict) and isinstance(initial_document_state.get("document", {}), dict)
+        else {}
+    )
+    previous_outdoor_cells = ReviewSessionService.extract_outdoor_temperature_cells_from_document(previous_document)
+    incoming_outdoor_cells = ReviewSessionService.extract_outdoor_temperature_cells_from_document(document)
+    has_outdoor_dirty_flag = "shared_outdoor_temperature_dirty" in payload
+    outdoor_cells_changed = (
+        bool(payload.get("shared_outdoor_temperature_dirty"))
+        if has_outdoor_dirty_flag
+        else (
+            bool(dirty_regions.get("fixed_blocks")) and any(
+                str(incoming_outdoor_cells.get(cell, "") if incoming_outdoor_cells.get(cell) is not None else "")
+                != str(previous_outdoor_cells.get(cell, "") if previous_outdoor_cells.get(cell) is not None else "")
+                for cell in ("B7", "D7")
+            )
+        )
+    )
+    outdoor_shared_publish_cells: Dict[str, str] | None = None
+    outdoor_batch_sync_result: Dict[str, Any] = {}
+    if outdoor_cells_changed:
+        outdoor_shared_publish_cells = dict(incoming_outdoor_cells)
+    elif batch_key:
+        try:
+            outdoor_state = service.get_outdoor_temperature_state(
+                batch_key=batch_key,
+                client_id=str(payload.get("client_id", "")).strip(),
+                preferred_document=document,
+                preferred_session=target,
+            )
+            outdoor_block = outdoor_state.get("shared_blocks", {}).get("outdoor_temperature", {})
+            outdoor_cells = outdoor_block.get("cells", {}) if isinstance(outdoor_block, dict) else {}
+            document, _outdoor_applied = ReviewSessionService.apply_outdoor_temperature_to_document(
+                document,
+                outdoor_cells if isinstance(outdoor_cells, dict) else {},
+            )
+        except ReviewSessionStoreUnavailableError as exc:
+            _raise_review_store_http_error(exc)
+        except Exception as exc:  # noqa: BLE001
+            container.add_system_log(
+                f"[交接班][室外温湿度共享] 保存前套用共享值失败，继续保存当前文档: "
+                f"building={building}, session_id={session_id}, error={exc}"
+            )
     save_started = time.perf_counter()
     write_elapsed_ms = 0
     defaults_elapsed_ms = 0
@@ -4010,6 +4120,7 @@ def handover_review_save(
     defaults_config_async = False
     defaults_config_status = "skipped"
     saved_document_revision = int(base_revision or 0)
+    auto_cloud_sync_result: Dict[str, Any] = {}
     with container.job_service.resource_guard(
         name=f"handover_save:{batch_key or building}:{session_id}",
         resource_keys=_handover_resource_keys(building=building, batch_key=batch_key),
@@ -4068,6 +4179,42 @@ def handover_review_save(
         except ReviewSessionStoreUnavailableError as exc:
             document_state.restore_document(building=building, previous=previous_document_state)
             _raise_review_store_http_error(exc, saved_document=True)
+        if outdoor_shared_publish_cells is not None and batch_key:
+            try:
+                shared_save = service.save_outdoor_temperature(
+                    batch_key=batch_key,
+                    building=building,
+                    client_id=str(payload.get("client_id", "")).strip(),
+                    cells=outdoor_shared_publish_cells,
+                )
+                outdoor_batch_sync_result = service.sync_outdoor_temperature_to_batch_documents(
+                    batch_key=batch_key,
+                    cells=outdoor_shared_publish_cells,
+                    source_session_id=session_id,
+                )
+                if isinstance(outdoor_batch_sync_result.get("batch_status", {}), dict):
+                    batch_status = outdoor_batch_sync_result.get("batch_status", batch_status)
+                _review_history_cache_invalidate_sessions(
+                    outdoor_batch_sync_result.get("updated_sessions", [])
+                    if isinstance(outdoor_batch_sync_result.get("updated_sessions", []), list)
+                    else []
+                )
+                container.add_system_log(
+                    f"[交接班][室外温湿度共享] 已同步五楼共享温湿度: "
+                    f"building={building}, session_id={session_id}, "
+                    f"B7={outdoor_shared_publish_cells.get('B7', '') or '-'}, "
+                    f"D7={outdoor_shared_publish_cells.get('D7', '') or '-'}, "
+                    f"shared_revision={shared_save.get('shared_blocks', {}).get('outdoor_temperature', {}).get('revision', '-')}, "
+                    f"其他楼更新={int(outdoor_batch_sync_result.get('updated_count', 0) or 0)}"
+                )
+            except ReviewSessionStoreUnavailableError as exc:
+                _raise_review_store_http_error(exc, saved_document=True)
+            except Exception as exc:  # noqa: BLE001
+                outdoor_batch_sync_result = {"status": "failed", "error": str(exc)}
+                container.add_system_log(
+                    f"[交接班][室外温湿度共享] 共享同步失败，已保留当前楼保存结果: "
+                    f"building={building}, session_id={session_id}, error={exc}"
+                )
         saved_document_for_response = document if isinstance(document, dict) else {}
         if isinstance(saved_document_state_for_cache, dict):
             state_document = saved_document_state_for_cache.get("document", {})
@@ -4134,15 +4281,48 @@ def handover_review_save(
         except ReviewSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         try:
-            excel_sync = _build_xlsx_write_queue_service(
+            xlsx_queue_service = _build_xlsx_write_queue_service(
                 container,
                 review_service=service,
                 document_state=document_state,
-            ).enqueue_review_excel_sync(
+            )
+            excel_sync = xlsx_queue_service.enqueue_review_excel_sync(
                 session=session,
                 target_revision=saved_document_revision,
             )
             queued_excel_sync = str(excel_sync.get("status", "")).strip().lower() not in {"", "failed", "unknown"}
+            outdoor_updated_sessions = (
+                outdoor_batch_sync_result.get("updated_sessions", [])
+                if isinstance(outdoor_batch_sync_result.get("updated_sessions", []), list)
+                else []
+            )
+            for outdoor_session in outdoor_updated_sessions:
+                if not isinstance(outdoor_session, dict):
+                    continue
+                outdoor_building = str(outdoor_session.get("building", "") or "").strip()
+                outdoor_session_id = str(outdoor_session.get("session_id", "") or "").strip()
+                if not outdoor_building or not outdoor_session_id:
+                    continue
+                try:
+                    patched_state = ReviewBuildingDocumentStore(
+                        config=_handover_cfg(container),
+                        building=outdoor_building,
+                    ).get_document(outdoor_session_id)
+                    patched_revision = (
+                        int(patched_state.get("revision", 0) or 0)
+                        if isinstance(patched_state, dict)
+                        else int(outdoor_session.get("revision", 0) or 0)
+                    )
+                    xlsx_queue_service.enqueue_review_excel_sync(
+                        session=outdoor_session,
+                        target_revision=patched_revision,
+                    )
+                    xlsx_queue_service.enqueue_capacity_overlay_sync(outdoor_session)
+                except Exception as exc:  # noqa: BLE001
+                    container.add_system_log(
+                        f"[交接班][室外温湿度共享] 其他楼后台同步排队失败: "
+                        f"building={outdoor_building}, session_id={outdoor_session_id}, error={exc}"
+                    )
         except Exception as exc:  # noqa: BLE001
             excel_sync = {
                 "status": "failed",
@@ -4171,6 +4351,14 @@ def handover_review_save(
                 "document_revision": saved_document_revision,
                 "snapshot_revision": saved_document_revision,
             },
+        )
+
+    if is_latest_session:
+        auto_cloud_sync_result = _maybe_start_handover_followup_job_after_review_save(
+            container,
+            followup=followup,
+            session=session,
+            batch_status=batch_status,
         )
 
     total_elapsed_ms = int((time.perf_counter() - save_started) * 1000)
@@ -4275,6 +4463,7 @@ def handover_review_save(
             current_revision=int(session.get("revision", 0) or 0),
         ),
         "batch_status": batch_status,
+        "auto_cloud_sync": auto_cloud_sync_result,
         "save_profile": {
             "write_ms": int(write_elapsed_ms or 0),
             "sqlite_save_ms": int(write_elapsed_ms or 0),
@@ -4285,6 +4474,15 @@ def handover_review_save(
             "session_ms": int(session_elapsed_ms or 0),
             "queued_excel_sync": bool(queued_excel_sync),
             "excel_sync_status": str(session.get("excel_sync", {}).get("status", "") if isinstance(session.get("excel_sync", {}), dict) else ""),
+            "outdoor_temperature_shared": {
+                "changed": bool(outdoor_shared_publish_cells is not None),
+                "updated_sessions": int(outdoor_batch_sync_result.get("updated_count", 0) or 0)
+                if isinstance(outdoor_batch_sync_result, dict)
+                else 0,
+                "error": str(outdoor_batch_sync_result.get("error", "") or "")
+                if isinstance(outdoor_batch_sync_result, dict)
+                else "",
+            },
             "defaults_config_async": bool(defaults_config_async),
             "defaults_config_status": str(defaults_config_status or "skipped"),
             "total_ms": int(total_elapsed_ms or 0),
@@ -4322,6 +4520,7 @@ def handover_review_confirm(
         client_id=str(payload.get("client_id", "")).strip(),
     )
     target_session = _load_target_session_or_404(service, building=building, session_id=session_id)
+    _ensure_cloud_sheet_not_uploading_or_409(target_session, action="操作确认状态")
     target_batch_key = str(target_session.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
         name=f"handover_confirm:{target_batch_key}:{building}",
@@ -4469,6 +4668,7 @@ def handover_review_unconfirm(
         client_id=str(payload.get("client_id", "")).strip(),
     )
     target_session = _load_target_session_or_404(service, building=building, session_id=session_id)
+    _ensure_cloud_sheet_not_uploading_or_409(target_session, action="操作确认状态")
     target_batch_key = str(target_session.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
         name=f"handover_unconfirm:{target_batch_key}:{building}",

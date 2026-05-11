@@ -725,9 +725,36 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "report_link": "交接班日报",
                     "screenshots": "日报截图",
                 },
-                "summary_page_url": "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgeZUMIpMDuIIfLA",
-                "external_page_url": "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgecZCUXaEtvP9Yl",
+                "screenshot_page_url": "https://124.222.19.16:3001/",
                 "browser_profile_directory": "",
+            },
+            "cabinet_shift_record_bitable_export": {
+                "enabled": True,
+                "target": {
+                    "app_token": "G7oUwGdwaiTmimk8i2ecGTWOn4d",
+                    "table_id": "tblObkKSs8C3o33B",
+                    "page_size": 500,
+                    "max_records": 5000,
+                    "create_batch_size": 200,
+                    "update_batch_size": 200,
+                },
+                "fields": {
+                    "building": "楼栋",
+                    "date": "日期",
+                    "shift": "班次",
+                    "duty_staff": "值班人员",
+                    "handover_staff": "接班人员",
+                    "planned_cabinets": "机房总规划机柜数（个）",
+                    "powered_cabinets": "实际上电机柜数（个）",
+                    "shift_power_on_cabinets": "本班组上电机柜数（个）",
+                    "shift_power_off_cabinets": "本班组下电机柜数（个）",
+                },
+                "fixed_values": {
+                    "shift_text": {
+                        "day": "白班",
+                        "night": "夜班",
+                    },
+                },
             },
             "template_fixed_fill": {
                 "date_cell": "B2",
@@ -1196,7 +1223,8 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "scheduler": {
                 "enabled": False,
                 "auto_start_in_gui": False,
-                "interval_minutes": 60,
+                "interval_minutes": 1440,
+                "minute_offset": 30,
                 "check_interval_sec": 30,
                 "retry_failed_on_next_tick": True,
                 "state_file": "branch_power_upload_scheduler_state.json",

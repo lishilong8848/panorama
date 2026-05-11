@@ -413,7 +413,7 @@ function renderStatus() {
     ${summaryCards()}
     <section class="action-bar">
       <button class="btn btn-primary" data-action="refresh-all">刷新状态</button>
-      <button class="btn btn-secondary" data-action="refresh-current-hour">立即下载当前小时全部文件</button>
+      <button class="btn btn-secondary" data-action="refresh-current-hour">立即下载当前小时常规源文件</button>
       <button class="btn btn-secondary" data-action="self-check">共享目录自检</button>
     </section>
     ${renderPageSlots()}
@@ -596,9 +596,9 @@ async function handleAction(event) {
       setMessage(payload.status_text || payload.message || "共享目录自检完成");
       await refreshAll({ silent: true });
     } else if (action === "refresh-current-hour") {
-      setMessage("已提交当前小时全部文件下载...");
+      setMessage("已提交当前小时常规源文件下载...");
       const payload = await api("/api/bridge/source-cache/refresh-current-hour", { method: "POST", body: "{}" });
-      setMessage(payload.message || "已开始下载当前小时全部文件");
+      setMessage(payload.message || "已开始下载当前小时常规源文件");
       await refreshAll({ silent: true });
     } else if (action === "refresh-building") {
       const family = target.dataset.family || "";

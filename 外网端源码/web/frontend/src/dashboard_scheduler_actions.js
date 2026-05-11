@@ -540,7 +540,7 @@ export function createDashboardSchedulerActions(ctx) {
     const payload = {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
-      interval_minutes: 60,
+      interval_minutes: 1440,
       minute_offset: toNonNegativeInt(scheduler.minute_offset, 30),
       check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
       retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,

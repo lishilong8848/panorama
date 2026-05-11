@@ -822,7 +822,6 @@ export function createRuntimeHealthConfigActions(ctx) {
       status: "",
       tested_at: "",
       summary_sheet_image: { status: "", error: "", path: "" },
-      external_page_image: { status: "", error: "", path: "" },
     };
   }
 
@@ -967,8 +966,7 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function getDailyReportTargetLabel(target) {
-    const targetText = String(target || "").trim().toLowerCase();
-    return targetText === "summary_sheet" ? "今日航图截图" : "排班截图";
+    return "日报截图";
   }
 
   function buildPreparedSavePayload() {
@@ -1606,7 +1604,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           running: Boolean(data.branch_power_upload.scheduler.running),
           status: String(data.branch_power_upload.scheduler.status || ""),
           next_run_time: String(data.branch_power_upload.scheduler.next_run_time || ""),
-          interval_minutes: Number.parseInt(String(data.branch_power_upload.scheduler.interval_minutes ?? 60), 10) || 60,
+          interval_minutes: Number.parseInt(String(data.branch_power_upload.scheduler.interval_minutes ?? 1440), 10) || 1440,
           minute_offset: Number.parseInt(String(data.branch_power_upload.scheduler.minute_offset ?? 30), 10) || 0,
           last_check_at: String(data.branch_power_upload.scheduler.last_check_at || ""),
           last_decision: String(data.branch_power_upload.scheduler.last_decision || ""),
@@ -1626,7 +1624,7 @@ export function createRuntimeHealthConfigActions(ctx) {
           running: false,
           status: "未初始化",
           next_run_time: "",
-          interval_minutes: 60,
+          interval_minutes: 1440,
           minute_offset: 30,
           last_check_at: "",
           last_decision: "",
@@ -2591,7 +2589,7 @@ export function createRuntimeHealthConfigActions(ctx) {
             delayMs: 0,
           });
         }, 1800);
-        message.value = String(data?.message || "").trim() || "已开始下载当前小时全部文件";
+        message.value = String(data?.message || "").trim() || "已开始下载当前小时常规源文件";
         return data;
       } catch (err) {
         message.value = `触发当前小时下载失败: ${err}`;
@@ -2738,7 +2736,6 @@ export function createRuntimeHealthConfigActions(ctx) {
               spreadsheet_url: "",
               error: "",
               summary_screenshot_path: "",
-              external_screenshot_path: "",
             },
       screenshot_auth:
         data?.screenshot_auth && typeof data.screenshot_auth === "object"
@@ -2757,31 +2754,6 @@ export function createRuntimeHealthConfigActions(ctx) {
           ? { ...data.capture_assets }
           : {
               summary_sheet_image: {
-                exists: false,
-                source: "none",
-                stored_path: "",
-                captured_at: "",
-                preview_url: "",
-                thumbnail_url: "",
-                full_image_url: "",
-                auto: {
-                  exists: false,
-                  stored_path: "",
-                  captured_at: "",
-                  preview_url: "",
-                  thumbnail_url: "",
-                  full_image_url: "",
-                },
-                manual: {
-                  exists: false,
-                  stored_path: "",
-                  captured_at: "",
-                  preview_url: "",
-                  thumbnail_url: "",
-                  full_image_url: "",
-                },
-              },
-              external_page_image: {
                 exists: false,
                 source: "none",
                 stored_path: "",
@@ -2928,14 +2900,9 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   function openHandoverDailyReportPreview(target) {
     if (!handoverDailyReportPreviewModal || !handoverDailyReportCaptureAssets) return;
-    const targetText = String(target || "").trim().toLowerCase();
+    const targetText = "summary_sheet";
     const assets = handoverDailyReportCaptureAssets.value || {};
-    const asset =
-      targetText === "summary_sheet"
-        ? assets.summarySheetImage || {}
-        : targetText === "external_page"
-          ? assets.externalPageImage || {}
-          : {};
+    const asset = assets.summarySheetImage || {};
     const fullImageUrl = String(asset?.full_image_url || asset?.preview_url || "").trim();
     if (!fullImageUrl) {
       message.value = "当前还没有可预览的截图";
@@ -2956,7 +2923,7 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   function openHandoverDailyReportUploadDialog(target) {
     if (!handoverDailyReportUploadModal) return;
-    const targetText = String(target || "").trim().toLowerCase();
+    const targetText = "summary_sheet";
     handoverDailyReportUploadModal.value = {
       open: true,
       target: targetText,
@@ -2974,7 +2941,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     return {
       duty_date: String(handoverDutyDate?.value || "").trim(),
       duty_shift: String(handoverDutyShift?.value || "").trim().toLowerCase(),
-      target: String(target || "").trim().toLowerCase(),
+      target: "summary_sheet",
     };
   }
 
@@ -4427,7 +4394,6 @@ export function createRuntimeHealthConfigActions(ctx) {
             status: "queued",
             tested_at: new Date().toISOString(),
             summary_sheet_image: { status: "", error: "", path: "" },
-            external_page_image: { status: "", error: "", path: "" },
           };
         }
         const jobId = await focusAcceptedJob(data, "截图测试任务已提交，请在任务与资源面板查看进度。");
@@ -4444,10 +4410,6 @@ export function createRuntimeHealthConfigActions(ctx) {
                 summary_sheet_image:
                   result?.summary_sheet_image && typeof result.summary_sheet_image === "object"
                     ? { ...result.summary_sheet_image }
-                    : { status: job.status === "failed" ? "failed" : "", error: String(job?.error || ""), path: "" },
-                external_page_image:
-                  result?.external_page_image && typeof result.external_page_image === "object"
-                    ? { ...result.external_page_image }
                     : { status: job.status === "failed" ? "failed" : "", error: String(job?.error || ""), path: "" },
               };
             }
@@ -4473,11 +4435,6 @@ export function createRuntimeHealthConfigActions(ctx) {
             status: "failed",
             tested_at: new Date().toISOString(),
             summary_sheet_image: {
-              status: "failed",
-              error: String(err || ""),
-              path: "",
-            },
-            external_page_image: {
               status: "failed",
               error: String(err || ""),
               path: "",

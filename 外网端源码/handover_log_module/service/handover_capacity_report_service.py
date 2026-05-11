@@ -79,7 +79,7 @@ _WEATHER_CACHE_LOCK = threading.RLock()
 _WEATHER_CACHE: Dict[Any, tuple[float, Dict[str, Any]]] = {}
 _WEATHER_INFLIGHT: Dict[Any, threading.Event] = {}
 _CAPACITY_BATCH_CACHE_TTL_SEC = 30
-_CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13")
+_CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13")
 _CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
 _SUBSTATION_110KV_TARGET_ROWS = {
     "阿开": 57,

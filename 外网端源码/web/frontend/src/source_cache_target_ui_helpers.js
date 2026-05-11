@@ -74,7 +74,7 @@ export function createSourceCacheTargetUiHelpers(options = {}) {
   });
 
   const currentHourRefreshButtonText = computed(() =>
-    isSourceCacheRefreshCurrentHourLocked.value ? "下载中..." : "立即下载当前小时全部文件",
+    isSourceCacheRefreshCurrentHourLocked.value ? "下载中..." : "立即下载当前小时常规源文件",
   );
   const manualAlarmRefreshButtonText = computed(() =>
     isSourceCacheRefreshAlarmManualLocked.value ? "拉取中..." : "一键拉取告警文件",

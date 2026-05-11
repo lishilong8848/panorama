@@ -128,6 +128,10 @@ def source_bucket_segment(
         return latest_bucket_segment(bucket_key, now=now)
 
     if len(duty_digits) != 8:
+        parsed = _parse_datetime(str(bucket_key or "").strip(), ("%Y-%m-%d", "%Y%m%d"))
+        if parsed is not None:
+            duty_digits = parsed.strftime("%Y%m%d")
+    if len(duty_digits) != 8:
         duty_digits = (now or datetime.now()).strftime("%Y%m%d")
 
     if normalized_family in {FAMILY_HANDOVER_LOG, FAMILY_HANDOVER_CAPACITY_REPORT}:
@@ -136,6 +140,8 @@ def source_bucket_segment(
         return f"{duty_digits}--月报"
     if normalized_family == FAMILY_ALARM_EVENT:
         return duty_digits
+    if normalized_family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH} and normalized_kind in {"day", "daily"}:
+        return f"{duty_digits}--整日"
     return duty_digits
 
 

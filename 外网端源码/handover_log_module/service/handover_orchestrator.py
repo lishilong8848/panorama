@@ -26,6 +26,9 @@ from handover_log_module.service.exercise_management_payload_builder import Exer
 from handover_log_module.service.handover_download_service import HandoverDownloadService
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
+from handover_log_module.service.handover_cabinet_shift_record_bitable_export_service import (
+    HandoverCabinetShiftRecordBitableExportService,
+)
 from handover_log_module.service.handover_extract_service import HandoverExtractService
 from handover_log_module.service.handover_fill_service import HandoverFillService
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
@@ -100,6 +103,7 @@ class HandoverOrchestrator:
             shift_roster_repo=self._shift_roster_repo,
         )
         self._source_data_attachment_export_service = SourceDataAttachmentBitableExportService(config)
+        self._cabinet_shift_record_export_service = HandoverCabinetShiftRecordBitableExportService(config)
         self._source_file_cache_service = HandoverSourceFileCacheService(config)
         self._review_session_service = ReviewSessionService(config)
         self._review_link_delivery_service = ReviewLinkDeliveryService(config)
@@ -915,9 +919,23 @@ class HandoverOrchestrator:
                 "uploaded_at": "",
                 "uploaded_revision": 0,
             }
+            session_cabinet_shift_record_export = {
+                "status": "skipped",
+                "reason": "missing_duty_context",
+                "record_id": "",
+                "error": "",
+                "uploaded_at": "",
+                "updated_at": "",
+                "uploaded_revision": 0,
+            }
             if duty_date_text and duty_shift_text:
                 session_source_data_attachment_export = (
                     self._source_data_attachment_export_service.build_deferred_state(
+                        duty_shift=duty_shift_text,
+                    )
+                )
+                session_cabinet_shift_record_export = (
+                    self._cabinet_shift_record_export_service.build_deferred_state(
                         duty_shift=duty_shift_text,
                     )
                 )
@@ -1044,6 +1062,7 @@ class HandoverOrchestrator:
                         source_mode=source_mode,
                         source_file_cache=managed_source_file_cache,
                         source_data_attachment_export=session_source_data_attachment_export,
+                        cabinet_shift_record_export=session_cabinet_shift_record_export,
                         capacity_output_file=result.capacity_output_file,
                         capacity_source_file=capacity_source_file_text,
                         capacity_status=result.capacity_status,

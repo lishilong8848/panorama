@@ -1284,6 +1284,8 @@ class SharedBridgeStore:
         range_query_start: str | None = None,
         range_query_end: str | None = None,
         requested_source_units: List[Dict[str, Any]] | None = None,
+        mode: str | None = None,
+        target_business_date: str | None = None,
         created_by_role: str,
         created_by_node_id: str,
         requested_by: str = "manual",
@@ -1332,6 +1334,8 @@ class SharedBridgeStore:
             "range_query_start": str(range_query_start or "").strip(),
             "range_query_end": str(range_query_end or "").strip(),
             "requested_source_units": normalized_requested_source_units,
+            "mode": str(mode or "").strip(),
+            "target_business_date": str(target_business_date or "").strip(),
         }
         bucket_dedupe = ",".join(normalized_bucket_keys) or request_payload["target_bucket_key"]
         dedupe_parts = [

@@ -41,8 +41,7 @@ class HandoverDailyReportBitableExportService:
                 "report_link": "交接班日报",
                 "screenshots": "日报截图",
             },
-            "summary_page_url": "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgeZUMIpMDuIIfLA",
-            "external_page_url": "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgecZCUXaEtvP9Yl",
+            "screenshot_page_url": "https://124.222.19.16:3001/",
         }
 
     @staticmethod
@@ -255,7 +254,6 @@ class HandoverDailyReportBitableExportService:
         duty_shift: str,
         spreadsheet_url: str,
         summary_screenshot_path: str,
-        external_screenshot_path: str,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cfg = self._normalize_cfg()
@@ -263,10 +261,8 @@ class HandoverDailyReportBitableExportService:
             return {"status": "skipped", "record_id": "", "record_url": "", "error": "disabled"}
 
         summary_path = Path(str(summary_screenshot_path or "").strip())
-        external_path = Path(str(external_screenshot_path or "").strip())
-        if not summary_path.exists() or not external_path.exists():
-            missing = "summary_sheet.png" if not summary_path.exists() else "external_page.png"
-            raise FileNotFoundError(missing)
+        if not summary_path.exists():
+            raise FileNotFoundError("daily_report_page.png")
 
         client = self._new_client(cfg)
         target = cfg.get("target", {})
@@ -300,11 +296,6 @@ class HandoverDailyReportBitableExportService:
             content=summary_path.read_bytes(),
             mime_type="image/png",
         )
-        external_token = client.upload_attachment_bytes(
-            file_name=external_path.name,
-            content=external_path.read_bytes(),
-            mime_type="image/png",
-        )
         fields = cfg.get("fields", {})
         report_field_name = str(fields.get("report_link", "交接班日报") or "交接班日报").strip()
         report_link_ui_type = self._lookup_field_ui_type(fields_meta, report_field_name).lower()
@@ -319,7 +310,6 @@ class HandoverDailyReportBitableExportService:
             ),
             fields["screenshots"]: [
                 {"file_token": summary_token},
-                {"file_token": external_token},
             ],
         }
         try:

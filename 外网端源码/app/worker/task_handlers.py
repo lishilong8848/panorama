@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Tuple
@@ -45,218 +45,6 @@ def _review_container(config: Dict[str, Any], emit_log: Callable[[str], None]):
         config_path="",
         reload_config=lambda _cfg: None,
     )
-
-
-def _branch_power_consecutive_hour_groups(hours: List[int]) -> List[List[int]]:
-    normalized_hours = set()
-    for raw_hour in hours:
-        try:
-            hour = int(raw_hour)
-        except (TypeError, ValueError):
-            continue
-        if 0 <= hour <= 23:
-            normalized_hours.add(hour)
-    normalized = sorted(normalized_hours)
-    groups: List[List[int]] = []
-    for hour in normalized:
-        if not groups or hour != groups[-1][-1] + 1:
-            groups.append([hour])
-        else:
-            groups[-1].append(hour)
-    return groups
-
-
-def _branch_power_range_query_window(bucket_keys: List[str]) -> tuple[str, str]:
-    if not bucket_keys:
-        return "", ""
-    parsed = [datetime.strptime(item, "%Y-%m-%d %H") for item in bucket_keys]
-    start_dt = min(parsed).replace(minute=0, second=0, microsecond=0) - timedelta(minutes=10)
-    end_dt = max(parsed).replace(minute=0, second=0, microsecond=0) + timedelta(minutes=20)
-    return start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _branch_power_upload_reasons(result: Dict[str, Any]) -> List[str]:
-    reasons: List[str] = []
-    upload_result = result.get("upload_result", {}) if isinstance(result.get("upload_result", {}), dict) else {}
-    reason = str(upload_result.get("reason", "") or "").strip()
-    if reason:
-        reasons.append(reason)
-    for item in result.get("upload_results", []) if isinstance(result.get("upload_results", []), list) else []:
-        if not isinstance(item, dict):
-            continue
-        item_result = item.get("result", {}) if isinstance(item.get("result", {}), dict) else {}
-        item_reason = str(item_result.get("reason", "") or "").strip()
-        if item_reason:
-            reasons.append(item_reason)
-    return reasons
-
-
-def _branch_power_result_touches_final_hour(result: Dict[str, Any], *, fallback_bucket_key: str, target_bucket_keys: List[str]) -> bool:
-    candidates = [str(fallback_bucket_key or "").strip(), *[str(item or "").strip() for item in target_bucket_keys]]
-    result_bucket = str(result.get("data_bucket_key", "") or result.get("bucket_key", "") or "").strip()
-    if result_bucket:
-        candidates.append(result_bucket)
-    for item in result.get("target_bucket_keys", []) if isinstance(result.get("target_bucket_keys", []), list) else []:
-        if str(item or "").strip():
-            candidates.append(str(item or "").strip())
-    return any(item.endswith(" 23") for item in candidates if item)
-
-
-def _raise_if_branch_power_backfill_still_no_data(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
-    requested_by = str(payload.get("requested_by", "") or "").strip().lower()
-    requested_units = payload.get("requested_source_units") if isinstance(payload.get("requested_source_units"), list) else []
-    if requested_by != "backfill_missing" and not requested_units:
-        return
-    no_data_items: List[Dict[str, Any]] = []
-    if str(result.get("status", "") or "").strip().lower() == "no_data":
-        no_data_items.extend(
-            item for item in (result.get("no_data_buildings") if isinstance(result.get("no_data_buildings"), list) else []) if isinstance(item, dict)
-        )
-    no_data_items.extend(
-        item for item in (result.get("no_data") if isinstance(result.get("no_data"), list) else []) if isinstance(item, dict)
-    )
-    if not no_data_items:
-        return
-    details = []
-    for item in no_data_items[:20]:
-        bucket_key = str(item.get("bucket_key", "") or result.get("data_bucket_key", "") or result.get("bucket_key", "") or "").strip()
-        building = str(item.get("building", "") or "").strip()
-        reason = str(item.get("reason", "") or "").strip()
-        details.append(f"{bucket_key or '-'}/{building or '-'}: {reason or '目标小时无有效数据'}")
-    suffix = f" 等{len(no_data_items)}项" if len(no_data_items) > 20 else ""
-    raise RuntimeError(f"内网补采后支路信息目标小时仍为空: {', '.join(details)}{suffix}")
-
-
-def _dispatch_branch_power_day_end_backfill_if_needed(
-    *,
-    config: Dict[str, Any],
-    payload: Dict[str, Any],
-    service: BranchPowerUploadService,
-    result: Dict[str, Any],
-    target_bucket_key: str,
-    target_bucket_keys: List[str],
-    emit_log: Callable[[str], None],
-) -> Dict[str, Any]:
-    origin = str(
-        payload.get("requested_by", "")
-        or payload.get("submitted_by", "")
-        or payload.get("origin", "")
-        or ""
-    ).strip().lower()
-    if origin != "scheduler":
-        return {}
-    if not _branch_power_result_touches_final_hour(
-        result,
-        fallback_bucket_key=target_bucket_key,
-        target_bucket_keys=target_bucket_keys,
-    ):
-        return {}
-    reasons = _branch_power_upload_reasons(result)
-    if not any(reason in {"day_incomplete", "row_fields_incomplete"} for reason in reasons):
-        return {}
-    business_bucket = next(
-        (
-            item
-            for item in [target_bucket_key, *target_bucket_keys, str(result.get("data_bucket_key", "") or "")]
-            if str(item or "").strip().endswith(" 23")
-        ),
-        "",
-    )
-    if not business_bucket:
-        emit_log("[支路信息补处理] 23点恢复入库后缺少业务日期，跳过自动补缺口派发")
-        return {"ok": False, "mode": "missing_business_bucket", "waiting": []}
-    business_date = datetime.strptime(str(business_bucket).strip(), "%Y-%m-%d %H").strftime("%Y-%m-%d")
-    configured_buildings = service.get_hour_status_summary(
-        business_date=business_date,
-        expected_buildings=[],
-        max_hour=23,
-    ).get("buildings", [])
-    buildings = [
-        str(item or "").strip()
-        for item in (
-            payload.get("buildings")
-            if isinstance(payload.get("buildings"), list)
-            else configured_buildings
-            if isinstance(configured_buildings, list)
-            else []
-        )
-        if str(item or "").strip()
-    ]
-    if not buildings:
-        buildings = [
-            str(item.get("building", "") or "").strip()
-            for item in (payload.get("source_units") if isinstance(payload.get("source_units"), list) else [])
-            if isinstance(item, dict) and str(item.get("building", "") or "").strip()
-        ]
-        buildings = list(dict.fromkeys(buildings))
-    if not buildings:
-        emit_log("[支路信息补处理] 23点恢复入库后缺少楼栋，跳过自动补缺口派发")
-        return {"ok": False, "mode": "missing_buildings", "business_date": business_date, "waiting": []}
-    missing_hours = service.get_missing_hour_numbers(
-        business_date=business_date,
-        expected_buildings=buildings,
-        max_hour=23,
-    )
-    emit_log(
-        "[支路信息补处理] 23点恢复入库后复查全天缺口 "
-        f"date={business_date}, reasons={','.join(reasons) or '-'}, "
-        f"missing_hours={','.join(f'{hour:02d}' for hour in missing_hours) or '-'}"
-    )
-    if not missing_hours:
-        return {"ok": True, "mode": "all_complete_after_recheck", "business_date": business_date, "waiting": []}
-
-    runtime = shared_bridge_runtime_module.SharedBridgeRuntimeService(
-        runtime_config=config,
-        app_version="worker",
-        emit_log=emit_log,
-    )
-    waiting: List[Dict[str, Any]] = []
-    try:
-        for group in _branch_power_consecutive_hour_groups(missing_hours):
-            bucket_keys = [f"{business_date} {hour:02d}" for hour in group]
-            is_range = len(bucket_keys) >= 2
-            range_query_start = ""
-            range_query_end = ""
-            if is_range:
-                range_query_start, range_query_end = _branch_power_range_query_window(bucket_keys)
-            task = runtime.get_or_create_branch_power_upload_task(
-                buildings=buildings,
-                resume_job_id=None,
-                target_bucket_key=bucket_keys[0],
-                target_bucket_keys=bucket_keys if is_range else [],
-                range_query_start=range_query_start,
-                range_query_end=range_query_end,
-                requested_by="backfill_missing",
-            )
-            task_id = str(task.get("task_id", "") or "").strip()
-            waiting.append(
-                {
-                    "task_id": task_id,
-                    "hours": group,
-                    "bucket_keys": bucket_keys,
-                    "mode": "range_download" if is_range else "single_download",
-                    "range_query_start": range_query_start,
-                    "range_query_end": range_query_end,
-                }
-            )
-            emit_log(
-                "[支路信息补处理] 23点恢复入库后已派发内网补缺口任务 "
-                f"task_id={task_id or '-'}, buckets={','.join(bucket_keys)}, "
-                f"mode={'range' if is_range else 'single'}, query={range_query_start or '-'}~{range_query_end or '-'}"
-            )
-    finally:
-        try:
-            runtime.stop()
-        except Exception:
-            pass
-    return {
-        "ok": True,
-        "mode": "day_end_backfill_dispatched",
-        "business_date": business_date,
-        "buildings": buildings,
-        "missing_hours": missing_hours,
-        "waiting": waiting,
-    }
 
 
 def handle_handover_from_download(
@@ -393,80 +181,27 @@ def handle_branch_power_from_download(
 ) -> Dict[str, Any]:
     service = BranchPowerUploadService(config)
     source_units = [item for item in list(payload.get("source_units") or []) if isinstance(item, dict)]
-    target_bucket_key = str(payload.get("target_bucket_key", "") or payload.get("bucket_key", "") or "").strip()
-    target_bucket_keys = [
-        str(item or "").strip()
-        for item in (payload.get("target_bucket_keys") if isinstance(payload.get("target_bucket_keys"), list) else [])
-        if str(item or "").strip()
-    ]
-    if not target_bucket_key and target_bucket_keys:
-        target_bucket_key = target_bucket_keys[0]
-    if not target_bucket_key:
-        raise RuntimeError("支路信息恢复任务缺少 target_bucket_key")
+    target_business_date = str(
+        payload.get("target_business_date", "")
+        or payload.get("business_date", "")
+        or ""
+    ).strip()
+    if not target_business_date:
+        target_business_date = str(payload.get("target_bucket_key", "") or payload.get("bucket_key", "") or "").strip()
+    if not target_business_date:
+        raise RuntimeError("支路信息整日恢复任务缺少 target_business_date")
+    target_business_date = target_business_date.replace("/", "-")[:10]
+    try:
+        target_business_date = datetime.strptime(target_business_date, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError as exc:
+        raise RuntimeError("支路信息整日恢复任务 target_business_date 格式必须为 YYYY-MM-DD") from exc
     if not source_units:
-        raise RuntimeError("支路信息恢复任务缺少共享源文件")
-    if target_bucket_keys:
-        if len(target_bucket_keys) >= 2:
-            result = service.continue_range_from_source_files(
-                bucket_keys=target_bucket_keys,
-                source_units=source_units,
-                emit_log=emit_log,
-            )
-            _raise_if_branch_power_backfill_still_no_data(payload, result)
-            backfill = _dispatch_branch_power_day_end_backfill_if_needed(
-                config=config,
-                payload=payload,
-                service=service,
-                result=result,
-                target_bucket_key=target_bucket_key,
-                target_bucket_keys=target_bucket_keys,
-                emit_log=emit_log,
-            )
-            if backfill:
-                result["backfill_missing"] = backfill
-            return result
-        bucket_key = target_bucket_keys[0]
-        bucket_units = [
-            item
-            for item in source_units
-            if str(item.get("data_hour_bucket", "") or item.get("bucket_key", "") or "").strip() == bucket_key
-        ] or source_units
-        result = service.continue_manual_hour_from_source_files(
-            bucket_key=bucket_key,
-            source_units=bucket_units,
-            emit_log=emit_log,
-        )
-        _raise_if_branch_power_backfill_still_no_data(payload, result)
-        backfill = _dispatch_branch_power_day_end_backfill_if_needed(
-            config=config,
-            payload=payload,
-            service=service,
-            result=result,
-            target_bucket_key=bucket_key,
-            target_bucket_keys=target_bucket_keys,
-            emit_log=emit_log,
-        )
-        if backfill:
-            result["backfill_missing"] = backfill
-        return result
-    result = service.continue_from_source_files(
-        bucket_key=target_bucket_key,
+        raise RuntimeError("支路信息整日恢复任务缺少共享源文件")
+    return service.upload_day_from_source_files(
+        business_date=target_business_date,
         source_units=source_units,
         emit_log=emit_log,
     )
-    _raise_if_branch_power_backfill_still_no_data(payload, result)
-    backfill = _dispatch_branch_power_day_end_backfill_if_needed(
-        config=config,
-        payload=payload,
-        service=service,
-        result=result,
-        target_bucket_key=target_bucket_key,
-        target_bucket_keys=target_bucket_keys,
-        emit_log=emit_log,
-    )
-    if backfill:
-        result["backfill_missing"] = backfill
-    return result
 
 
 def handle_wet_bulb_collection_run(
@@ -973,19 +708,16 @@ def handle_daily_report_auth_open(
     emit_log: Callable[[str], None],
     runtime: Any = None,  # noqa: ANN401
 ) -> Dict[str, Any]:
-    routes = _review_routes()
-    container = _review_container(config, emit_log)
     duty_date = str(payload.get("duty_date", "") or "").strip()
     duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
     if runtime is not None:
         runtime.raise_if_cancelled()
-    _, _, _, screenshot_service = routes._build_daily_report_services(container)
-    result = screenshot_service.open_login_browser(emit_log=emit_log)
+    emit_log("[交接班][日报截图] 单截图公开页面模式，无需初始化飞书截图登录态")
     return {
-        "ok": bool(result.get("ok", False)),
-        "status": str(result.get("status", "")).strip() or "failed",
-        "message": str(result.get("message", "")).strip(),
-        "profile_dir": str(result.get("profile_dir", "")).strip(),
+        "ok": True,
+        "status": "skipped",
+        "message": "单截图公开页面模式，无需初始化飞书截图登录态",
+        "profile_dir": "",
         "duty_date": duty_date,
         "duty_shift": duty_shift,
     }
@@ -1007,37 +739,18 @@ def handle_daily_report_screenshot_test(
     review_service, _state_service, asset_service, screenshot_service = routes._build_daily_report_services(container)
     cloud_batch = review_service.get_cloud_batch(batch_key) or {}
     spreadsheet_url = str(cloud_batch.get("spreadsheet_url", "")).strip() if isinstance(cloud_batch, dict) else ""
-    summary_result = screenshot_service.capture_summary_sheet(
+    summary_result = screenshot_service.capture_daily_report_page(
         duty_date=duty_date,
         duty_shift=duty_shift,
         emit_log=emit_log,
-        prefer_existing_page=True,
-        allow_open_fallback=True,
     )
-    external_result = screenshot_service.capture_external_page(
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-        emit_log=emit_log,
-        prefer_existing_page=True,
-        allow_open_fallback=True,
-    )
-    statuses = {
-        "summary": str(summary_result.get("status", "")).strip().lower(),
-        "external": str(external_result.get("status", "")).strip().lower(),
-    }
-    if statuses["summary"] in {"ok", "skipped"} and statuses["external"] == "ok":
-        overall_status = "ok"
-    elif statuses["summary"] == "ok" or statuses["external"] == "ok":
-        overall_status = "partial_failed"
-    else:
-        overall_status = "failed"
+    overall_status = "ok" if str(summary_result.get("status", "")).strip().lower() in {"ok", "skipped"} else "failed"
     return {
         "ok": overall_status != "failed",
         "status": overall_status,
         "batch_key": batch_key,
         "spreadsheet_url": spreadsheet_url,
         "summary_sheet_image": summary_result,
-        "external_page_image": external_result,
         "capture_assets": asset_service.get_capture_assets_context(duty_date=duty_date, duty_shift=duty_shift),
     }
 
@@ -1057,26 +770,13 @@ def handle_daily_report_recapture(
         runtime.raise_if_cancelled()
     review_service, state_service, asset_service, screenshot_service = routes._build_daily_report_services(container)
     try:
-        if target == "summary_sheet":
-            result = routes._daily_report_capture_result_payload(
-                screenshot_service.capture_summary_sheet(
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
-                    emit_log=emit_log,
-                    prefer_existing_page=True,
-                    allow_open_fallback=True,
-                )
+        result = routes._daily_report_capture_result_payload(
+            screenshot_service.capture_daily_report_page(
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                emit_log=emit_log,
             )
-        else:
-            result = routes._daily_report_capture_result_payload(
-                screenshot_service.capture_external_page(
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
-                    emit_log=emit_log,
-                    prefer_existing_page=True,
-                    allow_open_fallback=True,
-                )
-            )
+        )
     except Exception as exc:  # noqa: BLE001
         result = routes._daily_report_capture_result_payload(fallback_stage="unknown", fallback_detail=str(exc))
         emit_log(

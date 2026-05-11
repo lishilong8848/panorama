@@ -11,6 +11,9 @@ from handover_log_module.service.handover_daily_report_bitable_export_service im
 from handover_log_module.service.handover_daily_report_screenshot_service import (
     HandoverDailyReportScreenshotService,
 )
+from handover_log_module.service.handover_cabinet_shift_record_bitable_export_service import (
+    HandoverCabinetShiftRecordBitableExportService,
+)
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 from handover_log_module.service.review_document_state_service import (
@@ -31,6 +34,8 @@ def _normalize_export_state(raw: Dict[str, Any] | None) -> Dict[str, Any]:
         "uploaded_count": int(payload.get("uploaded_count", 0) or 0),
         "error": str(payload.get("error", "")).strip(),
         "uploaded_at": str(payload.get("uploaded_at", "")).strip(),
+        "record_id": str(payload.get("record_id", "")).strip(),
+        "updated_at": str(payload.get("updated_at", "")).strip(),
         "uploaded_revision": int(payload.get("uploaded_revision", 0) or 0),
         "frozen_after_first_full_cloud_sync": bool(payload.get("frozen_after_first_full_cloud_sync", False)),
     }
@@ -66,9 +71,7 @@ def _normalize_daily_report_export_state(raw: Dict[str, Any] | None) -> Dict[str
         "record_url": str(payload.get("record_url", "")).strip(),
         "spreadsheet_url": str(payload.get("spreadsheet_url", "")).strip(),
         "summary_screenshot_path": str(payload.get("summary_screenshot_path", "")).strip(),
-        "external_screenshot_path": str(payload.get("external_screenshot_path", "")).strip(),
         "summary_screenshot_source_used": str(payload.get("summary_screenshot_source_used", "")).strip().lower(),
-        "external_screenshot_source_used": str(payload.get("external_screenshot_source_used", "")).strip().lower(),
         "updated_at": str(payload.get("updated_at", "")).strip(),
         "error": str(payload.get("error", "")).strip(),
         "error_code": str(payload.get("error_code", "")).strip(),
@@ -101,7 +104,7 @@ def _followup_status_text(value: Any) -> str:
         "skipped_due_to_cloud_sync_not_ok": "云表未成功，已跳过",
         "target_page_not_open": "目标页面未打开",
         "target_page_mismatch": "目标页面不匹配",
-        "summary_sheet_not_found": "未找到今日航图页面",
+        "summary_sheet_not_found": "未找到日报截图页面",
         "ready": "已就绪",
     }
     return mapping.get(text, text or "-")
@@ -129,6 +132,11 @@ def _followup_reason_text(value: Any) -> str:
         "pending_review": "待确认后上传",
         "missing_spreadsheet_url": "缺少云表链接",
         "invalid_duty_context": "班次上下文无效",
+        "cloud_sync_pending": "等待云文档同步成功",
+        "missing_document": "缺少审核文档",
+        "record_sync_failed": "机柜记录写入失败",
+        "created": "已新增记录",
+        "updated": "已更新记录",
     }
     return mapping.get(text, text or "-")
 
@@ -145,6 +153,7 @@ class ReviewFollowupTriggerService:
         self._daily_report_asset_service = HandoverDailyReportAssetService(self.config)
         self._daily_report_screenshot_service = HandoverDailyReportScreenshotService(self.config)
         self._daily_report_bitable_export_service = HandoverDailyReportBitableExportService(self.config)
+        self._cabinet_shift_record_export_service = HandoverCabinetShiftRecordBitableExportService(self.config)
         self._review_document_state_service = ReviewDocumentStateService(self.config)
 
     def evaluate(self, batch_status: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -228,6 +237,145 @@ class ReviewFollowupTriggerService:
             return normalized
         return self._daily_report_export_state(status="idle")
 
+    @staticmethod
+    def _empty_cabinet_shift_record_export(status: str = "idle", reason: str = "") -> Dict[str, Any]:
+        return {
+            "status": str(status or "idle").strip().lower() or "idle",
+            "reason": str(reason or "").strip(),
+            "created_buildings": [],
+            "updated_buildings": [],
+            "skipped_buildings": [],
+            "failed_buildings": [],
+            "details": {},
+        }
+
+    def _existing_cabinet_shift_record_export(self, sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        normalized_sessions = [session for session in sessions if isinstance(session, dict)]
+        if not normalized_sessions:
+            return self._empty_cabinet_shift_record_export()
+        details: Dict[str, Dict[str, Any]] = {}
+        updated_buildings: List[str] = []
+        skipped_buildings: List[Dict[str, str]] = []
+        failed_buildings: List[Dict[str, str]] = []
+        pending_buildings: List[Dict[str, str]] = []
+        for session in normalized_sessions:
+            building = str(session.get("building", "")).strip() or "-"
+            revision = int(session.get("revision", 0) or 0)
+            state = _normalize_export_state(session.get("cabinet_shift_record_export", {}))
+            details[building] = state
+            status = str(state.get("status", "")).strip().lower()
+            reason = str(state.get("reason", "")).strip()
+            if self._is_export_complete_for_revision(
+                state,
+                revision,
+                static_skip_reasons={"disabled", "missing_duty_context"},
+            ):
+                if status == "skipped":
+                    skipped_buildings.append({"building": building, "reason": reason or "skipped"})
+                else:
+                    updated_buildings.append(building)
+                continue
+            if status == "failed":
+                failed_buildings.append({"building": building, "error": str(state.get("error", "")).strip()})
+                continue
+            pending_buildings.append({"building": building, "reason": reason or status or "pending_upload"})
+        if failed_buildings and updated_buildings:
+            status = "partial_failed"
+        elif failed_buildings:
+            status = "failed"
+        elif pending_buildings:
+            status = "pending"
+        elif updated_buildings or skipped_buildings:
+            status = "ok"
+        else:
+            status = "idle"
+        return {
+            "status": status,
+            "reason": "",
+            "created_buildings": [],
+            "updated_buildings": updated_buildings,
+            "skipped_buildings": skipped_buildings,
+            "failed_buildings": failed_buildings,
+            "pending_buildings": pending_buildings,
+            "details": details,
+        }
+
+    def _run_cabinet_shift_record_export(
+        self,
+        *,
+        batch_key: str,
+        sessions: List[Dict[str, Any]],
+        cloud_result: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        target_batch = str(batch_key or "").strip()
+        normalized_sessions = [session for session in sessions if isinstance(session, dict)]
+        if not normalized_sessions:
+            return self._empty_cabinet_shift_record_export(status="skipped", reason="missing_sessions")
+        cloud_status = str(cloud_result.get("status", "")).strip().lower()
+        cloud_skips = [item for item in (cloud_result.get("skipped_buildings", []) or []) if isinstance(item, dict)]
+        cloud_disabled = bool(cloud_skips) and all(
+            str(item.get("reason", "")).strip().lower() == "disabled" for item in cloud_skips
+        )
+        if cloud_status == "disabled" or cloud_disabled:
+            emit_log("[交接班][机柜班次多维] 跳过: 云文档同步已禁用")
+            return self._existing_cabinet_shift_record_export(normalized_sessions)
+        if cloud_status != "ok" and not self._all_sessions_cloud_synced_current_revision(normalized_sessions):
+            emit_log(f"[交接班][机柜班次多维] 跳过: 云表同步状态={_followup_status_text(cloud_status)}")
+            return self._existing_cabinet_shift_record_export(normalized_sessions)
+
+        candidates: List[Dict[str, Any]] = []
+        skipped_buildings: List[Dict[str, str]] = []
+        for session in normalized_sessions:
+            building = str(session.get("building", "")).strip() or "-"
+            session_id = str(session.get("session_id", "")).strip()
+            revision = int(session.get("revision", 0) or 0)
+            state = _normalize_export_state(session.get("cabinet_shift_record_export", {}))
+            if self._is_export_complete_for_revision(
+                state,
+                revision,
+                static_skip_reasons={"disabled", "missing_duty_context"},
+            ):
+                skipped_buildings.append({"building": building, "reason": "already_uploaded"})
+                continue
+            if not self._is_cloud_sync_complete_for_revision(session.get("cloud_sheet_sync", {}), revision):
+                skipped_buildings.append({"building": building, "reason": "cloud_sync_pending"})
+                continue
+            if not session_id:
+                skipped_buildings.append({"building": building, "reason": "missing_session_id"})
+                continue
+            candidates.append(session)
+        if not candidates:
+            existing = self._existing_cabinet_shift_record_export(normalized_sessions)
+            existing["skipped_buildings"] = list(existing.get("skipped_buildings", []) or []) + skipped_buildings
+            return existing
+
+        emit_log(
+            f"[交接班][机柜班次多维] 开始 batch={target_batch}, sessions={len(candidates)}"
+        )
+        result = self._cabinet_shift_record_export_service.export_sessions(
+            sessions=candidates,
+            emit_log=emit_log,
+        )
+        details = result.get("details", {}) if isinstance(result.get("details", {}), dict) else {}
+        for session in candidates:
+            building = str(session.get("building", "")).strip() or "-"
+            session_id = str(session.get("session_id", "")).strip()
+            detail = details.get(building, {}) if isinstance(details.get(building, {}), dict) else {}
+            if not session_id or not detail:
+                continue
+            try:
+                self._review_service.update_cabinet_shift_record_export(
+                    session_id=session_id,
+                    cabinet_shift_record_export=detail,
+                )
+            except ReviewSessionNotFoundError as exc:
+                emit_log(
+                    f"[交接班][机柜班次多维] 状态回写失败: building={building}, session_id={session_id}, error={exc}"
+                )
+        result["skipped_buildings"] = list(skipped_buildings) + list(result.get("skipped_buildings", []) or [])
+        return result
+
     def _all_sessions_cloud_synced_current_revision(self, sessions: List[Dict[str, Any]]) -> bool:
         normalized_sessions = [session for session in sessions if isinstance(session, dict)]
         if not normalized_sessions:
@@ -303,6 +451,7 @@ class ReviewFollowupTriggerService:
                     "blocked_reason": gate.get("blocked_reason", "") or "五个楼栋尚未全部确认",
                 },
                 "daily_report_record_export": self._existing_daily_report_record_export(sessions),
+                "cabinet_shift_record_export": self._existing_cabinet_shift_record_export(sessions),
                 "followup_progress": self._collect_followup_progress(
                     batch_key=target_batch,
                     sessions=sessions,
@@ -347,6 +496,7 @@ class ReviewFollowupTriggerService:
                     "blocked_reason": gate.get("blocked_reason", ""),
                 },
                 "daily_report_record_export": self._existing_daily_report_record_export(sessions),
+                "cabinet_shift_record_export": self._existing_cabinet_shift_record_export(sessions),
                 "followup_progress": self._collect_followup_progress(
                     batch_key=target_batch,
                     sessions=sessions,
@@ -378,6 +528,9 @@ class ReviewFollowupTriggerService:
                 "daily_report_record_export": self._existing_daily_report_record_export(
                     self._review_service.list_batch_sessions(target_batch)
                 ),
+                "cabinet_shift_record_export": self._existing_cabinet_shift_record_export(
+                    self._review_service.list_batch_sessions(target_batch)
+                ),
                 "followup_progress": self._collect_followup_progress(
                     batch_key=target_batch,
                     sessions=self._review_service.list_batch_sessions(target_batch),
@@ -396,11 +549,28 @@ class ReviewFollowupTriggerService:
             sessions=refreshed_sessions,
             emit_log=emit_log,
         )
+        single_sessions = [
+            item
+            for item in refreshed_sessions
+            if isinstance(item, dict)
+            and (
+                str(item.get("session_id", "")).strip() == target_session_id
+                or str(item.get("building", "")).strip() == target_building
+            )
+        ] or [session]
+        cabinet_shift_record_export = self._run_cabinet_shift_record_export(
+            batch_key=target_batch,
+            sessions=single_sessions,
+            cloud_result=cloud_result,
+            emit_log=emit_log,
+        )
+        refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
         return self._compose_followup_result(
             batch_key=target_batch,
             export_result=self._empty_export_result(),
             cloud_result=cloud_result,
             daily_report_record_export=self._existing_daily_report_record_export(refreshed_sessions or [session]),
+            cabinet_shift_record_export=cabinet_shift_record_export,
             sessions=refreshed_sessions or [session],
         )
 
@@ -532,6 +702,8 @@ class ReviewFollowupTriggerService:
                 daily_report_failed = 1
 
         attachment_pending_count = 0
+        cabinet_pending_count = 0
+        cabinet_failed_count = 0
         cloud_pending_count = 0
         failed_count = daily_report_failed
         for session in sessions:
@@ -546,13 +718,24 @@ class ReviewFollowupTriggerService:
             if str(attachment_state.get("status", "")).strip().lower() == "failed":
                 failed_count += 1
 
+            cabinet_state = _normalize_export_state(session.get("cabinet_shift_record_export", {}))
+            if not self._is_export_complete_for_revision(
+                cabinet_state,
+                revision,
+                static_skip_reasons={"disabled", "missing_duty_context"},
+            ):
+                cabinet_pending_count += 1
+            if str(cabinet_state.get("status", "")).strip().lower() == "failed":
+                cabinet_failed_count += 1
+                failed_count += 1
+
             cloud_state = _normalize_cloud_sync_state(session.get("cloud_sheet_sync", {}))
             if not self._is_cloud_sync_complete_for_revision(cloud_state, revision):
                 cloud_pending_count += 1
             if self._is_cloud_sync_failed(cloud_state):
                 failed_count += 1
 
-        pending_count = attachment_pending_count + cloud_pending_count + daily_report_pending
+        pending_count = attachment_pending_count + cloud_pending_count + cabinet_pending_count + daily_report_pending
         if pending_count <= 0 and failed_count <= 0:
             status = "complete"
         elif pending_count > 0 and failed_count > 0:
@@ -572,6 +755,8 @@ class ReviewFollowupTriggerService:
             "pending_count": pending_count,
             "failed_count": failed_count,
             "attachment_pending_count": attachment_pending_count,
+            "cabinet_shift_record_pending_count": cabinet_pending_count,
+            "cabinet_shift_record_failed_count": cabinet_failed_count,
             "cloud_pending_count": cloud_pending_count,
             "daily_report_status": daily_report_status,
         }
@@ -610,21 +795,37 @@ class ReviewFollowupTriggerService:
         export_result: Dict[str, Any],
         cloud_result: Dict[str, Any],
         daily_report_record_export: Dict[str, Any],
+        cabinet_shift_record_export: Dict[str, Any],
         sessions: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         normalized_cloud = self._normalize_followup_result_cloud_payload(cloud_result)
+        cabinet_result = cabinet_shift_record_export if isinstance(cabinet_shift_record_export, dict) else {}
         combined_uploaded = sorted(
-            set(export_result.get("uploaded_buildings", []) + list(normalized_cloud.get("uploaded_buildings", []) or []))
+            set(
+                export_result.get("uploaded_buildings", [])
+                + list(normalized_cloud.get("uploaded_buildings", []) or [])
+                + list(cabinet_result.get("created_buildings", []) or [])
+                + list(cabinet_result.get("updated_buildings", []) or [])
+            )
         )
         combined_failed_map: Dict[str, str] = {}
-        for item in export_result.get("failed_buildings", []) + list(normalized_cloud.get("failed_buildings", []) or []):
+        failed_items = (
+            export_result.get("failed_buildings", [])
+            + list(normalized_cloud.get("failed_buildings", []) or [])
+            + list(cabinet_result.get("failed_buildings", []) or [])
+        )
+        for item in failed_items:
             if not isinstance(item, dict):
                 continue
             building = str(item.get("building", "")).strip()
             if not building:
                 continue
             combined_failed_map[building] = str(item.get("error", "")).strip()
-        combined_skipped = export_result.get("skipped_buildings", []) + list(normalized_cloud.get("skipped_buildings", []) or [])
+        combined_skipped = (
+            export_result.get("skipped_buildings", [])
+            + list(normalized_cloud.get("skipped_buildings", []) or [])
+            + list(cabinet_result.get("skipped_buildings", []) or [])
+        )
         followup_progress = self._collect_followup_progress(batch_key=batch_key, sessions=sessions, ready=True)
         if combined_failed_map and combined_uploaded:
             status = "partial_failed"
@@ -649,6 +850,7 @@ class ReviewFollowupTriggerService:
             "blocked_reason": "",
             "cloud_sheet_sync": normalized_cloud,
             "daily_report_record_export": daily_report_record_export,
+            "cabinet_shift_record_export": cabinet_result,
             "followup_progress": followup_progress,
         }
 
@@ -1057,9 +1259,7 @@ class ReviewFollowupTriggerService:
         status: str,
         spreadsheet_url: str = "",
         summary_screenshot_path: str = "",
-        external_screenshot_path: str = "",
         summary_screenshot_source_used: str = "",
-        external_screenshot_source_used: str = "",
         record_id: str = "",
         record_url: str = "",
         error: str = "",
@@ -1073,9 +1273,7 @@ class ReviewFollowupTriggerService:
                 "record_url": str(record_url or "").strip(),
                 "spreadsheet_url": str(spreadsheet_url or "").strip(),
                 "summary_screenshot_path": str(summary_screenshot_path or "").strip(),
-                "external_screenshot_path": str(external_screenshot_path or "").strip(),
                 "summary_screenshot_source_used": str(summary_screenshot_source_used or "").strip().lower(),
-                "external_screenshot_source_used": str(external_screenshot_source_used or "").strip().lower(),
                 "updated_at": self._now_text(),
                 "error": str(error or "").strip(),
                 "error_code": str(error_code or "").strip(),
@@ -1094,10 +1292,8 @@ class ReviewFollowupTriggerService:
             duty_shift=duty_shift,
         )
         summary = capture_assets.get("summary_sheet_image", {}) if isinstance(capture_assets, dict) else {}
-        external = capture_assets.get("external_page_image", {}) if isinstance(capture_assets, dict) else {}
         return {
             "summary_sheet_image": summary if isinstance(summary, dict) else {},
-            "external_page_image": external if isinstance(external, dict) else {},
         }
 
     def _build_daily_report_export_from_effective_assets(
@@ -1113,23 +1309,17 @@ class ReviewFollowupTriggerService:
             duty_shift=duty_shift,
         )
         summary = effective_assets["summary_sheet_image"]
-        external = effective_assets["external_page_image"]
         summary_path = str(summary.get("stored_path", "")).strip()
-        external_path = str(external.get("stored_path", "")).strip()
         summary_source = str(summary.get("source", "")).strip().lower()
-        external_source = str(external.get("source", "")).strip().lower()
-        if not summary_path or not external_path:
-            missing_name = "summary_sheet" if not summary_path else "external_page"
+        if not summary_path:
             return self._daily_report_export_state(
                 status="failed",
                 spreadsheet_url=spreadsheet_url,
                 summary_screenshot_path=summary_path,
-                external_screenshot_path=external_path,
                 summary_screenshot_source_used=summary_source,
-                external_screenshot_source_used=external_source,
-                error="当前最终生效截图不完整，无法重写日报记录。",
+                error="当前最终生效日报截图不完整，无法重写日报记录。",
                 error_code="missing_effective_asset",
-                error_detail=f"missing_effective_asset:{missing_name}",
+                error_detail="missing_effective_asset:summary_sheet",
             )
         try:
             export_result = self._daily_report_bitable_export_service.export_record(
@@ -1137,16 +1327,13 @@ class ReviewFollowupTriggerService:
                 duty_shift=duty_shift,
                 spreadsheet_url=spreadsheet_url,
                 summary_screenshot_path=summary_path,
-                external_screenshot_path=external_path,
                 emit_log=emit_log,
             )
             return self._daily_report_export_state(
                 status=str(export_result.get("status", "")).strip().lower() or "success",
                 spreadsheet_url=spreadsheet_url,
                 summary_screenshot_path=summary_path,
-                external_screenshot_path=external_path,
                 summary_screenshot_source_used=summary_source,
-                external_screenshot_source_used=external_source,
                 record_id=str(export_result.get("record_id", "")).strip(),
                 record_url=str(export_result.get("record_url", "")).strip(),
                 error=str(export_result.get("error", "")).strip(),
@@ -1161,9 +1348,7 @@ class ReviewFollowupTriggerService:
                 status="failed",
                 spreadsheet_url=spreadsheet_url,
                 summary_screenshot_path=summary_path,
-                external_screenshot_path=external_path,
                 summary_screenshot_source_used=summary_source,
-                external_screenshot_source_used=external_source,
                 error=error,
                 error_code=error_code,
                 error_detail=error_detail,
@@ -1215,22 +1400,7 @@ class ReviewFollowupTriggerService:
             )
 
         self._daily_report_asset_service.prune_stale_assets()
-        auth_state = self._daily_report_screenshot_service.check_auth_status(emit_log=emit_log)
-        if str(auth_state.get("status", "")).strip().lower() != "ready":
-            emit_log("[交接班][日报多维] 跳过: 需要重新登录飞书")
-            auth_error = str(auth_state.get("error", "")).strip() or _followup_status_text(auth_state.get("status", ""))
-            state = self._daily_report_export_state(
-                status="login_required",
-                spreadsheet_url=spreadsheet_url,
-                error=auth_error,
-            )
-            return self._daily_report_state_service.update_export_state(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                daily_report_record_export=state,
-            )
-
-        summary_result = self._daily_report_screenshot_service.capture_summary_sheet(
+        summary_result = self._daily_report_screenshot_service.capture_daily_report_page(
             duty_date=duty_date,
             duty_shift=duty_shift,
             emit_log=emit_log,
@@ -1239,33 +1409,11 @@ class ReviewFollowupTriggerService:
             summary_error = str(summary_result.get("error", "")).strip() or _followup_status_text(
                 summary_result.get("status", "")
             )
-            emit_log(f"[交接班][日报多维] 跳过: 今日航图截图失败，原因={summary_error}")
+            emit_log(f"[交接班][日报多维] 跳过: 日报截图失败，原因={summary_error}")
             state = self._daily_report_export_state(
                 status="capture_failed",
                 spreadsheet_url=spreadsheet_url,
                 error=summary_error,
-            )
-            return self._daily_report_state_service.update_export_state(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                daily_report_record_export=state,
-            )
-
-        external_result = self._daily_report_screenshot_service.capture_external_page(
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            emit_log=emit_log,
-        )
-        if str(external_result.get("status", "")).strip().lower() != "ok":
-            external_error = str(external_result.get("error", "")).strip() or _followup_status_text(
-                external_result.get("status", "")
-            )
-            emit_log(f"[交接班][日报多维] 跳过: 外围页面截图失败，原因={external_error}")
-            state = self._daily_report_export_state(
-                status="capture_failed",
-                spreadsheet_url=spreadsheet_url,
-                summary_screenshot_path=str(summary_result.get("path", "")).strip(),
-                error=external_error,
             )
             return self._daily_report_state_service.update_export_state(
                 duty_date=duty_date,
@@ -1723,6 +1871,7 @@ class ReviewFollowupTriggerService:
         batch_status = self._review_service.get_batch_status(batch_key)
         gate = self.evaluate(batch_status)
         if not gate.get("ready_for_followup_upload", False):
+            blocked_sessions = self._review_service.list_batch_sessions(batch_key)
             return {
                 "status": "blocked",
                 "batch_key": str(batch_key or "").strip(),
@@ -1743,9 +1892,10 @@ class ReviewFollowupTriggerService:
                     status="skipped",
                     error=gate.get("blocked_reason", ""),
                 ),
+                "cabinet_shift_record_export": self._existing_cabinet_shift_record_export(blocked_sessions),
                 "followup_progress": self._collect_followup_progress(
                     batch_key=str(batch_key or "").strip(),
-                    sessions=self._review_service.list_batch_sessions(batch_key),
+                    sessions=blocked_sessions,
                     ready=False,
                 ),
             }
@@ -1776,6 +1926,13 @@ class ReviewFollowupTriggerService:
             sessions=refreshed_sessions or sessions,
             emit_log=emit_log,
         )
+        cabinet_shift_record_export = self._run_cabinet_shift_record_export(
+            batch_key=batch_key,
+            sessions=refreshed_sessions or sessions,
+            cloud_result=cloud_result,
+            emit_log=emit_log,
+        )
+        refreshed_sessions = self._review_service.list_batch_sessions(batch_key)
         daily_report_record_export = self._run_daily_report_record_export(
             batch_key=batch_key,
             sessions=refreshed_sessions or sessions,
@@ -1788,6 +1945,7 @@ class ReviewFollowupTriggerService:
             export_result=export_result,
             cloud_result=cloud_result,
             daily_report_record_export=daily_report_record_export,
+            cabinet_shift_record_export=cabinet_shift_record_export,
             sessions=refreshed_sessions or sessions,
         )
 
@@ -1817,6 +1975,7 @@ class ReviewFollowupTriggerService:
                     status="skipped",
                     error=gate.get("blocked_reason", ""),
                 ),
+                "cabinet_shift_record_export": self._existing_cabinet_shift_record_export(sessions),
                 "followup_progress": self._collect_followup_progress(
                     batch_key=target_batch,
                     sessions=sessions,
@@ -1860,6 +2019,13 @@ class ReviewFollowupTriggerService:
             sessions=refreshed_sessions,
             emit_log=emit_log,
         )
+        cabinet_shift_record_export = self._run_cabinet_shift_record_export(
+            batch_key=target_batch,
+            sessions=refreshed_sessions,
+            cloud_result=cloud_result,
+            emit_log=emit_log,
+        )
+        refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
 
         daily_report_record_export = {}
         if refreshed_sessions:
@@ -1890,6 +2056,7 @@ class ReviewFollowupTriggerService:
             export_result=export_result,
             cloud_result=cloud_result,
             daily_report_record_export=daily_report_record_export,
+            cabinet_shift_record_export=cabinet_shift_record_export,
             sessions=refreshed_sessions,
         )
 

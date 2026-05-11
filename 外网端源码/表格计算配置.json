@@ -880,8 +880,7 @@
           "report_link": "交接班日报",
           "screenshots": "日报截图"
         },
-        "summary_page_url": "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgeZUMIpMDuIIfLA",
-        "external_page_url": "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgecZCUXaEtvP9Yl",
+        "screenshot_page_url": "https://124.222.19.16:3001/",
         "browser_profile_directory": ""
       },
       "template_fixed_fill": {
@@ -4411,7 +4410,8 @@
       "scheduler": {
         "enabled": false,
         "auto_start_in_gui": false,
-        "interval_minutes": 60,
+        "interval_minutes": 1440,
+        "minute_offset": 30,
         "check_interval_sec": 30,
         "retry_failed_on_next_tick": true,
         "state_file": "branch_power_upload_scheduler_state.json"

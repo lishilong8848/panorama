@@ -47,9 +47,7 @@ class HandoverDailyReportStateService:
             "record_url": "",
             "spreadsheet_url": "",
             "summary_screenshot_path": "",
-            "external_screenshot_path": "",
             "summary_screenshot_source_used": "",
-            "external_screenshot_source_used": "",
             "updated_at": "",
             "error": "",
             "error_code": "",
@@ -61,15 +59,6 @@ class HandoverDailyReportStateService:
         empty_variant = {"exists": False, "stored_path": "", "captured_at": "", "preview_url": ""}
         return {
             "summary_sheet_image": {
-                "exists": False,
-                "source": "none",
-                "stored_path": "",
-                "captured_at": "",
-                "preview_url": "",
-                "auto": dict(empty_variant),
-                "manual": dict(empty_variant),
-            },
-            "external_page_image": {
                 "exists": False,
                 "source": "none",
                 "stored_path": "",
@@ -132,9 +121,7 @@ class HandoverDailyReportStateService:
                 "record_url": str(payload.get("record_url", "") or "").strip(),
                 "spreadsheet_url": str(payload.get("spreadsheet_url", "") or "").strip(),
                 "summary_screenshot_path": str(payload.get("summary_screenshot_path", "") or "").strip(),
-                "external_screenshot_path": str(payload.get("external_screenshot_path", "") or "").strip(),
                 "summary_screenshot_source_used": str(payload.get("summary_screenshot_source_used", "") or "").strip().lower(),
-                "external_screenshot_source_used": str(payload.get("external_screenshot_source_used", "") or "").strip().lower(),
                 "updated_at": str(payload.get("updated_at", "") or "").strip(),
                 "error": str(payload.get("error", "") or "").strip(),
                 "error_code": str(payload.get("error_code", "") or "").strip(),
@@ -333,27 +320,19 @@ class HandoverDailyReportStateService:
         capture_assets: Dict[str, Any],
     ) -> Dict[str, Any]:
         summary_asset = capture_assets.get("summary_sheet_image", {}) if isinstance(capture_assets, dict) else {}
-        external_asset = capture_assets.get("external_page_image", {}) if isinstance(capture_assets, dict) else {}
         has_summary = bool(summary_asset.get("exists", False))
-        has_external = bool(external_asset.get("exists", False))
         spreadsheet_url = str(export_state.get("spreadsheet_url", "") or "").strip()
 
-        rewrite_allowed = bool(spreadsheet_url) and has_summary and has_external
+        rewrite_allowed = bool(spreadsheet_url) and has_summary
         rewrite_disabled_reason = ""
         rewrite_reason_code = ""
         if not rewrite_allowed:
             if not spreadsheet_url:
                 rewrite_disabled_reason = "当前批次缺少云文档链接，无法重写日报记录。"
                 rewrite_reason_code = "missing_spreadsheet_url"
-            elif not has_summary and not has_external:
-                rewrite_disabled_reason = "当前最终生效截图不完整，无法重写日报记录。"
-                rewrite_reason_code = "missing_effective_assets"
-            elif not has_summary:
-                rewrite_disabled_reason = "缺少今日航图截图，无法重写日报记录。"
-                rewrite_reason_code = "missing_summary_asset"
             else:
-                rewrite_disabled_reason = "缺少排班截图，无法重写日报记录。"
-                rewrite_reason_code = "missing_external_asset"
+                rewrite_disabled_reason = "缺少日报截图，无法重写日报记录。"
+                rewrite_reason_code = "missing_summary_asset"
 
         return {
             "open_auth": self._action_payload(label="初始化飞书截图登录态"),
@@ -518,17 +497,10 @@ class HandoverDailyReportStateService:
                 "capture_assets": {
                     "summary_sheet_image": self._present_capture_asset_card(
                         normalized_capture_assets.get("summary_sheet_image", {}),
-                        title="今日航图截图",
+                        title="日报截图",
                         duty_date=str(duty_date or "").strip(),
                         duty_shift=str(duty_shift or "").strip().lower(),
                         last_written_source=str(export_state.get("summary_screenshot_source_used", "") or "").strip().lower(),
-                    ),
-                    "external_page_image": self._present_capture_asset_card(
-                        normalized_capture_assets.get("external_page_image", {}),
-                        title="排班截图",
-                        duty_date=str(duty_date or "").strip(),
-                        duty_shift=str(duty_shift or "").strip().lower(),
-                        last_written_source=str(export_state.get("external_screenshot_source_used", "") or "").strip().lower(),
                     ),
                 },
             },

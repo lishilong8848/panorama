@@ -24,7 +24,6 @@ from app.modules.feishu.api.routes import router as feishu_router
 from app.modules.notify.api.routes import router as notify_router
 from app.modules.ocr.api.routes import router as ocr_router
 from app.modules.report_pipeline.api.routes import (
-    _run_external_branch_power_backfill_missing_flow,
     router as pipeline_router,
     schedule_handover_review_access_startup_probe,
 )
@@ -50,10 +49,6 @@ from app.shared.utils.frontend_cache import (
     source_frontend_no_cache_headers,
 )
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
-from handover_log_module.api.facade import load_handover_config
-from handover_log_module.service.handover_daily_report_screenshot_service import (
-    HandoverDailyReportScreenshotService,
-)
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
 from pipeline_utils import get_app_dir, get_app_root_dir
@@ -203,46 +198,47 @@ def _default_role_route(role_mode: str) -> str:
     return "/external/dashboard"
 
 def _initialize_handover_daily_report_auth(container) -> None:
-    existing_thread = getattr(container, "_handover_daily_report_auth_init_thread", None)
-    if isinstance(existing_thread, threading.Thread) and existing_thread.is_alive():
+    try:
+        from handover_log_module.api.facade import load_handover_config
+        from handover_log_module.service.handover_daily_report_screenshot_service import (
+            HandoverDailyReportScreenshotService,
+        )
+
+        runtime_config = getattr(container, "runtime_config", {})
+        handover_cfg = load_handover_config(runtime_config if isinstance(runtime_config, dict) else {})
+        screenshot_service = HandoverDailyReportScreenshotService(handover_cfg)
+        screenshot_service.open_daily_report_screenshot_page(emit_log=lambda text: container.add_system_log(str(text)))
+        container.add_system_log("[交接班][日报截图] 单截图公开页面模式，无需初始化飞书截图登录态")
+    except Exception as exc:  # noqa: BLE001
         try:
-            container.add_system_log("[交接班][日报截图登录] 启动自动初始化已在后台执行，跳过重复触发")
+            container.add_system_log(f"[交接班][日报截图] 启动预打开日报截图页面异常，已跳过: {exc}")
         except Exception:  # noqa: BLE001
             pass
-        return
 
-    def _runner() -> None:
+
+def _ensure_capacity_report_image_runtime(container) -> None:
+    try:
+        from handover_log_module.api.facade import load_handover_config
+        from handover_log_module.service.capacity_report_image_delivery_service import (
+            ensure_capacity_report_image_runtime_dependencies,
+        )
+
+        runtime_config = getattr(container, "runtime_config", {})
+        handover_cfg = load_handover_config(runtime_config if isinstance(runtime_config, dict) else {})
+        result = ensure_capacity_report_image_runtime_dependencies(
+            handover_cfg,
+            emit_log=lambda text: container.add_system_log(str(text)),
+            install_missing=True,
+        )
+        if not bool(result.get("ok", False)):
+            container.add_system_log(
+                "[交接班][容量表图片发送] 截图依赖未完全就绪，发送容量表图片时会提示依赖错误"
+            )
+    except Exception as exc:  # noqa: BLE001
         try:
-            handover_cfg = load_handover_config(container.runtime_config)
-            export_cfg = handover_cfg.get("daily_report_bitable_export", {})
-            if not isinstance(export_cfg, dict):
-                export_cfg = {}
-            if not bool(export_cfg.get("enabled", True)):
-                container.add_system_log("[交接班][日报截图登录] 启动自动初始化已跳过：日报多维导出已禁用")
-                return
-            screenshot_service = HandoverDailyReportScreenshotService(handover_cfg)
-            result = screenshot_service.open_login_browser(emit_log=container.add_system_log)
-            message = str(result.get("message", "") or "").strip() or "已触发自动初始化"
-            container.add_system_log(f"[交接班][日报截图登录] 启动自动初始化: {message}")
-        except Exception as exc:  # noqa: BLE001
-            try:
-                container.add_system_log(f"[交接班][日报截图登录] 启动自动初始化失败：{exc}")
-            except Exception:  # noqa: BLE001
-                pass
-        finally:
-            try:
-                setattr(container, "_handover_daily_report_auth_init_thread", None)
-            except Exception:  # noqa: BLE001
-                pass
-
-    thread = threading.Thread(
-        target=_runner,
-        name="handover-daily-report-auth-init",
-        daemon=True,
-    )
-    setattr(container, "_handover_daily_report_auth_init_thread", thread)
-    thread.start()
-    container.add_system_log("[交接班][日报截图登录] 启动自动初始化已转入后台，不阻塞外网页面进入")
+            container.add_system_log(f"[交接班][容量表图片发送] 截图依赖初始化失败，已跳过: {exc}")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def create_app(*, enable_lifespan: bool = True) -> FastAPI:
@@ -620,7 +616,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 "[访问控制] 已启用局域网页面隔离：仅对外开放 /handover/review/*、/api/handover/review/* 与 /assets/*"
             )
             if role_mode != "internal":
-                app.state.runtime_activation_step = "initializing_handover_daily_report_auth"
+                app.state.runtime_activation_step = "installing_capacity_report_image_runtime"
+                _ensure_capacity_report_image_runtime(container)
+                app.state.runtime_activation_step = "initializing_handover_daily_report_screenshot"
                 _initialize_handover_daily_report_auth(container)
                 app.state.runtime_activation_step = "probing_handover_review_access"
                 schedule_handover_review_access_startup_probe(container)
@@ -1547,9 +1545,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(f"[自动上传支路功率调度] {detail}")
             return False, detail
 
-        target_bucket_key = (
-            datetime.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
-        ).strftime("%Y-%m-%d %H")
+        target_business_date = (datetime.now().date() - timedelta(days=1)).strftime("%Y-%m-%d")
         target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
         if not target_buildings:
             detail = "共享桥接未配置可用楼栋，无法执行自动上传支路功率调度"
@@ -1561,7 +1557,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 entries = bridge_service.get_latest_source_cache_entries(
                     source_family=source_family,
                     buildings=target_buildings,
-                    bucket_key=target_bucket_key,
+                    bucket_key=target_business_date,
                 )
                 output = [
                     item
@@ -1587,14 +1583,16 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             missing_switch = [building for building in target_buildings if building not in switch_ready]
             missing_buildings = list(dict.fromkeys([*missing_power, *missing_current, *missing_switch]))
             if missing_buildings:
-                dedupe_key = f"branch_power_upload:scheduler:{target_bucket_key}:{'|'.join(sorted(target_buildings))}"
+                dedupe_key = f"branch_power_upload:daily:{target_business_date}:{'|'.join(sorted(target_buildings))}"
                 job, bridge_task = start_waiting_bridge_job(
                     job_service=container.job_service,
                     bridge_service=bridge_service,
                     name=source,
                     worker_handler="branch_power_from_download",
                     worker_payload={
-                        "target_bucket_key": target_bucket_key,
+                        "mode": "daily_branch_sources",
+                        "target_bucket_key": target_business_date,
+                        "target_business_date": target_business_date,
                         "building_scope": "all_enabled",
                         "building": None,
                         "buildings": missing_buildings,
@@ -1610,14 +1608,16 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     bridge_create_name="create_branch_power_upload_task",
                     bridge_kwargs={
                         "buildings": missing_buildings,
-                        "target_bucket_key": target_bucket_key,
+                        "target_bucket_key": target_business_date,
+                        "mode": "daily_branch_sources",
+                        "target_business_date": target_business_date,
                         "requested_by": "scheduler",
                     },
                 )
                 accepted_detail = (
-                    "等待内网补采同步：支路功率/电流/开关当前小时桶源文件尚未全部到位。"
+                    "等待内网补采同步：支路功率/电流/开关整日源文件尚未全部到位。"
                     f" 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'},"
-                    f" bucket={target_bucket_key}, missing={','.join(missing_buildings)}, job_id={job.job_id}"
+                    f" business_date={target_business_date}, missing={','.join(missing_buildings)}, job_id={job.job_id}"
                 )
                 container.add_system_log(f"[自动上传支路功率调度] {accepted_detail}")
                 return True, accepted_detail
@@ -1627,7 +1627,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     entries = bridge_service.get_latest_source_cache_entries(
                         source_family=source_family,
                         buildings=target_buildings,
-                        bucket_key=target_bucket_key,
+                        bucket_key=target_business_date,
                     )
                     output: dict[str, dict] = {}
                     for item in entries if isinstance(entries, list) else []:
@@ -1659,7 +1659,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         missing_switch.append(building)
                     metadata = power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {}
                     unit = {
-                        "bucket_key": target_bucket_key,
+                        "bucket_key": target_business_date,
+                        "business_date": target_business_date,
                         "building": building,
                         "power_file": str(power_entry.get("file_path", "") or "").strip(),
                         "metadata": metadata,
@@ -1682,40 +1683,22 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         f"开关索引缺失={','.join(missing_switch) or '-'}"
                     )
                 service = BranchPowerUploadService(container.runtime_config)
-                result = service.continue_from_source_files(
-                    bucket_key=target_bucket_key,
+                result = service.upload_day_from_source_files(
+                    business_date=target_business_date,
                     source_units=source_units,
                     emit_log=emit_log,
                 )
-                upload_result = result.get("upload_result", {}) if isinstance(result, dict) else {}
-                upload_reason = str(upload_result.get("reason", "") or "").strip()
-                if target_bucket_key.endswith(" 23") and upload_reason in {"day_incomplete", "row_fields_incomplete"}:
-                    business_date = datetime.strptime(target_bucket_key, "%Y-%m-%d %H").date()
-                    emit_log(
-                        "[自动上传支路功率调度] 23点末次上传发现库中少数据，开始派发内网补缺口 "
-                        f"business_date={business_date.strftime('%Y-%m-%d')}, reason={upload_reason}"
-                    )
-                    result["backfill_missing"] = _run_external_branch_power_backfill_missing_flow(
-                        container=container,
-                        config=container.runtime_config,
-                        business_date=business_date,
-                        buildings=target_buildings,
-                        max_hour=23,
-                        emit_log=emit_log,
-                        priority="scheduler",
-                        submitted_by="scheduler",
-                    )
                 return result
 
-            dedupe_key = f"branch_power_cache:scheduler:{target_bucket_key}:{'|'.join(sorted(target_buildings))}"
+            dedupe_key = f"branch_power_cache:daily:{target_business_date}:{'|'.join(sorted(target_buildings))}"
             job = _start_external_cache_job(
-                name="自动上传支路功率-使用共享文件",
-                feature="branch_power_cache_by_hour",
+                name="自动上传支路功率-整日直传",
+                feature="branch_power_cache_by_day",
                 resource_key="shared_bridge:branch_power",
                 run_func=_run_from_cache,
                 dedupe_key=dedupe_key,
             )
-            detail = f"已提交支路信息共享文件入库任务 job_id={job.job_id}, bucket={target_bucket_key}"
+            detail = f"已提交支路信息整日直传任务 job_id={job.job_id}, business_date={target_business_date}"
             container.add_system_log(f"[自动上传支路功率调度] {detail}")
             return True, detail
         except Exception as exc:  # noqa: BLE001

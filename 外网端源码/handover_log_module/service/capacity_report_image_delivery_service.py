@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import os
 import re
+import shutil
+import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -17,11 +21,18 @@ from handover_log_module.service.handover_capacity_report_service import Handove
 from handover_log_module.service.handover_summary_message_service import HandoverSummaryMessageService
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.review_session_service import ReviewSessionNotFoundError, ReviewSessionService
-from pipeline_utils import get_app_dir
+from pipeline_utils import get_app_dir, get_app_root_dir
 
 
-_SCREENSHOT_QUEUE_TIMEOUT_SEC = 120
-_CLIPBOARD_WAIT_SEC = 10
+_SCREENSHOT_QUEUE_TIMEOUT_SEC = 600
+_LIBREOFFICE_CONVERT_TIMEOUT_SEC = 180
+_DEPENDENCY_INSTALL_TIMEOUT_SEC = 900
+_PDF_RENDER_SCALE = 2.0
+_CAPACITY_REPORT_SHEET_NAME = "本班组"
+_PYPI_MIRRORS: tuple[tuple[str, str, str], ...] = (
+    ("清华源", "https://pypi.tuna.tsinghua.edu.cn/simple", "pypi.tuna.tsinghua.edu.cn"),
+    ("阿里云源", "https://mirrors.aliyun.com/pypi/simple", "mirrors.aliyun.com"),
+)
 
 
 def _now_text() -> str:
@@ -47,7 +58,292 @@ def _runtime_root(handover_cfg: Dict[str, Any]) -> Path:
     )
 
 
-class CapacityReportExcelScreenshotQueue:
+def _subprocess_creation_flags() -> int:
+    if os.name != "nt":
+        return 0
+    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+
+
+def _tail_process_output(value: str, *, limit: int = 1200) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _dependency_search_roots() -> List[Path]:
+    roots: List[Path] = []
+    for candidate in (get_app_dir(), get_app_root_dir(get_app_dir()), Path.cwd()):
+        try:
+            path = Path(candidate).resolve()
+        except Exception:
+            path = Path(candidate)
+        if path not in roots:
+            roots.append(path)
+    return roots
+
+
+def _find_soffice_executable() -> Path | None:
+    env_path = _text(os.environ.get("LIBREOFFICE_SOFFICE_PATH"))
+    env_home = _text(os.environ.get("LIBREOFFICE_HOME"))
+    candidates: List[str] = []
+    if env_path:
+        candidates.append(env_path)
+    if env_home:
+        home_path = Path(env_home)
+        candidates.append(str(home_path / "program" / "soffice.exe"))
+        candidates.append(str(home_path / "soffice.exe"))
+    for name in ("soffice", "libreoffice"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    for root in _dependency_search_roots():
+        candidates.extend(
+            [
+                str(root / "runtime_dependencies" / "LibreOffice" / "program" / "soffice.exe"),
+                str(root / "runtime_dependencies" / "libreoffice" / "program" / "soffice.exe"),
+                str(root / "dependencies" / "LibreOffice" / "program" / "soffice.exe"),
+                str(root / "tools" / "LibreOffice" / "program" / "soffice.exe"),
+                str(root / "LibreOffice" / "program" / "soffice.exe"),
+            ]
+        )
+    candidates.extend(
+        [
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        ]
+    )
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
+def _pypdfium2_importable() -> bool:
+    try:
+        importlib.import_module("pypdfium2")
+        return True
+    except Exception:
+        return False
+
+
+def _pypdfium2_install_commands() -> List[tuple[str, List[str]]]:
+    base = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "pypdfium2",
+        "--timeout",
+        "300",
+        "--retries",
+        "5",
+    ]
+    output: List[tuple[str, List[str]]] = []
+    for label, index_url, trusted_host in _PYPI_MIRRORS:
+        output.append((label, [*base, "-i", index_url, "--trusted-host", trusted_host]))
+    output.append(("默认源", base))
+    return output
+
+
+def _install_pypdfium2(*, emit_log: Callable[[str], None]) -> bool:
+    emit_log("[交接班][容量表图片发送] pypdfium2 未安装，开始自动安装")
+    last_error = ""
+    for source_label, command in _pypdfium2_install_commands():
+        emit_log(f"[交接班][容量表图片发送] pypdfium2 自动安装尝试 source={source_label}")
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_DEPENDENCY_INSTALL_TIMEOUT_SEC,
+                creationflags=_subprocess_creation_flags(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+            emit_log(f"[交接班][容量表图片发送] pypdfium2 自动安装尝试失败 source={source_label}, error={exc}")
+            continue
+        if result.returncode != 0:
+            last_error = _tail_process_output(result.stderr or result.stdout)
+            emit_log(
+                "[交接班][容量表图片发送] pypdfium2 自动安装尝试失败 "
+                f"source={source_label}, code={result.returncode}, stderr={last_error}"
+            )
+            continue
+        importlib.invalidate_caches()
+        if _pypdfium2_importable():
+            emit_log(f"[交接班][容量表图片发送] pypdfium2 自动安装完成 source={source_label}")
+            return True
+        last_error = "pip安装完成但当前Python仍无法导入pypdfium2"
+    emit_log(f"[交接班][容量表图片发送] pypdfium2 自动安装失败: {last_error or 'unknown'}")
+    return False
+
+
+def _find_local_libreoffice_installer() -> Path | None:
+    patterns = (
+        "LibreOffice*.msi",
+        "libreoffice*.msi",
+        "LibreOffice*.exe",
+        "libreoffice*.exe",
+    )
+    candidates: List[Path] = []
+    for root in _dependency_search_roots():
+        for dirname in ("runtime_dependencies", "dependencies", "tools", "installers"):
+            directory = root / dirname
+            if not directory.exists() or not directory.is_dir():
+                continue
+            for pattern in patterns:
+                candidates.extend(path for path in directory.glob(pattern) if path.is_file())
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True)[0]
+
+
+def _install_libreoffice_from_local_installer(*, emit_log: Callable[[str], None]) -> bool:
+    installer = _find_local_libreoffice_installer()
+    if installer is None:
+        return False
+    suffix = installer.suffix.lower()
+    if suffix == ".msi":
+        commands = [["msiexec.exe", "/i", str(installer), "/qn", "/norestart"]]
+    elif suffix == ".exe":
+        commands = [[str(installer), "/S"], [str(installer), "/quiet", "/norestart"]]
+    else:
+        return False
+    emit_log(f"[交接班][容量表图片发送] LibreOffice 未安装，开始使用本地安装包 installer={installer}")
+    last_error = ""
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_DEPENDENCY_INSTALL_TIMEOUT_SEC,
+                creationflags=_subprocess_creation_flags(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+            continue
+        if result.returncode == 0 and _find_soffice_executable() is not None:
+            emit_log("[交接班][容量表图片发送] LibreOffice 本地安装包安装完成")
+            return True
+        last_error = _tail_process_output(result.stderr or result.stdout)
+    emit_log(f"[交接班][容量表图片发送] LibreOffice 本地安装包安装失败: {last_error or 'unknown'}")
+    return False
+
+
+def _local_libreoffice_hint() -> str:
+    root = _dependency_search_roots()[0]
+    return str(root / "runtime_dependencies" / "LibreOffice_*.msi")
+
+
+def _install_libreoffice_windows(*, emit_log: Callable[[str], None]) -> bool:
+    if os.name != "nt":
+        emit_log("[交接班][容量表图片发送] 非 Windows 环境，无法自动安装 LibreOffice")
+        return False
+    if _install_libreoffice_from_local_installer(emit_log=emit_log):
+        return True
+    winget = shutil.which("winget")
+    if not winget:
+        emit_log(
+            "[交接班][容量表图片发送] 未找到 winget，且未发现本地 LibreOffice 安装包 "
+            f"hint={_local_libreoffice_hint()}"
+        )
+        return False
+    base_command = [
+        winget,
+        "install",
+        "--id",
+        "TheDocumentFoundation.LibreOffice",
+        "-e",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--silent",
+    ]
+    commands = [base_command + ["--disable-interactivity"], base_command]
+    emit_log(
+        "[交接班][容量表图片发送] LibreOffice 未安装，开始通过 winget 自动安装 "
+        f"hint={_local_libreoffice_hint()}"
+    )
+    last_error = ""
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_DEPENDENCY_INSTALL_TIMEOUT_SEC,
+                creationflags=_subprocess_creation_flags(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+            continue
+        if result.returncode == 0 and _find_soffice_executable() is not None:
+            emit_log("[交接班][容量表图片发送] LibreOffice 自动安装完成")
+            return True
+        last_error = _tail_process_output(result.stderr or result.stdout)
+    emit_log(f"[交接班][容量表图片发送] LibreOffice 自动安装失败: {last_error or 'unknown'}")
+    return False
+
+
+def ensure_capacity_report_image_runtime_dependencies(
+    handover_cfg: Dict[str, Any] | None = None,
+    *,
+    emit_log: Callable[[str], None] = print,
+    install_missing: bool = True,
+) -> Dict[str, Any]:
+    """Ensure the external-side capacity report screenshot renderer can run."""
+
+    started = time.monotonic()
+    result: Dict[str, Any] = {
+        "ok": True,
+        "soffice_path": "",
+        "pypdfium2": False,
+        "installed": [],
+        "errors": [],
+    }
+    soffice = _find_soffice_executable()
+    if soffice is None and install_missing:
+        if _install_libreoffice_windows(emit_log=emit_log):
+            result["installed"].append("libreoffice")
+            soffice = _find_soffice_executable()
+    if soffice is None:
+        result["ok"] = False
+        result["errors"].append(f"LibreOffice未安装，可放置离线安装包到: {_local_libreoffice_hint()}")
+    else:
+        result["soffice_path"] = str(soffice)
+
+    pypdfium_ready = _pypdfium2_importable()
+    if not pypdfium_ready and install_missing:
+        if _install_pypdfium2(emit_log=emit_log):
+            result["installed"].append("pypdfium2")
+            pypdfium_ready = True
+    if not pypdfium_ready:
+        result["ok"] = False
+        result["errors"].append("pypdfium2未安装")
+    result["pypdfium2"] = bool(pypdfium_ready)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    if result["ok"]:
+        emit_log(
+            "[交接班][容量表图片发送] 截图依赖已就绪 "
+            f"soffice={result['soffice_path']}, pypdfium2={result['pypdfium2']}, elapsed_ms={elapsed_ms}"
+        )
+    else:
+        emit_log(
+            "[交接班][容量表图片发送] 截图依赖未完全就绪 "
+            f"errors={'; '.join(result['errors'])}, elapsed_ms={elapsed_ms}"
+        )
+    return result
+
+
+class CapacityReportImageRenderQueue:
     def __init__(self) -> None:
         self._condition = threading.Condition()
         self._next_ticket = 0
@@ -67,7 +363,7 @@ class CapacityReportExcelScreenshotQueue:
             self._next_ticket += 1
             pending_before = max(0, ticket - self._serving_ticket)
             emit_log(
-                "[交接班][容量表图片发送] 进入Excel截图队列 "
+                "[交接班][容量表图片发送] 进入容量表截图队列 "
                 f"{context}, ticket={ticket}, pending_before={pending_before}"
             )
             while ticket != self._serving_ticket:
@@ -77,7 +373,7 @@ class CapacityReportExcelScreenshotQueue:
                 self._condition.wait(timeout=remaining)
         wait_ms = int((time.monotonic() - started) * 1000)
         emit_log(
-            "[交接班][容量表图片发送] 已获取Excel截图队列 "
+            "[交接班][容量表图片发送] 已获取容量表截图队列 "
             f"{context}, ticket={ticket}, wait_ms={wait_ms}"
         )
         try:
@@ -87,12 +383,12 @@ class CapacityReportExcelScreenshotQueue:
                 self._serving_ticket += 1
                 self._condition.notify_all()
             emit_log(
-                "[交接班][容量表图片发送] 已释放Excel截图队列 "
+                "[交接班][容量表图片发送] 已释放容量表截图队列 "
                 f"{context}, ticket={ticket}"
             )
 
 
-_SCREENSHOT_QUEUE = CapacityReportExcelScreenshotQueue()
+_SCREENSHOT_QUEUE = CapacityReportImageRenderQueue()
 
 
 class CapacityReportImageDeliveryService:
@@ -119,7 +415,13 @@ class CapacityReportImageDeliveryService:
     def _configured_sheet_name(self) -> str:
         capacity_cfg = self.handover_cfg.get("capacity_report", {})
         template_cfg = capacity_cfg.get("template", {}) if isinstance(capacity_cfg, dict) else {}
-        return _text(template_cfg.get("sheet_name") if isinstance(template_cfg, dict) else "")
+        configured = _text(template_cfg.get("sheet_name") if isinstance(template_cfg, dict) else "")
+        return configured or _CAPACITY_REPORT_SHEET_NAME
+
+    def _libreoffice_temp_root(self) -> Path:
+        root = _runtime_root(self.handover_cfg) / "handover" / "capacity_report_images" / "libreoffice"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
 
     def _output_image_path(
         self,
@@ -170,7 +472,7 @@ class CapacityReportImageDeliveryService:
     def _file_lock_path(self) -> Path:
         root = _runtime_root(self.handover_cfg) / "handover" / "capacity_report_images"
         root.mkdir(parents=True, exist_ok=True)
-        return root / ".excel_copy_picture.lock"
+        return root / ".capacity_report_image_render.lock"
 
     @contextmanager
     def _runtime_file_lock(
@@ -207,9 +509,9 @@ class CapacityReportImageDeliveryService:
                 try:
                     path.unlink(missing_ok=True)
                 except Exception as exc:  # noqa: BLE001
-                    emit_log(f"[交接班][容量表图片发送] Excel截图锁文件清理失败 lock={path}, error={exc}")
+                    emit_log(f"[交接班][容量表图片发送] 容量表截图锁文件清理失败 lock={path}, error={exc}")
 
-    def _render_excel_copy_picture(
+    def _render_capacity_report_image(
         self,
         *,
         source_path: Path,
@@ -227,120 +529,218 @@ class CapacityReportImageDeliveryService:
                 context=context,
                 emit_log=emit_log,
             ):
-                return self._render_excel_copy_picture_locked(
+                return self._render_libreoffice_sheet_image(
                     source_path=source_path,
                     output_path=output_path,
                     emit_log=emit_log,
                 )
 
-    def _render_excel_copy_picture_locked(
+    @staticmethod
+    def _crop_rendered_page(image: Any) -> Any:
+        from PIL import Image, ImageChops
+
+        rgb = image.convert("RGB") if getattr(image, "mode", "") != "RGB" else image
+        background = Image.new("RGB", rgb.size, "white")
+        diff = ImageChops.difference(rgb, background)
+        bbox = diff.getbbox()
+        if not bbox:
+            return rgb
+        margin = 8
+        left = max(0, bbox[0] - margin)
+        upper = max(0, bbox[1] - margin)
+        right = min(rgb.width, bbox[2] + margin)
+        lower = min(rgb.height, bbox[3] + margin)
+        return rgb.crop((left, upper, right, lower))
+
+    def _copy_single_sheet_workbook(
+        self,
+        *,
+        source_path: Path,
+        target_path: Path,
+        emit_log: Callable[[str], None],
+    ) -> str:
+        import openpyxl
+
+        configured_sheet = self._configured_sheet_name()
+        workbook = openpyxl.load_workbook(source_path)
+        try:
+            if configured_sheet not in workbook.sheetnames:
+                raise RuntimeError(f"未找到截图Sheet: {configured_sheet}")
+            target_sheet = workbook[configured_sheet]
+            workbook.active = workbook.index(target_sheet)
+            for sheet in list(workbook.worksheets):
+                if sheet.title != configured_sheet:
+                    workbook.remove(sheet)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            workbook.save(target_path)
+            emit_log(
+                "[交接班][容量表图片发送] 已生成单Sheet截图临时表 "
+                f"sheet={configured_sheet}, temp={target_path}"
+            )
+            return configured_sheet
+        finally:
+            workbook.close()
+
+    def _convert_xlsx_to_pdf_with_libreoffice(
+        self,
+        *,
+        source_path: Path,
+        output_dir: Path,
+        emit_log: Callable[[str], None],
+    ) -> Path:
+        soffice = _find_soffice_executable()
+        if soffice is None:
+            raise RuntimeError("LibreOffice未安装，无法生成容量报表图片")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir = self._libreoffice_temp_root() / "profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        command = [
+            str(soffice),
+            "--headless",
+            "--nologo",
+            "--nofirststartwizard",
+            "--nodefault",
+            "--nolockcheck",
+            f"-env:UserInstallation={profile_dir.as_uri()}",
+            "--convert-to",
+            "pdf:calc_pdf_Export",
+            "--outdir",
+            str(output_dir),
+            str(source_path),
+        ]
+        started = time.monotonic()
+        emit_log(
+            "[交接班][容量表图片发送] LibreOffice导出PDF开始 "
+            f"source={source_path}, outdir={output_dir}, soffice={soffice}"
+        )
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_LIBREOFFICE_CONVERT_TIMEOUT_SEC,
+            creationflags=_subprocess_creation_flags(),
+        )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "LibreOffice导出PDF失败 "
+                f"code={result.returncode}, stderr={_tail_process_output(result.stderr or result.stdout)}"
+            )
+        pdf_path = output_dir / f"{source_path.stem}.pdf"
+        if not pdf_path.exists() or not pdf_path.is_file():
+            candidates = sorted(output_dir.glob("*.pdf"), key=lambda item: item.stat().st_mtime, reverse=True)
+            pdf_path = candidates[0] if candidates else pdf_path
+        if not pdf_path.exists() or not pdf_path.is_file():
+            raise RuntimeError("LibreOffice导出PDF成功但未找到PDF文件")
+        emit_log(
+            "[交接班][容量表图片发送] LibreOffice导出PDF完成 "
+            f"pdf={pdf_path}, elapsed_ms={elapsed_ms}"
+        )
+        return pdf_path
+
+    def _render_pdf_to_image(
+        self,
+        *,
+        pdf_path: Path,
+        output_path: Path,
+        sheet_name: str,
+        emit_log: Callable[[str], None],
+    ) -> Path:
+        try:
+            import pypdfium2
+            from PIL import Image
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"pypdfium2/Pillow未安装，无法渲染PDF: {exc}") from exc
+
+        document = pypdfium2.PdfDocument(str(pdf_path))
+        pages: List[Any] = []
+        try:
+            page_count = len(document)
+            if page_count <= 0:
+                raise RuntimeError("PDF没有可渲染页面")
+            for index in range(page_count):
+                page = document[index]
+                try:
+                    bitmap = page.render(scale=_PDF_RENDER_SCALE)
+                    page_image = bitmap.to_pil().convert("RGB")
+                    pages.append(self._crop_rendered_page(page_image))
+                finally:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+        finally:
+            try:
+                document.close()
+            except Exception:
+                pass
+        if not pages:
+            raise RuntimeError("PDF渲染为空")
+
+        gap = 12 if len(pages) > 1 else 0
+        width = max(image.width for image in pages)
+        height = sum(image.height for image in pages) + gap * max(0, len(pages) - 1)
+        combined = Image.new("RGB", (width, height), "white")
+        y = 0
+        for image in pages:
+            x = int((width - image.width) / 2)
+            combined.paste(image, (x, y))
+            y += image.height + gap
+
+        buffer = BytesIO()
+        combined.save(buffer, format="PNG", optimize=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(output_path, buffer.getvalue(), validator=validate_image_file, temp_suffix=".tmp")
+        stat = output_path.stat()
+        emit_log(
+            "[交接班][容量表图片发送] LibreOffice截图生成成功 "
+            f"image={output_path}, size={int(getattr(stat, 'st_size', 0) or 0)}, "
+            f"sheet={sheet_name}, pdf_pages={len(pages)}, width={width}, height={height}"
+        )
+        return output_path
+
+    def _render_libreoffice_sheet_image(
         self,
         *,
         source_path: Path,
         output_path: Path,
         emit_log: Callable[[str], None],
     ) -> Path:
-        excel = None
-        workbook = None
-        co_initialized = False
-        excel_pid = 0
+        started = time.monotonic()
+        temp_root = self._libreoffice_temp_root() / f"job_{os.getpid()}_{int(time.time() * 1000)}"
         try:
-            import pythoncom
-            import win32com.client
-            from PIL import ImageGrab
-
-            emit_log(f"[交接班][容量表图片发送] Excel截图开始 source={source_path}, target={output_path}")
-            pythoncom.CoInitialize()
-            co_initialized = True
-            excel = win32com.client.DispatchEx("Excel.Application")
-            try:
-                import win32process
-
-                _, excel_pid = win32process.GetWindowThreadProcessId(int(excel.Hwnd))
-            except Exception:
-                excel_pid = 0
-            emit_log(f"[交接班][容量表图片发送] Excel已启动 source={source_path}, excel_pid={excel_pid or '-'}")
-            excel.Visible = False
-            excel.DisplayAlerts = False
-            excel.ScreenUpdating = False
-            try:
-                excel.EnableEvents = False
-            except Exception:
-                pass
-            workbook = excel.Workbooks.Open(os.path.abspath(str(source_path)), UpdateLinks=0, ReadOnly=True, AddToMru=False)
-            configured_sheet = self._configured_sheet_name()
-            if configured_sheet:
-                try:
-                    sheet = workbook.Sheets(configured_sheet)
-                except Exception:
-                    sheet = workbook.Sheets(1)
-                    emit_log(
-                        "[交接班][容量表图片发送] 配置Sheet不存在，已使用首个Sheet "
-                        f"configured_sheet={configured_sheet}"
-                    )
-            else:
-                sheet = workbook.Sheets(1)
-            try:
-                sheet_name = str(sheet.Name)
-            except Exception:
-                sheet_name = configured_sheet or "1"
-            workbook.Activate()
-            sheet.Activate()
-            used_range = sheet.UsedRange
-            try:
-                used_address = str(used_range.Address)
-                used_rows = int(used_range.Rows.Count)
-                used_cols = int(used_range.Columns.Count)
-            except Exception:
-                used_address = "UsedRange"
-                used_rows = 0
-                used_cols = 0
-            emit_log(
-                "[交接班][容量表图片发送] Excel截图区域 "
-                f"sheet={sheet_name}, used_range={used_address}, rows={used_rows}, cols={used_cols}, excel_pid={excel_pid or '-'}"
+            work_dir = temp_root / "work"
+            out_dir = temp_root / "pdf"
+            sheet_xlsx = work_dir / source_path.name
+            sheet_name = self._copy_single_sheet_workbook(
+                source_path=source_path,
+                target_path=sheet_xlsx,
+                emit_log=emit_log,
             )
-            used_range.CopyPicture(Format=2)
-            deadline = time.monotonic() + _CLIPBOARD_WAIT_SEC
-            image = None
-            while time.monotonic() < deadline:
-                grabbed = ImageGrab.grabclipboard()
-                if hasattr(grabbed, "save"):
-                    image = grabbed.copy() if hasattr(grabbed, "copy") else grabbed
-                    break
-                time.sleep(0.2)
-            if image is None:
-                raise RuntimeError("Excel截图失败: 剪贴板未获取到图片")
-            buffer = BytesIO()
-            image.save(buffer, format="PNG")
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(output_path, buffer.getvalue(), validator=validate_image_file, temp_suffix=".tmp")
-            stat = output_path.stat()
-            emit_log(
-                "[交接班][容量表图片发送] Excel截图生成成功 "
-                f"image={output_path}, size={int(getattr(stat, 'st_size', 0) or 0)}, excel_pid={excel_pid or '-'}"
+            pdf_path = self._convert_xlsx_to_pdf_with_libreoffice(
+                source_path=sheet_xlsx,
+                output_dir=out_dir,
+                emit_log=emit_log,
             )
-            return output_path
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][容量表图片发送] Excel截图异常: error={exc}")
-            raise
+            image_path = self._render_pdf_to_image(
+                pdf_path=pdf_path,
+                output_path=output_path,
+                sheet_name=sheet_name,
+                emit_log=emit_log,
+            )
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            emit_log(
+                "[交接班][容量表图片发送] LibreOffice单Sheet截图完成 "
+                f"source={source_path}, image={image_path}, elapsed_ms={elapsed_ms}"
+            )
+            return image_path
         finally:
-            if workbook is not None:
-                try:
-                    workbook.Close(False)
-                except Exception:
-                    pass
-            if excel is not None:
-                try:
-                    excel.Quit()
-                except Exception:
-                    pass
-            if co_initialized:
-                try:
-                    import pythoncom
-
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
+            try:
+                shutil.rmtree(temp_root, ignore_errors=True)
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][容量表图片发送] LibreOffice截图临时目录清理失败 dir={temp_root}, error={exc}")
 
     def _persist_delivery(
         self,
@@ -401,6 +801,7 @@ class CapacityReportImageDeliveryService:
         error: str,
         failed_recipients: List[Dict[str, str]] | None = None,
         emit_log: Callable[[str], None],
+        update_review_delivery: bool = False,
     ) -> Dict[str, Any]:
         session_id = _text(session.get("session_id"))
         building = _text(session.get("building"))
@@ -414,15 +815,22 @@ class CapacityReportImageDeliveryService:
             "source": "manual",
         }
         persisted = self._persist_delivery(session_id=session_id, delivery=next_delivery, emit_log=emit_log)
-        review_delivery = self._persist_review_delivery(
-            session=session,
-            status="failed",
-            attempt_at=attempt_at,
-            successful_recipients=[],
-            failed_recipients=failed,
-            error=error,
-            emit_log=emit_log,
-        )
+        if update_review_delivery:
+            review_delivery = self._persist_review_delivery(
+                session=session,
+                status="failed",
+                attempt_at=attempt_at,
+                successful_recipients=[],
+                failed_recipients=failed,
+                error=error,
+                emit_log=emit_log,
+            )
+        else:
+            review_delivery = (
+                dict(session.get("review_link_delivery", {}))
+                if isinstance(session.get("review_link_delivery", {}), dict)
+                else {}
+            )
         emit_log(
             "[交接班][容量表图片发送] 失败 "
             f"building={building}, session_id={session_id}, error={error}, failed_recipients={failed}"
@@ -622,7 +1030,7 @@ class CapacityReportImageDeliveryService:
                 )
             output_image = self._output_image_path(session=current_session, signature=target_signature)
             try:
-                image_path = self._render_excel_copy_picture(
+                image_path = self._render_capacity_report_image(
                     source_path=capacity_path,
                     output_path=output_image,
                     emit_log=emit_log,
@@ -640,7 +1048,7 @@ class CapacityReportImageDeliveryService:
                     session=current_session,
                     delivery=delivery_state,
                     attempt_at=attempt_at,
-                    error=f"Excel截图失败，未发送: {exc}",
+                    error=f"容量表截图失败，未发送: {exc}",
                     emit_log=emit_log,
                 )
         else:

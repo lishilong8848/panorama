@@ -264,17 +264,17 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                     <strong class="status-metric-value">{{ handoverDutyShift === 'day' ? '白班' : '夜班' }}</strong>
                   </div>
                   <div class="status-metric">
-                    <div class="status-metric-label">截图登录态</div>
-                    <strong class="status-metric-value">{{ handoverDailyReportAuthVm.text }}</strong>
+                    <div class="status-metric-label">截图方式</div>
+                    <strong class="status-metric-value">单图直截</strong>
                   </div>
                 </div>
                 <div class="ops-focus-card">
                   <div class="ops-focus-card-label">执行条件</div>
-                  <div class="ops-focus-card-title">两张截图与云文档链接齐全后，才能重写日报多维表</div>
-                  <div class="ops-focus-card-meta">建议先检查登录态，再做截图测试；自动图异常时再手工替换。</div>
+                  <div class="ops-focus-card-title">日报截图与云文档链接齐全后，即可重写日报多维表</div>
+                  <div class="ops-focus-card-meta">截图固定访问公开日报页面，不再依赖飞书截图登录态。</div>
                 </div>
                 <div class="hint">日报多维表记录只在“一键全确认”且本批次云文档全部成功后自动写入。</div>
-                <div class="hint">两张截图默认自动截取。若图不正确，可放大查看、重新截图，或手工上传/粘贴替换后再手动重写日报记录。</div>
+                <div class="hint">日报截图默认自动截取。若图不正确，可放大查看、重新截图，或手工上传/粘贴替换后再手动重写日报记录。</div>
                 <div class="handover-daily-report-meta">
                   <div class="form-row">
                     <label class="label">当前日期</label>
@@ -284,7 +284,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                     <label class="label">当前班次</label>
                     <div class="readonly-inline-card">{{ handoverDutyShift === 'day' ? '白班' : '夜班' }}</div>
                   </div>
-                  <div class="form-row">
+                  <div class="form-row" v-if="false">
                     <label class="label">截图登录态</label>
                     <div class="readonly-inline-card">
                       <span class="status-badge status-badge-soft" :class="'tone-' + handoverDailyReportAuthVm.tone">
@@ -299,17 +299,18 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                     </div>
                   </div>
                 </div>
-                <div class="hint" v-if="handoverDailyReportContext.screenshot_auth.last_checked_at">
+                <div class="hint" v-if="false && handoverDailyReportContext.screenshot_auth.last_checked_at">
                   最近检测：{{ handoverDailyReportContext.screenshot_auth.last_checked_at }}
                 </div>
-                <div class="hint" v-if="handoverDailyReportAuthVm.profileText">
+                <div class="hint" v-if="false && handoverDailyReportAuthVm.profileText">
                   {{ handoverDailyReportAuthVm.profileLabel || '当前目标浏览器' }}：{{ handoverDailyReportAuthVm.profileText }}
                 </div>
-                <div class="hint" v-if="handoverDailyReportAuthVm.error">
+                <div class="hint" v-if="false && handoverDailyReportAuthVm.error">
                   {{ handoverDailyReportAuthVm.error }}
                 </div>
                 <div class="btn-line" style="margin-top:10px;">
                   <button
+                    v-if="false"
                     class="btn btn-secondary"
                     :disabled="isActionLocked(actionKeyHandoverDailyReportAuthOpen) || isHandoverDailyReportActionDisabled('open_auth')"
                     @click="openHandoverDailyReportScreenshotAuth"
@@ -324,7 +325,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                     {{ isActionLocked(actionKeyHandoverDailyReportScreenshotTest) ? '测试中...' : getHandoverDailyReportActionButtonText('screenshot_test', '截图测试') }}
                   </button>
                 </div>
-                <div class="hint" v-if="!isActionLocked(actionKeyHandoverDailyReportAuthOpen) && getHandoverDailyReportActionDisabledReason('open_auth')">
+                <div class="hint" v-if="false && !isActionLocked(actionKeyHandoverDailyReportAuthOpen) && getHandoverDailyReportActionDisabledReason('open_auth')">
                   {{ getHandoverDailyReportActionDisabledReason('open_auth') }}
                 </div>
                 <div class="hint" v-if="!isActionLocked(actionKeyHandoverDailyReportScreenshotTest) && getHandoverDailyReportActionDisabledReason('screenshot_test')">
@@ -356,11 +357,11 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                     >
                       <img
                         :src="handoverDailyReportCaptureAssets.summarySheetImage.thumbnail_url || handoverDailyReportCaptureAssets.summarySheetImage.preview_url"
-                        alt="今日航图截图"
+                        alt="日报截图"
                         style="display:block; width:100%; max-height:180px; object-fit:cover;"
                       />
                     </div>
-                    <div v-else class="readonly-inline-card" style="margin-top:10px;">当前还没有今日航图截图</div>
+                    <div v-else class="readonly-inline-card" style="margin-top:10px;">当前还没有日报截图</div>
                     <div class="hint" style="margin-top:8px;">
                       最近测试：
                       <span class="status-badge status-badge-soft" :class="'tone-' + handoverDailyReportSummaryTestVm.tone">
@@ -376,7 +377,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                       生效时间：{{ handoverDailyReportCaptureAssets.summarySheetImage.captured_at }}
                     </div>
                     <div class="hint" v-if="handoverDailyReportSummaryTestVm.error">{{ handoverDailyReportSummaryTestVm.error }}</div>
-                    <div class="hint">自动截取固定飞书页面并向下滚动拼接完整长图，卡片中仅显示低清预览。</div>
+                    <div class="hint">自动截取固定公开页面并向下滚动拼接完整长图，卡片中仅显示低清预览。</div>
                     <div class="btn-line" style="margin-top:10px; flex-wrap:wrap;">
                       <button
                         class="btn btn-secondary"
@@ -405,68 +406,6 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                     </div>
                   </div>
 
-                  <div class="content-card handover-daily-report-card">
-                    <div class="btn-line" style="justify-content:space-between; align-items:center;">
-                      <strong>{{ handoverDailyReportCaptureAssets.externalPageImage.title }}</strong>
-                      <span class="status-badge status-badge-soft" :class="handoverDailyReportCaptureAssets.externalPageImage.source === 'manual' ? 'tone-warning' : handoverDailyReportCaptureAssets.externalPageImage.source === 'auto' ? 'tone-info' : 'tone-neutral'">
-                        {{ handoverDailyReportCaptureAssets.externalPageImage.sourceText }}
-                      </span>
-                    </div>
-                    <div
-                      v-if="handoverDailyReportCaptureAssets.externalPageImage.exists"
-                      style="margin-top:10px; border:1px solid rgba(255,255,255,.12); border-radius:10px; overflow:hidden; background:#0f172a; cursor:pointer;"
-                      @click="openHandoverDailyReportPreview('external_page')"
-                    >
-                      <img
-                        :src="handoverDailyReportCaptureAssets.externalPageImage.thumbnail_url || handoverDailyReportCaptureAssets.externalPageImage.preview_url"
-                        alt="排班截图"
-                        style="display:block; width:100%; max-height:180px; object-fit:cover;"
-                      />
-                    </div>
-                    <div v-else class="readonly-inline-card" style="margin-top:10px;">当前还没有排班截图</div>
-                    <div class="hint" style="margin-top:8px;">
-                      最近测试：
-                      <span class="status-badge status-badge-soft" :class="'tone-' + handoverDailyReportExternalTestVm.tone">
-                        {{ handoverDailyReportExternalTestVm.text }}
-                      </span>
-                    </div>
-                    <div class="hint">
-                      <span class="status-badge status-badge-soft" :class="'tone-' + handoverDailyReportCaptureAssets.externalPageImage.lastWrittenSourceTone">
-                        {{ handoverDailyReportCaptureAssets.externalPageImage.lastWrittenSourceText }}
-                      </span>
-                    </div>
-                    <div class="hint" v-if="handoverDailyReportCaptureAssets.externalPageImage.captured_at">
-                      生效时间：{{ handoverDailyReportCaptureAssets.externalPageImage.captured_at }}
-                    </div>
-                    <div class="hint" v-if="handoverDailyReportExternalTestVm.error">{{ handoverDailyReportExternalTestVm.error }}</div>
-                    <div class="hint">卡片中仅显示低清预览，点击后查看完整截图。</div>
-                    <div class="btn-line" style="margin-top:10px; flex-wrap:wrap;">
-                      <button
-                        class="btn btn-secondary"
-                        :disabled="isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.externalPageImage, 'preview')"
-                        @click="openHandoverDailyReportPreview('external_page')"
-                      >{{ getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.externalPageImage, 'preview', '放大查看') }}</button>
-                      <button
-                        class="btn btn-secondary"
-                        :disabled="isActionLocked(getHandoverDailyReportRecaptureActionKey('external_page')) || isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.externalPageImage, 'recapture')"
-                        @click="recaptureHandoverDailyReportAsset('external_page')"
-                      >{{ isActionLocked(getHandoverDailyReportRecaptureActionKey('external_page')) ? '重截中...' : getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.externalPageImage, 'recapture', '重新截图') }}</button>
-                      <button
-                        class="btn btn-secondary"
-                        :disabled="isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.externalPageImage, 'upload')"
-                        @click="openHandoverDailyReportUploadDialog('external_page')"
-                      >{{ getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.externalPageImage, 'upload', '上传/粘贴替换') }}</button>
-                      <button
-                        v-if="handoverDailyReportCaptureAssets.externalPageImage.hasManual"
-                        class="btn btn-ghost"
-                        :disabled="isActionLocked(getHandoverDailyReportRestoreActionKey('external_page')) || isHandoverDailyReportAssetActionDisabled(handoverDailyReportCaptureAssets.externalPageImage, 'restore_auto')"
-                        @click="restoreHandoverDailyReportAutoAsset('external_page')"
-                      >{{ isActionLocked(getHandoverDailyReportRestoreActionKey('external_page')) ? '恢复中...' : getHandoverDailyReportAssetActionButtonText(handoverDailyReportCaptureAssets.externalPageImage, 'restore_auto', '恢复自动图') }}</button>
-                    </div>
-                    <div class="hint" v-if="getHandoverDailyReportAssetActionDisabledReason(handoverDailyReportCaptureAssets.externalPageImage, 'preview') && !handoverDailyReportCaptureAssets.externalPageImage.exists">
-                      {{ getHandoverDailyReportAssetActionDisabledReason(handoverDailyReportCaptureAssets.externalPageImage, 'preview') }}
-                    </div>
-                  </div>
                 </div>
                 <div class="hint" v-if="handoverDailyReportExportVm.error">
                   {{ handoverDailyReportExportVm.error }}

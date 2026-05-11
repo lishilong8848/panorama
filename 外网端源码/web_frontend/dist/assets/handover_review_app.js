@@ -45,7 +45,8 @@ const SUBSTATION_110KV_LOCK_RELEASE_IDLE_MS = 10000;
 const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
 const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
 const HANDOVER_REVIEW_STATUS_BROADCAST_KEY = "handover_review_status_broadcast_v1";
-const CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13"];
+const CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13"];
+const OUTDOOR_TEMPERATURE_CELLS = ["B7", "D7"];
 const SUBSTATION_110KV_ROWS = [
   { row_id: "incoming_akai", label: "阿开", group: "incoming" },
   { row_id: "incoming_ajia", label: "阿家", group: "incoming" },
@@ -289,6 +290,47 @@ function normalizeCoolingPumpPressures(raw = {}) {
         .filter((row) => row.zone && row.unit > 0)
     : [];
   return { rows, tanks };
+}
+
+function normalizeOutdoorTemperatureBlock(raw = {}) {
+  const rawCells = raw?.cells && typeof raw.cells === "object" ? raw.cells : {};
+  const cells = {};
+  OUTDOOR_TEMPERATURE_CELLS.forEach((cell) => {
+    cells[cell] = String(rawCells[cell] ?? "");
+  });
+  return {
+    block_id: "outdoor_temperature",
+    batch_key: String(raw?.batch_key || "").trim(),
+    revision: Number.parseInt(String(raw?.revision || 0), 10) || 0,
+    updated_at: String(raw?.updated_at || "").trim(),
+    updated_by_building: String(raw?.updated_by_building || "").trim(),
+    updated_by_client: String(raw?.updated_by_client || "").trim(),
+    cells,
+    fields: OUTDOOR_TEMPERATURE_CELLS.map((cell) => ({
+      cell,
+      label: cell === "B7" ? "室外干球温度" : "室外湿球温度",
+      value: cells[cell],
+    })),
+  };
+}
+
+function applyOutdoorTemperatureCellsToDocument(document, cells = {}) {
+  if (!document || typeof document !== "object" || !Array.isArray(document.fixed_blocks)) return false;
+  let changed = false;
+  document.fixed_blocks.forEach((block) => {
+    if (!block || typeof block !== "object" || !Array.isArray(block.fields)) return;
+    block.fields.forEach((field) => {
+      if (!field || typeof field !== "object") return;
+      const cell = String(field.cell || "").trim().toUpperCase();
+      if (!OUTDOOR_TEMPERATURE_CELLS.includes(cell)) return;
+      const nextValue = String(cells[cell] ?? "");
+      if (String(field.value ?? "") !== nextValue) {
+        field.value = nextValue;
+        changed = true;
+      }
+    });
+  });
+  return changed;
 }
 
 function normalizeSubstation110kvBlock(raw = {}) {
@@ -1002,9 +1044,11 @@ export function mountHandoverReviewApp(Vue) {
       const reviewHolderLabel = String(reviewClientIdentity.holderLabel || "").trim();
       const concurrency = ref(emptyConcurrencyState(0));
       const sharedBlocks = ref({
+        outdoor_temperature: normalizeOutdoorTemperatureBlock({}),
         substation_110kv: normalizeSubstation110kvBlock({}),
       });
       const sharedBlockLocks = ref({
+        outdoor_temperature: normalizeSharedLockPayload({}, 0),
         substation_110kv: normalizeSharedLockPayload({}, 0),
       });
       const substation110kvDirty = ref(false);
@@ -1013,6 +1057,7 @@ export function mountHandoverReviewApp(Vue) {
       const substation110kvPreviewSyncTimer = ref(null);
       const substation110kvIdleReleaseTimer = ref(null);
       const substation110kvDirtyMarked = ref(false);
+      const outdoorTemperatureDirty = ref(false);
       const historyLoading = ref(false);
       const historyLoaded = ref(false);
       const historyCacheKey = ref("");
@@ -1571,6 +1616,27 @@ export function mountHandoverReviewApp(Vue) {
       function applySharedBlockPayload(payload = {}) {
         const shared = payload?.shared_blocks && typeof payload.shared_blocks === "object" ? payload.shared_blocks : {};
         const locks = payload?.shared_block_locks && typeof payload.shared_block_locks === "object" ? payload.shared_block_locks : {};
+        if (Object.prototype.hasOwnProperty.call(shared, "outdoor_temperature")) {
+          const incomingOutdoor = normalizeOutdoorTemperatureBlock(shared.outdoor_temperature || {});
+          const currentOutdoorRevision = Number(sharedBlocks.value?.outdoor_temperature?.revision || 0);
+          const incomingOutdoorRevision = Number(incomingOutdoor.revision || 0);
+          if (!currentOutdoorRevision || !incomingOutdoorRevision || incomingOutdoorRevision >= currentOutdoorRevision) {
+            sharedBlocks.value = {
+              ...sharedBlocks.value,
+              outdoor_temperature: incomingOutdoor,
+            };
+            if (!dirtyRegions.value.fixed_blocks && !saving.value && !documentHydrating.value) {
+              applyOutdoorTemperatureCellsToDocument(documentRef.value, incomingOutdoor.cells);
+            }
+          }
+          sharedBlockLocks.value = {
+            ...sharedBlockLocks.value,
+            outdoor_temperature: normalizeSharedLockPayload(
+              locks.outdoor_temperature || sharedBlockLocks.value.outdoor_temperature,
+              incomingOutdoor.revision,
+            ),
+          };
+        }
         const hasIncomingSubstation = Object.prototype.hasOwnProperty.call(shared, "substation_110kv");
         let incomingBlock = normalizeSubstation110kvBlock(hasIncomingSubstation ? shared.substation_110kv : sharedBlocks.value.substation_110kv);
         const incomingLock = normalizeSharedLockPayload(
@@ -1997,6 +2063,7 @@ export function mountHandoverReviewApp(Vue) {
         documentRef.value = nextDocument;
         applyPayloadMeta(payload);
         dirtyRegions.value = emptyDirtyRegions();
+        outdoorTemperatureDirty.value = false;
         dirty.value = false;
         capacityLinkedDirty.value = false;
         staleRevisionConflict.value = false;
@@ -2022,6 +2089,7 @@ export function mountHandoverReviewApp(Vue) {
         }
         documentHydrating.value = true;
         documentRef.value = normalizeDocument(rawDocument);
+        outdoorTemperatureDirty.value = false;
         window.setTimeout(() => {
           documentHydrating.value = false;
         }, 0);
@@ -2320,6 +2388,7 @@ export function mountHandoverReviewApp(Vue) {
             client_id: reviewClientId,
             document: documentRef.value,
             dirty_regions: payloadDirtyRegions,
+            shared_outdoor_temperature_dirty: outdoorTemperatureDirty.value,
           });
           applyPayloadMeta(response || {});
           applySavedDocumentPayload(response || {}, payloadVersion);
@@ -2327,6 +2396,7 @@ export function mountHandoverReviewApp(Vue) {
           if (documentMutationVersion.value === payloadVersion) {
             dirtyRegions.value = emptyDirtyRegions();
             capacityLinkedDirty.value = false;
+            outdoorTemperatureDirty.value = false;
             dirty.value = false;
           } else {
             dirty.value = true;
@@ -2388,6 +2458,11 @@ export function mountHandoverReviewApp(Vue) {
         blankFooterInventoryRowWithDefaults,
         resolveFooterAutoFillCells,
         blankFooterInventoryRow,
+        onFixedFieldChanged: ({ cell }) => {
+          if (OUTDOOR_TEMPERATURE_CELLS.includes(String(cell || "").trim().toUpperCase())) {
+            outdoorTemperatureDirty.value = true;
+          }
+        },
       });
 
       const {

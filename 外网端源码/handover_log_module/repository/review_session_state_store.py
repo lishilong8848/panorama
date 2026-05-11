@@ -1263,3 +1263,80 @@ class ReviewSessionStateStore:
             client_id=normalized_client_id,
         )
         return {"block": block, "lock": lock, "no_change": no_change}
+
+    def save_shared_block_unlocked(
+        self,
+        *,
+        batch_key: str,
+        block_id: str,
+        building: str = "",
+        client_id: str = "",
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        batch_key_text = str(batch_key or "").strip()
+        block_id_text = str(block_id or "").strip()
+        if not batch_key_text or not block_id_text:
+            return {
+                "block": self._row_to_shared_block(None, batch_key=batch_key_text, block_id=block_id_text),
+                "no_change": True,
+            }
+        building_text = str(building or "").strip()
+        client_text = str(client_id or "").strip()
+        now_text = _now_text()
+        block_key = self._shared_block_key(batch_key_text, block_id_text)
+        payload_json = json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=False, sort_keys=True)
+        self.ensure_ready()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            block_row = conn.execute(
+                "SELECT * FROM review_shared_blocks WHERE block_key = ?",
+                (block_key,),
+            ).fetchone()
+            current = self._row_to_shared_block(block_row, batch_key=batch_key_text, block_id=block_id_text)
+            current_revision = int(current.get("revision", 0) or 0)
+            current_payload_json = json.dumps(
+                current.get("payload", {}) if isinstance(current.get("payload", {}), dict) else {},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            no_change = payload_json == current_payload_json
+            if not no_change:
+                next_revision = current_revision + 1
+                conn.execute(
+                    """
+                    INSERT INTO review_shared_blocks(
+                        block_key,
+                        batch_key,
+                        block_id,
+                        revision,
+                        updated_at,
+                        updated_by_building,
+                        updated_by_client,
+                        payload_json
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(block_key) DO UPDATE SET
+                        revision = excluded.revision,
+                        updated_at = excluded.updated_at,
+                        updated_by_building = excluded.updated_by_building,
+                        updated_by_client = excluded.updated_by_client,
+                        payload_json = excluded.payload_json
+                    """,
+                    (
+                        block_key,
+                        batch_key_text,
+                        block_id_text,
+                        next_revision,
+                        now_text,
+                        building_text,
+                        client_text,
+                        payload_json,
+                    ),
+                )
+            saved_row = conn.execute(
+                "SELECT * FROM review_shared_blocks WHERE block_key = ?",
+                (block_key,),
+            ).fetchone()
+        return {
+            "block": self._row_to_shared_block(saved_row, batch_key=batch_key_text, block_id=block_id_text),
+            "no_change": no_change,
+        }

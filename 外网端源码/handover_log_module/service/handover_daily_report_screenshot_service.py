@@ -25,8 +25,7 @@ _SYSTEM_BROWSER_PROCESS: subprocess.Popen | None = None
 
 
 class HandoverDailyReportScreenshotService:
-    DEFAULT_EXTERNAL_PAGE_URL = "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgecZCUXaEtvP9Yl"
-    DEFAULT_SUMMARY_PAGE_URL = "https://vnet.feishu.cn/app/LTjUbmZsTaTFIVsuQSLcUi4Onf4?pageId=pgeZUMIpMDuIIfLA"
+    DEFAULT_SCREENSHOT_PAGE_URL = "https://124.222.19.16:3001/"
     DEFAULT_DEBUG_PORT = 29333
     PREFERRED_BROWSER_KIND = "edge"
 
@@ -175,6 +174,81 @@ class HandoverDailyReportScreenshotService:
                 return meta
         return None
 
+    def _system_browser_start_candidates(self) -> List[Dict[str, str]]:
+        candidates: List[Dict[str, str]] = []
+        for kind in (self.PREFERRED_BROWSER_KIND, "chrome", "edge"):
+            meta = self._resolve_browser_meta_by_kind(kind)
+            executable = str((meta or {}).get("executable_path", "") or "").strip()
+            if not meta or not executable:
+                continue
+            if any(str(item.get("executable_path", "") or "").casefold() == executable.casefold() for item in candidates):
+                continue
+            candidates.append(meta)
+        return candidates
+
+    def _headless_launch_candidates(self) -> List[Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
+
+        def _append(candidate: Dict[str, Any]) -> None:
+            signature = (
+                str(candidate.get("kind", "") or ""),
+                str(candidate.get("executable_path", "") or ""),
+                str(candidate.get("channel", "") or ""),
+            )
+            for existing in candidates:
+                if (
+                    str(existing.get("kind", "") or ""),
+                    str(existing.get("executable_path", "") or ""),
+                    str(existing.get("channel", "") or ""),
+                ) == signature:
+                    return
+            candidates.append(candidate)
+
+        for kind in (self.PREFERRED_BROWSER_KIND, "chrome", "edge"):
+            meta = self._resolve_browser_meta_by_kind(kind)
+            executable_path = str((meta or {}).get("executable_path", "") or "").strip()
+            if executable_path:
+                _append(
+                    {
+                        "kind": kind,
+                        "label": self._browser_label(meta),
+                        "executable_path": executable_path,
+                    }
+                )
+        _append({"kind": "chrome", "label": "Google Chrome", "channel": "chrome"})
+        _append({"kind": "edge", "label": "Microsoft Edge", "channel": "msedge"})
+        _append({"kind": "chromium", "label": "Playwright Chromium"})
+        return candidates
+
+    async def _launch_headless_browser_with_fallback(self, playwright, emit_log: Callable[[str], None]):
+        base_kwargs: Dict[str, Any] = {
+            "headless": True,
+            "args": ["--ignore-certificate-errors"],
+        }
+        failures: List[str] = []
+        for candidate in self._headless_launch_candidates():
+            launch_kwargs = dict(base_kwargs)
+            executable_path = str(candidate.get("executable_path", "") or "").strip()
+            channel = str(candidate.get("channel", "") or "").strip()
+            label = str(candidate.get("label", "") or "").strip() or "Chromium"
+            if executable_path:
+                launch_kwargs["executable_path"] = executable_path
+                detail = f"{label}({executable_path})"
+            elif channel:
+                launch_kwargs["channel"] = channel
+                detail = f"{label}(channel={channel})"
+            else:
+                detail = label
+            try:
+                browser = await playwright.chromium.launch(**launch_kwargs)
+                emit_log(f"[交接班][日报截图] 浏览器启动成功: {detail}")
+                return browser
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc).splitlines()[0] if str(exc).strip() else exc.__class__.__name__
+                failures.append(f"{detail}: {error}")
+                emit_log(f"[交接班][日报截图] 浏览器启动失败，尝试下一个: {detail}, error={error}")
+        raise RuntimeError("日报截图浏览器启动失败: " + " | ".join(failures))
+
     def _preferred_browser_available(self) -> bool:
         return self._resolve_browser_meta_by_kind(self.PREFERRED_BROWSER_KIND) is not None
 
@@ -253,10 +327,16 @@ class HandoverDailyReportScreenshotService:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
     def _cfg(self) -> Dict[str, Any]:
-        return {
-            "summary_page_url": self.DEFAULT_SUMMARY_PAGE_URL,
-            "external_page_url": self.DEFAULT_EXTERNAL_PAGE_URL,
+        cfg = {
+            "screenshot_page_url": self.DEFAULT_SCREENSHOT_PAGE_URL,
         }
+        raw = self.handover_cfg.get("daily_report_bitable_export", {})
+        if isinstance(raw, dict):
+            for key in ("screenshot_page_url",):
+                value = str(raw.get(key, "") or "").strip()
+                if value:
+                    cfg[key] = value
+        return cfg
 
     def _probe_debug_endpoint(self) -> Dict[str, Any] | None:
         try:
@@ -307,35 +387,45 @@ class HandoverDailyReportScreenshotService:
         return result.get("value")
 
     def _start_system_browser(self, *, url: str, emit_log: Callable[[str], None]) -> tuple[bool, str]:
-        browser_meta = self._resolve_system_browser(prefer_running_debug=False)
-        if browser_meta is None:
+        candidates = self._system_browser_start_candidates()
+        if not candidates:
             return False, "browser_unavailable: 未找到系统 Edge 或 Chrome 浏览器"
-        executable = str(browser_meta.get("executable_path", "") or "").strip()
-        if not executable:
-            return False, "browser_unavailable: 未找到系统 Edge 或 Chrome 浏览器"
-        profile_dir_text = str(browser_meta.get("profile_dir", "") or "").strip() or str(self._profile_dir(browser_meta))
-        profile_name = str(browser_meta.get("profile_name", "") or "").strip() or self._resolve_profile_directory_name(browser_meta)
-        command = [
-            executable,
-            f"--remote-debugging-port={self._debug_port()}",
-            "--new-window",
-            f"--profile-directory={profile_name}",
-        ]
-        if profile_dir_text:
-            command.append(f"--user-data-dir={profile_dir_text}")
-        command.append(str(url or self._probe_url()).strip() or self._probe_url())
+        last_error = ""
         global _SYSTEM_BROWSER_PROCESS
-        try:
-            _SYSTEM_BROWSER_PROCESS = subprocess.Popen(command)
-        except Exception as exc:  # noqa: BLE001
-            return False, f"browser_unavailable: {exc}"
-        if self._wait_for_debug_endpoint():
+        for browser_meta in candidates:
+            executable = str(browser_meta.get("executable_path", "") or "").strip()
+            if not executable:
+                continue
+            profile_dir_text = str(browser_meta.get("profile_dir", "") or "").strip() or str(self._profile_dir(browser_meta))
+            profile_name = str(browser_meta.get("profile_name", "") or "").strip() or self._resolve_profile_directory_name(browser_meta)
+            command = [
+                executable,
+                f"--remote-debugging-port={self._debug_port()}",
+                "--new-window",
+                "--ignore-certificate-errors",
+                f"--profile-directory={profile_name}",
+            ]
+            if profile_dir_text:
+                command.append(f"--user-data-dir={profile_dir_text}")
+            command.append(str(url or self._probe_url()).strip() or self._probe_url())
+            try:
+                _SYSTEM_BROWSER_PROCESS = subprocess.Popen(command)
+            except Exception as exc:  # noqa: BLE001
+                last_error = f"{self._browser_label(browser_meta)} 启动失败: {exc}"
+                emit_log(f"[交接班][日报截图] 启动托管浏览器失败，尝试下一个 browser={self._browser_label(browser_meta)}, error={exc}")
+                continue
+            if self._wait_for_debug_endpoint(timeout_sec=8):
+                emit_log(
+                    f"[交接班][日报截图登录] 已接管系统浏览器调试端口 "
+                    f"browser={self._browser_label(browser_meta)}, port={self._debug_port()}, profile={profile_name}, user_data_dir={profile_dir_text}"
+                )
+                return True, ""
+            last_error = f"{self._browser_label(browser_meta)} 调试端口未就绪"
             emit_log(
-                f"[交接班][日报截图登录] 已接管系统浏览器调试端口 "
-                f"browser={self._browser_label(browser_meta)}, port={self._debug_port()}, profile={profile_name}, user_data_dir={profile_dir_text}"
+                "[交接班][日报截图] 托管浏览器调试端口未就绪，尝试下一个 "
+                f"browser={self._browser_label(browser_meta)}, port={self._debug_port()}"
             )
-            return True, ""
-        return False, f"browser_debug_port_unavailable: 请先关闭所有 {self._browser_label(browser_meta)} 窗口后重试"
+        return False, f"browser_debug_port_unavailable: {last_error or '系统浏览器调试端口未就绪'}"
 
     def open_target_page_in_system_browser(self, target_url: str) -> tuple[bool, str]:
         browser_meta = self._resolve_system_browser()
@@ -358,6 +448,140 @@ class HandoverDailyReportScreenshotService:
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
         return True, ""
+
+    async def _connect_browser_for_preopen_async(
+        self,
+        playwright,
+        *,
+        open_url: str,
+        emit_log: Callable[[str], None],
+    ):
+        if self._probe_debug_endpoint() is None:
+            ok, error = await asyncio.to_thread(self._start_system_browser, url=open_url, emit_log=emit_log)
+            if not ok:
+                raise RuntimeError(error)
+        return await playwright.chromium.connect_over_cdp(self._debug_base_url(), timeout=10000)
+
+    @staticmethod
+    async def _ignore_certificate_errors_for_page_async(page) -> None:
+        try:
+            session = await page.context.new_cdp_session(page)
+            await session.send("Security.setIgnoreCertificateErrors", {"ignore": True})
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    async def _continue_certificate_warning_async(
+        page,
+        *,
+        target_url: str,
+        emit_log: Callable[[str], None],
+    ) -> bool:
+        target_text = str(target_url or "").strip()
+        emit_log(f"[交接班][日报截图] 检测到证书隐私提示，自动继续访问 url={target_text or '-'}")
+        try:
+            await page.keyboard.type("thisisunsafe", delay=10)
+            await page.wait_for_timeout(1500)
+            current_url = str(getattr(page, "url", "") or "").strip()
+            if target_text and HandoverDailyReportScreenshotService._is_target_url_match(
+                current_url=current_url,
+                target_url=target_text,
+            ):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        for selector in ("#details-button", "button#details-button"):
+            try:
+                await page.locator(selector).first.click(timeout=1500)
+                await page.wait_for_timeout(500)
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        for selector in ("#proceed-link", "a#proceed-link"):
+            try:
+                await page.locator(selector).first.click(timeout=1500)
+                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    async def _goto_with_certificate_bypass_async(
+        self,
+        page,
+        *,
+        target_url: str,
+        emit_log: Callable[[str], None],
+        timeout: int = 30000,
+    ) -> None:
+        await self._ignore_certificate_errors_for_page_async(page)
+        try:
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=timeout)
+            return
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc or "")
+            if "ERR_CERT" not in error_text and "CERT_AUTHORITY_INVALID" not in error_text and "不是私密连接" not in error_text:
+                raise
+            if await self._continue_certificate_warning_async(page, target_url=target_url, emit_log=emit_log):
+                return
+            raise
+
+    async def open_daily_report_screenshot_page_async(self, emit_log: Callable[[str], None] = print) -> Dict[str, Any]:
+        url = self._probe_url()
+        started = time.monotonic()
+        browser = None
+        try:
+            async with self._async_playwright_context() as playwright:
+                browser = await self._connect_browser_for_preopen_async(
+                    playwright,
+                    open_url=url,
+                    emit_log=emit_log,
+                )
+                page, matched_mode = await self.ensure_target_page_async(
+                    browser,
+                    target_url=url,
+                    emit_log=emit_log,
+                    open_if_missing=True,
+                )
+                if page is not None:
+                    await self._ignore_certificate_errors_for_page_async(page)
+                    if str(getattr(page, "url", "") or "").strip().startswith("chrome-error://"):
+                        await self._continue_certificate_warning_async(page, target_url=url, emit_log=emit_log)
+                    try:
+                        await page.bring_to_front()
+                    except Exception:  # noqa: BLE001
+                        pass
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                status = "reused" if str(matched_mode or "").strip().lower() == "reused" else "opened"
+                emit_log(
+                    "[交接班][日报截图] 启动预打开日报截图页面完成 "
+                    f"status={status}, matched={matched_mode or '-'}, url={url}, elapsed_ms={elapsed_ms}"
+                )
+                return {
+                    "ok": True,
+                    "status": status,
+                    "matched_mode": str(matched_mode or "").strip().lower(),
+                    "url": url,
+                    "error": "",
+                    "elapsed_ms": elapsed_ms,
+                }
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            error = str(exc or "").strip()
+            emit_log(f"[交接班][日报截图] 启动预打开日报截图页面失败 url={url}, error={error}, elapsed_ms={elapsed_ms}")
+            return {
+                "ok": False,
+                "status": "failed",
+                "matched_mode": "",
+                "url": url,
+                "error": error,
+                "elapsed_ms": elapsed_ms,
+            }
+        finally:
+            browser = None
+
+    def open_daily_report_screenshot_page(self, emit_log: Callable[[str], None] = print) -> Dict[str, Any]:
+        return self._run_async_fn(self.open_daily_report_screenshot_page_async, emit_log=emit_log)
 
     def ensure_browser_debug_ready(
         self,
@@ -578,7 +802,7 @@ class HandoverDailyReportScreenshotService:
         return result
 
     def _probe_url(self) -> str:
-        return self._cfg()["external_page_url"]
+        return self._cfg()["screenshot_page_url"]
 
     @staticmethod
     def _capture_failure_result(
@@ -632,7 +856,7 @@ class HandoverDailyReportScreenshotService:
         if error_code == "target_page_not_open":
             return f"目标网页当前没有在{resolved_browser_label}中打开，请先打开对应页面后再重试。"
         if error_code == "summary_sheet_not_found":
-            return "未找到今日航图页面，请确认当前飞书页面已打开且内容可见。"
+            return "未找到日报截图页面，请确认页面可正常访问。"
         if error_code == "target_page_mismatch":
             return "当前打开页面与目标页面不一致，请重新打开对应飞书页面后重试。"
         if error_code == "login_required":
@@ -660,9 +884,7 @@ class HandoverDailyReportScreenshotService:
     def _target_label(target: str) -> str:
         target_text = str(target or "").strip().lower()
         if target_text == "summary_sheet":
-            return "今日航图截图"
-        if target_text == "external_page":
-            return "排班截图"
+            return "日报截图"
         return target_text or "-"
 
     @staticmethod
@@ -902,7 +1124,12 @@ class HandoverDailyReportScreenshotService:
             return None, ""
         context = await self._resolve_browser_context_async(browser)
         page = await context.new_page()
-        await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        await self._goto_with_certificate_bypass_async(
+            page,
+            target_url=target_url,
+            emit_log=emit_log,
+            timeout=30000,
+        )
         emit_log(
             "[交接班][日报截图登录] 目标页缺失，已自动补开 "
             f"url={str(target_url or '').strip() or '-'}"
@@ -1149,7 +1376,12 @@ class HandoverDailyReportScreenshotService:
                     if page is None:
                         context = await self._resolve_browser_context_async(browser)
                         page = await context.new_page()
-                        await page.goto(self._probe_url(), wait_until="domcontentloaded", timeout=30000)
+                        await self._goto_with_certificate_bypass_async(
+                            page,
+                            target_url=self._probe_url(),
+                            emit_log=emit_log,
+                            timeout=30000,
+                        )
                         matched_mode = "opened_missing_target"
                     if page is not None:
                         try:
@@ -1222,108 +1454,115 @@ class HandoverDailyReportScreenshotService:
             **self._browser_state_fields(browser_meta),
         }
 
-    async def capture_summary_sheet_async(
+    async def capture_daily_report_page_async(
         self,
         *,
         duty_date: str,
         duty_shift: str,
         emit_log: Callable[[str], None] = print,
-        prefer_existing_page: bool = True,
-        allow_open_fallback: bool = True,
     ) -> Dict[str, Any]:
-        url = self._cfg()["summary_page_url"]
+        url = self._cfg()["screenshot_page_url"]
+        target = "summary_sheet"
+        output_path = self._asset_service.get_summary_sheet_path(duty_date=duty_date, duty_shift=duty_shift)
         emit_log(
             f"[交接班][日报截图] 开始 batch={duty_date}|{duty_shift}, "
-            f"target=summary_sheet, label=今日航图截图, url={url}"
+            f"target=daily_report_page, label=日报截图, url={url}"
         )
-        result = await self._capture_sheet_like_page_async(
-            url=url,
-            sheet_name="",
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            target="summary_sheet",
-            output_path=self._asset_service.get_summary_sheet_path(duty_date=duty_date, duty_shift=duty_shift),
-            prefer_existing_page=prefer_existing_page,
-            allow_open_fallback=allow_open_fallback,
-            emit_log=emit_log,
-        )
-        self._emit_capture_result_log(
-            emit_log,
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            target="summary_sheet",
-            result=result,
-        )
-        return result
+        stage = "open_public_page"
+        browser = None
+        context = None
+        page = None
+        try:
+            async with self._async_playwright_context() as playwright:
+                browser = await self._launch_headless_browser_with_fallback(playwright, emit_log)
+                context = await browser.new_context(
+                    ignore_https_errors=True,
+                    viewport={"width": 1920, "height": 1080},
+                )
+                page = await context.new_page()
+                self._emit_capture_stage_log(
+                    emit_log,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    target=target,
+                    stage=stage,
+                )
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                stage = "wait_page_stable"
+                self._emit_capture_stage_log(
+                    emit_log,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    target=target,
+                    stage=stage,
+                )
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:  # noqa: BLE001
+                    pass
+                await self._wait_for_page_stable_async(page)
+                stage = "capture"
+                self._emit_capture_stage_log(
+                    emit_log,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    target=target,
+                    stage=stage,
+                )
+                content = await self._capture_page_with_fallback_async(page, prefer_document_full_page=True)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_bytes(output_path, content, validator=validate_image_file, temp_suffix=".tmp")
+                result = self._capture_success_result(
+                    output_path,
+                    resolved_url=str(getattr(page, "url", "") or url),
+                    resolved_page_id="daily_report_page",
+                    matched_mode="opened_public_page",
+                )
+                self._emit_capture_result_log(
+                    emit_log,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    target=target,
+                    result=result,
+                )
+                return result
+        except Exception as exc:  # noqa: BLE001
+            error_code = self._classify_capture_exception(exc)
+            result = self._capture_failure_result(
+                stage=stage,
+                error=error_code,
+                error_detail=str(exc),
+                error_message=self._capture_error_message(error_code, fallback=str(exc), browser_label="无登录公开页面"),
+            )
+            self._emit_capture_result_log(
+                emit_log,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                target=target,
+                result=result,
+            )
+            return result
+        finally:
+            for item in (context, browser):
+                if item is None:
+                    continue
+                try:
+                    await item.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
-    async def capture_external_page_async(
+    def capture_daily_report_page(
         self,
         *,
         duty_date: str,
         duty_shift: str,
         emit_log: Callable[[str], None] = print,
-        prefer_existing_page: bool = True,
-        allow_open_fallback: bool = True,
-    ) -> Dict[str, Any]:
-        url = self._cfg()["external_page_url"]
-        emit_log(
-            f"[交接班][日报截图] 开始 batch={duty_date}|{duty_shift}, "
-            f"target=external_page, label=排班截图, url={url}"
-        )
-        result = await self._capture_sheet_like_page_async(
-            url=url,
-            sheet_name="",
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            target="external_page",
-            output_path=self._asset_service.get_external_page_path(duty_date=duty_date, duty_shift=duty_shift),
-            prefer_existing_page=prefer_existing_page,
-            allow_open_fallback=allow_open_fallback,
-            emit_log=emit_log,
-        )
-        self._emit_capture_result_log(
-            emit_log,
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            target="external_page",
-            result=result,
-        )
-        return result
-
-    def capture_summary_sheet(
-        self,
-        *,
-        duty_date: str,
-        duty_shift: str,
-        emit_log: Callable[[str], None] = print,
-        prefer_existing_page: bool = True,
-        allow_open_fallback: bool = True,
     ) -> Dict[str, Any]:
         return self._run_async_fn(
-            self.capture_summary_sheet_async,
+            self.capture_daily_report_page_async,
             duty_date=duty_date,
             duty_shift=duty_shift,
             emit_log=emit_log,
-            prefer_existing_page=prefer_existing_page,
-            allow_open_fallback=allow_open_fallback,
-        )
-
-    def capture_external_page(
-        self,
-        *,
-        duty_date: str,
-        duty_shift: str,
-        emit_log: Callable[[str], None] = print,
-        prefer_existing_page: bool = True,
-        allow_open_fallback: bool = True,
-    ) -> Dict[str, Any]:
-        return self._run_async_fn(
-            self.capture_external_page_async,
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            emit_log=emit_log,
-            prefer_existing_page=prefer_existing_page,
-            allow_open_fallback=allow_open_fallback,
         )
 
     def _capture_sheet_like_page(
@@ -1532,7 +1771,7 @@ class HandoverDailyReportScreenshotService:
                 )
                 content = await self._capture_page_with_fallback_async(
                     page,
-                    prefer_document_full_page=(str(target or "").strip().lower() in {"summary_sheet", "external_page"}),
+                    prefer_document_full_page=(str(target or "").strip().lower() == "summary_sheet"),
                 )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 atomic_write_bytes(output_path, content, validator=validate_image_file, temp_suffix=".tmp")

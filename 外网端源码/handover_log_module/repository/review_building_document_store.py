@@ -395,6 +395,122 @@ class ReviewBuildingDocumentStore:
             row = conn.execute("SELECT * FROM review_documents WHERE session_id=?", (session_id,)).fetchone()
         return self._row_to_document(row) or {}, previous
 
+    @staticmethod
+    def _patch_fixed_cells_in_document(document: Dict[str, Any], cells: Dict[str, Any]) -> bool:
+        if not isinstance(document, dict) or not isinstance(cells, dict):
+            return False
+        normalized_cells = {
+            str(cell or "").strip().upper(): str(value if value is not None else "")
+            for cell, value in cells.items()
+            if str(cell or "").strip()
+        }
+        if not normalized_cells:
+            return False
+        changed = False
+        fixed_blocks = document.get("fixed_blocks", [])
+        if not isinstance(fixed_blocks, list):
+            return False
+        for block in fixed_blocks:
+            if not isinstance(block, dict):
+                continue
+            fields = block.get("fields", [])
+            if not isinstance(fields, list):
+                continue
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+                cell_name = str(field.get("cell", "") or "").strip().upper()
+                if cell_name not in normalized_cells:
+                    continue
+                next_value = normalized_cells[cell_name]
+                if str(field.get("value", "") if field.get("value") is not None else "") != next_value:
+                    field["value"] = next_value
+                    changed = True
+        return changed
+
+    def patch_fixed_cells(
+        self,
+        *,
+        session: Dict[str, Any],
+        cells: Dict[str, Any],
+        reason: str = "shared_fixed_cells",
+    ) -> Dict[str, Any]:
+        self.ensure_ready()
+        session_id = str(session.get("session_id", "") or "").strip()
+        if not session_id:
+            return {"changed": False, "error": "missing_session_id"}
+        now = _now_text()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM review_documents WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return {"changed": False, "error": "document_not_initialized"}
+            document = _json_loads(row["document_json"], {})
+            if not isinstance(document, dict):
+                document = {}
+            if not self._patch_fixed_cells_in_document(document, cells):
+                payload = self._row_to_document(row) or {}
+                payload["changed"] = False
+                return payload
+            previous_revision = int(row["revision"] or 0)
+            next_revision = previous_revision + 1
+            dirty_regions = _json_loads(row["dirty_regions_json"], {})
+            if not isinstance(dirty_regions, dict):
+                dirty_regions = {}
+            dirty_regions["fixed_blocks"] = True
+            source_excel_path = str(session.get("output_file", "") or "").strip() or str(row["source_excel_path"] or "")
+            source_excel_mtime, source_excel_size = _source_excel_fingerprint(source_excel_path)
+            conn.execute(
+                """
+                UPDATE review_documents
+                   SET revision=?,
+                       document_json=?,
+                       dirty_regions_json=?,
+                       source_excel_path=?,
+                       source_excel_mtime=?,
+                       source_excel_size=?,
+                       updated_at=?
+                 WHERE session_id=?
+                """,
+                (
+                    next_revision,
+                    _json_dumps(document),
+                    _json_dumps(dirty_regions),
+                    source_excel_path,
+                    source_excel_mtime,
+                    source_excel_size,
+                    now,
+                    session_id,
+                ),
+            )
+            current_sync = self.get_sync_state_from_conn(conn, session_id)
+            self._upsert_sync_state_conn(
+                conn,
+                session_id=session_id,
+                status="pending",
+                synced_revision=int(current_sync.get("synced_revision", 0) or 0),
+                pending_revision=next_revision,
+                error="",
+                updated_at=now,
+            )
+            self._upsert_sync_job_conn(
+                conn,
+                session_id=session_id,
+                target_revision=next_revision,
+                status="pending",
+                reset_attempts=True,
+                error="",
+                updated_at=now,
+            )
+            updated = conn.execute("SELECT * FROM review_documents WHERE session_id=?", (session_id,)).fetchone()
+        payload = self._row_to_document(updated) or {}
+        payload["changed"] = True
+        payload["previous_revision"] = previous_revision
+        payload["patch_reason"] = str(reason or "").strip()
+        return payload
+
     def restore_document(self, previous: Dict[str, Any] | None) -> None:
         if not isinstance(previous, dict) or not previous.get("session_id"):
             return

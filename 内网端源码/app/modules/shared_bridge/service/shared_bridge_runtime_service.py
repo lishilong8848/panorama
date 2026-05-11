@@ -249,53 +249,6 @@ class SharedBridgeRuntimeService:
                 continue
         return ""
 
-    @classmethod
-    def _normalize_branch_requested_source_units(cls, raw_units: Any) -> List[Dict[str, Any]]:
-        allowed = {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH}
-        output: List[Dict[str, Any]] = []
-        seen: set[tuple[str, str, tuple[str, ...]]] = set()
-        for item in raw_units if isinstance(raw_units, list) else []:
-            if not isinstance(item, dict):
-                continue
-            building = str(item.get("building", "") or "").strip()
-            source_family = str(item.get("source_family", "") or "").strip()
-            if not building or source_family not in allowed:
-                continue
-            bucket_keys = [
-                cls._normalize_branch_bucket_key(raw_value)
-                for raw_value in (item.get("target_bucket_keys") if isinstance(item.get("target_bucket_keys"), list) else [])
-            ]
-            bucket_keys = sorted({bucket_key for bucket_key in bucket_keys if bucket_key})
-            if not bucket_keys:
-                single_bucket = cls._normalize_branch_bucket_key(item.get("target_bucket_key", "") or item.get("bucket_key", ""))
-                if single_bucket:
-                    bucket_keys = [single_bucket]
-            if not bucket_keys:
-                continue
-            key = (building, source_family, tuple(bucket_keys))
-            if key in seen:
-                continue
-            seen.add(key)
-            output.append(
-                {
-                    "building": building,
-                    "source_family": source_family,
-                    "target_bucket_keys": bucket_keys,
-                    "reason": str(item.get("reason", "") or "").strip(),
-                }
-            )
-        output.sort(key=lambda unit: (str(unit.get("building", "")), str(unit.get("source_family", "")), ",".join(unit.get("target_bucket_keys", []))))
-        return output
-
-    @classmethod
-    def _branch_requested_units_dedupe(cls, units: List[Dict[str, Any]]) -> str:
-        parts: List[str] = []
-        for unit in cls._normalize_branch_requested_source_units(units):
-            parts.append(
-                f"{unit.get('building')}|{unit.get('source_family')}|{','.join(unit.get('target_bucket_keys', []))}"
-            )
-        return ";".join(parts)
-
     @staticmethod
     def _parse_missing_day_metric_handover_units(
         error_text: str,
@@ -456,14 +409,21 @@ class SharedBridgeRuntimeService:
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
         internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
-        target_bucket_keys = self._normalize_text_list(internal_result.get("target_bucket_keys", []))
-        if not target_bucket_keys:
-            target_bucket_keys = self._normalize_text_list(request.get("target_bucket_keys", []))
-        bucket_key = (
-            str(internal_result.get("bucket_key", "") or "").strip()
-            or str(request.get("target_bucket_key", "") or "").strip()
-            or (target_bucket_keys[0] if target_bucket_keys else "")
-        )
+        business_date = str(
+            internal_result.get("target_business_date", "")
+            or request.get("target_business_date", "")
+            or request.get("business_date", "")
+            or internal_result.get("bucket_key", "")
+            or request.get("target_bucket_key", "")
+            or ""
+        ).strip()
+        match = re.match(r"^(\d{4}-\d{2}-\d{2})", business_date.replace("/", "-"))
+        if match:
+            business_date = match.group(1)
+        elif self._source_cache_service is not None:
+            business_date = self._source_cache_service.branch_power_business_date()
+        if not business_date:
+            raise RuntimeError("支路整日恢复任务缺少业务日期")
         source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
         normalized_units: List[Dict[str, Any]] = []
         for item in source_units:
@@ -483,18 +443,14 @@ class SharedBridgeRuntimeService:
             if not is_accessible_cached_file_path(power_file):
                 raise FileNotFoundError(f"共享目录中的支路功率源文件不存在或不可访问: {power_file}")
             metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
-            data_hour_bucket = str(item.get("data_hour_bucket", "") or metadata.get("data_hour_bucket", "") or "").strip()
             normalized_unit: Dict[str, Any] = {
                 "building": building,
                 "file_path": power_file,
                 "power_file": power_file,
                 "metadata": metadata,
-                "data_hour_bucket": data_hour_bucket,
+                "business_date": business_date,
                 "source_files": {"power_file": power_file},
             }
-            unit_bucket = str(item.get("bucket_key", "") or metadata.get("bucket_hour", "") or "").strip()
-            if unit_bucket:
-                normalized_unit["bucket_key"] = unit_bucket
             for key, label in (("current_file", "支路电流源文件"), ("switch_file", "支路开关源文件")):
                 companion = str(item.get(key, "") or source_files.get(key, "") or "").strip()
                 if not companion:
@@ -509,13 +465,14 @@ class SharedBridgeRuntimeService:
         return {
             "worker_payload": {
                 "resume_kind": "shared_bridge_branch_power",
-                "target_bucket_key": bucket_key,
-                "target_bucket_keys": target_bucket_keys,
+                "target_bucket_key": business_date,
+                "target_business_date": business_date,
+                "mode": "daily_branch_sources",
                 "source_units": normalized_units,
                 "bridge_task_id": task_id,
             },
-            "summary": "共享文件已到位，正在继续处理支路信息",
-            "log_text": f"[共享桥接] 任务={task_id} 支路信息共享文件已齐全，正在自动恢复原任务",
+            "summary": "共享文件已到位，正在继续处理支路整日直传",
+            "log_text": f"[共享桥接] 任务={task_id} 支路整日共享文件已齐全，正在自动恢复原任务",
         }
 
     def _build_wet_bulb_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
@@ -2503,6 +2460,8 @@ class SharedBridgeRuntimeService:
         range_query_start: str | None = None,
         range_query_end: str | None = None,
         requested_source_units: List[Dict[str, Any]] | None = None,
+        mode: str | None = None,
+        target_business_date: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -2516,6 +2475,8 @@ class SharedBridgeRuntimeService:
             range_query_start=range_query_start,
             range_query_end=range_query_end,
             requested_source_units=requested_source_units,
+            mode=mode,
+            target_business_date=target_business_date,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -2589,39 +2550,39 @@ class SharedBridgeRuntimeService:
         range_query_start: str | None = None,
         range_query_end: str | None = None,
         requested_source_units: List[Dict[str, Any]] | None = None,
+        mode: str | None = None,
+        target_business_date: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
         normalized_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
-        normalized_bucket_keys = [str(item or "").strip() for item in (target_bucket_keys or []) if str(item or "").strip()]
-        normalized_requested_units = self._normalize_branch_requested_source_units(requested_source_units)
+        normalized_bucket_keys = []
+        normalized_requested_units: List[Dict[str, Any]] = []
         resolved_bucket_key = str(target_bucket_key or "").strip()
-        if not normalized_buildings and normalized_requested_units:
-            normalized_buildings = sorted({str(unit.get("building", "") or "").strip() for unit in normalized_requested_units if str(unit.get("building", "") or "").strip()})
-        if not normalized_bucket_keys and normalized_requested_units:
-            normalized_bucket_keys = sorted(
-                {
-                    str(bucket_key or "").strip()
-                    for unit in normalized_requested_units
-                    for bucket_key in (unit.get("target_bucket_keys", []) if isinstance(unit.get("target_bucket_keys", []), list) else [])
-                    if str(bucket_key or "").strip()
-                }
-            )
-        if not resolved_bucket_key and normalized_bucket_keys:
-            resolved_bucket_key = normalized_bucket_keys[0]
-        if not resolved_bucket_key and self._source_cache_service is not None:
-            resolved_bucket_key = self._source_cache_service.branch_power_bucket()
-        bucket_dedupe = ",".join(normalized_bucket_keys) or resolved_bucket_key
+        normalized_mode = "daily_branch_sources"
+        normalized_business_date = str(target_business_date or "").strip()
+        if normalized_business_date:
+            resolved_bucket_key = normalized_business_date
+        if not normalized_business_date:
+            for candidate in [resolved_bucket_key]:
+                text = str(candidate or "").strip().replace("/", "-")
+                match = re.match(r"^(\d{4}-\d{2}-\d{2})(?:\s+\d{1,2})?$", text)
+                if match:
+                    normalized_business_date = match.group(1)
+                    break
+        if not normalized_business_date and self._source_cache_service is not None:
+            normalized_business_date = self._source_cache_service.branch_power_business_date()
+        resolved_bucket_key = normalized_business_date
+        normalized_bucket_keys = []
+        normalized_requested_units = []
+        bucket_dedupe = resolved_bucket_key
         dedupe_parts = [
             "branch_power_upload",
             bucket_dedupe or _now_text()[:13],
             ",".join(normalized_buildings) or "all_enabled",
         ]
-        unit_dedupe = self._branch_requested_units_dedupe(normalized_requested_units)
-        if unit_dedupe:
-            dedupe_parts.append(unit_dedupe)
         dedupe_key = "|".join(dedupe_parts)
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
@@ -2634,6 +2595,8 @@ class SharedBridgeRuntimeService:
             range_query_start=range_query_start,
             range_query_end=range_query_end,
             requested_source_units=normalized_requested_units,
+            mode=normalized_mode,
+            target_business_date=normalized_business_date,
             requested_by=requested_by,
         )
 
@@ -4857,44 +4820,26 @@ class SharedBridgeRuntimeService:
             if self._source_cache_service is None:
                 raise RuntimeError("共享缓存服务未初始化，无法下载支路功率")
             self._wait_internal_download_pool_ready(emit_log=emit_log)
-            requested_bucket_keys = [
-                str(item or "").strip()
-                for item in (request.get("target_bucket_keys") if isinstance(request.get("target_bucket_keys"), list) else [])
-                if str(item or "").strip()
-            ]
-            bucket_key = (
-                str(request.get("target_bucket_key", "") or "").strip()
-                or (requested_bucket_keys[0] if requested_bucket_keys else "")
-                or self._source_cache_service.branch_power_bucket()
-            )
-            target_bucket_keys = requested_bucket_keys or [bucket_key]
-            requested_source_units = self._normalize_branch_requested_source_units(request.get("requested_source_units"))
-            explicit_data_buckets = bool(requested_bucket_keys)
-            if requested_source_units:
-                target_bucket_keys = sorted(
-                    {
-                        str(bucket or "").strip()
-                        for unit in requested_source_units
-                        for bucket in (unit.get("target_bucket_keys", []) if isinstance(unit.get("target_bucket_keys", []), list) else [])
-                        if str(bucket or "").strip()
-                    }
-                )
-                if target_bucket_keys:
-                    bucket_key = target_bucket_keys[0]
-                explicit_data_buckets = True
+            target_business_date = str(
+                request.get("target_business_date", "")
+                or request.get("business_date", "")
+                or request.get("target_bucket_key", "")
+                or ""
+            ).strip()
+            if target_business_date:
+                try:
+                    target_business_date = datetime.strptime(target_business_date.replace("/", "-")[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+                except ValueError:
+                    target_business_date = ""
+            if not target_business_date:
+                target_business_date = self._source_cache_service.branch_power_business_date()
+            bucket_key = target_business_date
+            covered_bucket_keys = self._source_cache_service.branch_power_day_bucket_keys(target_business_date)
             buildings = [str(item or "").strip() for item in (request.get("buildings") if isinstance(request.get("buildings"), list) else []) if str(item or "").strip()]
-            if requested_source_units:
-                buildings = sorted(
-                    {
-                        str(unit.get("building", "") or "").strip()
-                        for unit in requested_source_units
-                        if str(unit.get("building", "") or "").strip()
-                    }
-                )
             if not buildings:
                 buildings = self._source_cache_service.get_enabled_buildings()
-            if not target_bucket_keys:
-                raise RuntimeError("支路信息内网下载缺少目标小时")
+            if not covered_bucket_keys:
+                raise RuntimeError("支路信息内网下载缺少业务日")
             if not buildings:
                 raise RuntimeError("支路信息内网下载缺少楼栋")
             source_units: List[Dict[str, Any]] = []
@@ -4905,26 +4850,23 @@ class SharedBridgeRuntimeService:
                 FAMILY_BRANCH_POWER: {
                     "label": "支路功率",
                     "file_key": "power_file",
-                    "latest": self._source_cache_service.fill_branch_power_latest,
-                    "range": self._source_cache_service.fill_branch_power_range_latest,
+                    "daily": self._source_cache_service.fill_branch_power_day_latest,
                 },
                 FAMILY_BRANCH_CURRENT: {
                     "label": "支路电流",
                     "file_key": "current_file",
-                    "latest": self._source_cache_service.fill_branch_current_latest,
-                    "range": self._source_cache_service.fill_branch_current_range_latest,
+                    "daily": self._source_cache_service.fill_branch_current_day_latest,
                 },
                 FAMILY_BRANCH_SWITCH: {
                     "label": "支路开关",
                     "file_key": "switch_file",
-                    "latest": self._source_cache_service.fill_branch_switch_latest,
-                    "range": self._source_cache_service.fill_branch_switch_range_latest,
+                    "daily": self._source_cache_service.fill_branch_switch_day_latest,
                 },
             }
             emit_log(
                 "[共享桥接][支路信息][内网] 开始下载三源文件 "
-                f"bucket={bucket_key}, data_buckets={','.join(target_bucket_keys)}, buildings={len(buildings)}, "
-                f"requested_units={len(requested_source_units)}"
+                f"mode=daily, business_date={target_business_date}, "
+                f"covered_hours={','.join(covered_bucket_keys)}, buildings={len(buildings)}"
             )
 
             def normalize_family_entry(
@@ -4937,9 +4879,7 @@ class SharedBridgeRuntimeService:
                 metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
                 data_bucket = str(
                     entry.get("bucket_key", "")
-                    or entry.get("data_hour_bucket", "")
-                    or metadata.get("data_hour_bucket", "")
-                    or metadata.get("bucket_hour", "")
+                    or metadata.get("business_date", "")
                     or fallback_bucket
                 ).strip()
                 file_path = str(entry.get("file_path", "") or entry.get("source_file", "") or "").strip()
@@ -4948,27 +4888,20 @@ class SharedBridgeRuntimeService:
                     "building": building,
                     "source_family": source_family,
                     "source_family_label": spec["label"],
-                    "file_path": file_path,
-                    "source_file": file_path,
-                    str(spec["file_key"]): file_path,
-                    "bucket_key": data_bucket,
-                    "data_hour_bucket": str(metadata.get("data_hour_bucket", "") or data_bucket).strip(),
-                    "metadata": metadata,
-                }
+                            "file_path": file_path,
+                            "source_file": file_path,
+                            str(spec["file_key"]): file_path,
+                            "bucket_key": data_bucket,
+                            "business_date": str(metadata.get("business_date", "") or "").strip(),
+                            "metadata": metadata,
+                        }
 
             def units_for_building(building: str) -> List[Dict[str, Any]]:
-                if requested_source_units:
-                    return [
-                        unit
-                        for unit in requested_source_units
-                        if str(unit.get("building", "") or "").strip() == building
-                    ]
                 return [
                     {
                         "building": building,
                         "source_family": source_family,
-                        "target_bucket_keys": list(target_bucket_keys),
-                        "reason": "legacy_all_families",
+                        "reason": "daily_all_families",
                     }
                     for source_family in (FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH)
                 ]
@@ -4987,34 +4920,20 @@ class SharedBridgeRuntimeService:
                 for unit in requested_for_building:
                     source_family = str(unit.get("source_family", "") or "").strip()
                     spec = family_specs.get(source_family)
-                    unit_bucket_keys = [
-                        str(item or "").strip()
-                        for item in (unit.get("target_bucket_keys") if isinstance(unit.get("target_bucket_keys"), list) else [])
-                        if str(item or "").strip()
-                    ]
-                    if not spec or not unit_bucket_keys:
+                    if not spec:
                         continue
                     try:
                         emit_log(
                             "[共享桥接][支路信息][内网] 源文件下载开始 "
-                            f"building={building}, family={spec['label']}, buckets={','.join(unit_bucket_keys)}"
+                            f"building={building}, family={spec['label']}, business_date={target_business_date}"
                         )
-                        if len(unit_bucket_keys) >= 2:
-                            raw_entries = spec["range"](
+                        raw_entries = [
+                            spec["daily"](
                                 building=building,
-                                bucket_keys=unit_bucket_keys,
+                                business_date=target_business_date,
                                 emit_log=emit_log,
                             )
-                        else:
-                            data_bucket_key = unit_bucket_keys[0] if (requested_source_units or explicit_data_buckets) else None
-                            raw_entries = [
-                                spec["latest"](
-                                    building=building,
-                                    bucket_key=unit_bucket_keys[0] if data_bucket_key else bucket_key,
-                                    data_bucket_key=data_bucket_key,
-                                    emit_log=emit_log,
-                                )
-                            ]
+                        ]
                         entries = [item for item in raw_entries if isinstance(item, dict)]
                         if not entries:
                             raise RuntimeError(f"{building} {spec['label']}未产生共享源文件")
@@ -5023,9 +4942,9 @@ class SharedBridgeRuntimeService:
                                 entry=entry,
                                 building=building,
                                 source_family=source_family,
-                                fallback_bucket=unit_bucket_keys[0],
+                                fallback_bucket=target_business_date,
                             )
-                            data_bucket = str(family_entry.get("bucket_key", "") or unit_bucket_keys[0]).strip()
+                            data_bucket = str(family_entry.get("bucket_key", "") or target_business_date).strip()
                             building_family_units.append(family_entry)
                             entries_by_bucket.setdefault(data_bucket, {})[source_family] = family_entry
                         emit_log(
@@ -5036,13 +4955,13 @@ class SharedBridgeRuntimeService:
                         error_text = str(exc)
                         emit_log(
                             "[共享桥接][支路信息][内网] 源文件下载失败 "
-                            f"building={building}, family={spec['label']}, buckets={','.join(unit_bucket_keys)}, error={error_text}"
+                            f"building={building}, family={spec['label']}, business_date={target_business_date}, error={error_text}"
                         )
                         building_failed_units.append(
                             {
                                 "building": building,
                                 "source_family": source_family,
-                                "target_bucket_keys": unit_bucket_keys,
+                                "target_business_date": target_business_date,
                                 "reason": str(unit.get("reason", "") or "").strip(),
                                 "error": error_text,
                             }
@@ -5071,7 +4990,7 @@ class SharedBridgeRuntimeService:
                                 "switch_file": switch_path,
                             },
                             "bucket_key": data_bucket,
-                            "data_hour_bucket": str(metadata.get("data_hour_bucket", "") or data_bucket).strip(),
+                            "business_date": str(metadata.get("business_date", "") or target_business_date).strip(),
                             "metadata": metadata,
                         }
                     )
@@ -5123,20 +5042,21 @@ class SharedBridgeRuntimeService:
                 if error_text:
                     failed_buildings.append({"building": building, "error": error_text})
             stage_result = {
-                "status": "success" if downloaded_source_units and not failed_source_units else "failed",
+                "status": "success" if source_units and not failed_source_units else "failed",
+                "mode": "daily",
+                "target_business_date": target_business_date,
                 "bucket_key": bucket_key,
                 "target_bucket_key": bucket_key,
-                "target_bucket_keys": target_bucket_keys if explicit_data_buckets else [],
+                "target_bucket_keys": [],
                 "range_query_start": str(request.get("range_query_start", "") or "").strip(),
                 "range_query_end": str(request.get("range_query_end", "") or "").strip(),
-                "requested_source_units": requested_source_units,
                 "source_units": source_units,
                 "downloaded_source_units": downloaded_source_units,
                 "failed_source_units": failed_source_units,
                 "failed_buildings": failed_buildings,
                 "downloaded_count": len(downloaded_source_units),
             }
-            if downloaded_source_units and not failed_source_units:
+            if source_units and not failed_source_units:
                 self._store.complete_stage(
                     task_id=task_id,
                     stage_id=stage_id,
@@ -5214,9 +5134,19 @@ class SharedBridgeRuntimeService:
         internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
         try:
-            bucket_key = str(internal_result.get("bucket_key", "") or request.get("target_bucket_key", "") or "").strip()
-            if not bucket_key and self._source_cache_service is not None:
-                bucket_key = self._source_cache_service.branch_power_bucket()
+            business_date = str(
+                internal_result.get("target_business_date", "")
+                or request.get("target_business_date", "")
+                or request.get("business_date", "")
+                or internal_result.get("bucket_key", "")
+                or request.get("target_bucket_key", "")
+                or ""
+            ).strip()
+            match = re.match(r"^(\d{4}-\d{2}-\d{2})", business_date.replace("/", "-"))
+            if match:
+                business_date = match.group(1)
+            elif self._source_cache_service is not None:
+                business_date = self._source_cache_service.branch_power_business_date()
             source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
             source_units = [item for item in source_units if isinstance(item, dict)]
             if not source_units and self._source_cache_service is not None:
@@ -5224,31 +5154,37 @@ class SharedBridgeRuntimeService:
                 source_units = self._source_cache_service.get_latest_ready_entries(
                     source_family=FAMILY_BRANCH_POWER,
                     buildings=buildings or None,
-                    bucket_key=bucket_key,
+                    bucket_key=business_date,
                 )
             normalized_units: List[Dict[str, Any]] = []
             for item in source_units:
                 building = str(item.get("building", "") or "").strip()
-                file_path = str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
-                if not building or not file_path:
+                source_files = item.get("source_files", {}) if isinstance(item.get("source_files", {}), dict) else {}
+                power_file = str(item.get("power_file", "") or source_files.get("power_file", "") or item.get("file_path", "") or item.get("source_file", "") or "").strip()
+                current_file = str(item.get("current_file", "") or source_files.get("current_file", "") or "").strip()
+                switch_file = str(item.get("switch_file", "") or source_files.get("switch_file", "") or "").strip()
+                if not building or not power_file:
                     continue
-                if not is_accessible_cached_file_path(file_path):
-                    raise FileNotFoundError(f"共享目录中的支路功率源文件不存在或不可访问: {file_path}")
+                for label, file_path in (("支路功率", power_file), ("支路电流", current_file), ("支路开关", switch_file)):
+                    if not file_path or not is_accessible_cached_file_path(file_path):
+                        raise FileNotFoundError(f"共享目录中的{label}整日源文件不存在或不可访问: {file_path or '-'}")
                 metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
-                data_hour_bucket = str(item.get("data_hour_bucket", "") or metadata.get("data_hour_bucket", "") or "").strip()
                 normalized_units.append(
                     {
                         "building": building,
-                        "file_path": file_path,
+                        "file_path": power_file,
+                        "power_file": power_file,
+                        "current_file": current_file,
+                        "switch_file": switch_file,
                         "metadata": metadata,
-                        "data_hour_bucket": data_hour_bucket,
+                        "business_date": business_date,
                     }
                 )
             if not normalized_units:
-                raise RuntimeError("共享目录中没有可继续上传的支路功率源文件")
-            emit_log(f"[共享桥接][支路功率][外网] 开始上传 bucket={bucket_key}, files={len(normalized_units)}")
-            result = BranchPowerUploadService(self.runtime_config).continue_from_source_files(
-                bucket_key=bucket_key,
+                raise RuntimeError("共享目录中没有可继续上传的支路整日源文件")
+            emit_log(f"[共享桥接][支路功率][外网] 开始整日直传 business_date={business_date}, buildings={len(normalized_units)}")
+            result = BranchPowerUploadService(self.runtime_config).upload_day_from_source_files(
+                business_date=business_date,
                 source_units=normalized_units,
                 emit_log=emit_log,
             )

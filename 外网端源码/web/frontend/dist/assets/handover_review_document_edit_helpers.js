@@ -19,6 +19,7 @@ export function createHandoverReviewDocumentEditHelpers(options = {}) {
     blankFooterInventoryRowWithDefaults,
     resolveFooterAutoFillCells,
     blankFooterInventoryRow,
+    onFixedFieldChanged,
   } = options;
 
   function markDocumentDirty({ region = "", capacityCell = "" } = {}) {
@@ -57,6 +58,9 @@ export function createHandoverReviewDocumentEditHelpers(options = {}) {
     const cellName = String(field.cell || "").trim().toUpperCase();
     field.value = nextValue;
     markDocumentDirty({ region: "fixed_blocks", capacityCell: cellName });
+    if (typeof onFixedFieldChanged === "function") {
+      onFixedFieldChanged({ cell: cellName, value: nextValue, blockIndex, fieldIndex });
+    }
   }
 
   function updateSectionCell(sectionIndex, rowIndex, column, value) {

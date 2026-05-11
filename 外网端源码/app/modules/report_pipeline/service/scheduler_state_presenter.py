@@ -362,7 +362,7 @@ def present_scheduler_overview_items(
                 _map_scheduler_decision_text(branch_power_snapshot.get("last_decision")),
                 _map_scheduler_trigger_text(branch_power_snapshot.get("last_trigger_result")),
                 branch_power_display.get("summary_text", ""),
-                fallback="每小时读取上一小时共享支路功率文件",
+                fallback="每天读取前一业务日支路三源整日文件",
             ),
             "parts": [
                 _overview_part(

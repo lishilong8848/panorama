@@ -1419,10 +1419,65 @@ def _validate_handover_daily_report_bitable_export(cfg: Dict[str, Any]) -> None:
         if not str(fields.get(key, "") or "").strip():
             raise ValueError(f"配置错误: features.handover_log.daily_report_bitable_export.fields.{key} 不能为空")
 
-    if not str(export_cfg.get("summary_page_url", "") or "").strip():
-        raise ValueError("配置错误: features.handover_log.daily_report_bitable_export.summary_page_url 不能为空")
-    if not str(export_cfg.get("external_page_url", "") or "").strip():
-        raise ValueError("配置错误: features.handover_log.daily_report_bitable_export.external_page_url 不能为空")
+    screenshot_url = str(export_cfg.get("screenshot_page_url", "") or "").strip()
+    if not screenshot_url:
+        raise ValueError("配置错误: features.handover_log.daily_report_bitable_export.screenshot_page_url 不能为空")
+
+
+def _validate_handover_cabinet_shift_record_bitable_export(cfg: Dict[str, Any]) -> None:
+    handover = cfg.get("features", {}).get("handover_log", {})
+    if not isinstance(handover, dict):
+        return
+    export_cfg = handover.get("cabinet_shift_record_bitable_export", {})
+    if not isinstance(export_cfg, dict):
+        raise ValueError("配置错误: features.handover_log.cabinet_shift_record_bitable_export 缺失或格式错误")
+
+    if not isinstance(export_cfg.get("enabled", True), bool):
+        raise ValueError("配置错误: features.handover_log.cabinet_shift_record_bitable_export.enabled 必须是布尔值")
+
+    target = export_cfg.get("target", {})
+    if not isinstance(target, dict):
+        raise ValueError("配置错误: features.handover_log.cabinet_shift_record_bitable_export.target 必须是对象")
+    if not str(target.get("app_token", "") or "").strip():
+        raise ValueError("配置错误: features.handover_log.cabinet_shift_record_bitable_export.target.app_token 不能为空")
+    if not str(target.get("table_id", "") or "").strip():
+        raise ValueError("配置错误: features.handover_log.cabinet_shift_record_bitable_export.target.table_id 不能为空")
+    for key in ("page_size", "max_records", "create_batch_size", "update_batch_size"):
+        if int(target.get(key, 0) or 0) <= 0:
+            raise ValueError(
+                f"配置错误: features.handover_log.cabinet_shift_record_bitable_export.target.{key} 必须大于0"
+            )
+
+    fields = export_cfg.get("fields", {})
+    if not isinstance(fields, dict):
+        raise ValueError("配置错误: features.handover_log.cabinet_shift_record_bitable_export.fields 必须是对象")
+    for key in (
+        "building",
+        "date",
+        "shift",
+        "duty_staff",
+        "handover_staff",
+        "planned_cabinets",
+        "powered_cabinets",
+        "shift_power_on_cabinets",
+        "shift_power_off_cabinets",
+    ):
+        if not str(fields.get(key, "") or "").strip():
+            raise ValueError(
+                f"配置错误: features.handover_log.cabinet_shift_record_bitable_export.fields.{key} 不能为空"
+            )
+
+    fixed_values = export_cfg.get("fixed_values", {})
+    shift_text = fixed_values.get("shift_text", {}) if isinstance(fixed_values, dict) else {}
+    if not isinstance(fixed_values, dict) or not isinstance(shift_text, dict):
+        raise ValueError(
+            "配置错误: features.handover_log.cabinet_shift_record_bitable_export.fixed_values.shift_text 必须是对象"
+        )
+    for key in ("day", "night"):
+        if not str(shift_text.get(key, "") or "").strip():
+            raise ValueError(
+                f"配置错误: features.handover_log.cabinet_shift_record_bitable_export.fixed_values.shift_text.{key} 不能为空"
+            )
 
 
 def _validate_handover_review_ui(cfg: Dict[str, Any]) -> None:
@@ -1786,6 +1841,7 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _validate_handover_source_data_attachment_export(normalized_v3)
     _validate_handover_cloud_sheet_sync(normalized_v3)
     _validate_handover_daily_report_bitable_export(normalized_v3)
+    _validate_handover_cabinet_shift_record_bitable_export(normalized_v3)
     _validate_handover_review_ui(normalized_v3)
     _validate_handover_cell_rules(normalized_v3)
     return normalized_v3

@@ -489,7 +489,7 @@ class SharedSourceCacheService:
     def _reset_light_building_state_unlocked(self) -> None:
         buildings = self.get_enabled_buildings()
         current_bucket = self._current_hour_bucket or self.current_hour_bucket()
-        branch_bucket = self.branch_power_bucket()
+        branch_bucket = self.branch_power_day_bucket()
         alarm_bucket = (
             str(self._family_status.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip()
             or self.current_alarm_bucket()
@@ -1188,17 +1188,17 @@ class SharedSourceCacheService:
             ),
             FAMILY_BRANCH_POWER: self._build_fast_external_family_from_index(
                 source_family=FAMILY_BRANCH_POWER,
-                current_bucket=self.branch_power_bucket(),
+                current_bucket=self.branch_power_day_bucket(),
                 buildings=buildings,
             ),
             FAMILY_BRANCH_CURRENT: self._build_fast_external_family_from_index(
                 source_family=FAMILY_BRANCH_CURRENT,
-                current_bucket=self.branch_power_bucket(),
+                current_bucket=self.branch_power_day_bucket(),
                 buildings=buildings,
             ),
             FAMILY_BRANCH_SWITCH: self._build_fast_external_family_from_index(
                 source_family=FAMILY_BRANCH_SWITCH,
-                current_bucket=self.branch_power_bucket(),
+                current_bucket=self.branch_power_day_bucket(),
                 buildings=buildings,
             ),
             FAMILY_ALARM_EVENT: self._build_fast_alarm_external_family_from_index(buildings=buildings),
@@ -1285,16 +1285,11 @@ class SharedSourceCacheService:
         now = when or datetime.now()
         return now.strftime("%Y-%m-%d %H")
 
-    def branch_power_bucket(self, when: datetime | None = None) -> str:
-        base = (when or datetime.now()).replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
-        return base.strftime("%Y-%m-%d %H")
+    def branch_power_business_date(self, when: datetime | None = None) -> str:
+        return ((when or datetime.now()) - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    def branch_power_data_bucket(self, bucket_key: str = "", when: datetime | None = None) -> str:
-        bucket_dt = _parse_hour_bucket(bucket_key) if str(bucket_key or "").strip() else None
-        if bucket_dt is None:
-            return self.branch_power_bucket(when)
-        base = bucket_dt.replace(minute=0, second=0, microsecond=0)
-        return base.strftime("%Y-%m-%d %H")
+    def branch_power_day_bucket(self, when: datetime | None = None) -> str:
+        return self.branch_power_business_date(when)
 
     def get_enabled_buildings(self) -> List[str]:
         configured_sites = self.runtime_config.get("internal_source_sites", [])
@@ -1384,7 +1379,7 @@ class SharedSourceCacheService:
             alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
             branch_bucket = (
                 str(families.get(FAMILY_BRANCH_POWER, {}).get("current_bucket", "") or "").strip()
-                or self.branch_power_bucket()
+                or self.branch_power_day_bucket()
             )
             handover_family = self._build_internal_light_family_snapshot(
                 source_family=FAMILY_HANDOVER_LOG,
@@ -2886,12 +2881,23 @@ class SharedSourceCacheService:
         output: List[Dict[str, Any]] = []
         for building in requested:
             if target_bucket:
-                entry = self._get_ready_entry(
-                    source_family=source_family,
-                    building=building,
-                    bucket_kind="latest",
-                    bucket_key=target_bucket,
-                )
+                target_kind_candidates = ["latest"]
+                if (
+                    self._normalize_source_family(source_family)
+                    in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH}
+                    and _parse_hour_bucket(target_bucket) is None
+                ):
+                    target_kind_candidates = ["daily", "latest"]
+                entry = None
+                for bucket_kind in target_kind_candidates:
+                    entry = self._get_ready_entry(
+                        source_family=source_family,
+                        building=building,
+                        bucket_kind=bucket_kind,
+                        bucket_key=target_bucket,
+                    )
+                    if entry:
+                        break
             else:
                 entry = self._get_latest_ready_entry_any_bucket(source_family=source_family, building=building)
             if not entry:
@@ -3328,19 +3334,6 @@ class SharedSourceCacheService:
         shift_segment = str(duty_shift or "all").strip().lower() or "all"
         return self._tmp_root / "handover_capacity_by_date" / str(duty_date or "manual").strip() / shift_segment
 
-    def _branch_power_temp_root(self, *, bucket_key: str, building: str) -> Path:
-        if self._tmp_root is None:
-            raise RuntimeError("共享缓存临时目录未配置")
-        return self._tmp_root / "branch_power_latest" / bucket_key / building
-
-    def _branch_power_query_window(self, bucket_key: str) -> tuple[str, str]:
-        data_bucket = self.branch_power_data_bucket(bucket_key)
-        bucket_dt = _parse_hour_bucket(data_bucket) or (datetime.now() - timedelta(hours=1))
-        hour_dt = bucket_dt.replace(minute=0, second=0, microsecond=0)
-        start_dt = hour_dt - timedelta(minutes=10)
-        end_dt = hour_dt + timedelta(minutes=20)
-        return start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")
-
     def fill_handover_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
         self._ensure_internal_source_writer("交接班最新源文件补采")
         cfg = load_handover_config(self.runtime_config)
@@ -3428,51 +3421,6 @@ class SharedSourceCacheService:
                 "building": building,
                 "duty_date": normalized_result_context["duty_date"],
                 "duty_shift": normalized_result_context["duty_shift"],
-            },
-        )
-
-    def fill_branch_power_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
-        self._ensure_internal_source_writer("支路功率最新源文件补采")
-        cfg = load_handover_config(self.runtime_config)
-        temp_root = self._branch_power_temp_root(bucket_key=bucket_key, building=building)
-        start_time, end_time = self._branch_power_query_window(bucket_key)
-        data_bucket_key = self.branch_power_data_bucket(bucket_key)
-        service = HandoverDownloadService(
-            cfg,
-            download_browser_pool=self.download_browser_pool,
-            business_root_override=temp_root,
-        )
-        result = service.run_branch_power_only(
-            buildings=[building],
-            start_time=start_time,
-            end_time=end_time,
-            switch_network=False,
-            reuse_cached=False,
-            emit_log=emit_log,
-        )
-        success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
-        if not success_files:
-            raise RuntimeError(f"本小时支路功率缓存下载失败: {building}")
-        item = success_files[0]
-        source_path = Path(str(item.get("file_path", "") or "").strip())
-        if not source_path.exists():
-            raise FileNotFoundError(f"下载完成后的支路功率源文件不存在: {source_path}")
-        return self._store_entry(
-            source_family=FAMILY_BRANCH_POWER,
-            building=building,
-            bucket_kind="latest",
-            bucket_key=bucket_key,
-            duty_date="",
-            duty_shift="",
-            source_path=source_path,
-            status="ready",
-            metadata={
-                "family": FAMILY_BRANCH_POWER,
-                "building": building,
-                "bucket_hour": bucket_key,
-                "data_hour_bucket": data_bucket_key,
-                "query_start": start_time,
-                "query_end": end_time,
             },
         )
 
@@ -5431,7 +5379,6 @@ class SharedSourceCacheService:
     def _run_current_bucket_once(self) -> None:
         self._ensure_dirs()
         current_bucket = self.current_hour_bucket()
-        branch_bucket = self.branch_power_bucket()
         with self._lock:
             self._current_hour_bucket = current_bucket
         self._refresh_family_bucket(source_family=FAMILY_HANDOVER_LOG, bucket_key=current_bucket, fill_func=self.fill_handover_latest)
@@ -5441,11 +5388,6 @@ class SharedSourceCacheService:
             fill_func=self.fill_handover_capacity_latest,
         )
         self._refresh_family_bucket(source_family=FAMILY_MONTHLY_REPORT, bucket_key=current_bucket, fill_func=self.fill_monthly_latest)
-        self._refresh_family_bucket(
-            source_family=FAMILY_BRANCH_POWER,
-            bucket_key=branch_bucket,
-            fill_func=self.fill_branch_power_latest,
-        )
         with self._lock:
             self._last_run_at = _now_text()
             handover_failed = list(self._family_status.get(FAMILY_HANDOVER_LOG, {}).get("failed_buildings", []) or [])
@@ -5453,8 +5395,7 @@ class SharedSourceCacheService:
                 self._family_status.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}).get("failed_buildings", []) or []
             )
             monthly_failed = list(self._family_status.get(FAMILY_MONTHLY_REPORT, {}).get("failed_buildings", []) or [])
-            branch_failed = list(self._family_status.get(FAMILY_BRANCH_POWER, {}).get("failed_buildings", []) or [])
-            if not handover_failed and not handover_capacity_failed and not monthly_failed and not branch_failed:
+            if not handover_failed and not handover_capacity_failed and not monthly_failed:
                 self._last_error = ""
 
     def _run_alarm_bucket_if_due(self, when: datetime | None = None) -> None:
@@ -5481,7 +5422,6 @@ class SharedSourceCacheService:
     def _run_current_hour_refresh_impl(self) -> None:
         self._ensure_dirs()
         bucket_key = self.current_hour_bucket()
-        branch_bucket_key = self.branch_power_bucket()
         failed_units: List[str] = []
         blocked_units: List[str] = []
         running_units: List[str] = []
@@ -5496,7 +5436,7 @@ class SharedSourceCacheService:
             running_buildings=[],
             completed_buildings=[],
         )
-        self._emit(f"[共享缓存] 开始立即补下当前小时全部文件 bucket={bucket_key}, 支路功率bucket={branch_bucket_key}")
+        self._emit(f"[共享缓存] 开始立即补下当前小时全部文件 bucket={bucket_key}")
         handover_result = self._refresh_family_bucket(
             source_family=FAMILY_HANDOVER_LOG,
             bucket_key=bucket_key,
@@ -5513,12 +5453,6 @@ class SharedSourceCacheService:
             source_family=FAMILY_MONTHLY_REPORT,
             bucket_key=bucket_key,
             fill_func=self.fill_monthly_latest,
-            force_retry_failed=True,
-        ) or {}
-        branch_power_result = self._refresh_family_bucket(
-            source_family=FAMILY_BRANCH_POWER,
-            bucket_key=branch_bucket_key,
-            fill_func=self.fill_branch_power_latest,
             force_retry_failed=True,
         ) or {}
         alarm_result: Dict[str, Any] = {
@@ -5539,7 +5473,6 @@ class SharedSourceCacheService:
             (FAMILY_HANDOVER_LOG, handover_result),
             (FAMILY_HANDOVER_CAPACITY_REPORT, handover_capacity_result),
             (FAMILY_MONTHLY_REPORT, monthly_result),
-            (FAMILY_BRANCH_POWER, branch_power_result),
             (FAMILY_ALARM_EVENT, alarm_result),
         ):
             for building in result.get("running_buildings", []) or []:
@@ -5627,9 +5560,11 @@ class SharedSourceCacheService:
             }
         if normalized_family == FAMILY_BRANCH_POWER:
             return {
+                "accepted": False,
                 "source_family": normalized_family,
-                "bucket_key": self.branch_power_bucket(),
-                "fill_func": self.fill_branch_power_latest,
+                "bucket_key": "",
+                "fill_func": None,
+                "reason": "branch_daily_only_external",
             }
         if normalized_family == FAMILY_ALARM_EVENT:
             bucket_key = self._auto_alarm_bucket()

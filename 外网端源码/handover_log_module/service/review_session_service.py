@@ -148,7 +148,13 @@ def _normalize_capacity_image_delivery(raw: Dict[str, Any] | None) -> Dict[str, 
     }
 
 
-_CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B13", "D13"]
+_CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13"]
+_OUTDOOR_TEMPERATURE_BLOCK_ID = "outdoor_temperature"
+_OUTDOOR_TEMPERATURE_CELLS = ("B7", "D7")
+_OUTDOOR_TEMPERATURE_FIELD_META = {
+    "B7": "室外干球温度",
+    "D7": "室外湿球温度",
+}
 _SUBSTATION_110KV_BLOCK_ID = "substation_110kv"
 _SUBSTATION_110KV_VALUE_KEYS = ["line_voltage", "current", "power_kw", "power_factor", "load_rate"]
 _SUBSTATION_110KV_COLUMNS = [
@@ -517,6 +523,7 @@ class ReviewSessionService:
                 "cloud_sheet_sync": {},
                 "source_file_cache": {},
                 "source_data_attachment_export": {},
+                "cabinet_shift_record_export": {},
             }
         )
 
@@ -702,6 +709,19 @@ class ReviewSessionService:
         }
 
     @staticmethod
+    def _normalize_cabinet_shift_record_export(raw: Dict[str, Any] | None) -> Dict[str, Any]:
+        payload = raw if isinstance(raw, dict) else {}
+        return {
+            "status": str(payload.get("status", "pending_review")).strip() or "pending_review",
+            "reason": str(payload.get("reason", "await_all_confirmed")).strip(),
+            "record_id": str(payload.get("record_id", "")).strip(),
+            "uploaded_revision": int(payload.get("uploaded_revision", 0) or 0),
+            "uploaded_at": str(payload.get("uploaded_at", "")).strip(),
+            "updated_at": str(payload.get("updated_at", "")).strip(),
+            "error": str(payload.get("error", "")).strip(),
+        }
+
+    @staticmethod
     def _normalize_source_file_cache(raw: Dict[str, Any] | None) -> Dict[str, Any]:
         payload = raw if isinstance(raw, dict) else {}
         managed = bool(payload.get("managed", False))
@@ -847,6 +867,9 @@ class ReviewSessionService:
             "source_file_cache": self._normalize_source_file_cache(raw.get("source_file_cache", {})),
             "source_data_attachment_export": self._normalize_source_data_attachment_export(
                 raw.get("source_data_attachment_export", {})
+            ),
+            "cabinet_shift_record_export": self._normalize_cabinet_shift_record_export(
+                raw.get("cabinet_shift_record_export", {})
             ),
             "review_link_delivery": _normalize_review_link_delivery(raw.get("review_link_delivery", {})),
             "capacity_image_delivery": _normalize_capacity_image_delivery(raw.get("capacity_image_delivery", {})),
@@ -1619,6 +1642,364 @@ class ReviewSessionService:
         except Exception as exc:  # noqa: BLE001
             _reraise_review_store_error(exc)
 
+    @staticmethod
+    def _normalize_outdoor_temperature_cells(raw: Dict[str, Any] | None) -> Dict[str, str]:
+        payload = raw if isinstance(raw, dict) else {}
+        source = payload.get("cells", payload)
+        if not isinstance(source, dict):
+            source = {}
+        return {
+            cell: str(source.get(cell, "") if source.get(cell) is not None else "")
+            for cell in _OUTDOOR_TEMPERATURE_CELLS
+        }
+
+    @staticmethod
+    def extract_outdoor_temperature_cells_from_document(document: Dict[str, Any] | None) -> Dict[str, str]:
+        output = {cell: "" for cell in _OUTDOOR_TEMPERATURE_CELLS}
+        fixed_blocks = document.get("fixed_blocks", []) if isinstance(document, dict) else []
+        if not isinstance(fixed_blocks, list):
+            return output
+        for block in fixed_blocks:
+            if not isinstance(block, dict):
+                continue
+            fields = block.get("fields", [])
+            if not isinstance(fields, list):
+                continue
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+                cell = str(field.get("cell", "") or "").strip().upper()
+                if cell in output:
+                    output[cell] = str(field.get("value", "") if field.get("value") is not None else "")
+        return output
+
+    @classmethod
+    def apply_outdoor_temperature_to_document(
+        cls,
+        document: Dict[str, Any] | None,
+        cells: Dict[str, Any] | None,
+    ) -> tuple[Dict[str, Any], bool]:
+        payload = document if isinstance(document, dict) else {}
+        normalized = cls._normalize_outdoor_temperature_cells(cells)
+        if not normalized:
+            return payload, False
+        changed = False
+        fixed_blocks = payload.get("fixed_blocks", [])
+        if not isinstance(fixed_blocks, list):
+            return payload, False
+        for block in fixed_blocks:
+            if not isinstance(block, dict):
+                continue
+            fields = block.get("fields", [])
+            if not isinstance(fields, list):
+                continue
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+                cell = str(field.get("cell", "") or "").strip().upper()
+                if cell not in normalized:
+                    continue
+                next_value = normalized[cell]
+                if str(field.get("value", "") if field.get("value") is not None else "") != next_value:
+                    field["value"] = next_value
+                    changed = True
+        return payload, changed
+
+    def _seed_outdoor_temperature_cells_for_batch(
+        self,
+        *,
+        batch_key: str,
+        preferred_document: Dict[str, Any] | None = None,
+        preferred_session: Dict[str, Any] | None = None,
+    ) -> Dict[str, str]:
+        cells = {cell: "" for cell in _OUTDOOR_TEMPERATURE_CELLS}
+        target_batch = str(batch_key or "").strip()
+        sessions = self.list_batch_sessions(target_batch) if target_batch else []
+        preferred_session_id = (
+            str(preferred_session.get("session_id", "") or "").strip()
+            if isinstance(preferred_session, dict)
+            else ""
+        )
+        ordered: List[Dict[str, Any]] = []
+        for session in sessions:
+            if isinstance(session, dict) and str(session.get("building", "") or "").strip() == "A楼":
+                ordered.append(session)
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            session_id = str(session.get("session_id", "") or "").strip()
+            if session_id == preferred_session_id or str(session.get("building", "") or "").strip() == "A楼":
+                continue
+            ordered.append(session)
+        if isinstance(preferred_session, dict) and preferred_session_id and not any(
+            str(item.get("session_id", "") or "").strip() == preferred_session_id for item in ordered
+        ):
+            ordered.append(preferred_session)
+
+        for session in ordered:
+            building = str(session.get("building", "") or "").strip()
+            session_id = str(session.get("session_id", "") or "").strip()
+            if not building or not session_id:
+                continue
+            try:
+                state = ReviewBuildingDocumentStore(config=self.config, building=building).get_document(session_id)
+            except Exception:  # noqa: BLE001
+                state = None
+            document = state.get("document", {}) if isinstance(state, dict) else {}
+            candidate = self.extract_outdoor_temperature_cells_from_document(
+                document if isinstance(document, dict) else {}
+            )
+            for cell in _OUTDOOR_TEMPERATURE_CELLS:
+                if not cells[cell] and str(candidate.get(cell, "") or "").strip():
+                    cells[cell] = str(candidate.get(cell, ""))
+            if all(str(cells.get(cell, "") or "").strip() for cell in _OUTDOOR_TEMPERATURE_CELLS):
+                return cells
+
+        preferred_cells = self.extract_outdoor_temperature_cells_from_document(preferred_document)
+        for cell in _OUTDOOR_TEMPERATURE_CELLS:
+            if not cells[cell]:
+                cells[cell] = str(preferred_cells.get(cell, ""))
+        return cells
+
+    def _compose_outdoor_temperature_block(
+        self,
+        raw_block: Dict[str, Any],
+        *,
+        seed_cells: Dict[str, str] | None = None,
+    ) -> Dict[str, Any]:
+        block = raw_block if isinstance(raw_block, dict) else {}
+        payload = block.get("payload", {}) if isinstance(block.get("payload", {}), dict) else {}
+        cells = self._normalize_outdoor_temperature_cells(payload)
+        seed = self._normalize_outdoor_temperature_cells(seed_cells)
+        use_seed = int(block.get("revision", 0) or 0) <= 0
+        for cell in _OUTDOOR_TEMPERATURE_CELLS:
+            if use_seed and not str(cells.get(cell, "") or "").strip():
+                cells[cell] = str(seed.get(cell, ""))
+        return {
+            "block_id": _OUTDOOR_TEMPERATURE_BLOCK_ID,
+            "batch_key": str(block.get("batch_key", "") or "").strip(),
+            "revision": int(block.get("revision", 0) or 0),
+            "updated_at": str(block.get("updated_at", "") or "").strip(),
+            "updated_by_building": str(block.get("updated_by_building", "") or "").strip(),
+            "updated_by_client": str(block.get("updated_by_client", "") or "").strip(),
+            "fields": [
+                {"cell": cell, "label": _OUTDOOR_TEMPERATURE_FIELD_META[cell], "value": cells.get(cell, "")}
+                for cell in _OUTDOOR_TEMPERATURE_CELLS
+            ],
+            "cells": cells,
+        }
+
+    def get_outdoor_temperature_state(
+        self,
+        *,
+        batch_key: str,
+        client_id: str = "",
+        preferred_document: Dict[str, Any] | None = None,
+        preferred_session: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        batch_key_text = str(batch_key or "").strip()
+        try:
+            raw_block = self._review_state_store.get_shared_block(
+                batch_key=batch_key_text,
+                block_id=_OUTDOOR_TEMPERATURE_BLOCK_ID,
+            )
+            seed_cells = self._seed_outdoor_temperature_cells_for_batch(
+                batch_key=batch_key_text,
+                preferred_document=preferred_document,
+                preferred_session=preferred_session,
+            )
+            block = self._compose_outdoor_temperature_block(raw_block, seed_cells=seed_cells)
+            lock = self._review_state_store.get_shared_block_lock(
+                batch_key=batch_key_text,
+                block_id=_OUTDOOR_TEMPERATURE_BLOCK_ID,
+                current_revision=int(block.get("revision", 0) or 0),
+                client_id=str(client_id or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        return {
+            "shared_blocks": {_OUTDOOR_TEMPERATURE_BLOCK_ID: block},
+            "shared_block_locks": {_OUTDOOR_TEMPERATURE_BLOCK_ID: lock},
+        }
+
+    def save_outdoor_temperature(
+        self,
+        *,
+        batch_key: str,
+        building: str,
+        client_id: str = "",
+        cells: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        payload = {"cells": self._normalize_outdoor_temperature_cells(cells)}
+        try:
+            saved = self._review_state_store.save_shared_block_unlocked(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_OUTDOOR_TEMPERATURE_BLOCK_ID,
+                building=str(building or "").strip(),
+                client_id=str(client_id or "").strip(),
+                payload=payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        block = self._compose_outdoor_temperature_block(saved.get("block", {}))
+        return {
+            "shared_blocks": {_OUTDOOR_TEMPERATURE_BLOCK_ID: block},
+            "no_change": bool(saved.get("no_change", False)),
+        }
+
+    def _touch_sessions_after_shared_document_patch(
+        self,
+        *,
+        batch_key: str,
+        session_ids: List[str],
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        target_batch = str(batch_key or "").strip()
+        target_ids = {str(item or "").strip() for item in (session_ids or []) if str(item or "").strip()}
+        if not target_batch or not target_ids:
+            return [], self.get_batch_status(target_batch)
+        state = self._load_state()
+        sessions = state.get("review_sessions", {})
+        cloud_batches = state.get("review_cloud_batches", {})
+        if not isinstance(sessions, dict):
+            return [], self.get_batch_status(target_batch)
+        batch_cloud = (
+            self._normalize_cloud_batch(cloud_batches.get(target_batch, {}))
+            if isinstance(cloud_batches, dict)
+            else self._normalize_cloud_batch({})
+        )
+        updated_sessions: List[Dict[str, Any]] = []
+        now_text = _now_text()
+        for session_id in target_ids:
+            raw_session = sessions.get(session_id, {})
+            if not isinstance(raw_session, dict):
+                continue
+            session = self._normalize_session(raw_session)
+            if str(session.get("batch_key", "")).strip() != target_batch:
+                continue
+            current_revision = int(session.get("revision", 1) or 1)
+            cloud_state = self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
+            cloud_status = str(cloud_state.get("status", "")).strip().lower()
+            preserve_confirmation = bool(session.get("confirmed", False)) and (
+                bool(batch_cloud.get("first_full_cloud_sync_completed", False))
+                or cloud_status in {"uploading", "syncing"}
+            )
+            session["revision"] = current_revision + 1
+            if not preserve_confirmation:
+                session["confirmed"] = False
+                session["confirmed_at"] = ""
+                session["confirmed_by"] = ""
+            session["updated_at"] = now_text
+
+            if not bool(batch_cloud.get("first_full_cloud_sync_completed", False)):
+                attachment_state = self._normalize_source_data_attachment_export(
+                    session.get("source_data_attachment_export", {})
+                )
+                attachment_state["frozen_after_first_full_cloud_sync"] = False
+                if attachment_state.get("reason") not in {"disabled", "missing_duty_context", "night_shift_disabled"}:
+                    attachment_state["status"] = "pending_review"
+                    attachment_state["reason"] = "await_all_confirmed"
+                    attachment_state["uploaded_count"] = 0
+                    attachment_state["error"] = ""
+                    attachment_state["uploaded_at"] = ""
+                    attachment_state["uploaded_revision"] = 0
+                session["source_data_attachment_export"] = attachment_state
+            else:
+                attachment_state = self._normalize_source_data_attachment_export(
+                    session.get("source_data_attachment_export", {})
+                )
+                if str(attachment_state.get("status", "")).strip().lower() in {"ok", "success", "skipped"}:
+                    attachment_state["frozen_after_first_full_cloud_sync"] = True
+                session["source_data_attachment_export"] = attachment_state
+
+            cabinet_state = self._normalize_cabinet_shift_record_export(
+                session.get("cabinet_shift_record_export", {})
+            )
+            if cabinet_state.get("reason") not in {"disabled", "missing_duty_context"}:
+                cabinet_state["status"] = "pending_upload" if preserve_confirmation else "pending_review"
+                cabinet_state["reason"] = "cloud_sync_pending" if preserve_confirmation else "await_all_confirmed"
+                cabinet_state["error"] = ""
+                cabinet_state["updated_at"] = now_text
+            session["cabinet_shift_record_export"] = cabinet_state
+
+            if str(cloud_state.get("status", "")).strip().lower() != "disabled":
+                cloud_state["success"] = False
+                if cloud_status in {"uploading", "syncing"}:
+                    cloud_state["status"] = cloud_status
+                    cloud_state["attempted"] = True
+                else:
+                    cloud_state["status"] = "pending_upload"
+                    cloud_state["attempted"] = False
+                    cloud_state["last_attempt_revision"] = int(cloud_state.get("synced_revision", 0) or 0)
+                cloud_state["updated_at"] = now_text
+                cloud_state["error"] = ""
+            session["cloud_sheet_sync"] = cloud_state
+            updated_sessions.append(dict(session))
+
+        if updated_sessions:
+            self._apply_review_state_changes(upsert_sessions=updated_sessions, latest_batch_key=target_batch)
+        return updated_sessions, self.get_batch_status(target_batch)
+
+    def sync_outdoor_temperature_to_batch_documents(
+        self,
+        *,
+        batch_key: str,
+        cells: Dict[str, Any] | None,
+        source_session_id: str = "",
+    ) -> Dict[str, Any]:
+        target_batch = str(batch_key or "").strip()
+        normalized_cells = self._normalize_outdoor_temperature_cells(cells)
+        source_id = str(source_session_id or "").strip()
+        if not target_batch:
+            return {"updated_sessions": [], "patched_documents": [], "skipped": True}
+        patched: List[Dict[str, Any]] = []
+        patched_session_ids: List[str] = []
+        for session in self.list_batch_sessions(target_batch):
+            if not isinstance(session, dict):
+                continue
+            session_id = str(session.get("session_id", "") or "").strip()
+            if not session_id or session_id == source_id:
+                continue
+            building = str(session.get("building", "") or "").strip()
+            if not building:
+                continue
+            try:
+                result = ReviewBuildingDocumentStore(config=self.config, building=building).patch_fixed_cells(
+                    session=session,
+                    cells=normalized_cells,
+                    reason="shared_outdoor_temperature",
+                )
+            except Exception as exc:  # noqa: BLE001
+                patched.append(
+                    {
+                        "building": building,
+                        "session_id": session_id,
+                        "changed": False,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            if bool(result.get("changed", False)):
+                patched_session_ids.append(session_id)
+            patched.append(
+                {
+                    "building": building,
+                    "session_id": session_id,
+                    "changed": bool(result.get("changed", False)),
+                    "revision": int(result.get("revision", 0) or 0),
+                    "error": str(result.get("error", "") or "").strip(),
+                }
+            )
+        updated_sessions, batch_status = self._touch_sessions_after_shared_document_patch(
+            batch_key=target_batch,
+            session_ids=patched_session_ids,
+        )
+        return {
+            "updated_sessions": updated_sessions,
+            "patched_documents": patched,
+            "batch_status": batch_status,
+            "updated_count": len(updated_sessions),
+        }
+
     def _compose_substation_110kv_block(self, raw_block: Dict[str, Any]) -> Dict[str, Any]:
         block = raw_block if isinstance(raw_block, dict) else {}
         payload = block.get("payload", {}) if isinstance(block.get("payload", {}), dict) else {}
@@ -2024,6 +2405,7 @@ class ReviewSessionService:
         source_mode: str,
         source_file_cache: Dict[str, Any] | None = None,
         source_data_attachment_export: Dict[str, Any] | None = None,
+        cabinet_shift_record_export: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         building_name = str(building or "").strip()
         duty_date_text = str(duty_date or "").strip()
@@ -2102,6 +2484,9 @@ class ReviewSessionService:
             "source_file_cache": self._normalize_source_file_cache(source_file_cache),
             "source_data_attachment_export": self._normalize_source_data_attachment_export(
                 source_data_attachment_export
+            ),
+            "cabinet_shift_record_export": self._normalize_cabinet_shift_record_export(
+                cabinet_shift_record_export
             ),
             "review_link_delivery": _normalize_review_link_delivery(
                 previous.get("review_link_delivery", {}) if isinstance(previous, dict) else {}
@@ -2186,7 +2571,14 @@ class ReviewSessionService:
         if int(base_revision) != current_revision:
             raise ReviewSessionConflictError("review session revision conflict")
 
-        session["confirmed"] = bool(confirmed)
+        target_confirmed = bool(confirmed)
+        current_confirmed = bool(session.get("confirmed", False))
+        cloud_state = self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
+        cloud_status = str(cloud_state.get("status", "")).strip().lower()
+        if current_confirmed != target_confirmed and cloud_status in {"uploading", "syncing"}:
+            raise ReviewSessionConflictError("当前楼栋云文档上传中，请等待上传完成后再操作确认状态")
+
+        session["confirmed"] = target_confirmed
         session["confirmed_at"] = _now_text() if confirmed else ""
         session["confirmed_by"] = str(confirmed_by or "").strip() if confirmed else ""
         session["revision"] = current_revision + 1
@@ -2322,6 +2714,26 @@ class ReviewSessionService:
         self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session)
 
+    def update_cabinet_shift_record_export(
+        self,
+        *,
+        session_id: str,
+        cabinet_shift_record_export: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        target_session_id = str(session_id or "").strip()
+        state = self._load_state()
+        sessions = state.get("review_sessions", {})
+        if not isinstance(sessions, dict) or target_session_id not in sessions:
+            raise ReviewSessionNotFoundError("review session not found")
+
+        session = self._normalize_session(sessions[target_session_id])
+        session["cabinet_shift_record_export"] = self._normalize_cabinet_shift_record_export(
+            cabinet_shift_record_export
+        )
+        session["updated_at"] = _now_text()
+        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
+        return dict(session)
+
     def touch_session_after_save(
         self,
         *,
@@ -2344,17 +2756,25 @@ class ReviewSessionService:
         if int(base_revision) != current_revision:
             raise ReviewSessionConflictError("review session revision conflict")
 
-        session["revision"] = current_revision + 1
-        session["confirmed"] = False
-        session["confirmed_at"] = ""
-        session["confirmed_by"] = ""
-        session["updated_at"] = _now_text()
-
         batch_cloud = (
             self._normalize_cloud_batch(cloud_batches.get(session["batch_key"], {}))
             if isinstance(cloud_batches, dict)
             else self._normalize_cloud_batch({})
         )
+        cloud_state = self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
+        cloud_status = str(cloud_state.get("status", "")).strip().lower()
+        preserve_confirmation = bool(session.get("confirmed", False)) and (
+            bool(batch_cloud.get("first_full_cloud_sync_completed", False))
+            or cloud_status in {"uploading", "syncing"}
+        )
+
+        session["revision"] = current_revision + 1
+        if not preserve_confirmation:
+            session["confirmed"] = False
+            session["confirmed_at"] = ""
+            session["confirmed_by"] = ""
+        session["updated_at"] = _now_text()
+
         if not bool(batch_cloud.get("first_full_cloud_sync_completed", False)):
             attachment_state = self._normalize_source_data_attachment_export(
                 session.get("source_data_attachment_export", {})
@@ -2376,12 +2796,25 @@ class ReviewSessionService:
                 attachment_state["frozen_after_first_full_cloud_sync"] = True
             session["source_data_attachment_export"] = attachment_state
 
-        cloud_state = self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
+        cabinet_state = self._normalize_cabinet_shift_record_export(
+            session.get("cabinet_shift_record_export", {})
+        )
+        if cabinet_state.get("reason") not in {"disabled", "missing_duty_context"}:
+            cabinet_state["status"] = "pending_upload" if preserve_confirmation else "pending_review"
+            cabinet_state["reason"] = "cloud_sync_pending" if preserve_confirmation else "await_all_confirmed"
+            cabinet_state["error"] = ""
+            cabinet_state["updated_at"] = _now_text()
+        session["cabinet_shift_record_export"] = cabinet_state
+
         if str(cloud_state.get("status", "")).strip().lower() != "disabled":
-            cloud_state["attempted"] = False
             cloud_state["success"] = False
-            cloud_state["status"] = "pending_upload"
-            cloud_state["last_attempt_revision"] = int(cloud_state.get("synced_revision", 0) or 0)
+            if cloud_status in {"uploading", "syncing"}:
+                cloud_state["status"] = cloud_status
+                cloud_state["attempted"] = True
+            else:
+                cloud_state["status"] = "pending_upload"
+                cloud_state["attempted"] = False
+                cloud_state["last_attempt_revision"] = int(cloud_state.get("synced_revision", 0) or 0)
             cloud_state["updated_at"] = _now_text()
             cloud_state["error"] = ""
         session["cloud_sheet_sync"] = cloud_state
@@ -2422,6 +2855,16 @@ class ReviewSessionService:
             cloud_state["updated_at"] = _now_text()
             cloud_state["error"] = ""
         session["cloud_sheet_sync"] = cloud_state
+
+        cabinet_state = self._normalize_cabinet_shift_record_export(
+            session.get("cabinet_shift_record_export", {})
+        )
+        if cabinet_state.get("reason") not in {"disabled", "missing_duty_context"}:
+            cabinet_state["status"] = "pending_upload"
+            cabinet_state["reason"] = "cloud_sync_pending"
+            cabinet_state["error"] = ""
+            cabinet_state["updated_at"] = _now_text()
+        session["cabinet_shift_record_export"] = cabinet_state
 
         self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session), self.get_batch_status(session["batch_key"])
