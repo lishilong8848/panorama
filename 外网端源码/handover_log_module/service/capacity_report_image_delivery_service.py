@@ -32,7 +32,9 @@ _SCREENSHOT_QUEUE_TIMEOUT_SEC = 600
 _LIBREOFFICE_CONVERT_TIMEOUT_SEC = 180
 _DEPENDENCY_INSTALL_TIMEOUT_SEC = 900
 _LIBREOFFICE_DOWNLOAD_READ_TIMEOUT_SEC = 120
-_PDF_RENDER_SCALE = 2.0
+_DEFAULT_PDF_RENDER_SCALE = 4.0
+_CAPACITY_IMAGE_RENDER_VERSION = "capacity_image_hires_v2"
+_CAPACITY_IMAGE_RENDER_SCALE_ENV = "QJPT_CAPACITY_IMAGE_RENDER_SCALE"
 _CAPACITY_REPORT_SHEET_NAME = "本班组"
 _LIBREOFFICE_INSTALLER_MIN_BYTES = 100 * 1024 * 1024
 _LIBREOFFICE_SUCCESS_CODES = {0, 3010}
@@ -107,6 +109,25 @@ def _tail_process_output(value: str, *, limit: int = 1200) -> str:
     if len(text) <= limit:
         return text
     return text[-limit:]
+
+
+def _capacity_image_render_scale() -> float:
+    raw = _text(os.environ.get(_CAPACITY_IMAGE_RENDER_SCALE_ENV))
+    if not raw:
+        return _DEFAULT_PDF_RENDER_SCALE
+    try:
+        value = float(raw)
+    except Exception:
+        return _DEFAULT_PDF_RENDER_SCALE
+    return min(6.0, max(2.0, value))
+
+
+def _capacity_image_cache_signature(source_signature: str) -> str:
+    text = _text(source_signature)
+    if not text:
+        return ""
+    payload = f"{text}|render={_CAPACITY_IMAGE_RENDER_VERSION}|scale={_capacity_image_render_scale():.2f}"
+    return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
 
 
 def _tail_text_file(path: Path, *, limit: int = 3000) -> str:
@@ -1012,10 +1033,11 @@ class CapacityReportImageDeliveryService:
             page_count = len(document)
             if page_count <= 0:
                 raise RuntimeError("PDF没有可渲染页面")
+            render_scale = _capacity_image_render_scale()
             for index in range(page_count):
                 page = document[index]
                 try:
-                    bitmap = page.render(scale=_PDF_RENDER_SCALE)
+                    bitmap = page.render(scale=render_scale)
                     page_image = bitmap.to_pil().convert("RGB")
                     pages.append(self._crop_rendered_page(page_image))
                 finally:
@@ -1049,7 +1071,7 @@ class CapacityReportImageDeliveryService:
         emit_log(
             "[交接班][容量表图片发送] LibreOffice截图生成成功 "
             f"image={output_path}, size={int(getattr(stat, 'st_size', 0) or 0)}, "
-            f"sheet={sheet_name}, pdf_pages={len(pages)}, width={width}, height={height}"
+            f"sheet={sheet_name}, pdf_pages={len(pages)}, width={width}, height={height}, render_scale={render_scale:.2f}"
         )
         return output_path
 
@@ -1298,7 +1320,7 @@ class CapacityReportImageDeliveryService:
             client_id=client_id,
             emit_log=emit_log,
         )
-        target_signature = _text(signature_info.get("signature"))
+        target_signature = _capacity_image_cache_signature(_text(signature_info.get("signature")))
         sync_state = current_session.get("capacity_sync", {}) if isinstance(current_session.get("capacity_sync", {}), dict) else {}
         sync_ready = (
             _text(sync_state.get("status")).lower() == "ready"
@@ -1371,7 +1393,7 @@ class CapacityReportImageDeliveryService:
                 client_id=client_id,
                 emit_log=emit_log,
             )
-            target_signature = _text(signature_info.get("signature"))
+            target_signature = _capacity_image_cache_signature(_text(signature_info.get("signature")))
             if not bool(signature_info.get("valid", False)):
                 return self._fail(
                     session=current_session,
@@ -1411,6 +1433,8 @@ class CapacityReportImageDeliveryService:
             **delivery_state,
             "image_path": str(image_path),
             "image_signature": target_signature,
+            "image_render_version": _CAPACITY_IMAGE_RENDER_VERSION,
+            "image_render_scale": _capacity_image_render_scale(),
             **image_stat,
         }
         self._persist_delivery(session_id=session_id, delivery=delivery_state, emit_log=emit_log)
