@@ -388,6 +388,22 @@ class SharedBridgeStore:
             ).fetchall()
         return [self._row_to_task_dict(row) for row in rows]
 
+    def list_active_tasks(self, *, limit: int = 1000) -> List[Dict[str, Any]]:
+        placeholders = ", ".join("?" for _ in _TERMINAL_TASK_STATUSES)
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT task_id, feature, mode, created_by_role, created_by_node_id, requested_by,
+                       status, dedupe_key, request_json, result_json, error, created_at, updated_at, revision
+                FROM bridge_tasks
+                WHERE status NOT IN ({placeholders})
+                ORDER BY created_at ASC, task_id ASC
+                LIMIT ?
+                """,
+                (*sorted(_TERMINAL_TASK_STATUSES), max(1, int(limit or 1000))),
+            ).fetchall()
+        return [self._row_to_task_dict(row) for row in rows]
+
     def get_task(self, task_id: str) -> Dict[str, Any] | None:
         task_text = str(task_id or "").strip()
         if not task_text:

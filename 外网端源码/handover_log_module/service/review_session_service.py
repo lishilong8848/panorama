@@ -149,6 +149,7 @@ def _normalize_capacity_image_delivery(raw: Dict[str, Any] | None) -> Dict[str, 
 
 
 _CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13"]
+_CAPACITY_LOAD_RATE_CELLS = ["J12", "J13", "J14", "J15"]
 _OUTDOOR_TEMPERATURE_BLOCK_ID = "outdoor_temperature"
 _OUTDOOR_TEMPERATURE_CELLS = ("B7", "D7")
 _OUTDOOR_TEMPERATURE_FIELD_META = {
@@ -589,6 +590,11 @@ class ReviewSessionService:
                         "end_column_index": end_col,
                     }
                 )
+        raw_load_rates = raw.get("capacity_load_rates", {})
+        if not isinstance(raw_load_rates, dict) and isinstance(raw.get("capacity_sync", {}), dict):
+            raw_load_rates = raw.get("capacity_sync", {}).get("capacity_load_rates", {})
+        elif isinstance(raw_load_rates, dict) and not raw_load_rates and isinstance(raw.get("capacity_sync", {}), dict):
+            raw_load_rates = raw.get("capacity_sync", {}).get("capacity_load_rates", {})
         return {
             "attempted": bool(payload.get("attempted", False)),
             "success": bool(payload.get("success", False)),
@@ -817,6 +823,23 @@ class ReviewSessionService:
             output[zone].sort(key=lambda row: int(row.get("unit", 0) or 0))
         return output
 
+    @staticmethod
+    def _normalize_capacity_load_rates(raw: Dict[str, Any] | None) -> Dict[str, Any]:
+        payload = raw if isinstance(raw, dict) else {}
+        output: Dict[str, Any] = {}
+        for cell in _CAPACITY_LOAD_RATE_CELLS:
+            try:
+                value = payload.get(cell)
+                if value is None or isinstance(value, bool):
+                    continue
+                output[cell] = float(value)
+            except Exception:  # noqa: BLE001
+                continue
+        updated_at = str(payload.get("updated_at", "") or "").strip()
+        if updated_at:
+            output["updated_at"] = updated_at
+        return output
+
     def _normalize_session(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         building = str(raw.get("building", "")).strip()
         duty_date = str(raw.get("duty_date", "")).strip()
@@ -828,6 +851,11 @@ class ReviewSessionService:
         session_id = str(raw.get("session_id", "")).strip() or self.build_session_id(building, duty_date, duty_shift)
         legacy_capacity_sync = self._derive_capacity_sync_from_legacy_fields(raw)
         capacity_sync = self._normalize_capacity_sync(raw.get("capacity_sync", {}), fallback=legacy_capacity_sync)
+        raw_load_rates = raw.get("capacity_load_rates", {})
+        if not isinstance(raw_load_rates, dict) and isinstance(raw.get("capacity_sync", {}), dict):
+            raw_load_rates = raw.get("capacity_sync", {}).get("capacity_load_rates", {})
+        elif isinstance(raw_load_rates, dict) and not raw_load_rates and isinstance(raw.get("capacity_sync", {}), dict):
+            raw_load_rates = raw.get("capacity_sync", {}).get("capacity_load_rates", {})
         return {
             "session_id": session_id,
             "building": building,
@@ -851,6 +879,7 @@ class ReviewSessionService:
                 if isinstance(raw.get("capacity_cooling_summary", {}), dict)
                 else {}
             ),
+            "capacity_load_rates": self._normalize_capacity_load_rates(raw_load_rates),
             "capacity_sync": capacity_sync,
             "data_file": str(raw.get("data_file", "")).strip(),
             "source_mode": str(raw.get("source_mode", "")).strip(),
@@ -2402,6 +2431,7 @@ class ReviewSessionService:
         capacity_sync: Dict[str, Any] | None = None,
         capacity_running_units: Dict[str, Any] | None = None,
         capacity_cooling_summary: Dict[str, Any] | None = None,
+        capacity_load_rates: Dict[str, Any] | None = None,
         source_mode: str,
         source_file_cache: Dict[str, Any] | None = None,
         source_data_attachment_export: Dict[str, Any] | None = None,
@@ -2431,6 +2461,11 @@ class ReviewSessionService:
         previous_output_file = str(previous.get("output_file", "") or "").strip() if isinstance(previous, dict) else ""
         previous_cloud_sync = previous.get("cloud_sheet_sync", {}) if isinstance(previous, dict) else {}
         batch_cloud = cloud_batches.get(batch_key, {}) if isinstance(cloud_batches.get(batch_key, {}), dict) else {}
+        resolved_capacity_load_rates = capacity_load_rates
+        if resolved_capacity_load_rates is None and isinstance(capacity_sync, dict):
+            maybe_rates = capacity_sync.get("capacity_load_rates", {})
+            if isinstance(maybe_rates, dict):
+                resolved_capacity_load_rates = maybe_rates
         session = {
             "session_id": session_id,
             "building": building_name,
@@ -2455,6 +2490,7 @@ class ReviewSessionService:
                 if isinstance(capacity_cooling_summary, dict)
                 else {}
             ),
+            "capacity_load_rates": self._normalize_capacity_load_rates(resolved_capacity_load_rates),
             "capacity_sync": self._normalize_capacity_sync(
                 capacity_sync,
                 fallback=self._derive_capacity_sync_from_legacy_fields(
@@ -2632,6 +2668,7 @@ class ReviewSessionService:
         *,
         session_id: str,
         capacity_sync: Dict[str, Any],
+        capacity_load_rates: Dict[str, Any] | None = None,
         capacity_status: str = "",
         capacity_error: str = "",
     ) -> Dict[str, Any]:
@@ -2651,6 +2688,14 @@ class ReviewSessionService:
             }
         )
         session["capacity_sync"] = self._normalize_capacity_sync(capacity_sync, fallback=fallback_sync)
+        load_rates_payload = capacity_load_rates
+        if load_rates_payload is None and isinstance(capacity_sync, dict):
+            maybe_rates = capacity_sync.get("capacity_load_rates", {})
+            if isinstance(maybe_rates, dict):
+                load_rates_payload = maybe_rates
+        normalized_load_rates = self._normalize_capacity_load_rates(load_rates_payload)
+        if normalized_load_rates:
+            session["capacity_load_rates"] = normalized_load_rates
         if str(capacity_status or "").strip():
             session["capacity_status"] = str(capacity_status or "").strip().lower()
         if capacity_error is not None:

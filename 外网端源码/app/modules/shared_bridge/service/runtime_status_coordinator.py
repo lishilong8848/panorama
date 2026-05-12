@@ -470,7 +470,7 @@ class RuntimeStatusCoordinator:
         }
 
     def _build_bridge_tasks_summary(self) -> Dict[str, Any]:
-        return self._build_bridge_tasks_summary_with_limit(limit=60)
+        return self._build_bridge_tasks_summary_with_limit(limit=2000)
 
     def _build_bridge_tasks_dashboard_summary(self) -> Dict[str, Any]:
         return self._build_bridge_tasks_summary_with_limit(limit=12)
@@ -481,12 +481,27 @@ class RuntimeStatusCoordinator:
         if service is None:
             return {"tasks": [], "count": 0}
         try:
-            tasks = service.list_tasks(limit=limit)
+            active_reader = getattr(service, "list_active_tasks", None)
+            active_tasks = active_reader(limit=max(limit, 2000)) if callable(active_reader) else []
+            recent_reader = getattr(service, "list_recent_tasks", None)
+            recent_tasks = recent_reader(limit=limit) if callable(recent_reader) else service.list_tasks(limit=limit)
+            by_id = {}
+            merged_candidates = [
+                *(active_tasks if isinstance(active_tasks, list) else []),
+                *(recent_tasks if isinstance(recent_tasks, list) else []),
+            ]
+            for task in merged_candidates:
+                if not isinstance(task, dict):
+                    continue
+                task_id = str(task.get("task_id", "") or "").strip()
+                if task_id and task_id not in by_id:
+                    by_id[task_id] = task
+            tasks = list(by_id.values())
         except Exception as exc:  # noqa: BLE001
             checker = getattr(service, "_is_recoverable_store_error", None)
             if callable(checker) and checker(exc):
                 cache_reader = getattr(service, "get_cached_tasks", None)
-                tasks = cache_reader(limit=limit) if callable(cache_reader) else []
+                tasks = cache_reader(limit=max(limit, 2000)) if callable(cache_reader) else []
             else:
                 if callable(self._emit_log):
                     self._emit_log(f"[运行状态] 刷新共享桥接任务摘要失败: {exc}")

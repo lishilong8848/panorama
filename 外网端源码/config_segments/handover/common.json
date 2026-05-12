@@ -1,6 +1,6 @@
-{
-  "revision": 6,
-  "updated_at": "2026-04-30T20:11:06+08:00",
+﻿{
+  "revision": 9,
+  "updated_at": "2026-05-12T20:28:22+08:00",
   "data": {
     "enabled": true,
     "scheduler": {
@@ -91,7 +91,7 @@
         "timeout_sec": 8,
         "auth_mode": "signed",
         "seniverse_public_key": "Pw-nkmTzcCorv7Dey",
-        "seniverse_private_key": "SwWfUI324UukiuVs2"
+        "seniverse_private_key": "*************uVs2"
       }
     },
     "template": {
@@ -845,7 +845,26 @@
         "I"
       ],
       "cabinet_power_defaults_by_building": {},
-      "footer_inventory_defaults_by_building": {}
+      "footer_inventory_defaults_by_building": {},
+      "review_link_recipients_by_building": {
+        "110站": [
+          {
+            "note": "lsl",
+            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+            "enabled": true
+          },
+          {
+            "note": "m",
+            "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+            "enabled": true
+          },
+          {
+            "note": "110",
+            "open_id": "ou_913ff495ae8f5a0a55ae5670fd148bbd",
+            "enabled": true
+          }
+        ]
+      }
     },
     "cell_rules": {
       "default_rows": [

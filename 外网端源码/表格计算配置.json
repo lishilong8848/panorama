@@ -1,4 +1,4 @@
-{
+﻿{
   "version": 3,
   "common": {
     "paths": {
@@ -34,13 +34,13 @@
     "scheduler": {
       "enabled": true,
       "auto_start_in_gui": true,
-      "interval_minutes": 60,
+      "run_time": "00:10:00",
       "check_interval_sec": 30,
-      "retry_failed_on_next_tick": true,
-      "state_file": "daily_scheduler_state.json",
       "catch_up_if_missed": false,
       "retry_failed_in_same_period": true,
-      "run_time": "00:10:00"
+      "state_file": "daily_scheduler_state.json",
+      "interval_minutes": 60,
+      "retry_failed_on_next_tick": true
     },
     "notify": {
       "enable_webhook": true,
@@ -298,7 +298,7 @@
           "timeout_sec": 8,
           "auth_mode": "signed",
           "seniverse_public_key": "Pw-nkmTzcCorv7Dey",
-          "seniverse_private_key": "SwWfUI324UukiuVs2"
+          "seniverse_private_key": "*************uVs2"
         }
       },
       "template": {
@@ -883,6 +883,34 @@
         "screenshot_page_url": "https://124.222.19.16:3001/",
         "browser_profile_directory": ""
       },
+      "cabinet_shift_record_bitable_export": {
+        "enabled": true,
+        "target": {
+          "app_token": "G7oUwGdwaiTmimk8i2ecGTWOn4d",
+          "table_id": "tblObkKSs8C3o33B",
+          "page_size": 500,
+          "max_records": 5000,
+          "create_batch_size": 200,
+          "update_batch_size": 200
+        },
+        "fields": {
+          "building": "楼栋",
+          "date": "日期",
+          "shift": "班次",
+          "duty_staff": "值班人员",
+          "handover_staff": "接班人员",
+          "planned_cabinets": "机房总规划机柜数（个）",
+          "powered_cabinets": "实际上电机柜数（个）",
+          "shift_power_on_cabinets": "本班组上电机柜数（个）",
+          "shift_power_off_cabinets": "本班组下电机柜数（个）"
+        },
+        "fixed_values": {
+          "shift_text": {
+            "day": "白班",
+            "night": "夜班"
+          }
+        }
+      },
       "template_fixed_fill": {
         "date_cell": "B2",
         "shift_cell": "F2",
@@ -904,24 +932,24 @@
         "enabled": true,
         "buildings": [
           {
-            "name": "A楼",
-            "code": "a"
+            "code": "a",
+            "name": "A楼"
           },
           {
-            "name": "B楼",
-            "code": "b"
+            "code": "b",
+            "name": "B楼"
           },
           {
-            "name": "C楼",
-            "code": "c"
+            "code": "c",
+            "name": "C楼"
           },
           {
-            "name": "D楼",
-            "code": "d"
+            "code": "d",
+            "name": "D楼"
           },
           {
-            "name": "E楼",
-            "code": "e"
+            "code": "e",
+            "name": "E楼"
           }
         ],
         "fixed_cells": {
@@ -1283,89 +1311,106 @@
           }
         },
         "review_link_recipients_by_building": {
+          "110站": [
+            {
+              "enabled": true,
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "lsl"
+            },
+            {
+              "enabled": true,
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "m"
+            },
+            {
+              "enabled": true,
+              "open_id": "ou_913ff495ae8f5a0a55ae5670fd148bbd",
+              "note": "110"
+            }
+          ],
           "A楼": [
             {
+              "enabled": true,
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "李世龙A",
-              "enabled": true
+              "note": "李世龙A"
             },
             {
+              "enabled": true,
               "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a",
-              "note": "A",
-              "enabled": true
+              "note": "A"
             },
             {
+              "enabled": true,
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "M",
-              "enabled": true
+              "note": "M"
             }
           ],
           "B楼": [
             {
+              "enabled": true,
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "李世龙B",
-              "enabled": true
+              "note": "李世龙B"
             },
             {
+              "enabled": true,
               "open_id": "ou_160e991b0fd811cda7260de056d8a363",
-              "note": "B",
-              "enabled": true
+              "note": "B"
             },
             {
+              "enabled": true,
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "m",
-              "enabled": true
+              "note": "m"
             }
           ],
           "C楼": [
             {
+              "enabled": true,
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "李世龙C",
-              "enabled": true
+              "note": "李世龙C"
             },
             {
+              "enabled": true,
               "open_id": "ou_99391b00c1406917930483d8500af400",
-              "note": "C",
-              "enabled": true
+              "note": "C"
             },
             {
+              "enabled": true,
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "m",
-              "enabled": true
+              "note": "m"
             }
           ],
           "D楼": [
             {
+              "enabled": true,
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "李世龙D",
-              "enabled": true
+              "note": "李世龙D"
             },
             {
+              "enabled": true,
               "open_id": "ou_b9c26b4da3721c2de11ee175c707e756",
-              "note": "D",
-              "enabled": true
+              "note": "D"
             },
             {
+              "enabled": true,
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "m",
-              "enabled": true
+              "note": "m"
             }
           ],
           "E楼": [
             {
+              "enabled": true,
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "李世龙E",
-              "enabled": true
+              "note": "李世龙E"
             },
             {
+              "enabled": true,
               "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3",
-              "note": "E",
-              "enabled": true
+              "note": "E"
             },
             {
+              "enabled": true,
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "m",
-              "enabled": true
+              "note": "m"
             }
           ]
         }
@@ -4433,66 +4478,66 @@
         "page_size": 500,
         "delete_batch_size": 500,
         "create_batch_size": 200,
+        "list_page_size": 500,
         "clear_before_upload": true,
-        "timeout": 30,
-        "list_page_size": 500
+        "timeout": 30
       },
       "shared_source_upload": {
         "replace_existing_on_full": true
       },
       "run_with_scheduler": true,
-      "window_end_time": "00:00:00",
+      "window_days": 35,
       "skip_levels": [
         5
       ],
+      "resume": {
+        "enabled": true,
+        "reuse_extracted_rows": true,
+        "max_retry": 3,
+        "root_dir": "alarm_export_resume",
+        "state_file": "alarm_export_resume_state.json",
+        "retry_interval_sec": 2
+      },
+      "alarm_category_default": "真实告警",
+      "enabled": true,
+      "level_mapping": {
+        "1": "紧急",
+        "2": "严重",
+        "3": "重要",
+        "4": "次要"
+      },
+      "window_end_time": "00:00:00",
+      "fields": {
+        "accept_time": "accept_time",
+        "accept_user": "accept_user",
+        "recover_status": "recover_status",
+        "alarm_type": "alarm_type",
+        "confirm_user": "confirm_user",
+        "confirm_time": "confirm_time",
+        "event_time": "event_time",
+        "accept_description": "accept_description",
+        "confirm_description": "confirm_description",
+        "event_source": "event_source",
+        "recover_time": "recover_time",
+        "process_status": "process_status",
+        "trigger_value": "trigger_value",
+        "content": "content",
+        "event_level": "event_level",
+        "process_suggestion": "process_suggestion"
+      },
       "test_db": {
         "user": "root",
-        "fixed_table": "event_2026_02",
-        "host": "127.0.0.1",
         "building_label": "测试楼栋",
         "password": "123456",
-        "time_field_mode": "auto",
-        "port": 3306,
         "database": "e_event",
+        "table_mode": "fixed",
         "enabled": true,
-        "table_mode": "fixed"
+        "host": "127.0.0.1",
+        "time_field_mode": "auto",
+        "fixed_table": "event_2026_02",
+        "port": 3306
       },
-      "resume": {
-        "state_file": "alarm_export_resume_state.json",
-        "reuse_extracted_rows": true,
-        "root_dir": "alarm_export_resume",
-        "retry_interval_sec": 2,
-        "max_retry": 3,
-        "enabled": true
-      },
-      "snapshot_mode": "clear_and_rebuild",
-      "window_days": 35,
-      "fields": {
-        "accept_user": "accept_user",
-        "process_suggestion": "process_suggestion",
-        "recover_status": "recover_status",
-        "content": "content",
-        "recover_time": "recover_time",
-        "trigger_value": "trigger_value",
-        "process_status": "process_status",
-        "confirm_user": "confirm_user",
-        "alarm_type": "alarm_type",
-        "accept_time": "accept_time",
-        "event_source": "event_source",
-        "confirm_description": "confirm_description",
-        "confirm_time": "confirm_time",
-        "accept_description": "accept_description",
-        "event_time": "event_time",
-        "event_level": "event_level"
-      },
-      "level_mapping": {
-        "3": "重要",
-        "4": "次要",
-        "1": "紧急",
-        "2": "严重"
-      },
-      "enabled": true,
-      "alarm_category_default": "真实告警"
+      "snapshot_mode": "clear_and_rebuild"
     },
     "manual_upload_gui": {
       "enabled": true

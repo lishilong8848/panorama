@@ -5397,7 +5397,7 @@ def retry_job(job_id: str, request: Request) -> Dict[str, Any]:
 
 
 @router.get("/api/jobs")
-def list_jobs(request: Request, limit: int = 50, statuses: str = "") -> Dict[str, Any]:
+def list_jobs(request: Request, limit: int = 2000, statuses: str = "") -> Dict[str, Any]:
     container = request.app.state.container
     normalized_statuses = [
         str(item or "").strip().lower()
@@ -5405,7 +5405,7 @@ def list_jobs(request: Request, limit: int = 50, statuses: str = "") -> Dict[str
         if str(item or "").strip()
     ]
     runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
-    safe_limit = max(1, min(int(limit or 50), 200))
+    safe_limit = max(1, min(int(limit or 2000), 2000))
     if (
         not normalized_statuses
         and runtime_status_coordinator is not None
@@ -5585,14 +5585,14 @@ def _build_external_health_lite_payload(request: Request) -> Dict[str, Any]:
 def _build_external_bridge_tasks_summary_fast(container) -> Dict[str, Any]:
     bridge_tasks_summary = _external_read_scope(
         container,
-        "bridge_tasks_dashboard_summary",
+        "bridge_tasks_summary",
         reason_prefix="external_bridge_tasks",
     )
     if isinstance(bridge_tasks_summary, dict):
         return bridge_tasks_summary
     bridge_tasks_summary_raw = _external_read_scope(
         container,
-        "bridge_tasks_summary",
+        "bridge_tasks_dashboard_summary",
         reason_prefix="external_bridge_tasks",
     ) or {"tasks": [], "count": 0}
     bridge_tasks_rows = (
@@ -5721,8 +5721,8 @@ def _build_external_jobs_module(request: Request) -> Dict[str, Any]:
             },
         )
     job_panel_summary = (
-        _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_jobs")
-        or _external_read_scope(container, "job_panel_summary", reason_prefix="external_jobs")
+        _external_read_scope(container, "job_panel_summary", reason_prefix="external_jobs")
+        or _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_jobs")
         or _empty_job_panel_summary()
     )
     overview = (
@@ -6043,8 +6043,8 @@ def _build_external_system_module(request: Request) -> Dict[str, Any]:
     )
     task_overview = {}
     job_panel_summary = (
-        _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_system")
-        or _external_read_scope(container, "job_panel_summary", reason_prefix="external_system")
+        _external_read_scope(container, "job_panel_summary", reason_prefix="external_system")
+        or _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_system")
         or _empty_job_panel_summary()
     )
     if isinstance(job_panel_summary.get("display", {}), dict):
@@ -6293,13 +6293,13 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         live_shared_bridge.get("internal_alert_status", {})
     )
     job_panel_summary = (
-        _read_scope("job_panel_dashboard_summary")
-        or _read_scope("job_panel_summary")
+        _read_scope("job_panel_summary")
+        or _read_scope("job_panel_dashboard_summary")
         or _empty_job_panel_summary()
     )
-    bridge_tasks_summary = _read_scope("bridge_tasks_dashboard_summary")
+    bridge_tasks_summary = _read_scope("bridge_tasks_summary")
     if not isinstance(bridge_tasks_summary, dict):
-        bridge_tasks_summary_raw = _read_scope("bridge_tasks_summary") or {
+        bridge_tasks_summary_raw = _read_scope("bridge_tasks_dashboard_summary") or {
             "tasks": [],
             "count": 0,
         }

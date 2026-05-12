@@ -43,6 +43,69 @@ def _build_query_end_time_for_hour_scale(start_time: str, end_time: str) -> tupl
     return str(end_time), False
 
 
+async def _query_page_state(frame, *, required_text: str = "") -> Dict[str, Any]:
+    return await frame.evaluate(
+        """(cfg) => {
+            const visible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) {
+                    return false;
+                }
+                return Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            };
+            const loading = Array.from(document.querySelectorAll('.text-indicator')).some((el) => {
+                return visible(el) && String(el.textContent || '').includes('正在加载');
+            });
+            const maskLoading = Array.from(document.querySelectorAll('.x-mask-msg, .x-mask-loading, .fr-loading')).some(visible);
+            const container = document.getElementById('content-container');
+            const text = container ? String(container.textContent || '') : '';
+            const requiredText = String(cfg?.requiredText || '');
+            return {
+                loading: Boolean(loading || maskLoading),
+                dataReady: Boolean(container) && (!requiredText || text.includes(requiredText)),
+                textLength: text.length,
+            };
+        }""",
+        {"requiredText": required_text},
+    )
+
+
+async def _wait_query_loading_started(frame, *, timeout_ms: int = 1000) -> None:
+    deadline = asyncio.get_running_loop().time() + max(0.1, int(timeout_ms or 1000) / 1000.0)
+    last_state: Dict[str, Any] = {}
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            last_state = await _query_page_state(frame)
+            if bool(last_state.get("loading", False)):
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(0.05)
+    raise RuntimeError(f"点击查询后1秒内未出现“正在加载”状态 state={last_state}")
+
+
+async def _wait_query_result_ready(frame, *, timeout_ms: int, required_text: str = "") -> None:
+    effective_timeout_ms = 180000
+    deadline = asyncio.get_running_loop().time() + max(1.0, effective_timeout_ms / 1000.0)
+    last_state: Dict[str, Any] = {}
+    while asyncio.get_running_loop().time() < deadline:
+        last_state = await _query_page_state(frame, required_text=required_text)
+        if bool(last_state.get("dataReady", False)):
+            return
+        if bool(last_state.get("loading", False)):
+            await asyncio.sleep(0.2)
+            continue
+        raise RuntimeError(
+            "查询加载已结束但未检测到有效数据 "
+            f"required={required_text or '-'}, text_length={last_state.get('textLength', 0)}"
+        )
+    raise RuntimeError(
+        "查询一直处于正在加载状态，未检测到有效数据 "
+        f"timeout_ms={effective_timeout_ms}, required={required_text or '-'}"
+    )
+
+
 async def download_single_url_once(
     page,
     save_dir: str,
@@ -176,13 +239,12 @@ async def download_single_url_once(
         query_btn = second_iframe.locator('button.fr-btn-text:has-text("查询"):visible')
         await query_btn.wait_for(state="visible", timeout=5000)
         await query_btn.click(delay=100)
+        await _wait_query_loading_started(second_iframe, timeout_ms=1000)
 
-        await second_iframe.wait_for_function(
-            """() => {
-                const container = document.getElementById('content-container');
-                return container && container.textContent.includes('IT负载');
-            }""",
-            timeout=query_result_timeout_ms,
+        await _wait_query_result_ready(
+            second_iframe,
+            timeout_ms=query_result_timeout_ms,
+            required_text="IT负载",
         )
 
         export_button = second_iframe.locator('button.fr-btn-text.x-emb-excel:has-text("原样导出")')

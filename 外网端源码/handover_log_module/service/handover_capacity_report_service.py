@@ -81,6 +81,9 @@ _WEATHER_INFLIGHT: Dict[Any, threading.Event] = {}
 _CAPACITY_BATCH_CACHE_TTL_SEC = 30
 _CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13")
 _CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
+_CAPACITY_LOAD_RATE_ROWS = (12, 13, 14, 15)
+_CAPACITY_LOAD_RATE_DENOMINATOR = 10000.0
+_CAPACITY_PERCENT_NUMBER_FORMAT = "0.00%"
 _SUBSTATION_110KV_TARGET_ROWS = {
     "阿开": 57,
     "阿家": 58,
@@ -812,6 +815,20 @@ class HandoverCapacityReportService:
         status = _text(payload.get("status")).lower()
         if status not in {"ready", "pending", "pending_input", "missing_file", "failed"}:
             status = "failed"
+        load_rates: Dict[str, Any] = {}
+        raw_rates = payload.get("capacity_load_rates", {})
+        if isinstance(raw_rates, dict):
+            for row_idx in _CAPACITY_LOAD_RATE_ROWS:
+                try:
+                    value = raw_rates.get(f"J{row_idx}")
+                    if value is None or isinstance(value, bool):
+                        continue
+                    load_rates[f"J{row_idx}"] = float(value)
+                except Exception:  # noqa: BLE001
+                    continue
+            updated_at = _text(raw_rates.get("updated_at"))
+            if updated_at:
+                load_rates["updated_at"] = updated_at
         return {
             "status": status,
             "updated_at": _text(payload.get("updated_at")) or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -819,6 +836,7 @@ class HandoverCapacityReportService:
             "tracked_cells": list(_CAPACITY_TRACKED_CELLS),
             "input_signature": _text(payload.get("input_signature")),
             "overlay_signature": _text(payload.get("overlay_signature")),
+            "capacity_load_rates": load_rates,
         }
 
     @staticmethod
@@ -828,6 +846,7 @@ class HandoverCapacityReportService:
         error: str = "",
         input_signature: str = "",
         overlay_signature: str = "",
+        capacity_load_rates: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         return HandoverCapacityReportService._normalize_capacity_sync_payload(
             {
@@ -836,6 +855,7 @@ class HandoverCapacityReportService:
                 "error": error,
                 "input_signature": input_signature,
                 "overlay_signature": overlay_signature,
+                "capacity_load_rates": capacity_load_rates or {},
             }
         )
 
@@ -1740,6 +1760,171 @@ class HandoverCapacityReportService:
             return None
 
     @classmethod
+    def _current_load_rates_from_sheet(
+        cls,
+        sheet,
+        overlay_values: Dict[str, Any] | None = None,
+    ) -> Dict[int, float]:
+        overlay = {
+            _text(cell).upper(): value
+            for cell, value in (overlay_values or {}).items()
+            if _text(cell)
+        }
+        rates: Dict[int, float] = {}
+        for row_idx in _CAPACITY_LOAD_RATE_ROWS:
+            g_cell = f"G{row_idx}"
+            raw_value = overlay.get(g_cell, sheet[g_cell].value)
+            g_value = cls._to_float_cell_value(raw_value)
+            if g_value is None:
+                continue
+            rates[row_idx] = g_value / _CAPACITY_LOAD_RATE_DENOMINATOR
+        return rates
+
+    def _load_previous_capacity_load_rates(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        current_rates: Dict[int, float],
+        emit_log: Callable[[str], None],
+    ) -> tuple[Dict[int, float], str]:
+        previous_date, previous_shift = self._previous_duty_context(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+        )
+        try:
+            previous_session = self._review_session_service.get_latest_session_for_context(
+                building=building,
+                duty_date=previous_date,
+                duty_shift=previous_shift,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warning = f"上一班容量负载率查询失败，变化率按0处理: {exc}"
+            emit_log(
+                "[交接班][容量报表][负载率] 上一班查询失败 "
+                f"building={building}, duty={previous_date}/{previous_shift}, error={exc}"
+            )
+            return dict(current_rates), warning
+
+        previous_rates = self._session_load_rates(previous_session if isinstance(previous_session, dict) else {})
+        if not previous_rates:
+            warning = "上一班容量负载率库记录未命中，负载变化率按0处理"
+            emit_log(
+                "[交接班][容量报表][负载率] 上一班库记录未命中 "
+                f"building={building}, duty={previous_date}/{previous_shift}"
+            )
+            return dict(current_rates), warning
+
+        merged = dict(current_rates)
+        merged.update(previous_rates)
+        emit_log(
+            "[交接班][容量报表][负载率] 上一班库记录读取完成 "
+            f"building={building}, duty={previous_date}/{previous_shift}, cells={','.join(sorted([f'J{row}' for row in previous_rates]))}"
+        )
+        return merged, ""
+
+    @staticmethod
+    def _build_load_rate_cell_values(
+        current_rates: Dict[int, float],
+        previous_rates: Dict[int, float],
+    ) -> Dict[str, float]:
+        values: Dict[str, float] = {}
+        for row_idx in _CAPACITY_LOAD_RATE_ROWS:
+            if row_idx not in current_rates:
+                continue
+            current_rate = float(current_rates[row_idx])
+            previous_rate = float(previous_rates.get(row_idx, current_rate))
+            values[f"J{row_idx}"] = current_rate
+            values[f"M{row_idx}"] = current_rate - previous_rate
+        return values
+
+    @staticmethod
+    def _capacity_load_rates_payload(current_rates: Dict[int, float]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        for row_idx in _CAPACITY_LOAD_RATE_ROWS:
+            if row_idx in current_rates:
+                payload[f"J{row_idx}"] = float(current_rates[row_idx])
+        if payload:
+            payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return payload
+
+    @staticmethod
+    def _session_load_rates(raw: Dict[str, Any] | None) -> Dict[int, float]:
+        payload = raw if isinstance(raw, dict) else {}
+        rates = payload.get("capacity_load_rates", {})
+        rates_payload = rates if isinstance(rates, dict) else {}
+        output: Dict[int, float] = {}
+        for row_idx in _CAPACITY_LOAD_RATE_ROWS:
+            try:
+                value = rates_payload.get(f"J{row_idx}")
+                if value is None or isinstance(value, bool):
+                    continue
+                output[row_idx] = float(value)
+            except Exception:  # noqa: BLE001
+                continue
+        return output
+
+    @staticmethod
+    def _apply_load_rate_number_format(sheet) -> None:
+        for row_idx in _CAPACITY_LOAD_RATE_ROWS:
+            sheet[f"J{row_idx}"].number_format = _CAPACITY_PERCENT_NUMBER_FORMAT
+            sheet[f"M{row_idx}"].number_format = _CAPACITY_PERCENT_NUMBER_FORMAT
+
+    def _build_load_rate_values_for_sheet(
+        self,
+        sheet,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        overlay_values: Dict[str, Any] | None,
+        emit_log: Callable[[str], None],
+    ) -> tuple[Dict[str, float], str, Dict[str, Any]]:
+        current_rates = self._current_load_rates_from_sheet(sheet, overlay_values=overlay_values)
+        if not current_rates:
+            return {}, "当前容量表G12:G15为空，未计算平均负载率和变化率", {}
+        previous_rates, warning = self._load_previous_capacity_load_rates(
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            current_rates=current_rates,
+            emit_log=emit_log,
+        )
+        return (
+            self._build_load_rate_cell_values(current_rates, previous_rates),
+            warning,
+            self._capacity_load_rates_payload(current_rates),
+        )
+
+    def _build_load_rate_values_from_file(
+        self,
+        *,
+        capacity_output_file: str,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        overlay_values: Dict[str, Any] | None,
+        emit_log: Callable[[str], None],
+    ) -> tuple[Dict[str, float], str, Dict[str, Any]]:
+        path = Path(_text(capacity_output_file))
+        if not _text(capacity_output_file) or not path.exists() or not path.is_file():
+            return {}, "", {}
+        workbook = load_workbook_quietly(path, data_only=True, read_only=True)
+        try:
+            sheet_name = self._sheet_name(workbook, _text(self._template_cfg().get("sheet_name")))
+            return self._build_load_rate_values_for_sheet(
+                workbook[sheet_name],
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                overlay_values=overlay_values,
+                emit_log=emit_log,
+            )
+        finally:
+            workbook.close()
+
+    @classmethod
     def _build_zone_capacity_formula_values_from_sheet(
         cls,
         sheet,
@@ -1912,6 +2097,20 @@ class HandoverCapacityReportService:
                 overlay_values=overlay_values,
             )
         )
+        load_rate_values, _, load_rate_payload = self._build_load_rate_values_from_file(
+            capacity_output_file=capacity_output_file,
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            overlay_values=overlay_values,
+            emit_log=emit_log,
+        )
+        overlay_values.update(load_rate_values)
+        signature_load_rates = {
+            cell: load_rate_payload[cell]
+            for cell in sorted(load_rate_payload)
+            if cell != "updated_at"
+        }
         normalized_values = {
             _text(cell).upper(): _text(value)
             for cell, value in overlay_values.items()
@@ -1919,13 +2118,14 @@ class HandoverCapacityReportService:
         }
         file_fingerprint = self._capacity_file_fingerprint(capacity_output_file)
         payload = {
-            "version": "capacity-overlay-signature-v3",
+            "version": "capacity-overlay-signature-v4",
             "building": _text(building),
             "duty_date": _text(duty_date),
             "duty_shift": _text(duty_shift).lower(),
             "input_signature": input_signature,
             "file": file_fingerprint,
             "values": {cell: normalized_values[cell] for cell in sorted(normalized_values)},
+            "capacity_load_rates": signature_load_rates,
         }
         signature = hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -2266,7 +2466,27 @@ class HandoverCapacityReportService:
                         "[交接班][容量报表][补写] 区域制冷量计算完成 "
                         f"building={building}, D22={formula_values.get('D22', '-')}, Q22={formula_values.get('Q22', '-')}"
                     )
+                load_rate_values, load_rate_warning, load_rate_payload = self._build_load_rate_values_for_sheet(
+                    sheet,
+                    building=building,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    overlay_values=overlay_values,
+                    emit_log=emit_log,
+                )
+                if load_rate_values:
+                    overlay_values.update(load_rate_values)
+                    emit_log(
+                        "[交接班][容量报表][补写] 平均负载率计算完成 "
+                        f"building={building}, J12={load_rate_values.get('J12', '-')}, M12={load_rate_values.get('M12', '-')}"
+                    )
+                if load_rate_warning:
+                    emit_log(
+                        "[交接班][容量报表][补写] 平均负载率计算警告 "
+                        f"building={building}, warning={load_rate_warning}"
+                    )
                 _write_cells_with_merged_support(sheet, overlay_values)
+                self._apply_load_rate_number_format(sheet)
                 atomic_save_workbook(workbook, capacity_output_path)
             finally:
                 workbook.close()
@@ -2311,11 +2531,13 @@ class HandoverCapacityReportService:
                 error=error,
                 input_signature=input_signature,
                 overlay_signature=overlay_signature,
+                capacity_load_rates=load_rate_payload,
             )
         return self._build_capacity_sync_payload(
             status="ready",
             input_signature=input_signature,
             overlay_signature=overlay_signature,
+            capacity_load_rates=load_rate_payload,
         )
 
     def generate(
@@ -2496,7 +2718,25 @@ class HandoverCapacityReportService:
             )
             cell_values.update(self._build_substation_110kv_values(shared_110kv))
             cell_values.update(self._build_cooling_pump_pressure_values(cooling_pump_pressures))
+            load_rate_values, load_rate_warning, load_rate_payload = self._build_load_rate_values_for_sheet(
+                sheet,
+                building=building_text,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                overlay_values=cell_values,
+                emit_log=emit_log,
+            )
+            if load_rate_values:
+                cell_values.update(load_rate_values)
+                emit_log(
+                    "[交接班][容量报表][负载率] 当前班次计算完成 "
+                    f"building={building_text}, "
+                    f"J12={load_rate_values.get('J12', '-')}, M12={load_rate_values.get('M12', '-')}"
+                )
+            if load_rate_warning:
+                warnings.append(load_rate_warning)
             _write_cells_with_merged_support(sheet, cell_values)
+            self._apply_load_rate_number_format(sheet)
             atomic_save_workbook(workbook, output_file)
         finally:
             workbook.close()
@@ -2526,6 +2766,7 @@ class HandoverCapacityReportService:
             "capacity_sync": capacity_sync,
             "running_units": running_units,
             "capacity_cooling_summary": capacity_cooling_summary,
+            "capacity_load_rates": load_rate_payload,
         }
 
 

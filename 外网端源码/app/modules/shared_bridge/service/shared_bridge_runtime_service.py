@@ -1659,6 +1659,76 @@ class SharedBridgeRuntimeService:
                 return self.get_cached_tasks(limit=limit)
             raise
 
+    def list_active_tasks(self, *, limit: int = 1000) -> list[Dict[str, Any]]:
+        safe_limit = max(1, int(limit or 1000))
+        if not self._store:
+            return [
+                task
+                for task in self.get_cached_tasks(limit=safe_limit)
+                if str(task.get("status", "") or "").strip().lower()
+                not in {"success", "failed", "partial_failed", "cancelled", "stale"}
+            ][:safe_limit]
+        try:
+            self._store.ensure_ready()
+            reader = getattr(self._store, "list_active_tasks", None)
+            tasks = reader(limit=safe_limit) if callable(reader) else self._store.list_tasks(limit=safe_limit)
+            active_tasks = [
+                task
+                for task in (tasks if isinstance(tasks, list) else [])
+                if str(task.get("status", "") or "").strip().lower()
+                not in {"success", "failed", "partial_failed", "cancelled", "stale"}
+            ]
+            self._cache_task_list(active_tasks)
+            return active_tasks[:safe_limit]
+        except Exception as exc:  # noqa: BLE001
+            if self._is_recoverable_store_error(exc):
+                self._mark_store_read_degraded(
+                    scope="list_active_tasks",
+                    exc=exc,
+                    busy_message="共享桥接数据库暂时忙碌，未完成共享任务列表已降级为缓存结果",
+                    unavailable_message="共享桥接数据库暂时不可用，未完成共享任务列表已降级为缓存结果",
+                )
+                return [
+                    task
+                    for task in self.get_cached_tasks(limit=safe_limit)
+                    if str(task.get("status", "") or "").strip().lower()
+                    not in {"success", "failed", "partial_failed", "cancelled", "stale"}
+                ][:safe_limit]
+            raise
+
+    def list_recent_tasks(self, *, limit: int = 100) -> list[Dict[str, Any]]:
+        safe_limit = max(1, int(limit or 100))
+        if not self._store:
+            return self.get_cached_tasks(limit=safe_limit)
+        try:
+            self._store.ensure_ready()
+            tasks = self._store.list_tasks(limit=safe_limit)
+            cached_active = [
+                task
+                for task in copy.deepcopy(self._cached_task_list)
+                if str(task.get("status", "") or "").strip().lower()
+                not in {"success", "failed", "partial_failed", "cancelled", "stale"}
+            ]
+            by_id: Dict[str, Dict[str, Any]] = {}
+            for task in [*cached_active, *(tasks if isinstance(tasks, list) else [])]:
+                if not isinstance(task, dict):
+                    continue
+                task_id = str(task.get("task_id", "") or "").strip()
+                if task_id and task_id not in by_id:
+                    by_id[task_id] = task
+            self._cache_task_list(list(by_id.values()))
+            return tasks
+        except Exception as exc:  # noqa: BLE001
+            if self._is_recoverable_store_error(exc):
+                self._mark_store_read_degraded(
+                    scope="list_recent_tasks",
+                    exc=exc,
+                    busy_message="共享桥接数据库暂时忙碌，最近共享任务列表已降级为缓存结果",
+                    unavailable_message="共享桥接数据库暂时不可用，最近共享任务列表已降级为缓存结果",
+                )
+                return self.get_cached_tasks(limit=safe_limit)
+            raise
+
     def get_task(self, task_id: str) -> Dict[str, Any] | None:
         task_text = str(task_id or "").strip()
         mailbox_task = self._get_mailbox_task(task_text)

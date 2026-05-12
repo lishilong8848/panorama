@@ -979,6 +979,7 @@ class HandoverOrchestrator:
             capacity_sync: Dict[str, Any] = {}
             capacity_running_units: Dict[str, Any] = {}
             capacity_cooling_summary: Dict[str, Any] = {}
+            capacity_load_rates: Dict[str, Any] = {}
             capacity_source_file_text = str(capacity_source_file or "").strip()
             if duty_date_text and duty_shift_text and result.output_file:
                 if capacity_source_file_text:
@@ -1039,6 +1040,11 @@ class HandoverOrchestrator:
                             if isinstance(capacity_result.get("capacity_sync", {}), dict)
                             else {}
                         )
+                        capacity_load_rates = (
+                            dict(capacity_result.get("capacity_load_rates", {}))
+                            if isinstance(capacity_result.get("capacity_load_rates", {}), dict)
+                            else {}
+                        )
                     except Exception as exc:  # noqa: BLE001
                         capacity_status = "failed"
                         capacity_error = str(exc)
@@ -1094,6 +1100,7 @@ class HandoverOrchestrator:
                         capacity_sync=capacity_sync,
                         capacity_running_units=capacity_running_units,
                         capacity_cooling_summary=capacity_cooling_summary,
+                        capacity_load_rates=capacity_load_rates,
                     )
                     result.review_session = review_session
                     result.batch_key = str(review_session.get("batch_key", "")).strip()

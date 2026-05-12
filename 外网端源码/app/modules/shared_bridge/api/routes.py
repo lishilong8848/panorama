@@ -227,7 +227,8 @@ def _ensure_bridge_write_allowed(request: Request) -> None:
 
 def _list_visible_bridge_tasks(service, *, limit: int = 100) -> list[Dict[str, Any]]:
     try:
-        tasks = service.list_tasks(limit=limit) if service else []
+        active_reader = getattr(service, "list_active_tasks", None) if service else None
+        tasks = active_reader(limit=limit) if callable(active_reader) else (service.list_tasks(limit=limit) if service else [])
     except Exception as exc:  # noqa: BLE001
         if not service or not _bridge_store_read_is_recoverable(service, exc):
             raise
@@ -250,7 +251,7 @@ def _get_visible_bridge_task(service, task_id: str) -> Dict[str, Any] | None:
     return payload
 
 
-def _build_bridge_tasks_summary_payload(service, *, limit: int = 60) -> Dict[str, Any]:
+def _build_bridge_tasks_summary_payload(service, *, limit: int = 2000) -> Dict[str, Any]:
     visible_tasks = _list_visible_bridge_tasks(service, limit=limit)
     return build_bridge_tasks_summary(
         [_bridge_present_task(task) for task in visible_tasks],
@@ -1250,10 +1251,10 @@ def bridge_source_cache_refresh_today(request: Request) -> Dict[str, Any]:
 
 
 @router.get("/api/bridge/tasks")
-def bridge_tasks(request: Request, limit: int = Query(100, ge=1, le=500)) -> Dict[str, Any]:
+def bridge_tasks(request: Request, limit: int = Query(2000, ge=1, le=2000)) -> Dict[str, Any]:
     container = request.app.state.container
     coordinator = getattr(container, "runtime_status_coordinator", None)
-    safe_limit = max(1, min(int(limit or 100), 500))
+    safe_limit = max(1, min(int(limit or 2000), 2000))
     if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
         snapshot = coordinator.read_scope_snapshot("bridge_tasks_summary")
         payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
@@ -1319,7 +1320,7 @@ def bridge_task_cancel(task_id: str, request: Request) -> Dict[str, Any]:
         "ok": True,
         "accepted": True,
         "task": present_bridge_task(_bridge_present_task(task_payload)) if task_payload else None,
-        "bridge_tasks_summary": _build_bridge_tasks_summary_payload(service, limit=60),
+        "bridge_tasks_summary": _build_bridge_tasks_summary_payload(service, limit=2000),
         "job_panel_summary": build_job_panel_summary(container, limit=60),
         "job_cancel_error": job_cancel_error,
     }
@@ -1343,5 +1344,5 @@ def bridge_task_retry(task_id: str, request: Request) -> Dict[str, Any]:
         "ok": True,
         "accepted": True,
         "task": present_bridge_task(_bridge_present_task(task_payload)) if task_payload else None,
-        "bridge_tasks_summary": _build_bridge_tasks_summary_payload(service, limit=60),
+        "bridge_tasks_summary": _build_bridge_tasks_summary_payload(service, limit=2000),
     }

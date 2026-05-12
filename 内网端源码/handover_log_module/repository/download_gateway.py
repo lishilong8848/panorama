@@ -630,45 +630,96 @@ class DownloadGateway:
             query_btn = frame2.locator('button.fr-btn-text:has-text("查询"):visible')
             await query_btn.wait_for(state="visible", timeout=8000)
             await query_btn.click(delay=100)
+            await self._wait_query_loading_started(frame2, timeout_ms=1000)
         except StepError:
             raise
         except Exception as exc:  # noqa: BLE001
             raise StepError("查询", str(exc)) from exc
 
+    @staticmethod
+    async def _query_page_state(frame2, *, min_rows: int, min_cells: int) -> Dict[str, Any]:
+        return await frame2.evaluate(
+            """(cfg) => {
+                const visible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) {
+                        return false;
+                    }
+                    return Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                };
+                const loading = Array.from(document.querySelectorAll('.text-indicator')).some((el) => {
+                    return visible(el) && String(el.textContent || '').includes('正在加载');
+                });
+                const maskLoading = Array.from(document.querySelectorAll('.x-mask-msg, .x-mask-loading, .fr-loading')).some(visible);
+                const container = document.getElementById('content-container');
+                const minRows = Number(cfg?.minRows || 8);
+                const minCells = Number(cfg?.minCells || 40);
+                let rowCount = 0;
+                let cellCount = 0;
+                if (container) {
+                    for (const table of Array.from(container.querySelectorAll('table'))) {
+                        if (!visible(table)) continue;
+                        rowCount = Math.max(rowCount, table.querySelectorAll('tr').length);
+                        cellCount = Math.max(cellCount, table.querySelectorAll('td').length);
+                    }
+                    const visibleCells = Array.from(container.querySelectorAll('td')).filter(visible);
+                    cellCount = Math.max(cellCount, visibleCells.length);
+                }
+                const dataReady = Boolean(container) && (rowCount >= minRows || cellCount >= minCells);
+                return { loading: Boolean(loading || maskLoading), dataReady, rowCount, cellCount };
+            }""",
+            {"minRows": min_rows, "minCells": min_cells},
+        )
+
+    async def _wait_query_loading_started(self, frame2, *, timeout_ms: int = 1000) -> None:
+        deadline = time.perf_counter() + max(0.1, int(timeout_ms or 1000) / 1000.0)
+        last_state: Dict[str, Any] = {}
+        while time.perf_counter() < deadline:
+            try:
+                last_state = await self._query_page_state(frame2, min_rows=1, min_cells=1)
+                if bool(last_state.get("loading", False)):
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(0.05)
+        raise StepError(
+            "查询",
+            "点击查询后1秒内未出现“正在加载”状态"
+            f" state={last_state if isinstance(last_state, dict) else {}}",
+        )
+
     async def _wait_query_ready(self, frame2, timeout_ms: int) -> None:
         min_rows = max(1, _as_int(self.handover_cfg.get("query_ready_min_rows", 8), 8))
         min_cells = max(1, _as_int(self.handover_cfg.get("query_ready_min_cells", 40), 40))
-        try:
-            await frame2.wait_for_function(
-                """(cfg) => {
-                    const loading = document.querySelector('.x-mask-msg, .x-mask-loading, .fr-loading');
-                    if (loading && loading.offsetParent !== null) {
-                        return false;
-                    }
-                    const container = document.getElementById('content-container');
-                    if (!container) return false;
-
-                    const minRows = Number(cfg?.minRows || 8);
-                    const minCells = Number(cfg?.minCells || 40);
-
-                    const tables = Array.from(container.querySelectorAll('table'));
-                    for (const table of tables) {
-                        if (table.offsetParent === null) continue;
-                        const rowCount = table.querySelectorAll('tr').length;
-                        const cellCount = table.querySelectorAll('td').length;
-                        if (rowCount >= minRows || cellCount >= minCells) {
-                            return true;
-                        }
-                    }
-
-                    const visibleCells = Array.from(container.querySelectorAll('td')).filter((el) => el.offsetParent !== null);
-                    return visibleCells.length >= minCells;
-                }""",
-                arg={"minRows": min_rows, "minCells": min_cells},
-                timeout=timeout_ms,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise StepError("查询", f"查询结果等待超时: {exc}") from exc
+        effective_timeout_ms = 180000
+        deadline = time.perf_counter() + max(1.0, effective_timeout_ms / 1000.0)
+        last_state: Dict[str, Any] = {}
+        while time.perf_counter() < deadline:
+            try:
+                last_state = await self._query_page_state(
+                    frame2,
+                    min_rows=min_rows,
+                    min_cells=min_cells,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise StepError("查询", f"读取查询状态失败: {exc}") from exc
+            if bool(last_state.get("dataReady", False)):
+                return
+            if bool(last_state.get("loading", False)):
+                await asyncio.sleep(0.2)
+                continue
+            if not bool(last_state.get("loading", False)):
+                raise StepError(
+                    "查询",
+                    "查询加载已结束但未检测到有效数据 "
+                    f"rows={last_state.get('rowCount', 0)}, cells={last_state.get('cellCount', 0)}",
+                )
+        raise StepError(
+            "查询",
+            "查询一直处于正在加载状态，未检测到有效数据 "
+            f"timeout_ms={effective_timeout_ms}, rows={last_state.get('rowCount', 0)}, cells={last_state.get('cellCount', 0)}",
+        )
 
     async def _export_with_download(
         self,

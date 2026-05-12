@@ -52,6 +52,15 @@ def get_multi_date_max(download_cfg: Dict[str, Any], default_value: int = 31) ->
 
 def is_retryable_download_timeout(error_text: str) -> bool:
     text = str(error_text or "").strip().lower()
+    retryable_query_errors = (
+        "点击查询后1秒内未出现",
+        "未出现“正在加载”",
+        "查询加载已结束但未检测到有效数据",
+        "查询一直处于正在加载状态",
+        "读取查询状态失败",
+    )
+    if any(marker in text for marker in retryable_query_errors):
+        return True
     if "timeout" not in text:
         return False
     if "page.fill" in text:

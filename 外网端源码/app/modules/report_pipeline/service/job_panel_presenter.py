@@ -28,6 +28,8 @@ _BRIDGE_WAITING_TEXTS = (
     "等待过旧楼栋共享文件更新",
     "等待共享文件",
 )
+_FULL_TASK_PANEL_LIMIT = 2000
+_RECENT_FINISHED_JOB_LIMIT = 20
 
 
 def _format_job_status(status: Any) -> str:
@@ -490,6 +492,9 @@ def _is_bridge_terminal_status(task: Dict[str, Any]) -> bool:
 def _is_bridge_waiting_resource_task(task: Dict[str, Any]) -> bool:
     if _is_bridge_terminal_status(task):
         return False
+    normalized_status = str(task.get("status", "") or "").strip().lower()
+    if normalized_status in {"queued_for_internal", "internal_claimed", "internal_running"}:
+        return True
     if _is_bridge_waiting_source_sync(task):
         return True
     combined = f"{_format_bridge_task_error(task)} {_format_bridge_stage_summary(task)}".strip()
@@ -750,7 +755,8 @@ def _safe_bridge_tasks(
     if service is None:
         return []
     try:
-        tasks = service.list_tasks(limit=limit)
+        active_reader = getattr(service, "list_active_tasks", None)
+        tasks = active_reader(limit=limit) if callable(active_reader) else service.list_tasks(limit=limit)
     except Exception as exc:  # noqa: BLE001
         checker = getattr(service, "_is_recoverable_store_error", None)
         if callable(checker) and checker(exc):
@@ -768,9 +774,6 @@ def _safe_bridge_tasks(
             continue
         if str(item.get("feature", "") or "").strip().lower() == "alarm_export":
             continue
-        request_payload = item.get("request")
-        if isinstance(request_payload, dict) and str(request_payload.get("resume_job_id", "") or "").strip():
-            continue
         normalized.append(item)
     return normalized
 
@@ -782,8 +785,32 @@ def build_job_panel_summary(
     emit_log: Callable[[str], None] | None = None,
     strict: bool = False,
 ) -> Dict[str, Any]:
-    safe_limit = max(1, min(int(limit or 60), 200))
-    jobs = _safe_jobs(container, limit=safe_limit, emit_log=emit_log, strict=strict)
+    safe_limit = max(1, min(max(int(limit or 0), _FULL_TASK_PANEL_LIMIT), _FULL_TASK_PANEL_LIMIT))
+    incomplete_jobs = _safe_jobs(
+        container,
+        limit=safe_limit,
+        statuses=sorted(_JOB_INCOMPLETE_STATUSES),
+        emit_log=emit_log,
+        strict=strict,
+    )
+    recent_finished_source = _safe_jobs(
+        container,
+        limit=_RECENT_FINISHED_JOB_LIMIT,
+        statuses=sorted(_JOB_FINISHED_STATUSES),
+        emit_log=emit_log,
+        strict=False,
+    )
+    jobs_by_id: Dict[str, Dict[str, Any]] = {}
+    jobs: List[Dict[str, Any]] = []
+    for job in [*incomplete_jobs, *recent_finished_source]:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("job_id", "") or "").strip()
+        if job_id and job_id in jobs_by_id:
+            continue
+        if job_id:
+            jobs_by_id[job_id] = job
+        jobs.append(job)
     presented_jobs = [_present_job(job) for job in jobs if isinstance(job, dict)]
     running_jobs = [item for item in presented_jobs if str(item.get("status", "")).strip().lower() in _JOB_RUNNING_STATUSES]
     waiting_jobs = [item for item in presented_jobs if str(item.get("status", "")).strip().lower() in _JOB_WAITING_STATUSES]
@@ -794,10 +821,17 @@ def build_job_panel_summary(
     ][:6]
 
     bridge_tasks = _safe_bridge_tasks(container, limit=safe_limit, emit_log=emit_log)
+    visible_job_bridge_task_ids = {
+        str(job.get("bridge_task_id", "") or "").strip()
+        for job in [*running_jobs, *waiting_jobs]
+        if str(job.get("bridge_task_id", "") or "").strip()
+    }
     waiting_bridge_items = [
         _present_bridge_waiting_item(task)
         for task in bridge_tasks
-        if isinstance(task, dict) and _is_bridge_waiting_resource_task(task)
+        if isinstance(task, dict)
+        and _is_bridge_waiting_resource_task(task)
+        and str(task.get("task_id", "") or "").strip() not in visible_job_bridge_task_ids
     ]
     active_bridge_count = sum(
         1
