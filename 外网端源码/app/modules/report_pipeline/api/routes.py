@@ -299,6 +299,7 @@ def _health_cached_component_async_default(
     default_value = copy.deepcopy(default)
     start_refresh = False
     return_value = default_value
+    refresh_token = ""
 
     with cache_lock:
         entry = cache.get(key)
@@ -309,20 +310,25 @@ def _health_cached_component_async_default(
                 if age_sec <= ttl:
                     return return_value
             if not bool(entry.get("refreshing", False)):
+                refresh_token = str(time.monotonic_ns())
                 entry["refreshing"] = True
+                entry["refresh_token"] = refresh_token
                 cache[key] = entry
                 start_refresh = True
             return return_value
+        refresh_token = str(time.monotonic_ns())
         cache[key] = {
             "ts": 0.0,
             "value": copy.deepcopy(default_value),
             "ready": False,
             "refreshing": True,
+            "refresh_token": refresh_token,
         }
         start_refresh = True
 
     if start_refresh:
         app_ref = request.app
+        token_ref = refresh_token
 
         def _runner() -> None:
             value = copy.deepcopy(default_value)
@@ -338,6 +344,9 @@ def _health_cached_component_async_default(
                 latest_lock = getattr(app_ref.state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, None)
                 if isinstance(latest_cache, dict) and isinstance(latest_lock, _THREAD_LOCK_TYPE):
                     with latest_lock:
+                        current_entry = latest_cache.get(key)
+                        if isinstance(current_entry, dict) and str(current_entry.get("refresh_token", "")) != token_ref:
+                            return
                         latest_cache[key] = {
                             "ts": time.monotonic(),
                             "value": copy.deepcopy(value),

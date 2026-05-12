@@ -63,6 +63,10 @@ _REVIEW_HISTORY_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_HISTORY_CACHE_TTL_SEC = 15.0
 _STATION_110_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
 _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+_HEALTH_COMPONENT_CACHE_ATTR = "_health_component_cache"
+_HEALTH_COMPONENT_CACHE_LOCK_ATTR = "_health_component_cache_lock"
+_HANDOVER_REVIEW_HEALTH_CACHE_STATUS_PREFIX = "handover_review_status:"
+_HANDOVER_REVIEW_HEALTH_CACHE_ACCESS_PREFIX = "handover_review_access:"
 
 
 async def _read_upload_file_limited(file: UploadFile, *, max_bytes: int) -> bytes:
@@ -304,6 +308,102 @@ def _review_history_cache_invalidate_sessions(sessions: Any) -> None:
     }
     for building in buildings:
         _review_history_cache_invalidate(building=building)
+
+
+def _request_runtime_status_refresh(container, *, reason: str) -> None:
+    coordinator = getattr(container, "runtime_status_coordinator", None)
+    if coordinator is None:
+        return
+    try:
+        request_refresh = getattr(coordinator, "request_refresh", None)
+        if callable(request_refresh):
+            request_refresh(reason=reason)
+    except Exception:
+        return
+
+
+def _publish_handover_review_status_cache(
+    request: Request,
+    container,
+    *,
+    service: ReviewSessionService,
+    batch_status: Dict[str, Any],
+    reason: str,
+) -> None:
+    status_payload = copy.deepcopy(batch_status if isinstance(batch_status, dict) else {})
+    batch_key = str(status_payload.get("batch_key", "") or "").strip()
+    if not batch_key:
+        return
+    if "followup_progress" not in status_payload:
+        try:
+            status_payload = _attach_followup_progress(
+                _build_review_followup_service(container),
+                status_payload,
+            )
+        except Exception:
+            pass
+    duty_date = str(status_payload.get("duty_date", "") or "").strip()
+    duty_shift = str(status_payload.get("duty_shift", "") or "").strip().lower()
+    if (not duty_date or not duty_shift) and hasattr(service, "parse_batch_key"):
+        duty_date, duty_shift = service.parse_batch_key(batch_key)
+
+    cache_keys: set[str] = set()
+    if duty_date and duty_shift:
+        cache_keys.add(f"handover_review_status:{duty_date}:{duty_shift}")
+    try:
+        latest_status = service.get_latest_batch_status()
+        if str(latest_status.get("batch_key", "") or "").strip() == batch_key:
+            cache_keys.add("handover_review_status:latest")
+    except Exception:
+        cache_keys.add("handover_review_status:latest")
+
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    if app_state is None:
+        _request_runtime_status_refresh(container, reason=reason)
+        return
+    cache = getattr(app_state, _HEALTH_COMPONENT_CACHE_ATTR, None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(app_state, _HEALTH_COMPONENT_CACHE_ATTR, cache)
+    cache_lock = getattr(app_state, _HEALTH_COMPONENT_CACHE_LOCK_ATTR, None)
+
+    def _update_cache() -> int:
+        removed = 0
+        for raw_key in list(cache.keys()):
+            key = str(raw_key or "")
+            if key.startswith(_HANDOVER_REVIEW_HEALTH_CACHE_ACCESS_PREFIX):
+                cache.pop(raw_key, None)
+                removed += 1
+                continue
+            if key.startswith(_HANDOVER_REVIEW_HEALTH_CACHE_STATUS_PREFIX) and key not in cache_keys:
+                cache.pop(raw_key, None)
+                removed += 1
+        entry = {
+            "ts": time.monotonic(),
+            "value": copy.deepcopy(status_payload),
+            "ready": True,
+            "refreshing": False,
+        }
+        for key in cache_keys:
+            cache[key] = copy.deepcopy(entry)
+        return removed
+
+    try:
+        if cache_lock is not None and hasattr(cache_lock, "__enter__"):
+            with cache_lock:
+                removed_count = _update_cache()
+        else:
+            removed_count = _update_cache()
+        if callable(getattr(container, "add_system_log", None)):
+            container.add_system_log(
+                f"[交接班][审核状态缓存] 已刷新 batch={batch_key}, keys={len(cache_keys)}, "
+                f"removed={removed_count}, reason={reason}"
+            )
+    except Exception as exc:  # noqa: BLE001
+        if callable(getattr(container, "add_system_log", None)):
+            container.add_system_log(f"[交接班][审核状态缓存] 刷新失败 batch={batch_key}, error={exc}")
+    finally:
+        _request_runtime_status_refresh(container, reason=reason)
 
 
 def _load_review_document_cached(
@@ -3028,6 +3128,13 @@ def handover_review_confirm_all(batch_key: str, request: Request) -> Dict[str, A
         refreshed_batch_status = _attach_followup_progress(followup, service.get_batch_status(batch_key))
         refreshed_sessions = service.list_batch_sessions(batch_key)
         _review_history_cache_invalidate_sessions(refreshed_sessions or updated_sessions)
+        _publish_handover_review_status_cache(
+            request,
+            container,
+            service=service,
+            batch_status=refreshed_batch_status or _attach_followup_progress(followup, batch_status),
+            reason="confirm_all",
+        )
         return {
             "ok": True,
             "updated_sessions": refreshed_sessions or updated_sessions,
@@ -4731,6 +4838,13 @@ def handover_review_confirm(
         latest_session = _attach_excel_sync_from_store(container, latest_session)
         _review_history_cache_invalidate(building=building)
         latest_batch_status = _attach_followup_progress(followup, service.get_batch_status(target_batch_key))
+        _publish_handover_review_status_cache(
+            request,
+            container,
+            service=service,
+            batch_status=latest_batch_status or _attach_followup_progress(followup, batch_status),
+            reason="confirm",
+        )
         response = {
             "ok": True,
             "session": latest_session,
@@ -4805,6 +4919,17 @@ def handover_review_unconfirm(
         )
         session = _attach_excel_sync_from_store(container, session)
         _review_history_cache_invalidate(building=building)
+        latest_batch_status = _attach_followup_progress(
+            _build_review_followup_service(container),
+            service.get_batch_status(target_batch_key),
+        )
+        _publish_handover_review_status_cache(
+            request,
+            container,
+            service=service,
+            batch_status=latest_batch_status or batch_status,
+            reason="unconfirm",
+        )
         response = {
             "ok": True,
             "session": session,
@@ -4821,7 +4946,7 @@ def handover_review_unconfirm(
                 current_revision=int(session.get("revision", 0) or 0),
                 emit_log=container.add_system_log,
             ),
-            "batch_status": batch_status,
+            "batch_status": latest_batch_status or batch_status,
         }
         return _attach_review_display_state(
             response,
