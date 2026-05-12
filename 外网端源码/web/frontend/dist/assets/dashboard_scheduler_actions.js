@@ -543,7 +543,7 @@ export function createDashboardSchedulerActions(ctx) {
       interval_minutes: 1440,
       minute_offset: toNonNegativeInt(scheduler.minute_offset, 30),
       check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
-      retry_failed_on_next_tick: scheduler.retry_failed_on_next_tick !== false,
+      retry_failed_on_next_tick: false,
       state_file: String(scheduler.state_file || "branch_power_upload_scheduler_state.json").trim(),
     };
     payload.minute_offset = payload.minute_offset % 60;

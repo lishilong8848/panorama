@@ -465,6 +465,7 @@ class AppContainer:
             scheduler_cfg = {}
         scheduler_cfg = dict(scheduler_cfg)
         scheduler_cfg["interval_minutes"] = 1440
+        scheduler_cfg["retry_failed_on_next_tick"] = False
         if "minute_offset" not in scheduler_cfg and "start_minute" not in scheduler_cfg and "run_minute" not in scheduler_cfg:
             scheduler_cfg["minute_offset"] = 30
         try:

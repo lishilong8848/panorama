@@ -20,7 +20,6 @@ ALLOWED_KEYS = {
     "auto_start_in_gui",
     "minute_offset",
     "check_interval_sec",
-    "retry_failed_on_next_tick",
     "state_file",
 }
 
@@ -110,7 +109,7 @@ def branch_power_upload_scheduler_config(payload: Dict[str, Any], request: Reque
         if key not in payload:
             continue
         value = payload.get(key)
-        if key in {"enabled", "auto_start_in_gui", "retry_failed_on_next_tick"}:
+        if key in {"enabled", "auto_start_in_gui"}:
             scheduler_cfg[key] = bool(value)
         elif key in {"check_interval_sec", "minute_offset"}:
             try:
@@ -131,6 +130,7 @@ def branch_power_upload_scheduler_config(payload: Dict[str, Any], request: Reque
             scheduler_cfg[key] = text
 
     scheduler_cfg["interval_minutes"] = 1440
+    scheduler_cfg["retry_failed_on_next_tick"] = False
 
     try:
         saved = save_settings(merged, container.config_path)
