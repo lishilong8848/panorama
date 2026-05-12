@@ -13,9 +13,9 @@
     },
     "shared_bridge": {
       "enabled": true,
-      "root_dir": "D:\\share",
+      "root_dir": "\\\\172.16.1.2\\share",
       "internal_root_dir": "D:\\share",
-      "external_root_dir": "D:\\share",
+      "external_root_dir": "\\\\172.16.1.2\\share",
       "poll_interval_sec": 2,
       "heartbeat_interval_sec": 5,
       "claim_lease_sec": 30,
@@ -298,7 +298,7 @@
           "timeout_sec": 8,
           "auth_mode": "signed",
           "seniverse_public_key": "Pw-nkmTzcCorv7Dey",
-          "seniverse_private_key": "*************uVs2"
+          "seniverse_private_key": "SwWfUI324UukiuVs2"
         }
       },
       "template": {
@@ -932,24 +932,24 @@
         "enabled": true,
         "buildings": [
           {
-            "code": "a",
-            "name": "A楼"
+            "name": "A楼",
+            "code": "a"
           },
           {
-            "code": "b",
-            "name": "B楼"
+            "name": "B楼",
+            "code": "b"
           },
           {
-            "code": "c",
-            "name": "C楼"
+            "name": "C楼",
+            "code": "c"
           },
           {
-            "code": "d",
-            "name": "D楼"
+            "name": "D楼",
+            "code": "d"
           },
           {
-            "code": "e",
-            "name": "E楼"
+            "name": "E楼",
+            "code": "e"
           }
         ],
         "fixed_cells": {
@@ -1084,16 +1084,16 @@
           },
           "D楼": {
             "cells": {
-              "B13": "988000",
-              "D13": "539000",
-              "F13": "/",
-              "H13": "/"
+              "B13": "988",
+              "D13": "545",
+              "F13": "0",
+              "H13": "0"
             }
           },
           "E楼": {
             "cells": {
               "B13": "1272",
-              "D13": "330",
+              "D13": "336",
               "F13": "0",
               "H13": "0"
             }
@@ -1313,104 +1313,104 @@
         "review_link_recipients_by_building": {
           "110站": [
             {
+              "note": "lsl",
               "enabled": true,
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "lsl"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
             },
             {
+              "note": "m",
               "enabled": true,
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "m"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
             },
             {
+              "note": "110",
               "enabled": true,
-              "open_id": "ou_913ff495ae8f5a0a55ae5670fd148bbd",
-              "note": "110"
+              "open_id": "ou_913ff495ae8f5a0a55ae5670fd148bbd"
             }
           ],
           "A楼": [
             {
+              "note": "李世龙A",
               "enabled": true,
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "李世龙A"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
             },
             {
+              "note": "A",
               "enabled": true,
-              "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a",
-              "note": "A"
+              "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a"
             },
             {
+              "note": "M",
               "enabled": true,
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "M"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
             }
           ],
           "B楼": [
             {
+              "note": "李世龙B",
               "enabled": true,
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "李世龙B"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
             },
             {
+              "note": "B",
               "enabled": true,
-              "open_id": "ou_160e991b0fd811cda7260de056d8a363",
-              "note": "B"
+              "open_id": "ou_160e991b0fd811cda7260de056d8a363"
             },
             {
+              "note": "m",
               "enabled": true,
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "m"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
             }
           ],
           "C楼": [
             {
+              "note": "李世龙C",
               "enabled": true,
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "李世龙C"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
             },
             {
+              "note": "C",
               "enabled": true,
-              "open_id": "ou_99391b00c1406917930483d8500af400",
-              "note": "C"
+              "open_id": "ou_99391b00c1406917930483d8500af400"
             },
             {
+              "note": "m",
               "enabled": true,
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "m"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
             }
           ],
           "D楼": [
             {
+              "note": "李世龙D",
               "enabled": true,
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "李世龙D"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
             },
             {
+              "note": "D",
               "enabled": true,
-              "open_id": "ou_b9c26b4da3721c2de11ee175c707e756",
-              "note": "D"
+              "open_id": "ou_b9c26b4da3721c2de11ee175c707e756"
             },
             {
+              "note": "m",
               "enabled": true,
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "m"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
             }
           ],
           "E楼": [
             {
+              "note": "李世龙E",
               "enabled": true,
-              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "note": "李世龙E"
+              "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2"
             },
             {
+              "note": "E",
               "enabled": true,
-              "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3",
-              "note": "E"
+              "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3"
             },
             {
+              "note": "m",
               "enabled": true,
-              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "note": "m"
+              "open_id": "ou_a6644e62a43b916c6bc26148cf74f208"
             }
           ]
         }
@@ -4478,66 +4478,66 @@
         "page_size": 500,
         "delete_batch_size": 500,
         "create_batch_size": 200,
+        "timeout": 30,
         "list_page_size": 500,
-        "clear_before_upload": true,
-        "timeout": 30
+        "clear_before_upload": true
       },
       "shared_source_upload": {
         "replace_existing_on_full": true
       },
-      "run_with_scheduler": true,
-      "window_days": 35,
+      "test_db": {
+        "port": 3306,
+        "building_label": "测试楼栋",
+        "time_field_mode": "auto",
+        "password": "123456",
+        "database": "e_event",
+        "user": "root",
+        "host": "127.0.0.1",
+        "fixed_table": "event_2026_02",
+        "table_mode": "fixed",
+        "enabled": true
+      },
+      "fields": {
+        "process_suggestion": "process_suggestion",
+        "alarm_type": "alarm_type",
+        "process_status": "process_status",
+        "confirm_description": "confirm_description",
+        "accept_time": "accept_time",
+        "confirm_user": "confirm_user",
+        "content": "content",
+        "recover_status": "recover_status",
+        "accept_user": "accept_user",
+        "trigger_value": "trigger_value",
+        "recover_time": "recover_time",
+        "event_time": "event_time",
+        "accept_description": "accept_description",
+        "event_level": "event_level",
+        "confirm_time": "confirm_time",
+        "event_source": "event_source"
+      },
+      "resume": {
+        "root_dir": "alarm_export_resume",
+        "state_file": "alarm_export_resume_state.json",
+        "reuse_extracted_rows": true,
+        "max_retry": 3,
+        "enabled": true,
+        "retry_interval_sec": 2
+      },
+      "window_end_time": "00:00:00",
+      "alarm_category_default": "真实告警",
+      "level_mapping": {
+        "2": "严重",
+        "3": "重要",
+        "4": "次要",
+        "1": "紧急"
+      },
       "skip_levels": [
         5
       ],
-      "resume": {
-        "enabled": true,
-        "reuse_extracted_rows": true,
-        "max_retry": 3,
-        "root_dir": "alarm_export_resume",
-        "state_file": "alarm_export_resume_state.json",
-        "retry_interval_sec": 2
-      },
-      "alarm_category_default": "真实告警",
+      "snapshot_mode": "clear_and_rebuild",
+      "window_days": 35,
       "enabled": true,
-      "level_mapping": {
-        "1": "紧急",
-        "2": "严重",
-        "3": "重要",
-        "4": "次要"
-      },
-      "window_end_time": "00:00:00",
-      "fields": {
-        "accept_time": "accept_time",
-        "accept_user": "accept_user",
-        "recover_status": "recover_status",
-        "alarm_type": "alarm_type",
-        "confirm_user": "confirm_user",
-        "confirm_time": "confirm_time",
-        "event_time": "event_time",
-        "accept_description": "accept_description",
-        "confirm_description": "confirm_description",
-        "event_source": "event_source",
-        "recover_time": "recover_time",
-        "process_status": "process_status",
-        "trigger_value": "trigger_value",
-        "content": "content",
-        "event_level": "event_level",
-        "process_suggestion": "process_suggestion"
-      },
-      "test_db": {
-        "user": "root",
-        "building_label": "测试楼栋",
-        "password": "123456",
-        "database": "e_event",
-        "table_mode": "fixed",
-        "enabled": true,
-        "host": "127.0.0.1",
-        "time_field_mode": "auto",
-        "fixed_table": "event_2026_02",
-        "port": 3306
-      },
-      "snapshot_mode": "clear_and_rebuild"
+      "run_with_scheduler": true
     },
     "manual_upload_gui": {
       "enabled": true
