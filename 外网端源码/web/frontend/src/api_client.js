@@ -533,6 +533,43 @@ export async function saveHandoverReview110kvApi(buildingCode, payload = {}) {
   });
 }
 
+export async function getHandoverReview110StationStatusApi(params = {}) {
+  return apiJsonWithTimeout(appendQuery("/api/handover/review/110-station/status", params), {}, 15000);
+}
+
+export async function parseHandoverReview110StationFileApi(form) {
+  const resp = await fetch("/api/handover/review/110-station/parse", {
+    method: "POST",
+    body: form,
+  });
+  const contentType = String(resp.headers.get("content-type") || "").toLowerCase();
+  const payload = contentType.includes("application/json") ? await resp.json() : { detail: await resp.text() };
+  if (!resp.ok) {
+    throw new Error(String(payload?.detail || payload?.error || `解析失败（HTTP ${resp.status}）`));
+  }
+  return payload;
+}
+
+export async function uploadHandoverReview110StationFileApi(form) {
+  const resp = await fetch("/api/handover/review/110-station/upload", {
+    method: "POST",
+    body: form,
+  });
+  const contentType = String(resp.headers.get("content-type") || "").toLowerCase();
+  const payload = contentType.includes("application/json") ? await resp.json() : { detail: await resp.text() };
+  if (!resp.ok) {
+    throw new Error(String(payload?.detail || payload?.error || `上传失败（HTTP ${resp.status}）`));
+  }
+  return payload;
+}
+
+export async function retryHandoverReview110StationCloudSyncApi(payload = {}) {
+  return apiJson("/api/handover/review/110-station/cloud-sync/retry", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export function buildHandoverReviewDownloadUrl(buildingCode, sessionId, params = {}) {
   return appendQuery(`/api/handover/review/${encodeURIComponent(buildingCode)}/download`, {
     session_id: sessionId,

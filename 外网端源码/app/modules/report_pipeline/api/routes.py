@@ -2061,6 +2061,14 @@ def _build_review_links_for_base_url(review_cfg: Dict[str, Any], effective_base_
                 "url": f"{effective_base_url}/handover/review/{code}",
             }
         )
+    if not any(str(item.get("code", "")).strip().lower() == "110" for item in links):
+        links.append(
+            {
+                "building": "110站",
+                "code": "110",
+                "url": f"{effective_base_url}/handover/review/110",
+            }
+        )
     return links
 
 

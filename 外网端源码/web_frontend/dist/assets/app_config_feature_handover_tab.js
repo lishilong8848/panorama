@@ -512,7 +512,7 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
           <div class="form-row">
             <label class="label">当前楼栋</label>
             <select :value="handoverConfigBuilding" @change="onHandoverReviewRecipientBuildingChange($event.target.value)">
-              <option v-for="opt in handoverConfigBuildingOptions" :key="'handover-review-recipient-' + opt.value" :value="opt.value">{{ opt.label }}</option>
+              <option v-for="opt in handoverReviewRecipientBuildingOptions" :key="'handover-review-recipient-' + opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </div>
           <div class="btn-line" style="margin-bottom:8px;">

@@ -9,6 +9,7 @@ from handover_log_module.core.footer_layout import (
     FOOTER_DYNAMIC_FIXED_CELLS,
     FOOTER_GROUP_TITLE_TEXT,
     FOOTER_INVENTORY_COLUMNS,
+    first_person_text,
     find_footer_inventory_layout,
 )
 from handover_log_module.core.section_layout import build_section_logical_columns, parse_category_sections
@@ -206,7 +207,7 @@ class ReviewDocumentParser:
         return spans
 
     def _inventory_footer_block(self, ws, layout) -> Dict[str, Any]:
-        receiver_text = self._read_cell_text(ws, "G3")
+        receiver_text = first_person_text(self._read_cell_text(ws, "G3"))
         rows: List[Dict[str, Any]] = []
         for row_idx in range(layout.data_start_row, layout.data_end_row + 1):
             cells = {}
@@ -215,6 +216,8 @@ class ReviewDocumentParser:
                 key = str(column["key"])
                 value = ws[f"{key}{row_idx}"].value
                 text = "" if value is None else str(value)
+                if key.upper() == "H":
+                    text = first_person_text(text)
                 cells[key] = text
                 if text.strip():
                     has_content = True

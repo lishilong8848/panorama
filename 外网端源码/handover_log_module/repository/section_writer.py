@@ -35,7 +35,16 @@ def _extract_cells_map(row_payload: Any) -> Dict[str, Any]:
 def _normalize_payload_rows(value: Any) -> List[Dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    return [_extract_cells_map(item) for item in value]
+    return [
+        row
+        for row in (_extract_cells_map(item) for item in value)
+        if any(_is_meaningful_payload_value(cell_value) for cell_value in row.values())
+    ]
+
+
+def _is_meaningful_payload_value(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text and text != "/")
 
 
 def _cleanup_row_merged_cells(ws: Worksheet, row_idx: int) -> None:
@@ -277,6 +286,14 @@ def _blank_data_row(ws: Worksheet, row_idx: int) -> None:
         cell.value = ""
 
 
+def _fill_empty_section_row(ws: Worksheet, row_idx: int) -> None:
+    for col in "ABCDEFGHI":
+        cell = ws[f"{col}{row_idx}"]
+        if isinstance(cell, MergedCell):
+            continue
+        cell.value = "/"
+
+
 def resolve_section_target_row_count(
     payload_count: int,
     *,
@@ -382,6 +399,8 @@ def write_category_sections(
                 if isinstance(target, MergedCell):
                     continue
                 target.value = row.get(col, "")
+        if payload_count == 0:
+            _fill_empty_section_row(ws, section.template_data_row)
 
         title_cell = ws.cell(row=section.title_row, column=1)
         if not isinstance(title_cell, MergedCell):

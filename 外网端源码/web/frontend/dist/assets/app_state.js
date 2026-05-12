@@ -1966,6 +1966,15 @@ export function createAppState(vueApi) {
     const list = normalized.length ? normalized : fallback;
     return list.map((building) => ({ value: building, label: building }));
   });
+  const handoverReviewRecipientBuildingOptions = computed(() => {
+    const rows = Array.isArray(handoverConfigBuildingOptions.value)
+      ? [...handoverConfigBuildingOptions.value]
+      : [];
+    if (!rows.some((item) => String(item?.value || "").trim() === "110站")) {
+      rows.push({ value: "110站", label: "110站" });
+    }
+    return rows;
+  });
   const handoverRuleScopeOptions = computed(() => {
     const currentBuilding = String(handoverConfigBuilding.value || "").trim() || "A楼";
     return [
@@ -2164,6 +2173,7 @@ export function createAppState(vueApi) {
     backendDashboardModuleHeroMap,
     dashboardActiveModuleHero,
     handoverConfigBuildingOptions,
+    handoverReviewRecipientBuildingOptions,
     handoverRuleScopeOptions,
     syncCustomWindowLocalInputs,
     actionGuard,

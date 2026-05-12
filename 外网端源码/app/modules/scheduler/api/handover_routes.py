@@ -52,6 +52,8 @@ def _build_handover_scheduler_payload(container, action_result: Dict[str, Any] |
     slots = snapshot.get("slots", {}) if isinstance(snapshot.get("slots", {}), dict) else {}
     morning = _slot_payload(slots.get("morning"))
     afternoon = _slot_payload(slots.get("afternoon"))
+    station_110_midnight = _slot_payload(slots.get("station_110_midnight"))
+    station_110_noon = _slot_payload(slots.get("station_110_noon"))
     return {
         "ok": True,
         "action": action_result or {},
@@ -65,6 +67,8 @@ def _build_handover_scheduler_payload(container, action_result: Dict[str, Any] |
         "memory_source": str(snapshot.get("memory_source", "") or ""),
         "morning": morning,
         "afternoon": afternoon,
+        "station_110_midnight": station_110_midnight,
+        "station_110_noon": station_110_noon,
         "state_paths": snapshot.get("state_paths", {}),
     }
 

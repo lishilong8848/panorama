@@ -78,7 +78,7 @@ export function createHandoverReviewDocumentEditHelpers(options = {}) {
     const section = documentRef.value.sections?.[sectionIndex];
     if (!section || !Array.isArray(section.rows)) return;
     markDocumentDirty({ region: "sections" });
-    section.rows.push(blankRow(section.columns));
+    section.rows.push(blankSectionRowWithDefaults(section));
   }
 
   function removeSectionRow(sectionIndex, rowIndex) {
@@ -101,6 +101,49 @@ export function createHandoverReviewDocumentEditHelpers(options = {}) {
 
   function sectionName(section) {
     return String(section?.name || "").trim();
+  }
+
+  function normalizedSectionName(section) {
+    return sectionName(section).replace(/\s+/g, "");
+  }
+
+  function isAttentionHandoverSection(section) {
+    return normalizedSectionName(section).includes("注意事项交接");
+  }
+
+  function normalizeCheckerName(value) {
+    const text = String(value ?? "").trim();
+    if (!text) return "";
+    return text.split(/[、,，;；/\\\s]+/).map((item) => item.trim()).filter(Boolean)[0] || text;
+  }
+
+  function resolveInventoryCheckerName() {
+    const footerBlocks = Array.isArray(documentRef.value.footer_blocks) ? documentRef.value.footer_blocks : [];
+    for (const block of footerBlocks) {
+      if (!block || String(block.type || "").trim() !== "inventory_table") continue;
+      const columns = Array.isArray(block.columns) ? block.columns : [];
+      const checkerColumn = columns.find((column) => normalizeHeaderText(column?.label).includes("清点确认人"))
+        || columns.find((column) => String(column?.key || "").trim().toUpperCase() === "H");
+      const checkerKey = checkerColumn?.key || "H";
+      const rows = Array.isArray(block.rows) ? block.rows : [];
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        const checker = normalizeCheckerName(rows[index]?.cells?.[checkerKey]);
+        if (checker) return checker;
+      }
+    }
+    return "";
+  }
+
+  function blankSectionRowWithDefaults(section) {
+    const row = blankRow(section?.columns);
+    if (!isAttentionHandoverSection(section)) return row;
+    const checkerName = resolveInventoryCheckerName();
+    if (!checkerName) return row;
+    const followerKey = findColumnKey(section, ["跟进人"], "G");
+    if (!followerKey || !row.cells || String(row.cells[followerKey] ?? "").trim()) return row;
+    row.cells[followerKey] = checkerName;
+    row.is_placeholder_row = !hasSectionRowContent(row, section.columns);
+    return row;
   }
 
   function findSectionIndexByName(name) {

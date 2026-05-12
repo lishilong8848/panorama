@@ -2613,6 +2613,32 @@ button:disabled,
   background: #f7fafc;
 }
 
+.station-110-preview-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.station-110-table-wrap {
+  overflow: visible;
+}
+
+.station-110-preview-table {
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.station-110-preview-table th,
+.station-110-preview-table td {
+  padding: 8px 6px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.station-110-preview-table th:first-child,
+.station-110-preview-table tbody th {
+  width: 96px;
+}
+
 .review-compact-input {
   min-height: 36px;
   padding: 7px 9px;

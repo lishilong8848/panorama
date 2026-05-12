@@ -3031,6 +3031,7 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   function normalizeHandoverBuildingName(building) {
     const raw = String(building || "").trim();
+    if (raw === "110站" || raw === "110") return "110站";
     if (["A楼", "B楼", "C楼", "D楼", "E楼"].includes(raw)) return raw;
     const upper = raw.toUpperCase();
     if (["A", "B", "C", "D", "E"].includes(upper)) return `${upper}楼`;
@@ -3038,7 +3039,9 @@ export function createRuntimeHealthConfigActions(ctx) {
   }
 
   function normalizeHandoverBuildingCode(building) {
-    return normalizeHandoverBuildingName(building).replace("楼", "");
+    const normalized = normalizeHandoverBuildingName(building);
+    if (normalized === "110站") return "110";
+    return normalized.replace("楼", "");
   }
 
   function normalizeHandoverReviewBaseUrlInput(rawValue) {

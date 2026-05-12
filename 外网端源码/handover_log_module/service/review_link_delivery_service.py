@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -19,6 +19,10 @@ from handover_log_module.service.review_access_snapshot_service import (
     normalize_review_base_url,
 )
 from handover_log_module.service.review_session_service import ReviewSessionService
+
+
+STATION_110_BUILDING = "110站"
+STATION_110_CODE = "110"
 
 
 def _now_text() -> str:
@@ -207,7 +211,7 @@ class ReviewLinkDeliveryService:
 
     def build_recipient_status_by_building(self) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
-        for building in HANDOVER_SEGMENT_BUILDINGS:
+        for building in [*HANDOVER_SEGMENT_BUILDINGS, STATION_110_BUILDING]:
             snapshot = self._recipient_snapshot_for_building(building)
             recipient_count = len(snapshot.get("recipients", []))
             raw_count = int(snapshot.get("raw_count", 0) or 0)
@@ -306,18 +310,29 @@ class ReviewLinkDeliveryService:
         building_text = str(building or "").strip()
         if not building_text:
             return ""
+        effective_base_url = str(
+            snapshot.get("review_base_url_effective", "") or snapshot.get("review_base_url", "") or ""
+        ).strip().rstrip("/")
+        if building_text in {STATION_110_BUILDING, STATION_110_CODE}:
+            return f"{effective_base_url}/handover/review/{STATION_110_CODE}" if effective_base_url else ""
         try:
             building_code = building_code_from_name(building_text)
         except Exception:  # noqa: BLE001
             building_code = ""
         if not building_code:
             return ""
-        effective_base_url = str(
-            snapshot.get("review_base_url_effective", "") or snapshot.get("review_base_url", "") or ""
-        ).strip().rstrip("/")
         if not effective_base_url:
             return ""
         return f"{effective_base_url}/handover/review/{building_code.lower()}"
+
+    @staticmethod
+    def _default_station_110_context(now: datetime | None = None) -> Dict[str, str]:
+        current = now or datetime.now()
+        if current.hour < 8:
+            return {"duty_date": (current - timedelta(days=1)).strftime("%Y-%m-%d"), "duty_shift": "night"}
+        if current.hour < 20:
+            return {"duty_date": current.strftime("%Y-%m-%d"), "duty_shift": "day"}
+        return {"duty_date": current.strftime("%Y-%m-%d"), "duty_shift": "night"}
 
     def _manual_test_review_url_for_building(self, snapshot: Dict[str, Any], building: str) -> str:
         url = self._review_url_for_building(snapshot, building)
@@ -774,6 +789,142 @@ class ReviewLinkDeliveryService:
             "building": building_text,
             "status": status,
             "error": error,
+            "message_text": message_text,
+            "successful_recipients": successful_recipients,
+            "failed_recipients": failed_recipients,
+            "review_url": url,
+        }
+
+    def send_station_110_review_link(
+        self,
+        *,
+        duty_date: str = "",
+        duty_shift: str = "",
+        source: str = "scheduler",
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        context = self._default_station_110_context()
+        duty_date_text = str(duty_date or "").strip() or context["duty_date"]
+        duty_shift_text = str(duty_shift or "").strip().lower() or context["duty_shift"]
+        if duty_shift_text not in {"day", "night"}:
+            raise ValueError("110站审核链接发送班次必须是 day/night")
+
+        building_text = STATION_110_BUILDING
+        recipient_snapshot = self._recipient_snapshot_for_building(building_text)
+        recipients = list(recipient_snapshot.get("recipients", []))
+        snapshot = materialize_review_access_snapshot(self.handover_cfg)
+        url = self._review_url_for_building(snapshot, building_text) or self._manual_test_review_url_for_building(
+            snapshot,
+            building_text,
+        )
+        source_text = str(source or "scheduler").strip().lower() or "scheduler"
+        emit_log(
+            "[交接班][110站审核链接发送] 开始发送 "
+            f"duty_date={duty_date_text}, duty_shift={duty_shift_text}, "
+            f"recipients={len(recipients)}, raw={int(recipient_snapshot.get('raw_count', 0) or 0)}, "
+            f"enabled={int(recipient_snapshot.get('enabled_count', 0) or 0)}, "
+            f"disabled={int(recipient_snapshot.get('disabled_count', 0) or 0)}, "
+            f"invalid={int(recipient_snapshot.get('invalid_count', 0) or 0)}, "
+            f"open_ids={recipient_snapshot.get('open_ids', [])}, access_ready={bool(url)}, source={source_text}, "
+            f"recipient_source={str(recipient_snapshot.get('source', '') or '').strip() or 'unknown'}"
+        )
+        if not recipients:
+            raw_count = int(recipient_snapshot.get("raw_count", 0) or 0)
+            invalid_count = int(recipient_snapshot.get("invalid_count", 0) or 0)
+            disabled_count = int(recipient_snapshot.get("disabled_count", 0) or 0)
+            reason = (
+                "110站审核链接接收人均未启用"
+                if raw_count > 0 and disabled_count > 0 and invalid_count == 0
+                else (
+                    "110站审核链接接收人无有效 open_id"
+                    if raw_count > 0 and invalid_count >= raw_count
+                    else "110站未配置审核链接接收人"
+                )
+            )
+            emit_log(f"[交接班][110站审核链接发送] 跳过发送: {reason}")
+            return {
+                "building": building_text,
+                "status": "disabled" if "未启用" in reason else "unconfigured",
+                "error": reason,
+                "duty_date": duty_date_text,
+                "duty_shift": duty_shift_text,
+                "review_url": url,
+                "successful_recipients": [],
+                "failed_recipients": [],
+            }
+        if not url:
+            reason = "审核访问地址尚未就绪"
+            emit_log(f"[交接班][110站审核链接发送] 跳过发送: {reason}")
+            return {
+                "building": building_text,
+                "status": "pending_access",
+                "error": reason,
+                "duty_date": duty_date_text,
+                "duty_shift": duty_shift_text,
+                "review_url": "",
+                "successful_recipients": [],
+                "failed_recipients": [],
+            }
+
+        message_text = self._build_message(
+            {
+                "building": building_text,
+                "duty_date": duty_date_text,
+                "duty_shift": duty_shift_text,
+            },
+            url,
+        )
+        successful_recipients: List[str] = []
+        failed_recipients: List[Dict[str, str]] = []
+        client = self._build_feishu_client()
+        for recipient in recipients:
+            open_id = recipient["open_id"]
+            note = recipient["note"]
+            receive_id_type = self._resolve_effective_receive_id_type(open_id, "open_id")
+            try:
+                client.send_text_message(
+                    receive_id=open_id,
+                    receive_id_type=receive_id_type,
+                    text=message_text,
+                )
+                successful_recipients.append(open_id)
+                emit_log(
+                    "[交接班][110站审核链接发送] 发送成功 "
+                    f"open_id={open_id}, receive_id_type={receive_id_type}, note={note or '-'}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                failed_recipients.append(
+                    {
+                        "open_id": open_id,
+                        "note": note,
+                        "error": str(exc),
+                    }
+                )
+                emit_log(
+                    "[交接班][110站审核链接发送] 发送失败 "
+                    f"open_id={open_id}, receive_id_type={receive_id_type}, note={note or '-'}, error={exc}"
+                )
+
+        if successful_recipients and failed_recipients:
+            status = "partial_failed"
+            error = "部分收件人发送失败"
+        elif successful_recipients:
+            status = "success"
+            error = ""
+        else:
+            status = "failed"
+            error = "全部收件人发送失败"
+        emit_log(
+            "[交接班][110站审核链接发送] 完成 "
+            f"duty_date={duty_date_text}, duty_shift={duty_shift_text}, status={status}, "
+            f"successful={len(successful_recipients)}, failed={len(failed_recipients)}"
+        )
+        return {
+            "building": building_text,
+            "status": status,
+            "error": error,
+            "duty_date": duty_date_text,
+            "duty_shift": duty_shift_text,
             "message_text": message_text,
             "successful_recipients": successful_recipients,
             "failed_recipients": failed_recipients,

@@ -1340,3 +1340,25 @@ class ReviewSessionStateStore:
             "block": self._row_to_shared_block(saved_row, batch_key=batch_key_text, block_id=block_id_text),
             "no_change": no_change,
         }
+
+    def clear_shared_block_dirty(self, *, batch_key: str, block_id: str) -> None:
+        batch_key_text = str(batch_key or "").strip()
+        block_id_text = str(block_id or "").strip()
+        if not batch_key_text or not block_id_text:
+            return
+        block_key = self._shared_block_key(batch_key_text, block_id_text)
+        self.ensure_ready()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE review_shared_block_locks
+                   SET dirty = 0,
+                       dirty_at = '',
+                       dirty_by_building = '',
+                       dirty_by_client = '',
+                       dirty_payload_json = '{}'
+                 WHERE lock_key = ?
+                """,
+                (block_key,),
+            )

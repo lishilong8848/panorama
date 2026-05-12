@@ -6,10 +6,12 @@ import {
   confirmHandoverReviewApi,
   getJobApi,
   getHandoverReviewApi,
+  getHandoverReview110StationStatusApi,
   getHandoverReviewBootstrapApi,
   getHandoverReviewHistoryApi,
   getHandoverReviewStatusApi,
   heartbeatHandoverReview110kvLockApi,
+  parseHandoverReview110StationFileApi,
   heartbeatHandoverReviewLockApi,
   markHandoverReview110kvDirtyApi,
   releaseHandoverReview110kvLockApi,
@@ -19,6 +21,8 @@ import {
   saveHandoverReview110kvApi,
   sendHandoverReviewCapacityImageApi,
   regenerateHandoverReviewApi,
+  retryHandoverReview110StationCloudSyncApi,
+  uploadHandoverReview110StationFileApi,
   updateHandoverReviewCloudSyncApi,
   unconfirmHandoverReviewApi,
 } from "./api_client.js";
@@ -36,7 +40,7 @@ const DEFAULT_FOOTER_INVENTORY_COLUMNS = [
   { key: "G", label: "其他补充说明", source_cols: ["G"], span: 1 },
   { key: "H", label: "清点确认人（接班）", source_cols: ["H"], span: 1 },
 ];
-const REVIEW_PATH_RE = /^\/handover\/review\/([a-e])\/?$/i;
+const REVIEW_PATH_RE = /^\/handover\/review\/([a-e]|110)\/?$/i;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 const REVIEW_LOCK_HEARTBEAT_MS = 15000;
 const SUBSTATION_110KV_AUTO_SAVE_DEBOUNCE_MS = 350;
@@ -291,6 +295,118 @@ function normalizeCoolingPumpPressures(raw = {}) {
     : [];
   return { rows, tanks };
 }
+
+const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
+  <div class="review-shell">
+    <header class="review-header review-header-sticky">
+      <div class="review-header-main">
+        <div class="review-header-copy">
+          <h1 class="review-title">110站</h1>
+          <p class="review-subtitle">{{ batchText }}</p>
+        </div>
+        <div class="review-header-actions">
+          <button class="btn btn-secondary btn-mini" @click="refreshStatus" :disabled="loading || parsing || uploading || retrying">刷新</button>
+          <button class="btn btn-warning btn-mini" @click="retryCloudSync" :disabled="!canRetryCloudSync">
+            {{ retrying ? "正在重试..." : "重试云文档同步" }}
+          </button>
+          <a v-if="cloudUrl" class="btn btn-secondary btn-mini" :href="cloudUrl" target="_blank" rel="noopener noreferrer">打开云文档</a>
+        </div>
+      </div>
+      <div class="review-meta-row review-meta-row-rich">
+        <span class="status-badge status-badge-soft tone-info icon-dot">{{ uploadStatusText }}</span>
+        <span class="status-badge status-badge-soft" :class="'tone-' + cloudTone">{{ cloudStatusText }}</span>
+      </div>
+      <div v-if="statusText" class="review-status-line review-status-info">{{ statusText }}</div>
+      <div v-if="errorText" class="review-status-line review-status-danger">{{ errorText }}</div>
+    </header>
+
+    <section class="review-current-view-section">
+      <article class="review-card">
+        <div class="review-card-head"><h2>上传110站交接班文件</h2></div>
+        <div class="review-fixed-fields review-current-view-fields">
+          <label class="review-field">
+            <span class="review-field-label">日期</span>
+            <input class="review-input" type="date" v-model="dutyDate" :disabled="loading || parsing || uploading || retrying" @change="refreshStatus" />
+          </label>
+          <label class="review-field">
+            <span class="review-field-label">班次</span>
+            <select class="review-input" v-model="dutyShift" :disabled="loading || parsing || uploading || retrying" @change="refreshStatus">
+              <option value="day">白班</option>
+              <option value="night">夜班</option>
+            </select>
+          </label>
+          <label class="review-field review-field-wide">
+            <span class="review-field-label">110站 Excel</span>
+            <input class="review-input" type="file" accept=".xlsx,.xlsm" :disabled="loading || parsing || uploading || retrying" @change="onFileChange" />
+            <small class="review-field-hint">第1个sheet写入云文档“110”页，第2个sheet回填各楼审核页110KV数据。</small>
+          </label>
+          <button class="btn btn-secondary btn-mini" @click="parseFile" :disabled="!selectedFile || parsing || uploading || retrying">
+            {{ parsing ? "正在解析..." : "解析" }}
+          </button>
+          <button class="btn btn-primary btn-mini" @click="uploadFile" :disabled="!selectedFile || parsing || uploading || retrying">
+            {{ uploading ? "正在上传..." : "上传并同步" }}
+          </button>
+        </div>
+      </article>
+    </section>
+
+    <section v-if="loading" class="review-empty-card">正在加载110站状态...</section>
+    <template v-else>
+      <section class="review-shared-grid station-110-preview-grid">
+        <article class="review-card">
+          <div class="review-card-head"><h2>文件状态</h2></div>
+          <div class="review-fixed-fields review-current-view-fields">
+            <label class="review-field">
+              <span class="review-field-label">文件名</span>
+              <input class="review-input" :value="upload.original_filename || '-'" readonly />
+            </label>
+            <label class="review-field">
+              <span class="review-field-label">上传时间</span>
+              <input class="review-input" :value="upload.uploaded_at || '-'" readonly />
+            </label>
+            <label class="review-field">
+              <span class="review-field-label">第1个sheet识别行数</span>
+              <input class="review-input" :value="sourceSheetText" readonly />
+            </label>
+            <label class="review-field">
+              <span class="review-field-label">第2个sheet</span>
+              <input class="review-input" :value="substationSheetText" readonly />
+            </label>
+          </div>
+        </article>
+
+        <article class="review-card">
+          <div class="review-card-head"><h2>第2个sheet识别结果</h2></div>
+          <div v-if="!parsedRows.length" class="review-empty-inline">暂无已解析的110KV数据</div>
+          <div v-else class="review-table-wrap station-110-table-wrap">
+            <table class="review-table review-substation-table station-110-preview-table">
+              <thead>
+                <tr>
+                  <th>进线/主变</th>
+                  <th>线电压</th>
+                  <th>电流/输出电流</th>
+                  <th>当前功率KW</th>
+                  <th>功率因数</th>
+                  <th>负载率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in parsedRows" :key="row.row_id">
+                  <th>{{ row.label }}</th>
+                  <td>{{ row.line_voltage || "-" }}</td>
+                  <td>{{ row.current || "-" }}</td>
+                  <td>{{ row.power_kw || "-" }}</td>
+                  <td>{{ row.power_factor || "-" }}</td>
+                  <td>{{ row.load_rate || "-" }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+    </template>
+  </div>
+`;
 
 function normalizeOutdoorTemperatureBlock(raw = {}) {
   const rawCells = raw?.cells && typeof raw.cells === "object" ? raw.cells : {};
@@ -603,6 +719,64 @@ function normalizeDocument(document) {
     footer_blocks: footerBlocks,
     cooling_pump_pressures: normalizeCoolingPumpPressures(document?.cooling_pump_pressures || {}),
   };
+}
+
+function normalizeStation110State(raw = {}) {
+  const upload = raw?.upload && typeof raw.upload === "object" ? raw.upload : {};
+  const cloudSync = upload.cloud_sync && typeof upload.cloud_sync === "object" ? upload.cloud_sync : {};
+  const batch = raw?.batch && typeof raw.batch === "object" ? raw.batch : {};
+  const cloudBatch = raw?.cloud_batch && typeof raw.cloud_batch === "object" ? raw.cloud_batch : {};
+  return {
+    batch: {
+      batch_key: String(batch.batch_key || "").trim(),
+      duty_date: String(batch.duty_date || "").trim(),
+      duty_shift: String(batch.duty_shift || "").trim().toLowerCase(),
+      duty_shift_text: String(batch.duty_shift_text || "").trim(),
+    },
+    upload: {
+      status: String(upload.status || "").trim().toLowerCase(),
+      error: String(upload.error || "").trim(),
+      original_filename: String(upload.original_filename || "").trim(),
+      uploaded_at: String(upload.uploaded_at || "").trim(),
+      source_sheet: upload.source_sheet && typeof upload.source_sheet === "object" ? upload.source_sheet : {},
+      substation_sheet: upload.substation_sheet && typeof upload.substation_sheet === "object" ? upload.substation_sheet : {},
+      parsed_110kv_rows: Array.isArray(upload.parsed_110kv_rows) ? upload.parsed_110kv_rows : [],
+      cloud_sync: {
+        status: String(cloudSync.status || "").trim().toLowerCase(),
+        spreadsheet_url: String(cloudSync.spreadsheet_url || "").trim(),
+        spreadsheet_title: String(cloudSync.spreadsheet_title || "").trim(),
+        sheet_title: String(cloudSync.sheet_title || "110").trim() || "110",
+        error: String(cloudSync.error || "").trim(),
+        synced_row_count: Number.parseInt(String(cloudSync.synced_row_count || 0), 10) || 0,
+        synced_column_count: Number.parseInt(String(cloudSync.synced_column_count || 0), 10) || 0,
+        updated_at: String(cloudSync.updated_at || "").trim(),
+      },
+    },
+    cloud_batch: {
+      status: String(cloudBatch.status || "").trim().toLowerCase(),
+      spreadsheet_url: String(cloudBatch.spreadsheet_url || "").trim(),
+      spreadsheet_title: String(cloudBatch.spreadsheet_title || "").trim(),
+      error: String(cloudBatch.error || "").trim(),
+    },
+  };
+}
+
+function station110StatusText(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "success") return "已上传";
+  if (normalized === "parsed") return "已解析";
+  if (normalized === "failed") return "解析失败";
+  if (normalized === "pending") return "待同步";
+  return "未上传";
+}
+
+function station110CloudStatusText(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "success") return "云文档已同步";
+  if (normalized === "failed") return "云文档同步失败";
+  if (normalized === "pending") return "云文档待同步";
+  if (normalized === "skipped") return "云文档已跳过";
+  return "云文档未同步";
 }
 
 function emptyDirtyRegions() {
@@ -993,7 +1167,209 @@ function emptyReviewCloudSheetVm() {
   };
 }
 
+function mountHandover110StationApp(Vue) {
+  const { createApp, ref, computed, onMounted } = Vue;
+  createApp({
+    setup() {
+      const loading = ref(true);
+      const parsing = ref(false);
+      const uploading = ref(false);
+      const retrying = ref(false);
+      const errorText = ref("");
+      const statusText = ref("");
+      const dutyDate = ref("");
+      const dutyShift = ref("day");
+      const selectedFile = ref(null);
+      const state = ref(normalizeStation110State({}));
+
+      const batchText = computed(() => {
+        const date = dutyDate.value || state.value.batch.duty_date || "-";
+        const shift = dutyShift.value === "night" ? "夜班" : "白班";
+        return `${date} ${shift}`;
+      });
+      const upload = computed(() => state.value.upload || normalizeStation110State({}).upload);
+      const cloudUrl = computed(() => upload.value.cloud_sync.spreadsheet_url || state.value.cloud_batch.spreadsheet_url || "");
+      const uploadStatusText = computed(() => station110StatusText(upload.value.status));
+      const cloudStatusText = computed(() => station110CloudStatusText(upload.value.cloud_sync.status));
+      const cloudTone = computed(() => {
+        const status = upload.value.cloud_sync.status;
+        if (status === "success") return "success";
+        if (status === "failed") return "danger";
+        if (status === "pending") return "warning";
+        return "neutral";
+      });
+      const canRetryCloudSync = computed(() => Boolean(upload.value.status === "success" && !loading.value && !parsing.value && !uploading.value && !retrying.value));
+      const parsedRows = computed(() => Array.isArray(upload.value.parsed_110kv_rows) ? upload.value.parsed_110kv_rows : []);
+      const sourceSheetText = computed(() => {
+        const sheet = upload.value.source_sheet || {};
+        const rowCount = Number.parseInt(String(sheet.recognized_row_count ?? sheet.data_row_count ?? sheet.max_row ?? 0), 10) || 0;
+        if (!sheet.title && rowCount <= 0) return "-";
+        return `${rowCount}行已识别`;
+      });
+      const substationSheetText = computed(() => {
+        const sheet = upload.value.substation_sheet || {};
+        if (!sheet.title) return "-";
+        return `${sheet.title} (${sheet.parsed_row_count || 0}行已识别)`;
+      });
+
+      function applyState(raw) {
+        const normalized = normalizeStation110State(raw || {});
+        state.value = normalized;
+        if (normalized.batch.duty_date) dutyDate.value = normalized.batch.duty_date;
+        if (["day", "night"].includes(normalized.batch.duty_shift)) dutyShift.value = normalized.batch.duty_shift;
+      }
+
+      async function refreshStatus() {
+        loading.value = true;
+        errorText.value = "";
+        try {
+          const response = await getHandoverReview110StationStatusApi({
+            duty_date: dutyDate.value,
+            duty_shift: dutyShift.value,
+            _t: Date.now(),
+          });
+          applyState(response);
+          statusText.value = "110站状态已刷新";
+        } catch (error) {
+          errorText.value = String(error?.message || error || "读取110站状态失败");
+        } finally {
+          loading.value = false;
+        }
+      }
+
+      function onFileChange(event) {
+        selectedFile.value = event?.target?.files?.[0] || null;
+      }
+
+      async function uploadFile() {
+        if (!selectedFile.value) return;
+        uploading.value = true;
+        errorText.value = "";
+        statusText.value = "正在上传110站文件...";
+        try {
+          const form = new FormData();
+          form.append("duty_date", dutyDate.value || state.value.batch.duty_date || "");
+          form.append("duty_shift", dutyShift.value || state.value.batch.duty_shift || "");
+          form.append("file", selectedFile.value);
+          const response = await uploadHandoverReview110StationFileApi(form);
+          applyState(response);
+          if (response?.ok === false) {
+            errorText.value = String(response?.error || response?.upload?.error || "110站文件解析失败");
+            statusText.value = "";
+          } else {
+            const cloudStatus = String(response?.upload?.cloud_sync?.status || "").trim().toLowerCase();
+            if (cloudStatus === "success") {
+              statusText.value = "110站文件已上传，审核页数据和云文档均已同步。";
+            } else if (cloudStatus === "failed") {
+              statusText.value = "110站文件已上传，审核页数据已回填，云文档同步失败，可重试。";
+              errorText.value = String(response?.upload?.cloud_sync?.error || "110站云文档同步失败");
+            } else {
+              statusText.value = "110站文件已上传，审核页数据已回填，云文档待同步。";
+            }
+          }
+        } catch (error) {
+          errorText.value = String(error?.message || error || "110站文件上传失败");
+          statusText.value = "";
+        } finally {
+          uploading.value = false;
+        }
+      }
+
+      async function parseFile() {
+        if (!selectedFile.value) return;
+        parsing.value = true;
+        errorText.value = "";
+        statusText.value = "正在解析110站文件...";
+        try {
+          const form = new FormData();
+          form.append("duty_date", dutyDate.value || state.value.batch.duty_date || "");
+          form.append("duty_shift", dutyShift.value || state.value.batch.duty_shift || "");
+          form.append("file", selectedFile.value);
+          const response = await parseHandoverReview110StationFileApi(form);
+          applyState(response);
+          if (response?.ok === false) {
+            errorText.value = String(response?.error || response?.upload?.error || "110站文件解析失败");
+            statusText.value = "";
+          } else {
+            const sourceRows = Number.parseInt(
+              String(response?.upload?.source_sheet?.recognized_row_count ?? response?.upload?.source_sheet?.max_row ?? 0),
+              10,
+            ) || 0;
+            const kvRows = Number.parseInt(String(response?.upload?.substation_sheet?.parsed_row_count ?? 0), 10) || 0;
+            statusText.value = `解析完成：第1个sheet识别${sourceRows}行，第2个sheet识别${kvRows}行。`;
+          }
+        } catch (error) {
+          errorText.value = String(error?.message || error || "110站文件解析失败");
+          statusText.value = "";
+        } finally {
+          parsing.value = false;
+        }
+      }
+
+      async function retryCloudSync() {
+        retrying.value = true;
+        errorText.value = "";
+        statusText.value = "正在重试110站云文档同步...";
+        try {
+          const response = await retryHandoverReview110StationCloudSyncApi({
+            duty_date: dutyDate.value || state.value.batch.duty_date || "",
+            duty_shift: dutyShift.value || state.value.batch.duty_shift || "",
+          });
+          applyState(response);
+          if (response?.ok === false) {
+            errorText.value = String(response?.error || response?.upload?.cloud_sync?.error || "110站云文档同步失败");
+            statusText.value = "";
+          } else {
+            statusText.value = "110站云文档同步完成。";
+          }
+        } catch (error) {
+          errorText.value = String(error?.message || error || "110站云文档同步失败");
+          statusText.value = "";
+        } finally {
+          retrying.value = false;
+        }
+      }
+
+      onMounted(() => {
+        void refreshStatus();
+      });
+
+      return {
+        loading,
+        parsing,
+        uploading,
+        retrying,
+        errorText,
+        statusText,
+        dutyDate,
+        dutyShift,
+        selectedFile,
+        upload,
+        batchText,
+        cloudUrl,
+        uploadStatusText,
+        cloudStatusText,
+        cloudTone,
+        canRetryCloudSync,
+        parsedRows,
+        sourceSheetText,
+        substationSheetText,
+        refreshStatus,
+        onFileChange,
+        parseFile,
+        uploadFile,
+        retryCloudSync,
+      };
+    },
+    template: HANDOVER_REVIEW_110_STATION_TEMPLATE,
+  }).mount("#app");
+}
+
 export function mountHandoverReviewApp(Vue) {
+  if (resolveReviewBuildingCode() === "110") {
+    mountHandover110StationApp(Vue);
+    return;
+  }
   const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;
 
   createApp({

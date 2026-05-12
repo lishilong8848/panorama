@@ -29,6 +29,10 @@ class HandoverSchedulerManager:
             "auto_start_in_gui": bool(raw.get("auto_start_in_gui", False)),
             "morning_time": str(raw.get("morning_time", "07:00:00")).strip() or "07:00:00",
             "afternoon_time": str(raw.get("afternoon_time", "16:00:00")).strip() or "16:00:00",
+            "station_110_review_link_enabled": bool(raw.get("station_110_review_link_enabled", True)),
+            "station_110_midnight_time": str(raw.get("station_110_midnight_time", "00:00:00")).strip()
+            or "00:00:00",
+            "station_110_noon_time": str(raw.get("station_110_noon_time", "12:00:00")).strip() or "12:00:00",
             "check_interval_sec": int(raw.get("check_interval_sec", 30)),
             "catch_up_if_missed": bool(raw.get("catch_up_if_missed", False)),
             "retry_failed_in_same_period": bool(raw.get("retry_failed_in_same_period", False)),
@@ -38,6 +42,14 @@ class HandoverSchedulerManager:
                 raw.get("afternoon_state_file", "handover_scheduler_afternoon_state.json")
             ).strip()
             or "handover_scheduler_afternoon_state.json",
+            "station_110_midnight_state_file": str(
+                raw.get("station_110_midnight_state_file", "handover_scheduler_110_midnight_state.json")
+            ).strip()
+            or "handover_scheduler_110_midnight_state.json",
+            "station_110_noon_state_file": str(
+                raw.get("station_110_noon_state_file", "handover_scheduler_110_noon_state.json")
+            ).strip()
+            or "handover_scheduler_110_noon_state.json",
         }
 
     def _slot_callback(self, slot: str) -> Callable[[str], tuple[bool, str]]:
@@ -63,8 +75,29 @@ class HandoverSchedulerManager:
             },
         }
 
+    def _daily_scheduler(
+        self,
+        *,
+        slot: str,
+        run_time: str,
+        state_file: str,
+        thread_name: str,
+        source_name: str,
+    ) -> DailyAutoSchedulerService:
+        return DailyAutoSchedulerService(
+            config=self._slot_service_config(
+                run_time=run_time,
+                state_file=state_file,
+            ),
+            emit_log=self._emit_log,
+            run_callback=self._slot_callback(slot),
+            is_busy=self._is_busy,
+            thread_name=thread_name,
+            source_name=source_name,
+        )
+
     def _build_schedulers(self) -> None:
-        self.schedulers = {
+        schedulers = {
             "morning": DailyAutoSchedulerService(
                 config=self._slot_service_config(
                     run_time=str(self._cfg["morning_time"]),
@@ -84,6 +117,22 @@ class HandoverSchedulerManager:
                 is_busy=self._is_busy,
             ),
         }
+        if bool(self._cfg.get("station_110_review_link_enabled", True)):
+            schedulers["station_110_midnight"] = self._daily_scheduler(
+                slot="station_110_midnight",
+                run_time=str(self._cfg["station_110_midnight_time"]),
+                state_file=str(self._cfg["station_110_midnight_state_file"]),
+                thread_name="handover-110-review-link-midnight-scheduler",
+                source_name="110站审核链接定时发送（0点）",
+            )
+            schedulers["station_110_noon"] = self._daily_scheduler(
+                slot="station_110_noon",
+                run_time=str(self._cfg["station_110_noon_time"]),
+                state_file=str(self._cfg["station_110_noon_state_file"]),
+                thread_name="handover-110-review-link-noon-scheduler",
+                source_name="110站审核链接定时发送（12点）",
+            )
+        self.schedulers = schedulers
 
     def set_run_callback(self, callback: Callable[[str, str], tuple[bool, str]]) -> None:
         self._run_callback = callback

@@ -739,6 +739,88 @@ def present_handover_review_overview(
                 },
             }
         )
+    existing_review_buildings = {
+        _string(row.get("building", ""))
+        for row in review_board_rows
+        if isinstance(row, dict) and _string(row.get("building", ""))
+    }
+    for link_item in review_link_rows:
+        if not isinstance(link_item, dict):
+            continue
+        link_code = _string(link_item.get("code", "")).lower()
+        link_building = _string(link_item.get("building", ""))
+        if link_code != "110" and link_building not in {"110站", "110"}:
+            continue
+        building = "110站"
+        if building in existing_review_buildings:
+            continue
+        recipient_status = _dict(recipient_status_map.get(building, {}))
+        recipient_count = _int(recipient_status.get("recipient_count", 0))
+        enabled_count = _int(recipient_status.get("enabled_count", 0))
+        disabled_count = _int(recipient_status.get("disabled_count", 0))
+        invalid_count = _int(recipient_status.get("invalid_count", 0))
+        recipient_status_text = _string(recipient_status.get("status_text", ""))
+        recipient_reason = _string(recipient_status.get("reason", ""))
+        review_link_send_allowed = recipient_count > 0
+        review_link_send_disabled_reason = ""
+        review_link_send_reason_code = ""
+        if not review_link_send_allowed:
+            if enabled_count <= 0 and disabled_count > 0 and invalid_count <= 0:
+                review_link_send_disabled_reason = recipient_reason or "110站审核链接接收人已全部停用"
+                review_link_send_reason_code = "recipient_all_disabled"
+            elif invalid_count > 0:
+                review_link_send_disabled_reason = recipient_reason or "110站审核链接接收人存在无效配置"
+                review_link_send_reason_code = "recipient_invalid"
+            else:
+                review_link_send_disabled_reason = recipient_reason or "110站未配置启用的审核链接接收人"
+                review_link_send_reason_code = "recipient_unconfigured"
+        review_board_rows.append(
+            {
+                "building": building,
+                "status": "upload_page",
+                "text": "上传页",
+                "tone": "info",
+                "code": "110",
+                "url": _string(link_item.get("url", "")),
+                "has_url": bool(_string(link_item.get("url", ""))),
+                "session_id": "",
+                "revision": 0,
+                "updated_at": "",
+                "cloud_sheet_sync": {
+                    "status": "not_applicable",
+                    "text": "不参与五楼确认",
+                    "tone": "neutral",
+                    "url": "",
+                    "error": "",
+                },
+                "review_link_delivery": {
+                    "status": "idle",
+                    "text": "待发送",
+                    "tone": "neutral",
+                    "error": "",
+                    "last_sent_at": "",
+                    "last_attempt_at": "",
+                },
+                "review_link_recipient_status": {
+                    "text": recipient_status_text or ("已保存，可发送" if review_link_send_allowed else "110站未配置接收人"),
+                    "reason": recipient_reason,
+                    "recipient_count": recipient_count,
+                    "enabled_count": enabled_count,
+                    "disabled_count": disabled_count,
+                    "invalid_count": invalid_count,
+                },
+                "actions": {
+                    "review_link_send": {
+                        "allowed": review_link_send_allowed,
+                        "pending": False,
+                        "label": "手动发送审核链接",
+                        "disabled_reason": review_link_send_disabled_reason,
+                        "reason_code": review_link_send_reason_code,
+                    },
+                },
+            }
+        )
+        existing_review_buildings.add(building)
     return {
         "tone": tone,
         "status_text": status_text,

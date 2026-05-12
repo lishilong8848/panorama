@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Dict, List
 
 from openpyxl.worksheet.worksheet import Worksheet
@@ -28,6 +29,21 @@ FOOTER_INVENTORY_COLUMNS: List[Dict[str, object]] = [
     {"key": "G", "label": "其他补充说明", "source_cols": ["G"], "span": 1},
     {"key": "H", "label": "清点确认人（接班）", "source_cols": ["H"], "span": 1},
 ]
+
+
+def first_person_text(raw_people: object, split_regex: str = r"[、,/，；;\s]+") -> str:
+    people = str(raw_people or "").strip()
+    if not people:
+        return ""
+    try:
+        parts = re.split(split_regex, people)
+    except Exception:  # noqa: BLE001
+        parts = re.split(r"[、,/，；;\s]+", people)
+    for part in parts:
+        text = str(part or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def cell_text(ws: Worksheet, row_idx: int, col_idx: int = 1) -> str:

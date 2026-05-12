@@ -15,6 +15,7 @@ from handover_log_module.service.handover_cabinet_shift_record_bitable_export_se
     HandoverCabinetShiftRecordBitableExportService,
 )
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
+from handover_log_module.service.handover_110_station_upload_service import Handover110StationUploadService
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateError,
@@ -149,6 +150,7 @@ class ReviewFollowupTriggerService:
         self._review_service = ReviewSessionService(self.config)
         self._source_data_attachment_export_service = SourceDataAttachmentBitableExportService(self.config)
         self._cloud_sheet_sync_service = HandoverCloudSheetSyncService(self.config)
+        self._station_110_upload_service = Handover110StationUploadService(self.config)
         self._daily_report_state_service = HandoverDailyReportStateService(self.config)
         self._daily_report_asset_service = HandoverDailyReportAssetService(self.config)
         self._daily_report_screenshot_service = HandoverDailyReportScreenshotService(self.config)
@@ -1127,7 +1129,47 @@ class ReviewFollowupTriggerService:
                 emit_log=emit_log,
             )
 
+    def _attach_station_110_sync_result(
+        self,
+        *,
+        batch_key: str,
+        cloud_result: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        result = cloud_result if isinstance(cloud_result, dict) else {}
+        token = str(result.get("spreadsheet_token", "")).strip()
+        if not token:
+            result["station_110_sync"] = {"status": "skipped", "reason": "missing_spreadsheet_token"}
+            return result
+        try:
+            station_result = self._station_110_upload_service.sync_existing_upload_to_cloud(
+                batch_key=batch_key,
+                emit_log=emit_log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            station_result = {"status": "failed", "error": str(exc)}
+            emit_log(f"[交接班][110站云表] 同步异常 batch={batch_key}, error={exc}")
+        result["station_110_sync"] = station_result
+        station_status = str(station_result.get("status", "")).strip().lower()
+        if station_status and station_status != "skipped":
+            emit_log(f"[交接班][110站云表] 跟随云文档上传完成 batch={batch_key}, status={station_status}")
+        return result
+
     def _run_cloud_sheet_upload(
+        self,
+        *,
+        batch_key: str,
+        sessions: List[Dict[str, Any]],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        with self._station_110_upload_service.batch_lock(batch_key):
+            return self._run_cloud_sheet_upload_locked(
+                batch_key=batch_key,
+                sessions=sessions,
+                emit_log=emit_log,
+            )
+
+    def _run_cloud_sheet_upload_locked(
         self,
         *,
         batch_key: str,
@@ -1181,7 +1223,7 @@ class ReviewFollowupTriggerService:
                 cloud_result=result,
                 emit_log=emit_log,
             )
-            return result
+            return self._attach_station_110_sync_result(batch_key=batch_key, cloud_result=result, emit_log=emit_log)
 
         upload_items, skipped_buildings, failed_buildings = self._build_cloud_items(
             sessions,
@@ -1194,7 +1236,7 @@ class ReviewFollowupTriggerService:
                 f"[交接班][云表最终上传] 已跳过: batch={batch_key}, "
                 f"状态={_followup_status_text(status)}, 已跳过={len(skipped_buildings)}, 已失败={len(failed_buildings)}"
             )
-            return {
+            result = {
                 "status": status,
                 "spreadsheet_token": str(batch_meta.get("spreadsheet_token", "")).strip(),
                 "spreadsheet_url": str(batch_meta.get("spreadsheet_url", "")).strip(),
@@ -1204,6 +1246,7 @@ class ReviewFollowupTriggerService:
                 "failed_buildings": failed_buildings,
                 "details": {},
             }
+            return self._attach_station_110_sync_result(batch_key=batch_key, cloud_result=result, emit_log=emit_log)
 
         self._mark_cloud_sheet_uploading(
             sessions=sessions,
@@ -1251,7 +1294,7 @@ class ReviewFollowupTriggerService:
             cloud_result=result,
             emit_log=emit_log,
         )
-        return result
+        return self._attach_station_110_sync_result(batch_key=batch_key, cloud_result=result, emit_log=emit_log)
 
     def _daily_report_export_state(
         self,

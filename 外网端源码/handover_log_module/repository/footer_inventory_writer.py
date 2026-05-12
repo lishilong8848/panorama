@@ -13,6 +13,7 @@ from handover_log_module.core.footer_layout import (
     FOOTER_INVENTORY_COLUMNS,
     FOOTER_SIGNOFF_MARKER,
     FooterInventoryLayout,
+    first_person_text,
     find_footer_inventory_layout,
     trim_rows_below_footer,
 )
@@ -141,6 +142,8 @@ def _normalize_inventory_rows(rows: Any, columns: List[Dict[str, Any]]) -> List[
         for column in columns:
             key = str(column["key"]).upper()
             normalized_row[key] = str(cells.get(key, "") or "")
+        if "H" in normalized_row:
+            normalized_row["H"] = first_person_text(normalized_row.get("H", ""))
         normalized.append(normalized_row)
     if normalized:
         return normalized
@@ -162,13 +165,15 @@ def _apply_inventory_receiver_fallback(
     columns: List[Dict[str, Any]],
     receiver_text: str,
 ) -> None:
-    if not str(receiver_text or "").strip():
+    receiver_first_person = first_person_text(receiver_text)
+    if not receiver_first_person:
         return
     for row_payload in rows:
         if str(row_payload.get("H", "") or "").strip():
+            row_payload["H"] = first_person_text(row_payload.get("H", ""))
             continue
         if _inventory_row_has_business_content(row_payload, columns):
-            row_payload["H"] = str(receiver_text or "").strip()
+            row_payload["H"] = receiver_first_person
 
 
 def _set_inventory_row_values(ws: Worksheet, row_idx: int, row_payload: Dict[str, str], columns: List[Dict[str, Any]]) -> None:

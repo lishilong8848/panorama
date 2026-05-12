@@ -1072,6 +1072,50 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         notify = WebhookNotifyService(runtime_config)
         role_mode = _deployment_role_mode()
 
+        if slot in {"station_110_midnight", "station_110_noon"}:
+            if role_mode == "internal":
+                container.add_system_log("[交接班][110站审核链接调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+                return True, "internal_role_skip"
+            if role_mode != "external":
+                detail = "当前未确认有效角色，无法执行110站审核链接调度"
+                container.add_system_log(f"[交接班][110站审核链接调度] {detail}")
+                return False, detail
+
+            from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
+
+            period = datetime.now().strftime("%Y-%m-%d")
+            dedupe_key = f"handover:110_review_link:{slot}:{period}"
+
+            def _run_station_110_link(emit_log):
+                service = ReviewLinkDeliveryService(runtime_config, config_path=container.config_path)
+                result = service.send_station_110_review_link(source="scheduler", emit_log=emit_log)
+                status = str(result.get("status", "") or "").strip().lower()
+                if status not in {"success", "partial_failed", "unconfigured", "disabled"}:
+                    raise RuntimeError(str(result.get("error", "") or "").strip() or "110站审核链接发送失败")
+                return result
+
+            try:
+                job = container.job_service.start_job(
+                    name=source,
+                    run_func=_run_station_110_link,
+                    resource_keys=["handover:review_link_delivery"],
+                    priority="scheduler",
+                    feature="handover_110_review_link_delivery",
+                    dedupe_key=dedupe_key,
+                    submitted_by="scheduler",
+                )
+            except Exception as exc:  # noqa: BLE001
+                notify.send_failure(stage=source, detail=str(exc), emit_log=container.add_system_log)
+                return False, str(exc)
+            done = container.job_service.wait_job(job.job_id)
+            if done.status == "success":
+                detail = f"110站审核链接发送完成 job_id={job.job_id}, slot={slot}"
+                container.add_system_log(f"[交接班][110站审核链接调度] {detail}")
+                return True, detail
+            detail = done.error or done.summary or "110站审核链接发送失败"
+            notify.send_failure(stage=source, detail=detail, emit_log=container.add_system_log)
+            return False, detail
+
         now = datetime.now()
         if slot == "morning":
             duty_date = (now.date() - timedelta(days=1)).strftime("%Y-%m-%d")

@@ -35,6 +35,7 @@ from handover_log_module.service.handover_daily_report_screenshot_service import
     HandoverDailyReportScreenshotService,
 )
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
+from handover_log_module.service.handover_110_station_upload_service import Handover110StationUploadService
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateConflictError,
@@ -60,6 +61,22 @@ _REVIEW_DOCUMENT_WARMUPS_INFLIGHT: set[str] = set()
 _REVIEW_BOOTSTRAP_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_HISTORY_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_HISTORY_CACHE_TTL_SEC = 15.0
+_STATION_110_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+_UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+
+
+async def _read_upload_file_limited(file: UploadFile, *, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail="上传文件过大，110站文件最大支持50MB")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _raise_review_store_http_error(
@@ -579,6 +596,10 @@ def _build_review_followup_service(container) -> ReviewFollowupTriggerService:
         _, _, _, followup = _build_review_services(container)
         return followup
     return ReviewFollowupTriggerService(_handover_cfg(container))
+
+
+def _build_station_110_upload_service(container) -> Handover110StationUploadService:
+    return Handover110StationUploadService(_handover_cfg(container))
 
 
 def _build_review_ui_config(container) -> Dict[str, Any]:
@@ -2855,7 +2876,8 @@ def _ensure_latest_session_actionable_or_400(service: ReviewSessionService, *, b
 def handover_review_page(building_code: str, request: Request):
     container = request.app.state.container
     service = _build_review_session_service(container)
-    _resolve_building_or_404(service, building_code)
+    if str(building_code or "").strip().lower() != "110":
+        _resolve_building_or_404(service, building_code)
     if str(container.frontend_mode or "").strip().lower() == "source":
         return HTMLResponse(
             render_frontend_index_html(
@@ -2869,6 +2891,97 @@ def handover_review_page(building_code: str, request: Request):
         container.frontend_root / "index.html",
         headers=source_frontend_no_cache_headers(container.frontend_mode),
     )
+
+
+@router.get("/api/handover/review/110-station/status")
+def handover_review_110_station_status(
+    request: Request,
+    duty_date: str = "",
+    duty_shift: str = "",
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service = _build_station_110_upload_service(container)
+    try:
+        return service.status(duty_date=duty_date, duty_shift=duty_shift)
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/handover/review/110-station/parse")
+async def handover_review_110_station_parse(
+    request: Request,
+    duty_date: str = Form(default=""),
+    duty_shift: str = Form(default=""),
+    file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    content = await _read_upload_file_limited(file, max_bytes=_STATION_110_UPLOAD_MAX_BYTES)
+    container = request.app.state.container
+    service = _build_station_110_upload_service(container)
+    try:
+        return service.parse(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            filename=str(file.filename or "").strip(),
+            content=content,
+            emit_log=container.add_system_log,
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        container.add_system_log(f"[交接班][110站解析] 失败: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/api/handover/review/110-station/upload")
+async def handover_review_110_station_upload(
+    request: Request,
+    duty_date: str = Form(default=""),
+    duty_shift: str = Form(default=""),
+    file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    content = await _read_upload_file_limited(file, max_bytes=_STATION_110_UPLOAD_MAX_BYTES)
+    container = request.app.state.container
+    service = _build_station_110_upload_service(container)
+    try:
+        return service.upload(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            filename=str(file.filename or "").strip(),
+            content=content,
+            emit_log=container.add_system_log,
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        container.add_system_log(f"[交接班][110站上传] 失败: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/api/handover/review/110-station/cloud-sync/retry")
+def handover_review_110_station_cloud_sync_retry(
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    container = request.app.state.container
+    service = _build_station_110_upload_service(container)
+    try:
+        return service.retry_cloud_sync(
+            duty_date=str(body.get("duty_date", "")).strip(),
+            duty_shift=str(body.get("duty_shift", "")).strip(),
+            emit_log=container.add_system_log,
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        container.add_system_log(f"[交接班][110站云表] 重试失败: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/api/handover/review/batch/{batch_key}/status")

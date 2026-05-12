@@ -435,7 +435,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                 <div class="task-block-head">
                   <div>
                     <div class="task-block-kicker">审核访问</div>
-                    <div class="handover-access-title">当前 5 个楼页面访问地址</div>
+                    <div class="handover-access-title">当前审核页面访问地址</div>
                   </div>
                   <span class="status-inline-note" v-if="handoverReviewOverview.batchKey">批次 {{ handoverReviewOverview.batchKey }}</span>
                 </div>
@@ -451,7 +451,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                 <div class="hint" v-if="handoverReviewOverview.dutyText">
                   本次上传云文档批次：{{ handoverReviewOverview.dutyText }}
                 </div>
-                <div class="hint">以下地址来自手工配置的审核页基地址，可直接发给局域网内对应楼栋电脑访问。</div>
+                <div class="hint">以下地址来自手工配置的审核页基地址，可直接发给局域网内对应楼栋或110站电脑访问。</div>
                 <div class="hint" v-if="health.handover.review_base_url_effective">
                   当前生效地址（手工指定）：{{ health.handover.review_base_url_effective }}
                 </div>

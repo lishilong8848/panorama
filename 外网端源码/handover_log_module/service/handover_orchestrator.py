@@ -63,6 +63,14 @@ def _followup_reason_text(value: Any) -> str:
     return mapping.get(text, text or "-")
 
 
+_ATTENTION_HANDOVER_SECTION_NAME = "三、注意事项交接"
+_ATTENTION_HANDOVER_DEFAULT_ITEMS = (
+    "各班根据室外湿球温度及时调整制冷单元模式",
+    "各班的重要事件和注意项交接在交接班记录保存四个班",
+    "每周日夜班清点工具包，对讲机及仪表设备，周一早班检查",
+)
+
+
 @dataclass
 class HandoverQueryContext:
     duty_date: str
@@ -475,6 +483,16 @@ class HandoverOrchestrator:
         return ""
 
     @staticmethod
+    def _build_attention_handover_default_payloads(next_people_text: str) -> Dict[str, Any]:
+        follower_text = str(next_people_text or "").strip() or "/"
+        return {
+            _ATTENTION_HANDOVER_SECTION_NAME: [
+                {"cells": {"B": item, "H": follower_text}}
+                for item in _ATTENTION_HANDOVER_DEFAULT_ITEMS
+            ]
+        }
+
+    @staticmethod
     def _safe_alarm_count(value: Any, default_text: str) -> int:
         try:
             return max(0, int(value))
@@ -798,7 +816,9 @@ class HandoverOrchestrator:
             roster_cfg = self.config.get("shift_roster", {})
             cells_cfg = roster_cfg.get("cells", {}) if isinstance(roster_cfg, dict) else {}
             current_people_cell = str(cells_cfg.get("current_people", "C3")).strip().upper() or "C3"
+            next_people_cell = str(cells_cfg.get("next_people", "G3")).strip().upper() or "G3"
             current_people_text = self._find_cell_value_case_insensitive(fixed_cell_values, current_people_cell)
+            next_people_text = self._find_cell_value_case_insensitive(fixed_cell_values, next_people_cell)
             is_current_duty_context = self._is_current_duty_context(
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
@@ -871,6 +891,9 @@ class HandoverOrchestrator:
                     combined_category_payloads.update(other_important_work_payloads)
             except Exception as exc:  # noqa: BLE001
                 emit_log(f"[交接班][其他重要工作] 构建失败，按空分类继续: {exc}")
+            combined_category_payloads.update(
+                self._build_attention_handover_default_payloads(next_people_text)
+            )
             category_payloads = combined_category_payloads
 
         result.alarm_summary = dict(resolved_alarm_summary or {})
