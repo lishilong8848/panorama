@@ -41,7 +41,7 @@ def _resolve_handover_config(runtime_config: Dict[str, Any]) -> Dict[str, Any]:
     from app.config.config_adapter import adapt_runtime_config, ensure_v3_config
 
     cfg = runtime_config if isinstance(runtime_config, dict) else {}
-    if isinstance(cfg.get("review_ui", {}), dict):
+    if "review_ui" in cfg and isinstance(cfg.get("review_ui"), dict):
         return copy.deepcopy(cfg)
 
     if _looks_like_runtime_config(cfg):
