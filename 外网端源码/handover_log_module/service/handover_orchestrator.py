@@ -1196,6 +1196,76 @@ class HandoverOrchestrator:
         summary.results.append(result)
         return summary.to_dict()
 
+    def _send_station_110_review_link_with_handover(
+        self,
+        result_summary: Dict[str, Any],
+        *,
+        duty_date: str = "",
+        duty_shift: str = "",
+        source: str,
+        emit_log: Callable[[str], None],
+    ) -> None:
+        if not isinstance(result_summary, dict):
+            return
+        try:
+            if int(result_summary.get("success_count", 0) or 0) <= 0:
+                return
+        except Exception:
+            return
+
+        duty_date_text = str(duty_date or result_summary.get("duty_date", "") or "").strip()
+        duty_shift_text = str(duty_shift or result_summary.get("duty_shift", "") or "").strip().lower()
+        if not duty_date_text or duty_shift_text not in {"day", "night"}:
+            rows = result_summary.get("results", []) if isinstance(result_summary.get("results", []), list) else []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                session = row.get("review_session", {}) if isinstance(row.get("review_session", {}), dict) else {}
+                if not duty_date_text:
+                    duty_date_text = str(session.get("duty_date", "") or "").strip()
+                if duty_shift_text not in {"day", "night"}:
+                    duty_shift_text = str(session.get("duty_shift", "") or "").strip().lower()
+                if duty_date_text and duty_shift_text in {"day", "night"}:
+                    break
+        if not duty_date_text or duty_shift_text not in {"day", "night"}:
+            emit_log(
+                "[交接班][110站审核链接发送] 随楼栋审核链接发送跳过: "
+                f"班次上下文不完整 duty_date={duty_date_text or '-'}, duty_shift={duty_shift_text or '-'}"
+            )
+            return
+
+        try:
+            batch_key = str(
+                result_summary.get("batch_key", "")
+                or self._review_session_service.build_batch_key(duty_date_text, duty_shift_text)
+            ).strip()
+            delivery = self._review_link_delivery_service.send_station_110_review_link(
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                source=source,
+                emit_log=emit_log,
+            )
+            delivery["batch_key"] = batch_key
+            result_summary["station_110_review_link_delivery"] = delivery
+        except Exception as exc:  # noqa: BLE001
+            result_summary["station_110_review_link_delivery"] = {
+                "building": "110站",
+                "status": "failed",
+                "error": str(exc),
+                "duty_date": duty_date_text,
+                "duty_shift": duty_shift_text,
+                "batch_key": str(
+                    result_summary.get("batch_key", "")
+                    or self._review_session_service.build_batch_key(duty_date_text, duty_shift_text)
+                ).strip(),
+                "successful_recipients": [],
+                "failed_recipients": [],
+            }
+            emit_log(
+                "[交接班][110站审核链接发送] 随楼栋审核链接发送失败但不阻断主流程 "
+                f"duty_date={duty_date_text}, duty_shift={duty_shift_text}, error={exc}"
+            )
+
     def run_from_existing_files(
         self,
         *,
@@ -1321,6 +1391,21 @@ class HandoverOrchestrator:
         result_summary = summary.to_dict()
         result_summary["selected_buildings"] = selected_buildings
         result_summary["skipped_buildings"] = skipped_buildings
+        if str(duty_date or "").strip() and str(duty_shift or "").strip():
+            result_summary["duty_date"] = str(duty_date or "").strip()
+            result_summary["duty_shift"] = str(duty_shift or "").strip().lower()
+            result_summary["batch_key"] = self._review_session_service.build_batch_key(
+                result_summary["duty_date"],
+                result_summary["duty_shift"],
+            )
+        if auto_send_review_link:
+            self._send_station_110_review_link_with_handover(
+                result_summary,
+                duty_date=str(duty_date or "").strip(),
+                duty_shift=str(duty_shift or "").strip().lower(),
+                source="auto_with_handover_batch",
+                emit_log=emit_log,
+            )
         return result_summary
 
     def run_from_download(
@@ -1592,4 +1677,11 @@ class HandoverOrchestrator:
             result_summary["duty_date"] = duty_date_text
         if duty_shift_text:
             result_summary["duty_shift"] = duty_shift_text
+        self._send_station_110_review_link_with_handover(
+            result_summary,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            source="auto_with_handover_download",
+            emit_log=emit_log,
+        )
         return result_summary

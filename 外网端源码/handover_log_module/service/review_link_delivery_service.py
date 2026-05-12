@@ -696,6 +696,14 @@ class ReviewLinkDeliveryService:
         batch_key_text = str(batch_key or "").strip()
         if not building_text:
             raise ValueError("building 不能为空")
+        if building_text in {STATION_110_BUILDING, STATION_110_CODE}:
+            duty_date, duty_shift = self._resolve_duty_context_from_batch_key(batch_key_text)
+            return self.send_station_110_review_link(
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                source="manual_test",
+                emit_log=emit_log,
+            )
         recipient_snapshot = self._recipient_snapshot_for_building(building_text)
         recipients = list(recipient_snapshot.get("recipients", []))
         if not recipients:
@@ -794,6 +802,17 @@ class ReviewLinkDeliveryService:
             "failed_recipients": failed_recipients,
             "review_url": url,
         }
+
+    def _resolve_duty_context_from_batch_key(self, batch_key: str) -> tuple[str, str]:
+        batch_key_text = str(batch_key or "").strip()
+        duty_date = ""
+        duty_shift = ""
+        parse_batch_key = getattr(self._review_service, "parse_batch_key", None)
+        if callable(parse_batch_key):
+            duty_date, duty_shift = parse_batch_key(batch_key_text)
+        elif "|" in batch_key_text:
+            duty_date, duty_shift = batch_key_text.split("|", 1)
+        return str(duty_date or "").strip(), str(duty_shift or "").strip().lower()
 
     def send_station_110_review_link(
         self,
