@@ -50,6 +50,7 @@ const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
 const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
 const HANDOVER_REVIEW_STATUS_BROADCAST_KEY = "handover_review_status_broadcast_v1";
 const CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13"];
+const FORCED_FIXED_CELL_VALUES = { F10: "15" };
 const OUTDOOR_TEMPERATURE_CELLS = ["B7", "D7"];
 const SUBSTATION_110KV_ROWS = [
   { row_id: "incoming_akai", label: "阿开", group: "incoming" },
@@ -249,7 +250,7 @@ function normalizeField(field) {
   return {
     cell,
     label: String(field?.label || cell || "字段"),
-    value: String(field?.value ?? ""),
+    value: String(FORCED_FIXED_CELL_VALUES[cell] ?? field?.value ?? ""),
   };
 }
 

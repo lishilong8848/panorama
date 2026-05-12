@@ -120,6 +120,7 @@ def branch_power_upload_scheduler_config(payload: Dict[str, Any], request: Reque
             if key == "minute_offset":
                 if number < 0:
                     raise HTTPException(status_code=400, detail="minute_offset 必须大于等于0")
+                number = number % 60
             elif number < 1:
                 raise HTTPException(status_code=400, detail=f"{key} 必须大于等于1")
             scheduler_cfg[key] = number

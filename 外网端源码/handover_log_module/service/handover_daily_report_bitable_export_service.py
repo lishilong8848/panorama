@@ -180,7 +180,7 @@ class HandoverDailyReportBitableExportService:
         url = str(spreadsheet_url or "").strip()
         report_field_name = str(cfg.get("fields", {}).get("report_link", "交接班日报") or "交接班日报").strip()
         ui_type = self._lookup_field_ui_type(fields_meta, report_field_name).lower()
-        if ui_type in {"15", "url"}:
+        if ui_type in {"", "15", "url"}:
             return {"text": url, "link": url}
         return url
 
@@ -188,6 +188,65 @@ class HandoverDailyReportBitableExportService:
     def _build_report_link_object_payload(spreadsheet_url: str) -> Dict[str, str]:
         url = str(spreadsheet_url or "").strip()
         return {"text": url, "link": url}
+
+    @staticmethod
+    def _extract_report_link_url(value: Any) -> str:
+        if isinstance(value, dict):
+            return str(value.get("link") or value.get("url") or value.get("text") or "").strip()
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            for item in value:
+                text = HandoverDailyReportBitableExportService._extract_report_link_url(item)
+                if text:
+                    return text
+        return ""
+
+    def _ensure_report_link_written(
+        self,
+        *,
+        client: FeishuBitableClient,
+        table_id: str,
+        record_id: str,
+        report_field_name: str,
+        spreadsheet_url: str,
+        emit_log: Callable[[str], None],
+    ) -> None:
+        record_text = str(record_id or "").strip()
+        url = str(spreadsheet_url or "").strip()
+        if not record_text or not url:
+            return
+        try:
+            record = client.get_record_by_id(table_id=table_id, record_id=record_text)
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][日报多维] 链接写入校验读取失败，将按成功继续: record_id={record_text}, error={exc}")
+            return
+        fields = record.get("fields", {}) if isinstance(record, dict) else {}
+        actual_url = self._extract_report_link_url(fields.get(report_field_name) if isinstance(fields, dict) else None)
+        if actual_url == url:
+            return
+        emit_log(
+            "[交接班][日报多维] 检测到日报链接未落表，开始补写 "
+            f"record_id={record_text}, field={report_field_name}"
+        )
+        payload = {report_field_name: self._build_report_link_object_payload(url)}
+        try:
+            client.update_record(table_id=table_id, record_id=record_text, fields=payload)
+        except Exception as exc:  # noqa: BLE001
+            if self._is_url_field_conv_fail(exc):
+                raise self._build_url_field_error(str(exc)) from exc
+            raise
+        try:
+            record = client.get_record_by_id(table_id=table_id, record_id=record_text)
+            fields = record.get("fields", {}) if isinstance(record, dict) else {}
+            actual_url = self._extract_report_link_url(fields.get(report_field_name) if isinstance(fields, dict) else None)
+        except Exception:
+            actual_url = url
+        if actual_url != url:
+            raise self._build_url_field_error(
+                f"日报链接字段补写后仍未生效: record_id={record_text}, field={report_field_name}"
+            )
+        emit_log(f"[交接班][日报多维] 日报链接补写成功 record_id={record_text}")
 
     @staticmethod
     def _extract_feishu_error_payload(error_text: str) -> Dict[str, Any]:
@@ -331,6 +390,14 @@ class HandoverDailyReportBitableExportService:
             records = responses[0].get("data", {}).get("records", []) if isinstance(responses[0].get("data", {}), dict) else []
             if isinstance(records, list) and records and isinstance(records[0], dict):
                 record_id = str(records[0].get("record_id", "") or "").strip()
+        self._ensure_report_link_written(
+            client=client,
+            table_id=table_id,
+            record_id=record_id,
+            report_field_name=report_field_name,
+            spreadsheet_url=spreadsheet_url,
+            emit_log=emit_log,
+        )
         emit_log(f"[交接班][日报多维] 写入成功 batch={duty_date}|{duty_shift}, record_id={record_id or '-'}")
         return {
             "status": "success",

@@ -75,6 +75,18 @@ def _interval_run_text(value: Any) -> str:
     return f"每 {minutes} 分钟" if minutes > 0 else "未设置"
 
 
+def _daily_minute_run_text(snapshot: Any, config: Any, *, default_minute: int = 30) -> str:
+    snapshot_payload = _dict(snapshot)
+    config_payload = _dict(config)
+    minute = _int(snapshot_payload.get("minute_offset"))
+    if minute <= 0 and str(snapshot_payload.get("minute_offset", "")).strip() not in {"0", "00"}:
+        minute = _int(config_payload.get("minute_offset"))
+    if minute <= 0 and str(config_payload.get("minute_offset", "")).strip() not in {"0", "00"}:
+        minute = default_minute
+    minute = max(0, minute) % 60
+    return f"每天 00:{minute:02d} 左右"
+
+
 def _monthly_run_text(day_of_month: Any, run_time: Any) -> str:
     day = _int(day_of_month)
     time_text = _text(run_time)
@@ -366,8 +378,8 @@ def present_scheduler_overview_items(
             ),
             "parts": [
                 _overview_part(
-                    label="循环调度",
-                    run_time_text=_interval_run_text(branch_power_cfg.get("interval_minutes")),
+                    label="每日调度",
+                    run_time_text=_daily_minute_run_text(branch_power_snapshot, branch_power_cfg),
                     next_run_time=branch_power_snapshot.get("next_run_time"),
                     last_trigger_at=branch_power_snapshot.get("last_trigger_at"),
                     result_text=_map_scheduler_trigger_text(branch_power_snapshot.get("last_trigger_result")),

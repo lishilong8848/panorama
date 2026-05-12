@@ -9,6 +9,11 @@ from handover_log_module.core.formatter import (
     build_metric_text,
     missing_metrics_for_cells,
 )
+from handover_log_module.core.fixed_cell_overrides import (
+    FORCED_FIXED_CELL_VALUES,
+    apply_forced_fixed_cell_values,
+    normalize_cell_name,
+)
 from handover_log_module.core.models import FillValue, MetricHit
 from handover_log_module.core.building_title_rules import HANDOVER_TITLE_CELL, build_handover_building_title
 from handover_log_module.repository.template_writer import copy_template_and_fill
@@ -128,13 +133,20 @@ class HandoverFillService:
         if not isinstance(format_templates, dict) or not format_templates:
             raise ValueError("配置错误: handover_log.format_templates 不能为空")
 
+        forced_cells = set(FORCED_FIXED_CELL_VALUES)
+        effective_cell_mapping = {
+            metric_key: cell
+            for metric_key, cell in cell_mapping.items()
+            if normalize_cell_name(cell) not in forced_cells
+        }
         cell_values = build_cell_value_map(
-            cell_mapping=cell_mapping,
+            cell_mapping=effective_cell_mapping,
             templates=format_templates,
             hits=hits,
             effective_config=effective_config,
             missing_policy=missing_policy,
         )
+        cell_values = apply_forced_fixed_cell_values(cell_values)
         resolved_values_by_id = build_resolved_value_context(hits=hits, effective_config=effective_config)
         fixed_cells: Dict[str, str] = {}
         if isinstance(fixed_cell_values, dict):
@@ -150,11 +162,12 @@ class HandoverFillService:
             template_cfg=template_cfg,
             fixed_cells=fixed_cells,
         )
+        fixed_cells = apply_forced_fixed_cell_values(fixed_cells)
         if fixed_cells:
             cell_values.update(fixed_cells)
 
         missing_map = missing_metrics_for_cells(
-            cell_mapping=cell_mapping,
+            cell_mapping=effective_cell_mapping,
             hits=hits,
             effective_config=effective_config,
         )
@@ -191,7 +204,7 @@ class HandoverFillService:
             )
 
         fills: List[FillValue] = []
-        for metric_key, cell in cell_mapping.items():
+        for metric_key, cell in effective_cell_mapping.items():
             text = build_metric_text(
                 metric_key=metric_key,
                 hits=hits,

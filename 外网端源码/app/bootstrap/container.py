@@ -467,6 +467,11 @@ class AppContainer:
         scheduler_cfg["interval_minutes"] = 1440
         if "minute_offset" not in scheduler_cfg and "start_minute" not in scheduler_cfg and "run_minute" not in scheduler_cfg:
             scheduler_cfg["minute_offset"] = 30
+        try:
+            raw_minute = int(scheduler_cfg.get("minute_offset", scheduler_cfg.get("start_minute", scheduler_cfg.get("run_minute", 30))) or 0)
+        except Exception:  # noqa: BLE001
+            raw_minute = 30
+        scheduler_cfg["minute_offset"] = max(0, raw_minute) % 60
         return IntervalSchedulerService(
             scheduler_cfg=scheduler_cfg,
             runtime_state_root=runtime_state_root or "runtime_state",

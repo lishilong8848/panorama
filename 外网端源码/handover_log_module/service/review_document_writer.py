@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 import openpyxl
 
 from app.shared.utils.atomic_file import atomic_save_workbook
+from handover_log_module.core.fixed_cell_overrides import apply_forced_fixed_cell_values
 from handover_log_module.core.footer_layout import FOOTER_DYNAMIC_FIXED_CELLS
 from handover_log_module.core.section_layout import capture_section_snapshots, parse_category_sections
 from handover_log_module.repository.excel_reader import load_workbook_quietly
@@ -56,7 +57,7 @@ class ReviewDocumentWriter:
                     fixed_cells[cell_name] = str(field.get("value", "") or "")
         if "A1" not in fixed_cells:
             fixed_cells["A1"] = str(document.get("title", "") or "")
-        return fixed_cells
+        return apply_forced_fixed_cell_values(fixed_cells)
 
     def _normalize_section_columns(self, section: Dict[str, Any]) -> List[Dict[str, Any]]:
         columns = section.get("columns", [])

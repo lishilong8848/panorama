@@ -81,13 +81,13 @@ async function guardedRun(actionKey, taskFn, options = {}) {
     return taskFn();
   }
 
-  function triggerDashboardRefresh(reason = "job_action") {
+  function triggerDashboardRefresh(reason = "job_action", options = {}) {
     if (typeof scheduleExternalDashboardRefresh === "function") {
-      scheduleExternalDashboardRefresh(reason);
+      scheduleExternalDashboardRefresh(reason, options);
       return;
     }
     if (typeof fetchExternalDashboardSummary === "function") {
-      void fetchExternalDashboardSummary({ silentMessage: true });
+      void fetchExternalDashboardSummary({ silentMessage: true, force: Boolean(options?.force) });
     }
   }
 
@@ -262,7 +262,7 @@ if (!canRun.value) return;
             applyJobPanelSummary(data.job_panel_summary);
             summaryApplied = true;
           }
-          triggerDashboardRefresh("job_cancel");
+          triggerDashboardRefresh("job_cancel", { force: true, delayMs: 0 });
           if (!summaryApplied && typeof fetchJobs === "function") {
             void fetchJobs({ silentMessage: true });
           }

@@ -1779,7 +1779,10 @@ export function createRuntimeHealthConfigActions(ctx) {
           ) {
             bootstrapRuntimeHydrationQueued = true;
             window.setTimeout(() => {
-              void fetchExternalDashboardSummary({ silentMessage: true });
+              void fetchExternalDashboardSummary({ force: true, silentMessage: true })
+                .finally(() => {
+                  bootstrapRuntimeHydrationQueued = false;
+                });
             }, 0);
           } else if (
             roleMode === "internal"
@@ -1788,7 +1791,10 @@ export function createRuntimeHealthConfigActions(ctx) {
           ) {
             bootstrapRuntimeHydrationQueued = true;
             window.setTimeout(() => {
-              void fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+              void fetchHealth({ silentTransientNetworkError: true, silentMessage: true })
+                .finally(() => {
+                  bootstrapRuntimeHydrationQueued = false;
+                });
             }, 0);
           }
         } else if (!Boolean(data?.runtime_activated) || fullHealthLoaded?.value) {
@@ -2305,6 +2311,18 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (bridgeSummary) {
       applyBridgeTasksSummary(bridgeSummary);
     }
+    if (data.handover_review_status && typeof data.handover_review_status === "object") {
+      health.handover.review_status = {
+        ...health.handover.review_status,
+        ...data.handover_review_status,
+      };
+    }
+    if (data.handover_review_access && typeof data.handover_review_access === "object") {
+      applyHandoverReviewAccessSnapshot(data.handover_review_access);
+    }
+    if (Array.isArray(data.handover_review_recipient_status_by_building)) {
+      health.handover.review_recipient_status_by_building = data.handover_review_recipient_status_by_building;
+    }
     const runtimeResources = data.runtime_resources_summary && typeof data.runtime_resources_summary === "object"
       ? data.runtime_resources_summary
       : null;
@@ -2526,10 +2544,14 @@ export function createRuntimeHealthConfigActions(ctx) {
         });
         const data = await cancelBridgeTaskApi(taskIdText);
         const applied = applyBridgeTaskMutationResult(data, taskIdText);
+        if (data?.job_panel_summary && typeof data.job_panel_summary === "object") {
+          applyJobPanelSummary(data.job_panel_summary);
+        }
         if (!applied) {
           await fetchBridgeTasks({ silentMessage: true, force: true });
           await fetchBridgeTaskDetail(taskIdText, { silentMessage: true });
         }
+        refreshRoleScopedRuntimeStatus("bridge_task_cancel", { force: true, delayMs: 0 });
         message.value = "共享任务取消请求已提交";
         return true;
       } catch (err) {

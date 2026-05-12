@@ -12,6 +12,7 @@ from handover_log_module.core.footer_layout import (
     first_person_text,
     find_footer_inventory_layout,
 )
+from handover_log_module.core.fixed_cell_overrides import forced_fixed_cell_value
 from handover_log_module.core.section_layout import build_section_logical_columns, parse_category_sections
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 
@@ -108,16 +109,18 @@ class ReviewDocumentParser:
             label_text = self._read_cell_text(ws, label_cell) if label_cell else ""
             if not label_text:
                 label_text = self.FIELD_LABEL_MAP.get(value_cell, value_cell)
+            forced_value = forced_fixed_cell_value(value_cell)
             return {
                 "cell": value_cell,
                 "label": label_text,
-                "value": self._read_cell_text(ws, value_cell),
+                "value": forced_value if forced_value is not None else self._read_cell_text(ws, value_cell),
             }
         cell_name = str(entry or "").strip().upper()
+        forced_value = forced_fixed_cell_value(cell_name)
         return {
             "cell": cell_name,
             "label": self.FIELD_LABEL_MAP.get(cell_name, cell_name),
-            "value": self._read_cell_text(ws, cell_name),
+            "value": forced_value if forced_value is not None else self._read_cell_text(ws, cell_name),
         }
 
     def _section_hidden_columns(self) -> List[str]:

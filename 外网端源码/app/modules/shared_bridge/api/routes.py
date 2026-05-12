@@ -258,6 +258,28 @@ def _build_bridge_tasks_summary_payload(service, *, limit: int = 60) -> Dict[str
     )
 
 
+def _refresh_runtime_status_after_bridge_mutation(container, reason: str) -> None:
+    coordinator = getattr(container, "runtime_status_coordinator", None)
+    if coordinator is None:
+        return
+    try:
+        refresh_now = getattr(coordinator, "refresh_now", None)
+        if callable(refresh_now):
+            refresh_now()
+            return
+    except Exception as exc:  # noqa: BLE001
+        try:
+            container.add_system_log(f"[共享桥接] 任务变更后刷新运行状态快照失败: {exc}")
+        except Exception:
+            pass
+    try:
+        request_refresh = getattr(coordinator, "request_refresh", None)
+        if callable(request_refresh):
+            request_refresh(reason=str(reason or "").strip() or "bridge_task_mutation")
+    except Exception:
+        pass
+
+
 def _start_local_background_job(
     container,
     *,
@@ -1268,6 +1290,11 @@ def bridge_task_cancel(task_id: str, request: Request) -> Dict[str, Any]:
     _ensure_bridge_write_allowed(request)
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
+    existing_task = _get_visible_bridge_task(service, task_id)
+    resume_job_id = ""
+    if isinstance(existing_task, dict):
+        task_request = existing_task.get("request", {}) if isinstance(existing_task.get("request", {}), dict) else {}
+        resume_job_id = str(task_request.get("resume_job_id", "") or "").strip()
     try:
         cancelled = bool(service and service.cancel_task(task_id))
     except Exception as exc:  # noqa: BLE001
@@ -1276,12 +1303,25 @@ def bridge_task_cancel(task_id: str, request: Request) -> Dict[str, Any]:
         _raise_bridge_store_http_error(exc)
     if not cancelled:
         raise HTTPException(status_code=404, detail="共享任务不存在")
+    job_cancel_error = ""
+    if resume_job_id:
+        try:
+            container.job_service.cancel_job(resume_job_id)
+        except Exception as exc:  # noqa: BLE001
+            job_cancel_error = f"绑定等待任务取消失败：{exc}"
+            try:
+                container.add_system_log(f"[共享桥接] 共享任务已取消，但绑定等待任务取消失败 task_id={task_id}, job_id={resume_job_id}, error={exc}")
+            except Exception:
+                pass
+    _refresh_runtime_status_after_bridge_mutation(container, "bridge_task_cancel")
     task_payload = _get_visible_bridge_task(service, task_id)
     return {
         "ok": True,
         "accepted": True,
         "task": present_bridge_task(_bridge_present_task(task_payload)) if task_payload else None,
         "bridge_tasks_summary": _build_bridge_tasks_summary_payload(service, limit=60),
+        "job_panel_summary": build_job_panel_summary(container, limit=60),
+        "job_cancel_error": job_cancel_error,
     }
 
 

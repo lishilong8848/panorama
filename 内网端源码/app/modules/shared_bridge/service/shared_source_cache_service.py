@@ -5358,6 +5358,9 @@ class SharedSourceCacheService:
         running_buildings: List[str] = []
         completed_buildings: List[str] = []
         pending_buildings: List[str] = []
+        bucket_kind_for_entry = "latest"
+        if normalized_family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH} and _parse_hour_bucket(bucket_key) is None:
+            bucket_kind_for_entry = "daily"
         with self._lock:
             self._ensure_light_family_cache_unlocked(
                 source_family=normalized_family,
@@ -5368,13 +5371,13 @@ class SharedSourceCacheService:
             entry_exists = self._entry_exists_for_bucket(
                 source_family=normalized_family,
                 building=building,
-                bucket_kind="latest",
+                bucket_kind=bucket_kind_for_entry,
                 bucket_key=bucket_key,
             )
             ready_entry = self._get_ready_entry(
                 source_family=normalized_family,
                 building=building,
-                bucket_kind="latest",
+                bucket_kind=bucket_kind_for_entry,
                 bucket_key=bucket_key,
             )
             ready_file_path = self._resolve_entry_file_path(ready_entry) if ready_entry else None
@@ -5397,7 +5400,7 @@ class SharedSourceCacheService:
             failed_entry = self._get_source_cache_entry(
                 source_family=normalized_family,
                 building=building,
-                bucket_kind="latest",
+                bucket_kind=bucket_kind_for_entry,
                 bucket_key=bucket_key,
                 status="failed",
             )
@@ -5532,7 +5535,7 @@ class SharedSourceCacheService:
                                     "last_error": error_text,
                                     "relative_path": self._failed_marker_relative_path(
                                         source_family=normalized_family,
-                                        bucket_kind="latest",
+                                        bucket_kind=bucket_kind_for_entry,
                                         bucket_key=bucket_key,
                                         building=building,
                                     ),
@@ -5546,7 +5549,7 @@ class SharedSourceCacheService:
                         self._record_failed_entry(
                             source_family=normalized_family,
                             building=building,
-                            bucket_kind="latest",
+                            bucket_kind=bucket_kind_for_entry,
                             bucket_key=bucket_key,
                             error_text=error_text,
                             metadata={"family": normalized_family, "building": building},
