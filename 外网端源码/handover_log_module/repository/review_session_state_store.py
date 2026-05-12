@@ -1362,3 +1362,18 @@ class ReviewSessionStateStore:
                 """,
                 (block_key,),
             )
+
+    def clear_shared_block_lock(self, *, batch_key: str, block_id: str) -> bool:
+        batch_key_text = str(batch_key or "").strip()
+        block_id_text = str(block_id or "").strip()
+        if not batch_key_text or not block_id_text:
+            return False
+        block_key = self._shared_block_key(batch_key_text, block_id_text)
+        self.ensure_ready()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            deleted = conn.execute(
+                "DELETE FROM review_shared_block_locks WHERE lock_key = ?",
+                (block_key,),
+            ).rowcount > 0
+        return deleted

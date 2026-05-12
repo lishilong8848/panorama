@@ -185,14 +185,10 @@ class Handover110StationUploadService:
     def resolve_context(self, *, duty_date: str = "", duty_shift: str = "") -> Dict[str, Any]:
         date_text = _normalize_duty_date(duty_date)
         shift_text = _normalize_shift(duty_shift)
-        if not date_text or not shift_text:
-            latest = self._review_service.get_latest_batch_status()
-            latest_date = _normalize_duty_date(latest.get("duty_date", "")) if isinstance(latest, dict) else ""
-            latest_shift = _normalize_shift(latest.get("duty_shift", "")) if isinstance(latest, dict) else ""
-            if latest_date and latest_shift:
-                date_text, shift_text = latest_date, latest_shift
-        if not date_text or not shift_text:
+        if not date_text:
             date_text, shift_text = _default_duty_context()
+        elif not shift_text:
+            _, shift_text = _default_duty_context()
         batch_key = self._review_service.build_batch_key(date_text, shift_text)
         return {
             "batch_key": batch_key,
@@ -235,11 +231,58 @@ class Handover110StationUploadService:
             client_id=_UPLOAD_CLIENT_ID,
             payload={"rows": rows},
         )
-        self._state_store.clear_shared_block_dirty(
-            batch_key=batch_key,
-            block_id=_SUBSTATION_110KV_BLOCK_ID,
-        )
+        if not bool(saved.get("no_change", False)):
+            self._state_store.clear_shared_block_lock(
+                batch_key=batch_key,
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+            )
         return saved
+
+    def _build_upload_file_path(self, *, upload_dir: Path, filename: str) -> Path:
+        suffix_name = _safe_filename(filename)
+        base_stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        candidate = upload_dir / f"{base_stamp}--{suffix_name}"
+        if not candidate.exists():
+            return candidate
+        index = 1
+        while True:
+            fallback = upload_dir / f"{base_stamp}-{index:02d}--{suffix_name}"
+            if not fallback.exists():
+                return fallback
+            index += 1
+
+    @staticmethod
+    def _build_failed_state_payload(
+        *,
+        batch_key: str,
+        duty_date: str,
+        duty_shift: str,
+        filename: str,
+        stored_path: Path,
+        error_text: str,
+        parsed: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "batch_key": batch_key,
+            "duty_date": duty_date,
+            "duty_shift": duty_shift,
+            "status": "failed",
+            "error": str(error_text or "").strip(),
+            "original_filename": str(filename or "").strip(),
+            "stored_path": str(stored_path),
+            "uploaded_at": _now_text(),
+            "updated_at": _now_text(),
+            "cloud_sync": _empty_cloud_sync(),
+        }
+        if isinstance(parsed, dict):
+            payload["source_sheet"] = parsed.get("source_sheet", {}) if isinstance(parsed.get("source_sheet", {}), dict) else {}
+            payload["substation_sheet"] = parsed.get("substation_sheet", {}) if isinstance(parsed.get("substation_sheet", {}), dict) else {}
+            payload["parsed_110kv_rows"] = (
+                parsed.get("parsed_110kv_rows", [])
+                if isinstance(parsed.get("parsed_110kv_rows", []), list)
+                else []
+            )
+        return payload
 
     def _parse_workbook(self, path: Path) -> Dict[str, Any]:
         workbook = load_workbook_quietly(path, data_only=True)
@@ -416,8 +459,7 @@ class Handover110StationUploadService:
 
         with _batch_lock(batch_key):
             upload_dir = self._upload_dir(duty_date=context["duty_date"], duty_shift=context["duty_shift"])
-            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            stored_path = upload_dir / f"{stamp}--{_safe_filename(filename)}"
+            stored_path = self._build_upload_file_path(upload_dir=upload_dir, filename=filename)
             stored_path.write_bytes(content)
             emit_log(
                 f"[交接班][110站解析] 已保存 batch={batch_key}, file={stored_path}"
@@ -427,18 +469,14 @@ class Handover110StationUploadService:
             except Exception as exc:  # noqa: BLE001
                 failed_state = self._save_state(
                     batch_key,
-                    {
-                        "batch_key": batch_key,
-                        "duty_date": context["duty_date"],
-                        "duty_shift": context["duty_shift"],
-                        "status": "failed",
-                        "error": str(exc),
-                        "original_filename": str(filename or "").strip(),
-                        "stored_path": str(stored_path),
-                        "uploaded_at": _now_text(),
-                        "updated_at": _now_text(),
-                        "cloud_sync": _empty_cloud_sync(),
-                    },
+                    self._build_failed_state_payload(
+                        batch_key=batch_key,
+                        duty_date=context["duty_date"],
+                        duty_shift=context["duty_shift"],
+                        filename=filename,
+                        stored_path=stored_path,
+                        error_text=str(exc),
+                    ),
                 )
                 emit_log(f"[交接班][110站解析] 解析失败 batch={batch_key}, error={exc}")
                 return {"ok": False, "batch": context, "upload": failed_state, "error": str(exc)}
@@ -495,8 +533,7 @@ class Handover110StationUploadService:
 
         with _batch_lock(batch_key):
             upload_dir = self._upload_dir(duty_date=context["duty_date"], duty_shift=context["duty_shift"])
-            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            stored_path = upload_dir / f"{stamp}--{_safe_filename(filename)}"
+            stored_path = self._build_upload_file_path(upload_dir=upload_dir, filename=filename)
             stored_path.write_bytes(content)
             emit_log(
                 f"[交接班][110站上传] 已保存 batch={batch_key}, file={stored_path}"
@@ -506,18 +543,14 @@ class Handover110StationUploadService:
             except Exception as exc:  # noqa: BLE001
                 failed_state = self._save_state(
                     batch_key,
-                    {
-                        "batch_key": batch_key,
-                        "duty_date": context["duty_date"],
-                        "duty_shift": context["duty_shift"],
-                        "status": "failed",
-                        "error": str(exc),
-                        "original_filename": str(filename or "").strip(),
-                        "stored_path": str(stored_path),
-                        "uploaded_at": _now_text(),
-                        "updated_at": _now_text(),
-                        "cloud_sync": _empty_cloud_sync(),
-                    },
+                    self._build_failed_state_payload(
+                        batch_key=batch_key,
+                        duty_date=context["duty_date"],
+                        duty_shift=context["duty_shift"],
+                        filename=filename,
+                        stored_path=stored_path,
+                        error_text=str(exc),
+                    ),
                 )
                 emit_log(f"[交接班][110站上传] 解析失败 batch={batch_key}, error={exc}")
                 return {"ok": False, "batch": context, "upload": failed_state, "error": str(exc)}
@@ -540,7 +573,24 @@ class Handover110StationUploadService:
                     "cloud_sync": _empty_cloud_sync("pending"),
                 },
             )
-            self._save_substation_rows(batch_key=batch_key, rows=parsed["parsed_110kv_rows"])
+            try:
+                self._save_substation_rows(batch_key=batch_key, rows=parsed["parsed_110kv_rows"])
+            except Exception as exc:  # noqa: BLE001
+                error_text = str(exc)
+                failed_state = self._save_state(
+                    batch_key,
+                    self._build_failed_state_payload(
+                        batch_key=batch_key,
+                        duty_date=context["duty_date"],
+                        duty_shift=context["duty_shift"],
+                        filename=filename,
+                        stored_path=stored_path,
+                        error_text=error_text,
+                        parsed=parsed,
+                    ),
+                )
+                emit_log(f"[交接班][110站上传] 共享110KV写入失败 batch={batch_key}, error={error_text}")
+                return {"ok": False, "batch": context, "upload": failed_state, "error": error_text}
             emit_log(
                 f"[交接班][110站上传] 解析完成 batch={batch_key}, "
                 f"source_sheet={parsed['source_sheet'].get('title', '-')}, "

@@ -1490,6 +1490,21 @@ export function mountHandoverReviewApp(Vue) {
         }
         return "";
       });
+      function stopSubstation110kvLocalEditing(message = "") {
+        clearSubstation110kvAutoSaveTimer();
+        clearSubstation110kvPreviewSyncTimer();
+        clearSubstation110kvIdleReleaseTimer();
+        latestSubstation110kvSaveSeq += 1;
+        substation110kvLocalVersion += 1;
+        substation110kvDirty.value = false;
+        substation110kvDirtyMarked.value = false;
+        refreshDirtyFlagFromRegions();
+        if (message) {
+          statusText.value = message;
+          errorText.value = "";
+        }
+        void releaseSubstation110kvLock();
+      }
       function hasReviewDocumentDirty() {
         return Boolean(
           dirtyRegions.value.fixed_blocks
@@ -2021,12 +2036,17 @@ export function mountHandoverReviewApp(Vue) {
           incomingBlock.revision,
         );
         const currentRevision = Number(sharedBlocks.value?.substation_110kv?.revision || 0);
+        const previousSubstationLock = normalizeSharedLockPayload(
+          sharedBlockLocks.value.substation_110kv,
+          currentRevision,
+        );
         const incomingRevision = Number(incomingBlock.revision || 0);
         if (hasIncomingSubstation && currentRevision > 0 && incomingRevision > 0 && incomingRevision < currentRevision) {
           incomingBlock = normalizeSubstation110kvBlock(sharedBlocks.value.substation_110kv || {});
         }
         const serverRevisionChanged = hasIncomingSubstation && incomingRevision !== currentRevision;
-        const preserveLocalRows = Boolean(substation110kvDirty.value);
+        const preserveLocalRows = Boolean(substation110kvDirty.value) && !serverRevisionChanged;
+        const localEditingInterrupted = serverRevisionChanged && (Boolean(substation110kvDirty.value) || Boolean(previousSubstationLock?.client_holds_lock));
         if (preserveLocalRows && hasIncomingSubstation) {
           const currentBlock = normalizeSubstation110kvBlock(sharedBlocks.value.substation_110kv || {});
           sharedBlocks.value = {
@@ -2041,13 +2061,10 @@ export function mountHandoverReviewApp(Vue) {
             ...sharedBlocks.value,
             substation_110kv: incomingBlock,
           };
-          if (serverRevisionChanged && substation110kvDirty.value) {
-            substation110kvDirty.value = false;
-            substation110kvDirtyMarked.value = false;
-            refreshDirtyFlagFromRegions();
-            if (!dirty.value && !saving.value) {
-              statusText.value = "110KV变电站已同步最新内容";
-            }
+          if (localEditingInterrupted) {
+            stopSubstation110kvLocalEditing("110站已将数据修改，当前编辑已停止，请基于最新内容继续。");
+          } else if (serverRevisionChanged && !dirty.value && !saving.value) {
+            statusText.value = "110KV变电站已同步最新内容";
           }
         }
         sharedBlockLocks.value = {
