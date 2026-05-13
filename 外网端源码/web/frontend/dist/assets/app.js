@@ -276,6 +276,7 @@ createApp({
     const dashboardRefreshActionsRef = { current: null };
     let startupRouteFallbackTimer = null;
     const externalDashboardRefreshTimerState = { timer: null };
+    const initialLoadingRetryBusy = ref(false);
     const updaterAwaitingRestartRecovery = ref(false);
     const startupRoleSelectorVisible = ref(false);
     const startupRoleDecisionReady = ref(false);
@@ -1567,6 +1568,29 @@ createApp({
       }
     });
 
+    async function retryInitialLoading() {
+      if (initialLoadingRetryBusy.value) return;
+      initialLoadingRetryBusy.value = true;
+      message.value = "正在重新读取运行状态...";
+      try {
+        await fetchBootstrapHealth({ force: true, silentMessage: true });
+        const roleMode = String(health?.deployment?.role_mode || deploymentRoleMode.value || "").trim().toLowerCase();
+        if (roleMode === "external") {
+          await fetchExternalDashboardSummary({ force: true, silentMessage: true });
+        } else {
+          await fetchHealth({ silentTransientNetworkError: true, silentMessage: true });
+        }
+        if (String(currentView.value || "").trim().toLowerCase() === "config") {
+          await fetchConfig({ silentMessage: true, loadHandoverSegments: runtimeRequestsReady.value });
+        }
+        message.value = fullHealthLoaded.value ? "运行状态已更新" : "已重新发起读取，请稍候";
+      } catch (err) {
+        message.value = `重新读取运行状态失败: ${err}`;
+      } finally {
+        initialLoadingRetryBusy.value = false;
+      }
+    }
+
     return {
       health,
       config,
@@ -1648,6 +1672,8 @@ createApp({
       engineerDirectoryLoaded,
       initialLoadingPhase,
       initialLoadingStatusText,
+      initialLoadingRetryBusy,
+      retryInitialLoading,
       buildingsText,
       sheetRuleRows,
       manualBuilding,

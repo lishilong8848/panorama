@@ -77,6 +77,17 @@ _AIRCON_ZONE_DIRECTION_BY_AREA = {
     "3": ("west", "south"),
     "4": ("west", "north"),
 }
+_AIRCON_CHINESE_AREA_DIGITS = {
+    "一": "1",
+    "二": "2",
+    "三": "3",
+    "四": "4",
+}
+_AIRCON_CHINESE_FLOOR_DIGITS = {
+    "二": "2",
+    "三": "3",
+    "四": "4",
+}
 _DEFAULT_PRIMARY_PUMP_ALIASES = {
     "A楼": ["冷冻水一次泵变频反馈"],
     "B楼": ["冷冻水一次泵变频反馈"],
@@ -890,21 +901,40 @@ def _aircon_quadrant(row: RawRow, *, building_code: str) -> tuple[int, str, str]
     combined = f"{b_text} {c_text}"
     if "空调" not in combined:
         return None
-    floor_match = re.search(r"([234])层", combined)
-    code_match = re.search(r"([234](?:11|12|40|41))", combined)
-    area_match = re.search(r"空调区([1-4])", combined)
+    compact = re.sub(r"\s+", "", combined)
+    floor_match = re.search(r"([234二三四])(?:层|楼|F|f)", combined)
+    code_match = re.search(r"(?<!\d)([234])[-_#号层楼Ff]?(11|12|40|41)(?!\d)", compact)
+    area_match = (
+        re.search(r"空调\s*区\s*([1-4一二三四])", combined)
+        or re.search(r"空调\s*([1-4一二三四])\s*区", combined)
+        or re.search(r"([1-4一二三四])\s*区\s*空调", combined)
+    )
     floor_token = _text(floor_match.group(1)) if floor_match else ""
+    floor_token = _AIRCON_CHINESE_FLOOR_DIGITS.get(floor_token, floor_token)
     if not floor_token and code_match:
-        floor_token = _text(code_match.group(1))[:1]
+        floor_token = _text(code_match.group(1))
     if not floor_token:
         return None
     if area_match:
-        mapping = _AIRCON_ZONE_DIRECTION_BY_AREA.get(_text(area_match.group(1)))
+        area_token = _AIRCON_CHINESE_AREA_DIGITS.get(_text(area_match.group(1)), _text(area_match.group(1)))
+        mapping = _AIRCON_ZONE_DIRECTION_BY_AREA.get(area_token)
         if mapping:
             zone, direction = mapping
             return int(floor_token), zone, direction
+    explicit_zone = ""
+    explicit_direction = ""
+    if "东区" in combined or "东侧" in combined:
+        explicit_zone = "east"
+    elif "西区" in combined or "西侧" in combined:
+        explicit_zone = "west"
+    if "南侧" in combined or "南区" in combined:
+        explicit_direction = "south"
+    elif "北侧" in combined or "北区" in combined:
+        explicit_direction = "north"
+    if explicit_zone and explicit_direction:
+        return int(floor_token), explicit_zone, explicit_direction
     if code_match:
-        suffix = _text(code_match.group(1))[1:]
+        suffix = _text(code_match.group(2))
         mapping = {
             "12": ("east", "south"),
             "11": ("east", "north"),

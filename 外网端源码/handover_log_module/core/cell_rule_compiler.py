@@ -4,6 +4,8 @@ import copy
 import re
 from typing import Any, Dict, List, Tuple
 
+from handover_log_module.core.fixed_cell_overrides import FORCED_FIXED_CELL_VALUES, normalize_cell_name
+
 
 _DEFAULT_COMPUTED_OPS = {
     "tank_backup",
@@ -177,6 +179,9 @@ def compile_rows_to_runtime(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         rule_type = _norm_text(row.get("rule_type")).lower() or "direct"
         template = _norm_text(row.get("template")) or "{value}"
         agg = _norm_text(row.get("agg")).lower() or "first"
+
+        if target_cell and normalize_cell_name(target_cell) in FORCED_FIXED_CELL_VALUES:
+            continue
 
         if target_cell:
             if _valid_cell(target_cell):

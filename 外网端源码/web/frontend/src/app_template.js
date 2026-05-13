@@ -152,12 +152,24 @@ const APP_TEMPLATE_PREFIX = `
         </section>
       </div>
 
-      <section v-if="message" class="global-message ops-global-message">{{ message }}</section>
+      <section v-if="message" class="global-message ops-global-message">
+        <span class="global-message-body">{{ message }}</span>
+      </section>
       <section
         v-if="initialLoadingPhase !== 'ready' && initialLoadingStatusText"
         class="global-message ops-global-message global-message-info"
       >
-        {{ initialLoadingStatusText }}
+        <span class="global-message-body">{{ initialLoadingStatusText }}</span>
+        <span class="global-message-actions">
+          <button
+            type="button"
+            class="btn btn-secondary btn-mini global-message-inline-action"
+            :disabled="initialLoadingRetryBusy"
+            @click="retryInitialLoading"
+          >
+            {{ initialLoadingRetryBusy ? '读取中...' : '重新读取状态' }}
+          </button>
+        </span>
       </section>
 `;
 

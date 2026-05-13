@@ -1130,6 +1130,29 @@ a {
   font-size: 13px;
 }
 
+.ops-global-message {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.global-message-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.global-message-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.global-message-inline-action {
+  white-space: nowrap;
+}
+
 .global-message-info {
   background: rgba(0, 103, 209, 0.08);
   border-color: rgba(0, 103, 209, 0.16);
@@ -1843,6 +1866,14 @@ a {
 .ops-job-list {
   display: grid;
   gap: 8px;
+}
+
+.ops-job-panel .ops-job-list {
+  max-height: min(420px, 54vh);
+  overflow: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .ops-job-list-item {
@@ -3337,6 +3368,16 @@ button:disabled,
   .page-nav .btn,
   .btn-line .btn,
   .ops-update-cluster .btn {
+    width: 100%;
+  }
+
+  .ops-global-message {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .global-message-actions,
+  .global-message-inline-action {
     width: 100%;
   }
 
