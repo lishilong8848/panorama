@@ -1,0 +1,36 @@
+{
+  "baseToken": "YOUR_FEISHU_BASE_TOKEN",
+  "dataCenterName": "EA118",
+  "larkCli": "lark-cli",
+  "tables": {
+    "source": {
+      "name": "机柜功率每日明细",
+      "tableId": "tbl_SOURCE_TABLE_ID",
+      "viewId": "vew_SOURCE_VIEW_ID"
+    },
+    "branch": {
+      "name": "单支路超6.25KW功率",
+      "tableId": "tbl_BRANCH_TARGET_TABLE_ID",
+      "viewId": "vew_BRANCH_TARGET_VIEW_ID",
+      "threshold": 6.25
+    },
+    "cabinet": {
+      "name": "机柜超18KW统计",
+      "tableId": "tbl_CABINET_TARGET_TABLE_ID",
+      "viewId": "vew_CABINET_TARGET_VIEW_ID",
+      "threshold": 18
+    },
+    "lineHead": {
+      "name": "列头柜超107.5功率统计",
+      "tableId": "tbl_LINE_HEAD_TARGET_TABLE_ID",
+      "viewId": "vew_LINE_HEAD_TARGET_VIEW_ID",
+      "threshold": 107.5
+    },
+    "rowLine": {
+      "name": "机列超215KW功率统计",
+      "tableId": "tbl_ROW_LINE_TARGET_TABLE_ID",
+      "viewId": "vew_ROW_LINE_TARGET_VIEW_ID",
+      "threshold": 215
+    }
+  }
+}
