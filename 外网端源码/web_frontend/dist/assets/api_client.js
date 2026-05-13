@@ -740,6 +740,10 @@ export async function submitBranchPowerFromDownloadJob(payload = {}) {
   return startJsonJobApi("/api/jobs/branch-power/from-download", payload || {});
 }
 
+export async function submitBranchPowerPowerAlertSyncJob(payload = {}) {
+  return startJsonJobApi("/api/jobs/branch-power/power-alert-sync", payload || {});
+}
+
 export async function submitDayMetricFromFileJob(form) {
   return postFormJob("/api/jobs/day-metric/from-file", form);
 }

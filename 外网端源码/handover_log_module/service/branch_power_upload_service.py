@@ -13,6 +13,7 @@ from app.config.config_adapter import normalize_role_mode
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
+from handover_log_module.service.power_alert_sync_service import PowerAlertSyncService
 
 
 @dataclass(frozen=True)
@@ -748,6 +749,10 @@ class BranchPowerUploadService:
             f"[支路功率上传] 整日直传批量上传完成 business_date={resolved_business_date}, "
             f"records={len(upload_records)}, parsed_hours={parsed_hour_count}, elapsed_ms={elapsed_ms}",
         )
+        power_alert_sync = PowerAlertSyncService(self.config).sync(
+            report_date=resolved_business_date,
+            emit_log=emit_log,
+        )
         return {
             "ok": True,
             "status": "success",
@@ -758,6 +763,7 @@ class BranchPowerUploadService:
             "records": len(upload_records),
             "deleted": deleted,
             "elapsed_ms": elapsed_ms,
+            "power_alert_sync": power_alert_sync,
         }
 
     @classmethod

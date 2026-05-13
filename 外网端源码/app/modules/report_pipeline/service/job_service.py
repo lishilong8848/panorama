@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -72,8 +73,6 @@ _WORKER_RUNTIME_REPAIR_TOKENS = (
     "modulenotfounderror",
     "no module named",
 )
-
-
 @dataclass
 class JobState:
     job_id: str
@@ -669,6 +668,66 @@ class JobService:
             except Exception:  # noqa: BLE001
                 pass
         self._write_console_line(line)
+
+    @staticmethod
+    def _job_success_notify_text(job: JobState) -> str:
+        return (
+            "全景助手控制台任务完成\n"
+            f"任务：{str(job.name or job.feature or '-').strip() or '-'}\n"
+            f"状态：成功\n"
+            f"完成时间：{str(job.finished_at or '').strip() or datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"任务ID：{str(job.job_id or '').strip() or '-'}"
+        )
+
+    def _job_success_notify_config(self) -> tuple[bool, str, float]:
+        runtime_cfg = self._runtime_config if isinstance(self._runtime_config, dict) else {}
+        notify_cfg = runtime_cfg.get("notify", {})
+        if not isinstance(notify_cfg, dict):
+            common_cfg = runtime_cfg.get("common", {})
+            notify_cfg = common_cfg.get("notify", {}) if isinstance(common_cfg, dict) else {}
+        if not isinstance(notify_cfg, dict):
+            notify_cfg = {}
+        enabled = bool(notify_cfg.get("task_success_webhook_enabled", True))
+        webhook_url = str(notify_cfg.get("task_success_webhook_url", "") or "").strip()
+        try:
+            timeout_sec = float(notify_cfg.get("task_success_webhook_timeout", 5) or 5)
+        except Exception:  # noqa: BLE001
+            timeout_sec = 5.0
+        return enabled, webhook_url, max(1.0, timeout_sec)
+
+    def _notify_job_success_to_feishu_async(self, job: JobState) -> None:
+        if str(job.status or "").strip().lower() != "success":
+            return
+        enabled, webhook_url, timeout_sec = self._job_success_notify_config()
+        if not enabled or not webhook_url:
+            return
+        payload = {
+            "msg_type": "text",
+            "content": {"text": self._job_success_notify_text(job)},
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        job_id = str(job.job_id or "").strip()
+        job_name = str(job.name or job.feature or "").strip()
+
+        def _send() -> None:
+            request = urllib.request.Request(
+                webhook_url,
+                data=body,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+                    response.read()
+                self._emit_service_log(f"[任务完成通知] 已发送飞书群机器人: job={job_id}, name={job_name or '-'}")
+            except Exception as exc:  # noqa: BLE001
+                self._emit_service_log(f"[任务完成通知] 发送飞书群机器人失败: job={job_id}, error={exc}")
+
+        threading.Thread(
+            target=_send,
+            name=f"job-success-feishu-{job_id[:8] or 'unknown'}",
+            daemon=True,
+        ).start()
 
     def _probe_worker_python(self, executable: Path | str) -> tuple[bool, str]:
         exe_text = str(executable or "").strip()
@@ -1298,6 +1357,7 @@ class JobService:
                     self._release_resources(job.job_id, list(job.acquired_resources))
                     job.acquired_resources = []
                     if not retry_after_repair:
+                        self._notify_job_success_to_feishu_async(job)
                         job.done_event.set()
                 if retry_after_repair:
                     continue
@@ -2100,6 +2160,7 @@ class JobService:
                     self._persist_job_snapshot(job)
                 self._release_resources(job.job_id, list(job.acquired_resources))
                 job.acquired_resources = []
+                self._notify_job_success_to_feishu_async(job)
                 job.done_event.set()
 
         thread = threading.Thread(target=_run, daemon=True, name=f"job-{job_id[:8]}")

@@ -1291,6 +1291,23 @@ def _validate_branch_power_upload(cfg: Dict[str, Any]) -> None:
         "features.branch_power_upload.scheduler",
         upload_cfg.get("scheduler", {}),
     )
+    power_alert_cfg = upload_cfg.get("power_alert_sync", {})
+    if power_alert_cfg is None:
+        return
+    if not isinstance(power_alert_cfg, dict):
+        raise ValueError("配置错误: features.branch_power_upload.power_alert_sync 必须是对象")
+    for key in ("enabled", "required", "dry_run", "auto_install"):
+        if key in power_alert_cfg and not isinstance(power_alert_cfg.get(key), bool):
+            raise ValueError(f"配置错误: features.branch_power_upload.power_alert_sync.{key} 必须是布尔值")
+    for timeout_key in ("timeout_sec", "install_timeout_sec"):
+        if timeout_key not in power_alert_cfg:
+            continue
+        try:
+            timeout_sec = int(power_alert_cfg.get(timeout_key))
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"配置错误: features.branch_power_upload.power_alert_sync.{timeout_key} 必须是正整数") from exc
+        if timeout_sec <= 0:
+            raise ValueError(f"配置错误: features.branch_power_upload.power_alert_sync.{timeout_key} 必须大于0")
 
 
 def _validate_handover_source_data_attachment_export(cfg: Dict[str, Any]) -> None:

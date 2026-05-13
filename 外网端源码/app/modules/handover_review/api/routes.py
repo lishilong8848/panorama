@@ -959,11 +959,15 @@ def _start_handover_followup_job_after_confirm(
     container,
     *,
     batch_key: str,
+    building: str = "",
+    session_id: str = "",
     submitted_by: str = "confirm",
     dedupe_key: str = "",
     task_label: str = "确认后上传",
 ) -> Dict[str, Any]:
     target_batch = str(batch_key or "").strip()
+    target_building = str(building or "").strip()
+    target_session_id = str(session_id or "").strip()
     label_text = str(task_label or "").strip() or "确认后上传"
     followup = _build_review_followup_service(container)
     if not target_batch:
@@ -971,10 +975,20 @@ def _start_handover_followup_job_after_confirm(
 
     def _run(emit_log) -> Dict[str, Any]:
         service = _build_review_followup_service(container)
-        emit_log(f"[交接班][{label_text}] 后台任务开始 batch={target_batch}")
-        result = service.continue_batch(target_batch, emit_log=emit_log)
+        scope_text = f"building={target_building}" if target_building else "batch=all"
+        emit_log(f"[交接班][{label_text}] 后台任务开始 batch={target_batch}, {scope_text}")
+        if target_building:
+            result = service.trigger_after_single_confirm(
+                batch_key=target_batch,
+                building=target_building,
+                session_id=target_session_id,
+                emit_log=emit_log,
+            )
+        else:
+            result = service.continue_batch(target_batch, emit_log=emit_log)
         emit_log(
             f"[交接班][{label_text}] 后台任务完成 batch={target_batch}, "
+            f"{scope_text}, "
             f"状态={_followup_status_text(result.get('status'))}, "
             f"已上传={len(result.get('uploaded_buildings', []) or [])}, "
             f"已失败={len(result.get('failed_buildings', []) or [])}, "
@@ -984,18 +998,25 @@ def _start_handover_followup_job_after_confirm(
 
     job = _start_handover_background_job(
         container,
-        name=f"交接班{label_text}-{target_batch}",
+        name=f"交接班{label_text}-{target_batch}{('-' + target_building) if target_building else ''}",
         run_func=_run,
         worker_handler="handover_followup_continue",
-        worker_payload={"batch_key": target_batch},
+        worker_payload={
+            "batch_key": target_batch,
+            "building": target_building,
+            "session_id": target_session_id,
+        },
         resource_keys=["network:external", f"handover_followup:{target_batch}"],
         priority="manual",
         feature="handover_followup_continue",
         submitted_by=submitted_by,
-        dedupe_key=str(dedupe_key or "").strip() or f"handover_followup_continue:{target_batch}",
+        dedupe_key=str(dedupe_key or "").strip()
+        or f"handover_followup_continue:{target_batch}:{target_building or 'batch'}:{target_session_id or '-'}",
     )
     job_id = str(getattr(job, "job_id", "") or (job.get("job_id", "") if isinstance(job, dict) else "")).strip()
-    container.add_system_log(f"[任务] 已提交: 交接班{label_text} batch={target_batch} ({job_id or '-'})")
+    container.add_system_log(
+        f"[任务] 已提交: 交接班{label_text} batch={target_batch}, building={target_building or '全部'} ({job_id or '-'})"
+    )
     return _build_followup_queued_result(followup, batch_key=target_batch, job=job)
 
 
@@ -1018,9 +1039,6 @@ def _maybe_start_handover_followup_job_after_review_save(
     synced_revision = int(cloud_state.get("synced_revision", 0) or 0)
     if str(cloud_state.get("status", "")).strip().lower() == "success" and synced_revision == revision:
         return {}
-    gate = followup.evaluate(batch_status if isinstance(batch_status, dict) else {})
-    if not followup.is_first_full_cloud_sync_completed(target_batch) and not bool(gate.get("ready_for_followup_upload", False)):
-        return {}
     session_id = str(session.get("session_id", "") or "").strip()
     building = str(session.get("building", "") or "").strip()
     dedupe_key = f"handover_followup_continue:{target_batch}:review_save:{session_id or building}:{revision}"
@@ -1028,6 +1046,8 @@ def _maybe_start_handover_followup_job_after_review_save(
         result = _start_handover_followup_job_after_confirm(
             container,
             batch_key=target_batch,
+            building=building,
+            session_id=session_id,
             submitted_by="review_save",
             dedupe_key=dedupe_key,
             task_label="审核保存后云文档重传",
@@ -1655,6 +1675,7 @@ def _persist_review_defaults(
         "footer_inventory_rows": int(persisted.get("footer_inventory_rows", 0) or 0),
         "cabinet_power_fields": int(persisted.get("cabinet_power_fields", 0) or 0),
         "cooling_pump_pressure_rows": int(persisted.get("cooling_pump_pressure_rows", 0) or 0),
+        "attention_handover_rows": int(persisted.get("attention_handover_rows", 0) or 0),
         "defaults_updated": bool(persisted.get("defaults_updated", False)),
         "config_updated": False,
         "aggregate_refresh_error": "",
@@ -4805,29 +4826,20 @@ def handover_review_confirm(
             f"[交接班][审核确认] building={building}, batch={session.get('batch_key', '-')}"
         )
         target_batch_key = str(session.get("batch_key", "")).strip()
-        gate = followup.evaluate(batch_status)
-        if followup.is_first_full_cloud_sync_completed(target_batch_key) or bool(gate.get("ready_for_followup_upload", False)):
-            try:
-                followup_result = _start_handover_followup_job_after_confirm(
-                    container,
-                    batch_key=target_batch_key,
-                    submitted_by="confirm",
-                )
-            except Exception as exc:  # noqa: BLE001
-                container.add_system_log(f"[交接班][确认后上传] 任务提交失败 batch={target_batch_key}, 错误={exc}")
-                followup_result = _build_followup_failure_result(
-                    followup,
-                    batch_key=target_batch_key,
-                    error=str(exc),
-                )
-        else:
-            container.add_system_log(
-                f"[交接班][确认后上传] 当前仅更新确认状态，等待五楼全部确认: batch={target_batch_key}, building={building}"
+        try:
+            followup_result = _start_handover_followup_job_after_confirm(
+                container,
+                batch_key=target_batch_key,
+                building=building,
+                session_id=str(session.get("session_id", "") or session_id).strip(),
+                submitted_by="confirm",
             )
-            followup_result = _build_followup_await_all_result(
+        except Exception as exc:  # noqa: BLE001
+            container.add_system_log(f"[交接班][确认后上传] 任务提交失败 batch={target_batch_key}, building={building}, 错误={exc}")
+            followup_result = _build_followup_failure_result(
                 followup,
                 batch_key=target_batch_key,
-                blocked_reason=str(gate.get("blocked_reason", "") or "").strip(),
+                error=str(exc),
             )
         container.add_system_log(
             f"[交接班][确认后上传] batch={session.get('batch_key', '-')}, 状态={_followup_status_text(followup_result.get('status'))}, "

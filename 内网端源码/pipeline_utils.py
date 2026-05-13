@@ -304,7 +304,7 @@ def build_event_text(stage: str, detail: str, building: str | None = None) -> st
         f"阶段: {stage}\n"
         f"{building_text}"
         f"详情: {detail}\n"
-        "处理建议: 可在《全景月报Web控制台》中选择对应功能进行补传。"
+        "处理建议: 可在《全景助手控制台》中选择对应功能进行补传。"
     )
 
 

@@ -654,6 +654,8 @@ def handle_handover_followup_continue(
         orchestrator = OrchestratorService(config)
         return orchestrator.run_handover_followup_continue(
             batch_key=str(payload.get("batch_key", "") or "").strip(),
+            building=str(payload.get("building", "") or "").strip(),
+            session_id=str(payload.get("session_id", "") or "").strip(),
             emit_log=emit_log,
         )
     except Exception as exc:  # noqa: BLE001

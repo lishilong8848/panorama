@@ -95,6 +95,7 @@ from handover_log_module.service.day_metric_standalone_upload_service import Day
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
 from handover_log_module.service.monthly_report_delivery_service import MonthlyReportDeliveryService
+from handover_log_module.service.power_alert_sync_service import PowerAlertSyncService
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
@@ -5104,6 +5105,59 @@ def job_branch_power_from_download(payload: Dict[str, Any], request: Request) ->
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/api/jobs/branch-power/power-alert-sync")
+def job_branch_power_power_alert_sync(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    config = _runtime_config(container)
+    payload_obj = payload if isinstance(payload, dict) else {}
+    raw_business_date = str(
+        payload_obj.get("target_business_date", "")
+        or payload_obj.get("business_date", "")
+        or payload_obj.get("date", "")
+        or ""
+    ).strip()
+    if raw_business_date:
+        try:
+            business_date = datetime.strptime(raw_business_date.replace("/", "-")[:10], "%Y-%m-%d").date()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="business_date 格式必须为 YYYY-MM-DD") from exc
+    else:
+        business_date = (datetime.now() - timedelta(days=1)).date()
+    business_date_key = business_date.strftime("%Y-%m-%d")
+    submitted_by = str(payload_obj.get("submitted_by", "") or "").strip() or "manual"
+    priority = "scheduler" if submitted_by == "scheduler" else "manual"
+
+    def _run(emit_log):
+        emit_log(f"[动环功率统计同步] 已进入后台重试: business_date={business_date_key}")
+        retry_config = copy.deepcopy(config if isinstance(config, dict) else {})
+        branch_cfg = retry_config.get("branch_power_upload", {})
+        if not isinstance(branch_cfg, dict):
+            branch_cfg = {}
+            retry_config["branch_power_upload"] = branch_cfg
+        power_alert_cfg = branch_cfg.get("power_alert_sync", {})
+        if not isinstance(power_alert_cfg, dict):
+            power_alert_cfg = {}
+            branch_cfg["power_alert_sync"] = power_alert_cfg
+        power_alert_cfg["required"] = True
+        return PowerAlertSyncService(retry_config).sync(report_date=business_date_key, emit_log=emit_log)
+
+    try:
+        job = _start_background_job(
+            container,
+            name=f"动环功率统计同步 business_date={business_date_key}",
+            run_func=_run,
+            resource_keys=_job_resource_keys("network:external", "branch_power:power_alert_sync"),
+            priority=priority,
+            feature="branch_power_power_alert_sync",
+            dedupe_key=_job_dedupe_key("branch_power_power_alert_sync", business_date=business_date_key),
+            submitted_by=submitted_by,
+        )
+        container.add_system_log(f"[任务] 已提交: 动环功率统计同步 business_date={business_date_key} ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/api/jobs/day-metric/from-file")
 async def job_day_metric_from_file(
     request: Request,
@@ -6148,7 +6202,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
             "reason_code": "role_mismatch",
             "tone": "neutral",
             "status_text": "当前不是外网端",
-            "summary_text": "外网业务控制台状态仅在外网端运行时返回。",
+            "summary_text": "全景助手控制台外网端状态仅在外网端运行时返回。",
             "detail_text": "",
             "display_note_text": "",
             "reference_bucket_key": "-",

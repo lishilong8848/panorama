@@ -99,6 +99,13 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                   >
                     {{ isActionLocked(actionKeyBranchPowerFromDownload) ? '执行中...' : '执行该业务日整日直传' }}
                   </button>
+                  <button
+                    class="btn btn-secondary"
+                    :disabled="!canRun || isActionLocked(actionKeyBranchPowerPowerAlertSync)"
+                    @click="runBranchPowerPowerAlertSync"
+                  >
+                    {{ isActionLocked(actionKeyBranchPowerPowerAlertSync) ? '同步中...' : '仅重跑动环统计同步' }}
+                  </button>
                 </div>
               </article>
 

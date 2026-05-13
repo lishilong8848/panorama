@@ -615,6 +615,22 @@ class ReviewSessionService:
         }
 
     @staticmethod
+    def _should_preserve_confirmation_after_edit(
+        *,
+        confirmed: bool,
+        cloud_state: Dict[str, Any],
+        current_revision: int,
+        first_full_cloud_sync_completed: bool,
+    ) -> bool:
+        if not bool(confirmed):
+            return False
+        cloud_status = str(cloud_state.get("status", "")).strip().lower()
+        if bool(first_full_cloud_sync_completed) or cloud_status in {"uploading", "syncing"}:
+            return True
+        synced_revision = int(cloud_state.get("synced_revision", 0) or 0)
+        return cloud_status in {"success", "ok"} and synced_revision >= int(current_revision or 0)
+
+    @staticmethod
     def _normalize_cloud_batch(raw: Dict[str, Any] | None) -> Dict[str, Any]:
         payload = raw if isinstance(raw, dict) else {}
         return {
@@ -1908,9 +1924,11 @@ class ReviewSessionService:
             current_revision = int(session.get("revision", 1) or 1)
             cloud_state = self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
             cloud_status = str(cloud_state.get("status", "")).strip().lower()
-            preserve_confirmation = bool(session.get("confirmed", False)) and (
-                bool(batch_cloud.get("first_full_cloud_sync_completed", False))
-                or cloud_status in {"uploading", "syncing"}
+            preserve_confirmation = self._should_preserve_confirmation_after_edit(
+                confirmed=bool(session.get("confirmed", False)),
+                cloud_state=cloud_state,
+                current_revision=current_revision,
+                first_full_cloud_sync_completed=bool(batch_cloud.get("first_full_cloud_sync_completed", False)),
             )
             session["revision"] = current_revision + 1
             if not preserve_confirmation:
@@ -2808,9 +2826,11 @@ class ReviewSessionService:
         )
         cloud_state = self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
         cloud_status = str(cloud_state.get("status", "")).strip().lower()
-        preserve_confirmation = bool(session.get("confirmed", False)) and (
-            bool(batch_cloud.get("first_full_cloud_sync_completed", False))
-            or cloud_status in {"uploading", "syncing"}
+        preserve_confirmation = self._should_preserve_confirmation_after_edit(
+            confirmed=bool(session.get("confirmed", False)),
+            cloud_state=cloud_state,
+            current_revision=current_revision,
+            first_full_cloud_sync_completed=bool(batch_cloud.get("first_full_cloud_sync_completed", False)),
         )
 
         session["revision"] = current_revision + 1

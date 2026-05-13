@@ -68,6 +68,10 @@ RETIRED_SHARED_BRIDGE_FEATURES: Dict[str, str] = {
 }
 
 
+class SharedBridgeTaskCancelledError(BaseException):
+    pass
+
+
 def normalize_role_mode(value: Any) -> str:
     return normalize_deployment_role_mode(value)
 
@@ -1609,6 +1613,30 @@ class SharedBridgeRuntimeService:
                     return mailbox_task
                 return self.get_cached_task(task_text)
             raise
+
+    def _is_task_cancelled(self, task_id: str) -> bool:
+        task_text = str(task_id or "").strip()
+        if not task_text:
+            return False
+        for reader in (self._get_mailbox_task, self.get_cached_task):
+            try:
+                task = reader(task_text)
+            except Exception:  # noqa: BLE001
+                task = None
+            if isinstance(task, dict) and str(task.get("status", "") or "").strip().lower() == "cancelled":
+                return True
+        if self._store:
+            try:
+                task = self._store.get_task(task_text)
+            except Exception:  # noqa: BLE001
+                task = None
+            if isinstance(task, dict) and str(task.get("status", "") or "").strip().lower() == "cancelled":
+                return True
+        return False
+
+    def _raise_if_task_cancelled(self, task_id: str) -> None:
+        if self._is_task_cancelled(task_id):
+            raise SharedBridgeTaskCancelledError("共享桥接任务已取消")
 
     def cancel_task(self, task_id: str) -> bool:
         if not self._store:
@@ -3285,6 +3313,7 @@ class SharedBridgeRuntimeService:
             line = str(text or "").strip()
             if not line:
                 return
+            self._raise_if_task_cancelled(task_id)
             self._emit_system_log(f"[共享桥接][{_role_label(side)}] 任务={task_id} {line}")
             if self._store:
                 self._store.append_event(
@@ -4918,6 +4947,7 @@ class SharedBridgeRuntimeService:
                     f"building={building}, units={len(requested_for_building)}"
                 )
                 for unit in requested_for_building:
+                    self._raise_if_task_cancelled(task_id)
                     source_family = str(unit.get("source_family", "") or "").strip()
                     spec = family_specs.get(source_family)
                     if not spec:
@@ -5030,6 +5060,7 @@ class SharedBridgeRuntimeService:
                             emit_log(f"[共享桥接][支路信息][内网] 下载失败 building={building}, error={error_text}")
                             building_results[building] = {"building": building, "source_units": [], "error": error_text}
 
+            self._raise_if_task_cancelled(task_id)
             for building in buildings:
                 result = building_results.get(building, {"building": building, "source_units": [], "error": "楼栋下载未返回结果"})
                 building_units = result.get("source_units", []) if isinstance(result.get("source_units", []), list) else []
@@ -5057,6 +5088,7 @@ class SharedBridgeRuntimeService:
                 "downloaded_count": len(downloaded_source_units),
             }
             if source_units and not failed_source_units:
+                self._raise_if_task_cancelled(task_id)
                 self._store.complete_stage(
                     task_id=task_id,
                     stage_id=stage_id,
@@ -5108,6 +5140,13 @@ class SharedBridgeRuntimeService:
                 task_result={"internal": stage_result, "status": "failed"},
             )
             self._request_runtime_status_refresh(reason=f"branch_power_internal_download_failed:{task_id}")
+        except SharedBridgeTaskCancelledError as exc:
+            self._emit_system_log(f"[共享桥接][内网端] 任务={task_id} 支路整日下载已取消: {exc}")
+            try:
+                self._store.cancel_task(task_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._request_runtime_status_refresh(reason=f"branch_power_internal_download_cancelled:{task_id}")
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
             self._fail_bound_job(task, error_text=error_text, summary="等待内网补采同步失败")
@@ -6497,6 +6536,12 @@ class SharedBridgeRuntimeService:
             return
         self._business_task_started()
         try:
+            task_id = str(task.get("task_id", "") or "").strip()
+            if task_id and self._is_task_cancelled(task_id):
+                if self._store:
+                    self._store.cancel_task(task_id)
+                self._emit_system_log(f"[共享桥接] 跳过已取消任务: task_id={task_id}")
+                return
             feature = str(task.get("feature", "") or "").strip()
             if feature == "handover_from_download":
                 if self.role_mode == "internal":
@@ -6568,6 +6613,15 @@ class SharedBridgeRuntimeService:
             error_text = f"共享桥接未识别或不支持的任务类型: 功能={feature}, 角色={_role_label(self.role_mode)}"
             self._fail_claimed_task(task, error_text=error_text, event_type="unsupported_feature", level="error")
             self._emit_system_log(f"[共享桥接] {error_text}")
+        except SharedBridgeTaskCancelledError as exc:
+            task_id = str(task.get("task_id", "") or "").strip()
+            if task_id and self._store:
+                try:
+                    self._store.cancel_task(task_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._emit_system_log(f"[共享桥接] 任务已取消: task_id={task_id or '-'}, reason={exc}")
+            self._request_runtime_status_refresh(reason=f"shared_bridge_task_cancelled:{task_id}")
         finally:
             self._business_task_finished()
 

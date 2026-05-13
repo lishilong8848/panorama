@@ -16,6 +16,11 @@ from handover_log_module.service.review_document_parser import ReviewDocumentPar
 from handover_log_module.service.review_document_writer import ReviewDocumentWriter
 
 
+_ATTENTION_HANDOVER_SECTION_NAME = "三、注意事项交接"
+_ATTENTION_HANDOVER_DEFAULT_KEY = "attention_handover_section"
+_ATTENTION_HANDOVER_COLUMNS = tuple("BCDEFGHI")
+
+
 class ReviewDocumentStateConflictError(RuntimeError):
     pass
 
@@ -236,6 +241,45 @@ class ReviewDocumentStateService:
     @staticmethod
     def _cooling_tank_defaults_key(zone: str) -> str:
         return f"tank:{str(zone or '').strip().lower()}"
+
+    @staticmethod
+    def _normalize_attention_handover_rows(rows: Any) -> List[Dict[str, Any]]:
+        if not isinstance(rows, list):
+            return []
+        output: List[Dict[str, Any]] = []
+        for row in rows:
+            cells = row.get("cells", {}) if isinstance(row, dict) else {}
+            if not isinstance(cells, dict):
+                cells = {}
+            normalized = {
+                column: str(cells.get(column, "") or "")
+                for column in _ATTENTION_HANDOVER_COLUMNS
+            }
+            if any(str(value or "").strip() and str(value or "").strip() != "/" for value in normalized.values()):
+                output.append({"cells": normalized})
+        return output
+
+    def _extract_attention_handover_rows_from_document(self, document: Dict[str, Any]) -> List[Dict[str, Any]] | None:
+        sections = document.get("sections", []) if isinstance(document, dict) else []
+        if not isinstance(sections, list):
+            return None
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            if str(section.get("name", "") or "").strip() != _ATTENTION_HANDOVER_SECTION_NAME:
+                continue
+            return self._normalize_attention_handover_rows(section.get("rows", []))
+        return None
+
+    def get_attention_handover_defaults(self, building: str) -> List[Dict[str, Any]] | None:
+        if not str(building or "").strip():
+            return None
+        raw = self._store(building).get_default(_ATTENTION_HANDOVER_DEFAULT_KEY)
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            return self._normalize_attention_handover_rows(raw.get("rows", []))
+        return self._normalize_attention_handover_rows(raw)
 
     @staticmethod
     def _first_non_empty(*values: Any) -> str:
@@ -600,11 +644,13 @@ class ReviewDocumentStateService:
         footer_dirty = bool(dirty.get("footer_inventory"))
         cabinet_dirty = bool(dirty.get("fixed_blocks"))
         cooling_dirty = bool(dirty.get("cooling_pump_pressures"))
-        if not footer_dirty and not cabinet_dirty and not cooling_dirty:
+        sections_dirty = bool(dirty.get("sections"))
+        if not footer_dirty and not cabinet_dirty and not cooling_dirty and not sections_dirty:
             return {
                 "footer_inventory_rows": 0,
                 "cabinet_power_fields": 0,
                 "cooling_pump_pressure_rows": 0,
+                "attention_handover_rows": 0,
                 "config_updated": False,
                 "defaults_updated": False,
             }
@@ -613,6 +659,7 @@ class ReviewDocumentStateService:
         footer_rows: List[Dict[str, Any]] = []
         cabinet_cells: Dict[str, str] = {}
         cooling_rows: List[Dict[str, Any]] = []
+        attention_rows: List[Dict[str, Any]] | None = None
         if footer_dirty:
             footer_rows = self._footer_defaults.extract_rows_from_document(document)
             updated = store.set_default("footer_inventory", self._footer_defaults.normalize_rows(footer_rows)) or updated
@@ -667,10 +714,18 @@ class ReviewDocumentStateService:
                     else:
                         defaults.pop(key, None)
             updated = store.set_default("cooling_pump_pressures", defaults) or updated
+        if sections_dirty:
+            attention_rows = self._extract_attention_handover_rows_from_document(document)
+            if attention_rows is not None:
+                updated = store.set_default(
+                    _ATTENTION_HANDOVER_DEFAULT_KEY,
+                    {"rows": attention_rows},
+                ) or updated
         return {
             "footer_inventory_rows": len(footer_rows),
             "cabinet_power_fields": len(cabinet_cells),
             "cooling_pump_pressure_rows": len(cooling_rows),
+            "attention_handover_rows": len(attention_rows or []),
             "config_updated": False,
             "defaults_updated": bool(updated),
         }
@@ -702,6 +757,7 @@ class ReviewDocumentStateService:
         return {
             "footer_inventory_rows": int(footer_count),
             "cabinet_power_fields": int(cabinet_count),
+            "attention_handover_rows": 0,
             "defaults_updated": bool(updated),
         }
 

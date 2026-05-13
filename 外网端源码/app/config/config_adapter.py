@@ -625,6 +625,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
     )
     alarm_export = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
     wet_bulb_collection = sanitize_wet_bulb_collection_config(_dict(features.get("wet_bulb_collection")))
+    branch_power_upload = _dict(features.get("branch_power_upload"))
     manual_upload_gui = _dict(features.get("manual_upload_gui"))
     runtime_download = {
         "save_dir": monthly_download_dir,
@@ -740,6 +741,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "feishu_sheet_import": copy.deepcopy(sheet_import),
         "handover_log": runtime_handover_log,
         "day_metric_upload": copy.deepcopy(day_metric_upload),
+        "branch_power_upload": copy.deepcopy(branch_power_upload),
         "alarm_export": copy.deepcopy(alarm_export),
         "wet_bulb_collection": copy.deepcopy(wet_bulb_collection),
         "manual_upload_gui": copy.deepcopy(manual_upload_gui),
@@ -847,6 +849,10 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
             _dict(runtime.get("day_metric_upload")),
             day_metric_upload,
         )
+    )
+    features["branch_power_upload"] = deep_merge_defaults(
+        _dict(runtime.get("branch_power_upload")),
+        _dict(features.get("branch_power_upload")),
     )
     features["alarm_export"] = sanitize_alarm_export_config(deep_merge_defaults(
         _dict(runtime.get("alarm_export")),

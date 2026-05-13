@@ -42,7 +42,7 @@ export function createAppShellUiHelpers(options = {}) {
   const showRuntimeNetworkPanel = computed(() => false);
   const showDashboardPageNav = computed(() => true);
 
-  const appShellTitle = computed(() => "外网业务控制台");
+  const appShellTitle = computed(() => "全景助手控制台");
   const statusNavLabel = computed(() => "状态总览");
   const dashboardNavLabel = computed(() => "业务控制台");
   const configNavLabel = computed(() => "配置中心");

@@ -418,53 +418,16 @@ class ReviewFollowupTriggerService:
         target_batch = str(batch_key or "").strip()
         target_building = str(building or "").strip()
         target_session_id = str(session_id or "").strip()
-        batch_status = self._review_service.get_batch_status(target_batch)
-        gate = self.evaluate(batch_status)
-        if self.is_first_full_cloud_sync_completed(target_batch):
-            emit_log(
-                f"[交接班][确认后上传] 已进入单楼云表重传模式: batch={target_batch}, building={target_building}"
-            )
-            return self.trigger_single_building_cloud_sync(
-                batch_key=target_batch,
-                building=target_building,
-                session_id=target_session_id,
-                emit_log=emit_log,
-            )
-        if not gate.get("ready_for_followup_upload", False):
-            sessions = self._review_service.list_batch_sessions(target_batch)
-            emit_log(
-                f"[交接班][确认后上传] 当前仅更新确认状态，等待五楼全部确认: "
-                f"batch={target_batch}, building={target_building}"
-            )
-            return {
-                "status": "await_all_confirmed",
-                "batch_key": target_batch,
-                "uploaded_buildings": [],
-                "skipped_buildings": [],
-                "failed_buildings": [],
-                "details": {},
-                "blocked_reason": gate.get("blocked_reason", "") or "五个楼栋尚未全部确认",
-                "cloud_sheet_sync": {
-                    "status": "await_all_confirmed",
-                    "uploaded_buildings": [],
-                    "skipped_buildings": [],
-                    "failed_buildings": [],
-                    "details": {},
-                    "blocked_reason": gate.get("blocked_reason", "") or "五个楼栋尚未全部确认",
-                },
-                "daily_report_record_export": self._existing_daily_report_record_export(sessions),
-                "cabinet_shift_record_export": self._existing_cabinet_shift_record_export(sessions),
-                "followup_progress": self._collect_followup_progress(
-                    batch_key=target_batch,
-                    sessions=sessions,
-                    ready=False,
-                ),
-            }
         emit_log(
-            f"[交接班][确认后上传] 已满足首次全量触发条件，开始批量执行完整后续链路: "
+            f"[交接班][确认后上传] 单楼确认后立即上传云文档: "
             f"batch={target_batch}, building={target_building}"
         )
-        return self.trigger_batch(target_batch, emit_log=emit_log)
+        return self.trigger_single_building_cloud_sync(
+            batch_key=target_batch,
+            building=target_building,
+            session_id=target_session_id,
+            emit_log=emit_log,
+        )
 
     def trigger_single_building_cloud_sync(
         self,
@@ -477,35 +440,6 @@ class ReviewFollowupTriggerService:
         target_batch = str(batch_key or "").strip()
         target_building = str(building or "").strip()
         target_session_id = str(session_id or "").strip()
-        batch_status = self._review_service.get_batch_status(target_batch)
-        gate = self.evaluate(batch_status)
-        if not gate.get("ready_for_followup_upload", False):
-            sessions = self._review_service.list_batch_sessions(target_batch)
-            return {
-                "status": "blocked",
-                "batch_key": target_batch,
-                "uploaded_buildings": [],
-                "skipped_buildings": [],
-                "failed_buildings": [],
-                "details": {},
-                "blocked_reason": gate.get("blocked_reason", ""),
-                "cloud_sheet_sync": {
-                    "status": "blocked",
-                    "uploaded_buildings": [],
-                    "skipped_buildings": [],
-                    "failed_buildings": [],
-                    "details": {},
-                    "blocked_reason": gate.get("blocked_reason", ""),
-                },
-                "daily_report_record_export": self._existing_daily_report_record_export(sessions),
-                "cabinet_shift_record_export": self._existing_cabinet_shift_record_export(sessions),
-                "followup_progress": self._collect_followup_progress(
-                    batch_key=target_batch,
-                    sessions=sessions,
-                    ready=False,
-                ),
-            }
-
         session = self._resolve_session_for_cloud_sync(
             batch_key=target_batch,
             building=target_building,
@@ -539,10 +473,46 @@ class ReviewFollowupTriggerService:
                     ready=True,
                 ),
             }
+        if not bool(session.get("confirmed", False)):
+            sessions = self._review_service.list_batch_sessions(target_batch)
+            return {
+                "status": "blocked",
+                "batch_key": target_batch,
+                "uploaded_buildings": [],
+                "skipped_buildings": [],
+                "failed_buildings": [{"building": target_building, "error": "pending_review"}],
+                "details": {},
+                "blocked_reason": "pending_review",
+                "cloud_sheet_sync": {
+                    "status": "blocked",
+                    "uploaded_buildings": [],
+                    "skipped_buildings": [],
+                    "failed_buildings": [{"building": target_building, "error": "pending_review"}],
+                    "details": {},
+                    "blocked_reason": "pending_review",
+                },
+                "daily_report_record_export": self._existing_daily_report_record_export(sessions),
+                "cabinet_shift_record_export": self._existing_cabinet_shift_record_export(sessions),
+                "followup_progress": self._collect_followup_progress(
+                    batch_key=target_batch,
+                    sessions=sessions,
+                    ready=True,
+                ),
+            }
 
-        cloud_result = self._run_cloud_sheet_upload(
+        export_result = self._run_session_followup_exports(
             batch_key=target_batch,
             sessions=[session],
+            emit_log=emit_log,
+        )
+        refreshed_session = self._resolve_session_for_cloud_sync(
+            batch_key=target_batch,
+            building=target_building,
+            session_id=target_session_id,
+        ) or session
+        cloud_result = self._run_cloud_sheet_upload(
+            batch_key=target_batch,
+            sessions=[refreshed_session],
             emit_log=emit_log,
         )
         refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
@@ -567,11 +537,24 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
         refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
+        daily_report_record_export = self._existing_daily_report_record_export(refreshed_sessions or [session])
+        if self._all_sessions_cloud_synced_current_revision(refreshed_sessions):
+            cloud_summary = self._summarize_cloud_sheet_sync(
+                batch_key=target_batch,
+                sessions=refreshed_sessions,
+            )
+            daily_report_record_export = self._run_daily_report_record_export(
+                batch_key=target_batch,
+                sessions=refreshed_sessions,
+                cloud_result=cloud_summary,
+                emit_log=emit_log,
+            )
+            refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
         return self._compose_followup_result(
             batch_key=target_batch,
-            export_result=self._empty_export_result(),
+            export_result=export_result,
             cloud_result=cloud_result,
-            daily_report_record_export=self._existing_daily_report_record_export(refreshed_sessions or [session]),
+            daily_report_record_export=daily_report_record_export,
             cabinet_shift_record_export=cabinet_shift_record_export,
             sessions=refreshed_sessions or [session],
         )

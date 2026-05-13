@@ -7,6 +7,7 @@ import {
   retryJobApi,
   startJsonJobApi,
   submitBranchPowerFromDownloadJob,
+  submitBranchPowerPowerAlertSyncJob,
   submitDayMetricFromDownloadJob,
   submitDayMetricFromFileJob,
   submitHandoverFollowupContinueJob,
@@ -24,6 +25,7 @@ const ACTION_KEYS = {
   handoverFromDownload: "job:handover_from_download",
   dayMetricFromDownload: "job:day_metric_from_download",
   branchPowerFromDownload: "job:branch_power_from_download",
+  branchPowerPowerAlertSync: "job:branch_power_power_alert_sync",
   dayMetricFromFile: "job:day_metric_from_file",
   dayMetricRetryUnit: "job:day_metric_retry_unit",
   dayMetricRetryFailed: "job:day_metric_retry_failed",
@@ -542,6 +544,32 @@ if (!canRun.value) return;
     );
   }
 
+  async function runBranchPowerPowerAlertSync() {
+    const businessDate = String(branchPowerBusinessDate?.value || "").trim();
+    if (!parseDateText(businessDate)) {
+      message.value = "请选择有效的动环统计业务日期";
+      return;
+    }
+    if (!canRun.value) return;
+    return guardedRun(
+      ACTION_KEYS.branchPowerPowerAlertSync,
+      async () => {
+        try {
+          const payload = {
+            business_date: businessDate,
+            target_business_date: businessDate,
+          };
+          message.value = `动环功率统计同步任务已提交: ${businessDate}`;
+          const response = await submitBranchPowerPowerAlertSyncJob(payload);
+          await applyAcceptedExecutionResponse(response, "动环功率统计同步");
+        } catch (err) {
+          message.value = `动环功率统计同步提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
   async function runDayMetricFromFile() {
     const building = String(dayMetricLocalBuilding.value || "").trim();
     const dutyDate = String(dayMetricLocalDate.value || "").trim();
@@ -694,6 +722,7 @@ if (!canRun.value) return;
     runHandoverFromDownload,
     runDayMetricFromDownload,
     runBranchPowerFromDownload,
+    runBranchPowerPowerAlertSync,
     runDayMetricFromFile,
     retryDayMetricUnit,
     retryFailedDayMetricUnits,

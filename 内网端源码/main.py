@@ -257,7 +257,7 @@ def _resolve_startup_config_path(explicit_config: str) -> str:
 def main(argv: list[str] | None = None) -> None:
     _configure_console_utf8()
     _apply_split_source_default_role()
-    parser = argparse.ArgumentParser(description="全景平台月报控制台入口")
+    parser = argparse.ArgumentParser(description="全景助手控制台入口")
     parser.add_argument("--config", default="", help="覆盖默认配置文件路径")
     parser.add_argument("--host", default="", help="覆盖配置中的 common.console.host")
     parser.add_argument("--port", type=int, default=0, help="覆盖配置中的 common.console.port")

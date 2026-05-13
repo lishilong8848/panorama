@@ -492,6 +492,29 @@ class HandoverOrchestrator:
             ]
         }
 
+    def _build_attention_handover_payloads(
+        self,
+        *,
+        building: str,
+        next_people_text: str,
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        try:
+            saved_rows = ReviewDocumentStateService(
+                self.config,
+                emit_log=emit_log,
+            ).get_attention_handover_defaults(building)
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][注意事项交接] 读取持久默认值失败，使用内置默认值: building={building}, error={exc}")
+            saved_rows = None
+        if saved_rows is not None:
+            emit_log(
+                f"[交接班][注意事项交接] 使用审核页保存内容: "
+                f"building={building}, rows={len(saved_rows)}"
+            )
+            return {_ATTENTION_HANDOVER_SECTION_NAME: saved_rows}
+        return self._build_attention_handover_default_payloads(next_people_text)
+
     @staticmethod
     def _safe_alarm_count(value: Any, default_text: str) -> int:
         try:
@@ -892,7 +915,11 @@ class HandoverOrchestrator:
             except Exception as exc:  # noqa: BLE001
                 emit_log(f"[交接班][其他重要工作] 构建失败，按空分类继续: {exc}")
             combined_category_payloads.update(
-                self._build_attention_handover_default_payloads(next_people_text)
+                self._build_attention_handover_payloads(
+                    building=building,
+                    next_people_text=next_people_text,
+                    emit_log=emit_log,
+                )
             )
             category_payloads = combined_category_payloads
 

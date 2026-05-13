@@ -7,6 +7,7 @@ export const APP_ACTION_KEYS = Object.freeze({
   actionKeyHandoverFromDownload: "job:handover_from_download",
   actionKeyDayMetricFromDownload: "job:day_metric_from_download",
   actionKeyBranchPowerFromDownload: "job:branch_power_from_download",
+  actionKeyBranchPowerPowerAlertSync: "job:branch_power_power_alert_sync",
   actionKeyDayMetricFromFile: "job:day_metric_from_file",
   actionKeyDayMetricRetryUnit: "job:day_metric_retry_unit",
   actionKeyDayMetricRetryFailed: "job:day_metric_retry_failed",

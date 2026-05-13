@@ -426,7 +426,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log("Web控制台已关闭")
 
     app = FastAPI(
-        title="全景平台月报 Web 控制台",
+        title="全景助手控制台",
         version="3.0.0",
         lifespan=_lifespan if enable_lifespan else None,
     )

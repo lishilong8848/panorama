@@ -359,16 +359,32 @@ class OrchestratorService:
         self,
         *,
         batch_key: str,
+        building: str = "",
+        session_id: str = "",
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
         target_batch = str(batch_key or "").strip()
-        emit_log(f"[交接班][继续后续上传] 提交执行: batch={target_batch}")
+        target_building = str(building or "").strip()
+        target_session_id = str(session_id or "").strip()
+        emit_log(
+            f"[交接班][继续后续上传] 提交执行: batch={target_batch}, "
+            f"building={target_building or '全部'}"
+        )
         handover_cfg = load_handover_config(self.config)
         service = ReviewFollowupTriggerService(handover_cfg)
-        result = service.continue_batch(batch_key=target_batch, emit_log=emit_log)
+        if target_building:
+            result = service.trigger_after_single_confirm(
+                batch_key=target_batch,
+                building=target_building,
+                session_id=target_session_id,
+                emit_log=emit_log,
+            )
+        else:
+            result = service.continue_batch(batch_key=target_batch, emit_log=emit_log)
         emit_log(
             "[交接班][继续后续上传] 执行完成: "
-            f"batch={target_batch}, status={str(result.get('status', '')).strip() or '-'}"
+            f"batch={target_batch}, building={target_building or '全部'}, "
+            f"status={str(result.get('status', '')).strip() or '-'}"
         )
         return result
 

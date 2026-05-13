@@ -5759,7 +5759,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
             "reason_code": "role_mismatch",
             "tone": "neutral",
             "status_text": "当前不是外网端",
-            "summary_text": "外网业务控制台状态仅在外网端运行时返回。",
+            "summary_text": "全景助手控制台外网端状态仅在外网端运行时返回。",
             "detail_text": "",
             "display_note_text": "",
             "reference_bucket_key": "-",
