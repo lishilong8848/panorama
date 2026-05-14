@@ -430,12 +430,32 @@ def _validate_handover_scheduler(cfg: Dict[str, Any]) -> None:
         raise ValueError("配置错误: features.handover_log.scheduler.morning_time 必须是 HH:MM:SS")
     if not _valid_time(str(scheduler_cfg.get("afternoon_time", ""))):
         raise ValueError("配置错误: features.handover_log.scheduler.afternoon_time 必须是 HH:MM:SS")
+    if "cloud_catchup_morning_time" in scheduler_cfg and not _valid_time(
+        str(scheduler_cfg.get("cloud_catchup_morning_time", ""))
+    ):
+        raise ValueError("配置错误: features.handover_log.scheduler.cloud_catchup_morning_time 必须是 HH:MM:SS")
+    if "cloud_catchup_afternoon_time" in scheduler_cfg and not _valid_time(
+        str(scheduler_cfg.get("cloud_catchup_afternoon_time", ""))
+    ):
+        raise ValueError("配置错误: features.handover_log.scheduler.cloud_catchup_afternoon_time 必须是 HH:MM:SS")
     if int(scheduler_cfg.get("check_interval_sec", 0)) <= 0:
         raise ValueError("配置错误: features.handover_log.scheduler.check_interval_sec 必须大于0")
     if not str(scheduler_cfg.get("morning_state_file", "")).strip():
         raise ValueError("配置错误: features.handover_log.scheduler.morning_state_file 不能为空")
     if not str(scheduler_cfg.get("afternoon_state_file", "")).strip():
         raise ValueError("配置错误: features.handover_log.scheduler.afternoon_state_file 不能为空")
+    if "cloud_catchup_enabled" in scheduler_cfg and not isinstance(
+        scheduler_cfg.get("cloud_catchup_enabled"), bool
+    ):
+        raise ValueError("配置错误: features.handover_log.scheduler.cloud_catchup_enabled 必须是布尔值")
+    if "cloud_catchup_morning_state_file" in scheduler_cfg and not str(
+        scheduler_cfg.get("cloud_catchup_morning_state_file", "")
+    ).strip():
+        raise ValueError("配置错误: features.handover_log.scheduler.cloud_catchup_morning_state_file 不能为空")
+    if "cloud_catchup_afternoon_state_file" in scheduler_cfg and not str(
+        scheduler_cfg.get("cloud_catchup_afternoon_state_file", "")
+    ).strip():
+        raise ValueError("配置错误: features.handover_log.scheduler.cloud_catchup_afternoon_state_file 不能为空")
 
 
 def _validate_handover_template(cfg: Dict[str, Any]) -> None:

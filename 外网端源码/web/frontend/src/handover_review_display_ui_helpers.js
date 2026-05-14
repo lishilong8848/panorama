@@ -2,6 +2,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
   const {
     computed,
     session,
+    reviewContext,
     reviewDisplayState,
     historyState,
     historyLoading,
@@ -54,13 +55,34 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
   });
 
   const sessionSummary = computed(() => {
-    if (!session.value) return "暂无会话";
-    const dutyDate = session.value.duty_date || "-";
-    return `${dutyDate} / ${shiftTextFromCode(session.value.duty_shift || "")}`;
+    const dutyDate = String(
+      session.value?.duty_date
+      || reviewContext?.value?.duty_date
+      || activeRouteSelection.value?.dutyDate
+      || "",
+    ).trim();
+    const dutyShift = String(
+      session.value?.duty_shift
+      || reviewContext?.value?.duty_shift
+      || activeRouteSelection.value?.dutyShift
+      || "",
+    ).trim();
+    if (!dutyDate && !dutyShift) return "暂无会话";
+    return `${dutyDate || "-"} / ${shiftTextFromCode(dutyShift)}`;
   });
 
-  const currentDutyDateText = computed(() => String(session.value?.duty_date || "").trim() || "-");
-  const currentDutyShiftText = computed(() => shiftTextFromCode(session.value?.duty_shift || ""));
+  const currentDutyDateText = computed(() => String(
+    session.value?.duty_date
+    || reviewContext?.value?.duty_date
+    || activeRouteSelection.value?.dutyDate
+    || "",
+  ).trim() || "-");
+  const currentDutyShiftText = computed(() => shiftTextFromCode(
+    session.value?.duty_shift
+    || reviewContext?.value?.duty_shift
+    || activeRouteSelection.value?.dutyShift
+    || "",
+  ));
   const currentModeText = computed(() => String(reviewDisplayState.value?.mode?.text || "").trim() || "-");
   const refreshActionBase = computed(() => reviewDisplayState.value.actions.refresh);
   const saveActionBase = computed(() => reviewDisplayState.value.actions.save);

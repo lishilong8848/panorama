@@ -186,7 +186,8 @@
     </section>
 
     <section v-else-if="!session" class="review-empty-card">
-      暂无可审核交接班文件
+      <strong>{{ reviewPendingTitle }}</strong>
+      <span>{{ reviewPendingMessage }}</span>
     </section>
 
     <template v-else>

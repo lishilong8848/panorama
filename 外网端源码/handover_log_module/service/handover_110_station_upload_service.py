@@ -4,7 +4,7 @@ import re
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Sequence
 
 from handover_log_module.core.shift_window import format_duty_date_text
 from handover_log_module.repository.excel_reader import load_workbook_quietly
@@ -21,6 +21,12 @@ _UPLOAD_BUILDING = "110站"
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 _BATCH_LOCK_GUARD = threading.Lock()
 _BATCH_LOCKS: dict[str, threading.RLock] = {}
+_DAY_SUBSTATION_SHEET_INDEX = 1
+_NIGHT_SUBSTATION_SHEET_INDEX = 2
+_DAY_SUBSTATION_LABEL_COLUMNS = (4, 1)
+_DAY_SUBSTATION_VALUE_COLUMNS = (5, 6, 7, 8, 9)
+_NIGHT_SUBSTATION_LABEL_COLUMNS = (5,)
+_NIGHT_SUBSTATION_VALUE_COLUMNS = (6, 7, 8, 9, 10)
 
 _ROW_SPECS = [
     {"row_id": "incoming_akai", "label": "阿开", "group": "incoming", "tokens": ("阿开",)},
@@ -62,11 +68,30 @@ def _normalize_shift(value: Any) -> str:
     return ""
 
 
-def _default_duty_context() -> tuple[str, str]:
+def _parse_hms_seconds(value: Any, fallback: str) -> int:
+    text = str(value or fallback or "").strip()
+    parts = text.split(":")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+        second = int(parts[2]) if len(parts) > 2 else 0
+    except Exception:  # noqa: BLE001
+        hour, minute, second = [int(part) for part in str(fallback or "00:00:00").split(":")[:3]]
+    hour = max(0, min(23, hour))
+    minute = max(0, min(59, minute))
+    second = max(0, min(59, second))
+    return hour * 3600 + minute * 60 + second
+
+
+def _default_duty_context(config: Dict[str, Any] | None = None) -> tuple[str, str]:
+    _ = config
     now = datetime.now()
-    if now.hour < 8:
+    second_of_day = now.hour * 3600 + now.minute * 60 + now.second
+    day_start = _parse_hms_seconds("08:00:00", "08:00:00")
+    night_start = _parse_hms_seconds("20:00:00", "20:00:00")
+    if second_of_day < day_start:
         return (now - timedelta(days=1)).strftime("%Y-%m-%d"), "night"
-    if now.hour < 20:
+    if second_of_day < night_start:
         return now.strftime("%Y-%m-%d"), "day"
     return now.strftime("%Y-%m-%d"), "night"
 
@@ -111,6 +136,18 @@ def _count_source_sheet_data_rows(worksheet: Any) -> int:
 
 def _normalize_match_text(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or "").strip()).replace("（", "(").replace("）", ")")
+
+
+def _normalize_column_indexes(values: Sequence[Any]) -> List[int]:
+    columns: List[int] = []
+    for value in values:
+        try:
+            column = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if column > 0 and column not in columns:
+            columns.append(column)
+    return columns
 
 
 def _empty_cloud_sync(status: str = "") -> Dict[str, Any]:
@@ -186,9 +223,9 @@ class Handover110StationUploadService:
         date_text = _normalize_duty_date(duty_date)
         shift_text = _normalize_shift(duty_shift)
         if not date_text:
-            date_text, shift_text = _default_duty_context()
+            date_text, shift_text = _default_duty_context(self.config)
         elif not shift_text:
-            _, shift_text = _default_duty_context()
+            _, shift_text = _default_duty_context(self.config)
         batch_key = self._review_service.build_batch_key(date_text, shift_text)
         return {
             "batch_key": batch_key,
@@ -284,14 +321,39 @@ class Handover110StationUploadService:
             )
         return payload
 
-    def _parse_workbook(self, path: Path) -> Dict[str, Any]:
+    @staticmethod
+    def _substation_parse_layout(duty_shift: str) -> Dict[str, Any]:
+        shift = _normalize_shift(duty_shift)
+        if shift == "night":
+            return {
+                "sheet_index": _NIGHT_SUBSTATION_SHEET_INDEX,
+                "label_columns": _NIGHT_SUBSTATION_LABEL_COLUMNS,
+                "value_columns": _NIGHT_SUBSTATION_VALUE_COLUMNS,
+                "layout": "night_sheet3_e_j",
+            }
+        return {
+            "sheet_index": _DAY_SUBSTATION_SHEET_INDEX,
+            "label_columns": _DAY_SUBSTATION_LABEL_COLUMNS,
+            "value_columns": _DAY_SUBSTATION_VALUE_COLUMNS,
+            "layout": "day_sheet2_d_i",
+        }
+
+    def _parse_workbook(self, path: Path, *, duty_shift: str) -> Dict[str, Any]:
         workbook = load_workbook_quietly(path, data_only=True)
         try:
-            if len(workbook.worksheets) < 2:
-                raise ValueError("110站文件至少需要包含2个sheet页")
+            layout = self._substation_parse_layout(duty_shift)
+            substation_sheet_index = int(layout.get("sheet_index", _DAY_SUBSTATION_SHEET_INDEX) or _DAY_SUBSTATION_SHEET_INDEX)
+            required_sheet_count = substation_sheet_index + 1
+            if len(workbook.worksheets) < required_sheet_count:
+                required_text = "3个sheet页" if _normalize_shift(duty_shift) == "night" else "2个sheet页"
+                raise ValueError(f"110站{('夜班' if _normalize_shift(duty_shift) == 'night' else '白班')}文件至少需要包含{required_text}")
             first_ws = workbook.worksheets[0]
-            second_ws = workbook.worksheets[1]
-            parsed_rows = self._parse_substation_sheet(second_ws)
+            substation_ws = workbook.worksheets[substation_sheet_index]
+            parsed_rows = self._parse_substation_sheet(
+                substation_ws,
+                label_columns=layout["label_columns"],
+                value_columns=layout["value_columns"],
+            )
             return {
                 "source_sheet": {
                     "title": str(first_ws.title or "").strip(),
@@ -301,9 +363,13 @@ class Handover110StationUploadService:
                     "merge_count": len(first_ws.merged_cells.ranges),
                 },
                 "substation_sheet": {
-                    "title": str(second_ws.title or "").strip(),
-                    "max_row": int(second_ws.max_row or 0),
-                    "max_column": int(second_ws.max_column or 0),
+                    "title": str(substation_ws.title or "").strip(),
+                    "sheet_index": substation_sheet_index + 1,
+                    "layout": str(layout.get("layout", "")).strip(),
+                    "label_columns": list(layout["label_columns"]),
+                    "value_columns": list(layout["value_columns"]),
+                    "max_row": int(substation_ws.max_row or 0),
+                    "max_column": int(substation_ws.max_column or 0),
                     "parsed_row_count": len(parsed_rows),
                 },
                 "parsed_110kv_rows": parsed_rows,
@@ -311,14 +377,29 @@ class Handover110StationUploadService:
         finally:
             workbook.close()
 
-    def _parse_substation_sheet(self, worksheet: Any) -> List[Dict[str, Any]]:
+    def _parse_substation_sheet(
+        self,
+        worksheet: Any,
+        *,
+        label_columns: Sequence[int],
+        value_columns: Sequence[int],
+    ) -> List[Dict[str, Any]]:
         matched: Dict[str, Dict[str, Any]] = {}
+        safe_label_columns = _normalize_column_indexes(label_columns)
+        safe_value_columns = _normalize_column_indexes(value_columns)
+        if not safe_label_columns or len(safe_value_columns) != len(_VALUE_KEYS):
+            raise ValueError("110站第2/3个sheet解析列配置无效")
         for row_idx in range(1, int(worksheet.max_row or 0) + 1):
-            raw_label = worksheet.cell(row=row_idx, column=4).value or worksheet.cell(row=row_idx, column=1).value
+            raw_label = ""
+            for column_idx in safe_label_columns:
+                candidate = worksheet.cell(row=row_idx, column=column_idx).value
+                if str(candidate or "").strip():
+                    raw_label = candidate
+                    break
             label_text = _normalize_match_text(raw_label)
             if not label_text:
                 continue
-            value_cells = [worksheet.cell(row=row_idx, column=col_idx) for col_idx in range(5, 10)]
+            value_cells = [worksheet.cell(row=row_idx, column=col_idx) for col_idx in safe_value_columns]
             values = [_format_cell_display(cell) for cell in value_cells]
             if not any(values) or str(values[0]).strip() == "线电压":
                 continue
@@ -339,7 +420,7 @@ class Handover110StationUploadService:
 
         missing = [spec["label"] for spec in _ROW_SPECS if spec["row_id"] not in matched]
         if missing:
-            raise ValueError(f"110站第2个sheet未识别到关键行: {', '.join(missing)}")
+            raise ValueError(f"110站目标sheet未识别到关键行: {', '.join(missing)}")
         return [matched[spec["row_id"]] for spec in _ROW_SPECS]
 
     def _ensure_cloud_batch(
@@ -465,7 +546,7 @@ class Handover110StationUploadService:
                 f"[交接班][110站解析] 已保存 batch={batch_key}, file={stored_path}"
             )
             try:
-                parsed = self._parse_workbook(stored_path)
+                parsed = self._parse_workbook(stored_path, duty_shift=context["duty_shift"])
             except Exception as exc:  # noqa: BLE001
                 failed_state = self._save_state(
                     batch_key,
@@ -500,10 +581,14 @@ class Handover110StationUploadService:
                 },
             )
             self._save_substation_rows(batch_key=batch_key, rows=parsed["parsed_110kv_rows"])
+            substation_sheet = parsed.get("substation_sheet", {})
             emit_log(
                 f"[交接班][110站解析] 解析完成 batch={batch_key}, "
                 f"source_rows={parsed['source_sheet'].get('recognized_row_count', 0)}, "
-                f"110kv_rows={len(parsed['parsed_110kv_rows'])}"
+                f"110kv_rows={len(parsed['parsed_110kv_rows'])}, "
+                f"substation_sheet={substation_sheet.get('title', '-')}, "
+                f"sheet_index={substation_sheet.get('sheet_index', '-')}, "
+                f"layout={substation_sheet.get('layout', '-')}"
             )
             return {
                 "ok": True,
@@ -539,7 +624,7 @@ class Handover110StationUploadService:
                 f"[交接班][110站上传] 已保存 batch={batch_key}, file={stored_path}"
             )
             try:
-                parsed = self._parse_workbook(stored_path)
+                parsed = self._parse_workbook(stored_path, duty_shift=context["duty_shift"])
             except Exception as exc:  # noqa: BLE001
                 failed_state = self._save_state(
                     batch_key,
@@ -591,10 +676,14 @@ class Handover110StationUploadService:
                 )
                 emit_log(f"[交接班][110站上传] 共享110KV写入失败 batch={batch_key}, error={error_text}")
                 return {"ok": False, "batch": context, "upload": failed_state, "error": error_text}
+            substation_sheet = parsed.get("substation_sheet", {})
             emit_log(
                 f"[交接班][110站上传] 解析完成 batch={batch_key}, "
                 f"source_sheet={parsed['source_sheet'].get('title', '-')}, "
-                f"110kv_rows={len(parsed['parsed_110kv_rows'])}"
+                f"110kv_rows={len(parsed['parsed_110kv_rows'])}, "
+                f"substation_sheet={substation_sheet.get('title', '-')}, "
+                f"sheet_index={substation_sheet.get('sheet_index', '-')}, "
+                f"layout={substation_sheet.get('layout', '-')}"
             )
             synced_state = self._sync_state_to_cloud(state=state, emit_log=emit_log)
             return {

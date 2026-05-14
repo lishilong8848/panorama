@@ -29,6 +29,11 @@ class HandoverSchedulerManager:
             "auto_start_in_gui": bool(raw.get("auto_start_in_gui", False)),
             "morning_time": str(raw.get("morning_time", "07:00:00")).strip() or "07:00:00",
             "afternoon_time": str(raw.get("afternoon_time", "16:00:00")).strip() or "16:00:00",
+            "cloud_catchup_enabled": bool(raw.get("cloud_catchup_enabled", True)),
+            "cloud_catchup_morning_time": str(raw.get("cloud_catchup_morning_time", "08:00:00")).strip()
+            or "08:00:00",
+            "cloud_catchup_afternoon_time": str(raw.get("cloud_catchup_afternoon_time", "17:30:00")).strip()
+            or "17:30:00",
             "station_110_review_link_enabled": bool(raw.get("station_110_review_link_enabled", True)),
             "station_110_midnight_time": str(raw.get("station_110_midnight_time", "00:00:00")).strip()
             or "00:00:00",
@@ -42,6 +47,14 @@ class HandoverSchedulerManager:
                 raw.get("afternoon_state_file", "handover_scheduler_afternoon_state.json")
             ).strip()
             or "handover_scheduler_afternoon_state.json",
+            "cloud_catchup_morning_state_file": str(
+                raw.get("cloud_catchup_morning_state_file", "handover_cloud_catchup_morning_state.json")
+            ).strip()
+            or "handover_cloud_catchup_morning_state.json",
+            "cloud_catchup_afternoon_state_file": str(
+                raw.get("cloud_catchup_afternoon_state_file", "handover_cloud_catchup_afternoon_state.json")
+            ).strip()
+            or "handover_cloud_catchup_afternoon_state.json",
             "station_110_midnight_state_file": str(
                 raw.get("station_110_midnight_state_file", "handover_scheduler_110_midnight_state.json")
             ).strip()
@@ -117,6 +130,21 @@ class HandoverSchedulerManager:
                 is_busy=self._is_busy,
             ),
         }
+        if bool(self._cfg.get("cloud_catchup_enabled", True)):
+            schedulers["cloud_catchup_morning"] = self._daily_scheduler(
+                slot="cloud_catchup_morning",
+                run_time=str(self._cfg["cloud_catchup_morning_time"]),
+                state_file=str(self._cfg["cloud_catchup_morning_state_file"]),
+                thread_name="handover-cloud-catchup-morning-scheduler",
+                source_name="交接班定时确认并上传云文档（8点）",
+            )
+            schedulers["cloud_catchup_afternoon"] = self._daily_scheduler(
+                slot="cloud_catchup_afternoon",
+                run_time=str(self._cfg["cloud_catchup_afternoon_time"]),
+                state_file=str(self._cfg["cloud_catchup_afternoon_state_file"]),
+                thread_name="handover-cloud-catchup-afternoon-scheduler",
+                source_name="交接班定时确认并上传云文档（17点30）",
+            )
         if bool(self._cfg.get("station_110_review_link_enabled", True)):
             schedulers["station_110_midnight"] = self._daily_scheduler(
                 slot="station_110_midnight",

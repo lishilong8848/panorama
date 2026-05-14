@@ -1,11 +1,11 @@
 ﻿from __future__ import annotations
 
 import asyncio
-import base64
 import copy
 import inspect
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict
 
@@ -910,7 +910,7 @@ def _build_followup_await_all_result(
     blocked_reason: str = "",
 ) -> Dict[str, Any]:
     target_batch = str(batch_key or "").strip()
-    reason = str(blocked_reason or "").strip() or "五个楼栋尚未全部确认"
+    reason = str(blocked_reason or "").strip() or "暂无已确认楼栋"
     return {
         "status": "await_all_confirmed",
         "batch_key": target_batch,
@@ -1794,6 +1794,50 @@ def _normalize_duty_context(duty_date: str = "", duty_shift: str = "") -> tuple[
     return duty_date_text, duty_shift_text
 
 
+def _parse_hms_seconds(value: Any, fallback: str) -> int:
+    text = str(value or fallback or "").strip()
+    parts = text.split(":")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+        second = int(parts[2]) if len(parts) > 2 else 0
+    except Exception:  # noqa: BLE001
+        hour, minute, second = [int(part) for part in str(fallback or "00:00:00").split(":")[:3]]
+    hour = max(0, min(23, hour))
+    minute = max(0, min(59, minute))
+    second = max(0, min(59, second))
+    return hour * 3600 + minute * 60 + second
+
+
+def _current_handover_duty_context(config: Dict[str, Any] | None = None, now: datetime | None = None) -> tuple[str, str]:
+    _ = config
+    day_start = _parse_hms_seconds("09:00:00", "09:00:00")
+    night_start = _parse_hms_seconds("18:00:00", "18:00:00")
+    current = now or datetime.now()
+    second_of_day = current.hour * 3600 + current.minute * 60 + current.second
+    if second_of_day < day_start:
+        return (current - timedelta(days=1)).strftime("%Y-%m-%d"), "night"
+    if second_of_day < night_start:
+        return current.strftime("%Y-%m-%d"), "day"
+    return current.strftime("%Y-%m-%d"), "night"
+
+
+def _resolve_review_duty_context(
+    service: ReviewSessionService,
+    *,
+    duty_date: str = "",
+    duty_shift: str = "",
+    session_id: str = "",
+    config: Dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    if str(session_id or "").strip():
+        return "", ""
+    duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
+    if duty_date_text and duty_shift_text:
+        return duty_date_text, duty_shift_text
+    return _current_handover_duty_context(config or getattr(service, "config", {}) or {})
+
+
 def _load_target_session_or_404(
     service: ReviewSessionService,
     *,
@@ -1835,6 +1879,105 @@ def _load_target_session_or_404(
     if str(session.get("building", "")).strip() != str(building or "").strip():
         raise HTTPException(status_code=404, detail="review session building mismatch")
     return session
+
+
+def _pending_review_payload(
+    service: ReviewSessionService,
+    *,
+    building: str,
+    duty_date: str,
+    duty_shift: str,
+    review_ui: Dict[str, Any] | None = None,
+    emit_log=None,
+) -> Dict[str, Any]:
+    batch_key = service.build_batch_key(duty_date, duty_shift)
+    try:
+        batch_status = service.get_batch_status(batch_key)
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    latest_session_id = _safe_latest_session_id(service, building=building, emit_log=emit_log)
+    shift_text = _shift_label(duty_shift)
+    message = f"{duty_date} {shift_text}交接班数据尚未生成，请在数据生成后再来查看。"
+    response = {
+        "ok": True,
+        "building": building,
+        "session": None,
+        "document": {},
+        "batch_status": batch_status,
+        "concurrency": _empty_concurrency(),
+        "review_ui": review_ui if isinstance(review_ui, dict) else {},
+        "history": _empty_history_payload(
+            latest_session_id=latest_session_id,
+            selected_session_id="",
+        ),
+        "latest_session_id": latest_session_id,
+        "review_context": {
+            "status": "waiting_generation",
+            "ready": False,
+            "duty_date": duty_date,
+            "duty_shift": duty_shift,
+            "duty_shift_text": shift_text,
+            "batch_key": batch_key,
+            "message": message,
+        },
+    }
+    response = _attach_review_display_state(
+        response,
+        service=service,
+        building=building,
+        include_concurrency=False,
+    )
+    display_state = response.get("display_state", {}) if isinstance(response.get("display_state", {}), dict) else {}
+    banners = list(display_state.get("status_banners", []) if isinstance(display_state.get("status_banners", []), list) else [])
+    banners.append({"code": "waiting_generation", "text": message, "tone": "warning"})
+    display_state["status_banners"] = banners
+    response["display_state"] = display_state
+    return response
+
+
+def _load_review_session_or_pending(
+    service: ReviewSessionService,
+    *,
+    building: str,
+    duty_date: str = "",
+    duty_shift: str = "",
+    session_id: str = "",
+    config: Dict[str, Any] | None = None,
+    review_ui: Dict[str, Any] | None = None,
+    emit_log=None,
+) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
+    resolved_date, resolved_shift = _resolve_review_duty_context(
+        service,
+        duty_date=duty_date,
+        duty_shift=duty_shift,
+        session_id=session_id,
+        config=config,
+    )
+    try:
+        session = _load_target_session_or_404(
+            service,
+            building=building,
+            duty_date=resolved_date or duty_date,
+            duty_shift=resolved_shift or duty_shift,
+            session_id=session_id,
+        )
+        return session, None
+    except HTTPException as exc:
+        if (
+            exc.status_code == 404
+            and not str(session_id or "").strip()
+            and resolved_date
+            and resolved_shift
+        ):
+            return None, _pending_review_payload(
+                service,
+                building=building,
+                duty_date=resolved_date,
+                duty_shift=resolved_shift,
+                review_ui=review_ui,
+                emit_log=emit_log,
+            )
+        raise
 
 
 def _shift_label(shift_code: str) -> str:
@@ -2233,10 +2376,10 @@ def _build_review_confirm_feedback(
     if followup_status == "await_all_confirmed":
         return _review_display_item(
             status="await_all_confirmed",
-            text="等待五个楼栋全部确认",
+            text="等待当前楼栋确认",
             tone="info",
             reason_code="await_all_confirmed",
-            detail_text="当前批次尚未全部确认，后续上传将在全部确认后执行。",
+            detail_text="当前楼栋尚未确认，确认后会上传当前楼栋云文档。",
         )
     if followup_status == "queued":
         return _review_display_item(
@@ -2287,12 +2430,14 @@ def _build_review_cloud_retry_feedback(result: Dict[str, Any] | None = None) -> 
         cloud_sheet_sync = payload.get("cloud_sheet_sync", {})
         if isinstance(cloud_sheet_sync, dict):
             blocked_reason = str(cloud_sheet_sync.get("blocked_reason", "")).strip()
+        if blocked_reason == "pending_review":
+            blocked_reason = "当前楼栋尚未确认，不能重试云表上传。"
         return _review_display_item(
             status="blocked",
-            text=blocked_reason or "当前批次尚未全部确认，不能重试云表上传。",
+            text=blocked_reason or "当前楼栋暂不能重试云表上传。",
             tone="warning",
             reason_code="blocked",
-            detail_text=blocked_reason or "当前批次尚未全部确认，不能重试云表上传。",
+            detail_text=blocked_reason or "当前楼栋暂不能重试云表上传。",
         )
     return _review_display_item(
         status="failed",
@@ -2441,7 +2586,6 @@ def _build_review_display_state(
     confirmed = bool(session_payload.get("confirmed", False))
     has_output_file = bool(str(session_payload.get("output_file", "")).strip())
     has_capacity_file = bool(str(session_payload.get("capacity_output_file", "")).strip())
-    all_confirmed = bool(batch_payload.get("all_confirmed", False))
     remote_editor_active = bool(concurrency_payload.get("is_editing_elsewhere", False))
     active_editor = (
         concurrency_payload.get("active_editor", {})
@@ -2568,7 +2712,7 @@ def _build_review_display_state(
         confirm_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
     elif cloud_sheet_uploading:
         confirm_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再操作确认状态"
-    retry_allowed = bool(session_payload) and (not is_history_mode) and confirmed and all_confirmed and str(cloud_sheet_state["status"]) in {"failed", "prepare_failed"}
+    retry_allowed = bool(session_payload) and (not is_history_mode) and confirmed and str(cloud_sheet_state["status"]) in {"failed", "prepare_failed"}
     retry_disabled_reason = ""
     if not session_payload:
         retry_disabled_reason = "暂无可重试的交接班记录"
@@ -2576,8 +2720,6 @@ def _build_review_display_state(
         retry_disabled_reason = "历史模式不支持重试当前云表上传"
     elif not confirmed:
         retry_disabled_reason = "当前楼栋尚未确认，不能重试云表上传"
-    elif not all_confirmed:
-        retry_disabled_reason = "当前批次尚未全部确认，不能重试云表上传"
     elif str(cloud_sheet_state["status"]) not in {"failed", "prepare_failed"}:
         retry_disabled_reason = "当前云表状态无需重试"
     update_history_allowed = bool(session_payload) and is_history_mode and not remote_editor_active
@@ -2602,14 +2744,14 @@ def _build_review_display_state(
         download_disabled_reason = "当前没有可下载的交接班文件"
     elif not has_output_file:
         download_disabled_reason = "当前没有可下载的交接班文件"
-    capacity_allowed = bool(session_payload) and has_capacity_file and str(capacity_state["status"]) == "ready"
+    capacity_allowed = bool(session_payload) and has_capacity_file
     capacity_disabled_reason = ""
     if not session_payload:
         capacity_disabled_reason = "当前没有可下载的交接班容量报表"
     elif not has_capacity_file:
         capacity_disabled_reason = "当前没有可下载的交接班容量报表"
     elif str(capacity_state["status"]) != "ready":
-        capacity_disabled_reason = capacity_state["error"] or "容量报表待补写完成后才能下载"
+        capacity_disabled_reason = ""
     capacity_image_send_allowed = bool(session_payload) and has_capacity_file and not is_history_mode and not remote_editor_active and not capacity_image_sending
     capacity_image_send_disabled_reason = ""
     if not session_payload:
@@ -2689,11 +2831,11 @@ def _build_review_display_state(
         detail_text="" if download_allowed else download_disabled_reason,
     )
     capacity_download_state = _review_display_item(
-        status="ready" if capacity_allowed else (str(capacity_state["status"]) or ("missing_file" if session_payload else "unavailable")),
-        text="容量报表可下载" if capacity_allowed else (capacity_disabled_reason or capacity_state["text"]),
-        tone="success" if capacity_allowed else str(capacity_state["tone"] or "warning"),
-        reason_code="ready" if capacity_allowed else (str(capacity_state["reason_code"]) or ("missing_file" if session_payload else "unavailable")),
-        detail_text="" if capacity_allowed else (capacity_disabled_reason or capacity_state["error"] or capacity_state["text"]),
+        status="ready" if capacity_allowed and str(capacity_state["status"]) == "ready" else ("needs_sync" if capacity_allowed else (str(capacity_state["status"]) or ("missing_file" if session_payload else "unavailable"))),
+        text="容量报表可下载" if capacity_allowed and str(capacity_state["status"]) == "ready" else ("容量报表可下载，下载前会同步最新字段" if capacity_allowed else (capacity_disabled_reason or capacity_state["text"])),
+        tone="success" if capacity_allowed and str(capacity_state["status"]) == "ready" else ("warning" if capacity_allowed else str(capacity_state["tone"] or "warning")),
+        reason_code="ready" if capacity_allowed and str(capacity_state["status"]) == "ready" else ("needs_sync" if capacity_allowed else (str(capacity_state["reason_code"]) or ("missing_file" if session_payload else "unavailable"))),
+        detail_text="" if capacity_allowed and str(capacity_state["status"]) == "ready" else ("点击下载时会先补写审核页字段，失败则不会下载旧文件" if capacity_allowed else (capacity_disabled_reason or capacity_state["error"] or capacity_state["text"])),
     )
     confirm_state = _review_display_item(
         status="confirmed" if confirmed else ("history_mode" if is_history_mode else ("blocked" if remote_editor_active else "pending_confirm")),
@@ -3597,16 +3739,23 @@ def handover_review_data(
     client_id: str = "",
 ) -> Dict[str, Any]:
     container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
     service, parser, writer, _ = _build_review_services(container)
     document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
     building = _resolve_building_or_404(service, building_code)
-    session = _load_target_session_or_404(
+    review_ui = parser.config.get("review_ui", {}) if isinstance(parser.config, dict) else {}
+    session, pending_payload = _load_review_session_or_pending(
         service,
         building=building,
         duty_date=duty_date,
         duty_shift=duty_shift,
         session_id=session_id,
+        config=handover_cfg,
+        review_ui=review_ui if isinstance(review_ui, dict) else {},
+        emit_log=container.add_system_log,
     )
+    if pending_payload is not None:
+        return pending_payload
     try:
         document, session = _load_review_document_cached(document_state, session)
     except ReviewDocumentStateError as exc:
@@ -3615,7 +3764,6 @@ def handover_review_data(
         batch_status = service.get_batch_status(session["batch_key"])
     except ReviewSessionStoreUnavailableError as exc:
         _raise_review_store_http_error(exc)
-    review_ui = parser.config.get("review_ui", {}) if isinstance(parser.config, dict) else {}
     response = {
         "ok": True,
         "building": building,
@@ -3657,16 +3805,23 @@ def handover_review_bootstrap(
     client_id: str = "",
 ) -> Dict[str, Any]:
     container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
     service, parser, writer, _ = _build_review_services(container)
     document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
     building = _resolve_building_or_404(service, building_code)
-    session = _load_target_session_or_404(
+    review_ui = _review_ui_payload(parser)
+    session, pending_payload = _load_review_session_or_pending(
         service,
         building=building,
         duty_date=duty_date,
         duty_shift=duty_shift,
         session_id=session_id,
+        config=handover_cfg,
+        review_ui=review_ui,
+        emit_log=container.add_system_log,
     )
+    if pending_payload is not None:
+        return pending_payload
     try:
         payload, _from_cache = _build_review_bootstrap_payload(
             building=building,
@@ -3698,15 +3853,22 @@ def handover_review_status(
     client_revision: int = 0,
 ) -> Dict[str, Any]:
     container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
     service = _build_review_session_service(container)
     building = _resolve_building_or_404(service, building_code)
-    session = _load_target_session_or_404(
+    review_ui = _build_review_ui_config(container)
+    session, pending_payload = _load_review_session_or_pending(
         service,
         building=building,
         duty_date=duty_date,
         duty_shift=duty_shift,
         session_id=session_id,
+        config=handover_cfg,
+        review_ui=review_ui,
+        emit_log=container.add_system_log,
     )
+    if pending_payload is not None:
+        return pending_payload
     session = _attach_excel_sync_from_store(container, session)
     session_revision = int(session.get("revision", 0) or 0)
     document_revision = _review_document_revision_from_store(
@@ -3721,7 +3883,6 @@ def handover_review_status(
         batch_status = service.get_batch_status(session["batch_key"])
     except ReviewSessionStoreUnavailableError as exc:
         _raise_review_store_http_error(exc)
-    review_ui = _build_review_ui_config(container)
     poll_interval_sec = 5
     if isinstance(review_ui, dict):
         try:
@@ -3852,24 +4013,19 @@ def handover_review_download(building_code: str, request: Request, session_id: s
         download_warning = str(exc)
     if download_warning:
         container.add_system_log(
-            "[交接班][下载成品] 同步最新审核内容失败，继续下载现有业务文件 "
+            "[交接班][下载成品] 同步最新审核内容失败，已阻止下载旧交接班文件 "
             f"building={building}, session_id={session_id_text}, file={output_file}, error={download_warning}"
         )
+        raise HTTPException(status_code=409, detail=download_warning)
 
     container.add_system_log(
         f"[交接班][下载成品] building={building}, session_id={session_id_text}, file={output_file}, "
-        f"warning={'yes' if download_warning else 'no'}"
+        "warning=no"
     )
-    headers = {}
-    if download_warning:
-        headers["x-handover-download-warning-base64"] = base64.b64encode(
-            f"交接班文件部分审核内容同步失败，已下载现有业务文件：{download_warning}".encode("utf-8")
-        ).decode("ascii")
     return FileResponse(
         path=output_file,
         filename=output_file.name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers=headers,
     )
 
 
@@ -3896,135 +4052,79 @@ def handover_review_capacity_download(
     output_file = Path(output_file_text)
     if not output_file.exists() or not output_file.is_file():
         raise HTTPException(status_code=404, detail="交接班容量报表文件不存在，请重新生成")
-    document_load_warning = ""
     try:
         document, target = document_state.load_document(target)
     except ReviewDocumentStateError as exc:
-        document_load_warning = str(exc)
         container.add_system_log(
-            "[交接班][下载容量报表] 审核文档读取失败，继续下载业务容量表并尽量补写动态字段 "
-            f"building={building}, session_id={session_id_text}, error={document_load_warning}"
+            "[交接班][下载容量报表] 审核文档读取失败，已阻止下载旧容量表 "
+            f"building={building}, session_id={session_id_text}, error={exc}"
         )
-        document = {}
-        attach_pump = getattr(document_state, "attach_cooling_pump_pressures", None)
-        if callable(attach_pump):
-            try:
-                document = attach_pump(document={}, session=target)
-            except Exception as pump_exc:  # noqa: BLE001
-                container.add_system_log(
-                    "[交接班][下载容量报表] 冷却水泵压力附加失败，继续下载 "
-                    f"building={building}, session_id={session_id_text}, error={pump_exc}"
-                )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     tracked_cells = _extract_capacity_tracked_cells(document)
-    shared_state = _get_substation_110kv_state_safe(
-        service,
-        batch_key=str(target.get("batch_key", "")).strip(),
-        client_id=str(client_id or "").strip(),
-        emit_log=container.add_system_log,
-    )
-    shared_110kv = (
-        shared_state.get("shared_blocks", {}).get("substation_110kv", {})
-        if isinstance(shared_state.get("shared_blocks", {}), dict)
-        else {}
-    )
-    cooling_pump_pressures = (
-        document.get("cooling_pump_pressures", {})
-        if isinstance(document.get("cooling_pump_pressures", {}), dict)
-        else {}
-    )
-    download_warning = ""
-    capacity_service = HandoverCapacityReportService(_handover_cfg(container))
-    target_overlay_signature = ""
     try:
-        target_overlay_signature = str(
-            capacity_service.build_capacity_overlay_signature(
-                building=building,
-                duty_date=str(target.get("duty_date", "")).strip(),
-                duty_shift=str(target.get("duty_shift", "")).strip().lower(),
-                handover_cells=tracked_cells,
-                capacity_output_file=output_file_text,
-                shared_110kv=shared_110kv if isinstance(shared_110kv, dict) else {},
-                cooling_pump_pressures=cooling_pump_pressures,
-                client_id=str(client_id or "").strip(),
-                emit_log=container.add_system_log,
-            ).get("signature", "")
-            or ""
-        ).strip()
+        queue_service = _build_xlsx_write_queue_service(
+            container,
+            review_service=service,
+            document_state=document_state,
+        )
+        queue_service.enqueue_capacity_overlay_sync(
+            target,
+            tracked_cells=tracked_cells,
+            client_id=str(client_id or "").strip(),
+        )
+        barrier = queue_service.wait_for_barrier(
+            building=building,
+            session_id=session_id_text,
+            reason="capacity_download",
+            timeout_sec=120,
+        )
+        if str(barrier.get("status", "")).strip().lower() != "success":
+            detail = str(barrier.get("error", "") or "").strip() or "容量报表写入队列失败"
+            container.add_system_log(
+                f"[交接班][下载容量报表] 补写失败，已阻止下载旧容量表 building={building}, session_id={session_id_text}, error={detail}"
+            )
+            raise HTTPException(status_code=409, detail=detail)
+    except HandoverXlsxWriteQueueTimeoutError as exc:
+        container.add_system_log(
+            f"[交接班][下载容量报表] 补写等待超时，已阻止下载旧容量表 building={building}, session_id={session_id_text}, error={exc}"
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         container.add_system_log(
-            f"[交接班][下载容量报表] 目标签名计算失败，转为补写后下载 building={building}, session_id={session_id_text}, error={exc}"
+            f"[交接班][下载容量报表] 补写异常，已阻止下载旧容量表 building={building}, session_id={session_id_text}, error={exc}"
         )
-    current_capacity_sync = target.get("capacity_sync", {}) if isinstance(target.get("capacity_sync", {}), dict) else {}
-    current_ready = (
-        str(current_capacity_sync.get("status", "")).strip().lower() == "ready"
-        and bool(target_overlay_signature)
-        and str(current_capacity_sync.get("overlay_signature", "") or "").strip() == target_overlay_signature
-    )
-    if not current_ready:
-        try:
-            queue_service = _build_xlsx_write_queue_service(
-                container,
-                review_service=service,
-                document_state=document_state,
-            )
-            queue_service.enqueue_capacity_overlay_sync(
-                target,
-                tracked_cells=tracked_cells,
-                client_id=str(client_id or "").strip(),
-            )
-            barrier = queue_service.wait_for_barrier(
-                building=building,
-                session_id=session_id_text,
-                reason="capacity_download",
-                timeout_sec=120,
-            )
-            if str(barrier.get("status", "")).strip().lower() != "success":
-                download_warning = str(barrier.get("error", "") or "").strip() or "容量报表写入队列失败"
-        except HandoverXlsxWriteQueueTimeoutError as exc:
-            download_warning = str(exc)
-        except Exception as exc:  # noqa: BLE001
-            download_warning = str(exc)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     get_session_by_id = getattr(service, "get_session_by_id", None)
     refreshed_target = get_session_by_id(session_id_text) if callable(get_session_by_id) else None
     refreshed_target = refreshed_target or target
     sync_payload = refreshed_target.get("capacity_sync", {}) if isinstance(refreshed_target.get("capacity_sync", {}), dict) else {}
     sync_status = str(sync_payload.get("status", "")).strip().lower()
-    if sync_status == "ready":
-        try:
-            target = refreshed_target
-        except Exception as exc:  # noqa: BLE001
-            container.add_system_log(
-                f"[交接班][下载容量报表] 补写状态读取失败 building={building}, session_id={session_id_text}, error={exc}"
-            )
-    elif not download_warning:
+    if sync_status != "ready":
         detail = str(sync_payload.get("error", "") if isinstance(sync_payload, dict) else "").strip() or "容量报表部分字段补写失败"
-        download_warning = detail
         container.add_system_log(
-            f"[交接班][下载容量报表] 补写失败但继续下载业务文件 building={building}, session_id={session_id_text}, error={detail}"
+            f"[交接班][下载容量报表] 补写未就绪，已阻止下载旧容量表 building={building}, session_id={session_id_text}, status={sync_status or '-'}, error={detail}"
         )
-    if document_load_warning and not download_warning:
-        download_warning = f"审核文档读取失败，已下载现有容量报表：{document_load_warning}"
-    if download_warning:
+        raise HTTPException(status_code=409, detail=detail)
+    target = refreshed_target
+    refreshed_output_file_text = str(target.get("capacity_output_file", "") or output_file_text).strip()
+    output_file = Path(refreshed_output_file_text)
+    if not refreshed_output_file_text or not output_file.exists() or not output_file.is_file():
+        detail = "容量报表补写完成但文件不存在，请重新生成"
         container.add_system_log(
-            f"[交接班][下载容量报表] 补写失败但继续下载业务文件 building={building}, session_id={session_id_text}, error={download_warning}"
+            f"[交接班][下载容量报表] {detail} building={building}, session_id={session_id_text}, file={refreshed_output_file_text or '-'}"
         )
+        raise HTTPException(status_code=409, detail=detail)
 
     container.add_system_log(
         f"[交接班][下载容量报表] building={building}, session_id={session_id_text}, "
-        f"110kv_revision={shared_110kv.get('revision', '-') if isinstance(shared_110kv, dict) else '-'}, "
-        f"pump_rows={len(cooling_pump_pressures.get('rows', [])) if isinstance(cooling_pump_pressures, dict) and isinstance(cooling_pump_pressures.get('rows', []), list) else 0}, "
-        f"file={output_file}"
+        f"status={sync_status}, file={output_file}"
     )
-    headers = {}
-    if download_warning:
-        headers["x-handover-download-warning-base64"] = base64.b64encode(
-            download_warning.encode("utf-8")
-        ).decode("ascii")
     return FileResponse(
         path=output_file,
         filename=output_file.name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers=headers,
     )
 
 

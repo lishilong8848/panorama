@@ -534,7 +534,7 @@ def present_handover_review_overview(
         followup_status_text = "后续上传待处理"
         followup_summary_text = f"待处理 {followup_pending} / 失败 {followup_failed}"
     else:
-        followup_tone = "success" if bool(review.get("all_confirmed", False)) else "neutral"
+        followup_tone = "success" if confirmed > 0 else "neutral"
         followup_status_text = "后续上传已清空"
         followup_summary_text = "已清空"
     confirm_all_allowed = bool(review.get("has_any_session", False)) and not bool(review.get("all_confirmed", False))
@@ -544,15 +544,13 @@ def present_handover_review_overview(
     elif bool(review.get("all_confirmed", False)):
         confirm_all_disabled_reason = "已全部确认"
     retry_all_visible = bool(batch_key) and bool(review.get("has_any_session", False))
-    retry_all_allowed = retry_all_visible and bool(review.get("all_confirmed", False)) and cloud_retry_failure_count > 0
+    retry_all_allowed = retry_all_visible and cloud_retry_failure_count > 0
     retry_all_disabled_reason = ""
     if not retry_all_visible:
         retry_all_disabled_reason = "当前没有可重试的交接班批次"
-    elif not bool(review.get("all_confirmed", False)):
-        retry_all_disabled_reason = "待全部确认后可重试"
     elif cloud_retry_failure_count <= 0:
         retry_all_disabled_reason = "云表已全部同步"
-    continue_followup_visible = bool(review.get("all_confirmed", False)) and can_resume_followup
+    continue_followup_visible = can_resume_followup
     continue_followup_allowed = continue_followup_visible
     continue_followup_disabled_reason = "" if continue_followup_visible else "当前没有可继续的后续上传"
     continue_followup_label = "继续后续上传"
@@ -2481,8 +2479,8 @@ def present_external_dashboard_display(
     elif review.get("has_any_session") and not review.get("all_confirmed"):
         tone = _string(review.get("tone", "")) or "warning"
         status_text = "当前批次还有待确认楼栋"
-        summary_text = _string(review.get("summary_text", "")) or "交接班批次还没完成确认。"
-        next_action_text = "先处理交接班确认，再继续后续云表或派生上传动作。"
+        summary_text = _string(review.get("summary_text", "")) or "交接班批次还没完成确认；已确认楼栋会单独上传云文档。"
+        next_action_text = "继续处理未确认楼栋；已确认楼栋的云文档上传可在后续上传卡片中查看。"
     elif _string(alarm.get("tone", "")) == "danger":
         tone = "warning"
         status_text = "最近专项上传有异常"
@@ -2523,8 +2521,8 @@ def present_external_dashboard_display(
     elif review.get("has_any_session") and not review.get("all_confirmed"):
         tone = _string(review.get("tone", "")) or "warning"
         status_text = "当前批次还有待确认楼栋"
-        reason_text = _string(review.get("summary_text", "")) or "交接班确认未结束。"
-        action_text = "先完成交接班确认，再执行后续上传或派生动作。"
+        reason_text = _string(review.get("summary_text", "")) or "交接班确认未结束；已确认楼栋会单独上传云文档。"
+        action_text = "继续处理未确认楼栋；需要时可续传已确认楼栋的后续任务。"
     elif _string(alarm.get("tone", "")) == "danger":
         tone = "warning"
         status_text = "最近告警上传异常"

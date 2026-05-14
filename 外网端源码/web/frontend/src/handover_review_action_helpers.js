@@ -250,7 +250,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
             statusText.value = resolveOperationFeedbackText(result, "云表上传成功");
             errorText.value = "";
           } else if (retryStatus === "blocked") {
-            errorText.value = resolveOperationFeedbackText(result, "当前批次尚未全部确认，不能重试云表上传。");
+            errorText.value = resolveOperationFeedbackText(result, "当前楼栋尚未确认，不能重试云表上传。");
           } else {
             const failedRows = Array.isArray(result?.cloud_sheet_sync?.failed_buildings)
               ? result.cloud_sheet_sync.failed_buildings

@@ -4,6 +4,7 @@ import copy
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.config.handover_segment_store import (
     HANDOVER_SEGMENT_BUILDINGS,
@@ -27,6 +28,19 @@ STATION_110_CODE = "110"
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _with_query_params(url: str, params: Dict[str, Any]) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    parts = urlsplit(text)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    for key, value in params.items():
+        value_text = str(value or "").strip()
+        if value_text:
+            query[str(key)] = value_text
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 def _looks_like_runtime_config(cfg: Dict[str, Any]) -> bool:
@@ -328,9 +342,10 @@ class ReviewLinkDeliveryService:
     @staticmethod
     def _default_station_110_context(now: datetime | None = None) -> Dict[str, str]:
         current = now or datetime.now()
-        if current.hour < 8:
+        second_of_day = current.hour * 3600 + current.minute * 60 + current.second
+        if second_of_day < 9 * 3600:
             return {"duty_date": (current - timedelta(days=1)).strftime("%Y-%m-%d"), "duty_shift": "night"}
-        if current.hour < 20:
+        if second_of_day < 18 * 3600:
             return {"duty_date": current.strftime("%Y-%m-%d"), "duty_shift": "day"}
         return {"duty_date": current.strftime("%Y-%m-%d"), "duty_shift": "night"}
 
@@ -835,6 +850,13 @@ class ReviewLinkDeliveryService:
         url = self._review_url_for_building(snapshot, building_text) or self._manual_test_review_url_for_building(
             snapshot,
             building_text,
+        )
+        url = _with_query_params(
+            url,
+            {
+                "duty_date": duty_date_text,
+                "duty_shift": duty_shift_text,
+            },
         )
         source_text = str(source or "scheduler").strip().lower() or "scheduler"
         emit_log(

@@ -136,6 +136,24 @@ _E_BUILDING_FLOW_ALIASES = {
     "tank": ["蓄冷罐总管道流量"],
 }
 _SECONDARY_PUMP_ALIASES = ["冷冻水二次泵变频反馈", "二次冷冻泵频率反馈", "二次泵频率反馈", "冷冻水二次泵频率反馈"]
+_SECONDARY_PUMP_INLET_PRESSURE_ALIASES = ["二次泵进口压力", "冷冻水二次泵进口压力", "二次冷冻泵进口压力"]
+_SECONDARY_PUMP_OUTLET_PRESSURE_ALIASES = ["二次泵出口压力", "冷冻水二次泵出口压力", "二次冷冻泵出口压力"]
+_SECONDARY_PUMP_LAYOUT = {
+    "west": {
+        "slots": [
+            {"title": "C47", "frequency": "D48", "inlet": "G48", "outlet": "K48"},
+            {"title": "C49", "frequency": "D50", "inlet": "G50", "outlet": "K50"},
+        ],
+        "redundancy": "D51",
+    },
+    "east": {
+        "slots": [
+            {"title": "P47", "frequency": "Q48", "inlet": "T48", "outlet": "X48"},
+            {"title": "P49", "frequency": "Q50", "inlet": "T50", "outlet": "X50"},
+        ],
+        "redundancy": "Q51",
+    },
+}
 _TANK_LEVEL_ALIASES = ["水池液位", "蓄水罐液位", "补水罐液位"]
 _E_BUILDING_CHILLER_SKIP_KEYS = {
     "current_or_power",
@@ -411,7 +429,47 @@ def _emit_pressure_format_warning(
 
 def _build_redundancy_text(count: int) -> str:
     safe_count = max(0, int(count))
-    return f"{safe_count}用（{max(0, 3 - safe_count)}）备"
+    return f"{safe_count}用{max(0, 3 - safe_count)}备"
+
+
+def _extract_equipment_numbers_from_row(row: RawRow) -> List[int]:
+    text = " ".join(
+        _text(getattr(row, attr, ""))
+        for attr in ("d_name", "c_text", "b_text")
+    )
+    numbers: List[int] = []
+    for match in re.finditer(r"(?<!\d)([1-9])\s*[#号]", text):
+        number = int(match.group(1))
+        if number not in numbers:
+            numbers.append(number)
+    return sorted(numbers)
+
+
+def _secondary_pump_metric_text(
+    query: CapacitySourceQuery,
+    *,
+    zone: str,
+    pump_number: int,
+    aliases: Sequence[str],
+) -> str:
+    target_zone = _text(zone).lower()
+    alias_tokens = [_casefold(item) for item in aliases if _text(item)]
+    if pump_number <= 0 or not alias_tokens:
+        return ""
+    for row in query.rows:
+        row_zone = _zone_of_row(row)
+        if target_zone and row_zone and row_zone != target_zone:
+            continue
+        numbers = _extract_equipment_numbers_from_row(row)
+        if pump_number not in numbers:
+            continue
+        d_name = _casefold(getattr(row, "d_name", ""))
+        if not any(alias in d_name for alias in alias_tokens):
+            continue
+        value_text = _text(getattr(row, "e_raw", None))
+        if value_text:
+            return value_text
+    return ""
 
 
 def _building_aliases(context: Dict[str, Any], key: str) -> List[str]:
@@ -542,13 +600,14 @@ def build_capacity_template_snapshot(sheet: Worksheet, building: str) -> Dict[st
             return _collect_rows(column_letter, anchor_rows, kind=kind)
         return _collect_rows(column_letter, list(range(start_row, end_row + 1)), kind=kind)
 
+    scan_end_row = max(202, int(getattr(sheet, "max_row", 0) or 0))
     return {
         "building_code": building_code,
         "template_family": template_family,
-        "tr_entries": _collect_merged_anchor_rows("B", 67, 202, kind="tr"),
-        "ups_entries": _collect_merged_anchor_rows("I", 67, 202, kind="ups"),
-        "hvdc_entries": _collect("O", 67, 186, kind="hvdc"),
-        "rpp_entries": _collect("S", 67, 186, kind="rpp"),
+        "tr_entries": _collect_merged_anchor_rows("B", 67, scan_end_row, kind="tr"),
+        "ups_entries": _collect_merged_anchor_rows("I", 67, scan_end_row, kind="ups"),
+        "hvdc_entries": _collect("O", 67, scan_end_row, kind="hvdc"),
+        "rpp_entries": _collect("S", 67, scan_end_row, kind="rpp"),
     }
 
 
@@ -607,16 +666,16 @@ def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]
         "U15": _text(handover_cells.get("H6")),
         "AD22": tank_west,
         "AD23": tank_east,
-        "V60": _text(handover_cells.get("B6")),
-        "O60": _text(handover_cells.get("D6")),
-        "S60": _text(handover_cells.get("F6")),
-        "AB56": _text(handover_cells.get("B13")),
-        "AC56": _text(handover_cells.get("D13")),
+        "V62": _text(handover_cells.get("B6")),
+        "O62": _text(handover_cells.get("D6")),
+        "S62": _text(handover_cells.get("F6")),
+        "AB58": _text(handover_cells.get("B13")),
+        "AC58": _text(handover_cells.get("D13")),
         "L2": weather_text,
         "X2": weather_humidity,
-        "O57": _text(water_summary.get("latest_daily_total")),
+        "O59": _text(water_summary.get("latest_daily_total")),
         "AC25": _text(water_summary.get("month_total")),
-        "R57": _text(water_summary.get("month_total")),
+        "R59": _text(water_summary.get("month_total")),
     }
     if duty_shift == "day":
         cell_values["G7"] = _text(handover_cells.get("B4")) or "/"
@@ -701,8 +760,8 @@ def _resolve_public_flow_values(query: CapacitySourceQuery, *, zone: str, contex
 
 def _region_summary_cells(zone: str) -> Dict[str, str]:
     if zone == "west":
-        return {"redundancy": "D42", "secondary_value": "D48", "secondary_redundancy": "D49", "tank_level": "AC27"}
-    return {"redundancy": "Q42", "secondary_value": "Q48", "secondary_redundancy": "Q49", "tank_level": "AC28"}
+        return {"redundancy": "D42", "tank_level": "AC27"}
+    return {"redundancy": "Q42", "tank_level": "AC28"}
 
 
 def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running_units: Dict[str, List[Dict[str, Any]]]) -> Dict[str, str]:
@@ -710,9 +769,40 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
     results: Dict[str, str] = {cells["redundancy"]: _build_redundancy_text(len(running_units.get(zone, [])))}
     secondary_rows = query.rows_by_d_regexes([re.escape(alias) for alias in _SECONDARY_PUMP_ALIASES], zone=zone, allow_global=True)
     running_secondary = [row for row in secondary_rows if getattr(row, "value", None) is not None and float(row.value) > 10]
-    if running_secondary:
-        results[cells["secondary_value"]] = _text(getattr(running_secondary[0], "e_raw", None))
-    results[cells["secondary_redundancy"]] = _build_redundancy_text(len(running_secondary))
+    running_secondary.sort(key=lambda row: (_extract_equipment_numbers_from_row(row) or [99])[0])
+    layout = _SECONDARY_PUMP_LAYOUT.get(zone, {})
+    for index, slot in enumerate(list(layout.get("slots", []) or [])):
+        row = running_secondary[index] if index < len(running_secondary) else None
+        if row is None:
+            results[_text(slot.get("title"))] = "/"
+            results[_text(slot.get("frequency"))] = "/"
+            results[_text(slot.get("inlet"))] = "0"
+            results[_text(slot.get("outlet"))] = "0"
+            continue
+        numbers = _extract_equipment_numbers_from_row(row)
+        pump_number = int(numbers[0]) if numbers else 0
+        number_text = f"{pump_number}#" if pump_number > 0 else ""
+        results[_text(slot.get("title"))] = f"{number_text}二次泵"
+        results[_text(slot.get("frequency"))] = _text(getattr(row, "e_raw", None))
+        inlet_text = _secondary_pump_metric_text(
+            query,
+            zone=zone,
+            pump_number=pump_number,
+            aliases=_SECONDARY_PUMP_INLET_PRESSURE_ALIASES,
+        )
+        outlet_text = _secondary_pump_metric_text(
+            query,
+            zone=zone,
+            pump_number=pump_number,
+            aliases=_SECONDARY_PUMP_OUTLET_PRESSURE_ALIASES,
+        )
+        if inlet_text:
+            results[_text(slot.get("inlet"))] = inlet_text
+        if outlet_text:
+            results[_text(slot.get("outlet"))] = outlet_text
+    redundancy_cell = _text(layout.get("redundancy"))
+    if redundancy_cell:
+        results[redundancy_cell] = _build_redundancy_text(len(running_secondary))
     results[cells["tank_level"]] = query.first_text_by_d_aliases(_TANK_LEVEL_ALIASES, zone=zone, allow_global=True)
     return {cell: value for cell, value in results.items() if value != ""}
 

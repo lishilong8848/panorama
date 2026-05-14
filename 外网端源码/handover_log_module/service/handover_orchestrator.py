@@ -53,7 +53,7 @@ def _followup_reason_text(value: Any) -> str:
         "disabled": "配置已禁用",
         "missing_duty_context": "缺少班次上下文",
         "night_shift_disabled": "夜班上传已禁用",
-        "await_all_confirmed": "等待五个楼栋全部确认",
+        "await_all_confirmed": "等待楼栋确认",
         "already_uploaded": "已按当前版本完成上传",
         "missing_source_file": "源数据文件不存在",
         "missing_source_file_cache": "源文件缓存不存在",

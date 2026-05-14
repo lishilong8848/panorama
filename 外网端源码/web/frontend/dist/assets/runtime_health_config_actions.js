@@ -945,7 +945,7 @@ export function createRuntimeHealthConfigActions(ctx) {
     if (cloudStatus === "blocked") {
       return (
         String(data?.cloud_sheet_sync?.blocked_reason || "").trim()
-        || "当前批次尚未全部确认，暂不能重试云表上传"
+        || "当前楼栋尚未确认，暂不能重试云表上传"
       );
     }
     return "当前没有需要重试的失败楼栋";

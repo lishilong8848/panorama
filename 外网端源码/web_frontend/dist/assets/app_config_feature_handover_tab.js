@@ -419,7 +419,7 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
           <div class="form-row"><label class="label">固定类型文案</label><input type="text" v-model="config.handover_log.source_data_attachment_export.fixed_values.type" /></div>
           <div class="form-row"><label class="label">白班文案</label><input type="text" v-model="config.handover_log.source_data_attachment_export.fixed_values.shift_text.day" /></div>
           <div class="form-row"><label class="label">夜班文案</label><input type="text" v-model="config.handover_log.source_data_attachment_export.fixed_values.shift_text.night" /></div>
-          <div class="hint" style="margin-bottom:8px;">五楼全部确认后上传各楼用于生成交接班的源数据表附件，支持白班和夜班。</div>
+          <div class="hint" style="margin-bottom:8px;">各楼确认后分别上传本楼用于生成交接班的源数据表附件，支持白班和夜班。</div>
       </section>
 
       <section class="content-card config-panel-card config-subgroup-card">
@@ -440,7 +440,7 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
           <div class="form-row"><label class="label">重试次数</label><input type="number" v-model.number="config.handover_log.cloud_sheet_sync.request.max_retries" /></div>
           <div class="form-row"><label class="label">重试退避（秒）</label><input type="number" step="0.5" v-model.number="config.handover_log.cloud_sheet_sync.request.retry_backoff_sec" /></div>
           <div class="hint" style="margin-bottom:8px;">当前楼栋 Sheet 名按楼独立保存；不同楼可以并行修改，互不覆盖。</div>
-          <div class="hint" style="margin-bottom:8px;">采集端源表到达共享目录后，系统只会为当前日期班次预创建一份云电子表格，并确保存在 A-E 楼 5 个固定 Sheet。五楼全部确认后，系统会把每个楼本地交接班成品 Excel 的“交接班日志”页覆盖写入同名 Sheet。审核保存本身不会立即同步云表；若最终上传失败，可按楼重试，也可一键重试全部失败楼栋。</div>
+          <div class="hint" style="margin-bottom:8px;">采集端源表到达共享目录后，系统只会为当前日期班次预创建一份云电子表格，并确保存在 A-E 楼 5 个固定 Sheet。任一楼确认后，系统会把该楼本地交接班成品 Excel 的“交接班日志”页覆盖写入同名 Sheet。审核保存本身不会立即同步云表；若最终上传失败，可按楼重试，也可一键重试全部失败楼栋。</div>
       </section>
 
       <section

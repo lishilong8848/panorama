@@ -1142,6 +1142,7 @@ class ReviewSessionService:
             required_count = len(building_names)
             has_any_session = any(row["has_session"] for row in rows)
             all_confirmed = confirmed_count == required_count and all(row["has_session"] for row in rows)
+            ready_for_followup_upload = confirmed_count > 0
             batch_status[batch_key] = {
                 "batch_key": batch_key,
                 "duty_date": duty_date,
@@ -1150,7 +1151,7 @@ class ReviewSessionService:
                 "confirmed_count": confirmed_count,
                 "required_count": required_count,
                 "all_confirmed": all_confirmed,
-                "ready_for_followup_upload": all_confirmed,
+                "ready_for_followup_upload": ready_for_followup_upload,
                 "buildings": rows,
                 "updated_at": _now_text(),
             }

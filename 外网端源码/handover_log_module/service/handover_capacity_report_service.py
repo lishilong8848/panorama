@@ -85,12 +85,12 @@ _CAPACITY_LOAD_RATE_ROWS = (12, 13, 14, 15)
 _CAPACITY_LOAD_RATE_DENOMINATOR = 10000.0
 _CAPACITY_PERCENT_NUMBER_FORMAT = "0.00%"
 _SUBSTATION_110KV_TARGET_ROWS = {
-    "阿开": 57,
-    "阿家": 58,
-    "1#主变": 60,
-    "2#主变": 61,
-    "3#主变": 62,
-    "4#主变": 63,
+    "阿开": 59,
+    "阿家": 60,
+    "1#主变": 62,
+    "2#主变": 63,
+    "3#主变": 64,
+    "4#主变": 65,
 }
 _SUBSTATION_110KV_TARGET_COLUMNS = {
     "line_voltage": "C",
@@ -1351,7 +1351,7 @@ class HandoverCapacityReportService:
             bucket["latest_daily_total"] = format_number(latest_values.get(building_name))
             emit_log(
                 "[交接班][容量报表][耗水摘要] 楼栋结果 "
-                f"building={building_name}, O57={bucket.get('latest_daily_total', '') or '-'}, "
+                f"building={building_name}, O59={bucket.get('latest_daily_total', '') or '-'}, "
                 f"AC25={bucket.get('month_total', '') or '-'}, matched={bucket.get('matched_records', 0)}"
             )
         emit_log(
@@ -1508,7 +1508,7 @@ class HandoverCapacityReportService:
                 filter_formula=filter_formula,
             )
         except Exception as exc:  # noqa: BLE001
-            warning = f"总用电量查询失败，V57/Y57 已按 0 处理: {exc}"
+            warning = f"总用电量查询失败，V59/Y59 已按 0 处理: {exc}"
             result["warnings"].append(warning)
             emit_log(
                 "[交接班][容量报表][总用电量] 查询失败 "
@@ -1562,16 +1562,16 @@ class HandoverCapacityReportService:
             bucket["prev_day_value"] = format_number(prev_value if prev_value is not None else 0)
             bucket["month_total"] = format_number(month_totals.get(building_name, 0.0))
             if not bool(bucket.get("prev_day_found")):
-                result["warnings"].append(f"{building_name} V57 缺少 {prev_day_text} 总用电量记录，已按 0 写入")
+                result["warnings"].append(f"{building_name} V59 缺少 {prev_day_text} 总用电量记录，已按 0 写入")
             elif not bool(bucket.get("prev_day_value_found")):
-                result["warnings"].append(f"{building_name} V57 {prev_day_text} 总用电量数值为空，已按 0 写入")
+                result["warnings"].append(f"{building_name} V59 {prev_day_text} 总用电量数值为空，已按 0 写入")
             if int(bucket.get("month_records", 0) or 0) <= 0:
-                result["warnings"].append(f"{building_name} Y57 缺少 {start_text}~{end_text} 总用电量记录，已按 0 写入")
+                result["warnings"].append(f"{building_name} Y59 缺少 {start_text}~{end_text} 总用电量记录，已按 0 写入")
             elif int(bucket.get("month_value_records", 0) or 0) <= 0:
-                result["warnings"].append(f"{building_name} Y57 {start_text}~{end_text} 总用电量数值为空，已按 0 写入")
+                result["warnings"].append(f"{building_name} Y59 {start_text}~{end_text} 总用电量数值为空，已按 0 写入")
             emit_log(
                 "[交接班][容量报表][总用电量] 楼栋结果 "
-                f"building={building_name}, V57={bucket.get('prev_day_value', '0')}, Y57={bucket.get('month_total', '0')}, "
+                f"building={building_name}, V59={bucket.get('prev_day_value', '0')}, Y59={bucket.get('month_total', '0')}, "
                 f"matched_month_records={int(bucket.get('month_records', 0) or 0)}, prev_day_found={bool(bucket.get('prev_day_found'))}"
             )
         emit_log(
@@ -1594,8 +1594,8 @@ class HandoverCapacityReportService:
         by_building = batch.get("by_building", {}) if isinstance(batch.get("by_building", {}), dict) else {}
         summary = by_building.get(building_text, {}) if isinstance(by_building.get(building_text, {}), dict) else {}
         payload = {
-            "V57": _text(summary.get("prev_day_value")) or "0",
-            "Y57": _text(summary.get("month_total")) or "0",
+            "V59": _text(summary.get("prev_day_value")) or "0",
+            "Y59": _text(summary.get("month_total")) or "0",
             "start_date": _text(batch.get("start_date")),
             "end_date": _text(batch.get("end_date")),
             "prev_day": _text(batch.get("prev_day")),
@@ -1611,8 +1611,8 @@ class HandoverCapacityReportService:
                 f"end={payload['end_date']}",
                 f"prev={payload['prev_day']}",
                 f"building={building_text}",
-                f"V57={payload['V57']}",
-                f"Y57={payload['Y57']}",
+                f"V59={payload['V59']}",
+                f"Y59={payload['Y59']}",
             ]
         )
         return payload
@@ -1729,17 +1729,18 @@ class HandoverCapacityReportService:
             "U15": _text(handover.get("H6")),
             "AD22": west_tank,
             "AD23": east_tank,
-            "V60": _text(handover.get("B6")),
-            "O60": _text(handover.get("D6")),
-            "S60": _text(handover.get("F6")),
-            "AB56": _text(handover.get("B13")),
-            "AC56": _text(handover.get("D13")),
+            "V62": _text(handover.get("B6")),
+            "O62": _text(handover.get("D6")),
+            "S62": _text(handover.get("F6")),
+            "AB58": _text(handover.get("B13")),
+            "AC58": _text(handover.get("D13")),
             "L2": weather_text,
             "X2": weather_humidity,
             "AC25": _text(water_summary.get("month_total")),
-            "O57": _text(water_summary.get("latest_daily_total")),
-            "V57": _text(total_electricity.get("V57")) or "0",
-            "Y57": _text(total_electricity.get("Y57")) or "0",
+            "O59": _text(water_summary.get("latest_daily_total")),
+            "R59": _text(water_summary.get("month_total")),
+            "V59": _text(total_electricity.get("V59")) or "0",
+            "Y59": _text(total_electricity.get("Y59")) or "0",
             "R2": _text(outdoor_handover_cells.get("B7")),
             "AB2": _text(outdoor_handover_cells.get("D7")),
         }
@@ -1850,6 +1851,10 @@ class HandoverCapacityReportService:
         return payload
 
     @staticmethod
+    def _is_current_load_rate_warning(warning: str) -> bool:
+        return _text(warning).startswith("当前容量表G")
+
+    @staticmethod
     def _session_load_rates(raw: Dict[str, Any] | None) -> Dict[int, float]:
         payload = raw if isinstance(raw, dict) else {}
         rates = payload.get("capacity_load_rates", {})
@@ -1882,8 +1887,10 @@ class HandoverCapacityReportService:
         emit_log: Callable[[str], None],
     ) -> tuple[Dict[str, float], str, Dict[str, Any]]:
         current_rates = self._current_load_rates_from_sheet(sheet, overlay_values=overlay_values)
+        missing_rows = [row_idx for row_idx in _CAPACITY_LOAD_RATE_ROWS if row_idx not in current_rates]
         if not current_rates:
-            return {}, "当前容量表G12:G15为空，未计算平均负载率和变化率", {}
+            missing_cells = ",".join(f"G{row_idx}" for row_idx in missing_rows) or "G12:G15"
+            return {}, f"当前容量表{missing_cells}为空，未计算平均负载率和变化率", {}
         previous_rates, warning = self._load_previous_capacity_load_rates(
             building=building,
             duty_date=duty_date,
@@ -1891,6 +1898,10 @@ class HandoverCapacityReportService:
             current_rates=current_rates,
             emit_log=emit_log,
         )
+        if missing_rows:
+            missing_cells = ",".join(f"G{row_idx}" for row_idx in missing_rows)
+            current_warning = f"当前容量表{missing_cells}为空，平均负载率和变化率不完整"
+            warning = "; ".join([item for item in [current_warning, warning] if _text(item)])
         return (
             self._build_load_rate_cell_values(current_rates, previous_rates),
             warning,
@@ -2430,6 +2441,7 @@ class HandoverCapacityReportService:
                 input_signature=input_signature,
             )
         valid, error = self._validate_capacity_overlay_inputs(handover_cells)
+        load_rate_blocking_error = ""
 
         try:
             workbook = load_workbook_quietly(capacity_output_path)
@@ -2485,6 +2497,8 @@ class HandoverCapacityReportService:
                         "[交接班][容量报表][补写] 平均负载率计算警告 "
                         f"building={building}, warning={load_rate_warning}"
                     )
+                    if self._is_current_load_rate_warning(load_rate_warning):
+                        load_rate_blocking_error = load_rate_warning
                 _write_cells_with_merged_support(sheet, overlay_values)
                 self._apply_load_rate_number_format(sheet)
                 atomic_save_workbook(workbook, capacity_output_path)
@@ -2529,6 +2543,14 @@ class HandoverCapacityReportService:
             return self._build_capacity_sync_payload(
                 status="pending_input",
                 error=error,
+                input_signature=input_signature,
+                overlay_signature=overlay_signature,
+                capacity_load_rates=load_rate_payload,
+            )
+        if load_rate_blocking_error:
+            return self._build_capacity_sync_payload(
+                status="failed",
+                error=load_rate_blocking_error,
                 input_signature=input_signature,
                 overlay_signature=overlay_signature,
                 capacity_load_rates=load_rate_payload,
@@ -2621,6 +2643,7 @@ class HandoverCapacityReportService:
         warnings: List[str] = []
         if previous_oil_warning:
             warnings.append(previous_oil_warning)
+        load_rate_blocking_error = ""
 
         current_alarm = self._normalize_alarm_summary(current_alarm_summary)
         previous_alarm = self._normalize_alarm_summary(previous_alarm_summary)
@@ -2735,6 +2758,8 @@ class HandoverCapacityReportService:
                 )
             if load_rate_warning:
                 warnings.append(load_rate_warning)
+                if self._is_current_load_rate_warning(load_rate_warning):
+                    load_rate_blocking_error = load_rate_warning
             _write_cells_with_merged_support(sheet, cell_values)
             self._apply_load_rate_number_format(sheet)
             atomic_save_workbook(workbook, output_file)
@@ -2747,15 +2772,23 @@ class HandoverCapacityReportService:
         )
         input_signature = self.capacity_input_signature({cell: handover_cells.get(cell, "") for cell in _CAPACITY_TRACKED_CELLS})
         valid, validation_error = self._validate_capacity_overlay_inputs(handover_cells)
-        if valid:
-            capacity_sync = self._build_capacity_sync_payload(
-                status="ready",
-                input_signature=input_signature,
-            )
-        else:
+        if not valid:
             capacity_sync = self._build_capacity_sync_payload(
                 status="pending_input",
                 error=validation_error,
+                input_signature=input_signature,
+                capacity_load_rates=load_rate_payload,
+            )
+        elif load_rate_blocking_error:
+            capacity_sync = self._build_capacity_sync_payload(
+                status="failed",
+                error=load_rate_blocking_error,
+                input_signature=input_signature,
+                capacity_load_rates=load_rate_payload,
+            )
+        else:
+            capacity_sync = self._build_capacity_sync_payload(
+                status="ready",
                 input_signature=input_signature,
             )
         return {

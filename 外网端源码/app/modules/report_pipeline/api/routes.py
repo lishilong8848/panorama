@@ -5848,7 +5848,7 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
         slots = payload.get("slots", {})
         if not isinstance(slots, dict):
             return payload
-        for slot in ("morning", "afternoon"):
+        for slot in ("morning", "afternoon", "cloud_catchup_morning", "cloud_catchup_afternoon"):
             if isinstance(payload.get(slot), dict):
                 continue
             slot_payload = slots.get(slot)

@@ -767,6 +767,34 @@ export function createAppState(vueApi) {
   const handoverFilesByBuilding = reactive({});
   const handoverDutyDate = ref(todayText());
   const handoverDutyShift = ref("day");
+
+  function handoverReviewUrlWithDutyContext(row) {
+    const url = String(row?.url || "").trim();
+    if (!url) return "";
+    const building = String(row?.building || "").trim();
+    const code = String(row?.code || "").trim().toLowerCase();
+    if (code !== "110" && building !== "110站" && building !== "110") {
+      return url;
+    }
+    const dutyDate = String(handoverDutyDate.value || "").trim();
+    const dutyShift = String(handoverDutyShift.value || "").trim().toLowerCase();
+    if (!dutyDate || !["day", "night"].includes(dutyShift)) {
+      return url;
+    }
+    try {
+      const parsed = new URL(url, window.location.origin);
+      parsed.searchParams.set("duty_date", dutyDate);
+      parsed.searchParams.set("duty_shift", dutyShift);
+      if (/^https?:\/\//i.test(url)) {
+        return parsed.toString();
+      }
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    } catch (_error) {
+      const separator = url.includes("?") ? "&" : "?";
+      return `${url}${separator}duty_date=${encodeURIComponent(dutyDate)}&duty_shift=${encodeURIComponent(dutyShift)}`;
+    }
+  }
+
   const handoverDownloadScope = ref("all_enabled");
   const handoverEngineerDirectory = ref([]);
   const handoverEngineerLoading = ref(false);
@@ -1597,15 +1625,16 @@ export function createAppState(vueApi) {
         : [];
       if (!backendRows.length) return [];
       return backendRows.map((row) => {
+        const reviewUrl = handoverReviewUrlWithDutyContext(row);
         return {
           ...row,
           link: {
             building: String(row.building || "").trim(),
             code: String(row.code || "").trim().toLowerCase(),
-            url: String(row.url || "").trim(),
+            url: reviewUrl,
           },
-          url: String(row.url || "").trim(),
-          hasUrl: Boolean(String(row.url || "").trim()),
+          url: reviewUrl,
+          hasUrl: Boolean(reviewUrl),
           cloudSheetSyncText: String(row.cloudSheetSync?.text || "").trim(),
           cloudSheetSyncTone: String(row.cloudSheetSync?.tone || "").trim() || "neutral",
           cloudSheetUrl: String(row.cloudSheetSync?.url || "").trim(),

@@ -1072,6 +1072,65 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         notify = WebhookNotifyService(runtime_config)
         role_mode = _deployment_role_mode()
 
+        if slot in {"cloud_catchup_morning", "cloud_catchup_afternoon"}:
+            if slot == "cloud_catchup_morning":
+                duty_date = (datetime.now().date() - timedelta(days=1)).strftime("%Y-%m-%d")
+                duty_shift = "night"
+                slot_name = "8点"
+            else:
+                duty_date = datetime.now().date().strftime("%Y-%m-%d")
+                duty_shift = "day"
+                slot_name = "17点30"
+            batch_key = f"{duty_date}|{duty_shift}"
+
+            if role_mode == "internal":
+                container.add_system_log("[交接班][云文档补上传调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+                return True, "internal_role_skip"
+            if role_mode != "external":
+                detail = "当前未确认有效角色，无法执行交接班云文档补上传调度"
+                container.add_system_log(f"[交接班][云文档补上传调度] {detail}")
+                return False, detail
+
+            from handover_log_module.api.facade import load_handover_config
+            from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
+
+            dedupe_key = f"handover:cloud_catchup:{slot}:{batch_key}"
+
+            def _run_cloud_catchup(emit_log):
+                service = ReviewFollowupTriggerService(load_handover_config(runtime_config))
+                result = service.upload_pending_cloud_sheets_for_duty(
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    emit_log=emit_log,
+                )
+                status = str(result.get("status", "") or "").strip().lower()
+                if status in {"failed", "partial_failed"}:
+                    failed_count = len(result.get("failed_buildings", []) or [])
+                    raise RuntimeError(f"交接班云文档补上传失败: status={status}, failed={failed_count}")
+                return result
+
+            try:
+                job = container.job_service.start_job(
+                    name=f"{source}-交接班定时确认并上传云文档（{slot_name}）",
+                    run_func=_run_cloud_catchup,
+                    resource_keys=["network:external", f"handover_followup:{batch_key}"],
+                    priority="scheduler",
+                    feature="handover_cloud_catchup",
+                    dedupe_key=dedupe_key,
+                    submitted_by="scheduler",
+                )
+            except Exception as exc:  # noqa: BLE001
+                notify.send_failure(stage=source, detail=str(exc), emit_log=container.add_system_log)
+                return False, str(exc)
+            done = container.job_service.wait_job(job.job_id)
+            if done.status == "success":
+                detail = f"交接班定时确认并上传云文档完成 job_id={job.job_id}, batch={batch_key}, slot={slot}"
+                container.add_system_log(f"[交接班][云文档补上传调度] {detail}")
+                return True, detail
+            detail = done.error or done.summary or "交接班定时确认并上传云文档失败"
+            notify.send_failure(stage=source, detail=detail, emit_log=container.add_system_log)
+            return False, detail
+
         if slot in {"station_110_midnight", "station_110_noon"}:
             if role_mode == "internal":
                 container.add_system_log("[交接班][110站审核链接调度] 当前为内网端，调度跳过；请在外网端启用该调度")

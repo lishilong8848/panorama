@@ -69,7 +69,7 @@ function shiftTextFromCode(shift) {
   return String(shift || "").trim() || "-";
 }
 
-function syncReviewSelectionToUrl({ sessionId = "", isLatest = false } = {}) {
+function syncReviewSelectionToUrl({ sessionId = "", isLatest = false, dutyDate = "", dutyShift = "" } = {}) {
   if (typeof window === "undefined" || !window.history?.replaceState) return;
   const url = new URL(window.location.href);
   url.searchParams.delete("session_id");
@@ -77,6 +77,9 @@ function syncReviewSelectionToUrl({ sessionId = "", isLatest = false } = {}) {
   url.searchParams.delete("duty_shift");
   if (sessionId && !isLatest) {
     url.searchParams.set("session_id", sessionId);
+  } else if (dutyDate && ["day", "night"].includes(String(dutyShift || "").trim().toLowerCase())) {
+    url.searchParams.set("duty_date", String(dutyDate || "").trim());
+    url.searchParams.set("duty_shift", String(dutyShift || "").trim().toLowerCase());
   }
   window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }
@@ -327,11 +330,11 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
         <div class="review-fixed-fields review-current-view-fields">
           <label class="review-field">
             <span class="review-field-label">日期</span>
-            <input class="review-input" type="date" v-model="dutyDate" :disabled="loading || parsing || uploading || retrying" @change="refreshStatus" />
+            <input class="review-input" type="date" v-model="dutyDate" :disabled="loading || parsing || uploading || retrying" @change="onStation110DutyChange" />
           </label>
           <label class="review-field">
             <span class="review-field-label">班次</span>
-            <select class="review-input" v-model="dutyShift" :disabled="loading || parsing || uploading || retrying" @change="refreshStatus">
+            <select class="review-input" v-model="dutyShift" :disabled="loading || parsing || uploading || retrying" @change="onStation110DutyChange">
               <option value="day">白班</option>
               <option value="night">夜班</option>
             </select>
@@ -339,7 +342,7 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
           <label class="review-field review-field-wide">
             <span class="review-field-label">110站 Excel</span>
             <input class="review-input" type="file" accept=".xlsx,.xlsm" :disabled="loading || parsing || uploading || retrying" @change="onFileChange" />
-            <small class="review-field-hint">第1个sheet写入云文档“110”页，第2个sheet回填各楼审核页110KV数据。</small>
+            <small class="review-field-hint">第1个sheet写入云文档“110”页；白班取第2个sheet，夜班取第3个sheet的110KV数据回填各楼审核页。</small>
           </label>
           <button class="btn btn-secondary btn-mini" @click="parseFile" :disabled="!selectedFile || parsing || uploading || retrying">
             {{ parsing ? "正在解析..." : "解析" }}
@@ -370,14 +373,14 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
               <input class="review-input" :value="sourceSheetText" readonly />
             </label>
             <label class="review-field">
-              <span class="review-field-label">第2个sheet</span>
+              <span class="review-field-label">110KV数据sheet</span>
               <input class="review-input" :value="substationSheetText" readonly />
             </label>
           </div>
         </article>
 
         <article class="review-card">
-          <div class="review-card-head"><h2>第2个sheet识别结果</h2></div>
+          <div class="review-card-head"><h2>110KV识别结果</h2></div>
           <div v-if="!parsedRows.length" class="review-empty-inline">暂无已解析的110KV数据</div>
           <div v-else class="review-table-wrap station-110-table-wrap">
             <table class="review-table review-substation-table station-110-preview-table">
@@ -859,6 +862,24 @@ function resolveReviewSelection(search = window.location.search) {
   return { sessionId: "", dutyDate: "", dutyShift: "" };
 }
 
+function normalizeReviewContext(raw = {}, fallback = {}) {
+  const fallbackDutyDate = String(fallback?.dutyDate || fallback?.duty_date || "").trim();
+  const fallbackDutyShift = String(fallback?.dutyShift || fallback?.duty_shift || "").trim().toLowerCase();
+  const dutyDate = String(raw?.duty_date || fallbackDutyDate || "").trim();
+  const dutyShift = String(raw?.duty_shift || fallbackDutyShift || "").trim().toLowerCase();
+  const normalizedShift = ["day", "night"].includes(dutyShift) ? dutyShift : "";
+  const readyValue = typeof raw?.ready === "boolean" ? raw.ready : Boolean(raw?.status === "ready");
+  return {
+    status: String(raw?.status || (readyValue ? "ready" : "")).trim(),
+    ready: readyValue,
+    duty_date: dutyDate,
+    duty_shift: normalizedShift,
+    duty_shift_text: String(raw?.duty_shift_text || shiftTextFromCode(normalizedShift)).trim(),
+    batch_key: String(raw?.batch_key || "").trim(),
+    message: String(raw?.message || "").trim(),
+  };
+}
+
 function normalizeHistoryPayload(raw, fallbackSession = null) {
   const sessionItems = Array.isArray(raw?.sessions)
     ? raw.sessions
@@ -1169,23 +1190,30 @@ function emptyReviewCloudSheetVm() {
 }
 
 function mountHandover110StationApp(Vue) {
-  const { createApp, ref, computed, onMounted } = Vue;
+  const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;
   createApp({
     setup() {
+      const initialSelection = resolveReviewSelection();
+      const hasExplicitDutySelection = Boolean(initialSelection.dutyDate && initialSelection.dutyShift);
       const loading = ref(true);
       const parsing = ref(false);
       const uploading = ref(false);
       const retrying = ref(false);
       const errorText = ref("");
       const statusText = ref("");
-      const dutyDate = ref("");
-      const dutyShift = ref("day");
+      const dutyDate = ref(String(initialSelection.dutyDate || "").trim());
+      const dutyShift = ref(["day", "night"].includes(String(initialSelection.dutyShift || "").trim().toLowerCase())
+        ? String(initialSelection.dutyShift || "").trim().toLowerCase()
+        : "");
+      const station110ManualDutySelection = ref(hasExplicitDutySelection);
       const selectedFile = ref(null);
       const state = ref(normalizeStation110State({}));
+      let station110RefreshTimer = null;
 
       const batchText = computed(() => {
         const date = dutyDate.value || state.value.batch.duty_date || "-";
-        const shift = dutyShift.value === "night" ? "夜班" : "白班";
+        const shiftValue = dutyShift.value || state.value.batch.duty_shift || "";
+        const shift = shiftValue === "night" ? "夜班" : shiftValue === "day" ? "白班" : "自动判断";
         return `${date} ${shift}`;
       });
       const upload = computed(() => state.value.upload || normalizeStation110State({}).upload);
@@ -1209,8 +1237,12 @@ function mountHandover110StationApp(Vue) {
       });
       const substationSheetText = computed(() => {
         const sheet = upload.value.substation_sheet || {};
-        if (!sheet.title) return "-";
-        return `${sheet.title} (${sheet.parsed_row_count || 0}行已识别)`;
+        const sheetIndex = Number.parseInt(String(sheet.sheet_index || 0), 10) || 0;
+        const title = String(sheet.title || "").trim();
+        const rowCount = Number.parseInt(String(sheet.parsed_row_count || 0), 10) || 0;
+        if (!title && rowCount <= 0) return "-";
+        const prefix = sheetIndex > 0 ? `第${sheetIndex}个sheet` : "目标sheet";
+        return `${prefix}${title ? `：${title}` : ""} (${rowCount}行已识别)`;
       });
 
       function applyState(raw) {
@@ -1220,21 +1252,49 @@ function mountHandover110StationApp(Vue) {
         if (["day", "night"].includes(normalized.batch.duty_shift)) dutyShift.value = normalized.batch.duty_shift;
       }
 
-      async function refreshStatus() {
-        loading.value = true;
-        errorText.value = "";
+      function buildStation110ContextPayload() {
+        if (!station110ManualDutySelection.value || !dutyDate.value || !dutyShift.value) {
+          return {};
+        }
+        return {
+          duty_date: dutyDate.value,
+          duty_shift: dutyShift.value,
+        };
+      }
+
+      function onStation110DutyChange() {
+        station110ManualDutySelection.value = true;
+        void refreshStatus();
+      }
+
+      function appendStation110Context(form) {
+        const context = buildStation110ContextPayload();
+        form.append("duty_date", context.duty_date || "");
+        form.append("duty_shift", context.duty_shift || "");
+      }
+
+      async function refreshStatus({ background = false } = {}) {
+        if (!background) {
+          loading.value = true;
+          errorText.value = "";
+        }
         try {
           const response = await getHandoverReview110StationStatusApi({
-            duty_date: dutyDate.value,
-            duty_shift: dutyShift.value,
+            ...buildStation110ContextPayload(),
             _t: Date.now(),
           });
           applyState(response);
-          statusText.value = "110站状态已刷新";
+          if (!background) {
+            statusText.value = "110站状态已刷新";
+          }
         } catch (error) {
-          errorText.value = String(error?.message || error || "读取110站状态失败");
+          if (!background) {
+            errorText.value = String(error?.message || error || "读取110站状态失败");
+          }
         } finally {
-          loading.value = false;
+          if (!background) {
+            loading.value = false;
+          }
         }
       }
 
@@ -1248,9 +1308,11 @@ function mountHandover110StationApp(Vue) {
         errorText.value = "";
         statusText.value = "正在上传110站文件...";
         try {
+          if (!hasExplicitDutySelection) {
+            await refreshStatus({ background: true });
+          }
           const form = new FormData();
-          form.append("duty_date", dutyDate.value || state.value.batch.duty_date || "");
-          form.append("duty_shift", dutyShift.value || state.value.batch.duty_shift || "");
+          appendStation110Context(form);
           form.append("file", selectedFile.value);
           const response = await uploadHandoverReview110StationFileApi(form);
           applyState(response);
@@ -1282,9 +1344,11 @@ function mountHandover110StationApp(Vue) {
         errorText.value = "";
         statusText.value = "正在解析110站文件...";
         try {
+          if (!hasExplicitDutySelection) {
+            await refreshStatus({ background: true });
+          }
           const form = new FormData();
-          form.append("duty_date", dutyDate.value || state.value.batch.duty_date || "");
-          form.append("duty_shift", dutyShift.value || state.value.batch.duty_shift || "");
+          appendStation110Context(form);
           form.append("file", selectedFile.value);
           const response = await parseHandoverReview110StationFileApi(form);
           applyState(response);
@@ -1297,7 +1361,9 @@ function mountHandover110StationApp(Vue) {
               10,
             ) || 0;
             const kvRows = Number.parseInt(String(response?.upload?.substation_sheet?.parsed_row_count ?? 0), 10) || 0;
-            statusText.value = `解析完成：第1个sheet识别${sourceRows}行，第2个sheet识别${kvRows}行。`;
+            const sheetIndex = Number.parseInt(String(response?.upload?.substation_sheet?.sheet_index ?? 0), 10) || 0;
+            const sheetText = sheetIndex > 0 ? `第${sheetIndex}个sheet` : "110KV数据sheet";
+            statusText.value = `解析完成：第1个sheet识别${sourceRows}行，${sheetText}识别${kvRows}行。`;
           }
         } catch (error) {
           errorText.value = String(error?.message || error || "110站文件解析失败");
@@ -1313,8 +1379,7 @@ function mountHandover110StationApp(Vue) {
         statusText.value = "正在重试110站云文档同步...";
         try {
           const response = await retryHandoverReview110StationCloudSyncApi({
-            duty_date: dutyDate.value || state.value.batch.duty_date || "",
-            duty_shift: dutyShift.value || state.value.batch.duty_shift || "",
+            ...buildStation110ContextPayload(),
           });
           applyState(response);
           if (response?.ok === false) {
@@ -1333,6 +1398,20 @@ function mountHandover110StationApp(Vue) {
 
       onMounted(() => {
         void refreshStatus();
+        if (!hasExplicitDutySelection) {
+          station110RefreshTimer = window.setInterval(() => {
+            if (!loading.value && !parsing.value && !uploading.value && !retrying.value) {
+              void refreshStatus({ background: true });
+            }
+          }, 60 * 1000);
+        }
+      });
+
+      onBeforeUnmount(() => {
+        if (station110RefreshTimer) {
+          window.clearInterval(station110RefreshTimer);
+          station110RefreshTimer = null;
+        }
       });
 
       return {
@@ -1356,6 +1435,7 @@ function mountHandover110StationApp(Vue) {
         sourceSheetText,
         substationSheetText,
         refreshStatus,
+        onStation110DutyChange,
         onFileChange,
         parseFile,
         uploadFile,
@@ -1399,6 +1479,7 @@ export function mountHandoverReviewApp(Vue) {
       const statusText = ref("");
       const building = ref("");
       const session = ref(null);
+      const reviewContext = ref(normalizeReviewContext({}, activeRouteSelection.value));
       const reviewDisplayState = ref(normalizeReviewDisplayState({}));
       const historyState = ref(normalizeHistoryPayload({}, null));
       const documentRef = ref(normalizeDocument({}));
@@ -1581,6 +1662,7 @@ export function mountHandoverReviewApp(Vue) {
       } = createHandoverReviewDisplayUiHelpers({
         computed,
         session,
+        reviewContext,
         reviewDisplayState,
         historyState,
         historyLoading,
@@ -1608,6 +1690,16 @@ export function mountHandoverReviewApp(Vue) {
         emptyReviewCloudSheetVm,
         resolveReviewActionDisabledReasonStrict,
         shiftTextFromCode,
+      });
+      const reviewPendingTitle = computed(() => sessionSummary.value || "当前班次");
+      const reviewPendingMessage = computed(() => {
+        const backendMessage = String(reviewContext.value?.message || "").trim();
+        if (backendMessage) return backendMessage;
+        if (errorText.value) return errorText.value;
+        const dateText = String(reviewContext.value?.duty_date || activeRouteSelection.value.dutyDate || "").trim();
+        const shiftText = shiftTextFromCode(reviewContext.value?.duty_shift || activeRouteSelection.value.dutyShift || "");
+        const prefix = dateText ? `${dateText} ${shiftText}` : "当前班次";
+        return `${prefix}交接班数据尚未生成，请在数据生成后再来查看。`;
       });
 
       function clearSaveTimers() {
@@ -1866,6 +1958,13 @@ export function mountHandoverReviewApp(Vue) {
 
       function syncRouteToCurrentSelection(nextHistory = historyState.value) {
         const selectedId = String(nextHistory?.selected_session_id || session.value?.session_id || "").trim();
+        if (!selectedId && activeRouteSelection.value?.dutyDate && activeRouteSelection.value?.dutyShift) {
+          syncReviewSelectionToUrl({
+            dutyDate: activeRouteSelection.value.dutyDate,
+            dutyShift: activeRouteSelection.value.dutyShift,
+          });
+          return;
+        }
         syncReviewSelectionToUrl({
           sessionId: selectedId,
           isLatest: Boolean(nextHistory?.selected_is_latest),
@@ -1879,10 +1978,25 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       function applyPayloadMeta(payload = {}) {
+        const hasSessionPayload = Object.prototype.hasOwnProperty.call(payload || {}, "session");
         const nextSession = payload?.session && typeof payload.session === "object" ? cloneDeep(payload.session) : null;
         const nextDocumentRevision = updateDocumentRevisionFromPayload(payload, nextSession);
-        if (nextSession) {
+        if (hasSessionPayload) {
           session.value = nextSession;
+          if (!nextSession) {
+            documentRevision.value = 0;
+          }
+        }
+        if (payload?.review_context && typeof payload.review_context === "object") {
+          reviewContext.value = normalizeReviewContext(payload.review_context, activeRouteSelection.value);
+        } else if (nextSession) {
+          reviewContext.value = normalizeReviewContext({
+            status: "ready",
+            ready: true,
+            duty_date: nextSession.duty_date,
+            duty_shift: nextSession.duty_shift,
+            batch_key: nextSession.batch_key,
+          }, activeRouteSelection.value);
         }
         applySharedBlockPayload(payload || {});
         reviewDisplayState.value = normalizeReviewDisplayState(payload?.display_state || reviewDisplayState.value);
@@ -1921,12 +2035,24 @@ export function mountHandoverReviewApp(Vue) {
           }
         }
         const selectedId = String(historyState.value?.selected_session_id || nextSession?.session_id || session.value?.session_id || "").trim();
-        activeRouteSelection.value = {
-          sessionId: historyState.value?.selected_is_latest ? "" : selectedId,
-          dutyDate: "",
-          dutyShift: "",
-        };
-        syncRouteToCurrentSelection(historyState.value);
+        if (!selectedId && reviewContext.value?.duty_date && reviewContext.value?.duty_shift) {
+          const routeHadExplicitDuty = Boolean(activeRouteSelection.value.dutyDate && activeRouteSelection.value.dutyShift);
+          activeRouteSelection.value = {
+            sessionId: "",
+            dutyDate: routeHadExplicitDuty ? reviewContext.value.duty_date : "",
+            dutyShift: routeHadExplicitDuty ? reviewContext.value.duty_shift : "",
+          };
+          syncReviewSelectionToUrl(routeHadExplicitDuty
+            ? { dutyDate: reviewContext.value.duty_date, dutyShift: reviewContext.value.duty_shift }
+            : {});
+        } else {
+          activeRouteSelection.value = {
+            sessionId: historyState.value?.selected_is_latest ? "" : selectedId,
+            dutyDate: "",
+            dutyShift: "",
+          };
+          syncRouteToCurrentSelection(historyState.value);
+        }
         applyConcurrencyState(
           payload?.concurrency,
           nextDocumentRevision || nextSession?.document_revision || nextSession?.revision || session.value?.document_revision || session.value?.revision || 0,
@@ -2363,11 +2489,23 @@ export function mountHandoverReviewApp(Vue) {
         applySharedBlockPayload(payload || {});
         reviewDisplayState.value = nextDisplayState;
 
+        const hasSessionPayload = Object.prototype.hasOwnProperty.call(payload || {}, "session");
         const incomingSession = payload?.session && typeof payload.session === "object" ? cloneDeep(payload.session) : {};
         const currentSessionId = String(session.value?.session_id || "").trim();
         const incomingSessionId = String(incomingSession.session_id || "").trim();
         const incomingRevision = updateDocumentRevisionFromPayload(payload, incomingSession);
         const currentRevision = currentDocumentRevision();
+        if (payload?.review_context && typeof payload.review_context === "object") {
+          reviewContext.value = normalizeReviewContext(payload.review_context, activeRouteSelection.value);
+        } else if (incomingSessionId) {
+          reviewContext.value = normalizeReviewContext({
+            status: "ready",
+            ready: true,
+            duty_date: incomingSession.duty_date,
+            duty_shift: incomingSession.duty_shift,
+            batch_key: incomingSession.batch_key,
+          }, activeRouteSelection.value);
+        }
 
         batchStatus.value = payload?.batch_status && typeof payload.batch_status === "object"
           ? cloneDeep(payload.batch_status)
@@ -2388,10 +2526,36 @@ export function mountHandoverReviewApp(Vue) {
           );
         }
         applyConcurrencyState(payload?.concurrency, incomingRevision || currentRevision, incomingSessionId || currentSessionId);
+        if (hasSessionPayload && !incomingSessionId) {
+          session.value = null;
+          documentRef.value = normalizeDocument({});
+          documentRevision.value = 0;
+          dirtyRegions.value = emptyDirtyRegions();
+          outdoorTemperatureDirty.value = false;
+          dirty.value = false;
+          capacityLinkedDirty.value = false;
+          staleRevisionConflict.value = false;
+          if (reviewContext.value?.duty_date && reviewContext.value?.duty_shift) {
+            const routeHadExplicitDuty = Boolean(activeRouteSelection.value.dutyDate && activeRouteSelection.value.dutyShift);
+            activeRouteSelection.value = {
+              sessionId: "",
+              dutyDate: routeHadExplicitDuty ? reviewContext.value.duty_date : "",
+              dutyShift: routeHadExplicitDuty ? reviewContext.value.duty_shift : "",
+            };
+          }
+          return;
+        }
 
         if (!session.value) {
           if (incomingSession && Object.keys(incomingSession).length) {
             session.value = incomingSession;
+            if (background) {
+              statusText.value = "检测到当前班次交接班数据已生成，正在加载审核内容...";
+              await loadReviewData({
+                background: false,
+                mode: shouldPreferBootstrapLoad() ? "bootstrap" : "full",
+              });
+            }
           }
           return;
         }
@@ -2992,6 +3156,7 @@ export function mountHandoverReviewApp(Vue) {
         statusText,
         building,
         session,
+        reviewContext,
         document: documentRef,
         batchStatus,
         historyState,
@@ -3005,6 +3170,8 @@ export function mountHandoverReviewApp(Vue) {
         currentDutyDateText,
         currentDutyShiftText,
         currentModeText,
+        reviewPendingTitle,
+        reviewPendingMessage,
         showReturnToLatestAction,
         showRefreshAction,
         showSaveAction,
