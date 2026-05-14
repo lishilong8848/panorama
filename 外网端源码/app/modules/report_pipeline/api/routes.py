@@ -1589,6 +1589,81 @@ def _collect_indexed_branch_source_units(
     }
 
 
+def _normalize_branch_power_business_dates(payload: Dict[str, Any]) -> List[str]:
+    payload_obj = payload if isinstance(payload, dict) else {}
+
+    def _iter_raw_values(value: Any) -> List[str]:
+        if isinstance(value, list):
+            output: List[str] = []
+            for item in value:
+                output.extend(_iter_raw_values(item))
+            return output
+        text = str(value or "").strip()
+        if not text:
+            return []
+        return [item.strip() for item in re.split(r"[\s,，;；]+", text) if item.strip()]
+
+    explicit_values: List[str] = []
+    for key in ("target_business_dates", "business_dates", "dates"):
+        explicit_values.extend(_iter_raw_values(payload_obj.get(key)))
+
+    raw_values: List[str] = list(explicit_values)
+    start_text = str(
+        payload_obj.get("target_business_date_start", "")
+        or payload_obj.get("business_date_start", "")
+        or payload_obj.get("start_date", "")
+        or ""
+    ).strip()
+    end_text = str(
+        payload_obj.get("target_business_date_end", "")
+        or payload_obj.get("business_date_end", "")
+        or payload_obj.get("end_date", "")
+        or ""
+    ).strip()
+    if not explicit_values and (start_text or end_text):
+        raw_start = start_text or end_text
+        raw_end = end_text or start_text
+        try:
+            start_date = datetime.strptime(raw_start.replace("/", "-")[:10], "%Y-%m-%d").date()
+            end_date = datetime.strptime(raw_end.replace("/", "-")[:10], "%Y-%m-%d").date()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="支路三源表业务日期范围格式必须为 YYYY-MM-DD") from exc
+        if end_date < start_date:
+            raise HTTPException(status_code=400, detail="支路三源表业务日期结束日期不能早于开始日期")
+        cursor = start_date
+        while cursor <= end_date:
+            raw_values.append(cursor.strftime("%Y-%m-%d"))
+            cursor += timedelta(days=1)
+
+    raw_single = str(
+        payload_obj.get("target_business_date", "")
+        or payload_obj.get("business_date", "")
+        or payload_obj.get("date", "")
+        or ""
+    ).strip()
+    if not explicit_values:
+        raw_values.extend(_iter_raw_values(raw_single))
+
+    if not raw_values:
+        raw_values.append((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"))
+
+    normalized: List[str] = []
+    for raw in raw_values:
+        try:
+            parsed = datetime.strptime(str(raw or "").strip().replace("/", "-")[:10], "%Y-%m-%d").date()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="target_business_date 格式必须为 YYYY-MM-DD") from exc
+        text = parsed.strftime("%Y-%m-%d")
+        if text not in normalized:
+            normalized.append(text)
+    normalized.sort()
+
+    max_days = 31
+    if len(normalized) > max_days:
+        raise HTTPException(status_code=400, detail=f"支路三源表一次最多执行 {max_days} 个业务日期")
+    return normalized
+
+
 def _branch_file_path(entry: Dict[str, Any] | None) -> str:
     if not isinstance(entry, dict):
         return ""
@@ -4972,20 +5047,7 @@ def job_branch_power_from_download(payload: Dict[str, Any], request: Request) ->
 
     bridge_service = _shared_bridge_service_or_raise(container)
     payload_obj = payload if isinstance(payload, dict) else {}
-    raw_business_date = str(
-        payload_obj.get("target_business_date", "")
-        or payload_obj.get("business_date", "")
-        or payload_obj.get("date", "")
-        or ""
-    ).strip()
-    if raw_business_date:
-        try:
-            business_date = datetime.strptime(raw_business_date.replace("/", "-")[:10], "%Y-%m-%d").date()
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail="target_business_date 格式必须为 YYYY-MM-DD") from exc
-    else:
-        business_date = (datetime.now() - timedelta(days=1)).date()
-    business_date_key = business_date.strftime("%Y-%m-%d")
+    business_date_keys = _normalize_branch_power_business_dates(payload_obj)
     buildings = _normalize_branch_power_buildings(payload_obj, bridge_service)
     if not buildings:
         raise HTTPException(status_code=400, detail="支路功率上传缺少楼栋")
@@ -4995,97 +5057,150 @@ def job_branch_power_from_download(payload: Dict[str, Any], request: Request) ->
 
     dedupe_key = _job_dedupe_key(
         "branch_power_external_dispatch_daily",
-        business_date=business_date_key,
+        business_dates=business_date_keys,
         buildings=buildings,
     )
 
     def _run_external_daily(emit_log):
+        multi_date = len(business_date_keys) > 1
         emit_log(
             "[支路功率] 已进入后台整日直传处理: "
-            f"business_date={business_date_key}, buildings={','.join(buildings)}"
+            f"business_dates={','.join(business_date_keys)}, buildings={','.join(buildings)}"
         )
         collect_result = _collect_indexed_branch_source_units(
             bridge_service,
-            bucket_keys=[business_date_key],
+            bucket_keys=business_date_keys,
             buildings=buildings,
             emit_log=emit_log,
         )
         bucket_units = collect_result.get("bucket_source_units", {}) if isinstance(collect_result, dict) else {}
         missing_by_bucket = collect_result.get("missing_by_bucket", {}) if isinstance(collect_result, dict) else {}
-        source_units = bucket_units.get(business_date_key, []) if isinstance(bucket_units, dict) else []
-        missing_items = missing_by_bucket.get(business_date_key, []) if isinstance(missing_by_bucket, dict) else []
-        missing_buildings: List[str] = []
-        for item in missing_items if isinstance(missing_items, list) else []:
-            building = str(item or "").split("/", 1)[0].strip()
-            if building and building not in missing_buildings:
-                missing_buildings.append(building)
-        if missing_items:
-            bridge_buildings = missing_buildings or buildings
-            waiting_job, waiting_task = start_waiting_bridge_job(
-                job_service=container.job_service,
-                bridge_service=bridge_service,
-                name="支路信息-内网整日补采",
-                worker_handler="branch_power_from_download",
-                worker_payload={
-                    "mode": "daily_branch_sources",
-                    "target_bucket_key": business_date_key,
-                    "target_business_date": business_date_key,
-                    "buildings": bridge_buildings,
-                    "requested_by": str(requested_by or submitted_by or "").strip() or "manual",
-                    "submitted_by": submitted_by,
-                },
-                resource_keys=_job_resource_keys("shared_bridge:branch_power"),
-                priority=priority,
-                feature="branch_power_upload",
-                dedupe_key=_job_dedupe_key(
-                    "branch_power_wait_shared_bridge_daily",
-                    business_date=business_date_key,
-                    buildings=bridge_buildings,
-                ),
-                submitted_by=submitted_by,
-                bridge_get_or_create_name="get_or_create_branch_power_upload_task",
-                bridge_create_name="create_branch_power_upload_task",
-                bridge_kwargs={
-                    "target_bucket_key": business_date_key,
-                    "buildings": bridge_buildings,
-                    "requested_by": str(requested_by or submitted_by or "").strip() or "manual",
-                    "mode": "daily_branch_sources",
-                    "target_business_date": business_date_key,
-                },
-            )
-            missing_preview = ",".join(missing_items[:8])
-            if len(missing_items) > 8:
-                missing_preview += f" 等{len(missing_items)}项"
-            emit_log(
-                "[共享桥接] 已受理支路信息整日补采任务 "
-                f"task_id={str(waiting_task.get('task_id', '') or '-').strip() or '-'}, "
-                f"business_date={business_date_key}, download_buildings={','.join(bridge_buildings)}, "
-                f"missing={missing_preview or '-'}"
-            )
-            return {
-                "ok": True,
-                "mode": "waiting_shared_bridge_daily",
-                "business_date": business_date_key,
-                "missing_buildings": bridge_buildings,
-                "missing_items": missing_items,
-                "waiting": _accepted_waiting_job_response(waiting_job, waiting_task),
-            }
-        if len(source_units) < len(buildings):
-            raise RuntimeError(
-                "支路整日源文件未齐全: "
-                f"business_date={business_date_key}, ready={len(source_units)}/{len(buildings)}"
-            )
         service = BranchPowerUploadService(config)
-        return service.upload_day_from_source_files(
-            business_date=business_date_key,
-            source_units=source_units,
-            emit_log=emit_log,
+        summary: Dict[str, Any] = {
+            "ok": True,
+            "status": "success",
+            "mode": "daily_direct_upload_batch" if multi_date else "daily_direct_upload",
+            "business_dates": business_date_keys,
+            "uploaded_dates": [],
+            "waiting_dates": [],
+            "failed_dates": [],
+        }
+        single_waiting_result: Dict[str, Any] | None = None
+        single_upload_result: Dict[str, Any] | None = None
+
+        for current_business_date in business_date_keys:
+            source_units = bucket_units.get(current_business_date, []) if isinstance(bucket_units, dict) else []
+            missing_items = missing_by_bucket.get(current_business_date, []) if isinstance(missing_by_bucket, dict) else []
+            missing_buildings: List[str] = []
+            for item in missing_items if isinstance(missing_items, list) else []:
+                building = str(item or "").split("/", 1)[0].strip()
+                if building and building not in missing_buildings:
+                    missing_buildings.append(building)
+            if missing_items:
+                bridge_buildings = missing_buildings or buildings
+                waiting_job, waiting_task = start_waiting_bridge_job(
+                    job_service=container.job_service,
+                    bridge_service=bridge_service,
+                    name="支路信息-内网整日补采",
+                    worker_handler="branch_power_from_download",
+                    worker_payload={
+                        "mode": "daily_branch_sources",
+                        "target_bucket_key": current_business_date,
+                        "target_business_date": current_business_date,
+                        "buildings": bridge_buildings,
+                        "requested_by": str(requested_by or submitted_by or "").strip() or "manual",
+                        "submitted_by": submitted_by,
+                    },
+                    resource_keys=_job_resource_keys("shared_bridge:branch_power"),
+                    priority=priority,
+                    feature="branch_power_upload",
+                    dedupe_key=_job_dedupe_key(
+                        "branch_power_wait_shared_bridge_daily",
+                        business_date=current_business_date,
+                        buildings=bridge_buildings,
+                    ),
+                    submitted_by=submitted_by,
+                    bridge_get_or_create_name="get_or_create_branch_power_upload_task",
+                    bridge_create_name="create_branch_power_upload_task",
+                    bridge_kwargs={
+                        "target_bucket_key": current_business_date,
+                        "buildings": bridge_buildings,
+                        "requested_by": str(requested_by or submitted_by or "").strip() or "manual",
+                        "mode": "daily_branch_sources",
+                        "target_business_date": current_business_date,
+                    },
+                )
+                missing_preview = ",".join(missing_items[:8])
+                if len(missing_items) > 8:
+                    missing_preview += f" 等{len(missing_items)}项"
+                emit_log(
+                    "[共享桥接] 已受理支路信息整日补采任务 "
+                    f"task_id={str(waiting_task.get('task_id', '') or '-').strip() or '-'}, "
+                    f"business_date={current_business_date}, download_buildings={','.join(bridge_buildings)}, "
+                    f"missing={missing_preview or '-'}"
+                )
+                waiting_result = {
+                    "ok": True,
+                    "mode": "waiting_shared_bridge_daily",
+                    "business_date": current_business_date,
+                    "missing_buildings": bridge_buildings,
+                    "missing_items": missing_items,
+                    "waiting": _accepted_waiting_job_response(waiting_job, waiting_task),
+                }
+                summary["waiting_dates"].append(waiting_result)
+                single_waiting_result = waiting_result
+                continue
+            if len(source_units) < len(buildings):
+                error_text = (
+                    "支路整日源文件未齐全: "
+                    f"business_date={current_business_date}, ready={len(source_units)}/{len(buildings)}"
+                )
+                summary["failed_dates"].append({"business_date": current_business_date, "error": error_text})
+                emit_log(f"[支路功率] {error_text}")
+                continue
+            try:
+                upload_result = service.upload_day_from_source_files(
+                    business_date=current_business_date,
+                    source_units=source_units,
+                    emit_log=emit_log,
+                )
+                summary["uploaded_dates"].append(
+                    {
+                        "business_date": current_business_date,
+                        "records": upload_result.get("records", 0) if isinstance(upload_result, dict) else 0,
+                        "parsed_hours": upload_result.get("parsed_hours", 0) if isinstance(upload_result, dict) else 0,
+                    }
+                )
+                single_upload_result = upload_result if isinstance(upload_result, dict) else None
+            except Exception as exc:  # noqa: BLE001
+                error_text = str(exc)
+                summary["failed_dates"].append({"business_date": current_business_date, "error": error_text})
+                emit_log(f"[支路功率][失败] 整日直传失败 business_date={current_business_date}, error={error_text}")
+
+        if summary["failed_dates"]:
+            failed_preview = "; ".join(
+                f"{item.get('business_date', '-')}: {item.get('error', '-')}"
+                for item in summary["failed_dates"][:8]
+                if isinstance(item, dict)
+            )
+            suffix = f" 等{len(summary['failed_dates'])}项" if len(summary["failed_dates"]) > 8 else ""
+            raise RuntimeError(f"支路三源表整日直传存在失败: {failed_preview}{suffix}")
+        if not multi_date:
+            if single_upload_result is not None:
+                return single_upload_result
+            if single_waiting_result is not None:
+                return single_waiting_result
+        emit_log(
+            "[支路功率] 多日整日直传处理完成 "
+            f"uploaded={len(summary['uploaded_dates'])}, waiting={len(summary['waiting_dates'])}, "
+            f"failed={len(summary['failed_dates'])}"
         )
+        return summary
 
     try:
         job = _start_background_job(
             container,
-            name="支路功率-整日直传",
+            name="支路功率-整日直传" if len(business_date_keys) == 1 else "支路功率-多日整日直传",
             run_func=_run_external_daily,
             worker_handler="",
             worker_payload={},
@@ -5097,7 +5212,7 @@ def job_branch_power_from_download(payload: Dict[str, Any], request: Request) ->
         )
         container.add_system_log(
             "[任务] 已提交: 支路功率-整日直传 "
-            f"business_date={business_date_key}, "
+            f"business_dates={','.join(business_date_keys)}, "
             f"buildings={','.join(buildings)} ({job.job_id})"
         )
         return job.to_dict()

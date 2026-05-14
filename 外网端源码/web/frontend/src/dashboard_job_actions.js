@@ -14,7 +14,7 @@ import {
   submitDayMetricRetryFailedJob,
   submitDayMetricRetryUnitJob,
 } from "./api_client.js";
-import { parseDateText } from "./config_helpers.js";
+import { expandDateRange, formatDateObj, parseDateText } from "./config_helpers.js";
 
 const ACTION_KEYS = {
   autoOnce: "job:auto_once",
@@ -61,6 +61,8 @@ export function createDashboardJobActions(ctx) {
     dayMetricLocalDate,
     dayMetricLocalFile,
     branchPowerBusinessDate,
+    branchPowerBusinessDateEnd,
+    branchPowerBusinessDatesText,
     streamController,
     fetchHealth,
     fetchJobs,
@@ -518,9 +520,28 @@ if (!canRun.value) return;
   }
 
   async function runBranchPowerFromDownload() {
-    const businessDate = String(branchPowerBusinessDate?.value || "").trim();
-    if (!parseDateText(businessDate)) {
-      message.value = "请选择有效的支路三源表业务日期";
+    const startDate = String(branchPowerBusinessDate?.value || "").trim();
+    const endDate = String(branchPowerBusinessDateEnd?.value || startDate).trim() || startDate;
+    const rawDatesText = String(branchPowerBusinessDatesText?.value || "").trim();
+    const rawDateItems = rawDatesText ? rawDatesText.split(/[\s,，;；]+/).map((item) => item.trim()).filter(Boolean) : [];
+    const listedDates = [];
+    for (const item of rawDateItems) {
+      const normalizedInput = item.replace(/\//g, "-").slice(0, 10);
+      const parsed = parseDateText(normalizedInput);
+      if (!parsed) {
+        message.value = `支路三源表日期列表中存在无效日期: ${item}`;
+        return;
+      }
+      const normalized = formatDateObj(parsed);
+      if (!listedDates.includes(normalized)) listedDates.push(normalized);
+    }
+    const businessDates = (listedDates.length ? listedDates : expandDateRange(startDate, endDate)).slice().sort();
+    if (!listedDates.length && (!parseDateText(startDate) || !parseDateText(endDate) || !businessDates.length)) {
+      message.value = "请选择有效的支路三源表业务日期范围";
+      return;
+    }
+    if (businessDates.length > 31) {
+      message.value = "支路三源表一次最多执行31个业务日期，请分批处理";
       return;
     }
     if (!canRun.value) return;
@@ -529,11 +550,21 @@ if (!canRun.value) return;
       async () => {
         try {
           const payload = {
-            business_date: businessDate,
-            target_business_date: businessDate,
+            business_date: businessDates[0],
+            target_business_date: businessDates[0],
+            business_dates: businessDates,
+            target_business_dates: businessDates,
             building_scope: "all_enabled",
           };
-          message.value = `支路三源表整日直传任务已提交: ${businessDate}`;
+          if (!listedDates.length) {
+            payload.business_date_start = businessDates[0];
+            payload.business_date_end = businessDates[businessDates.length - 1];
+          }
+          const dateLabel =
+            businessDates.length === 1
+              ? businessDates[0]
+              : `${businessDates[0]} 至 ${businessDates[businessDates.length - 1]}（${businessDates.length}天）`;
+          message.value = `支路三源表整日直传任务已提交: ${dateLabel}`;
           const response = await submitBranchPowerFromDownloadJob(payload);
           await applyAcceptedExecutionResponse(response, "支路三源表整日直传");
         } catch (err) {

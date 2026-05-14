@@ -763,6 +763,8 @@ export function createAppState(vueApi) {
   const dayMetricLocalDate = ref(todayText());
   const dayMetricLocalFile = ref(null);
   const branchPowerBusinessDate = ref(yesterdayText());
+  const branchPowerBusinessDateEnd = ref(yesterdayText());
+  const branchPowerBusinessDatesText = ref("");
   const handoverFile = ref(null);
   const handoverFilesByBuilding = reactive({});
   const handoverDutyDate = ref(todayText());
@@ -2081,6 +2083,8 @@ export function createAppState(vueApi) {
     dayMetricLocalDate,
     dayMetricLocalFile,
     branchPowerBusinessDate,
+    branchPowerBusinessDateEnd,
+    branchPowerBusinessDatesText,
     handoverFile,
     handoverFilesByBuilding,
     handoverDutyDate,
