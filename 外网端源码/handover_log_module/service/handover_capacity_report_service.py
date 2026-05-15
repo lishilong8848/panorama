@@ -31,6 +31,7 @@ from handover_log_module.repository.excel_reader import load_rows, load_workbook
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
 from handover_log_module.service.capacity_report_common import CapacitySourceQuery, build_capacity_template_snapshot
+from handover_log_module.service.handover_capacity_oil_cache_service import HandoverCapacityOilCacheService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from pipeline_utils import get_app_dir
 
@@ -332,6 +333,7 @@ class HandoverCapacityReportService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
         self._review_session_service = ReviewSessionService(self.config)
+        self._oil_cache_service = HandoverCapacityOilCacheService(self.config)
         self._weather_payload_cache: Dict[str, Dict[str, str]] = {}
         self._water_summary_cache: Dict[tuple[str, str], Dict[str, str]] = {}
 
@@ -469,7 +471,7 @@ class HandoverCapacityReportService:
         def _find_value(candidates: List[str]) -> str:
             for candidate in candidates:
                 for row in rows:
-                    if _text(getattr(row, "c_text", "")) != "燃油自控系统":
+                    if not self._is_oil_control_row(row):
                         continue
                     if _text(getattr(row, "d_name", "")) != candidate:
                         continue
@@ -527,10 +529,15 @@ class HandoverCapacityReportService:
             "second": _text(display_values.get("second")),
         }
 
+    @staticmethod
+    def _is_oil_control_row(row: Any) -> bool:
+        c_text = _text(getattr(row, "c_text", ""))
+        return bool("燃油" in c_text and "自控系统" in c_text)
+
     def _extract_specific_oil_value(self, rows: List[Any], aliases: List[str]) -> str:
         for candidate in aliases:
             for row in rows:
-                if _text(getattr(row, "c_text", "")) != "燃油自控系统":
+                if not self._is_oil_control_row(row):
                     continue
                 if _text(getattr(row, "d_name", "")) != candidate:
                     continue
@@ -552,6 +559,31 @@ class HandoverCapacityReportService:
             duty_date=duty_date,
             duty_shift=duty_shift,
         )
+        try:
+            cached_previous = self._oil_cache_service.load_previous_values(
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+            )
+        except Exception as exc:  # noqa: BLE001
+            cached_previous = {}
+            emit_log(
+                "[交接班][容量报表][燃油] 上一班油量缓存读取失败 "
+                f"building={building}, duty={previous_date}/{previous_shift}, error={exc}"
+            )
+        cached_first = _text(cached_previous.get("first") if isinstance(cached_previous, dict) else "")
+        cached_second = _text(cached_previous.get("second") if isinstance(cached_previous, dict) else "")
+        if cached_first or cached_second:
+            emit_log(
+                "[交接班][容量报表][燃油] 上一班油量缓存命中 "
+                f"building={building}, duty={previous_date}/{previous_shift}, "
+                f"first={cached_first or '-'}, second={cached_second or '-'}"
+            )
+            return {
+                "first": cached_first or _text(current_display_values.get("first")),
+                "second": cached_second or _text(current_display_values.get("second")),
+            }, ""
+
         try:
             previous_session = self._review_session_service.get_latest_session_for_context(
                 building=building,
@@ -615,6 +647,41 @@ class HandoverCapacityReportService:
             "first": previous_first or _text(current_display_values.get("first")),
             "second": previous_second or _text(current_display_values.get("second")),
         }, ""
+
+    def _save_current_capacity_display_oil_values(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        current_display_values: Dict[str, str],
+        emit_log: Callable[[str], None],
+    ) -> None:
+        first = _text(current_display_values.get("first"))
+        second = _text(current_display_values.get("second"))
+        if not first and not second:
+            emit_log(
+                "[交接班][容量报表][燃油] 当前班次油量为空，跳过缓存 "
+                f"building={building}, duty={duty_date}/{duty_shift}"
+            )
+            return
+        try:
+            self._oil_cache_service.save_current_values(
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                first=first,
+                second=second,
+            )
+            emit_log(
+                "[交接班][容量报表][燃油] 当前班次油量已缓存 "
+                f"building={building}, duty={duty_date}/{duty_shift}, first={first or '-'}, second={second or '-'}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(
+                "[交接班][容量报表][燃油] 当前班次油量缓存失败 "
+                f"building={building}, duty={duty_date}/{duty_shift}, error={exc}"
+            )
 
     def _normalize_alarm_summary(self, payload: Dict[str, Any] | None) -> Dict[str, Any]:
         data = payload if isinstance(payload, dict) else {}
@@ -2643,6 +2710,8 @@ class HandoverCapacityReportService:
         warnings: List[str] = []
         if previous_oil_warning:
             warnings.append(previous_oil_warning)
+        if not _text(oil_current.get("first")) and not _text(oil_current.get("second")):
+            warnings.append("当前班次油量未识别，容量表U13/X13将为空")
         load_rate_blocking_error = ""
 
         current_alarm = self._normalize_alarm_summary(current_alarm_summary)
@@ -2763,6 +2832,13 @@ class HandoverCapacityReportService:
             _write_cells_with_merged_support(sheet, cell_values)
             self._apply_load_rate_number_format(sheet)
             atomic_save_workbook(workbook, output_file)
+            self._save_current_capacity_display_oil_values(
+                building=building_text,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                current_display_values=oil_current,
+                emit_log=emit_log,
+            )
         finally:
             workbook.close()
 

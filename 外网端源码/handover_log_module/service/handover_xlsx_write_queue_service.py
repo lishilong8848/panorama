@@ -47,7 +47,8 @@ class HandoverXlsxWriteQueueService:
         emit_log: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config if isinstance(config, dict) else {}
-        self.emit_log = emit_log if callable(emit_log) else print
+        self._raw_emit_log = emit_log if callable(emit_log) else print
+        self.emit_log = self._emit_log_safely
         self.review_service = review_service or ReviewSessionService(self.config)
         self.document_state = document_state or ReviewDocumentStateService(
             self.config,
@@ -55,6 +56,21 @@ class HandoverXlsxWriteQueueService:
             writer=writer,
             emit_log=self.emit_log,
         )
+        if hasattr(self.document_state, "emit_log"):
+            self.document_state.emit_log = self.emit_log
+
+    def _emit_log_safely(self, message: str) -> None:
+        text = str(message or "")
+        try:
+            self._raw_emit_log(text)
+            return
+        except Exception as exc:  # noqa: BLE001
+            # xlsx 写入队列是持久后台队列，可能长于触发它的任务生命周期。
+            # 任务日志器关闭后，日志失败不能反过来把 Excel 同步标记为失败。
+            try:
+                print(f"{text} [日志降级输出: {type(exc).__name__}: {exc}]")
+            except Exception:
+                pass
 
     def _store(self, building: str) -> ReviewBuildingDocumentStore:
         return ReviewBuildingDocumentStore(config=self.config, building=building)

@@ -1137,6 +1137,111 @@ a {
   gap: 12px;
 }
 
+.review-card-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.person-fill-toolbar,
+.person-picker-details {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.person-fill-toolbar {
+  min-width: min(340px, 100%);
+}
+
+.person-fill-toolbar summary,
+.person-picker-details summary {
+  min-height: 32px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-2);
+  list-style: none;
+}
+
+.person-fill-toolbar summary::-webkit-details-marker,
+.person-picker-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.person-fill-toolbar summary::after,
+.person-picker-details summary::after {
+  content: "展开";
+  margin-left: 8px;
+  color: var(--text-3);
+  font-weight: 700;
+}
+
+.person-fill-toolbar[open] summary::after,
+.person-picker-details[open] summary::after {
+  content: "收起";
+}
+
+.person-fill-panel {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  padding: 0 10px 10px;
+}
+
+.review-person-select {
+  width: min(260px, 64vw);
+  min-height: 34px;
+  max-height: 74px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.person-picker-details {
+  margin-top: 6px;
+}
+
+.person-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 8px 8px;
+}
+
+.person-chip {
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: none;
+  background: var(--surface-1);
+  color: var(--text-2);
+}
+
+.person-chip.is-active {
+  border-color: var(--tone-primary);
+  background: rgba(34, 122, 191, 0.12);
+  color: var(--tone-primary);
+}
+
+.person-picker-hint {
+  display: block;
+  padding: 0 10px 10px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.person-picker-hint.tone-danger {
+  color: var(--tone-danger);
+}
+
 .global-message-body {
   min-width: 0;
   overflow-wrap: anywhere;

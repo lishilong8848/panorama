@@ -1,5 +1,3 @@
-const FORCED_FIXED_CELL_VALUES = { F10: "15" };
-
 export function createHandoverReviewDocumentEditHelpers(options = {}) {
   const {
     documentRef,
@@ -56,7 +54,7 @@ export function createHandoverReviewDocumentEditHelpers(options = {}) {
     const field = block?.fields?.[fieldIndex];
     if (!field) return;
     const cellName = String(field.cell || "").trim().toUpperCase();
-    const nextValue = String(FORCED_FIXED_CELL_VALUES[cellName] ?? value ?? "");
+    const nextValue = String(value ?? "");
     if (String(field.value ?? "") === nextValue) return;
     field.value = nextValue;
     markDocumentDirty({ region: "fixed_blocks", capacityCell: cellName });

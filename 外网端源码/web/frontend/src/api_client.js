@@ -473,6 +473,13 @@ export async function getHandoverReviewStatusApi(buildingCode, params = {}, opti
   return apiJson(appendQuery(`/api/handover/review/${buildingCode}/status`, params), options);
 }
 
+export async function refreshHandoverReviewEventSectionsApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/sections/events/refresh`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getHandoverReviewHistoryApi(buildingCode, params = {}, options = {}) {
   return apiJson(appendQuery(`/api/handover/review/${buildingCode}/history`, params), options);
 }

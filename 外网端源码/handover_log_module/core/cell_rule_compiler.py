@@ -4,7 +4,11 @@ import copy
 import re
 from typing import Any, Dict, List, Tuple
 
-from handover_log_module.core.fixed_cell_overrides import FORCED_FIXED_CELL_VALUES, normalize_cell_name
+from handover_log_module.core.fixed_cell_overrides import (
+    DEFAULT_FIXED_CELL_VALUES,
+    FORCED_FIXED_CELL_VALUES,
+    normalize_cell_name,
+)
 
 
 _DEFAULT_COMPUTED_OPS = {
@@ -12,6 +16,18 @@ _DEFAULT_COMPUTED_OPS = {
     "ring_supply_temp",
     "chiller_mode_summary",
 }
+_A_BUILDING_UPS_BACKUP_D_REGEX = (
+    r"A\s*-\s*(?:"
+    r"141\s*-\s*(?:101|201)"
+    r"|118\s*-\s*(?:101|201)"
+    r"|246\s*-\s*101"
+    r"|217\s*-\s*101"
+    r"|346\s*-\s*101"
+    r"|316\s*-\s*101"
+    r"|446\s*-\s*101"
+    r"|416\s*-\s*101"
+    r")(?!\d)"
+)
 
 
 def _dict(value: Any) -> Dict[str, Any]:
@@ -69,6 +85,15 @@ def _expand_compatible_d_keywords(row_id: str, keywords: List[str]) -> List[str]
 
     for keyword in keywords:
         _append(keyword)
+
+    if row_id == "battery_backup_min":
+        # 交接班日志源表里 5 个楼的 UPS 后备时间命名不完全一致：
+        # A 楼常见“电池放电时长”，B 楼常见“UPS-101放电时间”，
+        # C/D/E 楼常见“电池放电后备时间”。统一扩展后继续按 E 列取最小值。
+        _append("电池放电后备时间")
+        _append("电池放电时长")
+        _append("放电后备时间")
+        _append("放电时间")
 
     if not re.fullmatch(r"chiller_mode_[1-6]", row_id):
         return expanded
@@ -166,11 +191,18 @@ def merge_effective_rows(cell_rules: Dict[str, Any], building: str) -> List[Dict
     return [merged[row_id] for row_id in order if row_id in merged]
 
 
-def compile_rows_to_runtime(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _building_code(building: Any) -> str:
+    text = _norm_text(building).upper()
+    match = re.search(r"[A-E]", text)
+    return match.group(0) if match else ""
+
+
+def compile_rows_to_runtime(rows: List[Dict[str, Any]], building: str = "") -> Dict[str, Any]:
     rules: Dict[str, Dict[str, Any]] = {}
     cell_mapping: Dict[str, str] = {}
     format_templates: Dict[str, str] = {}
     computed_metric_ops: Dict[str, Dict[str, Any]] = {}
+    building_code = _building_code(building)
     for row in rows:
         row_id = _norm_text(row.get("id"))
         if not row_id or not bool(row.get("enabled", True)):
@@ -180,7 +212,10 @@ def compile_rows_to_runtime(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         template = _norm_text(row.get("template")) or "{value}"
         agg = _norm_text(row.get("agg")).lower() or "first"
 
-        if target_cell and normalize_cell_name(target_cell) in FORCED_FIXED_CELL_VALUES:
+        if target_cell and normalize_cell_name(target_cell) in {
+            *FORCED_FIXED_CELL_VALUES,
+            *DEFAULT_FIXED_CELL_VALUES,
+        }:
             continue
 
         if target_cell:
@@ -218,6 +253,12 @@ def compile_rows_to_runtime(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             rule["use_b"] = True
         if bool(row.get("use_c", False)):
             rule["use_c"] = True
+        if row_id == "battery_backup_min":
+            if building_code == "A":
+                rule["d_regex"] = _A_BUILDING_UPS_BACKUP_D_REGEX
+                rule.pop("group_contains", None)
+            elif building_code in {"B", "C", "D", "E"}:
+                rule["group_contains"] = "UPS"
         rules[row_id] = rule
     return {
         "rules": rules,
@@ -232,7 +273,7 @@ def build_effective_handover_config(base_cfg: Dict[str, Any], building: str, bui
     normalized_rules = normalize_cell_rules(cfg, buildings)
     cfg["cell_rules"] = normalized_rules
     rows = merge_effective_rows(normalized_rules, building)
-    compiled = compile_rows_to_runtime(rows)
+    compiled = compile_rows_to_runtime(rows, building=building)
     cfg["rules"] = compiled["rules"]
     cfg["cell_mapping"] = compiled["cell_mapping"]
     cfg["format_templates"] = compiled["format_templates"]

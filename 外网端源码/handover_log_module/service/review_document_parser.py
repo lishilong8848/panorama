@@ -12,7 +12,7 @@ from handover_log_module.core.footer_layout import (
     first_person_text,
     find_footer_inventory_layout,
 )
-from handover_log_module.core.fixed_cell_overrides import forced_fixed_cell_value
+from handover_log_module.core.fixed_cell_overrides import default_fixed_cell_value, forced_fixed_cell_value
 from handover_log_module.core.section_layout import build_section_logical_columns, parse_category_sections
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 
@@ -103,24 +103,32 @@ class ReviewDocumentParser:
         return "" if value is None else str(value)
 
     def _build_fixed_field(self, ws, entry: Dict[str, str] | str) -> Dict[str, Any]:
+        def _resolved_value(cell_name: str) -> str:
+            forced_value = forced_fixed_cell_value(cell_name)
+            if forced_value is not None:
+                return forced_value
+            actual_value = self._read_cell_text(ws, cell_name)
+            if str(actual_value or "").strip():
+                return actual_value
+            default_value = default_fixed_cell_value(cell_name)
+            return default_value if default_value is not None else actual_value
+
         if isinstance(entry, dict):
             value_cell = str(entry.get("value_cell", "")).strip().upper()
             label_cell = str(entry.get("label_cell", "")).strip().upper()
             label_text = self._read_cell_text(ws, label_cell) if label_cell else ""
             if not label_text:
                 label_text = self.FIELD_LABEL_MAP.get(value_cell, value_cell)
-            forced_value = forced_fixed_cell_value(value_cell)
             return {
                 "cell": value_cell,
                 "label": label_text,
-                "value": forced_value if forced_value is not None else self._read_cell_text(ws, value_cell),
+                "value": _resolved_value(value_cell),
             }
         cell_name = str(entry or "").strip().upper()
-        forced_value = forced_fixed_cell_value(cell_name)
         return {
             "cell": cell_name,
             "label": self.FIELD_LABEL_MAP.get(cell_name, cell_name),
-            "value": forced_value if forced_value is not None else self._read_cell_text(ws, cell_name),
+            "value": _resolved_value(cell_name),
         }
 
     def _section_hidden_columns(self) -> List[str]:
@@ -128,6 +136,11 @@ class ReviewDocumentParser:
         if not isinstance(hidden_columns, list):
             return []
         return [str(value or "").strip().upper() for value in hidden_columns if str(value or "").strip()]
+
+    @staticmethod
+    def _is_meaningful_section_cell(value: Any) -> bool:
+        text = str(value or "").strip()
+        return bool(text and text != "/")
 
     def _fixed_blocks(self, ws) -> List[Dict[str, Any]]:
         fixed_cells = self._review_ui_cfg().get("fixed_cells", {})
@@ -188,7 +201,9 @@ class ReviewDocumentParser:
                     {
                         "row_id": f"{section.name}:{row_idx}",
                         "cells": cells,
-                        "is_placeholder_row": not any(str(value).strip() for value in cells.values()),
+                        "is_placeholder_row": not any(
+                            self._is_meaningful_section_cell(value) for value in cells.values()
+                        ),
                     }
                 )
             output.append(

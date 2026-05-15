@@ -36,6 +36,7 @@ from handover_log_module.service.handover_daily_report_screenshot_service import
 )
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.handover_110_station_upload_service import Handover110StationUploadService
+from handover_log_module.service.event_category_payload_builder import EventCategoryPayloadBuilder
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateConflictError,
@@ -711,6 +712,44 @@ def _build_review_ui_config(container) -> Dict[str, Any]:
     handover_cfg = _handover_cfg(container)
     review_ui = handover_cfg.get("review_ui", {}) if isinstance(handover_cfg, dict) else {}
     return review_ui if isinstance(review_ui, dict) else {}
+
+
+def _fixed_cell_value_from_review_document(document: Dict[str, Any] | None, cell_name: str) -> str:
+    target = str(cell_name or "").strip().upper()
+    if not target or not isinstance(document, dict):
+        return ""
+    fixed_blocks = document.get("fixed_blocks", [])
+    if not isinstance(fixed_blocks, list):
+        return ""
+    for block in fixed_blocks:
+        fields = block.get("fields", []) if isinstance(block, dict) else []
+        if not isinstance(fields, list):
+            continue
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            if str(field.get("cell", "") or "").strip().upper() != target:
+                continue
+            return str(field.get("value", "") or "").strip()
+    return ""
+
+
+def _is_current_handover_duty_context(*, duty_date: str, duty_shift: str) -> bool:
+    cursor = datetime.now()
+    second_of_day = cursor.hour * 3600 + cursor.minute * 60 + cursor.second
+    if second_of_day < 9 * 3600:
+        current_date = (cursor.date() - timedelta(days=1)).strftime("%Y-%m-%d")
+        current_shift = "night"
+    elif second_of_day < 18 * 3600:
+        current_date = cursor.strftime("%Y-%m-%d")
+        current_shift = "day"
+    else:
+        current_date = cursor.strftime("%Y-%m-%d")
+        current_shift = "night"
+    return (
+        str(duty_date or "").strip() == current_date
+        and str(duty_shift or "").strip().lower() == current_shift
+    )
 
 
 def _build_review_document_state_service(
@@ -3839,6 +3878,73 @@ def handover_review_bootstrap(
         emit_log=container.add_system_log,
         include_concurrency=False,
     )
+
+
+@router.post("/api/handover/review/{building_code}/sections/events/refresh")
+def handover_review_refresh_event_sections(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
+    service, parser, writer, _ = _build_review_services(container)
+    document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
+    building = _resolve_building_or_404(service, building_code)
+    session_id = str(payload.get("session_id", "") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    try:
+        document, session = document_state.load_document(target)
+    except ReviewDocumentStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    duty_date_text = str(session.get("duty_date", "") or "").strip()
+    duty_shift_text = str(session.get("duty_shift", "") or "").strip().lower()
+    if not duty_date_text or duty_shift_text not in {"day", "night"}:
+        raise HTTPException(status_code=400, detail="当前审核记录缺少日期或班次，无法刷新事件分类")
+
+    follower_text = _fixed_cell_value_from_review_document(document, "C3")
+    builder = EventCategoryPayloadBuilder(handover_cfg)
+    started = time.perf_counter()
+    try:
+        sections = builder.build(
+            building=building,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            follower_text=follower_text,
+            is_current_duty_context=_is_current_handover_duty_context(
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+            ),
+            emit_log=container.add_system_log,
+        )
+    except Exception as exc:  # noqa: BLE001
+        container.add_system_log(
+            f"[交接班][审核页事件刷新] 失败 building={building}, session={session_id}, error={exc}"
+        )
+        raise HTTPException(status_code=400, detail=f"刷新事件分类失败: {exc}") from exc
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    event_sections = sections if isinstance(sections, dict) else {}
+    row_counts = {
+        str(name): len(rows) if isinstance(rows, list) else 0
+        for name, rows in event_sections.items()
+    }
+    container.add_system_log(
+        f"[交接班][审核页事件刷新] 完成 building={building}, session={session_id}, "
+        f"sections={row_counts}, elapsed_ms={elapsed_ms}"
+    )
+    return {
+        "ok": True,
+        "building": building,
+        "session_id": session_id,
+        "duty_date": duty_date_text,
+        "duty_shift": duty_shift_text,
+        "sections": event_sections,
+        "row_counts": row_counts,
+        "elapsed_ms": elapsed_ms,
+    }
 
 
 @router.get("/api/handover/review/{building_code}/status")
