@@ -32,6 +32,7 @@ from handover_log_module.repository.review_building_document_store import Review
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
 from handover_log_module.service.capacity_report_common import CapacitySourceQuery, build_capacity_template_snapshot
 from handover_log_module.service.handover_capacity_oil_cache_service import HandoverCapacityOilCacheService
+from handover_log_module.service.capacity_room_inputs_service import CapacityRoomInputsService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from pipeline_utils import get_app_dir
 
@@ -80,7 +81,19 @@ _WEATHER_CACHE_LOCK = threading.RLock()
 _WEATHER_CACHE: Dict[Any, tuple[float, Dict[str, Any]]] = {}
 _WEATHER_INFLIGHT: Dict[Any, threading.Event] = {}
 _CAPACITY_BATCH_CACHE_TTL_SEC = 30
-_CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13")
+_CAPACITY_TRACKED_CELLS = (
+    "H6",
+    "F8",
+    "B6",
+    "D6",
+    "F6",
+    "D8",
+    "B7",
+    "D7",
+    "B13",
+    "D13",
+    *CapacityRoomInputsService.tracked_cells(),
+)
 _CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
 _CAPACITY_LOAD_RATE_ROWS = (12, 13, 14, 15)
 _CAPACITY_LOAD_RATE_DENOMINATOR = 10000.0
@@ -869,7 +882,40 @@ class HandoverCapacityReportService:
     @classmethod
     def extract_tracked_cells_from_review_document(cls, document: Dict[str, Any]) -> Dict[str, str]:
         fixed_cells = cls._extract_fixed_cells_from_document(document if isinstance(document, dict) else {})
+        fixed_cells.update(
+            CapacityRoomInputsService.extract_cells_from_document(document if isinstance(document, dict) else {})
+        )
         return {cell: _text(fixed_cells.get(cell)) for cell in _CAPACITY_TRACKED_CELLS}
+
+    def _capacity_room_cells_from_defaults(self, *, building: str, emit_log: Callable[[str], None] = print) -> Dict[str, str]:
+        building_text = _text(building)
+        if not building_text:
+            return {}
+        try:
+            raw_defaults = ReviewBuildingDocumentStore(config=self.config, building=building_text).get_default(
+                CapacityRoomInputsService.DEFAULTS_KEY
+            )
+        except Exception as exc:  # noqa: BLE001
+            try:
+                emit_log(f"[交接班][容量报表][包间默认] 读取SQLite默认值失败 building={building_text}, error={exc}")
+            except Exception:  # noqa: BLE001
+                pass
+            raw_defaults = None
+        if isinstance(raw_defaults, dict):
+            return CapacityRoomInputsService.cells_from_payload(raw_defaults, building=building_text)
+        return {}
+
+    @staticmethod
+    def _capacity_room_overlay_values(*, building: str, handover_cells: Dict[str, Any]) -> Dict[str, str]:
+        handover = handover_cells if isinstance(handover_cells, dict) else {}
+        overlay: Dict[str, str] = {}
+        for spec in CapacityRoomInputsService.row_specs_for_building(building):
+            for cell_key in ("total_cell", "powered_cell", "aircon_cell"):
+                cell_name = _text(spec.get(cell_key)).upper()
+                if not cell_name or cell_name not in handover:
+                    continue
+                overlay[cell_name] = _text(handover.get(cell_name))
+        return overlay
 
     @staticmethod
     def capacity_input_signature(cells: Dict[str, Any] | None) -> str:
@@ -1811,7 +1857,9 @@ class HandoverCapacityReportService:
             "R2": _text(outdoor_handover_cells.get("B7")),
             "AB2": _text(outdoor_handover_cells.get("D7")),
         }
-        return {cell: value for cell, value in overlay.items() if value != ""}
+        output = {cell: value for cell, value in overlay.items() if value != ""}
+        output.update(self._capacity_room_overlay_values(building=building, handover_cells=handover))
+        return output
 
     @staticmethod
     def _to_float_cell_value(value: Any) -> float | None:
@@ -2417,6 +2465,7 @@ class HandoverCapacityReportService:
             list(_CAPACITY_TRACKED_CELLS),
             sheet_name=handover_sheet_name,
         )
+        handover_cells.update(self._capacity_room_cells_from_defaults(building=building, emit_log=emit_log))
         return self.sync_overlay_for_existing_report_from_cells(
             building=building,
             duty_date=duty_date,
@@ -2624,6 +2673,7 @@ class HandoverCapacityReportService:
             ],
             sheet_name=handover_sheet_name,
         )
+        handover_cells.update(self._capacity_room_cells_from_defaults(building=building_text, emit_log=emit_log))
         capacity_rows = self._load_capacity_rows(capacity_source_file)
         oil_current = self._extract_current_oil_display_values(
             building=building_text,

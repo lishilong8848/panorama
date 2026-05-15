@@ -148,7 +148,13 @@ def _normalize_capacity_image_delivery(raw: Dict[str, Any] | None) -> Dict[str, 
     }
 
 
-_CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13"]
+_CAPACITY_SYNC_TRACKED_CELLS = [
+    "H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13",
+    "Z69", "AA69", "AC69", "Z79", "AA79", "AC79", "Z89", "AA89", "AC89",
+    "Z103", "AA103", "AC103", "Z109", "AA109", "AC109", "Z117", "AA117", "AC117",
+    "Z127", "AA127", "AC127", "Z129", "AA129", "AC129", "Z149", "AA149", "AC149",
+    "Z169", "AA169", "AC169",
+]
 _CAPACITY_LOAD_RATE_CELLS = ["J12", "J13", "J14", "J15"]
 _OUTDOOR_TEMPERATURE_BLOCK_ID = "outdoor_temperature"
 _OUTDOOR_TEMPERATURE_CELLS = ("B7", "D7")

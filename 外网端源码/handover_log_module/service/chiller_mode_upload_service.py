@@ -202,7 +202,8 @@ class ChillerModeUploadService:
 
     @staticmethod
     def _is_chiller_mode_point(point: str) -> bool:
-        return "冷机模式" in str(point or "").strip()
+        normalized = re.sub(r"\s+", "", str(point or "").strip())
+        return bool(normalized and "冷机" in normalized and "模式" in normalized)
 
     def _parse_source_file(
         self,

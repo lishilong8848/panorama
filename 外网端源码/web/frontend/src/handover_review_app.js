@@ -51,7 +51,16 @@ const SUBSTATION_110KV_LOCK_RELEASE_IDLE_MS = 10000;
 const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
 const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
 const HANDOVER_REVIEW_STATUS_BROADCAST_KEY = "handover_review_status_broadcast_v1";
-const CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13"];
+const CAPACITY_ROOM_TRACKED_CELLS = [
+  "Z69", "AA69", "AC69", "Z79", "AA79", "AC79", "Z89", "AA89", "AC89",
+  "Z103", "AA103", "AC103", "Z109", "AA109", "AC109", "Z117", "AA117", "AC117",
+  "Z127", "AA127", "AC127", "Z129", "AA129", "AC129", "Z149", "AA149", "AC149",
+  "Z169", "AA169", "AC169",
+];
+const CAPACITY_SYNC_TRACKED_CELLS = [
+  "H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13",
+  ...CAPACITY_ROOM_TRACKED_CELLS,
+];
 const OUTDOOR_TEMPERATURE_CELLS = ["B7", "D7"];
 const SUBSTATION_110KV_ROWS = [
   { row_id: "incoming_akai", label: "阿开", group: "incoming" },
@@ -760,6 +769,30 @@ function normalizeFooterBlock(block, index) {
   return normalizeReadonlyFooterBlock(block, index);
 }
 
+function normalizeCapacityRoomRow(row, index) {
+  const room = String(row?.room || `M${index + 1}`).trim() || `M${index + 1}`;
+  const rowNumber = Number.parseInt(String(row?.row || 0), 10) || 0;
+  return {
+    room,
+    label: String(row?.label || `${room}包间`).trim() || `${room}包间`,
+    row: rowNumber,
+    total_cell: String(row?.total_cell || "").trim().toUpperCase(),
+    powered_cell: String(row?.powered_cell || "").trim().toUpperCase(),
+    aircon_cell: String(row?.aircon_cell || "").trim().toUpperCase(),
+    total_cabinets: String(row?.total_cabinets ?? ""),
+    powered_cabinets: String(row?.powered_cabinets ?? ""),
+    aircon_started: String(row?.aircon_started ?? ""),
+  };
+}
+
+function normalizeCapacityRoomInputs(raw = {}) {
+  const rows = Array.isArray(raw?.rows) ? raw.rows.map(normalizeCapacityRoomRow) : [];
+  return {
+    title: String(raw?.title || "M1-M6包间机柜与空调启动台数").trim() || "M1-M6包间机柜与空调启动台数",
+    rows,
+  };
+}
+
 function normalizeDocument(document) {
   const fixedBlocks = Array.isArray(document?.fixed_blocks)
     ? document.fixed_blocks.map(normalizeFixedBlock)
@@ -776,6 +809,7 @@ function normalizeDocument(document) {
     sections,
     footer_blocks: footerBlocks,
     cooling_pump_pressures: normalizeCoolingPumpPressures(document?.cooling_pump_pressures || {}),
+    capacity_room_inputs: normalizeCapacityRoomInputs(document?.capacity_room_inputs || {}),
   };
 }
 
@@ -843,6 +877,7 @@ function emptyDirtyRegions() {
     sections: false,
     footer_inventory: false,
     cooling_pump_pressures: false,
+    capacity_room_inputs: false,
   };
 }
 
@@ -852,6 +887,7 @@ function cloneDirtyRegions(dirtyRegions) {
     sections: Boolean(dirtyRegions?.sections),
     footer_inventory: Boolean(dirtyRegions?.footer_inventory),
     cooling_pump_pressures: Boolean(dirtyRegions?.cooling_pump_pressures),
+    capacity_room_inputs: Boolean(dirtyRegions?.capacity_room_inputs),
   };
 }
 
@@ -1651,7 +1687,8 @@ export function mountHandoverReviewApp(Vue) {
           dirtyRegions.value.fixed_blocks
           || dirtyRegions.value.sections
           || dirtyRegions.value.footer_inventory
-          || dirtyRegions.value.cooling_pump_pressures,
+          || dirtyRegions.value.cooling_pump_pressures
+          || dirtyRegions.value.capacity_room_inputs,
         );
       }
 
@@ -3168,6 +3205,23 @@ export function mountHandoverReviewApp(Vue) {
         markDocumentDirty({ region: "cooling_pump_pressures" });
       }
 
+      function updateCapacityRoomInput(rowIndex, key, value) {
+        const rows = documentRef.value?.capacity_room_inputs?.rows;
+        if (!Array.isArray(rows) || !rows[rowIndex]) return;
+        const normalizedKey = String(key || "").trim();
+        const cellKeyByValueKey = {
+          total_cabinets: "total_cell",
+          powered_cabinets: "powered_cell",
+          aircon_started: "aircon_cell",
+        };
+        if (!Object.prototype.hasOwnProperty.call(cellKeyByValueKey, normalizedKey)) return;
+        const nextValue = String(value ?? "");
+        if (String(rows[rowIndex][normalizedKey] ?? "") === nextValue) return;
+        rows[rowIndex][normalizedKey] = nextValue;
+        const cellName = String(rows[rowIndex][cellKeyByValueKey[normalizedKey]] || "").trim().toUpperCase();
+        markDocumentDirty({ region: "capacity_room_inputs", capacityCell: cellName });
+      }
+
       async function saveSubstation110kvIfNeeded() {
         if (!substation110kvDirty.value) return true;
         const locked = await ensureSubstation110kvLock();
@@ -3528,6 +3582,7 @@ export function mountHandoverReviewApp(Vue) {
         updateCoolingPumpPressure,
         updateCoolingTowerLevel,
         updateCoolingTankValue,
+        updateCapacityRoomInput,
         saveCurrentReview,
         toggleConfirm,
         retryCloudSheetSync: () => retryCloudSheetSync(getJobApi),

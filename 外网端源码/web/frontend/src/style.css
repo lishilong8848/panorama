@@ -2874,6 +2874,23 @@ button:disabled,
   border-collapse: collapse;
 }
 
+.capacity-room-table {
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.capacity-room-table td:first-child {
+  width: 24%;
+}
+
+.capacity-room-table td:first-child small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .review-table th,
 .review-table td,
 .site-table th,

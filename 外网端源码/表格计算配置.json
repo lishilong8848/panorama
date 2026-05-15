@@ -4503,15 +4503,41 @@
         "enabled": true,
         "required": false,
         "dry_run": false,
-        "auto_install": true,
-        "repo_url": "https://github.com/frankmjy/QJZS-kw.git",
-        "git_executable": "git",
-        "node_executable": "node",
-        "repo_dir": "../external_repos/QJZS-kw",
-        "script_path": "scripts/sync-power-alerts.js",
-        "config_path": "config/power-alert-sync.config.json",
-        "install_timeout_sec": 180,
-        "timeout_sec": 900
+        "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+        "data_center_name": "EA118",
+        "page_size": 500,
+        "batch_size": 200,
+        "tables": {
+          "source": {
+            "name": "机柜功率每日明细",
+            "table_id": "tblT5KbsxGCK1SwA",
+            "view_id": "vewVpRF3Ok"
+          },
+          "branch": {
+            "name": "单支路超6.25KW功率",
+            "table_id": "tblvyOhLPCIH52gB",
+            "view_id": "vewcScal5R",
+            "threshold": 6.25
+          },
+          "cabinet": {
+            "name": "机柜超18KW统计",
+            "table_id": "tbloY4JDihNu0aJ7",
+            "view_id": "vewjNHFVZK",
+            "threshold": 18
+          },
+          "line_head": {
+            "name": "列头柜超107.5功率统计",
+            "table_id": "tblqxn3BajmZHxb6",
+            "view_id": "vew07sLZm1",
+            "threshold": 107.5
+          },
+          "row_line": {
+            "name": "机列超215KW功率统计",
+            "table_id": "tblCcFzmKKz50tYT",
+            "view_id": "vewQialYnD",
+            "threshold": 215
+          }
+        }
       }
     },
     "chiller_mode_upload": {

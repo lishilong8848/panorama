@@ -1112,7 +1112,7 @@ function applyChillerModeUploadDefaults(cfg) {
   setBooleanDefault(scheduler, "auto_start_in_gui", false);
   setNumberDefault(scheduler, "interval_minutes", 10);
   setNumberDefault(scheduler, "check_interval_sec", 30);
-  setBooleanDefault(scheduler, "retry_failed_on_next_tick", true);
+  setBooleanDefault(scheduler, "retry_failed_on_next_tick", false);
   setStringDefault(scheduler, "state_file", "chiller_mode_upload_scheduler_state.json");
 
   setStringDefault(target, "app_token", "ASLxbfESPahdTKs0A9NccgbrnXc");

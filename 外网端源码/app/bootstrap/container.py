@@ -451,6 +451,8 @@ class AppContainer:
         scheduler_cfg = chiller_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
+        scheduler_cfg = dict(scheduler_cfg)
+        scheduler_cfg["retry_failed_on_next_tick"] = False
         return IntervalSchedulerService(
             scheduler_cfg=scheduler_cfg,
             runtime_state_root=runtime_state_root or "runtime_state",

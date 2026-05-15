@@ -1373,12 +1373,14 @@ def _normalize_review_dirty_regions(raw: Any) -> Dict[str, bool]:
             "sections": True,
             "footer_inventory": True,
             "cooling_pump_pressures": True,
+            "capacity_room_inputs": True,
         }
     return {
         "fixed_blocks": bool(raw.get("fixed_blocks")),
         "sections": bool(raw.get("sections")),
         "footer_inventory": bool(raw.get("footer_inventory")),
         "cooling_pump_pressures": bool(raw.get("cooling_pump_pressures")),
+        "capacity_room_inputs": bool(raw.get("capacity_room_inputs")),
     }
 
 
@@ -1401,11 +1403,9 @@ def _extract_review_fixed_cells(document: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _extract_capacity_tracked_cells(document: Dict[str, Any]) -> Dict[str, str]:
-    fixed_cells = _extract_review_fixed_cells(document)
-    return {
-        cell: str(fixed_cells.get(cell, "") or "").strip()
-        for cell in HandoverCapacityReportService.tracked_cells()
-    }
+    return HandoverCapacityReportService.extract_tracked_cells_from_review_document(
+        document if isinstance(document, dict) else {}
+    )
 
 
 def _should_sync_capacity_after_review_save(
@@ -1415,7 +1415,11 @@ def _should_sync_capacity_after_review_save(
     tracked_cells: Dict[str, str],
 ) -> bool:
     dirty = dirty_regions or {}
-    if not bool(dirty.get("fixed_blocks")) and not bool(dirty.get("cooling_pump_pressures")):
+    if (
+        not bool(dirty.get("fixed_blocks"))
+        and not bool(dirty.get("cooling_pump_pressures"))
+        and not bool(dirty.get("capacity_room_inputs"))
+    ):
         return False
     previous = previous_session if isinstance(previous_session, dict) else {}
     previous_sync = previous.get("capacity_sync", {}) if isinstance(previous.get("capacity_sync", {}), dict) else {}
@@ -1713,6 +1717,7 @@ def _persist_review_defaults(
     result: Dict[str, int | bool | str] = {
         "footer_inventory_rows": int(persisted.get("footer_inventory_rows", 0) or 0),
         "cabinet_power_fields": int(persisted.get("cabinet_power_fields", 0) or 0),
+        "capacity_room_rows": int(persisted.get("capacity_room_rows", 0) or 0),
         "cooling_pump_pressure_rows": int(persisted.get("cooling_pump_pressure_rows", 0) or 0),
         "attention_handover_rows": int(persisted.get("attention_handover_rows", 0) or 0),
         "defaults_updated": bool(persisted.get("defaults_updated", False)),
@@ -4601,7 +4606,12 @@ def handover_review_save(
             document_state.restore_document(building=building, previous=previous_document_state)
             _raise_review_store_http_error(exc, saved_document=True)
         is_latest_session = bool(latest_session_id and latest_session_id == session_id)
-        persisted_defaults = {"footer_inventory_rows": 0, "cabinet_power_fields": 0, "config_updated": False}
+        persisted_defaults = {
+            "footer_inventory_rows": 0,
+            "cabinet_power_fields": 0,
+            "capacity_room_rows": 0,
+            "config_updated": False,
+        }
         try:
             session_started = time.perf_counter()
             if is_latest_session:
@@ -4688,6 +4698,7 @@ def handover_review_save(
                 persisted_defaults = {
                     "footer_inventory_rows": 0,
                     "cabinet_power_fields": 0,
+                    "capacity_room_rows": 0,
                     "config_updated": False,
                     "defaults_updated": False,
                     "config_sync_required": False,
@@ -4819,12 +4830,14 @@ def handover_review_save(
             container.add_system_log(
                 f"[交接班][审核模板默认] 已写入楼栋SQLite默认值: building={building}, "
                 f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0)}, "
+                f"capacity_room_rows={persisted_defaults.get('capacity_room_rows', 0)}, "
                 f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0)}"
             )
         else:
             container.add_system_log(
                 f"[交接班][审核模板默认] 楼栋SQLite默认值无变化，已跳过写入: building={building}, "
                 f"cabinet_power_fields={persisted_defaults.get('cabinet_power_fields', 0) if isinstance(persisted_defaults, dict) else 0}, "
+                f"capacity_room_rows={persisted_defaults.get('capacity_room_rows', 0) if isinstance(persisted_defaults, dict) else 0}, "
                 f"footer_inventory_rows={persisted_defaults.get('footer_inventory_rows', 0) if isinstance(persisted_defaults, dict) else 0}"
             )
         if defaults_config_status == "queued":

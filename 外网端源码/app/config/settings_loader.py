@@ -1316,18 +1316,39 @@ def _validate_branch_power_upload(cfg: Dict[str, Any]) -> None:
         return
     if not isinstance(power_alert_cfg, dict):
         raise ValueError("配置错误: features.branch_power_upload.power_alert_sync 必须是对象")
-    for key in ("enabled", "required", "dry_run", "auto_install"):
+    for key in ("enabled", "required", "dry_run"):
         if key in power_alert_cfg and not isinstance(power_alert_cfg.get(key), bool):
             raise ValueError(f"配置错误: features.branch_power_upload.power_alert_sync.{key} 必须是布尔值")
-    for timeout_key in ("timeout_sec", "install_timeout_sec"):
-        if timeout_key not in power_alert_cfg:
+    for int_key in ("page_size", "batch_size"):
+        if int_key not in power_alert_cfg:
             continue
         try:
-            timeout_sec = int(power_alert_cfg.get(timeout_key))
+            int_value = int(power_alert_cfg.get(int_key))
         except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"配置错误: features.branch_power_upload.power_alert_sync.{timeout_key} 必须是正整数") from exc
-        if timeout_sec <= 0:
-            raise ValueError(f"配置错误: features.branch_power_upload.power_alert_sync.{timeout_key} 必须大于0")
+            raise ValueError(f"配置错误: features.branch_power_upload.power_alert_sync.{int_key} 必须是正整数") from exc
+        if int_value <= 0:
+            raise ValueError(f"配置错误: features.branch_power_upload.power_alert_sync.{int_key} 必须大于0")
+    tables_cfg = power_alert_cfg.get("tables", {})
+    if tables_cfg is not None and not isinstance(tables_cfg, dict):
+        raise ValueError("配置错误: features.branch_power_upload.power_alert_sync.tables 必须是对象")
+    if isinstance(tables_cfg, dict):
+        for table_key in ("source", "branch", "cabinet", "line_head", "row_line"):
+            table_cfg = tables_cfg.get(table_key, {})
+            if table_cfg is None:
+                continue
+            if not isinstance(table_cfg, dict):
+                raise ValueError(f"配置错误: features.branch_power_upload.power_alert_sync.tables.{table_key} 必须是对象")
+            if "enabled" in table_cfg and not isinstance(table_cfg.get("enabled"), bool):
+                raise ValueError(
+                    f"配置错误: features.branch_power_upload.power_alert_sync.tables.{table_key}.enabled 必须是布尔值"
+                )
+            if "threshold" in table_cfg:
+                try:
+                    float(table_cfg.get("threshold"))
+                except Exception as exc:  # noqa: BLE001
+                    raise ValueError(
+                        f"配置错误: features.branch_power_upload.power_alert_sync.tables.{table_key}.threshold 必须是数字"
+                    ) from exc
 
 
 def _validate_chiller_mode_upload(cfg: Dict[str, Any]) -> None:

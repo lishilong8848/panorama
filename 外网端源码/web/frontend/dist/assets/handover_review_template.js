@@ -320,6 +320,64 @@
         </article>
       </section>
 
+      <section v-if="document.capacity_room_inputs && document.capacity_room_inputs.rows && document.capacity_room_inputs.rows.length" class="review-sections">
+        <article class="review-card review-section-card">
+          <div class="review-card-head">
+            <div>
+              <h2>{{ document.capacity_room_inputs.title || "M1-M6包间机柜与空调启动台数" }}</h2>
+              <p class="review-card-subtitle">保存后会作为本楼下次生成容量表的默认值，并同步补写当前容量表。</p>
+            </div>
+          </div>
+          <div class="review-table-wrap capacity-room-table-wrap">
+            <table class="review-table capacity-room-table">
+              <thead>
+                <tr>
+                  <th>包间</th>
+                  <th>总机柜数</th>
+                  <th>上电机柜数</th>
+                  <th>空调启动台数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, rowIndex) in document.capacity_room_inputs.rows" :key="row.room + ':' + row.row">
+                  <td>
+                    <strong>{{ row.label || row.room }}</strong>
+                    <small>{{ row.total_cell }} / {{ row.powered_cell }} / {{ row.aircon_cell }}</small>
+                  </td>
+                  <td>
+                    <input
+                      class="review-input"
+                      :value="row.total_cabinets"
+                      :disabled="regenerating"
+                      @input="updateCapacityRoomInput(rowIndex, 'total_cabinets', $event.target.value)"
+                      @change="updateCapacityRoomInput(rowIndex, 'total_cabinets', $event.target.value)"
+                    />
+                  </td>
+                  <td>
+                    <input
+                      class="review-input"
+                      :value="row.powered_cabinets"
+                      :disabled="regenerating"
+                      @input="updateCapacityRoomInput(rowIndex, 'powered_cabinets', $event.target.value)"
+                      @change="updateCapacityRoomInput(rowIndex, 'powered_cabinets', $event.target.value)"
+                    />
+                  </td>
+                  <td>
+                    <input
+                      class="review-input"
+                      :value="row.aircon_started"
+                      :disabled="regenerating"
+                      @input="updateCapacityRoomInput(rowIndex, 'aircon_started', $event.target.value)"
+                      @change="updateCapacityRoomInput(rowIndex, 'aircon_started', $event.target.value)"
+                    />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
       <section class="review-fixed-grid">
         <article v-for="(block, blockIndex) in document.fixed_blocks" :key="block.id || blockIndex" class="review-card">
           <div class="review-card-head">

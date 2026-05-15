@@ -5914,16 +5914,18 @@ class SharedSourceCacheService:
             "[共享缓存] 制冷单元模式切换参数定时拉取开始 "
             f"bucket={bucket_key}, interval_sec={self._chiller_mode_switch_interval_sec}"
         )
-        self._refresh_family_bucket(
-            source_family=FAMILY_CHILLER_MODE_SWITCH,
-            bucket_key=bucket_key,
-            fill_func=self.fill_chiller_mode_switch_latest,
-            force_retry_failed=True,
-            force_refresh_existing=True,
-        )
-        with self._lock:
-            self._last_chiller_mode_switch_run_monotonic = time.monotonic()
-            self._last_run_at = _now_text()
+        try:
+            self._refresh_family_bucket(
+                source_family=FAMILY_CHILLER_MODE_SWITCH,
+                bucket_key=bucket_key,
+                fill_func=self.fill_chiller_mode_switch_latest,
+                force_retry_failed=True,
+                force_refresh_existing=True,
+            )
+        finally:
+            with self._lock:
+                self._last_chiller_mode_switch_run_monotonic = time.monotonic()
+                self._last_run_at = _now_text()
 
     def _mark_current_hour_refresh(self, **fields: Any) -> None:
         with self._lock:

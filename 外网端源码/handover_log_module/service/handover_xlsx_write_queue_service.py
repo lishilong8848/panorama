@@ -97,11 +97,9 @@ class HandoverXlsxWriteQueueService:
 
     @classmethod
     def _extract_capacity_tracked_cells(cls, document: Dict[str, Any]) -> Dict[str, str]:
-        fixed_cells = cls._extract_fixed_cells(document)
-        return {
-            cell: _text(fixed_cells.get(cell, ""))
-            for cell in HandoverCapacityReportService.tracked_cells()
-        }
+        return HandoverCapacityReportService.extract_tracked_cells_from_review_document(
+            document if isinstance(document, dict) else {}
+        )
 
     def _recover_running_once(self, building: str) -> None:
         key = _text(building)
