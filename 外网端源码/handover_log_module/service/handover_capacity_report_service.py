@@ -2002,60 +2002,6 @@ class HandoverCapacityReportService:
         finally:
             workbook.close()
 
-    @classmethod
-    def _build_zone_capacity_formula_values_from_sheet(
-        cls,
-        sheet,
-        overlay_values: Dict[str, Any] | None = None,
-    ) -> Dict[str, str]:
-        overlay = {
-            _text(cell).upper(): value
-            for cell, value in (overlay_values or {}).items()
-            if _text(cell)
-        }
-
-        def _cell_text(cell: str) -> str:
-            key = _text(cell).upper()
-            if key in overlay:
-                return _text(overlay.get(key))
-            return _text(sheet[key].value)
-
-        def _calc(*, flow_cell: str, return_cell: str, supply_cell: str) -> str:
-            primary_flow = cls._to_float_cell_value(_cell_text(flow_cell))
-            chilled_return_temp = cls._to_float_cell_value(_cell_text(return_cell))
-            chilled_supply_temp = cls._to_float_cell_value(_cell_text(supply_cell))
-            if primary_flow is None or chilled_return_temp is None or chilled_supply_temp is None:
-                return ""
-            return format_number(abs(chilled_return_temp - chilled_supply_temp) * primary_flow * 1.163)
-
-        values: Dict[str, str] = {}
-        west_value = _calc(flow_cell="G22", return_cell="L28", supply_cell="L29")
-        if west_value:
-            values["D22"] = west_value
-        east_value = _calc(flow_cell="T22", return_cell="Y28", supply_cell="Y29")
-        if east_value:
-            values["Q22"] = east_value
-        return values
-
-    def _build_zone_capacity_formula_values_from_file(
-        self,
-        *,
-        capacity_output_file: str,
-        overlay_values: Dict[str, Any] | None = None,
-    ) -> Dict[str, str]:
-        path = Path(_text(capacity_output_file))
-        if not _text(capacity_output_file) or not path.exists() or not path.is_file():
-            return {}
-        workbook = load_workbook_quietly(path)
-        try:
-            sheet_name = self._sheet_name(workbook, _text(self._template_cfg().get("sheet_name")))
-            return self._build_zone_capacity_formula_values_from_sheet(
-                workbook[sheet_name],
-                overlay_values=overlay_values,
-            )
-        finally:
-            workbook.close()
-
     @staticmethod
     def _build_substation_110kv_values(shared_110kv: Dict[str, Any] | None) -> Dict[str, str]:
         block = shared_110kv if isinstance(shared_110kv, dict) else {}
@@ -2169,12 +2115,6 @@ class HandoverCapacityReportService:
         overlay_values.update(self._build_substation_110kv_values(shared_block))
         if isinstance(cooling_pump_pressures, dict):
             overlay_values.update(self._build_cooling_pump_pressure_values(cooling_pump_pressures))
-        overlay_values.update(
-            self._build_zone_capacity_formula_values_from_file(
-                capacity_output_file=capacity_output_file,
-                overlay_values=overlay_values,
-            )
-        )
         load_rate_values, _, load_rate_payload = self._build_load_rate_values_from_file(
             capacity_output_file=capacity_output_file,
             building=building,
@@ -2535,16 +2475,6 @@ class HandoverCapacityReportService:
                 overlay_values.update(self._build_substation_110kv_values(shared_block))
                 if isinstance(cooling_pump_pressures, dict):
                     overlay_values.update(self._build_cooling_pump_pressure_values(cooling_pump_pressures))
-                formula_values = self._build_zone_capacity_formula_values_from_sheet(
-                    sheet,
-                    overlay_values=overlay_values,
-                )
-                if formula_values:
-                    overlay_values.update(formula_values)
-                    emit_log(
-                        "[交接班][容量报表][补写] 区域制冷量计算完成 "
-                        f"building={building}, D22={formula_values.get('D22', '-')}, Q22={formula_values.get('Q22', '-')}"
-                    )
                 load_rate_values, load_rate_warning, load_rate_payload = self._build_load_rate_values_for_sheet(
                     sheet,
                     building=building,

@@ -54,6 +54,7 @@ FAMILY_ALARM_EVENT = "alarm_event_family"
 FAMILY_BRANCH_POWER = "branch_power_family"
 FAMILY_BRANCH_CURRENT = "branch_current_family"
 FAMILY_BRANCH_SWITCH = "branch_switch_family"
+FAMILY_CHILLER_MODE_SWITCH = "chiller_mode_switch_family"
 LEGACY_FAMILY_ALIASES = {
     FAMILY_HANDOVER_LOG: ("handover_family",),
     FAMILY_MONTHLY_REPORT: ("monthly_family",),
@@ -66,6 +67,7 @@ FAMILY_DIR_NAMES = {
     FAMILY_BRANCH_POWER: "branch_power",
     FAMILY_BRANCH_CURRENT: "branch_current",
     FAMILY_BRANCH_SWITCH: "branch_switch",
+    FAMILY_CHILLER_MODE_SWITCH: "chiller_mode_switch",
 }
 FAMILY_LABELS = {
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
@@ -75,6 +77,7 @@ FAMILY_LABELS = {
     FAMILY_BRANCH_POWER: "支路功率源文件",
     FAMILY_BRANCH_CURRENT: "支路电流源文件",
     FAMILY_BRANCH_SWITCH: "支路开关源文件",
+    FAMILY_CHILLER_MODE_SWITCH: "制冷单元模式切换参数源文件",
 }
 
 ALARM_EVENT_BITABLE_TARGET_FIELDS = {
@@ -250,6 +253,7 @@ class SharedSourceCacheService:
             FAMILY_BRANCH_POWER: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_BRANCH_CURRENT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_BRANCH_SWITCH: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+            FAMILY_CHILLER_MODE_SWITCH: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
         }
         self._light_building_status: Dict[str, Dict[str, Dict[str, Any]]] = {
             FAMILY_HANDOVER_LOG: {},
@@ -259,6 +263,7 @@ class SharedSourceCacheService:
             FAMILY_BRANCH_POWER: {},
             FAMILY_BRANCH_CURRENT: {},
             FAMILY_BRANCH_SWITCH: {},
+            FAMILY_CHILLER_MODE_SWITCH: {},
         }
         self._current_hour_refresh: Dict[str, Any] = {
             "running": False,
@@ -490,6 +495,10 @@ class SharedSourceCacheService:
         buildings = self.get_enabled_buildings()
         current_bucket = self._current_hour_bucket or self.current_hour_bucket()
         branch_bucket = self.branch_power_day_bucket()
+        chiller_mode_switch_bucket = (
+            str(self._family_status.get(FAMILY_CHILLER_MODE_SWITCH, {}).get("current_bucket", "") or "").strip()
+            or self.current_chiller_mode_switch_bucket()
+        )
         alarm_bucket = (
             str(self._family_status.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip()
             or self.current_alarm_bucket()
@@ -501,6 +510,7 @@ class SharedSourceCacheService:
         self._family_status.setdefault(FAMILY_BRANCH_POWER, {})["current_bucket"] = branch_bucket
         self._family_status.setdefault(FAMILY_BRANCH_CURRENT, {})["current_bucket"] = branch_bucket
         self._family_status.setdefault(FAMILY_BRANCH_SWITCH, {})["current_bucket"] = branch_bucket
+        self._family_status.setdefault(FAMILY_CHILLER_MODE_SWITCH, {})["current_bucket"] = chiller_mode_switch_bucket
         for family_name, bucket_key in (
             (FAMILY_HANDOVER_LOG, current_bucket),
             (FAMILY_HANDOVER_CAPACITY_REPORT, current_bucket),
@@ -509,6 +519,7 @@ class SharedSourceCacheService:
             (FAMILY_BRANCH_POWER, branch_bucket),
             (FAMILY_BRANCH_CURRENT, branch_bucket),
             (FAMILY_BRANCH_SWITCH, branch_bucket),
+            (FAMILY_CHILLER_MODE_SWITCH, chiller_mode_switch_bucket),
         ):
             family_cache = self._light_building_status.setdefault(family_name, {})
             for building in buildings:
@@ -738,7 +749,11 @@ class SharedSourceCacheService:
             "buildings": building_rows,
             "latest_selection": {},
         }
-        bucket_scope_text = "本次定时" if self._normalize_source_family(source_family) == FAMILY_ALARM_EVENT else "本小时"
+        bucket_scope_text = (
+            "本次定时"
+            if self._normalize_source_family(source_family) in {FAMILY_ALARM_EVENT, FAMILY_CHILLER_MODE_SWITCH}
+            else "本小时"
+        )
         family_key = self._normalize_source_family(source_family)
         return present_source_cache_family(
             raw_family,
@@ -759,6 +774,10 @@ class SharedSourceCacheService:
             alarm_external_upload = copy.deepcopy(self._alarm_external_upload_state)
         include_latest_selection = True
         alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
+        chiller_mode_switch_bucket = (
+            str(families.get(FAMILY_CHILLER_MODE_SWITCH, {}).get("current_bucket", "") or "").strip()
+            or self.current_chiller_mode_switch_bucket()
+        )
         snapshot_error = ""
         try:
             handover_family = self._build_family_health_snapshot(
@@ -792,6 +811,15 @@ class SharedSourceCacheService:
         except Exception as exc:  # noqa: BLE001
             alarm_family = {"current_bucket": alarm_bucket, "buildings": []}
             snapshot_error = snapshot_error or str(exc)
+        try:
+            chiller_mode_switch_family = self._build_family_health_snapshot(
+                source_family=FAMILY_CHILLER_MODE_SWITCH,
+                current_bucket=chiller_mode_switch_bucket,
+                include_latest_selection=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            chiller_mode_switch_family = {"current_bucket": chiller_mode_switch_bucket, "buildings": []}
+            snapshot_error = snapshot_error or str(exc)
         families[FAMILY_HANDOVER_LOG] = {**families.get(FAMILY_HANDOVER_LOG, {}), **handover_family}
         families[FAMILY_HANDOVER_CAPACITY_REPORT] = {
             **families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
@@ -802,6 +830,10 @@ class SharedSourceCacheService:
             **families.get(FAMILY_ALARM_EVENT, {}),
             **alarm_family,
             "external_upload": alarm_external_upload,
+        }
+        families[FAMILY_CHILLER_MODE_SWITCH] = {
+            **families.get(FAMILY_CHILLER_MODE_SWITCH, {}),
+            **chiller_mode_switch_family,
         }
         snapshot = {
             "enabled": bool(self.enabled and self.role_mode in {"internal", "external"}),
@@ -818,6 +850,7 @@ class SharedSourceCacheService:
             FAMILY_BRANCH_POWER: families.get(FAMILY_BRANCH_POWER, {}),
             FAMILY_BRANCH_CURRENT: families.get(FAMILY_BRANCH_CURRENT, {}),
             FAMILY_BRANCH_SWITCH: families.get(FAMILY_BRANCH_SWITCH, {}),
+            FAMILY_CHILLER_MODE_SWITCH: families.get(FAMILY_CHILLER_MODE_SWITCH, {}),
             FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
         }
         snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
@@ -1201,6 +1234,12 @@ class SharedSourceCacheService:
                 current_bucket=self.branch_power_day_bucket(),
                 buildings=buildings,
             ),
+            FAMILY_CHILLER_MODE_SWITCH: self._build_fast_external_family_from_index(
+                source_family=FAMILY_CHILLER_MODE_SWITCH,
+                current_bucket=str(self._family_status.get(FAMILY_CHILLER_MODE_SWITCH, {}).get("current_bucket", "") or "").strip()
+                or self.current_chiller_mode_switch_bucket(),
+                buildings=buildings,
+            ),
             FAMILY_ALARM_EVENT: self._build_fast_alarm_external_family_from_index(buildings=buildings),
         }
         snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
@@ -1243,6 +1282,7 @@ class SharedSourceCacheService:
         self._branch_power_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_POWER] if self.shared_root else None
         self._branch_current_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_CURRENT] if self.shared_root else None
         self._branch_switch_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_SWITCH] if self.shared_root else None
+        self._chiller_mode_switch_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_CHILLER_MODE_SWITCH] if self.shared_root else None
         self._tmp_root = self.shared_root / "tmp" / "source_cache" if self.shared_root else None
 
     def update_runtime_config(self, runtime_config: Dict[str, Any]) -> None:
@@ -1270,6 +1310,12 @@ class SharedSourceCacheService:
             return FAMILY_MONTHLY_REPORT
         if text in {FAMILY_BRANCH_POWER, "branch_power"}:
             return FAMILY_BRANCH_POWER
+        if text in {FAMILY_BRANCH_CURRENT, "branch_current"}:
+            return FAMILY_BRANCH_CURRENT
+        if text in {FAMILY_BRANCH_SWITCH, "branch_switch"}:
+            return FAMILY_BRANCH_SWITCH
+        if text in {FAMILY_CHILLER_MODE_SWITCH, "chiller_mode_switch"}:
+            return FAMILY_CHILLER_MODE_SWITCH
         return text
 
     def _source_family_candidates(self, source_family: str) -> List[str]:
@@ -1284,6 +1330,10 @@ class SharedSourceCacheService:
     def current_hour_bucket(self, when: datetime | None = None) -> str:
         now = when or datetime.now()
         return now.strftime("%Y-%m-%d %H")
+
+    def current_chiller_mode_switch_bucket(self, when: datetime | None = None) -> str:
+        now = when or datetime.now()
+        return now.strftime("%Y-%m-%d %H:%M")
 
     def branch_power_business_date(self, when: datetime | None = None) -> str:
         return ((when or datetime.now()) - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1688,6 +1738,8 @@ class SharedSourceCacheService:
             self._branch_current_cache_root.mkdir(parents=True, exist_ok=True)
         if self._branch_switch_cache_root is not None:
             self._branch_switch_cache_root.mkdir(parents=True, exist_ok=True)
+        if self._chiller_mode_switch_cache_root is not None:
+            self._chiller_mode_switch_cache_root.mkdir(parents=True, exist_ok=True)
         self._tmp_root.mkdir(parents=True, exist_ok=True)
 
     def ensure_required_directories(self) -> Dict[str, str]:
@@ -1705,6 +1757,7 @@ class SharedSourceCacheService:
             FAMILY_BRANCH_POWER: str(self._branch_power_cache_root) if self._branch_power_cache_root is not None else "",
             FAMILY_BRANCH_CURRENT: str(self._branch_current_cache_root) if self._branch_current_cache_root is not None else "",
             FAMILY_BRANCH_SWITCH: str(self._branch_switch_cache_root) if self._branch_switch_cache_root is not None else "",
+            FAMILY_CHILLER_MODE_SWITCH: str(self._chiller_mode_switch_cache_root) if self._chiller_mode_switch_cache_root is not None else "",
             "tmp_source_cache": str(self._tmp_root) if self._tmp_root is not None else "",
         }
 
@@ -1802,6 +1855,8 @@ class SharedSourceCacheService:
             return self._branch_current_cache_root
         if normalized_family == FAMILY_BRANCH_SWITCH and self._branch_switch_cache_root is not None:
             return self._branch_switch_cache_root
+        if normalized_family == FAMILY_CHILLER_MODE_SWITCH and self._chiller_mode_switch_cache_root is not None:
+            return self._chiller_mode_switch_cache_root
         raise RuntimeError("共享缓存根目录未配置")
 
     def _month_segment(self, value: str) -> str:

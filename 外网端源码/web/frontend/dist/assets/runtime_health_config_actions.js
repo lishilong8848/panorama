@@ -97,6 +97,7 @@ const SOURCE_CACHE_FAMILY_LABELS = {
   branch_power_family: "支路功率源文件",
   branch_current_family: "支路电流源文件",
   branch_switch_family: "支路开关源文件",
+  chiller_mode_switch_family: "制冷单元模式切换参数源文件",
   alarm_event_family: "告警信息源文件",
 };
 const ENGINEER_DIRECTORY_CACHE_KEY = "handover_engineer_directory_daily_cache_v1";
@@ -1117,7 +1118,16 @@ export function createRuntimeHealthConfigActions(ctx) {
     ) {
       merged.current_hour_refresh_overview = current.current_hour_refresh_overview;
     }
-    ["handover_log_family", "handover_capacity_report_family", "monthly_report_family", "branch_power_family", "alarm_event_family"].forEach((key) => {
+    [
+      "handover_log_family",
+      "handover_capacity_report_family",
+      "monthly_report_family",
+      "branch_power_family",
+      "branch_current_family",
+      "branch_switch_family",
+      "chiller_mode_switch_family",
+      "alarm_event_family",
+    ].forEach((key) => {
       merged[key] = mergeLiteSharedBridgeFamily(current[key], next[key]);
     });
     return merged;
@@ -1367,6 +1377,27 @@ export function createRuntimeHealthConfigActions(ctx) {
         Object.assign(health.wet_bulb_collection.target_preview, data.wet_bulb_collection.target_preview);
       } else {
         Object.assign(health.wet_bulb_collection.target_preview, {
+          configured_app_token: "",
+          operation_app_token: "",
+          table_id: "",
+          target_kind: "",
+          display_url: "",
+          bitable_url: "",
+          wiki_node_token: "",
+          message: "",
+          resolved_at: "",
+        });
+      }
+    }
+    if (data.chiller_mode_upload && typeof data.chiller_mode_upload === "object") {
+      health.chiller_mode_upload.enabled = Boolean(data.chiller_mode_upload.enabled);
+      if (data.chiller_mode_upload.scheduler && typeof data.chiller_mode_upload.scheduler === "object") {
+        Object.assign(health.chiller_mode_upload.scheduler, data.chiller_mode_upload.scheduler);
+      }
+      if (data.chiller_mode_upload.target_preview && typeof data.chiller_mode_upload.target_preview === "object") {
+        Object.assign(health.chiller_mode_upload.target_preview, data.chiller_mode_upload.target_preview);
+      } else {
+        Object.assign(health.chiller_mode_upload.target_preview, {
           configured_app_token: "",
           operation_app_token: "",
           table_id: "",
@@ -1975,6 +2006,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     const wet = summary.wet_bulb_collection_scheduler;
     if (wet && typeof wet === "object" && health?.wet_bulb_collection?.scheduler) {
       Object.assign(health.wet_bulb_collection.scheduler, wet);
+    }
+    const chillerMode = summary.chiller_mode_upload_scheduler;
+    if (chillerMode && typeof chillerMode === "object" && health?.chiller_mode_upload?.scheduler) {
+      Object.assign(health.chiller_mode_upload.scheduler, chillerMode);
     }
     const dayMetric = summary.day_metric_upload_scheduler;
     if (dayMetric && typeof dayMetric === "object" && health?.day_metric_upload?.scheduler) {

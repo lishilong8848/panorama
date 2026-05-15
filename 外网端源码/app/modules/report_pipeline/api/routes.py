@@ -59,6 +59,7 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_POWER,
     FAMILY_BRANCH_SWITCH,
+    FAMILY_CHILLER_MODE_SWITCH,
     SharedSourceCacheService,
     is_accessible_cached_file_path,
 )
@@ -90,6 +91,7 @@ from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.event_followup_cache_store import EventFollowupCacheStore
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
 from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService
+from handover_log_module.service.chiller_mode_upload_service import ChillerModeUploadService
 from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
@@ -1814,6 +1816,95 @@ def _run_external_wet_bulb_shared_flow(
     return service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
 
 
+def _run_external_chiller_mode_upload_shared_flow(
+    *,
+    container,
+    config: Dict[str, Any],
+    emit_log: Callable[[str], None],
+) -> Dict[str, Any]:
+    bridge_service = _shared_bridge_service_or_raise(container)
+    target_buildings = bridge_service.get_source_cache_buildings()
+    emit_log("[制冷模式参数上传] 已进入后台共享文件处理")
+    if not target_buildings:
+        detail = "共享缓存楼栋列表为空，无法选择制冷模式参数源文件"
+        emit_log(f"[制冷模式参数上传] {detail}，本次不扫描共享目录、不清空目标表")
+        return {
+            "status": "failed",
+            "run_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "failed_files": [{"building": "-", "file_path": "", "error": detail}],
+            "parsed_files": [],
+            "deleted_count": 0,
+            "created_count": 0,
+        }
+    emit_log(
+        "[制冷模式参数上传] 读取共享缓存最新索引: "
+        f"family={FAMILY_CHILLER_MODE_SWITCH}, buildings={','.join(target_buildings) or '-'}"
+    )
+    selection = _normalize_latest_cache_selection(bridge_service.get_latest_source_cache_selection(
+        source_family=FAMILY_CHILLER_MODE_SWITCH,
+        buildings=target_buildings,
+        max_selection_age_hours=1.0,
+    ), verify_files=False)
+    cached_entries = selection["selected_entries"]
+    emit_log(
+        "[制冷模式参数上传] 共享缓存最新索引读取完成: "
+        f"bucket={selection.get('best_bucket_key') or '-'}, "
+        f"ready={len(cached_entries)}/{len(target_buildings)}"
+    )
+    if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
+        detail = _build_latest_cache_wait_detail(feature_name="制冷模式参数", selection=selection)
+        emit_log(f"[制冷模式参数上传] 共享缓存尚未齐全，本次不扫描共享目录、不清空目标表: {detail}")
+        return {
+            "status": "failed",
+            "run_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "failed_files": [
+                {
+                    "building": "-",
+                    "file_path": "",
+                    "error": detail,
+                }
+            ],
+            "parsed_files": [],
+            "deleted_count": 0,
+            "created_count": 0,
+        }
+
+    source_units = [
+        {
+            "building": str(item.get("building", "") or "").strip(),
+            "file_path": str(item.get("file_path", "") or "").strip(),
+        }
+        for item in cached_entries
+    ]
+    emit_log(
+        "[制冷模式参数上传] 已选择共享源文件，开始处理: "
+        + "; ".join(
+            f"{item.get('building') or '-'}={Path(str(item.get('file_path', '') or '')).name or '-'}"
+            for item in source_units
+        )
+    )
+    service = ChillerModeUploadService(config)
+    return service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
+
+
+def _raise_if_chiller_mode_upload_failed(result: Dict[str, Any]) -> Dict[str, Any]:
+    status = str((result or {}).get("status", "") or "").strip().lower()
+    if status != "failed":
+        return result
+    failed_files = (result or {}).get("failed_files", [])
+    detail_items: List[str] = []
+    if isinstance(failed_files, list):
+        for item in failed_files[:5]:
+            if not isinstance(item, dict):
+                continue
+            building = str(item.get("building", "") or "-").strip() or "-"
+            file_name = Path(str(item.get("file_path", "") or "")).name or "-"
+            error = str(item.get("error", "") or "未知错误").strip() or "未知错误"
+            detail_items.append(f"{building}/{file_name}: {error}")
+    detail = "；".join(detail_items) if detail_items else "未提供失败明细"
+    raise RuntimeError(f"制冷模式参数上传失败：{detail}")
+
+
 def _run_external_multi_date_shared_flow(
     *,
     container,
@@ -2815,6 +2906,7 @@ def health(
     include_handover_runtime_context = role_mode != "internal" and not is_lite_mode
     include_network_probe = role_mode != "internal" and not is_lite_mode
     include_wet_bulb_target_preview = role_mode != "internal" and not is_lite_mode
+    include_chiller_mode_target_preview = role_mode != "internal" and not is_lite_mode
     include_day_metric_target_preview = role_mode != "internal" and not is_lite_mode
     include_alarm_event_target_preview = role_mode != "internal" and not is_lite_mode
     include_engineer_directory_target_preview = role_mode != "internal" and not is_lite_mode
@@ -2878,6 +2970,10 @@ def health(
     if not isinstance(wet_bulb_cfg, dict):
         wet_bulb_cfg = {}
     wet_bulb_scheduler_snapshot = container.wet_bulb_collection_scheduler_status()
+    chiller_mode_cfg = runtime_cfg.get("chiller_mode_upload", {}) if isinstance(runtime_cfg, dict) else {}
+    if not isinstance(chiller_mode_cfg, dict):
+        chiller_mode_cfg = {}
+    chiller_mode_upload_scheduler_snapshot = _safe_scheduler_snapshot("chiller_mode_upload_scheduler_status")
     handover_loaded_cfg: Dict[str, Any] = {}
     if include_engineer_directory_target_preview or include_handover_runtime_context:
         handover_loaded_cfg = load_handover_config(runtime_cfg)
@@ -2890,6 +2986,17 @@ def health(
             default={},
         )
         if include_wet_bulb_target_preview
+        else {}
+    )
+    chiller_mode_target_preview = (
+        _health_cached_component_async_default(
+            request,
+            key="target_preview:chiller_mode_upload",
+            ttl_sec=_HEALTH_CACHE_TTL_TARGET_PREVIEW_SEC,
+            builder=lambda: ChillerModeUploadService(runtime_cfg).build_target_descriptor(force_refresh=False),
+            default={},
+        )
+        if include_chiller_mode_target_preview
         else {}
     )
     monthly_event_report_service = MonthlyEventReportService(runtime_cfg)
@@ -3001,6 +3108,7 @@ def health(
         runtime_cfg,
         engineer_directory_target_preview=engineer_directory_target_preview,
         wet_bulb_target_preview=wet_bulb_target_preview,
+        chiller_mode_target_preview=chiller_mode_target_preview,
         day_metric_target_preview=day_metric_target_preview,
         alarm_event_target_preview=alarm_event_target_preview,
     )
@@ -3332,6 +3440,29 @@ def health(
                 "target_preview": wet_bulb_target_preview,
                 "target_display": feature_target_displays.get("wet_bulb_collection", {}),
             },
+        "chiller_mode_upload": {
+            "enabled": bool(chiller_mode_cfg.get("enabled", True)),
+            "scheduler": {
+                "running": bool(chiller_mode_upload_scheduler_snapshot.get("running", False)),
+                "status": str(chiller_mode_upload_scheduler_snapshot.get("status", "未初始化")),
+                "next_run_time": str(chiller_mode_upload_scheduler_snapshot.get("next_run_time", "")),
+                "last_check_at": str(chiller_mode_upload_scheduler_snapshot.get("last_check_at", "")),
+                "last_decision": str(chiller_mode_upload_scheduler_snapshot.get("last_decision", "")),
+                "last_trigger_at": str(chiller_mode_upload_scheduler_snapshot.get("last_trigger_at", "")),
+                "last_trigger_result": str(chiller_mode_upload_scheduler_snapshot.get("last_trigger_result", "")),
+                "state_path": str(chiller_mode_upload_scheduler_snapshot.get("state_path", "")),
+                "state_exists": bool(chiller_mode_upload_scheduler_snapshot.get("state_exists", False)),
+                "remembered_enabled": bool(chiller_mode_upload_scheduler_snapshot.get("remembered_enabled", False)),
+                "effective_auto_start_in_gui": bool(
+                    chiller_mode_upload_scheduler_snapshot.get("effective_auto_start_in_gui", False)
+                ),
+                "memory_source": str(chiller_mode_upload_scheduler_snapshot.get("memory_source", "") or ""),
+                "executor_bound": _safe_bool_method("is_chiller_mode_upload_scheduler_executor_bound"),
+                "callback_name": _safe_text_method("chiller_mode_upload_scheduler_executor_name"),
+            },
+            "target_preview": chiller_mode_target_preview,
+            "target_display": feature_target_displays.get("chiller_mode_upload", {}),
+        },
             "monthly_event_report": {
                 "enabled": bool(monthly_event_report_service.is_enabled()),
             "scheduler": {
@@ -4112,6 +4243,46 @@ def job_wet_bulb_collection_run(request: Request) -> Dict[str, Any]:
             submitted_by="manual",
         )
         container.add_system_log(f"[任务] 已提交: 湿球温度定时采集 ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/jobs/chiller-mode-upload/run")
+def job_chiller_mode_upload_run(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    config = _runtime_config(container)
+    role_mode = _deployment_role_mode(container)
+
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端执行制冷模式参数上传")
+    if role_mode != "external":
+        raise HTTPException(status_code=409, detail="当前未确认外网端角色，无法执行制冷模式参数上传")
+
+    _shared_bridge_service_or_raise(container)
+    dedupe_key = _job_dedupe_key("chiller_mode_upload_external_dispatch", source="manual")
+
+    def _run_external_shared(emit_log):
+        return _raise_if_chiller_mode_upload_failed(_run_external_chiller_mode_upload_shared_flow(
+            container=container,
+            config=config,
+            emit_log=emit_log,
+        ))
+
+    try:
+        job = _start_background_job(
+            container,
+            name="制冷模式参数上传-共享文件处理",
+            run_func=_run_external_shared,
+            worker_handler="",
+            worker_payload={},
+            resource_keys=_job_resource_keys("shared_bridge:chiller_mode_upload"),
+            priority="manual",
+            feature="chiller_mode_upload_external_dispatch",
+            dedupe_key=dedupe_key,
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: 制冷模式参数上传-共享文件处理 ({job.job_id})")
         return job.to_dict()
     except JobBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -5975,6 +6146,7 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
         "scheduler": _safe_scheduler("scheduler_status"),
         "handover_scheduler": _normalize_handover_scheduler(_safe_scheduler("handover_scheduler_status")),
         "wet_bulb_collection_scheduler": _safe_scheduler("wet_bulb_collection_scheduler_status"),
+        "chiller_mode_upload_scheduler": _safe_scheduler("chiller_mode_upload_scheduler_status"),
         "day_metric_upload_scheduler": _safe_scheduler("day_metric_upload_scheduler_status"),
         "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
@@ -6638,6 +6810,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         "scheduler": _safe_scheduler("scheduler_status"),
         "handover_scheduler": _safe_scheduler("handover_scheduler_status"),
         "wet_bulb_collection_scheduler": _safe_scheduler("wet_bulb_collection_scheduler_status"),
+        "chiller_mode_upload_scheduler": _safe_scheduler("chiller_mode_upload_scheduler_status"),
         "day_metric_upload_scheduler": _safe_scheduler("day_metric_upload_scheduler_status"),
         "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),

@@ -195,6 +195,17 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "debug_step_log": True,
                 "export_button_text": "原样导出",
             },
+            "chiller_mode_switch": {
+                "interval_sec": 600,
+                "download": {
+                    "template_name": "制冷单元模式切换参数",
+                    "sheet_name": "制冷单元模式切换参数",
+                    "lookback_minutes": 11,
+                    "scale_label": "5分钟",
+                    "menu_path": ["报表报告", "数据查询", "即时报表"],
+                    "export_button_text": "原样导出",
+                },
+            },
             "capacity_report": {
                 "download": {
                     "template_name": "交接班容量报表",
@@ -1250,6 +1261,39 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "config_path": "config/power-alert-sync.config.json",
                 "install_timeout_sec": 180,
                 "timeout_sec": 900,
+            },
+        },
+        "chiller_mode_upload": {
+            "enabled": True,
+            "scheduler": {
+                "enabled": True,
+                "auto_start_in_gui": False,
+                "interval_minutes": 10,
+                "check_interval_sec": 30,
+                "retry_failed_on_next_tick": True,
+                "state_file": "chiller_mode_upload_scheduler_state.json",
+            },
+            "target": {
+                "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+                "table_id": "tblkvVCNRbtMmjQg",
+                "page_size": 500,
+                "max_records": 5000,
+                "delete_batch_size": 500,
+                "create_batch_size": 200,
+                "replace_existing": True,
+            },
+            "fields": {
+                "building": "楼栋",
+                "controller": "所属控制器",
+                "point": "采集点",
+                "value": "数据",
+                "chiller_mode": "冷机模式",
+            },
+            "mode_value_map": {
+                "1": "制冷",
+                "2": "预冷",
+                "3": "板换",
+                "4": "停机",
             },
         },
         "alarm_export": {

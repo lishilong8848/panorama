@@ -32,6 +32,7 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_POWER,
     FAMILY_BRANCH_SWITCH,
+    FAMILY_CHILLER_MODE_SWITCH,
     FAMILY_HANDOVER_CAPACITY_REPORT,
     FAMILY_HANDOVER_LOG,
     FAMILY_LABELS,
@@ -1781,6 +1782,7 @@ class SharedBridgeRuntimeService:
             (FAMILY_HANDOVER_LOG, FAMILY_LABELS[FAMILY_HANDOVER_LOG]),
             (FAMILY_HANDOVER_CAPACITY_REPORT, FAMILY_LABELS[FAMILY_HANDOVER_CAPACITY_REPORT]),
             (FAMILY_MONTHLY_REPORT, FAMILY_LABELS[FAMILY_MONTHLY_REPORT]),
+            (FAMILY_CHILLER_MODE_SWITCH, FAMILY_LABELS[FAMILY_CHILLER_MODE_SWITCH]),
             (FAMILY_ALARM_EVENT, FAMILY_LABELS[FAMILY_ALARM_EVENT]),
         )
         if not root_text:
@@ -1834,6 +1836,12 @@ class SharedBridgeRuntimeService:
                 FAMILY_MONTHLY_REPORT,
                 FAMILY_LABELS[FAMILY_MONTHLY_REPORT],
                 Path(str(cache_paths.get(FAMILY_MONTHLY_REPORT, "") or (root_path / FAMILY_LABELS[FAMILY_MONTHLY_REPORT]))),
+                "directory",
+            ),
+            (
+                FAMILY_CHILLER_MODE_SWITCH,
+                FAMILY_LABELS[FAMILY_CHILLER_MODE_SWITCH],
+                Path(str(cache_paths.get(FAMILY_CHILLER_MODE_SWITCH, "") or (root_path / FAMILY_LABELS[FAMILY_CHILLER_MODE_SWITCH]))),
                 "directory",
             ),
             (

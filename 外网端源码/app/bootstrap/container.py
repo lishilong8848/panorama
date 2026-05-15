@@ -48,6 +48,7 @@ _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS: tuple[tuple[str, str, tuple[str, ...]], ...
     ("auto_flow", "每日用电明细自动流程", ("common", "scheduler")),
     ("handover", "交接班调度", ("features", "handover_log", "scheduler")),
     ("wet_bulb_collection", "湿球温度定时采集", ("features", "wet_bulb_collection", "scheduler")),
+    ("chiller_mode_upload", "制冷模式参数上传", ("features", "chiller_mode_upload", "scheduler")),
     ("day_metric_upload", "12项独立上传", ("features", "day_metric_upload", "scheduler")),
     ("branch_power_upload", "自动上传支路功率", ("features", "branch_power_upload", "scheduler")),
     ("alarm_event_upload", "告警信息上传", ("features", "alarm_export", "scheduler")),
@@ -61,6 +62,7 @@ _EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
     "auto_flow": "scheduler",
     "handover": "handover_scheduler_manager",
     "wet_bulb_collection": "wet_bulb_collection_scheduler",
+    "chiller_mode_upload": "chiller_mode_upload_scheduler",
     "day_metric_upload": "day_metric_upload_scheduler",
     "branch_power_upload": "branch_power_upload_scheduler",
     "alarm_event_upload": "alarm_event_upload_scheduler",
@@ -99,6 +101,8 @@ class AppContainer:
     handover_scheduler_callback: Callable[[str, str], tuple[bool, str]] | None = None
     wet_bulb_collection_scheduler: IntervalSchedulerService | None = None
     wet_bulb_collection_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
+    chiller_mode_upload_scheduler: IntervalSchedulerService | None = None
+    chiller_mode_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     day_metric_upload_scheduler: IntervalSchedulerService | None = None
     day_metric_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     branch_power_upload_scheduler: IntervalSchedulerService | None = None
@@ -214,6 +218,9 @@ class AppContainer:
         if not self.wet_bulb_collection_scheduler:
             _report_progress("building_wet_bulb_scheduler")
             self.wet_bulb_collection_scheduler = self._build_wet_bulb_collection_scheduler()
+        if not self.chiller_mode_upload_scheduler:
+            _report_progress("building_chiller_mode_upload_scheduler")
+            self.chiller_mode_upload_scheduler = self._build_chiller_mode_upload_scheduler()
         if not self.day_metric_upload_scheduler:
             _report_progress("building_day_metric_scheduler")
             self.day_metric_upload_scheduler = self._build_day_metric_upload_scheduler()
@@ -263,6 +270,9 @@ class AppContainer:
         if self.wet_bulb_collection_scheduler_callback and self.wet_bulb_collection_scheduler:
             _report_progress("binding_wet_bulb_scheduler_callback")
             self.wet_bulb_collection_scheduler.run_callback = self.wet_bulb_collection_scheduler_callback
+        if self.chiller_mode_upload_scheduler_callback and self.chiller_mode_upload_scheduler:
+            _report_progress("binding_chiller_mode_upload_scheduler_callback")
+            self.chiller_mode_upload_scheduler.run_callback = self.chiller_mode_upload_scheduler_callback
         if self.day_metric_upload_scheduler_callback and self.day_metric_upload_scheduler:
             _report_progress("binding_day_metric_scheduler_callback")
             self.day_metric_upload_scheduler.run_callback = self.day_metric_upload_scheduler_callback
@@ -430,6 +440,27 @@ class AppContainer:
             source_name="湿球温度定时采集",
         )
 
+    def _build_chiller_mode_upload_scheduler(self) -> IntervalSchedulerService:
+        chiller_cfg = self.runtime_config.get("chiller_mode_upload", {})
+        if not isinstance(chiller_cfg, dict):
+            chiller_cfg = {}
+        paths_cfg = self.runtime_config.get("paths", {})
+        if not isinstance(paths_cfg, dict):
+            paths_cfg = {}
+        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
+        scheduler_cfg = chiller_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        return IntervalSchedulerService(
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=runtime_state_root or "runtime_state",
+            emit_log=self.add_system_log,
+            run_callback=self.chiller_mode_upload_scheduler_callback or self._chiller_mode_upload_scheduler_run_callback,
+            is_busy=self.job_service.has_running_jobs,
+            thread_name="chiller-mode-upload-scheduler",
+            source_name="制冷模式参数上传",
+        )
+
     def _build_day_metric_upload_scheduler(self) -> IntervalSchedulerService:
         day_metric_cfg = self.runtime_config.get("day_metric_upload", {})
         if not isinstance(day_metric_cfg, dict):
@@ -575,6 +606,9 @@ class AppContainer:
     def _wet_bulb_collection_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"湿球温度定时采集调度回调尚未绑定执行器(source={source})"
 
+    def _chiller_mode_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
+        return False, f"制冷模式参数上传调度回调尚未绑定执行器(source={source})"
+
     def _day_metric_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"12项独立上传调度回调尚未绑定执行器(source={source})"
 
@@ -644,6 +678,27 @@ class AppContainer:
         callback = self.wet_bulb_collection_scheduler_callback
         if callback is None:
             return "-"
+        name = getattr(callback, "__name__", "")
+        if not name:
+            name = getattr(getattr(callback, "__func__", None), "__name__", "")
+        return str(name or "-")
+
+    def is_chiller_mode_upload_scheduler_executor_bound(self) -> bool:
+        callback = None
+        if self.chiller_mode_upload_scheduler:
+            callback = getattr(self.chiller_mode_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.chiller_mode_upload_scheduler_callback
+        return not self._is_placeholder_callback(callback, self._chiller_mode_upload_scheduler_run_callback)
+
+    def chiller_mode_upload_scheduler_executor_name(self) -> str:
+        callback = None
+        if self.chiller_mode_upload_scheduler:
+            callback = getattr(self.chiller_mode_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.chiller_mode_upload_scheduler_callback
+        if callback is None:
+            callback = self._chiller_mode_upload_scheduler_run_callback
         name = getattr(callback, "__name__", "")
         if not name:
             name = getattr(getattr(callback, "__func__", None), "__name__", "")
@@ -773,6 +828,11 @@ class AppContainer:
         self.wet_bulb_collection_scheduler_callback = callback
         if self.wet_bulb_collection_scheduler:
             self.wet_bulb_collection_scheduler.run_callback = callback
+
+    def set_chiller_mode_upload_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
+        self.chiller_mode_upload_scheduler_callback = callback
+        if self.chiller_mode_upload_scheduler:
+            self.chiller_mode_upload_scheduler.run_callback = callback
 
     def set_day_metric_upload_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
         self.day_metric_upload_scheduler_callback = callback
@@ -1291,6 +1351,28 @@ class AppContainer:
             self.add_system_log("[湿球温度定时采集调度] 已禁用")
 
         self.add_system_log(
+            f"[制冷模式参数上传调度] 启动阶段执行器状态: executor_bound={self.is_chiller_mode_upload_scheduler_executor_bound()}, "
+            f"callback={self.chiller_mode_upload_scheduler_executor_name()}"
+        )
+        chiller_mode_status = self.chiller_mode_upload_scheduler_status()
+        if role_mode == "internal":
+            self.add_system_log("[制冷模式参数上传调度] 当前为内网端，启动时不自动开启")
+        elif bool(chiller_mode_status.get("enabled", False)):
+            chiller_mode_cfg = self.runtime_config.get("chiller_mode_upload", {})
+            if not isinstance(chiller_mode_cfg, dict):
+                chiller_mode_cfg = {}
+            chiller_mode_scheduler_cfg = chiller_mode_cfg.get("scheduler", {})
+            if not isinstance(chiller_mode_scheduler_cfg, dict):
+                chiller_mode_scheduler_cfg = {}
+            if bool(chiller_mode_scheduler_cfg.get("auto_start_in_gui", False)):
+                _report_progress("starting_chiller_mode_upload_scheduler")
+                self.start_chiller_mode_upload_scheduler(source=source)
+            else:
+                self.add_system_log("[制冷模式参数上传调度] 启动时未自动开启")
+        else:
+            self.add_system_log("[制冷模式参数上传调度] 已禁用")
+
+        self.add_system_log(
             f"[12项独立上传调度] 启动阶段执行器状态: executor_bound={self.is_day_metric_upload_scheduler_executor_bound()}, "
             f"callback={self.day_metric_upload_scheduler_executor_name()}"
         )
@@ -1578,6 +1660,7 @@ class AppContainer:
             ("scheduler", self.stop_scheduler),
             ("handover_scheduler", self.stop_handover_scheduler),
             ("wet_bulb_collection_scheduler", self.stop_wet_bulb_collection_scheduler),
+            ("chiller_mode_upload_scheduler", self.stop_chiller_mode_upload_scheduler),
             ("day_metric_upload_scheduler", self.stop_day_metric_upload_scheduler),
             ("branch_power_upload_scheduler", self.stop_branch_power_upload_scheduler),
             ("alarm_event_upload_scheduler", self.stop_alarm_event_upload_scheduler),
@@ -1669,6 +1752,29 @@ class AppContainer:
             result = {"stopped": False, "running": False, "reason": "not_initialized"}
         self.add_system_log(
             f"[湿球温度定时采集调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def start_chiller_mode_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if not self.chiller_mode_upload_scheduler:
+            self.chiller_mode_upload_scheduler = self._build_chiller_mode_upload_scheduler()
+        result = self.chiller_mode_upload_scheduler.start()
+        self.add_system_log(
+            f"[制冷模式参数上传调度] {source}启动请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}, "
+            f"executor_bound={self.is_chiller_mode_upload_scheduler_executor_bound()}, "
+            f"callback={self.chiller_mode_upload_scheduler_executor_name()}"
+        )
+        return result
+
+    def stop_chiller_mode_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if self.chiller_mode_upload_scheduler:
+            result = self.chiller_mode_upload_scheduler.stop()
+        else:
+            result = {"stopped": False, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            f"[制冷模式参数上传调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
             f"running={bool(result.get('running', False))}"
         )
         return result
@@ -2267,6 +2373,29 @@ class AppContainer:
             **memory_fields,
         }
 
+    def chiller_mode_upload_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("chiller_mode_upload")
+        if not self.chiller_mode_upload_scheduler:
+            return {
+                "enabled": False,
+                "running": False,
+                "status": "未初始化",
+                "next_run_time": "",
+                "last_check_at": "",
+                "last_decision": "",
+                "last_trigger_at": "",
+                "last_trigger_result": "",
+                "state_path": "",
+                "state_exists": False,
+                **memory_fields,
+            }
+        runtime = self.chiller_mode_upload_scheduler.get_runtime_snapshot()
+        return {
+            "enabled": bool(self.chiller_mode_upload_scheduler.enabled),
+            **runtime,
+            **memory_fields,
+        }
+
     def day_metric_upload_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("day_metric_upload")
         if not self.day_metric_upload_scheduler:
@@ -2409,6 +2538,23 @@ class AppContainer:
             duration_ms=duration_ms,
         )
 
+    def record_chiller_mode_upload_external_run(
+        self,
+        *,
+        status: str,
+        source: str,
+        detail: str = "",
+        duration_ms: int = 0,
+    ) -> None:
+        if not self.chiller_mode_upload_scheduler:
+            return
+        self.chiller_mode_upload_scheduler.record_external_run(
+            status=status,
+            source=source,
+            detail=detail,
+            duration_ms=duration_ms,
+        )
+
     def _apply_runtime_config_snapshot(self, settings: Dict[str, Any]) -> None:
         self.config = copy.deepcopy(settings)
         self.runtime_config = adapt_runtime_config(self.config)
@@ -2440,6 +2586,9 @@ class AppContainer:
         was_wet_bulb_running = (
             self.wet_bulb_collection_scheduler.is_running() if self.wet_bulb_collection_scheduler else False
         )
+        was_chiller_mode_upload_running = (
+            self.chiller_mode_upload_scheduler.is_running() if self.chiller_mode_upload_scheduler else False
+        )
         was_day_metric_upload_running = (
             self.day_metric_upload_scheduler.is_running() if self.day_metric_upload_scheduler else False
         )
@@ -2468,6 +2617,8 @@ class AppContainer:
             self.handover_scheduler_manager.stop()
         if self.wet_bulb_collection_scheduler:
             self.wet_bulb_collection_scheduler.stop()
+        if self.chiller_mode_upload_scheduler:
+            self.chiller_mode_upload_scheduler.stop()
         if self.day_metric_upload_scheduler:
             self.day_metric_upload_scheduler.stop()
         if self.branch_power_upload_scheduler:
@@ -2487,6 +2638,7 @@ class AppContainer:
         self.scheduler = self._build_scheduler()
         self.handover_scheduler_manager = self._build_handover_scheduler_manager()
         self.wet_bulb_collection_scheduler = self._build_wet_bulb_collection_scheduler()
+        self.chiller_mode_upload_scheduler = self._build_chiller_mode_upload_scheduler()
         self.day_metric_upload_scheduler = self._build_day_metric_upload_scheduler()
         self.branch_power_upload_scheduler = self._build_branch_power_upload_scheduler()
         self.alarm_event_upload_scheduler = self._build_alarm_event_upload_scheduler()
@@ -2513,6 +2665,8 @@ class AppContainer:
             self.handover_scheduler_manager.set_run_callback(self.handover_scheduler_callback)
         if self.wet_bulb_collection_scheduler_callback:
             self.wet_bulb_collection_scheduler.run_callback = self.wet_bulb_collection_scheduler_callback
+        if self.chiller_mode_upload_scheduler_callback:
+            self.chiller_mode_upload_scheduler.run_callback = self.chiller_mode_upload_scheduler_callback
         if self.day_metric_upload_scheduler_callback:
             self.day_metric_upload_scheduler.run_callback = self.day_metric_upload_scheduler_callback
         if self.branch_power_upload_scheduler_callback:
@@ -2548,6 +2702,13 @@ class AppContainer:
         if not isinstance(wet_bulb_scheduler_cfg, dict):
             wet_bulb_scheduler_cfg = {}
         wet_bulb_auto_start = bool(wet_bulb_scheduler_cfg.get("auto_start_in_gui", False))
+        chiller_mode_cfg = self.runtime_config.get("chiller_mode_upload", {})
+        if not isinstance(chiller_mode_cfg, dict):
+            chiller_mode_cfg = {}
+        chiller_mode_scheduler_cfg = chiller_mode_cfg.get("scheduler", {})
+        if not isinstance(chiller_mode_scheduler_cfg, dict):
+            chiller_mode_scheduler_cfg = {}
+        chiller_mode_auto_start = bool(chiller_mode_scheduler_cfg.get("auto_start_in_gui", False))
         day_metric_cfg = self.runtime_config.get("day_metric_upload", {})
         if not isinstance(day_metric_cfg, dict):
             day_metric_cfg = {}
@@ -2596,6 +2757,8 @@ class AppContainer:
             self.handover_scheduler_manager.start()
         if was_wet_bulb_running or (self.runtime_services_armed and wet_bulb_auto_start):
             self.wet_bulb_collection_scheduler.start()
+        if was_chiller_mode_upload_running or (self.runtime_services_armed and chiller_mode_auto_start):
+            self.chiller_mode_upload_scheduler.start()
         if was_day_metric_upload_running or (self.runtime_services_armed and day_metric_auto_start):
             self.day_metric_upload_scheduler.start()
         if was_branch_power_upload_running or (self.runtime_services_armed and branch_power_auto_start):

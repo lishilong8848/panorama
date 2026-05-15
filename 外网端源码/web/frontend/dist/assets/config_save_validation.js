@@ -8,6 +8,7 @@
 } from "./config_helpers.js";
 import {
   cleanupAlarmExportCompat,
+  cleanupChillerModeUploadCompat,
   cleanupDayMetricUploadCompat,
   cleanupWetBulbCollectionCompat,
 } from "./config_compat_cleanup.js";
@@ -1513,6 +1514,61 @@ function validateAndNormalizeWetBulbCollection(payload) {
   return { ok: true };
 }
 
+function validateAndNormalizeChillerModeUpload(payload) {
+  payload.chiller_mode_upload = payload.chiller_mode_upload || {};
+  const upload = cleanupChillerModeUploadCompat(payload.chiller_mode_upload);
+  upload.scheduler = upload.scheduler && typeof upload.scheduler === "object" ? upload.scheduler : {};
+  upload.target = upload.target && typeof upload.target === "object" ? upload.target : {};
+  upload.fields = upload.fields && typeof upload.fields === "object" ? upload.fields : {};
+  upload.mode_value_map = upload.mode_value_map && typeof upload.mode_value_map === "object" ? upload.mode_value_map : {};
+
+  upload.enabled = Boolean(upload.enabled ?? true);
+  upload.scheduler.enabled = true;
+  upload.scheduler.auto_start_in_gui = Boolean(upload.scheduler.auto_start_in_gui);
+  upload.scheduler.interval_minutes = Number.parseInt(upload.scheduler.interval_minutes ?? 10, 10);
+  upload.scheduler.check_interval_sec = Number.parseInt(upload.scheduler.check_interval_sec ?? 30, 10);
+  upload.scheduler.retry_failed_on_next_tick = Boolean(upload.scheduler.retry_failed_on_next_tick ?? true);
+  upload.scheduler.state_file = String(upload.scheduler.state_file || "").trim();
+
+  upload.target.app_token = String(upload.target.app_token || "").trim();
+  upload.target.table_id = String(upload.target.table_id || "").trim();
+  upload.target.page_size = Number.parseInt(upload.target.page_size ?? 500, 10);
+  upload.target.max_records = Number.parseInt(upload.target.max_records ?? 5000, 10);
+  upload.target.delete_batch_size = Number.parseInt(upload.target.delete_batch_size ?? 500, 10);
+  upload.target.create_batch_size = Number.parseInt(upload.target.create_batch_size ?? 200, 10);
+  upload.target.replace_existing = Boolean(upload.target.replace_existing ?? true);
+
+  for (const key of ["building", "controller", "point", "value", "chiller_mode"]) {
+    upload.fields[key] = String(upload.fields[key] || "").trim();
+  }
+  for (const [key, fallback] of Object.entries({ "1": "制冷", "2": "预冷", "3": "板换", "4": "停机" })) {
+    if (!String(upload.mode_value_map[key] || "").trim()) upload.mode_value_map[key] = fallback;
+  }
+
+  if (!Number.isInteger(upload.scheduler.interval_minutes) || upload.scheduler.interval_minutes < 1) {
+    return { ok: false, error: "制冷模式参数上传执行间隔必须大于等于1分钟" };
+  }
+  if (!Number.isInteger(upload.scheduler.check_interval_sec) || upload.scheduler.check_interval_sec <= 0) {
+    return { ok: false, error: "制冷模式参数上传检查间隔必须大于0秒" };
+  }
+  if (!upload.scheduler.state_file) {
+    return { ok: false, error: "制冷模式参数上传状态文件名不能为空" };
+  }
+  if (!upload.target.app_token || !upload.target.table_id) {
+    return { ok: false, error: "制冷模式参数上传目标配置不能为空，请填写 app_token 和 table_id" };
+  }
+  for (const key of ["page_size", "max_records", "delete_batch_size", "create_batch_size"]) {
+    if (!Number.isInteger(upload.target[key]) || upload.target[key] <= 0) {
+      return { ok: false, error: `制冷模式参数上传 ${key} 必须大于0` };
+    }
+  }
+  if (!upload.fields.building || !upload.fields.controller || !upload.fields.point || !upload.fields.value || !upload.fields.chiller_mode) {
+    return { ok: false, error: "制冷模式参数上传字段映射（楼栋/所属控制器/采集点/数据/冷机模式）不能为空" };
+  }
+  payload.chiller_mode_upload = upload;
+  return { ok: true };
+}
+
 export function prepareConfigPayloadForSave({
   config,
   buildingsText,
@@ -1900,6 +1956,10 @@ export function prepareConfigPayloadForSave({
   const wetBulbCollectionValidation = validateAndNormalizeWetBulbCollection(payload);
   if (!wetBulbCollectionValidation.ok) {
     return wetBulbCollectionValidation;
+  }
+  const chillerModeUploadValidation = validateAndNormalizeChillerModeUpload(payload);
+  if (!chillerModeUploadValidation.ok) {
+    return chillerModeUploadValidation;
   }
 
   return { ok: true, payload };

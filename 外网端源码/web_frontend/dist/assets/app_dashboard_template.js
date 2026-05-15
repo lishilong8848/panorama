@@ -7,6 +7,7 @@ import { DASHBOARD_HANDOVER_LOG_SECTION } from "./dashboard_template_sections/da
 import { DASHBOARD_DAY_METRIC_UPLOAD_SECTION } from "./dashboard_template_sections/dashboard_day_metric_upload_section.js";
 import { DASHBOARD_BRANCH_POWER_UPLOAD_SECTION } from "./dashboard_template_sections/dashboard_branch_power_upload_section.js";
 import { DASHBOARD_WET_BULB_COLLECTION_SECTION } from "./dashboard_template_sections/dashboard_wet_bulb_collection_section.js";
+import { DASHBOARD_CHILLER_MODE_UPLOAD_SECTION } from "./dashboard_template_sections/dashboard_chiller_mode_upload_section.js";
 import { DASHBOARD_MONTHLY_EVENT_REPORT_SECTION } from "./dashboard_template_sections/dashboard_monthly_event_report_section.js";
 import { DASHBOARD_ALARM_EVENT_UPLOAD_SECTION } from "./dashboard_template_sections/dashboard_alarm_event_upload_section.js";
 
@@ -289,6 +290,7 @@ ${DASHBOARD_HANDOVER_LOG_SECTION}
 ${DASHBOARD_DAY_METRIC_UPLOAD_SECTION}
 ${DASHBOARD_BRANCH_POWER_UPLOAD_SECTION}
 ${DASHBOARD_WET_BULB_COLLECTION_SECTION}
+${DASHBOARD_CHILLER_MODE_UPLOAD_SECTION}
 ${DASHBOARD_MONTHLY_EVENT_REPORT_SECTION}
 ${DASHBOARD_ALARM_EVENT_UPLOAD_SECTION}
         <div

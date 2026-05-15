@@ -128,6 +128,45 @@ class HandoverDownloadService:
             report_kind="branch_switch",
         )
 
+    def _chiller_mode_switch_download_config(self) -> Dict[str, Any]:
+        base_cfg = copy.deepcopy(
+            self.config.get("download", {}) if isinstance(self.config.get("download", {}), dict) else {}
+        )
+        root_cfg = (
+            self.config.get("chiller_mode_switch", {})
+            if isinstance(self.config.get("chiller_mode_switch", {}), dict)
+            else {}
+        )
+        download_cfg = (
+            root_cfg.get("download", {})
+            if isinstance(root_cfg.get("download", {}), dict)
+            else {}
+        )
+        base_cfg.update(copy.deepcopy(download_cfg))
+        base_cfg["template_name"] = str(
+            download_cfg.get("template_name")
+            or root_cfg.get("template_name")
+            or "制冷单元模式切换参数"
+        ).strip()
+        base_cfg["sheet_name"] = str(
+            download_cfg.get("sheet_name")
+            or root_cfg.get("sheet_name")
+            or "制冷单元模式切换参数"
+        ).strip()
+        base_cfg["scale_label"] = str(
+            download_cfg.get("scale_label")
+            or root_cfg.get("scale_label")
+            or "5分钟"
+        ).strip()
+        base_cfg["export_button_text"] = str(
+            download_cfg.get("export_button_text")
+            or root_cfg.get("export_button_text")
+            or base_cfg.get("export_button_text")
+            or "原样导出"
+        ).strip()
+        base_cfg["report_kind"] = "chiller_mode_switch"
+        return base_cfg
+
     @staticmethod
     def _merge_multi_download_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         merged_results: List[Dict[str, Any]] = []
@@ -313,6 +352,27 @@ class HandoverDownloadService:
         merged = self._merge_multi_download_results(results)
         merged["report_kind"] = "branch_switch"
         return merged
+
+    def run_chiller_mode_switch_only(
+        self,
+        buildings: List[str] | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        switch_network: bool = True,
+        reuse_cached: bool = True,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        cloned_service = self._clone_with_download_config(self._chiller_mode_switch_download_config())
+        result = cloned_service.run(
+            buildings=buildings,
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=switch_network,
+            reuse_cached=reuse_cached,
+            emit_log=emit_log,
+        )
+        result["report_kind"] = "chiller_mode_switch"
+        return result
 
     def run_with_capacity_report(
         self,

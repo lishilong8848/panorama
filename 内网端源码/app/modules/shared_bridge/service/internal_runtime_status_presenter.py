@@ -219,6 +219,12 @@ def build_internal_runtime_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             title="支路开关源文件",
             fallback_bucket=str(raw_cache.get("branch_switch_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
         ),
+        "chiller_mode_switch_family": _complete_internal_source_family(
+            raw_cache.get("chiller_mode_switch_family", {}),
+            key="chiller_mode_switch_family",
+            title="制冷单元模式切换参数源文件",
+            fallback_bucket=str(raw_cache.get("chiller_mode_switch_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
+        ),
         "alarm_event_family": _complete_internal_source_family(
             raw_cache.get("alarm_event_family", {}),
             key="alarm_event_family",
@@ -305,6 +311,12 @@ def build_internal_runtime_building_status(snapshot: Dict[str, Any], *, building
                 building=building,
                 fallback_bucket=str(raw_cache.get("branch_switch_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
                 source_family="branch_switch_family",
+            ),
+            "chiller_mode_switch_family": select_internal_runtime_building_row(
+                raw_cache.get("chiller_mode_switch_family", {}),
+                building=building,
+                fallback_bucket=str(raw_cache.get("chiller_mode_switch_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
+                source_family="chiller_mode_switch_family",
             ),
             "alarm_event_family": select_internal_runtime_building_row(
                 raw_cache.get("alarm_event_family", {}),

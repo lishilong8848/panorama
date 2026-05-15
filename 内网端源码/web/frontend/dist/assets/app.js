@@ -6,6 +6,7 @@ const SOURCE_FAMILIES = [
   ["branch_power_family", "支路功率源文件"],
   ["branch_current_family", "支路电流源文件"],
   ["branch_switch_family", "支路开关源文件"],
+  ["chiller_mode_switch_family", "制冷单元模式切换参数源文件"],
   ["alarm_event_family", "告警信息源文件"],
 ];
 

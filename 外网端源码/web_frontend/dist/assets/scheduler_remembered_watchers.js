@@ -2,6 +2,7 @@ const SCHEDULER_REMEMBERED_PATHS = [
   ["scheduler", () => "scheduler"],
   ["handover_scheduler", () => "handover"],
   ["wet_bulb_collection", () => "wet_bulb"],
+  ["chiller_mode_upload", () => "chiller_mode_upload"],
   ["day_metric_upload", () => "day_metric_upload"],
   ["branch_power_upload", () => "branch_power_upload"],
   ["alarm_event_upload", () => "alarm_event_upload"],

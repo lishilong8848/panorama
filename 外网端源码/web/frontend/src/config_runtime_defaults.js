@@ -1,6 +1,7 @@
 ﻿import { clone } from "./config_common_utils.js";
 import {
   cleanupAlarmExportCompat,
+  cleanupChillerModeUploadCompat,
   cleanupDayMetricUploadCompat,
   cleanupWetBulbCollectionCompat,
 } from "./config_compat_cleanup.js";
@@ -137,6 +138,7 @@ function ensureRoot(cfg) {
   cfg.day_metric_upload = cfg.day_metric_upload || {};
   cfg.branch_power_upload = cfg.branch_power_upload || {};
   cfg.wet_bulb_collection = cfg.wet_bulb_collection || {};
+  cfg.chiller_mode_upload = cfg.chiller_mode_upload || {};
   cfg.handover_log.template = cfg.handover_log.template || {};
   cfg.handover_log.review_ui = cfg.handover_log.review_ui || {};
   cfg.web = cfg.web || {};
@@ -195,6 +197,10 @@ function ensureRoot(cfg) {
   cfg.wet_bulb_collection.target = cfg.wet_bulb_collection.target || {};
   cfg.wet_bulb_collection.fields = cfg.wet_bulb_collection.fields || {};
   cfg.wet_bulb_collection.cooling_mode = cfg.wet_bulb_collection.cooling_mode || {};
+  cfg.chiller_mode_upload.scheduler = cfg.chiller_mode_upload.scheduler || {};
+  cfg.chiller_mode_upload.target = cfg.chiller_mode_upload.target || {};
+  cfg.chiller_mode_upload.fields = cfg.chiller_mode_upload.fields || {};
+  cfg.chiller_mode_upload.mode_value_map = cfg.chiller_mode_upload.mode_value_map || {};
   cfg.alarm_export.scheduler = cfg.alarm_export.scheduler || {};
   cfg.alarm_export.feishu = cfg.alarm_export.feishu || {};
   cfg.alarm_export.shared_source_upload =
@@ -1093,6 +1099,43 @@ function applyWetBulbCollectionDefaults(cfg) {
   }
 }
 
+function applyChillerModeUploadDefaults(cfg) {
+  const upload = cleanupChillerModeUploadCompat(cfg.chiller_mode_upload);
+  const scheduler = upload.scheduler || (upload.scheduler = {});
+  const target = upload.target || (upload.target = {});
+  const fields = upload.fields || (upload.fields = {});
+  const modeMap = upload.mode_value_map || (upload.mode_value_map = {});
+
+  setBooleanDefault(upload, "enabled", true);
+
+  setBooleanDefault(scheduler, "enabled", true);
+  setBooleanDefault(scheduler, "auto_start_in_gui", false);
+  setNumberDefault(scheduler, "interval_minutes", 10);
+  setNumberDefault(scheduler, "check_interval_sec", 30);
+  setBooleanDefault(scheduler, "retry_failed_on_next_tick", true);
+  setStringDefault(scheduler, "state_file", "chiller_mode_upload_scheduler_state.json");
+
+  setStringDefault(target, "app_token", "ASLxbfESPahdTKs0A9NccgbrnXc");
+  setStringDefault(target, "table_id", "tblkvVCNRbtMmjQg");
+  setNumberDefault(target, "page_size", 500);
+  setNumberDefault(target, "max_records", 5000);
+  setNumberDefault(target, "delete_batch_size", 500);
+  setNumberDefault(target, "create_batch_size", 200);
+  setBooleanDefault(target, "replace_existing", true);
+
+  setStringDefault(fields, "building", "楼栋");
+  setStringDefault(fields, "controller", "所属控制器");
+  setStringDefault(fields, "point", "采集点");
+  setStringDefault(fields, "value", "数据");
+  setStringDefault(fields, "chiller_mode", "冷机模式");
+
+  if (!String(modeMap["1"] || "").trim()) modeMap["1"] = "制冷";
+  if (!String(modeMap["2"] || "").trim()) modeMap["2"] = "预冷";
+  if (!String(modeMap["3"] || "").trim()) modeMap["3"] = "板换";
+  if (!String(modeMap["4"] || "").trim()) modeMap["4"] = "停机";
+  cfg.chiller_mode_upload = upload;
+}
+
 function applyDayMetricUploadDefaults(cfg) {
   const upload = cleanupDayMetricUploadCompat(cfg.day_metric_upload);
   const scheduler = upload.scheduler;
@@ -1178,6 +1221,7 @@ export function ensureConfigShape(raw) {
   applyAlarmExportDefaults(cfg);
   applyNetworkDefaults(cfg);
   applyWetBulbCollectionDefaults(cfg);
+  applyChillerModeUploadDefaults(cfg);
   applyDayMetricUploadDefaults(cfg);
   applyBranchPowerUploadDefaults(cfg);
   setBooleanDefault(cfg.manual_upload_gui, "enabled", true);

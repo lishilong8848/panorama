@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 from app.config.config_compat_cleanup import (
     sanitize_alarm_export_config,
+    sanitize_chiller_mode_upload_config,
     sanitize_day_metric_upload_config,
     sanitize_wet_bulb_collection_config,
 )
@@ -428,6 +429,9 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
         _dict(features.get("wet_bulb_collection"))
     )
+    features["chiller_mode_upload"] = sanitize_chiller_mode_upload_config(
+        _dict(features.get("chiller_mode_upload"))
+    )
     if _is_external_deployment(common):
         _strip_external_source_site_config(common, features)
     else:
@@ -472,6 +476,9 @@ def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
         features["alarm_export"] = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
         features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
             _dict(features.get("wet_bulb_collection"))
+        )
+        features["chiller_mode_upload"] = sanitize_chiller_mode_upload_config(
+            _dict(features.get("chiller_mode_upload"))
         )
         _discard_deprecated_alarm_db(common, features)
         _normalize_handover_rules(features)
@@ -625,6 +632,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
     )
     alarm_export = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
     wet_bulb_collection = sanitize_wet_bulb_collection_config(_dict(features.get("wet_bulb_collection")))
+    chiller_mode_upload = sanitize_chiller_mode_upload_config(_dict(features.get("chiller_mode_upload")))
     branch_power_upload = _dict(features.get("branch_power_upload"))
     manual_upload_gui = _dict(features.get("manual_upload_gui"))
     runtime_download = {
@@ -744,6 +752,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "branch_power_upload": copy.deepcopy(branch_power_upload),
         "alarm_export": copy.deepcopy(alarm_export),
         "wet_bulb_collection": copy.deepcopy(wet_bulb_collection),
+        "chiller_mode_upload": copy.deepcopy(chiller_mode_upload),
         "manual_upload_gui": copy.deepcopy(manual_upload_gui),
         "web": copy.deepcopy(console),
     }
@@ -862,6 +871,12 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         deep_merge_defaults(
             _dict(runtime.get("wet_bulb_collection")),
             _dict(features.get("wet_bulb_collection")),
+        )
+    )
+    features["chiller_mode_upload"] = sanitize_chiller_mode_upload_config(
+        deep_merge_defaults(
+            _dict(runtime.get("chiller_mode_upload")),
+            _dict(features.get("chiller_mode_upload")),
         )
     )
     _apply_single_root_paths(common, features)

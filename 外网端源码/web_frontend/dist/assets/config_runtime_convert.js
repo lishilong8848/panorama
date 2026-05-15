@@ -1,6 +1,7 @@
 import { clone } from "./config_common_utils.js";
 import {
   cleanupAlarmExportCompat,
+  cleanupChillerModeUploadCompat,
   cleanupDayMetricUploadCompat,
   cleanupWetBulbCollectionCompat,
 } from "./config_compat_cleanup.js";
@@ -85,6 +86,7 @@ export function convertV3ConfigToLegacy(v3) {
     day_metric_upload: cleanupDayMetricUploadCompat(features.day_metric_upload || {}, { cloneInput: true }),
     branch_power_upload: clone(features.branch_power_upload || {}),
     wet_bulb_collection: cleanupWetBulbCollectionCompat(features.wet_bulb_collection || {}, { cloneInput: true }),
+    chiller_mode_upload: cleanupChillerModeUploadCompat(features.chiller_mode_upload || {}, { cloneInput: true }),
     alarm_export: cleanupAlarmExportCompat(features.alarm_export || {}, { cloneInput: true }),
     manual_upload_gui: clone(features.manual_upload_gui || {}),
     web: clone(common.console || {}),
@@ -161,6 +163,7 @@ export function convertLegacyConfigToV3(legacy) {
       day_metric_upload: cleanupDayMetricUploadCompat(src.day_metric_upload || {}, { cloneInput: true }),
       branch_power_upload: clone(src.branch_power_upload || {}),
       wet_bulb_collection: cleanupWetBulbCollectionCompat(src.wet_bulb_collection || {}, { cloneInput: true }),
+      chiller_mode_upload: cleanupChillerModeUploadCompat(src.chiller_mode_upload || {}, { cloneInput: true }),
       alarm_export: cleanupAlarmExportCompat(src.alarm_export || {}, { cloneInput: true }),
       manual_upload_gui: clone(src.manual_upload_gui || {}),
     },

@@ -13,6 +13,7 @@ FAMILY_ALARM_EVENT = "alarm_event_family"
 FAMILY_BRANCH_POWER = "branch_power_family"
 FAMILY_BRANCH_CURRENT = "branch_current_family"
 FAMILY_BRANCH_SWITCH = "branch_switch_family"
+FAMILY_CHILLER_MODE_SWITCH = "chiller_mode_switch_family"
 
 SOURCE_TYPE_FOLDERS = {
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
@@ -22,6 +23,7 @@ SOURCE_TYPE_FOLDERS = {
     FAMILY_BRANCH_POWER: "支路功率源文件",
     FAMILY_BRANCH_CURRENT: "支路电流源文件",
     FAMILY_BRANCH_SWITCH: "支路开关源文件",
+    FAMILY_CHILLER_MODE_SWITCH: "制冷单元模式切换参数源文件",
 }
 
 OUTPUT_TYPE_HANDOVER_LOG = "handover_log_output"
@@ -93,6 +95,19 @@ def latest_bucket_segment(bucket_key: str, *, now: datetime | None = None) -> st
     return (now or datetime.now()).strftime("%Y%m%d--%H")
 
 
+def interval_bucket_segment(bucket_key: str, *, now: datetime | None = None) -> str:
+    parsed = _parse_datetime(
+        str(bucket_key or "").strip(),
+        ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y%m%d%H%M%S", "%Y%m%d%H%M"),
+    )
+    if parsed is not None:
+        return parsed.strftime("%Y%m%d--%H%M")
+    digits = "".join(ch for ch in str(bucket_key or "").strip() if ch.isdigit())
+    if len(digits) >= 12:
+        return f"{digits[:8]}--{digits[8:12]}"
+    return (now or datetime.now()).strftime("%Y%m%d--%H%M")
+
+
 def manual_alarm_bucket_segment(bucket_key: str, *, now: datetime | None = None) -> str:
     parsed = _parse_datetime(
         str(bucket_key or "").strip(),
@@ -122,6 +137,8 @@ def source_bucket_segment(
     if normalized_family == FAMILY_MONTHLY_REPORT and len(duty_digits) == 8:
         # 月报源文件按“业务日期”统一落盘，latest 与历史补采共用同一套日期目录和文件名。
         return f"{duty_digits}--月报"
+    if normalized_family == FAMILY_CHILLER_MODE_SWITCH and normalized_kind in {"latest", "interval"}:
+        return interval_bucket_segment(bucket_key, now=now)
     if normalized_kind == "manual" and normalized_family == FAMILY_ALARM_EVENT:
         return manual_alarm_bucket_segment(bucket_key, now=now)
     if normalized_kind == "latest":

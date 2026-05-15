@@ -206,6 +206,7 @@ class DownloadGateway:
                 "支路开关",
                 "列头柜支路电流",
                 "列头柜支路开关",
+                "制冷单元模式切换参数",
             )
         )
 
@@ -589,6 +590,56 @@ class DownloadGateway:
             errors.append(f"input-fallback: {exc}")
         raise StepError(label, "; ".join(errors) if errors else "未找到下拉控件")
 
+    async def _fill_chiller_mode_switch_scale_input(
+        self,
+        frame2,
+        *,
+        value: str,
+        timeout_ms: int,
+    ) -> None:
+        scale_value = str(value or "").strip()
+        if not scale_value:
+            return
+        errors: List[str] = []
+        editor_selectors = [
+            'div.fr-trigger-editor[widgetname="查询刻度"]',
+            "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), ' fr-trigger-editor ') and @widgetname='查询刻度']",
+        ]
+        for selector in editor_selectors:
+            try:
+                editor = frame2.locator(selector).first
+                await editor.wait_for(state="visible", timeout=max(1000, int(timeout_ms)))
+                input_locator = editor.locator("div.fr-trigger-text > input.fr-trigger-texteditor").first
+                await input_locator.wait_for(state="visible", timeout=max(1000, int(timeout_ms)))
+                box = await input_locator.bounding_box()
+                width = float(box.get("width", 0) or 0) if isinstance(box, dict) else 0.0
+                if width > 120:
+                    raise RuntimeError(f"查询刻度输入框宽度异常，疑似点到测点列表: width={width}")
+                await input_locator.evaluate(
+                    """(el, nextValue) => {
+                        const value = String(nextValue || '');
+                        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+                        if (setter) {
+                            setter.call(el, value);
+                        } else {
+                            el.value = value;
+                        }
+                        el.setAttribute('value', value);
+                        el.setAttribute('title', value);
+                        for (const eventName of ['focus', 'input', 'change', 'keyup', 'blur']) {
+                            el.dispatchEvent(new Event(eventName, { bubbles: true }));
+                        }
+                    }""",
+                    scale_value,
+                )
+                actual = str(await input_locator.evaluate("(el) => el.value || ''") or "").strip()
+                if actual == scale_value:
+                    return
+                raise RuntimeError(f"查询刻度输入框写入后仍为 {actual!r}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{selector}: {exc}")
+        raise StepError("查询刻度", "; ".join(errors) if errors else "未找到制冷单元模式切换参数查询刻度输入框")
+
     async def _fill_query_conditions(
         self,
         frame2,
@@ -600,6 +651,7 @@ class DownloadGateway:
         start_end_visible_timeout_ms: int,
     ) -> None:
         try:
+            is_chiller_mode_switch = "制冷单元模式切换参数" in str(sheet_name or "")
             await self._fill_text_input_by_widget_or_label(
                 frame2,
                 label_text="开始时间",
@@ -614,18 +666,26 @@ class DownloadGateway:
                 timeout_ms=start_end_visible_timeout_ms,
             )
 
-            await self._fill_optional_sheet_name(
-                frame2,
-                sheet_name=sheet_name,
-                timeout_ms=start_end_visible_timeout_ms,
-            )
+            if not is_chiller_mode_switch:
+                await self._fill_optional_sheet_name(
+                    frame2,
+                    sheet_name=sheet_name,
+                    timeout_ms=start_end_visible_timeout_ms,
+                )
 
-            await self._select_combo_by_widget_or_label(
-                frame2,
-                label_text="查询刻度",
-                option_text=scale_label,
-                timeout_ms=start_end_visible_timeout_ms,
-            )
+            if is_chiller_mode_switch:
+                await self._fill_chiller_mode_switch_scale_input(
+                    frame2,
+                    value=scale_label,
+                    timeout_ms=start_end_visible_timeout_ms,
+                )
+            else:
+                await self._select_combo_by_widget_or_label(
+                    frame2,
+                    label_text="查询刻度",
+                    option_text=scale_label,
+                    timeout_ms=start_end_visible_timeout_ms,
+                )
 
             query_btn = frame2.locator('button.fr-btn-text:has-text("查询"):visible')
             await query_btn.wait_for(state="visible", timeout=8000)

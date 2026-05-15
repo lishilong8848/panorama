@@ -1330,6 +1330,36 @@ def _validate_branch_power_upload(cfg: Dict[str, Any]) -> None:
             raise ValueError(f"配置错误: features.branch_power_upload.power_alert_sync.{timeout_key} 必须大于0")
 
 
+def _validate_chiller_mode_upload(cfg: Dict[str, Any]) -> None:
+    upload_cfg = cfg.get("features", {}).get("chiller_mode_upload", {})
+    if not isinstance(upload_cfg, dict):
+        raise ValueError("配置错误: features.chiller_mode_upload 缺失或格式错误")
+    _validate_feature_interval_scheduler(
+        "features.chiller_mode_upload.scheduler",
+        upload_cfg.get("scheduler", {}),
+    )
+    target = upload_cfg.get("target", {})
+    fields = upload_cfg.get("fields", {})
+    if not isinstance(target, dict):
+        raise ValueError("配置错误: features.chiller_mode_upload.target 必须是对象")
+    if not isinstance(fields, dict):
+        raise ValueError("配置错误: features.chiller_mode_upload.fields 必须是对象")
+    if not str(target.get("app_token", "")).strip():
+        raise ValueError("配置错误: features.chiller_mode_upload.target.app_token 不能为空")
+    if not str(target.get("table_id", "")).strip():
+        raise ValueError("配置错误: features.chiller_mode_upload.target.table_id 不能为空")
+    for key in ("page_size", "max_records", "delete_batch_size", "create_batch_size"):
+        try:
+            number = int(target.get(key, 0))
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"配置错误: features.chiller_mode_upload.target.{key} 必须是正整数") from exc
+        if number <= 0:
+            raise ValueError(f"配置错误: features.chiller_mode_upload.target.{key} 必须大于0")
+    for key in ("building", "controller", "point", "value", "chiller_mode"):
+        if not str(fields.get(key, "")).strip():
+            raise ValueError(f"配置错误: features.chiller_mode_upload.fields.{key} 不能为空")
+
+
 def _validate_handover_source_data_attachment_export(cfg: Dict[str, Any]) -> None:
     handover = cfg.get("features", {}).get("handover_log", {})
     if not isinstance(handover, dict):
@@ -1875,6 +1905,7 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _validate_handover_other_important_work_section(normalized_v3)
     _validate_day_metric_upload(normalized_v3)
     _validate_branch_power_upload(normalized_v3)
+    _validate_chiller_mode_upload(normalized_v3)
     _validate_handover_source_data_attachment_export(normalized_v3)
     _validate_handover_cloud_sheet_sync(normalized_v3)
     _validate_handover_daily_report_bitable_export(normalized_v3)
