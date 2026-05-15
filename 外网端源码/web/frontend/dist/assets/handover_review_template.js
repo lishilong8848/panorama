@@ -320,6 +320,64 @@
         </article>
       </section>
 
+      <section v-if="document.capacity_room_inputs && document.capacity_room_inputs.rows && document.capacity_room_inputs.rows.length" class="review-sections">
+        <article class="review-card review-section-card">
+          <div class="review-card-head">
+            <div>
+              <h2>{{ document.capacity_room_inputs.title || "M1-M6包间机柜与空调启动台数" }}</h2>
+              <p class="review-card-subtitle">保存后会作为本楼下次生成容量表的默认值，并同步补写当前容量表。</p>
+            </div>
+          </div>
+          <div class="review-table-wrap capacity-room-table-wrap">
+            <table class="review-table capacity-room-table">
+              <thead>
+                <tr>
+                  <th>包间</th>
+                  <th>总机柜数</th>
+                  <th>上电机柜数</th>
+                  <th>空调启动台数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, rowIndex) in document.capacity_room_inputs.rows" :key="row.room + ':' + row.row">
+                  <td>
+                    <strong>{{ row.label || row.room }}</strong>
+                    <small>{{ row.total_cell }} / {{ row.powered_cell }} / {{ row.aircon_cell }}</small>
+                  </td>
+                  <td>
+                    <input
+                      class="review-input"
+                      :value="row.total_cabinets"
+                      :disabled="regenerating"
+                      @input="updateCapacityRoomInput(rowIndex, 'total_cabinets', $event.target.value)"
+                      @change="updateCapacityRoomInput(rowIndex, 'total_cabinets', $event.target.value)"
+                    />
+                  </td>
+                  <td>
+                    <input
+                      class="review-input"
+                      :value="row.powered_cabinets"
+                      :disabled="regenerating"
+                      @input="updateCapacityRoomInput(rowIndex, 'powered_cabinets', $event.target.value)"
+                      @change="updateCapacityRoomInput(rowIndex, 'powered_cabinets', $event.target.value)"
+                    />
+                  </td>
+                  <td>
+                    <input
+                      class="review-input"
+                      :value="row.aircon_started"
+                      :disabled="regenerating"
+                      @input="updateCapacityRoomInput(rowIndex, 'aircon_started', $event.target.value)"
+                      @change="updateCapacityRoomInput(rowIndex, 'aircon_started', $event.target.value)"
+                    />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
       <section class="review-fixed-grid">
         <article v-for="(block, blockIndex) in document.fixed_blocks" :key="block.id || blockIndex" class="review-card">
           <div class="review-card-head">
@@ -355,9 +413,51 @@
               <h2>{{ section.name }}</h2>
               <p class="review-card-subtitle">支持新增、删除、修改本分类内容，保存后回写 Excel。</p>
             </div>
-            <button class="btn btn-secondary btn-mini" @click="addSectionRow(sectionIndex)" :disabled="regenerating">
-              新增一行
-            </button>
+            <div class="review-card-actions">
+              <button
+                v-if="isEventRefreshSection(section)"
+                class="btn btn-secondary btn-mini"
+                @click="refreshEventSectionFromBitable(section.name)"
+                :disabled="eventSectionsRefreshing || saving || regenerating || syncingRemoteRevision"
+              >
+                {{ eventSectionsRefreshing ? "刷新中..." : "刷新多维" }}
+              </button>
+              <details v-if="findSectionPersonColumn(section)" class="person-fill-toolbar" @toggle="ensureEngineerDirectoryLoaded">
+                <summary>批量填人</summary>
+                <div class="person-fill-panel">
+                  <select
+                    class="review-person-select"
+                    multiple
+                    :value="selectedSectionPersonValues(sectionIndex)"
+                    @focus="ensureEngineerDirectoryLoaded"
+                    @mousedown="ensureEngineerDirectoryLoaded"
+                    @change="updateSectionPersonSelection(sectionIndex, $event)"
+                    :disabled="regenerating || sectionPersonOptions.length === 0"
+                  >
+                    <option
+                      v-for="person in sectionPersonOptions"
+                      :key="section.name + ':bulk:' + person.key"
+                      :value="person.name"
+                      :selected="selectedSectionPersonValues(sectionIndex).includes(person.name)"
+                    >
+                      {{ person.label }}
+                    </option>
+                  </select>
+                  <button
+                    class="btn btn-secondary btn-mini"
+                    @click="fillSectionPeople(sectionIndex)"
+                    :disabled="regenerating || !selectedSectionPersonValues(sectionIndex).length"
+                  >
+                    填入本分类
+                  </button>
+                </div>
+                <small v-if="engineerDirectoryLoading" class="person-picker-hint">正在读取工程师目录...</small>
+                <small v-else-if="engineerDirectoryError" class="person-picker-hint tone-danger">{{ engineerDirectoryError }}</small>
+              </details>
+              <button class="btn btn-secondary btn-mini" @click="addSectionRow(sectionIndex)" :disabled="regenerating">
+                新增一行
+              </button>
+            </div>
           </div>
           <div class="review-table-wrap">
             <table class="review-table">
@@ -386,6 +486,23 @@
                       @input="updateSectionCell(sectionIndex, rowIndex, column.key, $event.target.value)"
                       @change="updateSectionCell(sectionIndex, rowIndex, column.key, $event.target.value)"
                     ></textarea>
+                    <details v-if="isSectionPersonColumn(section, column) && sectionPersonOptions.length" class="person-picker-details" @toggle="ensureEngineerDirectoryLoaded">
+                      <summary>选择人名</summary>
+                      <div class="person-chip-row">
+                        <button
+                          v-for="person in sectionPersonOptions"
+                          :key="section.name + ':' + rowIndex + ':' + column.key + ':' + person.key"
+                          class="person-chip"
+                          :class="{ 'is-active': sectionPersonActive(row, column.key, person.name) }"
+                          @click="toggleSectionPerson(sectionIndex, rowIndex, column.key, person.name)"
+                          :disabled="regenerating"
+                        >
+                          {{ person.name }}
+                        </button>
+                      </div>
+                      <small v-if="engineerDirectoryLoading" class="person-picker-hint">正在读取工程师目录...</small>
+                      <small v-else-if="engineerDirectoryError" class="person-picker-hint tone-danger">{{ engineerDirectoryError }}</small>
+                    </details>
                   </td>
                   <td class="review-col-action">
                     <div class="review-row-actions">
@@ -452,6 +569,21 @@
                         @input="updateFooterCell(blockIndex, rowIndex, column.key, $event.target.value)"
                         @change="updateFooterCell(blockIndex, rowIndex, column.key, $event.target.value)"
                       ></textarea>
+                      <details v-if="isFooterHandoverPersonColumn(column) && handoverPersonOptions.length" class="person-picker-details">
+                        <summary>选择接班人</summary>
+                        <div class="person-chip-row">
+                          <button
+                            v-for="person in handoverPersonOptions"
+                            :key="block.id + ':' + rowIndex + ':' + column.key + ':' + person.key"
+                            class="person-chip"
+                            :class="{ 'is-active': footerPersonActive(row, column.key, person.name) }"
+                            @click="toggleFooterHandoverPerson(blockIndex, rowIndex, column.key, person.name)"
+                            :disabled="regenerating"
+                          >
+                            {{ person.name }}
+                          </button>
+                        </div>
+                      </details>
                     </td>
                     <td class="review-col-action">
                       <button class="btn btn-danger btn-mini" @click="removeFooterRow(blockIndex, rowIndex)" :disabled="regenerating">

@@ -16,7 +16,7 @@ def _as_list(value: Any) -> List[str]:
 
 
 def _norm_text(value: Any) -> str:
-    return str(value or "").strip().casefold()
+    return re.sub(r"\s+", "", str(value or "")).strip().casefold()
 
 
 def _row_match_rule(row: RawRow, rule: Dict[str, Any]) -> bool:

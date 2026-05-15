@@ -31,6 +31,8 @@ from handover_log_module.repository.excel_reader import load_rows, load_workbook
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
 from handover_log_module.service.capacity_report_common import CapacitySourceQuery, build_capacity_template_snapshot
+from handover_log_module.service.handover_capacity_oil_cache_service import HandoverCapacityOilCacheService
+from handover_log_module.service.capacity_room_inputs_service import CapacityRoomInputsService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from pipeline_utils import get_app_dir
 
@@ -79,7 +81,28 @@ _WEATHER_CACHE_LOCK = threading.RLock()
 _WEATHER_CACHE: Dict[Any, tuple[float, Dict[str, Any]]] = {}
 _WEATHER_INFLIGHT: Dict[Any, threading.Event] = {}
 _CAPACITY_BATCH_CACHE_TTL_SEC = 30
-_CAPACITY_TRACKED_CELLS = ("H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13")
+_CAPACITY_TRACKED_CELLS = (
+    "C3",
+    "G3",
+    "B4",
+    "F4",
+    "H6",
+    "F8",
+    "B6",
+    "D6",
+    "F6",
+    "D8",
+    "B7",
+    "D7",
+    "B10",
+    "D10",
+    "B15",
+    "D15",
+    "F15",
+    "B13",
+    "D13",
+    *CapacityRoomInputsService.tracked_cells(),
+)
 _CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
 _CAPACITY_LOAD_RATE_ROWS = (12, 13, 14, 15)
 _CAPACITY_LOAD_RATE_DENOMINATOR = 10000.0
@@ -292,7 +315,7 @@ def _build_fixed_header_cells(building: Any) -> Dict[str, str]:
         "S18": building_floor_text,
         "A20": building_floor_text,
         "A65": f"{building_floor_text}容量一览表",
-        "O55": f"{building_floor_text}能耗一览",
+        "A67": f"{building_floor_text}能耗一览",
     }
 
 
@@ -332,6 +355,7 @@ class HandoverCapacityReportService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
         self._review_session_service = ReviewSessionService(self.config)
+        self._oil_cache_service = HandoverCapacityOilCacheService(self.config)
         self._weather_payload_cache: Dict[str, Dict[str, str]] = {}
         self._water_summary_cache: Dict[tuple[str, str], Dict[str, str]] = {}
 
@@ -469,7 +493,7 @@ class HandoverCapacityReportService:
         def _find_value(candidates: List[str]) -> str:
             for candidate in candidates:
                 for row in rows:
-                    if _text(getattr(row, "c_text", "")) != "燃油自控系统":
+                    if not self._is_oil_control_row(row):
                         continue
                     if _text(getattr(row, "d_name", "")) != candidate:
                         continue
@@ -527,10 +551,15 @@ class HandoverCapacityReportService:
             "second": _text(display_values.get("second")),
         }
 
+    @staticmethod
+    def _is_oil_control_row(row: Any) -> bool:
+        c_text = _text(getattr(row, "c_text", ""))
+        return bool("燃油" in c_text and "自控系统" in c_text)
+
     def _extract_specific_oil_value(self, rows: List[Any], aliases: List[str]) -> str:
         for candidate in aliases:
             for row in rows:
-                if _text(getattr(row, "c_text", "")) != "燃油自控系统":
+                if not self._is_oil_control_row(row):
                     continue
                 if _text(getattr(row, "d_name", "")) != candidate:
                     continue
@@ -552,6 +581,31 @@ class HandoverCapacityReportService:
             duty_date=duty_date,
             duty_shift=duty_shift,
         )
+        try:
+            cached_previous = self._oil_cache_service.load_previous_values(
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+            )
+        except Exception as exc:  # noqa: BLE001
+            cached_previous = {}
+            emit_log(
+                "[交接班][容量报表][燃油] 上一班油量缓存读取失败 "
+                f"building={building}, duty={previous_date}/{previous_shift}, error={exc}"
+            )
+        cached_first = _text(cached_previous.get("first") if isinstance(cached_previous, dict) else "")
+        cached_second = _text(cached_previous.get("second") if isinstance(cached_previous, dict) else "")
+        if cached_first or cached_second:
+            emit_log(
+                "[交接班][容量报表][燃油] 上一班油量缓存命中 "
+                f"building={building}, duty={previous_date}/{previous_shift}, "
+                f"first={cached_first or '-'}, second={cached_second or '-'}"
+            )
+            return {
+                "first": cached_first or _text(current_display_values.get("first")),
+                "second": cached_second or _text(current_display_values.get("second")),
+            }, ""
+
         try:
             previous_session = self._review_session_service.get_latest_session_for_context(
                 building=building,
@@ -615,6 +669,41 @@ class HandoverCapacityReportService:
             "first": previous_first or _text(current_display_values.get("first")),
             "second": previous_second or _text(current_display_values.get("second")),
         }, ""
+
+    def _save_current_capacity_display_oil_values(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        current_display_values: Dict[str, str],
+        emit_log: Callable[[str], None],
+    ) -> None:
+        first = _text(current_display_values.get("first"))
+        second = _text(current_display_values.get("second"))
+        if not first and not second:
+            emit_log(
+                "[交接班][容量报表][燃油] 当前班次油量为空，跳过缓存 "
+                f"building={building}, duty={duty_date}/{duty_shift}"
+            )
+            return
+        try:
+            self._oil_cache_service.save_current_values(
+                building=building,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                first=first,
+                second=second,
+            )
+            emit_log(
+                "[交接班][容量报表][燃油] 当前班次油量已缓存 "
+                f"building={building}, duty={duty_date}/{duty_shift}, first={first or '-'}, second={second or '-'}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(
+                "[交接班][容量报表][燃油] 当前班次油量缓存失败 "
+                f"building={building}, duty={duty_date}/{duty_shift}, error={exc}"
+            )
 
     def _normalize_alarm_summary(self, payload: Dict[str, Any] | None) -> Dict[str, Any]:
         data = payload if isinstance(payload, dict) else {}
@@ -802,7 +891,40 @@ class HandoverCapacityReportService:
     @classmethod
     def extract_tracked_cells_from_review_document(cls, document: Dict[str, Any]) -> Dict[str, str]:
         fixed_cells = cls._extract_fixed_cells_from_document(document if isinstance(document, dict) else {})
+        fixed_cells.update(
+            CapacityRoomInputsService.extract_cells_from_document(document if isinstance(document, dict) else {})
+        )
         return {cell: _text(fixed_cells.get(cell)) for cell in _CAPACITY_TRACKED_CELLS}
+
+    def _capacity_room_cells_from_defaults(self, *, building: str, emit_log: Callable[[str], None] = print) -> Dict[str, str]:
+        building_text = _text(building)
+        if not building_text:
+            return {}
+        try:
+            raw_defaults = ReviewBuildingDocumentStore(config=self.config, building=building_text).get_default(
+                CapacityRoomInputsService.DEFAULTS_KEY
+            )
+        except Exception as exc:  # noqa: BLE001
+            try:
+                emit_log(f"[交接班][容量报表][包间默认] 读取SQLite默认值失败 building={building_text}, error={exc}")
+            except Exception:  # noqa: BLE001
+                pass
+            raw_defaults = None
+        if isinstance(raw_defaults, dict):
+            return CapacityRoomInputsService.cells_from_payload(raw_defaults, building=building_text)
+        return {}
+
+    @staticmethod
+    def _capacity_room_overlay_values(*, building: str, handover_cells: Dict[str, Any]) -> Dict[str, str]:
+        handover = handover_cells if isinstance(handover_cells, dict) else {}
+        overlay: Dict[str, str] = {}
+        for spec in CapacityRoomInputsService.row_specs_for_building(building):
+            for cell_key in ("total_cell", "powered_cell", "aircon_cell"):
+                cell_name = _text(spec.get(cell_key)).upper()
+                if not cell_name or cell_name not in handover:
+                    continue
+                overlay[cell_name] = _text(handover.get(cell_name))
+        return overlay
 
     @staticmethod
     def capacity_input_signature(cells: Dict[str, Any] | None) -> str:
@@ -882,6 +1004,23 @@ class HandoverCapacityReportService:
         if len(numbers) >= 2:
             return _text(numbers[0]), _text(numbers[1])
         return "", ""
+
+    @staticmethod
+    def _split_metric_pair(value: Any) -> tuple[str, str]:
+        text = _text(value)
+        if not text:
+            return "", ""
+        if "/" not in text:
+            return "", text
+        left, right = text.split("/", 1)
+        return _text(left), _text(right)
+
+    @staticmethod
+    def _alarm_count_text(value: Any) -> str:
+        try:
+            return str(int(float(_text(value) or 0)))
+        except Exception:  # noqa: BLE001
+            return _text(value) or "0"
 
     @staticmethod
     def _weather_keyword_from_html(html: str) -> str:
@@ -1724,11 +1863,24 @@ class HandoverCapacityReportService:
         weather_text = _text(weather_payload.get("text"))
         weather_humidity = _text(weather_payload.get("humidity"))
         west_tank, east_tank = self._derive_tank_pair_from_f8(handover.get("F8"))
+        h16_left, h16_right = self._split_metric_pair(handover.get("B10"))
+        h18_left, h18_right = self._split_metric_pair(handover.get("D10"))
+        long_day_cell = "B4" if _text(duty_shift).lower() == "day" else "F4"
         overlay = {
+            "M6": _text(handover.get("C3")),
+            "U6": _text(handover.get("G3")),
+            "S7": _text(handover.get(long_day_cell)),
             "AC24": _text(handover.get("D8")),
             "U15": _text(handover.get("H6")),
             "AD22": west_tank,
             "AD23": east_tank,
+            "H16": h16_right,
+            "L16": h16_left,
+            "H18": h18_right,
+            "L18": h18_left,
+            "G9": f"交班未恢复告警：{self._alarm_count_text(handover.get('D15'))}",
+            "L9": self._alarm_count_text(handover.get("B15")),
+            "S9": _text(handover.get("F15")) or "/",
             "V62": _text(handover.get("B6")),
             "O62": _text(handover.get("D6")),
             "S62": _text(handover.get("F6")),
@@ -1744,7 +1896,11 @@ class HandoverCapacityReportService:
             "R2": _text(outdoor_handover_cells.get("B7")),
             "AB2": _text(outdoor_handover_cells.get("D7")),
         }
-        return {cell: value for cell, value in overlay.items() if value != ""}
+        if _text(duty_shift).lower() == "day":
+            overlay["G7"] = _text(handover.get("B4")) or "/"
+        output = {cell: value for cell, value in overlay.items() if value != ""}
+        output.update(self._capacity_room_overlay_values(building=building, handover_cells=handover))
+        return output
 
     @staticmethod
     def _to_float_cell_value(value: Any) -> float | None:
@@ -1935,60 +2091,6 @@ class HandoverCapacityReportService:
         finally:
             workbook.close()
 
-    @classmethod
-    def _build_zone_capacity_formula_values_from_sheet(
-        cls,
-        sheet,
-        overlay_values: Dict[str, Any] | None = None,
-    ) -> Dict[str, str]:
-        overlay = {
-            _text(cell).upper(): value
-            for cell, value in (overlay_values or {}).items()
-            if _text(cell)
-        }
-
-        def _cell_text(cell: str) -> str:
-            key = _text(cell).upper()
-            if key in overlay:
-                return _text(overlay.get(key))
-            return _text(sheet[key].value)
-
-        def _calc(*, flow_cell: str, return_cell: str, supply_cell: str) -> str:
-            primary_flow = cls._to_float_cell_value(_cell_text(flow_cell))
-            chilled_return_temp = cls._to_float_cell_value(_cell_text(return_cell))
-            chilled_supply_temp = cls._to_float_cell_value(_cell_text(supply_cell))
-            if primary_flow is None or chilled_return_temp is None or chilled_supply_temp is None:
-                return ""
-            return format_number(abs(chilled_return_temp - chilled_supply_temp) * primary_flow * 1.163)
-
-        values: Dict[str, str] = {}
-        west_value = _calc(flow_cell="G22", return_cell="L28", supply_cell="L29")
-        if west_value:
-            values["D22"] = west_value
-        east_value = _calc(flow_cell="T22", return_cell="Y28", supply_cell="Y29")
-        if east_value:
-            values["Q22"] = east_value
-        return values
-
-    def _build_zone_capacity_formula_values_from_file(
-        self,
-        *,
-        capacity_output_file: str,
-        overlay_values: Dict[str, Any] | None = None,
-    ) -> Dict[str, str]:
-        path = Path(_text(capacity_output_file))
-        if not _text(capacity_output_file) or not path.exists() or not path.is_file():
-            return {}
-        workbook = load_workbook_quietly(path)
-        try:
-            sheet_name = self._sheet_name(workbook, _text(self._template_cfg().get("sheet_name")))
-            return self._build_zone_capacity_formula_values_from_sheet(
-                workbook[sheet_name],
-                overlay_values=overlay_values,
-            )
-        finally:
-            workbook.close()
-
     @staticmethod
     def _build_substation_110kv_values(shared_110kv: Dict[str, Any] | None) -> Dict[str, str]:
         block = shared_110kv if isinstance(shared_110kv, dict) else {}
@@ -2102,12 +2204,6 @@ class HandoverCapacityReportService:
         overlay_values.update(self._build_substation_110kv_values(shared_block))
         if isinstance(cooling_pump_pressures, dict):
             overlay_values.update(self._build_cooling_pump_pressure_values(cooling_pump_pressures))
-        overlay_values.update(
-            self._build_zone_capacity_formula_values_from_file(
-                capacity_output_file=capacity_output_file,
-                overlay_values=overlay_values,
-            )
-        )
         load_rate_values, _, load_rate_payload = self._build_load_rate_values_from_file(
             capacity_output_file=capacity_output_file,
             building=building,
@@ -2410,6 +2506,7 @@ class HandoverCapacityReportService:
             list(_CAPACITY_TRACKED_CELLS),
             sheet_name=handover_sheet_name,
         )
+        handover_cells.update(self._capacity_room_cells_from_defaults(building=building, emit_log=emit_log))
         return self.sync_overlay_for_existing_report_from_cells(
             building=building,
             duty_date=duty_date,
@@ -2468,16 +2565,6 @@ class HandoverCapacityReportService:
                 overlay_values.update(self._build_substation_110kv_values(shared_block))
                 if isinstance(cooling_pump_pressures, dict):
                     overlay_values.update(self._build_cooling_pump_pressure_values(cooling_pump_pressures))
-                formula_values = self._build_zone_capacity_formula_values_from_sheet(
-                    sheet,
-                    overlay_values=overlay_values,
-                )
-                if formula_values:
-                    overlay_values.update(formula_values)
-                    emit_log(
-                        "[交接班][容量报表][补写] 区域制冷量计算完成 "
-                        f"building={building}, D22={formula_values.get('D22', '-')}, Q22={formula_values.get('Q22', '-')}"
-                    )
                 load_rate_values, load_rate_warning, load_rate_payload = self._build_load_rate_values_for_sheet(
                     sheet,
                     building=building,
@@ -2627,6 +2714,7 @@ class HandoverCapacityReportService:
             ],
             sheet_name=handover_sheet_name,
         )
+        handover_cells.update(self._capacity_room_cells_from_defaults(building=building_text, emit_log=emit_log))
         capacity_rows = self._load_capacity_rows(capacity_source_file)
         oil_current = self._extract_current_oil_display_values(
             building=building_text,
@@ -2643,6 +2731,8 @@ class HandoverCapacityReportService:
         warnings: List[str] = []
         if previous_oil_warning:
             warnings.append(previous_oil_warning)
+        if not _text(oil_current.get("first")) and not _text(oil_current.get("second")):
+            warnings.append("当前班次油量未识别，容量表U13/X13将为空")
         load_rate_blocking_error = ""
 
         current_alarm = self._normalize_alarm_summary(current_alarm_summary)
@@ -2763,6 +2853,13 @@ class HandoverCapacityReportService:
             _write_cells_with_merged_support(sheet, cell_values)
             self._apply_load_rate_number_format(sheet)
             atomic_save_workbook(workbook, output_file)
+            self._save_current_capacity_display_oil_values(
+                building=building_text,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                current_display_values=oil_current,
+                emit_log=emit_log,
+            )
         finally:
             workbook.close()
 

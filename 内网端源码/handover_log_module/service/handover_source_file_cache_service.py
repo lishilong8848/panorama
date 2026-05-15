@@ -16,6 +16,7 @@ from app.shared.utils.atomic_file import (
 from app.shared.utils.artifact_naming import (
     FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_POWER,
+    FAMILY_CHILLER_MODE_SWITCH,
     FAMILY_HANDOVER_CAPACITY_REPORT,
     FAMILY_HANDOVER_LOG,
     build_source_artifact_path,
@@ -373,6 +374,8 @@ class HandoverSourceFileCacheService:
                 return FAMILY_BRANCH_POWER
         if "支路功率" in text or "列头柜支路电流" in text:
             return FAMILY_BRANCH_POWER
+        if "制冷单元模式切换参数" in text:
+            return FAMILY_CHILLER_MODE_SWITCH
         if "容量" in text or "每日报表合集" in text:
             return FAMILY_HANDOVER_CAPACITY_REPORT
         return FAMILY_HANDOVER_LOG

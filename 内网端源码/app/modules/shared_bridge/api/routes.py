@@ -73,6 +73,7 @@ _LATEST_REFRESHABLE_SOURCE_FAMILIES = {
     "branch_power_family": "支路功率源文件",
     "branch_current_family": "支路电流源文件",
     "branch_switch_family": "支路开关源文件",
+    "chiller_mode_switch_family": "制冷单元模式切换参数源文件",
     "alarm_event_family": "告警信息源文件",
 }
 
@@ -100,7 +101,16 @@ def _internal_summary_has_runtime_signal(payload: Any) -> bool:
             "expired",
         }:
             return True
-    for key in ("handover_log_family", "handover_capacity_report_family", "monthly_report_family", "branch_power_family", "branch_current_family", "branch_switch_family", "alarm_event_family"):
+    for key in (
+        "handover_log_family",
+        "handover_capacity_report_family",
+        "monthly_report_family",
+        "branch_power_family",
+        "branch_current_family",
+        "branch_switch_family",
+        "chiller_mode_switch_family",
+        "alarm_event_family",
+    ):
         family = cache.get(key, {}) if isinstance(cache.get(key, {}), dict) else {}
         rows = family.get("buildings", []) if isinstance(family.get("buildings", []), list) else []
         if any(

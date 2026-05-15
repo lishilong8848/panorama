@@ -1012,6 +1012,11 @@ class ReviewBuildingDocumentStore:
                        updated_at=?,
                        finished_at=''
                  WHERE status='running'
+                    OR (
+                        status='failed'
+                        AND error LIKE '%TaskEngineDatabase 已关闭%'
+                        AND attempts < 5
+                    )
                 """,
                 (now,),
             )

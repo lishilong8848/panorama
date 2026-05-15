@@ -43,6 +43,7 @@ export function createSchedulerUiHelpers(options = {}) {
     if (normalized === "scheduler") return health.scheduler;
     if (normalized === "handover") return health.handover_scheduler;
     if (normalized === "wet_bulb") return health.wet_bulb_collection?.scheduler || {};
+    if (normalized === "chiller_mode_upload") return health.chiller_mode_upload?.scheduler || {};
     if (normalized === "day_metric_upload") return health.day_metric_upload?.scheduler || {};
     if (normalized === "branch_power_upload") return health.branch_power_upload?.scheduler || {};
     if (normalized === "alarm_event_upload") return health.alarm_event_upload?.scheduler || {};
@@ -180,6 +181,14 @@ export function createSchedulerUiHelpers(options = {}) {
       && typeof config.value.wet_bulb_collection.scheduler === "object"
     ) {
       config.value.wet_bulb_collection.scheduler.auto_start_in_gui = remembered;
+      return;
+    }
+    if (
+      normalized === "chiller_mode_upload"
+      && config?.value?.chiller_mode_upload?.scheduler
+      && typeof config.value.chiller_mode_upload.scheduler === "object"
+    ) {
+      config.value.chiller_mode_upload.scheduler.auto_start_in_gui = remembered;
       return;
     }
     if (

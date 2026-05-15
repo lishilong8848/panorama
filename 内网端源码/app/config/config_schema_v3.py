@@ -192,6 +192,17 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "debug_step_log": True,
                 "export_button_text": "原样导出",
             },
+            "chiller_mode_switch": {
+                "interval_sec": 600,
+                "download": {
+                    "template_name": "制冷单元模式切换参数",
+                    "sheet_name": "制冷单元模式切换参数",
+                    "lookback_minutes": 11,
+                    "scale_label": "5分钟",
+                    "menu_path": ["报表报告", "数据查询", "即时报表"],
+                    "export_button_text": "原样导出",
+                },
+            },
             "capacity_report": {
                 "download": {
                     "template_name": "交接班容量报表",

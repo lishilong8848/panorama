@@ -287,7 +287,11 @@ def _blank_data_row(ws: Worksheet, row_idx: int) -> None:
 
 
 def _fill_empty_section_row(ws: Worksheet, row_idx: int) -> None:
-    for col in "ABCDEFGHI":
+    sequence_cell = ws[f"A{row_idx}"]
+    if not isinstance(sequence_cell, MergedCell):
+        sequence_cell.value = 1
+
+    for col in "BCDEFGHI":
         cell = ws[f"{col}{row_idx}"]
         if isinstance(cell, MergedCell):
             continue

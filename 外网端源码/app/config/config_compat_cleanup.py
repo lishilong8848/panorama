@@ -49,3 +49,19 @@ def sanitize_wet_bulb_collection_config(wet_bulb_collection: Dict[str, Any] | No
     target.pop("wiki_url", None)
     sanitized["target"] = target
     return sanitized
+
+
+def sanitize_chiller_mode_upload_config(chiller_mode_upload: Dict[str, Any] | None) -> Dict[str, Any]:
+    sanitized = copy.deepcopy(_dict(chiller_mode_upload))
+    sanitized.pop("manual_button_enabled", None)
+    source = _dict(sanitized.get("source"))
+    source.pop("switch_to_internal_before_download", None)
+    if source:
+        sanitized["source"] = source
+    else:
+        sanitized.pop("source", None)
+    target = _dict(sanitized.get("target"))
+    target.pop("base_url", None)
+    target.pop("wiki_url", None)
+    sanitized["target"] = target
+    return sanitized

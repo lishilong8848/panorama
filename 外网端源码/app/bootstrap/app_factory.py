@@ -35,6 +35,7 @@ from app.modules.shared_bridge.service.runtime_status_coordinator import Runtime
 from app.modules.scheduler.api.handover_routes import router as handover_scheduler_router
 from app.modules.scheduler.api.day_metric_upload_routes import router as day_metric_upload_scheduler_router
 from app.modules.scheduler.api.branch_power_upload_routes import router as branch_power_upload_scheduler_router
+from app.modules.scheduler.api.chiller_mode_upload_routes import router as chiller_mode_upload_scheduler_router
 from app.modules.scheduler.api.alarm_event_upload_routes import router as alarm_event_upload_scheduler_router
 from app.modules.scheduler.api.monthly_change_report_routes import router as monthly_change_report_scheduler_router
 from app.modules.scheduler.api.monthly_event_report_routes import router as monthly_event_report_scheduler_router
@@ -185,6 +186,7 @@ def _register_external_role_routes(app: FastAPI) -> None:
     app.include_router(handover_scheduler_router)
     app.include_router(day_metric_upload_scheduler_router)
     app.include_router(branch_power_upload_scheduler_router)
+    app.include_router(chiller_mode_upload_scheduler_router)
     app.include_router(alarm_event_upload_scheduler_router)
     app.include_router(wet_bulb_collection_scheduler_router)
     app.include_router(monthly_change_report_scheduler_router)
@@ -406,6 +408,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_handover_scheduler(source="关闭自动")
             if container.wet_bulb_collection_scheduler:
                 container.stop_wet_bulb_collection_scheduler(source="关闭自动")
+            if container.chiller_mode_upload_scheduler:
+                container.stop_chiller_mode_upload_scheduler(source="关闭自动")
             if container.day_metric_upload_scheduler:
                 container.stop_day_metric_upload_scheduler(source="关闭自动")
             if container.branch_power_upload_scheduler:
@@ -591,6 +595,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(
                 f"[湿球温度定时采集调度] 执行器绑定完成: {container.wet_bulb_collection_scheduler_executor_name()}, "
                 f"executor_bound={container.is_wet_bulb_collection_scheduler_executor_bound()}"
+            )
+            container.add_system_log(
+                f"[制冷模式参数上传调度] 执行器绑定完成: {container.chiller_mode_upload_scheduler_executor_name()}, "
+                f"executor_bound={container.is_chiller_mode_upload_scheduler_executor_bound()}"
             )
             container.add_system_log(
                 f"[12项独立上传调度] 执行器绑定完成: {container.day_metric_upload_scheduler_executor_name()}, "
@@ -1521,6 +1529,130 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             return True, "ok"
         return False, done.error or done.summary or "任务失败"
 
+    def chiller_mode_upload_scheduler_callback(source: str) -> tuple[bool, str]:
+        from handover_log_module.service.chiller_mode_upload_service import ChillerModeUploadService
+
+        runtime_config = container.runtime_config
+        role_mode = _deployment_role_mode()
+        if role_mode == "internal":
+            container.add_system_log("[制冷模式参数上传调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+        if role_mode != "external":
+            detail = "当前未确认有效角色，无法执行制冷模式参数上传调度"
+            container.add_system_log(f"[制冷模式参数上传调度] {detail}")
+            container.record_chiller_mode_upload_external_run(
+                status="failed",
+                source="scheduler",
+                detail=detail,
+                duration_ms=0,
+            )
+            return False, detail
+
+        bridge_service, bridge_error = _resolve_bridge_runtime()
+        if bridge_service is None:
+            detail = f"共享桥接未就绪，外网端无法执行制冷模式参数上传调度：{_bridge_runtime_error_text(bridge_error)}"
+            container.add_system_log(f"[制冷模式参数上传调度] {detail}")
+            container.record_chiller_mode_upload_external_run(
+                status="failed",
+                source="scheduler",
+                detail=detail,
+                duration_ms=0,
+            )
+            return False, detail
+
+        try:
+            target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
+            if not target_buildings:
+                detail = "共享缓存楼栋列表为空，无法选择制冷模式参数源文件"
+                container.add_system_log(f"[制冷模式参数上传调度] {detail}")
+                container.record_chiller_mode_upload_external_run(
+                    status="failed",
+                    source="scheduler",
+                    detail=detail,
+                    duration_ms=0,
+                )
+                return False, detail
+            selection = bridge_service.get_latest_source_cache_selection(
+                source_family=ChillerModeUploadService.SOURCE_FAMILY,
+                buildings=target_buildings,
+                max_selection_age_hours=1.0,
+            )
+            cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
+            if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                detail = _build_latest_cache_wait_text("制冷模式参数", selection if isinstance(selection, dict) else {})
+                container.add_system_log(f"[制冷模式参数上传调度] {detail}")
+                container.record_chiller_mode_upload_external_run(
+                    status="failed",
+                    source="scheduler",
+                    detail=detail,
+                    duration_ms=0,
+                )
+                return False, detail
+
+            def _run_from_cache(emit_log):
+                service = ChillerModeUploadService(runtime_config)
+                source_units = [
+                    {
+                        "building": str(item.get("building", "") or "").strip(),
+                        "file_path": str(item.get("file_path", "") or "").strip(),
+                    }
+                    for item in cached_entries
+                ]
+                result = service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
+                if str((result or {}).get("status", "") or "").strip().lower() == "failed":
+                    failed_files = (result or {}).get("failed_files", [])
+                    detail_items = []
+                    if isinstance(failed_files, list):
+                        for failed in failed_files[:5]:
+                            if not isinstance(failed, dict):
+                                continue
+                            building = str(failed.get("building", "") or "-").strip() or "-"
+                            file_path = str(failed.get("file_path", "") or "").strip()
+                            file_name = os.path.basename(file_path) if file_path else "-"
+                            error = str(failed.get("error", "") or "未知错误").strip() or "未知错误"
+                            detail_items.append(f"{building}/{file_name}: {error}")
+                    raise RuntimeError("制冷模式参数上传失败：" + ("；".join(detail_items) if detail_items else "未提供失败明细"))
+                return result
+
+            job = _start_external_cache_job(
+                name="制冷模式参数上传-共享文件",
+                feature="chiller_mode_upload_cache_latest",
+                resource_key="shared_bridge:chiller_mode_upload",
+                run_func=_run_from_cache,
+            )
+            submit_detail = f"已提交制冷模式参数共享文件上传任务 job_id={job.job_id}"
+            container.add_system_log(f"[制冷模式参数上传调度] {submit_detail}")
+            started_at = datetime.now()
+            done = container.job_service.wait_job(job.job_id)
+            duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+            if done.status != "success":
+                detail = done.error or done.summary or "制冷模式参数上传任务失败"
+                container.record_chiller_mode_upload_external_run(
+                    status="failed",
+                    source="scheduler",
+                    detail=detail,
+                    duration_ms=duration_ms,
+                )
+                return False, detail
+            detail = f"制冷模式参数共享文件上传完成 job_id={job.job_id}"
+            container.record_chiller_mode_upload_external_run(
+                status="success",
+                source="scheduler",
+                detail=detail,
+                duration_ms=duration_ms,
+            )
+            return True, detail
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            container.add_system_log(f"[制冷模式参数上传调度] 任务提交失败：{error_text}")
+            container.record_chiller_mode_upload_external_run(
+                status="failed",
+                source="scheduler",
+                detail=error_text,
+                duration_ms=0,
+            )
+            return False, error_text
+
     def day_metric_upload_scheduler_callback(source: str) -> tuple[bool, str]:
         from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 
@@ -2011,6 +2143,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     setter = getattr(container, "set_wet_bulb_collection_scheduler_callback", None)
     if callable(setter):
         setter(wet_bulb_collection_scheduler_callback)
+    setter = getattr(container, "set_chiller_mode_upload_scheduler_callback", None)
+    if callable(setter):
+        setter(chiller_mode_upload_scheduler_callback)
     setter = getattr(container, "set_day_metric_upload_scheduler_callback", None)
     if callable(setter):
         setter(day_metric_upload_scheduler_callback)

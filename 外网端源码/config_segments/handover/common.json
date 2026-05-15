@@ -12,7 +12,9 @@
       "catch_up_if_missed": false,
       "retry_failed_in_same_period": false,
       "morning_state_file": "handover_scheduler_morning_state.json",
-      "afternoon_state_file": "handover_scheduler_afternoon_state.json"
+      "afternoon_state_file": "handover_scheduler_afternoon_state.json",
+      "cloud_catchup_morning_state_file": "handover_cloud_catchup_morning_state.json",
+      "cloud_catchup_afternoon_state_file": "handover_cloud_catchup_afternoon_state.json"
     },
     "download": {
       "template_name": "交接班日志（李世龙）",
@@ -44,6 +46,21 @@
       "debug_step_log": true,
       "export_button_text": "原样导出",
       "sites": []
+    },
+    "chiller_mode_switch": {
+      "interval_sec": 600,
+      "download": {
+        "template_name": "制冷单元模式切换参数",
+        "sheet_name": "制冷单元模式切换参数",
+        "lookback_minutes": 11,
+        "scale_label": "5分钟",
+        "menu_path": [
+          "报表报告",
+          "数据查询",
+          "即时报表"
+        ],
+        "export_button_text": "原样导出"
+      }
     },
     "capacity_report": {
       "download": {
@@ -994,7 +1011,10 @@
           "target_cell": "F10",
           "rule_type": "aggregate",
           "d_keywords": [
-            "电池放电后备时间"
+            "电池放电后备时间",
+            "电池放电时长",
+            "放电后备时间",
+            "放电时间"
           ],
           "match_mode": "contains_casefold",
           "agg": "min",

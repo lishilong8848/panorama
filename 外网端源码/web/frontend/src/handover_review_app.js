@@ -4,6 +4,7 @@ import {
   claimHandoverReview110kvLockApi,
   claimHandoverReviewLockApi,
   confirmHandoverReviewApi,
+  getHandoverEngineerDirectoryApi,
   getJobApi,
   getHandoverReviewApi,
   getHandoverReview110StationStatusApi,
@@ -17,6 +18,7 @@ import {
   releaseHandoverReview110kvLockApi,
   releaseHandoverReviewLockApi,
   retryHandoverReviewCloudSyncApi,
+  refreshHandoverReviewEventSectionsApi,
   saveHandoverReviewApi,
   saveHandoverReview110kvApi,
   sendHandoverReviewCapacityImageApi,
@@ -49,8 +51,17 @@ const SUBSTATION_110KV_LOCK_RELEASE_IDLE_MS = 10000;
 const REVIEW_CLIENT_ID_STORAGE_KEY = "handover_review_client_id";
 const REVIEW_CLIENT_LABEL_STORAGE_KEY = "handover_review_client_label";
 const HANDOVER_REVIEW_STATUS_BROADCAST_KEY = "handover_review_status_broadcast_v1";
-const CAPACITY_SYNC_TRACKED_CELLS = ["H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13"];
-const FORCED_FIXED_CELL_VALUES = { F10: "15" };
+const CAPACITY_ROOM_TRACKED_CELLS = [
+  "Z69", "AA69", "AC69", "Z79", "AA79", "AC79", "Z89", "AA89", "AC89",
+  "Z103", "AA103", "AC103", "Z109", "AA109", "AC109", "Z117", "AA117", "AC117",
+  "Z127", "AA127", "AC127", "Z129", "AA129", "AC129", "Z149", "AA149", "AC149",
+  "Z169", "AA169", "AC169",
+];
+const CAPACITY_SYNC_TRACKED_CELLS = [
+  "C3", "G3", "B4", "F4", "H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7",
+  "B10", "D10", "B15", "D15", "F15", "B13", "D13",
+  ...CAPACITY_ROOM_TRACKED_CELLS,
+];
 const OUTDOOR_TEMPERATURE_CELLS = ["B7", "D7"];
 const SUBSTATION_110KV_ROWS = [
   { row_id: "incoming_akai", label: "阿开", group: "incoming" },
@@ -67,6 +78,56 @@ function shiftTextFromCode(shift) {
   if (normalized === "day") return "白班";
   if (normalized === "night") return "夜班";
   return String(shift || "").trim() || "-";
+}
+
+function normalizePersonName(value) {
+  return String(value ?? "").replace(/\s+/g, "").trim();
+}
+
+function splitPersonNames(value) {
+  const seen = new Set();
+  return String(value ?? "")
+    .split(/[、,，;；/\\\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => {
+      const key = normalizePersonName(item);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function joinPersonNames(names) {
+  return (Array.isArray(names) ? names : [])
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean)
+    .join("、");
+}
+
+function togglePersonNameValue(value, name, { max = 0 } = {}) {
+  const target = String(name ?? "").trim();
+  if (!target) return String(value ?? "");
+  const targetKey = normalizePersonName(target);
+  const names = splitPersonNames(value);
+  const existingIndex = names.findIndex((item) => normalizePersonName(item) === targetKey);
+  if (existingIndex >= 0) {
+    names.splice(existingIndex, 1);
+    return joinPersonNames(names);
+  }
+  names.push(target);
+  const capped = max > 0 && names.length > max ? names.slice(names.length - max) : names;
+  return joinPersonNames(capped);
+}
+
+function hasPersonNameValue(value, name) {
+  const target = normalizePersonName(name);
+  if (!target) return false;
+  return splitPersonNames(value).some((item) => normalizePersonName(item) === target);
+}
+
+function normalizeHeaderLabel(value) {
+  return String(value ?? "").replace(/\s+/g, "").trim();
 }
 
 function syncReviewSelectionToUrl({ sessionId = "", isLatest = false, dutyDate = "", dutyShift = "" } = {}) {
@@ -253,7 +314,7 @@ function normalizeField(field) {
   return {
     cell,
     label: String(field?.label || cell || "字段"),
-    value: String(FORCED_FIXED_CELL_VALUES[cell] ?? field?.value ?? ""),
+    value: String(field?.value ?? ""),
   };
 }
 
@@ -526,7 +587,10 @@ function resolveSectionColumns(section) {
 
 function hasSectionRowContent(row, columns) {
   if (!row || !row.cells || !Array.isArray(columns)) return false;
-  return columns.some((column) => String(row.cells[column.key] || "").trim());
+  return columns.some((column) => {
+    const text = String(row.cells[column.key] || "").trim();
+    return Boolean(text && text !== "/");
+  });
 }
 
 function blankRow(columns) {
@@ -706,6 +770,30 @@ function normalizeFooterBlock(block, index) {
   return normalizeReadonlyFooterBlock(block, index);
 }
 
+function normalizeCapacityRoomRow(row, index) {
+  const room = String(row?.room || `M${index + 1}`).trim() || `M${index + 1}`;
+  const rowNumber = Number.parseInt(String(row?.row || 0), 10) || 0;
+  return {
+    room,
+    label: String(row?.label || `${room}包间`).trim() || `${room}包间`,
+    row: rowNumber,
+    total_cell: String(row?.total_cell || "").trim().toUpperCase(),
+    powered_cell: String(row?.powered_cell || "").trim().toUpperCase(),
+    aircon_cell: String(row?.aircon_cell || "").trim().toUpperCase(),
+    total_cabinets: String(row?.total_cabinets ?? ""),
+    powered_cabinets: String(row?.powered_cabinets ?? ""),
+    aircon_started: String(row?.aircon_started ?? ""),
+  };
+}
+
+function normalizeCapacityRoomInputs(raw = {}) {
+  const rows = Array.isArray(raw?.rows) ? raw.rows.map(normalizeCapacityRoomRow) : [];
+  return {
+    title: String(raw?.title || "M1-M6包间机柜与空调启动台数").trim() || "M1-M6包间机柜与空调启动台数",
+    rows,
+  };
+}
+
 function normalizeDocument(document) {
   const fixedBlocks = Array.isArray(document?.fixed_blocks)
     ? document.fixed_blocks.map(normalizeFixedBlock)
@@ -722,6 +810,7 @@ function normalizeDocument(document) {
     sections,
     footer_blocks: footerBlocks,
     cooling_pump_pressures: normalizeCoolingPumpPressures(document?.cooling_pump_pressures || {}),
+    capacity_room_inputs: normalizeCapacityRoomInputs(document?.capacity_room_inputs || {}),
   };
 }
 
@@ -789,6 +878,7 @@ function emptyDirtyRegions() {
     sections: false,
     footer_inventory: false,
     cooling_pump_pressures: false,
+    capacity_room_inputs: false,
   };
 }
 
@@ -798,7 +888,23 @@ function cloneDirtyRegions(dirtyRegions) {
     sections: Boolean(dirtyRegions?.sections),
     footer_inventory: Boolean(dirtyRegions?.footer_inventory),
     cooling_pump_pressures: Boolean(dirtyRegions?.cooling_pump_pressures),
+    capacity_room_inputs: Boolean(dirtyRegions?.capacity_room_inputs),
   };
+}
+
+function normalizeCapacityTrackedCells(rawTrackedCells) {
+  const seen = new Set();
+  return [
+    ...(Array.isArray(rawTrackedCells) ? rawTrackedCells : []),
+    ...CAPACITY_SYNC_TRACKED_CELLS,
+  ]
+    .map((item) => String(item || "").trim().toUpperCase())
+    .filter(Boolean)
+    .filter((cell) => {
+      if (seen.has(cell)) return false;
+      seen.add(cell);
+      return true;
+    });
 }
 
 function normalizeCapacitySync(raw) {
@@ -806,14 +912,11 @@ function normalizeCapacitySync(raw) {
   const normalizedStatus = ["ready", "pending", "pending_input", "missing_file", "failed"].includes(status)
     ? status
     : "failed";
-  const trackedCells = Array.isArray(raw?.tracked_cells) && raw.tracked_cells.length
-    ? raw.tracked_cells
-    : CAPACITY_SYNC_TRACKED_CELLS;
   return {
     status: normalizedStatus,
     updated_at: String(raw?.updated_at || "").trim(),
     error: String(raw?.error || "").trim(),
-    tracked_cells: trackedCells.map((item) => String(item || "").trim().toUpperCase()).filter(Boolean),
+    tracked_cells: normalizeCapacityTrackedCells(raw?.tracked_cells),
     input_signature: String(raw?.input_signature || "").trim(),
   };
 }
@@ -1014,9 +1117,7 @@ function normalizeReviewDisplayState(raw = {}) {
         }))
         .filter((item) => item.text)
     : [];
-  const trackedCells = Array.isArray(raw?.capacity_sync?.tracked_cells)
-    ? raw.capacity_sync.tracked_cells.map((item) => String(item || "").trim().toUpperCase()).filter(Boolean)
-    : CAPACITY_SYNC_TRACKED_CELLS;
+  const trackedCells = normalizeCapacityTrackedCells(raw?.capacity_sync?.tracked_cells);
   return {
     mode: normalizeDisplayBadge(raw?.mode, {
       code: "unknown",
@@ -1471,6 +1572,7 @@ export function mountHandoverReviewApp(Vue) {
       const confirming = ref(false);
       const retryingCloudSync = ref(false);
       const updatingHistoryCloudSync = ref(false);
+      const eventSectionsRefreshing = ref(false);
       const dirty = ref(false);
       const dirtyRegions = ref(emptyDirtyRegions());
       const capacityLinkedDirty = ref(false);
@@ -1519,6 +1621,11 @@ export function mountHandoverReviewApp(Vue) {
       const historyLoading = ref(false);
       const historyLoaded = ref(false);
       const historyCacheKey = ref("");
+      const engineerDirectoryRows = ref([]);
+      const engineerDirectoryLoading = ref(false);
+      const engineerDirectoryLoaded = ref(false);
+      const engineerDirectoryError = ref("");
+      const selectedSectionPeople = ref({});
       const staleRevisionConflict = ref(false);
       const syncingRemoteRevision = ref(false);
       const heldLockSessionId = ref("");
@@ -1591,7 +1698,8 @@ export function mountHandoverReviewApp(Vue) {
           dirtyRegions.value.fixed_blocks
           || dirtyRegions.value.sections
           || dirtyRegions.value.footer_inventory
-          || dirtyRegions.value.cooling_pump_pressures,
+          || dirtyRegions.value.cooling_pump_pressures
+          || dirtyRegions.value.capacity_room_inputs,
         );
       }
 
@@ -1701,6 +1809,229 @@ export function mountHandoverReviewApp(Vue) {
         const prefix = dateText ? `${dateText} ${shiftText}` : "当前班次";
         return `${prefix}交接班数据尚未生成，请在数据生成后再来查看。`;
       });
+      function fixedFieldValue(cellName) {
+        const target = String(cellName || "").trim().toUpperCase();
+        const blocks = Array.isArray(documentRef.value?.fixed_blocks) ? documentRef.value.fixed_blocks : [];
+        for (const block of blocks) {
+          const fields = Array.isArray(block?.fields) ? block.fields : [];
+          for (const field of fields) {
+            if (String(field?.cell || "").trim().toUpperCase() === target) {
+              return String(field?.value ?? "").trim();
+            }
+          }
+        }
+        return "";
+      }
+
+      function personOption(name, source = "") {
+        const text = String(name || "").trim();
+        if (!text) return null;
+        return {
+          name: text,
+          key: normalizePersonName(text),
+          source: String(source || "").trim(),
+          label: source ? `${text} · ${source}` : text,
+        };
+      }
+
+      function dedupePersonOptions(options) {
+        const seen = new Set();
+        return (Array.isArray(options) ? options : [])
+          .filter(Boolean)
+          .filter((item) => {
+            const key = normalizePersonName(item.name);
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+      }
+
+      const currentDutyPersonOptions = computed(() => splitPersonNames(fixedFieldValue("C3")).map((name) => personOption(name, "值班人")));
+      const handoverPersonOptions = computed(() => splitPersonNames(fixedFieldValue("G3")).map((name) => personOption(name, "接班人")));
+      const dutyPersonOptions = computed(() => dedupePersonOptions([
+        ...currentDutyPersonOptions.value,
+        ...handoverPersonOptions.value,
+      ]));
+      const engineerPersonOptions = computed(() => {
+        const rows = Array.isArray(engineerDirectoryRows.value) ? engineerDirectoryRows.value : [];
+        const currentBuilding = String(building.value || "").trim();
+        const sameBuilding = rows.filter((row) => String(row?.building || "").trim() === currentBuilding);
+        const sourceRows = sameBuilding.length ? sameBuilding : rows;
+        return dedupePersonOptions(sourceRows.map((row) => {
+          const name = String(row?.supervisor || "").trim();
+          const specialty = String(row?.specialty || row?.position || "工程师").trim();
+          return personOption(name, specialty || "工程师");
+        }));
+      });
+      const sectionPersonOptions = computed(() => dedupePersonOptions([
+        ...dutyPersonOptions.value,
+        ...engineerPersonOptions.value,
+      ]));
+
+      async function ensureEngineerDirectoryLoaded() {
+        if (engineerDirectoryLoaded.value || engineerDirectoryLoading.value) return;
+        engineerDirectoryLoading.value = true;
+        engineerDirectoryError.value = "";
+        try {
+          const response = await getHandoverEngineerDirectoryApi();
+          engineerDirectoryRows.value = Array.isArray(response?.rows) ? response.rows : [];
+          engineerDirectoryLoaded.value = true;
+        } catch (error) {
+          engineerDirectoryError.value = String(error?.message || error || "工程师目录读取失败");
+          engineerDirectoryRows.value = [];
+        } finally {
+          engineerDirectoryLoading.value = false;
+        }
+      }
+
+      function isEventRefreshSection(section) {
+        const name = normalizeHeaderLabel(section?.name);
+        return name.includes("新事件处理") || name.includes("历史事件跟进");
+      }
+
+      function isSectionPersonColumn(section, column) {
+        const label = normalizeHeaderLabel(column?.label || column?.key);
+        if (!label || label.includes("执行方")) return false;
+        return label.includes("跟进人") || label.includes("执行人") || label.includes("随工人");
+      }
+
+      function findSectionPersonColumn(section) {
+        const columns = Array.isArray(section?.columns) ? section.columns : [];
+        return columns.find((column) => isSectionPersonColumn(section, column)) || null;
+      }
+
+      function selectedSectionPersonValues(sectionIndex) {
+        const values = selectedSectionPeople.value?.[sectionIndex];
+        return Array.isArray(values) ? values : [];
+      }
+
+      function updateSectionPersonSelection(sectionIndex, event) {
+        const selected = Array.from(event?.target?.selectedOptions || [])
+          .map((option) => String(option.value || "").trim())
+          .filter(Boolean);
+        selectedSectionPeople.value = {
+          ...selectedSectionPeople.value,
+          [sectionIndex]: selected,
+        };
+      }
+
+      async function fillSectionPeople(sectionIndex) {
+        const section = documentRef.value.sections?.[sectionIndex];
+        const column = findSectionPersonColumn(section);
+        const selected = selectedSectionPersonValues(sectionIndex);
+        if (!section || !column || !selected.length) {
+          statusText.value = "请选择要填入的人名";
+          return;
+        }
+        const locked = await ensureEditingLock();
+        if (!locked) {
+          statusText.value = "当前审核页正在其他终端编辑，请等待或刷新后重试";
+          return;
+        }
+        const rows = Array.isArray(section.rows) ? section.rows : [];
+        const value = joinPersonNames(selected);
+        let changed = 0;
+        for (const row of rows) {
+          if (!row || !row.cells || !hasSectionRowContent(row, section.columns)) continue;
+          if (String(row.cells[column.key] ?? "") === value) continue;
+          row.cells[column.key] = value;
+          row.is_placeholder_row = !hasSectionRowContent(row, section.columns);
+          changed += 1;
+        }
+        if (!changed) {
+          statusText.value = "当前分类没有可填入的人名行";
+          return;
+        }
+        markDocumentDirty({ region: "sections" });
+        statusText.value = `已将${value}填入${section.name}，待保存`;
+      }
+
+      function toggleSectionPerson(sectionIndex, rowIndex, columnKey, personName) {
+        const section = documentRef.value.sections?.[sectionIndex];
+        const row = section?.rows?.[rowIndex];
+        if (!section || !row || !row.cells) return;
+        const nextValue = togglePersonNameValue(row.cells[columnKey], personName);
+        updateSectionCell(sectionIndex, rowIndex, columnKey, nextValue);
+      }
+
+      function sectionPersonActive(row, columnKey, personName) {
+        return hasPersonNameValue(row?.cells?.[columnKey], personName);
+      }
+
+      function isFooterHandoverPersonColumn(column) {
+        const key = String(column?.key || "").trim().toUpperCase();
+        const label = normalizeHeaderLabel(column?.label || "");
+        return key === "H" || label.includes("清点确认人") || label.includes("接班");
+      }
+
+      function toggleFooterHandoverPerson(blockIndex, rowIndex, columnKey, personName) {
+        const block = documentRef.value.footer_blocks?.[blockIndex];
+        const row = block?.rows?.[rowIndex];
+        if (!block || block.type !== "inventory_table" || !row || !row.cells) return;
+        const nextValue = togglePersonNameValue(row.cells[columnKey], personName, { max: 2 });
+        updateFooterCell(blockIndex, rowIndex, columnKey, nextValue);
+      }
+
+      function footerPersonActive(row, columnKey, personName) {
+        return hasPersonNameValue(row?.cells?.[columnKey], personName);
+      }
+
+      function normalizeEventSectionRows(section, rows) {
+        const columns = resolveSectionColumns(section);
+        const normalizedRows = (Array.isArray(rows) ? rows : []).map((row) => normalizeSectionRow(row, columns));
+        const contentRows = normalizedRows.filter((row) => hasSectionRowContent(row, columns));
+        return contentRows.length ? contentRows : [blankRow(columns)];
+      }
+
+      function applyEventSectionRows(sectionName, rows) {
+        const sections = Array.isArray(documentRef.value.sections) ? documentRef.value.sections : [];
+        const targetName = String(sectionName || "").trim();
+        const sectionIndex = sections.findIndex((section) => String(section?.name || "").trim() === targetName);
+        if (sectionIndex < 0) return false;
+        const section = sections[sectionIndex];
+        section.rows = normalizeEventSectionRows(section, rows);
+        return true;
+      }
+
+      async function refreshEventSectionFromBitable(sectionName) {
+        const targetName = String(sectionName || "").trim();
+        if (!session.value?.session_id || !targetName) return;
+        if (dirtyRegions.value.sections && typeof window !== "undefined") {
+          const confirmed = window.confirm("刷新会覆盖该事件分类当前未保存内容，是否继续？");
+          if (!confirmed) return;
+        }
+        const locked = await ensureEditingLock();
+        if (!locked) {
+          statusText.value = "当前审核页正在其他终端编辑，请等待或刷新后重试";
+          return;
+        }
+        eventSectionsRefreshing.value = true;
+        errorText.value = "";
+        statusText.value = `正在刷新${targetName}...`;
+        try {
+          const response = await refreshHandoverReviewEventSectionsApi(buildingCode, {
+            session_id: session.value.session_id,
+            client_id: reviewClientId,
+            section_name: targetName,
+          });
+          const sections = response?.sections && typeof response.sections === "object" ? response.sections : {};
+          const updated = applyEventSectionRows(targetName, sections[targetName]);
+          if (!updated) {
+            throw new Error(`未找到${targetName}分类`);
+          }
+          markDocumentDirty({ region: "sections" });
+          statusText.value = `${targetName}已从多维刷新，正在保存...`;
+          const saved = await saveDocument({ reason: "event_section_refresh" });
+          statusText.value = saved
+            ? `${targetName}已从多维刷新并保存`
+            : `${targetName}已刷新，但保存未完成，请处理提示后手动保存`;
+        } catch (error) {
+          errorText.value = String(error?.message || error || "刷新事件分类失败");
+          statusText.value = "刷新事件分类失败";
+        } finally {
+          eventSectionsRefreshing.value = false;
+        }
+      }
 
       function clearSaveTimers() {
         // 审核页已改为显式保存，这里保留空实现，兼容现有调用点。
@@ -2885,6 +3216,23 @@ export function mountHandoverReviewApp(Vue) {
         markDocumentDirty({ region: "cooling_pump_pressures" });
       }
 
+      function updateCapacityRoomInput(rowIndex, key, value) {
+        const rows = documentRef.value?.capacity_room_inputs?.rows;
+        if (!Array.isArray(rows) || !rows[rowIndex]) return;
+        const normalizedKey = String(key || "").trim();
+        const cellKeyByValueKey = {
+          total_cabinets: "total_cell",
+          powered_cabinets: "powered_cell",
+          aircon_started: "aircon_cell",
+        };
+        if (!Object.prototype.hasOwnProperty.call(cellKeyByValueKey, normalizedKey)) return;
+        const nextValue = String(value ?? "");
+        if (String(rows[rowIndex][normalizedKey] ?? "") === nextValue) return;
+        rows[rowIndex][normalizedKey] = nextValue;
+        const cellName = String(rows[rowIndex][cellKeyByValueKey[normalizedKey]] || "").trim().toUpperCase();
+        markDocumentDirty({ region: "capacity_room_inputs", capacityCell: cellName });
+      }
+
       async function saveSubstation110kvIfNeeded() {
         if (!substation110kvDirty.value) return true;
         const locked = await ensureSubstation110kvLock();
@@ -3149,6 +3497,7 @@ export function mountHandoverReviewApp(Vue) {
         confirming,
         retryingCloudSync,
         updatingHistoryCloudSync,
+        eventSectionsRefreshing,
         cloudSyncBusy,
         dirty,
         needsRefresh,
@@ -3204,6 +3553,10 @@ export function mountHandoverReviewApp(Vue) {
         substation110kvLockText,
         coolingPumpPressureRows,
         coolingTankRows,
+        handoverPersonOptions,
+        sectionPersonOptions,
+        engineerDirectoryLoading,
+        engineerDirectoryError,
         reviewHeaderBadges,
         reviewStatusBanners,
         confirmActionVm,
@@ -3216,6 +3569,19 @@ export function mountHandoverReviewApp(Vue) {
         updateSectionCell,
         addSectionRow,
         removeSectionRow,
+        isEventRefreshSection,
+        refreshEventSectionFromBitable,
+        findSectionPersonColumn,
+        isSectionPersonColumn,
+        selectedSectionPersonValues,
+        updateSectionPersonSelection,
+        fillSectionPeople,
+        toggleSectionPerson,
+        sectionPersonActive,
+        isFooterHandoverPersonColumn,
+        toggleFooterHandoverPerson,
+        footerPersonActive,
+        ensureEngineerDirectoryLoaded,
         canTransferSectionRowToOtherImportantWork,
         transferSectionRowToOtherImportantWork,
         updateFooterCell,
@@ -3227,6 +3593,7 @@ export function mountHandoverReviewApp(Vue) {
         updateCoolingPumpPressure,
         updateCoolingTowerLevel,
         updateCoolingTankValue,
+        updateCapacityRoomInput,
         saveCurrentReview,
         toggleConfirm,
         retryCloudSheetSync: () => retryCloudSheetSync(getJobApi),

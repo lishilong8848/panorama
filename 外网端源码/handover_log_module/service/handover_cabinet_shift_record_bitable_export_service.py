@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import copy
+import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Set
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
@@ -177,6 +178,74 @@ class HandoverCabinetShiftRecordBitableExportService:
         return float(number)
 
     @staticmethod
+    def _normalize_number_from_text(value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value).strip().replace(",", "")
+        if not text:
+            return None
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not match:
+            return None
+        return HandoverCabinetShiftRecordBitableExportService._normalize_number(match.group(0))
+
+    @staticmethod
+    def _is_meaningful_section_row(row: Dict[str, Any]) -> bool:
+        if not isinstance(row, dict):
+            return False
+        if bool(row.get("is_placeholder_row", False)):
+            return False
+        cells = row.get("cells", {})
+        if not isinstance(cells, dict):
+            return False
+        for value in cells.values():
+            text = str(value or "").strip()
+            if text and text != "/":
+                return True
+        return False
+
+    @classmethod
+    def _section_counts(cls, document: Dict[str, Any]) -> Dict[str, int]:
+        counts = {
+            "event_count": 0,
+            "change_count": 0,
+            "exercise_count": 0,
+            "maintenance_count": 0,
+            "construction_count": 0,
+            "training_count": 0,
+        }
+        sections = document.get("sections", []) if isinstance(document, dict) else []
+        if not isinstance(sections, list):
+            return counts
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            title = str(section.get("name", "") or "").strip()
+            rows = section.get("rows", [])
+            count = sum(1 for row in rows if isinstance(row, dict) and cls._is_meaningful_section_row(row))
+            if count <= 0:
+                continue
+            if "事件" in title:
+                counts["event_count"] += count
+            elif "变更" in title:
+                counts["change_count"] += count
+            elif "演练" in title:
+                counts["exercise_count"] += count
+            elif "维护" in title:
+                counts["maintenance_count"] += count
+            elif "施工" in title:
+                counts["construction_count"] += count
+            elif "培训" in title:
+                counts["training_count"] += count
+        return counts
+
+    @staticmethod
+    def _safe_payload_fields(fields: Dict[str, Any], writable_field_names: Set[str] | None) -> Dict[str, Any]:
+        if writable_field_names is None:
+            return dict(fields)
+        return {name: value for name, value in fields.items() if name in writable_field_names}
+
+    @staticmethod
     def _shift_text(duty_shift: str, cfg: Dict[str, Any]) -> str:
         shift_key = str(duty_shift or "").strip().lower()
         shift_text_cfg = cfg.get("fixed_values", {}).get("shift_text", {})
@@ -202,6 +271,55 @@ class HandoverCabinetShiftRecordBitableExportService:
                 if cell:
                     values[cell] = item.get("value", "")
         return values
+
+    def _business_extra_fields(self, row: Dict[str, Any], fixed_values: Dict[str, Any], document: Dict[str, Any]) -> Dict[str, Any]:
+        counts = self._section_counts(document)
+        pue = self._normalize_number_from_text(fixed_values.get("B6", ""))
+        total_load = self._normalize_number_from_text(fixed_values.get("D6", ""))
+        it_load = self._normalize_number_from_text(fixed_values.get("F6", ""))
+        diesel_backup = self._normalize_number_from_text(fixed_values.get("H6", ""))
+        dry_bulb = self._normalize_number_from_text(fixed_values.get("B7", ""))
+        wet_bulb = self._normalize_number_from_text(fixed_values.get("D7", ""))
+        municipal_pressure = self._normalize_number_from_text(fixed_values.get("B8", ""))
+        water_tank_backup = self._normalize_number_from_text(fixed_values.get("D8", ""))
+        ups_battery_backup = self._normalize_number_from_text(fixed_values.get("F10", ""))
+        cold_high_temp = str(fixed_values.get("B9", "") or "").strip()
+        cold_high_humidity = str(fixed_values.get("D9", "") or "").strip()
+        cold_low_temp = str(fixed_values.get("F9", "") or "").strip()
+        cold_low_humidity = str(fixed_values.get("H9", "") or "").strip()
+        transformer_load = str(fixed_values.get("B10", "") or "").strip()
+        ups_load = str(fixed_values.get("D10", "") or "").strip()
+        return {
+            "PUE（实时）": pue,
+            "室外干球温度（℃）": dry_bulb,
+            "市政（自备井)供水压力（Bar）": municipal_pressure,
+            "冷通道最高温度（℃）/编号": cold_high_temp,
+            "变压器最高负载率/编号": transformer_load,
+            "总负荷（kW）": total_load,
+            "室外湿球温度（℃）": wet_bulb,
+            "蓄水池后备时间（H）": water_tank_backup,
+            "冷通道最高湿度（%）/编号": cold_high_humidity,
+            "UPS最高负载率/编号": ups_load,
+            "IT总负荷（kW）": it_load,
+            "冷源模式": str(fixed_values.get("F7", "") or "").strip(),
+            "蓄冷罐后备时间（min）": str(fixed_values.get("F8", "") or "").strip(),
+            "冷通道最低温度（℃）/编号": cold_low_temp,
+            "UPS蓄电池最短后备时间（min）": ups_battery_backup,
+            "柴油后备时间（H）": diesel_backup,
+            "冷水系统供水温度（℃）": str(fixed_values.get("H7", "") or "").strip(),
+            "冷通道最低湿度（%）/编号": cold_low_humidity,
+            "当班告警总数（个）": self._normalize_number_from_text(fixed_values.get("B15", "")),
+            "未恢复告警数（个）": self._normalize_number_from_text(fixed_values.get("D15", "")),
+            "未恢复原因": str(fixed_values.get("F15", "") or "").strip(),
+            "事件数量": counts["event_count"],
+            "变更数量": counts["change_count"],
+            "演练数量": counts["exercise_count"],
+            "维护数量": counts["maintenance_count"],
+            "施工数量": counts["construction_count"],
+            "培训数量": counts["training_count"],
+            "事件数量-自动统计": counts["event_count"],
+            "值班人员-自动统计": str(row.get("duty_staff", "") or "").strip(),
+        }
 
     def build_deferred_state(self, *, duty_shift: str) -> Dict[str, Any]:
         cfg = self._normalize_cfg()
@@ -286,7 +404,7 @@ class HandoverCabinetShiftRecordBitableExportService:
         document, synced_session = self._review_document_state_service.load_document(session)
         fixed_values = self._fixed_cell_values(document)
         revision = int(synced_session.get("revision", session.get("revision", 0)) or session.get("revision", 0) or 0)
-        return {
+        row = {
             "session_id": str(session.get("session_id", "") or "").strip(),
             "building": building,
             "duty_date": duty_date,
@@ -300,10 +418,17 @@ class HandoverCabinetShiftRecordBitableExportService:
             "shift_power_on_cabinets": self._normalize_number(fixed_values.get("F13", "")),
             "shift_power_off_cabinets": self._normalize_number(fixed_values.get("H13", "")),
         }
+        row["extra_fields"] = self._business_extra_fields(row, fixed_values, document)
+        return row
 
-    def _create_fields(self, row: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    def _create_fields(
+        self,
+        row: Dict[str, Any],
+        cfg: Dict[str, Any],
+        writable_field_names: Set[str] | None = None,
+    ) -> Dict[str, Any]:
         fields = cfg.get("fields", {})
-        return {
+        payload = {
             fields["building"]: row["building"],
             fields["date"]: self._midnight_timestamp_ms(row["duty_date"]),
             fields["shift"]: row["shift_text"],
@@ -314,15 +439,53 @@ class HandoverCabinetShiftRecordBitableExportService:
             fields["shift_power_on_cabinets"]: row["shift_power_on_cabinets"],
             fields["shift_power_off_cabinets"]: row["shift_power_off_cabinets"],
         }
+        payload.update(row.get("extra_fields", {}) if isinstance(row.get("extra_fields", {}), dict) else {})
+        return self._safe_payload_fields(payload, writable_field_names)
 
-    def _update_fields(self, row: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    def _update_fields(
+        self,
+        row: Dict[str, Any],
+        cfg: Dict[str, Any],
+        writable_field_names: Set[str] | None = None,
+    ) -> Dict[str, Any]:
         fields = cfg.get("fields", {})
-        return {
+        payload = {
+            fields["duty_staff"]: row["duty_staff"],
+            fields["handover_staff"]: row["handover_staff"],
             fields["planned_cabinets"]: row["planned_cabinets"],
             fields["powered_cabinets"]: row["powered_cabinets"],
             fields["shift_power_on_cabinets"]: row["shift_power_on_cabinets"],
             fields["shift_power_off_cabinets"]: row["shift_power_off_cabinets"],
         }
+        payload.update(row.get("extra_fields", {}) if isinstance(row.get("extra_fields", {}), dict) else {})
+        return self._safe_payload_fields(payload, writable_field_names)
+
+    def _writable_field_names(self, client: FeishuBitableClient, *, table_id: str, emit_log: Callable[[str], None]) -> Set[str] | None:
+        read_only_types = {20, 1001, 1002, 1005}
+        try:
+            fields_meta = client.list_fields(table_id=table_id, page_size=500)
+        except Exception as exc:  # noqa: BLE001
+            self._emit(emit_log, f"字段结构读取失败，将按固定字段名写入: error={exc}")
+            return None
+        writable: Set[str] = set()
+        skipped: List[str] = []
+        for item in fields_meta if isinstance(fields_meta, list) else []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("field_name") or item.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                field_type = int(item.get("type", 0) or 0)
+            except Exception:  # noqa: BLE001
+                field_type = 0
+            if field_type in read_only_types:
+                skipped.append(name)
+                continue
+            writable.add(name)
+        if skipped:
+            self._emit(emit_log, f"只读字段已跳过: {','.join(skipped)}")
+        return writable
 
     @staticmethod
     def _extract_created_record_ids(responses: List[Dict[str, Any]]) -> List[str]:
@@ -427,6 +590,7 @@ class HandoverCabinetShiftRecordBitableExportService:
                 emit_log=emit_log
             )
             client = self._new_client(cfg)
+            writable_field_names = self._writable_field_names(client, table_id=table_id, emit_log=emit_log)
             update_records: List[Dict[str, Any]] = []
             create_rows: List[Dict[str, Any]] = []
             for row in rows:
@@ -438,7 +602,7 @@ class HandoverCabinetShiftRecordBitableExportService:
                     cfg=cfg,
                 )
                 if matched_ids:
-                    update_payload = self._update_fields(row, cfg)
+                    update_payload = self._update_fields(row, cfg, writable_field_names)
                     for record_id in matched_ids:
                         update_records.append({"record_id": record_id, "fields": update_payload})
                     row["record_id"] = matched_ids[0]
@@ -458,7 +622,7 @@ class HandoverCabinetShiftRecordBitableExportService:
             if create_rows:
                 responses = client.batch_create_records(
                     table_id=table_id,
-                    fields_list=[self._create_fields(row, cfg) for row in create_rows],
+                    fields_list=[self._create_fields(row, cfg, writable_field_names) for row in create_rows],
                     batch_size=int(target.get("create_batch_size", 200) or 200),
                 )
                 created_record_ids = self._extract_created_record_ids(responses)

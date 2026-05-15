@@ -66,6 +66,11 @@ const SPECIAL_GROUP = {
       desc: '复用交接班日志源文件提取湿球温度和冷源运行模式，并写入多维表。',
     },
     {
+      id: 'chiller_mode_upload',
+      title: '制冷模式参数上传',
+      desc: '读取制冷单元模式切换参数源文件，解析控制器和采集点后清表重传多维表。',
+    },
+    {
       id: 'monthly_event_report',
       title: '体系月度统计表',
       desc: '读取上一个自然月的新事件处理数据，按楼栋生成事件月度统计表到本地目录。',

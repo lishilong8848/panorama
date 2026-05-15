@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -345,6 +346,7 @@ class FeishuBitableClient:
         *,
         view_id: str = "",
         filter_formula: str = "",
+        field_names: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         if page_size <= 0:
             raise ValueError("page_size 必须大于0")
@@ -363,6 +365,13 @@ class FeishuBitableClient:
                 params["view_id"] = str(view_id).strip()
             if str(filter_formula).strip():
                 params["filter"] = str(filter_formula).strip()
+            normalized_field_names = [
+                str(name).strip()
+                for name in (field_names or [])
+                if str(name).strip()
+            ]
+            if normalized_field_names:
+                params["field_names"] = json.dumps(normalized_field_names, ensure_ascii=False)
 
             data = self._get_json(url, params=params)
             payload = data.get("data") if isinstance(data, dict) else {}

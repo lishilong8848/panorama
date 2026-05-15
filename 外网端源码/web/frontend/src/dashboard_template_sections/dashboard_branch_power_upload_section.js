@@ -85,10 +85,26 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                   <div class="ops-focus-card-title">读取整日共享三源表，解析完成后直接上传多维表</div>
                   <div class="ops-focus-card-meta">支路本地库不再参与新流程；源文件缺失时会创建内网整日补采任务。</div>
                 </div>
+                <div class="task-grid two-col" style="margin-top:10px;">
+                  <div class="form-row">
+                    <label class="label">开始业务日期</label>
+                    <input class="input" type="date" v-model="branchPowerBusinessDate" />
+                  </div>
+                  <div class="form-row">
+                    <label class="label">结束业务日期</label>
+                    <input class="input" type="date" v-model="branchPowerBusinessDateEnd" />
+                  </div>
+                  <div class="hint" style="grid-column:1 / -1;">手动执行可处理单日或连续多日，一次最多31天；调度仍在每天 00:30 左右处理前一业务日。</div>
+                </div>
                 <div class="form-row" style="margin-top:10px;">
-                  <label class="label">业务日期</label>
-                  <input class="input" type="date" v-model="branchPowerBusinessDate" />
-                  <div class="hint">手动执行只按这一天处理；调度仍在每天 00:30 左右处理前一业务日。</div>
+                  <label class="label">指定日期列表（可选）</label>
+                  <textarea
+                    class="input"
+                    rows="2"
+                    v-model="branchPowerBusinessDatesText"
+                    placeholder="例如：2026-05-08, 2026-05-10；填写后优先按列表执行"
+                  ></textarea>
+                  <div class="hint">适合不连续日期；留空则按上方开始/结束日期范围执行。</div>
                 </div>
                 <div class="hint">{{ bridgeExecutionHint }}</div>
                 <div class="btn-stack" style="margin-top:8px;">
@@ -97,7 +113,7 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                     :disabled="!canRun || isActionLocked(actionKeyBranchPowerFromDownload)"
                     @click="runBranchPowerFromDownload"
                   >
-                    {{ isActionLocked(actionKeyBranchPowerFromDownload) ? '执行中...' : '执行该业务日整日直传' }}
+                    {{ isActionLocked(actionKeyBranchPowerFromDownload) ? '执行中...' : '执行所选业务日整日直传' }}
                   </button>
                   <button
                     class="btn btn-secondary"

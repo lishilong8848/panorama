@@ -12,6 +12,14 @@ from handover_log_module.core.normalizers import format_number
 
 _WEST_PUBLIC_CELLS = {"first": "G22", "second": "J22", "tank": "M22"}
 _EAST_PUBLIC_CELLS = {"first": "T22", "second": "W22", "tank": "Z22"}
+_ZONE_CAPACITY_TARGET_CELLS = {"west": "D22", "east": "Q22"}
+_ZONE_CAPACITY_DIRECT_ALIASES_BY_BUILDING = {
+    "A楼": ["实际冷吨"],
+    "B楼": ["系统制冷量"],
+    "C楼": ["一次侧冷量"],
+    "D楼": ["供冷量"],
+}
+_ZONE_CAPACITY_A_BUILDING_RT_TO_KW = 3.517
 _BLOCK_COL_OFFSET = column_index_from_string("Q") - column_index_from_string("D")
 _BLOCK_ROW_OFFSET = 10
 _WEST_BLOCK_BASE_CELLS = {
@@ -427,6 +435,16 @@ def _emit_pressure_format_warning(
         pass
 
 
+def _emit_capacity_report_log(context: Dict[str, Any], message: str) -> None:
+    emit_log = context.get("emit_log")
+    if not callable(emit_log):
+        return
+    try:
+        emit_log(message)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _build_redundancy_text(count: int) -> str:
     safe_count = max(0, int(count))
     return f"{safe_count}用{max(0, 3 - safe_count)}备"
@@ -826,23 +844,66 @@ def _build_capacity_source_direct_values(query: CapacitySourceQuery, *, context:
     return values
 
 
-def _build_zone_capacity_formula_values(values: Dict[str, str]) -> Dict[str, str]:
+def _row_numeric_value(row: RawRow) -> float | None:
+    value = getattr(row, "value", None)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    parsed = _to_float_text(getattr(row, "e_raw", None))
+    if parsed is not None:
+        return parsed
+    match = re.search(r"[+-]?\d+(?:\.\d+)?", _text(getattr(row, "e_raw", None)).replace(",", ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _format_zone_capacity_direct_value(*, building: str, row: RawRow) -> str:
+    raw_text = _text(getattr(row, "e_raw", None))
+    numeric_value = _row_numeric_value(row)
+    if numeric_value is None:
+        return "" if building == "A楼" else raw_text
+    if building == "A楼":
+        numeric_value *= _ZONE_CAPACITY_A_BUILDING_RT_TO_KW
+    return format_number(numeric_value)
+
+
+def _build_zone_capacity_direct_values(query: CapacitySourceQuery, *, context: Dict[str, Any]) -> Dict[str, str]:
     results: Dict[str, str] = {}
-
-    def _calc(*, flow_cell: str, return_cell: str, supply_cell: str) -> str:
-        primary_flow = _to_float_text(values.get(flow_cell))
-        chilled_return_temp = _to_float_text(values.get(return_cell))
-        chilled_supply_temp = _to_float_text(values.get(supply_cell))
-        if primary_flow is None or chilled_return_temp is None or chilled_supply_temp is None:
-            return ""
-        return format_number(abs(chilled_return_temp - chilled_supply_temp) * primary_flow * 1.163)
-
-    west_value = _calc(flow_cell="G22", return_cell="L28", supply_cell="L29")
-    if west_value:
-        results["D22"] = west_value
-    east_value = _calc(flow_cell="T22", return_cell="Y28", supply_cell="Y29")
-    if east_value:
-        results["Q22"] = east_value
+    building = _text(context.get("building"))
+    aliases = _ZONE_CAPACITY_DIRECT_ALIASES_BY_BUILDING.get(building, [])
+    if not aliases:
+        return results
+    for zone, target_cell in _ZONE_CAPACITY_TARGET_CELLS.items():
+        row = query.first_row_by_d_aliases(aliases, zone=zone, allow_global=False)
+        zone_label = "西区" if zone == "west" else "东区"
+        if row is None:
+            _emit_capacity_report_log(
+                context,
+                "[交接班][容量报表][制冷量直取] 未识别 "
+                f"building={building}, zone={zone_label}, aliases={','.join(aliases)}, target={target_cell}",
+            )
+            continue
+        value_text = _format_zone_capacity_direct_value(building=building, row=row)
+        if not value_text:
+            _emit_capacity_report_log(
+                context,
+                "[交接班][容量报表][制冷量直取] 源值非数字，已跳过 "
+                f"building={building}, zone={zone_label}, alias={_text(getattr(row, 'd_name', ''))}, "
+                f"raw={_text(getattr(row, 'e_raw', None))}, target={target_cell}",
+            )
+            continue
+        results[target_cell] = value_text
+        _emit_capacity_report_log(
+            context,
+            "[交接班][容量报表][制冷量直取] 已填入 "
+            f"building={building}, zone={zone_label}, alias={_text(getattr(row, 'd_name', ''))}, "
+            f"raw={_text(getattr(row, 'e_raw', None))}, value={value_text}, target={target_cell}",
+        )
     return results
 
 
@@ -1071,9 +1132,9 @@ def build_capacity_cells_with_config(context: Dict[str, Any], config: Dict[str, 
     values.update(_resolve_public_flow_values(query, zone="west", context=context))
     values.update(_resolve_public_flow_values(query, zone="east", context=context))
     values.update(_build_capacity_source_direct_values(query, context=context))
+    values.update(_build_zone_capacity_direct_values(query, context=context))
     values.update(_build_zone_unit_values(query, zone="west", running_units=running_units, context=context))
     values.update(_build_zone_unit_values(query, zone="east", running_units=running_units, context=context))
-    values.update(_build_zone_capacity_formula_values(values))
     values.update(_build_zone_summary_values(query, zone="west", running_units=running_units))
     values.update(_build_zone_summary_values(query, zone="east", running_units=running_units))
     values.update(_build_tr_values(query, snapshot))

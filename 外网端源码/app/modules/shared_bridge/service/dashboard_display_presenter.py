@@ -281,17 +281,56 @@ def _present_wet_bulb_target(runtime_config: Any, preview_payload: Any) -> Dict[
     }
 
 
+def _present_chiller_mode_upload_target(runtime_config: Any, preview_payload: Any) -> Dict[str, Any]:
+    config = runtime_config if isinstance(runtime_config, dict) else {}
+    preview = preview_payload if isinstance(preview_payload, dict) else {}
+    feature_cfg = (
+        config.get("chiller_mode_upload", {})
+        if isinstance(config.get("chiller_mode_upload", {}), dict)
+        else {}
+    )
+    target_cfg = (
+        feature_cfg.get("target", {})
+        if isinstance(feature_cfg.get("target", {}), dict)
+        else {}
+    )
+    configured_app_token = _string(preview.get("configured_app_token", "")) or _string(target_cfg.get("app_token", ""))
+    operation_app_token = _string(preview.get("operation_app_token", ""))
+    table_id = _string(preview.get("table_id", "")) or _string(target_cfg.get("table_id", ""))
+    display_url = _string(preview.get("display_url", "")) or _string(preview.get("bitable_url", ""))
+    target_kind = _string(preview.get("target_kind", ""))
+    resolved_at = _string(preview.get("resolved_at", ""))
+    message = _string(preview.get("message", ""))
+    configured = bool(configured_app_token and table_id)
+    status_text = "已解析" if display_url else ("待解析" if configured else "未配置")
+    return {
+        "configured_app_token": configured_app_token,
+        "operation_app_token": operation_app_token,
+        "table_id": table_id,
+        "display_url": display_url,
+        "bitable_url": display_url,
+        "target_kind": target_kind,
+        "resolved_at": resolved_at,
+        "message": message,
+        "configured": configured,
+        "status_text": status_text,
+        "hint_text": message or ("保存配置后会自动解析制冷模式参数目标多维表。" if configured else "请先补齐制冷模式参数目标多维表配置。"),
+    }
+
+
 def present_feature_target_displays(
     runtime_config: Any,
     *,
     engineer_directory_target_preview: Any = None,
     wet_bulb_target_preview: Any = None,
+    chiller_mode_target_preview: Any = None,
     day_metric_target_preview: Any = None,
     alarm_event_target_preview: Any = None,
 ) -> Dict[str, Any]:
     return {
         "engineer_directory": _present_engineer_directory_target(runtime_config, engineer_directory_target_preview),
         "wet_bulb_collection": _present_wet_bulb_target(runtime_config, wet_bulb_target_preview),
+        "chiller_mode_upload": _present_chiller_mode_upload_target(runtime_config, chiller_mode_target_preview),
         "day_metric_upload": _present_day_metric_target(runtime_config, day_metric_target_preview),
         "alarm_event_upload": _present_alarm_target(runtime_config, alarm_event_target_preview),
     }
@@ -2719,6 +2758,7 @@ def present_external_module_hero_overviews(
     bridge_active_count = _int(task_overview.get("bridge_active_count", 0))
     day_metric_target = _dict(target_displays.get("day_metric_upload"))
     wet_bulb_target = _dict(target_displays.get("wet_bulb_collection"))
+    chiller_mode_target = _dict(target_displays.get("chiller_mode_upload"))
 
     def _scheduler_metric(snapshot: Any, default_status: str = "-") -> Dict[str, Any]:
         payload = snapshot if isinstance(snapshot, dict) else {}
@@ -2729,6 +2769,7 @@ def present_external_module_hero_overviews(
         }
 
     wet_bulb_scheduler = _scheduler_metric(scheduler_status.get("wet_bulb_collection_scheduler", {}))
+    chiller_mode_scheduler = _scheduler_metric(scheduler_status.get("chiller_mode_upload_scheduler", {}))
     auto_flow_scheduler = _scheduler_metric(scheduler_status.get("scheduler", {}))
     day_metric_scheduler = _scheduler_metric(scheduler_status.get("day_metric_upload_scheduler", {}))
     monthly_event_scheduler = _scheduler_metric(scheduler_status.get("monthly_event_report_scheduler", {}))
@@ -2833,6 +2874,16 @@ def present_external_module_hero_overviews(
                 {"label": "调度状态", "value": wet_bulb_scheduler["status_text"]},
                 {"label": "下次执行", "value": wet_bulb_scheduler["next_run_time"]},
                 {"label": "目标状态", "value": _string(wet_bulb_target.get("status_text", "")) or "未配置"},
+            ],
+        },
+        "chiller_mode_upload": {
+            "eyebrow": "专项重写",
+            "title": "制冷模式参数上传",
+            "description": "读取制冷单元模式切换参数源文件，解析控制器、采集点与模式后清表重传多维表。",
+            "metrics": [
+                {"label": "调度状态", "value": chiller_mode_scheduler["status_text"]},
+                {"label": "下次执行", "value": chiller_mode_scheduler["next_run_time"]},
+                {"label": "目标状态", "value": _string(chiller_mode_target.get("status_text", "")) or "未配置"},
             ],
         },
         "monthly_event_report": {

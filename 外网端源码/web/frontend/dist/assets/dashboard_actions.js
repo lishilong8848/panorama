@@ -1,4 +1,5 @@
 import { createDashboardJobActions } from "./dashboard_job_actions.js";
+import { createDashboardChillerModeUploadActions } from "./dashboard_chiller_mode_upload_actions.js";
 import { createDashboardMonthlyEventReportActions } from "./dashboard_monthly_event_report_actions.js";
 import { createDashboardSchedulerActions } from "./dashboard_scheduler_actions.js";
 import { createDashboardSharedBridgeActions } from "./dashboard_shared_bridge_actions.js";
@@ -9,12 +10,14 @@ export function createDashboardActions(ctx) {
   const schedulerActions = createDashboardSchedulerActions(ctx);
   const sharedBridgeActions = createDashboardSharedBridgeActions(ctx);
   const wetBulbActions = createDashboardWetBulbCollectionActions(ctx);
+  const chillerModeUploadActions = createDashboardChillerModeUploadActions(ctx);
   const monthlyEventReportActions = createDashboardMonthlyEventReportActions(ctx);
   return {
     ...jobActions,
     ...schedulerActions,
     ...sharedBridgeActions,
     ...wetBulbActions,
+    ...chillerModeUploadActions,
     ...monthlyEventReportActions,
   };
 }

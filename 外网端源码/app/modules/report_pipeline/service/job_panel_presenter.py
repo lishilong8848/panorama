@@ -231,6 +231,8 @@ def _format_bridge_feature(feature: Any) -> str:
         return "12项使用共享文件上传"
     if normalized == "wet_bulb_collection":
         return "湿球温度采集"
+    if normalized in {"chiller_mode_upload", "chiller_mode_upload_external_dispatch", "chiller_mode_upload_cache_latest"}:
+        return "制冷模式参数上传"
     if normalized == "monthly_report_pipeline":
         return "月报主流程"
     if normalized == "internal_browser_alert":
@@ -396,6 +398,8 @@ def _format_bridge_stage_name(stage: Dict[str, Any], feature: Any = "", mode: An
             return "准备12项共享文件"
         if feature_text == "wet_bulb_collection":
             return "准备湿球共享文件"
+        if feature_text in {"chiller_mode_upload", "chiller_mode_upload_external_dispatch", "chiller_mode_upload_cache_latest"}:
+            return "准备制冷模式参数共享文件"
         if feature_text == "monthly_report_pipeline":
             return "准备月报历史共享文件" if mode_text == "multi_date" else "准备月报共享文件"
         return "准备共享文件"

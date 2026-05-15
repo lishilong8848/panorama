@@ -333,12 +333,18 @@ class ReviewFollowupTriggerService:
             session_id = str(session.get("session_id", "")).strip()
             revision = int(session.get("revision", 0) or 0)
             state = _normalize_export_state(session.get("cabinet_shift_record_export", {}))
-            if self._is_export_complete_for_revision(
-                state,
-                revision,
-                static_skip_reasons={"disabled", "missing_duty_context"},
+            state_status = str(state.get("status", "")).strip().lower()
+            state_reason = str(state.get("reason", "")).strip().lower()
+            if (
+                state_status == "skipped"
+                and state_reason in {"disabled", "missing_duty_context"}
+                and self._is_export_complete_for_revision(
+                    state,
+                    revision,
+                    static_skip_reasons={"disabled", "missing_duty_context"},
+                )
             ):
-                skipped_buildings.append({"building": building, "reason": "already_uploaded"})
+                skipped_buildings.append({"building": building, "reason": state_reason})
                 continue
             if not self._is_cloud_sync_complete_for_revision(session.get("cloud_sheet_sync", {}), revision):
                 skipped_buildings.append({"building": building, "reason": "cloud_sync_pending"})

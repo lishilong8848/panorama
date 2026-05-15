@@ -33,7 +33,7 @@
     },
     "scheduler": {
       "enabled": true,
-      "auto_start_in_gui": true,
+      "auto_start_in_gui": false,
       "run_time": "00:10:00",
       "check_interval_sec": 30,
       "catch_up_if_missed": false,
@@ -49,7 +49,10 @@
       "timeout": 10,
       "on_download_failure": true,
       "on_wifi_failure": true,
-      "on_upload_failure": true
+      "on_upload_failure": true,
+      "task_success_webhook_enabled": true,
+      "task_success_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/16cb9857-afe7-4f0b-967b-db65e5264499",
+      "task_success_webhook_timeout": 5
     },
     "feishu_auth": {
       "app_id": "cli_a9d1c9fe9d381cee",
@@ -212,14 +215,19 @@
       "enabled": true,
       "scheduler": {
         "enabled": true,
-        "auto_start_in_gui": true,
-        "morning_time": "02:00:00",
-        "afternoon_time": "12:00:00",
+        "auto_start_in_gui": false,
+        "morning_time": "06:00:00",
+        "afternoon_time": "16:00:00",
+        "cloud_catchup_enabled": true,
+        "cloud_catchup_morning_time": "08:00:00",
+        "cloud_catchup_afternoon_time": "17:30:00",
         "check_interval_sec": 30,
         "catch_up_if_missed": false,
         "retry_failed_in_same_period": false,
         "morning_state_file": "handover_scheduler_morning_state.json",
-        "afternoon_state_file": "handover_scheduler_afternoon_state.json"
+        "afternoon_state_file": "handover_scheduler_afternoon_state.json",
+        "cloud_catchup_morning_state_file": "handover_cloud_catchup_morning_state.json",
+        "cloud_catchup_afternoon_state_file": "handover_cloud_catchup_afternoon_state.json"
       },
       "download": {
         "template_name": "交接班日志（李世龙）",
@@ -251,6 +259,21 @@
         "debug_step_log": true,
         "export_button_text": "原样导出",
         "sites": []
+      },
+      "chiller_mode_switch": {
+        "interval_sec": 600,
+        "download": {
+          "template_name": "制冷单元模式切换参数",
+          "sheet_name": "制冷单元模式切换参数",
+          "lookback_minutes": 11,
+          "scale_label": "5分钟",
+          "menu_path": [
+            "报表报告",
+            "数据查询",
+            "即时报表"
+          ],
+          "export_button_text": "原样导出"
+        }
       },
       "capacity_report": {
         "download": {
@@ -1313,103 +1336,103 @@
         "review_link_recipients_by_building": {
           "110站": [
             {
-              "note": "lsl",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "lsl",
               "enabled": true
             },
             {
-              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "m",
               "enabled": true
             },
             {
-              "note": "110",
               "open_id": "ou_913ff495ae8f5a0a55ae5670fd148bbd",
+              "note": "110",
               "enabled": true
             }
           ],
           "A楼": [
             {
-              "note": "李世龙A",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "李世龙A",
               "enabled": true
             },
             {
-              "note": "A",
               "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a",
+              "note": "A",
               "enabled": true
             },
             {
-              "note": "M",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "M",
               "enabled": true
             }
           ],
           "B楼": [
             {
-              "note": "李世龙B",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "李世龙B",
               "enabled": true
             },
             {
-              "note": "B",
               "open_id": "ou_160e991b0fd811cda7260de056d8a363",
+              "note": "B",
               "enabled": true
             },
             {
-              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "m",
               "enabled": true
             }
           ],
           "C楼": [
             {
-              "note": "李世龙C",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "李世龙C",
               "enabled": true
             },
             {
-              "note": "C",
               "open_id": "ou_99391b00c1406917930483d8500af400",
+              "note": "C",
               "enabled": true
             },
             {
-              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "m",
               "enabled": true
             }
           ],
           "D楼": [
             {
-              "note": "李世龙D",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "李世龙D",
               "enabled": true
             },
             {
-              "note": "D",
               "open_id": "ou_b9c26b4da3721c2de11ee175c707e756",
+              "note": "D",
               "enabled": true
             },
             {
-              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "m",
               "enabled": true
             }
           ],
           "E楼": [
             {
-              "note": "李世龙E",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+              "note": "李世龙E",
               "enabled": true
             },
             {
-              "note": "E",
               "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3",
+              "note": "E",
               "enabled": true
             },
             {
-              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+              "note": "m",
               "enabled": true
             }
           ]
@@ -1543,7 +1566,10 @@
             "target_cell": "F10",
             "rule_type": "aggregate",
             "d_keywords": [
-              "电池放电后备时间"
+              "电池放电后备时间",
+              "电池放电时长",
+              "放电后备时间",
+              "放电时间"
             ],
             "match_mode": "contains_casefold",
             "agg": "min",
@@ -2165,7 +2191,10 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电时长"
+                "电池放电时长",
+                "电池放电后备时间",
+                "放电后备时间",
+                "放电时间"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",
@@ -2779,7 +2808,10 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电后备时间"
+                "电池放电后备时间",
+                "电池放电时长",
+                "放电后备时间",
+                "放电时间"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",
@@ -3394,7 +3426,10 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电后备时间"
+                "电池放电后备时间",
+                "电池放电时长",
+                "放电后备时间",
+                "放电时间"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",
@@ -3970,7 +4005,10 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电后备时间"
+                "电池放电后备时间",
+                "电池放电时长",
+                "放电后备时间",
+                "放电时间"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",
@@ -4422,7 +4460,7 @@
     "day_metric_upload": {
       "scheduler": {
         "enabled": true,
-        "auto_start_in_gui": true,
+        "auto_start_in_gui": false,
         "interval_minutes": 60,
         "check_interval_sec": 30,
         "retry_failed_on_next_tick": true,
@@ -4460,12 +4498,85 @@
         "check_interval_sec": 30,
         "retry_failed_on_next_tick": true,
         "state_file": "branch_power_upload_scheduler_state.json"
+      },
+      "power_alert_sync": {
+        "enabled": true,
+        "required": false,
+        "dry_run": false,
+        "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+        "data_center_name": "EA118",
+        "page_size": 500,
+        "batch_size": 200,
+        "tables": {
+          "source": {
+            "name": "机柜功率每日明细",
+            "table_id": "tblT5KbsxGCK1SwA",
+            "view_id": "vewVpRF3Ok"
+          },
+          "branch": {
+            "name": "单支路超6.25KW功率",
+            "table_id": "tblvyOhLPCIH52gB",
+            "view_id": "vewcScal5R",
+            "threshold": 6.25
+          },
+          "cabinet": {
+            "name": "机柜超18KW统计",
+            "table_id": "tbloY4JDihNu0aJ7",
+            "view_id": "vewjNHFVZK",
+            "threshold": 18
+          },
+          "line_head": {
+            "name": "列头柜超107.5功率统计",
+            "table_id": "tblqxn3BajmZHxb6",
+            "view_id": "vew07sLZm1",
+            "threshold": 107.5
+          },
+          "row_line": {
+            "name": "机列超215KW功率统计",
+            "table_id": "tblCcFzmKKz50tYT",
+            "view_id": "vewQialYnD",
+            "threshold": 215
+          }
+        }
+      }
+    },
+    "chiller_mode_upload": {
+      "enabled": true,
+      "scheduler": {
+        "enabled": true,
+        "auto_start_in_gui": false,
+        "interval_minutes": 10,
+        "check_interval_sec": 30,
+        "retry_failed_on_next_tick": true,
+        "state_file": "chiller_mode_upload_scheduler_state.json"
+      },
+      "target": {
+        "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+        "table_id": "tblkvVCNRbtMmjQg",
+        "page_size": 500,
+        "max_records": 5000,
+        "delete_batch_size": 500,
+        "create_batch_size": 200,
+        "replace_existing": true
+      },
+      "fields": {
+        "building": "楼栋",
+        "controller": "所属控制器",
+        "point": "采集点",
+        "value": "数据",
+        "chiller_mode": "冷机模式"
+      },
+      "mode_value_map": {
+        "1": "制冷",
+        "2": "预冷",
+        "3": "板换",
+        "4": "停机"
       }
     },
     "alarm_export": {
       "scheduler": {
         "enabled": true,
-        "auto_start_in_gui": true,
+        "auto_start_in_gui": false,
         "run_time": "08:10:00",
         "check_interval_sec": 30,
         "catch_up_if_missed": false,
@@ -4480,64 +4591,66 @@
         "create_batch_size": 200,
         "clear_before_upload": true,
         "timeout": 30,
+        "clear_before_upload": true,
         "list_page_size": 500
       },
       "shared_source_upload": {
         "replace_existing_on_full": true
       },
+      "skip_levels": [
+        5
+      ],
+      "snapshot_mode": "clear_and_rebuild",
+      "window_end_time": "00:00:00",
+      "run_with_scheduler": true,
       "resume": {
-        "enabled": true,
-        "max_retry": 3,
+        "retry_interval_sec": 2,
         "root_dir": "alarm_export_resume",
         "state_file": "alarm_export_resume_state.json",
-        "retry_interval_sec": 2,
-        "reuse_extracted_rows": true
+        "enabled": true,
+        "reuse_extracted_rows": true,
+        "max_retry": 3
       },
-      "run_with_scheduler": true,
+      "test_db": {
+        "building_label": "测试楼栋",
+        "database": "e_event",
+        "password": "123456",
+        "host": "127.0.0.1",
+        "enabled": true,
+        "fixed_table": "event_2026_02",
+        "table_mode": "fixed",
+        "time_field_mode": "auto",
+        "user": "root",
+        "port": 3306
+      },
       "alarm_category_default": "真实告警",
+      "enabled": true,
+      "window_days": 35,
       "level_mapping": {
         "2": "严重",
-        "4": "次要",
         "3": "重要",
+        "4": "次要",
         "1": "紧急"
       },
       "window_days": 35,
       "fields": {
-        "event_time": "event_time",
-        "alarm_type": "alarm_type",
-        "recover_status": "recover_status",
-        "trigger_value": "trigger_value",
-        "accept_time": "accept_time",
-        "process_suggestion": "process_suggestion",
-        "confirm_time": "confirm_time",
-        "confirm_user": "confirm_user",
-        "recover_time": "recover_time",
-        "event_source": "event_source",
+        "accept_description": "accept_description",
         "content": "content",
+        "trigger_value": "trigger_value",
+        "process_suggestion": "process_suggestion",
+        "process_status": "process_status",
+        "accept_time": "accept_time",
+        "event_source": "event_source",
+        "confirm_user": "confirm_user",
+        "confirm_time": "confirm_time",
+        "alarm_type": "alarm_type",
+        "recover_time": "recover_time",
+        "recover_status": "recover_status",
+        "event_level": "event_level",
         "accept_user": "accept_user",
         "confirm_description": "confirm_description",
-        "accept_description": "accept_description",
-        "event_level": "event_level",
-        "process_status": "process_status"
-      },
-      "enabled": true,
-      "skip_levels": [
-        5
-      ],
-      "test_db": {
-        "password": "123456",
-        "port": 3306,
-        "host": "127.0.0.1",
-        "fixed_table": "event_2026_02",
-        "building_label": "测试楼栋",
-        "database": "e_event",
-        "enabled": true,
-        "user": "root",
-        "time_field_mode": "auto",
-        "table_mode": "fixed"
-      },
-      "window_end_time": "00:00:00",
-      "snapshot_mode": "clear_and_rebuild"
+        "event_time": "event_time"
+      }
     },
     "manual_upload_gui": {
       "enabled": true
@@ -4574,7 +4687,7 @@
         "wet_bulb_temp": "天气湿球温度"
       },
       "scheduler": {
-        "auto_start_in_gui": true,
+        "auto_start_in_gui": false,
         "check_interval_sec": 30,
         "enabled": true,
         "interval_minutes": 60,

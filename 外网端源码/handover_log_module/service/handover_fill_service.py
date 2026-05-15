@@ -10,6 +10,7 @@ from handover_log_module.core.formatter import (
     missing_metrics_for_cells,
 )
 from handover_log_module.core.fixed_cell_overrides import (
+    DEFAULT_FIXED_CELL_VALUES,
     FORCED_FIXED_CELL_VALUES,
     apply_forced_fixed_cell_values,
     normalize_cell_name,
@@ -133,11 +134,11 @@ class HandoverFillService:
         if not isinstance(format_templates, dict) or not format_templates:
             raise ValueError("配置错误: handover_log.format_templates 不能为空")
 
-        forced_cells = set(FORCED_FIXED_CELL_VALUES)
+        fixed_default_or_forced_cells = {*FORCED_FIXED_CELL_VALUES, *DEFAULT_FIXED_CELL_VALUES}
         effective_cell_mapping = {
             metric_key: cell
             for metric_key, cell in cell_mapping.items()
-            if normalize_cell_name(cell) not in forced_cells
+            if normalize_cell_name(cell) not in fixed_default_or_forced_cells
         }
         cell_values = build_cell_value_map(
             cell_mapping=effective_cell_mapping,

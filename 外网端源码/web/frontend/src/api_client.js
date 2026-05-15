@@ -297,6 +297,29 @@ export async function saveWetBulbCollectionSchedulerConfigApi(payload) {
   });
 }
 
+export async function startChillerModeUploadJobApi() {
+  return apiJson("/api/jobs/chiller-mode-upload/run", { method: "POST", body: "{}" });
+}
+
+export async function startChillerModeUploadSchedulerApi() {
+  return apiJson("/api/scheduler/chiller-mode-upload/start", { method: "POST", body: "{}" });
+}
+
+export async function stopChillerModeUploadSchedulerApi() {
+  return apiJson("/api/scheduler/chiller-mode-upload/stop", { method: "POST", body: "{}" });
+}
+
+export async function getChillerModeUploadSchedulerStatusApi() {
+  return apiJson("/api/scheduler/chiller-mode-upload/status");
+}
+
+export async function saveChillerModeUploadSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/chiller-mode-upload/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function startDayMetricUploadSchedulerApi() {
   return apiJson("/api/scheduler/day-metric-upload/start", { method: "POST", body: "{}" });
 }
@@ -471,6 +494,13 @@ export async function getHandoverReviewBootstrapApi(buildingCode, params = {}, o
 
 export async function getHandoverReviewStatusApi(buildingCode, params = {}, options = {}) {
   return apiJson(appendQuery(`/api/handover/review/${buildingCode}/status`, params), options);
+}
+
+export async function refreshHandoverReviewEventSectionsApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/sections/events/refresh`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function getHandoverReviewHistoryApi(buildingCode, params = {}, options = {}) {

@@ -378,6 +378,37 @@ export function createAppState(vueApi) {
         resolved_at: "",
       },
     },
+    chiller_mode_upload: {
+      enabled: false,
+      scheduler: {
+        running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
+        status: "-",
+        next_run_time: "",
+        last_check_at: "",
+        last_decision: "",
+        last_trigger_at: "",
+        last_trigger_result: "",
+        interval_minutes: 10,
+        state_path: "",
+        state_exists: false,
+        executor_bound: false,
+        callback_name: "-",
+      },
+      target_preview: {
+        configured_app_token: "",
+        operation_app_token: "",
+        table_id: "",
+        target_kind: "",
+        display_url: "",
+        bitable_url: "",
+        wiki_node_token: "",
+        message: "",
+        resolved_at: "",
+      },
+    },
     monthly_event_report: {
       enabled: false,
       scheduler: {
@@ -717,6 +748,7 @@ export function createAppState(vueApi) {
   const schedulerQuickSaving = ref(false);
   const handoverSchedulerQuickSaving = ref(false);
   const wetBulbSchedulerQuickSaving = ref(false);
+  const chillerModeUploadSchedulerQuickSaving = ref(false);
   const dayMetricUploadSchedulerQuickSaving = ref(false);
   const branchPowerUploadSchedulerQuickSaving = ref(false);
   const alarmEventUploadSchedulerQuickSaving = ref(false);
@@ -726,6 +758,7 @@ export function createAppState(vueApi) {
     scheduler: { mode: "idle", rememberedOverride: null },
     handover: { mode: "idle", rememberedOverride: null },
     wet_bulb: { mode: "idle", rememberedOverride: null },
+    chiller_mode_upload: { mode: "idle", rememberedOverride: null },
     day_metric_upload: { mode: "idle", rememberedOverride: null },
     branch_power_upload: { mode: "idle", rememberedOverride: null },
     alarm_event_upload: { mode: "idle", rememberedOverride: null },
@@ -763,6 +796,8 @@ export function createAppState(vueApi) {
   const dayMetricLocalDate = ref(todayText());
   const dayMetricLocalFile = ref(null);
   const branchPowerBusinessDate = ref(yesterdayText());
+  const branchPowerBusinessDateEnd = ref(yesterdayText());
+  const branchPowerBusinessDatesText = ref("");
   const handoverFile = ref(null);
   const handoverFilesByBuilding = reactive({});
   const handoverDutyDate = ref(todayText());
@@ -1058,10 +1093,13 @@ export function createAppState(vueApi) {
     const currentHourBucket = String(payload.current_hour_bucket || payload.currentHourBucket || "").trim();
     const familyKeys = [
       "handover_log_family",
+      "handover_capacity_report_family",
       "monthly_report_family",
       "branch_power_family",
+      "branch_current_family",
+      "branch_switch_family",
+      "chiller_mode_switch_family",
       "alarm_event_family",
-      "handover_capacity_report_family",
     ].filter((familyKey) => payload?.[familyKey] && typeof payload[familyKey] === "object");
     const families = familyKeys.map((familyKey) => {
       const rawFamily = payload[familyKey] && typeof payload[familyKey] === "object" ? payload[familyKey] : {};
@@ -1574,6 +1612,12 @@ export function createAppState(vueApi) {
   const wetBulbSchedulerTriggerText = computed(() =>
     readSchedulerDisplayText(health.wet_bulb_collection?.scheduler, "trigger_text", "暂无记录"),
   );
+  const chillerModeUploadSchedulerDecisionText = computed(() =>
+    readSchedulerDisplayText(health.chiller_mode_upload?.scheduler, "decision_text", "暂无记录"),
+  );
+  const chillerModeUploadSchedulerTriggerText = computed(() =>
+    readSchedulerDisplayText(health.chiller_mode_upload?.scheduler, "trigger_text", "暂无记录"),
+  );
   const monthlyEventReportSchedulerDecisionText = computed(() =>
     readSchedulerDisplayText(health.monthly_event_report?.scheduler, "decision_text", "暂无记录"),
   );
@@ -2056,6 +2100,7 @@ export function createAppState(vueApi) {
     schedulerQuickSaving,
     handoverSchedulerQuickSaving,
     wetBulbSchedulerQuickSaving,
+    chillerModeUploadSchedulerQuickSaving,
     dayMetricUploadSchedulerQuickSaving,
     branchPowerUploadSchedulerQuickSaving,
     alarmEventUploadSchedulerQuickSaving,
@@ -2081,6 +2126,8 @@ export function createAppState(vueApi) {
     dayMetricLocalDate,
     dayMetricLocalFile,
     branchPowerBusinessDate,
+    branchPowerBusinessDateEnd,
+    branchPowerBusinessDatesText,
     handoverFile,
     handoverFilesByBuilding,
     handoverDutyDate,
@@ -2138,6 +2185,8 @@ export function createAppState(vueApi) {
     schedulerTriggerText,
     wetBulbSchedulerDecisionText,
     wetBulbSchedulerTriggerText,
+    chillerModeUploadSchedulerDecisionText,
+    chillerModeUploadSchedulerTriggerText,
     dayMetricUploadSchedulerDecisionText,
     dayMetricUploadSchedulerTriggerText,
     branchPowerUploadSchedulerDecisionText,

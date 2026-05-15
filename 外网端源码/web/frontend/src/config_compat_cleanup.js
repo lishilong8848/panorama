@@ -40,3 +40,12 @@ export function cleanupWetBulbCollectionCompat(raw, options = {}) {
   delete cfg.target.wiki_url;
   return cfg;
 }
+
+export function cleanupChillerModeUploadCompat(raw, options = {}) {
+  const cfg = options.cloneInput ? clone(raw || {}) : ensurePlainObject(raw);
+  delete cfg.manual_button_enabled;
+  cfg.target = ensurePlainObject(cfg.target);
+  delete cfg.target.base_url;
+  delete cfg.target.wiki_url;
+  return cfg;
+}

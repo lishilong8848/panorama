@@ -11,6 +11,7 @@ from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.footer_inventory_writer import write_footer_inventory_table
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
+from handover_log_module.service.capacity_room_inputs_service import CapacityRoomInputsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_writer import ReviewDocumentWriter
@@ -50,6 +51,7 @@ class ReviewDocumentStateService:
         self.writer = writer or ReviewDocumentWriter(self.config)
         self.emit_log = emit_log if callable(emit_log) else print
         self._cabinet_defaults = CabinetPowerDefaultsService()
+        self._capacity_room_inputs = CapacityRoomInputsService()
         self._footer_defaults = FooterInventoryDefaultsService()
 
     def _store(self, building: str) -> ReviewBuildingDocumentStore:
@@ -175,7 +177,9 @@ class ReviewDocumentStateService:
         session_with_sync = self.attach_excel_sync(session)
         session_with_sync["revision"] = int(state.get("revision", session_with_sync.get("revision", 0)) or 0)
         document = state.get("document", {}) if isinstance(state.get("document", {}), dict) else {}
-        return self.attach_cooling_pump_pressures(document=document, session=session_with_sync), session_with_sync
+        document = self.attach_cooling_pump_pressures(document=document, session=session_with_sync)
+        document = self.attach_capacity_room_inputs(document=document, session=session_with_sync)
+        return document, session_with_sync
 
     @staticmethod
     def _normalize_capacity_running_units(raw: Dict[str, Any] | None) -> Dict[str, List[Dict[str, Any]]]:
@@ -412,6 +416,31 @@ class ReviewDocumentStateService:
         payload["cooling_pump_pressures"] = {"rows": rows, "tanks": tanks}
         return payload
 
+    def attach_capacity_room_inputs(
+        self,
+        *,
+        document: Dict[str, Any],
+        session: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = dict(document if isinstance(document, dict) else {})
+        building = self._building(session)
+        if not building:
+            return payload
+        current = payload.get("capacity_room_inputs", {})
+        if isinstance(current, dict) and isinstance(current.get("rows", []), list) and current.get("rows"):
+            payload["capacity_room_inputs"] = self._capacity_room_inputs.normalize_payload(current, building=building)
+            return payload
+        try:
+            defaults = self._store(building).get_default(CapacityRoomInputsService.DEFAULTS_KEY)
+        except Exception:  # noqa: BLE001
+            defaults = None
+        if isinstance(defaults, dict):
+            payload["capacity_room_inputs"] = self._capacity_room_inputs.normalize_payload(defaults, building=building)
+            return payload
+        template_cells = self._capacity_room_inputs.template_cells_for_building(building)
+        payload["capacity_room_inputs"] = self._capacity_room_inputs.payload_from_cells(template_cells, building=building)
+        return payload
+
     def save_document(
         self,
         *,
@@ -644,11 +673,13 @@ class ReviewDocumentStateService:
         footer_dirty = bool(dirty.get("footer_inventory"))
         cabinet_dirty = bool(dirty.get("fixed_blocks"))
         cooling_dirty = bool(dirty.get("cooling_pump_pressures"))
+        capacity_room_dirty = bool(dirty.get("capacity_room_inputs"))
         sections_dirty = bool(dirty.get("sections"))
-        if not footer_dirty and not cabinet_dirty and not cooling_dirty and not sections_dirty:
+        if not footer_dirty and not cabinet_dirty and not cooling_dirty and not capacity_room_dirty and not sections_dirty:
             return {
                 "footer_inventory_rows": 0,
                 "cabinet_power_fields": 0,
+                "capacity_room_rows": 0,
                 "cooling_pump_pressure_rows": 0,
                 "attention_handover_rows": 0,
                 "config_updated": False,
@@ -658,6 +689,7 @@ class ReviewDocumentStateService:
         updated = False
         footer_rows: List[Dict[str, Any]] = []
         cabinet_cells: Dict[str, str] = {}
+        capacity_room_payload: Dict[str, Any] = {}
         cooling_rows: List[Dict[str, Any]] = []
         attention_rows: List[Dict[str, Any]] | None = None
         if footer_dirty:
@@ -666,6 +698,12 @@ class ReviewDocumentStateService:
         if cabinet_dirty:
             cabinet_cells = self._cabinet_defaults.extract_cells_from_document(document)
             updated = store.set_default("cabinet_power", self._cabinet_defaults.normalize_cells(cabinet_cells)) or updated
+        if capacity_room_dirty:
+            capacity_room_payload = self._capacity_room_inputs.normalize_payload(
+                document.get("capacity_room_inputs", {}) if isinstance(document, dict) else {},
+                building=building,
+            )
+            updated = store.set_default(CapacityRoomInputsService.DEFAULTS_KEY, capacity_room_payload) or updated
         if cooling_dirty:
             cooling_payload = (
                 document.get("cooling_pump_pressures", {})
@@ -724,6 +762,7 @@ class ReviewDocumentStateService:
         return {
             "footer_inventory_rows": len(footer_rows),
             "cabinet_power_fields": len(cabinet_cells),
+            "capacity_room_rows": len(capacity_room_payload.get("rows", [])) if isinstance(capacity_room_payload, dict) else 0,
             "cooling_pump_pressure_rows": len(cooling_rows),
             "attention_handover_rows": len(attention_rows or []),
             "config_updated": False,

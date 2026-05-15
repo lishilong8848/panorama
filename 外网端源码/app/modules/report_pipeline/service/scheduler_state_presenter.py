@@ -231,6 +231,9 @@ def present_scheduler_overview_items(
     wet_bulb_cfg = _dict(
         _cfg_get(config_payload, ("wet_bulb_collection", "scheduler"), ("features", "wet_bulb_collection", "scheduler"))
     )
+    chiller_mode_cfg = _dict(
+        _cfg_get(config_payload, ("chiller_mode_upload", "scheduler"), ("features", "chiller_mode_upload", "scheduler"))
+    )
     day_metric_cfg = _dict(
         _cfg_get(config_payload, ("day_metric_upload", "scheduler"), ("features", "day_metric_upload", "scheduler"))
     )
@@ -258,6 +261,7 @@ def present_scheduler_overview_items(
     scheduler_snapshot = _dict(summary_payload.get("scheduler"))
     handover_snapshot = _dict(summary_payload.get("handover_scheduler"))
     wet_bulb_snapshot = _dict(summary_payload.get("wet_bulb_collection_scheduler"))
+    chiller_mode_snapshot = _dict(summary_payload.get("chiller_mode_upload_scheduler"))
     day_metric_snapshot = _dict(summary_payload.get("day_metric_upload_scheduler"))
     branch_power_snapshot = _dict(summary_payload.get("branch_power_upload_scheduler"))
     alarm_snapshot = _dict(summary_payload.get("alarm_event_upload_scheduler"))
@@ -267,6 +271,7 @@ def present_scheduler_overview_items(
     auto_flow_display = present_scheduler_state(scheduler_snapshot, role_mode=role_mode)
     handover_display = present_scheduler_state(handover_snapshot, role_mode=role_mode)
     wet_bulb_display = present_scheduler_state(wet_bulb_snapshot, role_mode=role_mode)
+    chiller_mode_display = present_scheduler_state(chiller_mode_snapshot, role_mode=role_mode)
     day_metric_display = present_scheduler_state(day_metric_snapshot, role_mode=role_mode)
     branch_power_display = present_scheduler_state(branch_power_snapshot, role_mode=role_mode)
     alarm_display = present_scheduler_state(alarm_snapshot, role_mode=role_mode)
@@ -430,6 +435,29 @@ def present_scheduler_overview_items(
                     next_run_time=wet_bulb_snapshot.get("next_run_time"),
                     last_trigger_at=wet_bulb_snapshot.get("last_trigger_at"),
                     result_text=_map_scheduler_trigger_text(wet_bulb_snapshot.get("last_trigger_result")),
+                )
+            ],
+        },
+        {
+            "key": "chiller_mode_upload",
+            "title": "制冷模式参数上传",
+            "module_id": "chiller_mode_upload",
+            "focus_key": "",
+            "tone": chiller_mode_display.get("tone", "neutral"),
+            "status_text": chiller_mode_display.get("status_text", "未启动"),
+            "summary_text": _summary_choice(
+                _map_scheduler_decision_text(chiller_mode_snapshot.get("last_decision")),
+                _map_scheduler_trigger_text(chiller_mode_snapshot.get("last_trigger_result")),
+                chiller_mode_display.get("summary_text", ""),
+                fallback="读取制冷单元模式切换参数源文件并清表重传",
+            ),
+            "parts": [
+                _overview_part(
+                    label="循环调度",
+                    run_time_text=_interval_run_text(chiller_mode_cfg.get("interval_minutes")),
+                    next_run_time=chiller_mode_snapshot.get("next_run_time"),
+                    last_trigger_at=chiller_mode_snapshot.get("last_trigger_at"),
+                    result_text=_map_scheduler_trigger_text(chiller_mode_snapshot.get("last_trigger_result")),
                 )
             ],
         },
