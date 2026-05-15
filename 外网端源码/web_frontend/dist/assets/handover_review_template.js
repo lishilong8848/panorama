@@ -188,6 +188,15 @@
     <section v-else-if="!session" class="review-empty-card">
       <strong>{{ reviewPendingTitle }}</strong>
       <span>{{ reviewPendingMessage }}</span>
+      <button
+        v-if="showRegenerateAction"
+        class="btn btn-warning btn-mini"
+        @click="regenerateCurrentReview"
+        :disabled="regenerateActionVm.disabled"
+        :title="regenerateActionVm.disabledReason || ''"
+      >
+        {{ regenerateActionVm.text }}
+      </button>
     </section>
 
     <template v-else>

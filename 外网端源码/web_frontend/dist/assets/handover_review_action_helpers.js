@@ -1,6 +1,7 @@
 export function createHandoverReviewActionHelpers(options = {}) {
   const {
     session,
+    reviewContext,
     building,
     buildingCode,
     dirty,
@@ -481,28 +482,39 @@ export function createHandoverReviewActionHelpers(options = {}) {
       return;
     }
     const sessionId = String(session.value?.session_id || "").trim();
-    if (!buildingCode || !sessionId) {
+    const dutyDate = String(session.value?.duty_date || reviewContext?.value?.duty_date || activeRouteSelection.value?.dutyDate || "").trim();
+    const dutyShift = String(session.value?.duty_shift || reviewContext?.value?.duty_shift || activeRouteSelection.value?.dutyShift || "").trim().toLowerCase();
+    const canGenerateWithoutSession = Boolean(!sessionId && dutyDate && (dutyShift === "day" || dutyShift === "night"));
+    if (!buildingCode || (!sessionId && !canGenerateWithoutSession)) {
       statusText.value = regenerateActionVm.value.disabledReason || "";
       return;
     }
     clearSaveTimers();
     regenerating.value = true;
     errorText.value = "";
-    statusText.value = dirty.value
-      ? "正在重新生成交接班及容量表，当前未保存修改将被覆盖..."
-      : "正在重新生成交接班及容量表...";
+    statusText.value = sessionId
+      ? (dirty.value
+        ? "正在重新生成交接班及容量表，当前未保存修改将被覆盖..."
+        : "正在重新生成交接班及容量表...")
+      : "正在生成当前班次交接班及容量表...";
     try {
-      const response = await regenerateHandoverReviewApi(buildingCode, {
-        session_id: sessionId,
+      const request = {
         client_id: reviewClientId,
-      });
+      };
+      if (sessionId) {
+        request.session_id = sessionId;
+      } else {
+        request.duty_date = dutyDate;
+        request.duty_shift = dutyShift;
+      }
+      const response = await regenerateHandoverReviewApi(buildingCode, request);
       const jobId = String(response?.job?.job_id || response?.job_id || "").trim();
       if (!jobId) {
-        throw new Error("重新生成任务提交失败");
+        throw new Error(sessionId ? "重新生成任务提交失败" : "生成任务提交失败");
       }
       const job = await waitForBackgroundJob(jobId, getJobApi, { timeoutMs: 10 * 60 * 1000, intervalMs: 1500 });
       if (!job) {
-        throw new Error("重新生成任务等待超时，请稍后刷新查看结果");
+        throw new Error(sessionId ? "重新生成任务等待超时，请稍后刷新查看结果" : "生成任务等待超时，请稍后刷新查看结果");
       }
       await loadReviewData({
         background: false,
@@ -510,15 +522,15 @@ export function createHandoverReviewActionHelpers(options = {}) {
       });
       if (job.status === "success") {
         dirty.value = false;
-        statusText.value = "交接班日志和容量表已重新生成";
+        statusText.value = sessionId ? "交接班日志和容量表已重新生成" : "当前班次交接班日志和容量表已生成";
         errorText.value = "";
       } else {
-        errorText.value = String(job?.error || job?.summary || "重新生成失败");
-        statusText.value = "重新生成失败，请处理后重试。";
+        errorText.value = String(job?.error || job?.summary || (sessionId ? "重新生成失败" : "生成失败"));
+        statusText.value = sessionId ? "重新生成失败，请处理后重试。" : "生成失败，请处理后重试。";
       }
     } catch (error) {
-      errorText.value = String(error?.message || error || "重新生成失败");
-      statusText.value = "重新生成失败，请处理后重试。";
+      errorText.value = String(error?.message || error || (sessionId ? "重新生成失败" : "生成失败"));
+      statusText.value = sessionId ? "重新生成失败，请处理后重试。" : "生成失败，请处理后重试。";
       try {
         await loadReviewData({ background: false, mode: shouldPreferBootstrapLoad() ? "bootstrap" : "full" });
       } catch (_error) {

@@ -1199,13 +1199,17 @@ export function createAppState(vueApi) {
       if (building && !buildings.includes(building)) buildings.push(building);
     }
     const reviewBoardRows = buildings.map((building) => {
+      const hasBackendRow = rowMap.has(building);
       const rawRow = rowMap.get(building) || {};
       const rawLink = linkMap.get(building) || {};
       const hasSession = Boolean(rawRow.has_session ?? rawRow.hasSession);
       const confirmed = Boolean(rawRow.confirmed);
       const url = String(rawLink.url || "").trim();
-      const status = confirmed ? "confirmed" : (hasSession ? "pending" : (url ? "available" : "missing"));
-      const text = confirmed ? "已确认" : (hasSession ? "待确认" : (url ? "可访问" : "未生成"));
+      const generatedStatus = hasBackendRow
+        ? { status: "missing", text: "未生成", tone: "warning" }
+        : { status: url ? "available" : "missing", text: url ? "可访问" : "未生成", tone: url ? "info" : "neutral" };
+      const status = confirmed ? "confirmed" : (hasSession ? "pending" : generatedStatus.status);
+      const text = confirmed ? "已确认" : (hasSession ? "待确认" : generatedStatus.text);
       const cloudSheetSync = rawRow.cloud_sheet_sync && typeof rawRow.cloud_sheet_sync === "object"
         ? rawRow.cloud_sheet_sync
         : {};
@@ -1214,7 +1218,7 @@ export function createAppState(vueApi) {
         building,
         status,
         text,
-        tone: confirmed ? "success" : (hasSession ? "warning" : (url ? "info" : "neutral")),
+        tone: confirmed ? "success" : (hasSession ? "warning" : generatedStatus.tone),
         code: String(rawLink.code || "").trim().toLowerCase(),
         url,
         cloud_sheet_sync: {

@@ -1250,7 +1250,8 @@ def _build_latest_handover_review_status(container) -> Dict[str, Any]:
     try:
         review_service = ReviewSessionService(handover_cfg)
         followup_service = ReviewFollowupTriggerService(handover_cfg)
-        status_payload = review_service.get_latest_batch_status()
+        duty_date, duty_shift = _current_handover_review_duty_context()
+        status_payload = review_service.get_batch_status_for_duty(duty_date, duty_shift)
         target_batch_key = str(status_payload.get("batch_key", "")).strip()
         status_payload["followup_progress"] = (
             followup_service.get_followup_progress(target_batch_key)
@@ -1263,9 +1264,10 @@ def _build_latest_handover_review_status(container) -> Dict[str, Any]:
 
 
 def _latest_handover_review_status_cached(container, request: Request) -> Dict[str, Any]:
+    duty_date, duty_shift = _current_handover_review_duty_context()
     return _health_cached_component(
         request,
-        key="handover_review_status:latest",
+        key=f"handover_review_status:{duty_date}:{duty_shift}",
         ttl_sec=_HEALTH_CACHE_TTL_REVIEW_STATUS_SEC,
         builder=lambda: _build_latest_handover_review_status(container),
     )
@@ -2536,6 +2538,16 @@ def _normalize_handover_duty_filters(duty_date: str = "", duty_shift: str = "") 
     return duty_date_text, duty_shift_text
 
 
+def _current_handover_review_duty_context(now: datetime | None = None) -> tuple[str, str]:
+    current = now or datetime.now()
+    second_of_day = current.hour * 3600 + current.minute * 60 + current.second
+    if second_of_day < 9 * 3600:
+        return (current - timedelta(days=1)).strftime("%Y-%m-%d"), "night"
+    if second_of_day < 18 * 3600:
+        return current.strftime("%Y-%m-%d"), "day"
+    return current.strftime("%Y-%m-%d"), "night"
+
+
 def _is_private_ipv4(text: str) -> bool:
     raw = str(text or "").strip()
     if not raw:
@@ -3192,6 +3204,8 @@ def health(
         handover_duty_date,
         handover_duty_shift,
     )
+    if not selected_duty_date or not selected_duty_shift:
+        selected_duty_date, selected_duty_shift = _current_handover_review_duty_context()
 
     handover_review_status: Dict[str, Any] = _empty_handover_review_status()
     handover_review_access = _empty_handover_review_access()
@@ -6258,9 +6272,10 @@ def _build_external_review_module(request: Request) -> Dict[str, Any]:
             display={"handover_review_overview": _external_empty_role_mismatch_display("当前不是外网端")},
         )
     runtime_cfg = _runtime_config(container)
+    current_duty_date, current_duty_shift = _current_handover_review_duty_context()
     handover_review_status = _health_cached_component_async_default(
         request,
-        key="handover_review_status:latest",
+        key=f"handover_review_status:{current_duty_date}:{current_duty_shift}",
         ttl_sec=_HEALTH_CACHE_TTL_REVIEW_STATUS_SEC,
         builder=lambda: _build_latest_handover_review_status(container),
         default=_empty_handover_review_status(),
@@ -6597,9 +6612,10 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         )
     if live_shared_bridge:
         health_lite = {**health_lite, "shared_bridge": live_shared_bridge}
+    current_duty_date, current_duty_shift = _current_handover_review_duty_context()
     handover_review_status = _health_cached_component_async_default(
         request,
-        key="handover_review_status:latest",
+        key=f"handover_review_status:{current_duty_date}:{current_duty_shift}",
         ttl_sec=_HEALTH_CACHE_TTL_REVIEW_STATUS_SEC,
         builder=lambda: _build_latest_handover_review_status(container),
         default=_empty_handover_review_status(),

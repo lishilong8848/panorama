@@ -2604,6 +2604,13 @@ def _build_review_display_state(
     defaults_sync_payload = defaults_sync if isinstance(defaults_sync, dict) else {}
     save_status_payload = save_status if isinstance(save_status, dict) else {}
     selected_session_id = str(session_payload.get("session_id", "")).strip()
+    batch_duty_date = str(batch_payload.get("duty_date", "") or "").strip()
+    batch_duty_shift = str(batch_payload.get("duty_shift", "") or "").strip().lower()
+    waiting_generation = (
+        not bool(session_payload)
+        and bool(batch_duty_date)
+        and batch_duty_shift in {"day", "night"}
+    )
     latest_session_id_text = str(
         latest_session_id
         or history_payload.get("latest_session_id", "")
@@ -2808,9 +2815,15 @@ def _build_review_display_state(
         capacity_image_send_disabled_reason = "当前没有可发送的容量报表"
     elif capacity_image_sending:
         capacity_image_send_disabled_reason = "容量表图片正在发送中，请等待发送完成"
-    regenerate_allowed = bool(session_payload) and not is_history_mode and not remote_editor_active and not cloud_sheet_uploading and not confirmed
+    regenerate_allowed = (
+        (waiting_generation and not remote_editor_active)
+        or (bool(session_payload) and not is_history_mode and not remote_editor_active and not cloud_sheet_uploading and not confirmed)
+    )
     regenerate_disabled_reason = ""
-    if not session_payload:
+    regenerate_label = "生成当前班次交接班及容量表" if waiting_generation else "重新生成交接班及容量表"
+    if waiting_generation:
+        regenerate_disabled_reason = ""
+    elif not session_payload:
         regenerate_disabled_reason = "暂无可重新生成的交接班记录"
     elif is_history_mode:
         regenerate_disabled_reason = "历史交接班日志不支持重新生成"
@@ -2830,18 +2843,18 @@ def _build_review_display_state(
             history_hint_rows.append("当前查看记录尚未成功上云，因此不在历史列表中。")
     history_hint = " ".join([item for item in history_hint_rows if str(item or "").strip()]).strip()
     save_state = _review_display_item(
-        status=str(save_status_payload.get("status", "")).strip().lower() or ("blocked" if remote_editor_active else ("history_ready" if is_history_mode else "ready")),
-        text=str(save_status_payload.get("state_text", "")).strip() or ("其他终端编辑中，当前只读" if remote_editor_active else ("历史交接班日志可编辑" if is_history_mode else "当前交接班日志可编辑")),
-        tone=str(save_status_payload.get("tone", "")).strip() or ("warning" if remote_editor_active else ("info" if is_history_mode else "success")),
-        reason_code=str(save_status_payload.get("reason_code", "")).strip().lower() or ("remote_editor_active" if remote_editor_active else ("history_mode" if is_history_mode else "ready")),
-        detail_text=str(save_status_payload.get("detail_text", "")).strip() or ("当前审核页正在其他终端编辑，请等待或刷新后重试" if remote_editor_active else ""),
+        status=str(save_status_payload.get("status", "")).strip().lower() or ("waiting_generation" if waiting_generation else ("blocked" if remote_editor_active else ("history_ready" if is_history_mode else "ready"))),
+        text=str(save_status_payload.get("state_text", "")).strip() or ("交接班数据未生成" if waiting_generation else ("其他终端编辑中，当前只读" if remote_editor_active else ("历史交接班日志可编辑" if is_history_mode else "当前交接班日志可编辑"))),
+        tone=str(save_status_payload.get("tone", "")).strip() or ("warning" if (waiting_generation or remote_editor_active) else ("info" if is_history_mode else "success")),
+        reason_code=str(save_status_payload.get("reason_code", "")).strip().lower() or ("waiting_generation" if waiting_generation else ("remote_editor_active" if remote_editor_active else ("history_mode" if is_history_mode else "ready"))),
+        detail_text=str(save_status_payload.get("detail_text", "")).strip() or ("当前班次交接班数据尚未生成" if waiting_generation else ("当前审核页正在其他终端编辑，请等待或刷新后重试" if remote_editor_active else "")),
     )
     confirm_badge = _review_badge(
         code="confirm",
-        text="可编辑" if is_history_mode else ("已确认" if confirmed else "待确认"),
-        tone="neutral" if is_history_mode else ("success" if confirmed else "warning"),
-        emphasis="outline" if is_history_mode else ("solid" if confirmed else "soft"),
-        icon="file" if is_history_mode else ("check" if confirmed else "warn"),
+        text="未生成" if waiting_generation else ("可编辑" if is_history_mode else ("已确认" if confirmed else "待确认")),
+        tone="warning" if waiting_generation else ("neutral" if is_history_mode else ("success" if confirmed else "warning")),
+        emphasis="soft" if waiting_generation else ("outline" if is_history_mode else ("solid" if confirmed else "soft")),
+        icon="warn" if waiting_generation else ("file" if is_history_mode else ("check" if confirmed else "warn")),
     )
     if remote_editor_active:
         save_badge = _review_badge(
@@ -2858,6 +2871,14 @@ def _build_review_display_state(
             tone="info",
             emphasis="soft",
             icon="file",
+        )
+    elif waiting_generation:
+        save_badge = _review_badge(
+            code="save",
+            text="待生成",
+            tone="warning",
+            emphasis="soft",
+            icon="warn",
         )
     else:
         save_badge = _review_badge(
@@ -2990,8 +3011,8 @@ def _build_review_display_state(
             ),
             "regenerate": _review_action(
                 allowed=regenerate_allowed,
-                visible=bool(session_payload) and not is_history_mode,
-                label="重新生成交接班及容量表",
+                visible=(waiting_generation or bool(session_payload)) and not is_history_mode,
+                label=regenerate_label,
                 disabled_reason=regenerate_disabled_reason,
                 tone="warning",
                 variant="warning",
@@ -4417,13 +4438,41 @@ def handover_review_regenerate(
 ) -> Dict[str, Any]:
     container = request.app.state.container
     service = _build_review_session_service(container)
+    handover_cfg = _handover_cfg(container)
     building = _resolve_building_or_404(service, building_code)
     session_id_text = str(payload.get("session_id", "") or "").strip()
     client_id = str(payload.get("client_id", "") or "").strip()
-    if not session_id_text:
-        raise HTTPException(status_code=400, detail="session_id 不能为空")
-    _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
-    target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    if session_id_text:
+        _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
+        target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+        action_label = "重新生成交接班及容量表"
+    else:
+        duty_date_text, duty_shift_text = _normalize_duty_context(
+            str(payload.get("duty_date", "") or "").strip(),
+            str(payload.get("duty_shift", "") or "").strip().lower(),
+        )
+        if not duty_date_text or not duty_shift_text:
+            duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
+        session_getter = getattr(service, "get_session_for_building_duty_fast", None)
+        if callable(session_getter):
+            target = session_getter(building, duty_date_text, duty_shift_text)
+        else:
+            target = service.get_session_for_building_duty(building, duty_date_text, duty_shift_text)
+        if not isinstance(target, dict):
+            target = {
+                "building": building,
+                "building_code": str(building_code or "").strip().lower(),
+                "session_id": service.build_session_id(building, duty_date_text, duty_shift_text),
+                "duty_date": duty_date_text,
+                "duty_shift": duty_shift_text,
+                "batch_key": service.build_batch_key(duty_date_text, duty_shift_text),
+            }
+        session_id_text = str(target.get("session_id", "") or "").strip() or service.build_session_id(
+            building,
+            duty_date_text,
+            duty_shift_text,
+        )
+        action_label = "生成当前班次交接班及容量表"
     if bool(target.get("confirmed", False)):
         raise HTTPException(status_code=409, detail="当前楼栋已确认，请先撤销确认后再重新生成")
     cloud_sync = target.get("cloud_sheet_sync", {}) if isinstance(target.get("cloud_sheet_sync", {}), dict) else {}
@@ -4432,16 +4481,16 @@ def handover_review_regenerate(
 
     duty_date = str(target.get("duty_date", "") or "").strip()
     duty_shift = str(target.get("duty_shift", "") or "").strip().lower()
-    batch_key = str(target.get("batch_key", "") or "").strip()
+    batch_key = str(target.get("batch_key", "") or "").strip() or service.build_batch_key(duty_date, duty_shift)
     handover_source, capacity_source = _resolve_regenerate_source_files(
         container,
         target,
         building=building,
     )
     if not handover_source:
-        raise HTTPException(status_code=409, detail="缺少可用于重新生成的交接班源文件")
+        raise HTTPException(status_code=409, detail=f"缺少可用于{action_label.replace('交接班及容量表', '')}的交接班源文件")
     if not capacity_source:
-        raise HTTPException(status_code=409, detail="缺少可用于重新生成的交接班容量报表源文件")
+        raise HTTPException(status_code=409, detail=f"缺少可用于{action_label.replace('交接班及容量表', '')}的交接班容量报表源文件")
 
     worker_payload = {
         "building": building,
@@ -4464,7 +4513,7 @@ def handover_review_regenerate(
 
     job = _start_handover_background_job(
         container,
-        name=f"重新生成交接班及容量表 {building}",
+        name=f"{action_label} {building}",
         run_func=_run,
         worker_handler="handover_review_regenerate",
         worker_payload=worker_payload,
@@ -4475,7 +4524,7 @@ def handover_review_regenerate(
         dedupe_key=f"handover_review_regenerate:{session_id_text}",
     )
     container.add_system_log(
-        f"[任务] 已提交: 重新生成交接班及容量表 building={building}, session={session_id_text} ({job.job_id})"
+        f"[任务] 已提交: {action_label} building={building}, session={session_id_text} ({job.job_id})"
     )
     return _accepted_job_response(job)
 

@@ -3386,6 +3386,7 @@ export function mountHandoverReviewApp(Vue) {
         saveCurrentReview,
       } = createHandoverReviewActionHelpers({
         session,
+        reviewContext,
         building,
         buildingCode,
         dirty,
