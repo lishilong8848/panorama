@@ -82,6 +82,10 @@ _WEATHER_CACHE: Dict[Any, tuple[float, Dict[str, Any]]] = {}
 _WEATHER_INFLIGHT: Dict[Any, threading.Event] = {}
 _CAPACITY_BATCH_CACHE_TTL_SEC = 30
 _CAPACITY_TRACKED_CELLS = (
+    "C3",
+    "G3",
+    "B4",
+    "F4",
     "H6",
     "F8",
     "B6",
@@ -90,6 +94,11 @@ _CAPACITY_TRACKED_CELLS = (
     "D8",
     "B7",
     "D7",
+    "B10",
+    "D10",
+    "B15",
+    "D15",
+    "F15",
     "B13",
     "D13",
     *CapacityRoomInputsService.tracked_cells(),
@@ -997,6 +1006,23 @@ class HandoverCapacityReportService:
         return "", ""
 
     @staticmethod
+    def _split_metric_pair(value: Any) -> tuple[str, str]:
+        text = _text(value)
+        if not text:
+            return "", ""
+        if "/" not in text:
+            return "", text
+        left, right = text.split("/", 1)
+        return _text(left), _text(right)
+
+    @staticmethod
+    def _alarm_count_text(value: Any) -> str:
+        try:
+            return str(int(float(_text(value) or 0)))
+        except Exception:  # noqa: BLE001
+            return _text(value) or "0"
+
+    @staticmethod
     def _weather_keyword_from_html(html: str) -> str:
         text = str(html or "")
         match = re.search(r"天气的关键词是[“\"]([^”\"<]{1,20})", text)
@@ -1837,11 +1863,24 @@ class HandoverCapacityReportService:
         weather_text = _text(weather_payload.get("text"))
         weather_humidity = _text(weather_payload.get("humidity"))
         west_tank, east_tank = self._derive_tank_pair_from_f8(handover.get("F8"))
+        h16_left, h16_right = self._split_metric_pair(handover.get("B10"))
+        h18_left, h18_right = self._split_metric_pair(handover.get("D10"))
+        long_day_cell = "B4" if _text(duty_shift).lower() == "day" else "F4"
         overlay = {
+            "M6": _text(handover.get("C3")),
+            "U6": _text(handover.get("G3")),
+            "S7": _text(handover.get(long_day_cell)),
             "AC24": _text(handover.get("D8")),
             "U15": _text(handover.get("H6")),
             "AD22": west_tank,
             "AD23": east_tank,
+            "H16": h16_right,
+            "L16": h16_left,
+            "H18": h18_right,
+            "L18": h18_left,
+            "G9": f"交班未恢复告警：{self._alarm_count_text(handover.get('D15'))}",
+            "L9": self._alarm_count_text(handover.get("B15")),
+            "S9": _text(handover.get("F15")) or "/",
             "V62": _text(handover.get("B6")),
             "O62": _text(handover.get("D6")),
             "S62": _text(handover.get("F6")),
@@ -1857,6 +1896,8 @@ class HandoverCapacityReportService:
             "R2": _text(outdoor_handover_cells.get("B7")),
             "AB2": _text(outdoor_handover_cells.get("D7")),
         }
+        if _text(duty_shift).lower() == "day":
+            overlay["G7"] = _text(handover.get("B4")) or "/"
         output = {cell: value for cell, value in overlay.items() if value != ""}
         output.update(self._capacity_room_overlay_values(building=building, handover_cells=handover))
         return output

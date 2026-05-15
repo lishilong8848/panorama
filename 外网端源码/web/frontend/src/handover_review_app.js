@@ -58,7 +58,8 @@ const CAPACITY_ROOM_TRACKED_CELLS = [
   "Z169", "AA169", "AC169",
 ];
 const CAPACITY_SYNC_TRACKED_CELLS = [
-  "H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7", "B13", "D13",
+  "C3", "G3", "B4", "F4", "H6", "F8", "B6", "D6", "F6", "D8", "B7", "D7",
+  "B10", "D10", "B15", "D15", "F15", "B13", "D13",
   ...CAPACITY_ROOM_TRACKED_CELLS,
 ];
 const OUTDOOR_TEMPERATURE_CELLS = ["B7", "D7"];
@@ -891,19 +892,31 @@ function cloneDirtyRegions(dirtyRegions) {
   };
 }
 
+function normalizeCapacityTrackedCells(rawTrackedCells) {
+  const seen = new Set();
+  return [
+    ...(Array.isArray(rawTrackedCells) ? rawTrackedCells : []),
+    ...CAPACITY_SYNC_TRACKED_CELLS,
+  ]
+    .map((item) => String(item || "").trim().toUpperCase())
+    .filter(Boolean)
+    .filter((cell) => {
+      if (seen.has(cell)) return false;
+      seen.add(cell);
+      return true;
+    });
+}
+
 function normalizeCapacitySync(raw) {
   const status = String(raw?.status || "").trim().toLowerCase();
   const normalizedStatus = ["ready", "pending", "pending_input", "missing_file", "failed"].includes(status)
     ? status
     : "failed";
-  const trackedCells = Array.isArray(raw?.tracked_cells) && raw.tracked_cells.length
-    ? raw.tracked_cells
-    : CAPACITY_SYNC_TRACKED_CELLS;
   return {
     status: normalizedStatus,
     updated_at: String(raw?.updated_at || "").trim(),
     error: String(raw?.error || "").trim(),
-    tracked_cells: trackedCells.map((item) => String(item || "").trim().toUpperCase()).filter(Boolean),
+    tracked_cells: normalizeCapacityTrackedCells(raw?.tracked_cells),
     input_signature: String(raw?.input_signature || "").trim(),
   };
 }
@@ -1104,9 +1117,7 @@ function normalizeReviewDisplayState(raw = {}) {
         }))
         .filter((item) => item.text)
     : [];
-  const trackedCells = Array.isArray(raw?.capacity_sync?.tracked_cells)
-    ? raw.capacity_sync.tracked_cells.map((item) => String(item || "").trim().toUpperCase()).filter(Boolean)
-    : CAPACITY_SYNC_TRACKED_CELLS;
+  const trackedCells = normalizeCapacityTrackedCells(raw?.capacity_sync?.tracked_cells);
   return {
     mode: normalizeDisplayBadge(raw?.mode, {
       code: "unknown",
