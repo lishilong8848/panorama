@@ -197,6 +197,12 @@ class BranchPowerUploadService:
         raw_value = row[value_index] if len(row) > value_index else None
         return any([room, machine_row, point, self._norm_text(raw_value)])
 
+    def _metric_cell_value_or_zero(self, row: tuple[Any, ...], value_index: int) -> Any:
+        value = row[value_index] if len(row) > value_index else None
+        if value is None or self._norm_text(value) == "":
+            return 0
+        return value
+
     def _load_metric_rows_by_hour(
         self,
         *,
@@ -226,11 +232,9 @@ class BranchPowerUploadService:
                     value_index = hour_col - 1
                     if not self._row_has_data(row, value_index):
                         continue
-                    value = row[value_index] if len(row) > value_index else None
                     if not room or not machine_row or not point:
                         raise RuntimeError(f"{file_path.name} 第{index}行缺少包间/机列/测点")
-                    if value is None or self._norm_text(value) == "":
-                        continue
+                    value = self._metric_cell_value_or_zero(row, value_index)
                     rows_by_bucket[bucket_key].append(
                         _MetricRow(
                             source_row=index,
