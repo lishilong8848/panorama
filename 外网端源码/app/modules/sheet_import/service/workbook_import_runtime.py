@@ -142,17 +142,24 @@ def import_workbook_sheets_to_feishu(
                 if sheet_name not in wb.sheetnames:
                     raise ValueError(f"工作簿中不存在 sheet: {sheet_name}")
                 ws = wb[sheet_name]
+                table_fields = client.list_fields(table_id=table_id, page_size=list_page_size)
+                list_field_names = [
+                    str(item.get("field_name", "") or item.get("name", "") or "").strip()
+                    for item in table_fields
+                    if isinstance(item, dict)
+                    and str(item.get("field_name", "") or item.get("name", "") or "").strip()
+                ]
 
                 if clear_before_upload:
                     cleared_count = client.clear_table(
                         table_id=table_id,
                         list_page_size=list_page_size,
                         delete_batch_size=delete_batch_size,
+                        list_field_names=list_field_names[:1],
                     )
                     result["cleared_count"] = cleared_count
                     emit_log(f"[5Sheet导表][{sheet_name}] 已清空 {cleared_count} 条旧记录")
 
-                table_fields = client.list_fields(table_id=table_id, page_size=list_page_size)
                 raw_row_payloads = extract_rows_with_row_index(ws=ws, header_row=header_row)
                 row_payloads, normalize_stats = prepare_row_payloads_for_table(
                     raw_rows=raw_row_payloads,

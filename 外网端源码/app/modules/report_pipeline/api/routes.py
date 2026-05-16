@@ -5248,9 +5248,11 @@ def job_branch_power_from_download(payload: Dict[str, Any], request: Request) ->
 
     def _run_external_daily(emit_log):
         multi_date = len(business_date_keys) > 1
+        upload_main_table = not multi_date
         emit_log(
             "[支路功率] 已进入后台整日直传处理: "
-            f"business_dates={','.join(business_date_keys)}, buildings={','.join(buildings)}"
+            f"business_dates={','.join(business_date_keys)}, buildings={','.join(buildings)}, "
+            f"upload_main_table={str(upload_main_table).lower()}"
         )
         collect_result = _collect_indexed_branch_source_units(
             bridge_service,
@@ -5292,7 +5294,10 @@ def job_branch_power_from_download(payload: Dict[str, Any], request: Request) ->
                         "mode": "daily_branch_sources",
                         "target_bucket_key": current_business_date,
                         "target_business_date": current_business_date,
-                        "buildings": bridge_buildings,
+                        "buildings": buildings,
+                        "download_buildings": bridge_buildings,
+                        "upload_buildings": buildings,
+                        "skip_main_table": not upload_main_table,
                         "requested_by": str(requested_by or submitted_by or "").strip() or "manual",
                         "submitted_by": submitted_by,
                     },
@@ -5310,6 +5315,8 @@ def job_branch_power_from_download(payload: Dict[str, Any], request: Request) ->
                     bridge_kwargs={
                         "target_bucket_key": current_business_date,
                         "buildings": bridge_buildings,
+                        "upload_buildings": buildings,
+                        "skip_main_table": not upload_main_table,
                         "requested_by": str(requested_by or submitted_by or "").strip() or "manual",
                         "mode": "daily_branch_sources",
                         "target_business_date": current_business_date,
@@ -5347,6 +5354,7 @@ def job_branch_power_from_download(payload: Dict[str, Any], request: Request) ->
                 upload_result = service.upload_day_from_source_files(
                     business_date=current_business_date,
                     source_units=source_units,
+                    upload_main_table=upload_main_table,
                     emit_log=emit_log,
                 )
                 summary["uploaded_dates"].append(
@@ -5446,7 +5454,7 @@ def job_branch_power_power_alert_sync(payload: Dict[str, Any], request: Request)
             container,
             name=f"动环功率统计同步 business_date={business_date_key}",
             run_func=_run,
-            resource_keys=_job_resource_keys("network:external", "branch_power:power_alert_sync"),
+            resource_keys=_job_resource_keys("shared_bridge:branch_power", "network:external", "branch_power:power_alert_sync"),
             priority=priority,
             feature="branch_power_power_alert_sync",
             dedupe_key=_job_dedupe_key("branch_power_power_alert_sync", business_date=business_date_key),

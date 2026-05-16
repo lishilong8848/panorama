@@ -852,10 +852,16 @@ class PowerAlertSyncService:
         )
         self._emit(
             emit_log,
-            f"[动环功率统计同步] 目标表计划 table={table.name}, generated={len(rows)}, "
-            f"same_date_existing={len(same_date_ids)}, mode={'dry_run' if dry_run else 'replace'}",
+            f"[动环功率统计同步] 目标表计划 date={report_date}, table={table.name}, table_id={table.table_id}, "
+            f"generated={len(rows)}, same_date_existing={len(same_date_ids)}, "
+            f"mode={'dry_run' if dry_run else 'replace'}",
         )
         if dry_run:
+            self._emit(
+                emit_log,
+                f"[动环功率统计同步] 目标表完成 date={report_date}, table={table.name}, table_id={table.table_id}, "
+                f"generated={len(rows)}, deleted=0, created=0, same_date_existing={len(same_date_ids)}, dry_run=true",
+            )
             return {
                 "table": table.name,
                 "table_id": table.table_id,
@@ -865,6 +871,7 @@ class PowerAlertSyncService:
                 "same_date_existing": len(same_date_ids),
                 "dry_run": True,
             }
+        converted_rows = self._convert_target_rows(rows=rows, field_meta=field_meta, field_names=field_names)
         deleted = 0
         if same_date_ids:
             deleted = client.batch_delete_records(
@@ -872,7 +879,6 @@ class PowerAlertSyncService:
                 record_ids=same_date_ids,
                 batch_size=batch_size,
             )
-        converted_rows = self._convert_target_rows(rows=rows, field_meta=field_meta, field_names=field_names)
         if converted_rows:
             client.batch_create_records(
                 table_id=table.table_id,
@@ -881,7 +887,9 @@ class PowerAlertSyncService:
             )
         self._emit(
             emit_log,
-            f"[动环功率统计同步] 目标表完成 table={table.name}, deleted={deleted}, created={len(converted_rows)}",
+            f"[动环功率统计同步] 目标表完成 date={report_date}, table={table.name}, table_id={table.table_id}, "
+            f"generated={len(rows)}, deleted={deleted}, created={len(converted_rows)}, "
+            f"same_date_existing={len(same_date_ids)}",
         )
         return {
             "table": table.name,
@@ -898,6 +906,24 @@ class PowerAlertSyncService:
         *,
         report_date: str,
         emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        return self._sync_impl(report_date=report_date, emit_log=emit_log, source_records=None)
+
+    def sync_from_source_records(
+        self,
+        *,
+        report_date: str,
+        source_records: List[Dict[str, Any]],
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        return self._sync_impl(report_date=report_date, emit_log=emit_log, source_records=source_records)
+
+    def _sync_impl(
+        self,
+        *,
+        report_date: str,
+        emit_log: Callable[[str], None],
+        source_records: List[Dict[str, Any]] | None,
     ) -> Dict[str, Any]:
         started = time.perf_counter()
         cfg = self._cfg()
@@ -943,12 +969,28 @@ class PowerAlertSyncService:
             return clients[table.app_token]
 
         try:
-            source_rows = self._read_source_rows(
-                client=_client_for(source_table),
-                source_table=source_table,
-                page_size=page_size,
-                emit_log=emit_log,
-            )
+            if source_records is None:
+                source_rows = self._read_source_rows(
+                    client=_client_for(source_table),
+                    source_table=source_table,
+                    page_size=page_size,
+                    emit_log=emit_log,
+                )
+            else:
+                source_rows = [
+                    row
+                    for row in (
+                        self._normalize_source_row(item)
+                        for item in source_records
+                        if isinstance(item, dict)
+                    )
+                    if row is not None
+                ]
+                self._emit(
+                    emit_log,
+                    f"[动环功率统计同步] 使用本地解析主表数据 date={report_date_slash}, "
+                    f"records={len(source_records)}, valid_rows={len(source_rows)}",
+                )
             if not source_rows:
                 raise RuntimeError("动环功率主表没有可用数据，拒绝覆盖目标统计表")
             generated = self._generate_all_targets(
@@ -971,7 +1013,19 @@ class PowerAlertSyncService:
                     emit_log=emit_log,
                 )
             elapsed_ms = int((time.perf_counter() - started) * 1000)
-            self._emit(emit_log, f"[动环功率统计同步] 完成 date={report_date_slash}, elapsed_ms={elapsed_ms}")
+            summary_parts = []
+            for table in target_tables:
+                item = results.get(table.key, {}) if isinstance(results.get(table.key, {}), dict) else {}
+                summary_parts.append(
+                    f"{table.name}: generated={int(item.get('generated', 0) or 0)}, "
+                    f"deleted={int(item.get('deleted', 0) or 0)}, created={int(item.get('created', 0) or 0)}"
+                )
+            summary_text = "; ".join(summary_parts)
+            self._emit(
+                emit_log,
+                f"[动环功率统计同步] 完成 date={report_date_slash}, source_rows={len(source_rows)}, "
+                f"targets={{{summary_text}}}, elapsed_ms={elapsed_ms}",
+            )
             return {
                 "ok": True,
                 "status": "success",

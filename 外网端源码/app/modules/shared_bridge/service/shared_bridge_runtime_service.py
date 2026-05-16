@@ -421,7 +421,11 @@ class SharedBridgeRuntimeService:
 
     def _branch_power_expected_buildings_from_task(self, task: Dict[str, Any]) -> List[str]:
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
-        buildings = self._normalize_text_list(request.get("buildings", []))
+        buildings = self._normalize_text_list(
+            request.get("upload_buildings", [])
+            or request.get("expected_buildings", [])
+            or request.get("buildings", [])
+        )
         if not buildings and self._source_cache_service is not None:
             buildings = [
                 str(item or "").strip()
@@ -533,11 +537,24 @@ class SharedBridgeRuntimeService:
             raise RuntimeError("支路整日等待任务缺少业务日期")
         buildings = self._branch_power_expected_buildings_from_task(task)
         source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
-        normalized_units = self._normalize_branch_power_daily_units(
-            source_units=[item for item in source_units if isinstance(item, dict)],
-            business_date=business_date,
-        )
+        normalized_units: List[Dict[str, Any]] = []
+        cache_error = ""
+        if buildings:
+            try:
+                normalized_units = self._build_branch_power_daily_units_from_cache(
+                    business_date=business_date,
+                    buildings=buildings,
+                )
+            except Exception as exc:  # noqa: BLE001
+                cache_error = str(exc)
+        if not normalized_units and not buildings:
+            normalized_units = self._normalize_branch_power_daily_units(
+                source_units=[item for item in source_units if isinstance(item, dict)],
+                business_date=business_date,
+            )
         if not normalized_units:
+            if cache_error:
+                raise RuntimeError(cache_error)
             normalized_units = self._build_branch_power_daily_units_from_cache(
                 business_date=business_date,
                 buildings=buildings,
@@ -549,6 +566,7 @@ class SharedBridgeRuntimeService:
                 raise RuntimeError(f"支路整日共享源文件缺少楼栋: {','.join(missing_buildings)}")
         requested_by = str(task.get("requested_by", "") or request.get("requested_by", "") or "").strip()
         submitted_by = str(task.get("requested_by", "") or request.get("submitted_by", "") or requested_by).strip()
+        skip_main_table = bool(request.get("skip_main_table", False))
         return {
             "worker_payload": {
                 "resume_kind": "shared_bridge_branch_power",
@@ -558,6 +576,7 @@ class SharedBridgeRuntimeService:
                 "requested_by": requested_by,
                 "submitted_by": submitted_by,
                 "mode": "daily_branch_sources",
+                "skip_main_table": skip_main_table,
                 "source_units": normalized_units,
                 "bridge_task_id": task_id,
             },
@@ -2627,6 +2646,8 @@ class SharedBridgeRuntimeService:
         range_query_start: str | None = None,
         range_query_end: str | None = None,
         requested_source_units: List[Dict[str, Any]] | None = None,
+        upload_buildings: List[str] | None = None,
+        skip_main_table: bool | None = None,
         mode: str | None = None,
         target_business_date: str | None = None,
         requested_by: str = "manual",
@@ -2642,6 +2663,8 @@ class SharedBridgeRuntimeService:
             range_query_start=range_query_start,
             range_query_end=range_query_end,
             requested_source_units=requested_source_units,
+            upload_buildings=upload_buildings,
+            skip_main_table=skip_main_table,
             mode=mode,
             target_business_date=target_business_date,
             created_by_role=self.role_mode,
@@ -2717,6 +2740,8 @@ class SharedBridgeRuntimeService:
         range_query_start: str | None = None,
         range_query_end: str | None = None,
         requested_source_units: List[Dict[str, Any]] | None = None,
+        upload_buildings: List[str] | None = None,
+        skip_main_table: bool | None = None,
         mode: str | None = None,
         target_business_date: str | None = None,
         requested_by: str = "manual",
@@ -2725,6 +2750,7 @@ class SharedBridgeRuntimeService:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
         normalized_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        normalized_upload_buildings = [str(item or "").strip() for item in (upload_buildings or []) if str(item or "").strip()]
         normalized_bucket_keys = [str(item or "").strip() for item in (target_bucket_keys or []) if str(item or "").strip()]
         normalized_requested_units: List[Dict[str, Any]] = []
         resolved_bucket_key = str(target_bucket_key or "").strip()
@@ -2752,6 +2778,10 @@ class SharedBridgeRuntimeService:
             bucket_dedupe or _now_text()[:13],
             ",".join(normalized_buildings) or "all_enabled",
         ]
+        if normalized_upload_buildings:
+            dedupe_parts.append("upload=" + ",".join(normalized_upload_buildings))
+        if bool(skip_main_table):
+            dedupe_parts.append("skip_main_table")
         dedupe_key = "|".join(dedupe_parts)
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
@@ -2764,6 +2794,8 @@ class SharedBridgeRuntimeService:
             range_query_start=range_query_start,
             range_query_end=range_query_end,
             requested_source_units=normalized_requested_units,
+            upload_buildings=normalized_upload_buildings,
+            skip_main_table=skip_main_table,
             mode=normalized_mode,
             target_business_date=normalized_business_date,
             requested_by=requested_by,
@@ -5080,12 +5112,16 @@ class SharedBridgeRuntimeService:
             if not normalized_units:
                 raise RuntimeError("共享目录中没有可继续上传的支路整日源文件")
 
-            expected_buildings = [
-                str(item or "").strip()
-                for item in (request.get("buildings") if isinstance(request.get("buildings"), list) else [])
-                if str(item or "").strip()
-            ]
+            expected_buildings = self._branch_power_expected_buildings_from_task(task)
             if expected_buildings:
+                normalized_units = self._build_branch_power_daily_units_from_cache(
+                    business_date=business_date,
+                    buildings=expected_buildings,
+                )
+                emit_log(
+                    "[共享桥接][支路功率][外网] 已从共享索引重新收齐整日源文件 "
+                    f"business_date={business_date}, buildings={','.join(expected_buildings)}, ready={len(normalized_units)}"
+                )
                 ready_buildings = {str(item.get("building", "") or "").strip() for item in normalized_units}
                 missing_buildings = [building for building in expected_buildings if building not in ready_buildings]
                 if missing_buildings:
@@ -5095,6 +5131,7 @@ class SharedBridgeRuntimeService:
             if resume_job_id:
                 requested_by = str(task.get("requested_by", "") or request.get("requested_by", "") or "").strip()
                 submitted_by = str(task.get("requested_by", "") or request.get("submitted_by", "") or requested_by).strip()
+                skip_main_table = bool(request.get("skip_main_table", False))
                 self._resume_bound_job(
                     task,
                     worker_payload={
@@ -5105,6 +5142,7 @@ class SharedBridgeRuntimeService:
                         "requested_by": requested_by,
                         "submitted_by": submitted_by,
                         "mode": "daily_branch_sources",
+                        "skip_main_table": skip_main_table,
                         "source_units": normalized_units,
                         "bridge_task_id": task_id,
                     },
@@ -5125,6 +5163,7 @@ class SharedBridgeRuntimeService:
             result = BranchPowerUploadService(self.runtime_config).upload_day_from_source_files(
                 business_date=business_date,
                 source_units=normalized_units,
+                upload_main_table=not bool(request.get("skip_main_table", False)),
                 emit_log=emit_log,
             )
             self._store.complete_stage(

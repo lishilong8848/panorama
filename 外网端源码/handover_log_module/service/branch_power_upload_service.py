@@ -591,6 +591,7 @@ class BranchPowerUploadService:
         *,
         business_date: str,
         source_units: List[Dict[str, Any]],
+        upload_main_table: bool = True,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         total_start = time.perf_counter()
@@ -606,7 +607,7 @@ class BranchPowerUploadService:
         self._emit(
             emit_log,
             f"[支路功率上传] 整日直传开始 business_date={resolved_business_date}, buildings={len(bundles)}, "
-            f"hours=00:00-23:00",
+            f"hours=00:00-23:00, upload_main_table={str(bool(upload_main_table)).lower()}",
         )
 
         records_by_key: Dict[tuple[str, str, str, str, str], Dict[str, Any]] = {}
@@ -690,8 +691,8 @@ class BranchPowerUploadService:
         if not records:
             raise RuntimeError(f"支路整日源文件没有解析出可上传记录 business_date={resolved_business_date}")
 
-        client = self._client(emit_log)
-        upload_fields = self._target_fields_from_bitable(client, emit_log)
+        client = self._client(emit_log) if upload_main_table else None
+        upload_fields = self._target_fields_from_bitable(client, emit_log) if client is not None else self._upload_fields()
         validation = self._validate_daily_direct_records(
             records=records,
             upload_fields=upload_fields,
@@ -725,34 +726,66 @@ class BranchPowerUploadService:
         if not upload_records:
             raise RuntimeError(f"支路整日解析结果为空，无法上传 business_date={resolved_business_date}")
 
-        clear_start = time.perf_counter()
-        self._emit(emit_log, f"[支路功率上传] 整日直传清空目标多维表开始 table_id={self.TABLE_ID}")
-        deleted = client.clear_table(
-            self.TABLE_ID,
-            progress_callback=self._progress_logger(emit_log, label="整日直传清空目标表", total=1),
-        )
-        self._emit(
-            emit_log,
-            f"[支路功率上传] 整日直传清空目标多维表完成 deleted={deleted}, elapsed_ms={self._elapsed_ms(clear_start)}",
-        )
+        deleted = 0
+        if upload_main_table:
+            if client is None:
+                client = self._client(emit_log)
+            clear_start = time.perf_counter()
+            self._emit(
+                emit_log,
+                f"[支路功率上传] 整日直传清空目标多维表开始 table_id={self.TABLE_ID}, list_fields={self.FIELD_BUILDING}",
+            )
+            deleted = client.clear_table(
+                self.TABLE_ID,
+                list_field_names=[self.FIELD_BUILDING],
+                progress_callback=self._progress_logger(emit_log, label="整日直传清空目标表", total=1),
+            )
+            self._emit(
+                emit_log,
+                f"[支路功率上传] 整日直传清空目标多维表完成 deleted={deleted}, elapsed_ms={self._elapsed_ms(clear_start)}",
+            )
 
-        create_start = time.perf_counter()
-        self._emit(emit_log, f"[支路功率上传] 整日直传批量上传开始 records={len(upload_records)}")
-        client.batch_create_records(
-            self.TABLE_ID,
-            upload_records,
-            progress_callback=self._progress_logger(emit_log, label="整日直传上传", total=len(upload_records)),
-        )
+            self._emit(emit_log, f"[支路功率上传] 整日直传批量上传开始 records={len(upload_records)}")
+            client.batch_create_records(
+                self.TABLE_ID,
+                upload_records,
+                progress_callback=self._progress_logger(emit_log, label="整日直传上传", total=len(upload_records)),
+            )
+            self._emit(
+                emit_log,
+                f"[支路功率上传] 整日直传批量上传完成 business_date={resolved_business_date}, "
+                f"records={len(upload_records)}, parsed_hours={parsed_hour_count}, elapsed_ms={self._elapsed_ms(total_start)}",
+            )
+            power_alert_sync = PowerAlertSyncService(self.config).sync(
+                report_date=resolved_business_date,
+                emit_log=emit_log,
+            )
+        else:
+            self._emit(
+                emit_log,
+                f"[支路功率上传] 跳过主表上传，直接同步动环功率四表 business_date={resolved_business_date}, records={len(upload_records)}",
+            )
+            power_alert_sync = PowerAlertSyncService(self.config).sync_from_source_records(
+                report_date=resolved_business_date,
+                source_records=upload_records,
+                emit_log=emit_log,
+            )
         elapsed_ms = self._elapsed_ms(total_start)
-        self._emit(
-            emit_log,
-            f"[支路功率上传] 整日直传批量上传完成 business_date={resolved_business_date}, "
-            f"records={len(upload_records)}, parsed_hours={parsed_hour_count}, elapsed_ms={elapsed_ms}",
-        )
-        power_alert_sync = PowerAlertSyncService(self.config).sync(
-            report_date=resolved_business_date,
-            emit_log=emit_log,
-        )
+        if not isinstance(power_alert_sync, dict) or str(power_alert_sync.get("status", "") or "").strip().lower() != "success":
+            upstream_label = "支路主表已上传" if upload_main_table else "支路源文件已解析"
+            raise RuntimeError(
+                f"{upstream_label}，但动环功率四表同步未成功，任务标记失败以便重试: "
+                f"business_date={resolved_business_date}, result={power_alert_sync}"
+            )
+        power_alert_targets = power_alert_sync.get("targets", {}) if isinstance(power_alert_sync.get("targets", {}), dict) else {}
+        expected_power_alert_targets = {"branch", "cabinet", "line_head", "row_line"}
+        missing_power_alert_targets = sorted(expected_power_alert_targets - set(power_alert_targets.keys()))
+        if missing_power_alert_targets:
+            upstream_label = "支路主表已上传" if upload_main_table else "支路源文件已解析"
+            raise RuntimeError(
+                f"{upstream_label}，但动环功率四表同步结果不完整，任务标记失败以便重试: "
+                f"business_date={resolved_business_date}, missing_targets={','.join(missing_power_alert_targets)}"
+            )
         return {
             "ok": True,
             "status": "success",
@@ -762,6 +795,7 @@ class BranchPowerUploadService:
             "buildings": [bundle.building for bundle in bundles],
             "records": len(upload_records),
             "deleted": deleted,
+            "upload_main_table": bool(upload_main_table),
             "elapsed_ms": elapsed_ms,
             "power_alert_sync": power_alert_sync,
         }

@@ -713,6 +713,7 @@ class WetBulbCollectionService:
                     table_id=table_id,
                     list_page_size=int(normalized_cfg.get("target", {}).get("page_size", 500) or 500),
                     delete_batch_size=int(normalized_cfg.get("target", {}).get("delete_batch_size", 200) or 200),
+                    list_field_names=[str(normalized_cfg.get("fields", {}).get("building", "楼栋") or "楼栋").strip()],
                 )
                 emit_log(f"[湿球温度定时采集] 整表清空完成: deleted={deleted_count}")
             except Exception as exc:

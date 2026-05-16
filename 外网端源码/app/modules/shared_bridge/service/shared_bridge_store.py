@@ -1300,6 +1300,8 @@ class SharedBridgeStore:
         range_query_start: str | None = None,
         range_query_end: str | None = None,
         requested_source_units: List[Dict[str, Any]] | None = None,
+        upload_buildings: List[str] | None = None,
+        skip_main_table: bool | None = None,
         mode: str | None = None,
         target_business_date: str | None = None,
         created_by_role: str,
@@ -1312,6 +1314,11 @@ class SharedBridgeStore:
         normalized_buildings = [
             str(item or "").strip()
             for item in (buildings or [])
+            if str(item or "").strip()
+        ]
+        normalized_upload_buildings = [
+            str(item or "").strip()
+            for item in (upload_buildings or [])
             if str(item or "").strip()
         ]
         normalized_bucket_keys = [
@@ -1350,6 +1357,8 @@ class SharedBridgeStore:
             "range_query_start": str(range_query_start or "").strip(),
             "range_query_end": str(range_query_end or "").strip(),
             "requested_source_units": normalized_requested_source_units,
+            "upload_buildings": normalized_upload_buildings,
+            "skip_main_table": bool(skip_main_table),
             "mode": str(mode or "").strip(),
             "target_business_date": str(target_business_date or "").strip(),
         }
@@ -1359,6 +1368,10 @@ class SharedBridgeStore:
             bucket_dedupe or now_text[:13],
             ",".join(normalized_buildings) or "all_enabled",
         ]
+        if normalized_upload_buildings:
+            dedupe_parts.append("upload=" + ",".join(normalized_upload_buildings))
+        if bool(skip_main_table):
+            dedupe_parts.append("skip_main_table")
         unit_dedupe = _branch_requested_units_dedupe(normalized_requested_source_units)
         if unit_dedupe:
             dedupe_parts.append(unit_dedupe)

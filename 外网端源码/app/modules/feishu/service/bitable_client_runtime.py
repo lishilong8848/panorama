@@ -391,16 +391,28 @@ class FeishuBitableClient:
                 break
         return records
 
-    def list_record_ids(self, table_id: str, page_size: int = 500) -> List[str]:
+    def list_record_ids(
+        self,
+        table_id: str,
+        page_size: int = 500,
+        field_names: Optional[List[str]] = None,
+    ) -> List[str]:
         if page_size <= 0:
             raise ValueError("page_size 必须大于0")
         url = self.LIST_RECORD_URL.format(app_token=self.app_token, table_id=table_id)
         record_ids: List[str] = []
         page_token = ""
+        normalized_field_names = [
+            str(name).strip()
+            for name in (field_names or [])
+            if str(name).strip()
+        ]
         while True:
             params: Dict[str, Any] = {"page_size": page_size}
             if page_token:
                 params["page_token"] = page_token
+            if normalized_field_names:
+                params["field_names"] = json.dumps(normalized_field_names, ensure_ascii=False)
             data = self._get_json(url, params=params)
             payload = data.get("data") if isinstance(data, dict) else {}
             items = payload.get("items") if isinstance(payload, dict) else []
@@ -469,9 +481,14 @@ class FeishuBitableClient:
         table_id: str,
         list_page_size: int = 500,
         delete_batch_size: int = 500,
+        list_field_names: Optional[List[str]] = None,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> int:
-        record_ids = self.list_record_ids(table_id=table_id, page_size=list_page_size)
+        record_ids = self.list_record_ids(
+            table_id=table_id,
+            page_size=list_page_size,
+            field_names=list_field_names,
+        )
         if not record_ids:
             return 0
         return self.batch_delete_records(

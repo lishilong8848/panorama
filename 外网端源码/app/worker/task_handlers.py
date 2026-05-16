@@ -200,6 +200,7 @@ def handle_branch_power_from_download(
     return service.upload_day_from_source_files(
         business_date=target_business_date,
         source_units=source_units,
+        upload_main_table=not bool(payload.get("skip_main_table", False)),
         emit_log=emit_log,
     )
 

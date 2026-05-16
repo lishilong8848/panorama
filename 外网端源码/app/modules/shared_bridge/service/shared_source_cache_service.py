@@ -4632,7 +4632,11 @@ class SharedSourceCacheService:
         building_text = str(building or "").strip()
         if not table_id or not building_field_name or not building_text:
             return 0
-        rows = client.list_records(table_id=table_id, page_size=list_page_size)
+        rows = client.list_records(
+            table_id=table_id,
+            page_size=list_page_size,
+            field_names=[building_field_name],
+        )
         record_ids: List[str] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -5023,6 +5027,17 @@ class SharedSourceCacheService:
                         table_id=table_id,
                         list_page_size=self._read_positive_int(target.get("list_page_size"), 500),
                         delete_batch_size=self._read_positive_int(target.get("delete_batch_size"), 500),
+                        list_field_names=[
+                            str(target_fields.get("building", "") or "").strip()
+                            or next(
+                                (
+                                    str(value).strip()
+                                    for value in target_fields.values()
+                                    if str(value).strip()
+                                ),
+                                "",
+                            )
+                        ],
                         progress_callback=_delete_progress_callback,
                     )
                 except TypeError:

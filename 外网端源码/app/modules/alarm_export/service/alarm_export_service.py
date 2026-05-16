@@ -272,6 +272,7 @@ class AlarmExportService:
         feishu_cfg: Dict[str, Any],
         emit_log: Callable[[str], None],
         source: str,
+        list_field_names: List[str] | None = None,
     ) -> int:
         emit_log(f"[{source}] 正在清空目标表旧记录...")
         last_logged_deleted = -1
@@ -297,6 +298,13 @@ class AlarmExportService:
             "list_page_size": int(feishu_cfg.get("list_page_size", 500)),
             "delete_batch_size": int(feishu_cfg.get("delete_batch_size", 500)),
         }
+        normalized_list_fields = [
+            str(name).strip()
+            for name in (list_field_names or [])
+            if str(name).strip()
+        ]
+        if normalized_list_fields:
+            clear_kwargs["list_field_names"] = normalized_list_fields[:1]
         try:
             cleared_count = int(
                 client.clear_table(
@@ -624,6 +632,7 @@ class AlarmExportService:
                     feishu_cfg=feishu_cfg,
                     emit_log=emit_log,
                     source=source,
+                    list_field_names=list(typed_rows[0].keys()) if typed_rows else [],
                 )
                 if resume_state:
                     resume_state["cleared"] = True
@@ -1028,6 +1037,7 @@ class AlarmExportService:
                         feishu_cfg=feishu_cfg,
                         emit_log=emit_log,
                         source=source,
+                        list_field_names=list(typed_rows[0].keys()) if typed_rows else [],
                     )
                     if resume_state:
                         resume_state["cleared"] = True
