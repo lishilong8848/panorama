@@ -1321,6 +1321,50 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "3": "板换",
                 "4": "停机",
             },
+            "hvac_bitable_sync": {
+                "enabled": True,
+                "required": False,
+                "dry_run": False,
+                "send_mode_switch_alerts": False,
+                "page_size": 500,
+                "batch_size": 200,
+                "base_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+                "source": {
+                    "table_id": "tblkvVCNRbtMmjQg",
+                    "all_view_id": "vewtnp2Ay9",
+                    "running_view_id": "vewSen1ncq",
+                },
+                "target": {
+                    "table_id": "tblxOyKdyyiMTdhR",
+                    "view_id": "vewyJLUSVm",
+                },
+                "weather": {
+                    "enabled": True,
+                    "latitude": 31.94,
+                    "longitude": 120.98,
+                    "timezone": "Asia/Shanghai",
+                    "summary_hours": 8,
+                    "past_days": 2,
+                    "forecast_days": 2,
+                    "temperature_trend_threshold_c": 0.5,
+                    "precipitation_threshold_mm": 0.1,
+                    "precipitation_probability_threshold": 50,
+                    "timeout_seconds": 15,
+                    "warnings": {
+                        "enabled": False,
+                        "provider": "cma",
+                        "station_id": "58259",
+                    },
+                },
+                "notifications": {
+                    "mode_switch_alerts": {
+                        "enabled": False,
+                        "chat_id": "oc_9961bb057de8bd715447559c5e63c4f2",
+                        "identity": "bot",
+                        "max_items": 10,
+                    },
+                },
+            },
         },
         "alarm_export": {
             "scheduler": {

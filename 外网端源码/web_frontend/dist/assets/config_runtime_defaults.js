@@ -1105,6 +1105,13 @@ function applyChillerModeUploadDefaults(cfg) {
   const target = upload.target || (upload.target = {});
   const fields = upload.fields || (upload.fields = {});
   const modeMap = upload.mode_value_map || (upload.mode_value_map = {});
+  const hvacSync = upload.hvac_bitable_sync || (upload.hvac_bitable_sync = {});
+  const hvacSource = hvacSync.source || (hvacSync.source = {});
+  const hvacTarget = hvacSync.target || (hvacSync.target = {});
+  const hvacWeather = hvacSync.weather || (hvacSync.weather = {});
+  const hvacWeatherWarnings = hvacWeather.warnings || (hvacWeather.warnings = {});
+  const hvacNotifications = hvacSync.notifications || (hvacSync.notifications = {});
+  const hvacModeSwitchAlerts = hvacNotifications.mode_switch_alerts || (hvacNotifications.mode_switch_alerts = {});
 
   setBooleanDefault(upload, "enabled", true);
 
@@ -1133,6 +1140,37 @@ function applyChillerModeUploadDefaults(cfg) {
   if (!String(modeMap["2"] || "").trim()) modeMap["2"] = "预冷";
   if (!String(modeMap["3"] || "").trim()) modeMap["3"] = "板换";
   if (!String(modeMap["4"] || "").trim()) modeMap["4"] = "停机";
+
+  setBooleanDefault(hvacSync, "enabled", true);
+  setBooleanDefault(hvacSync, "required", false);
+  setBooleanDefault(hvacSync, "dry_run", false);
+  setBooleanDefault(hvacSync, "send_mode_switch_alerts", false);
+  setNumberDefault(hvacSync, "page_size", 500);
+  setNumberDefault(hvacSync, "batch_size", 200);
+  setStringDefault(hvacSync, "base_token", "ASLxbfESPahdTKs0A9NccgbrnXc");
+  setStringDefault(hvacSource, "table_id", "tblkvVCNRbtMmjQg");
+  setStringDefault(hvacSource, "all_view_id", "vewtnp2Ay9");
+  setStringDefault(hvacSource, "running_view_id", "vewSen1ncq");
+  setStringDefault(hvacTarget, "table_id", "tblxOyKdyyiMTdhR");
+  setStringDefault(hvacTarget, "view_id", "vewyJLUSVm");
+  setBooleanDefault(hvacWeather, "enabled", true);
+  setNumberDefault(hvacWeather, "latitude", 31.94);
+  setNumberDefault(hvacWeather, "longitude", 120.98);
+  setStringDefault(hvacWeather, "timezone", "Asia/Shanghai");
+  setNumberDefault(hvacWeather, "summary_hours", 8);
+  setNumberDefault(hvacWeather, "past_days", 2);
+  setNumberDefault(hvacWeather, "forecast_days", 2);
+  setNumberDefault(hvacWeather, "temperature_trend_threshold_c", 0.5);
+  setNumberDefault(hvacWeather, "precipitation_threshold_mm", 0.1);
+  setNumberDefault(hvacWeather, "precipitation_probability_threshold", 50);
+  setNumberDefault(hvacWeather, "timeout_seconds", 15);
+  setBooleanDefault(hvacWeatherWarnings, "enabled", false);
+  setStringDefault(hvacWeatherWarnings, "provider", "cma");
+  setStringDefault(hvacWeatherWarnings, "station_id", "58259");
+  setBooleanDefault(hvacModeSwitchAlerts, "enabled", false);
+  setStringDefault(hvacModeSwitchAlerts, "chat_id", "oc_9961bb057de8bd715447559c5e63c4f2");
+  setStringDefault(hvacModeSwitchAlerts, "identity", "bot");
+  setNumberDefault(hvacModeSwitchAlerts, "max_items", 10);
   cfg.chiller_mode_upload = upload;
 }
 

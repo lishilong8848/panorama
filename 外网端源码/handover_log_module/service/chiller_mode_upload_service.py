@@ -12,6 +12,7 @@ from app.config.config_compat_cleanup import sanitize_chiller_mode_upload_config
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
+from handover_log_module.service.hvac_bitable_sync_service import HvacBitableSyncService
 
 
 class ChillerModeUploadService:
@@ -55,6 +56,50 @@ class ChillerModeUploadService:
                 "2": "预冷",
                 "3": "板换",
                 "4": "停机",
+            },
+            "hvac_bitable_sync": {
+                "enabled": True,
+                "required": False,
+                "dry_run": False,
+                "send_mode_switch_alerts": False,
+                "page_size": 500,
+                "batch_size": 200,
+                "base_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+                "source": {
+                    "table_id": "tblkvVCNRbtMmjQg",
+                    "all_view_id": "vewtnp2Ay9",
+                    "running_view_id": "vewSen1ncq",
+                },
+                "target": {
+                    "table_id": "tblxOyKdyyiMTdhR",
+                    "view_id": "vewyJLUSVm",
+                },
+                "weather": {
+                    "enabled": True,
+                    "latitude": 31.94,
+                    "longitude": 120.98,
+                    "timezone": "Asia/Shanghai",
+                    "summary_hours": 8,
+                    "past_days": 2,
+                    "forecast_days": 2,
+                    "temperature_trend_threshold_c": 0.5,
+                    "precipitation_threshold_mm": 0.1,
+                    "precipitation_probability_threshold": 50,
+                    "timeout_seconds": 15,
+                    "warnings": {
+                        "enabled": False,
+                        "provider": "cma",
+                        "station_id": "58259",
+                    },
+                },
+                "notifications": {
+                    "mode_switch_alerts": {
+                        "enabled": False,
+                        "chat_id": "oc_9961bb057de8bd715447559c5e63c4f2",
+                        "identity": "bot",
+                        "max_items": 10,
+                    },
+                },
             },
         }
 
@@ -111,6 +156,10 @@ class ChillerModeUploadService:
         for key, value in defaults.items():
             normalized_map.setdefault(str(key), str(value))
         cfg["mode_value_map"] = normalized_map
+
+        hvac_sync = cfg.get("hvac_bitable_sync", {}) if isinstance(cfg.get("hvac_bitable_sync", {}), dict) else {}
+        hvac_default = self._defaults()["hvac_bitable_sync"]
+        cfg["hvac_bitable_sync"] = self._deep_merge(hvac_default, hvac_sync)
         return cfg
 
     def _new_target_resolver(self) -> BitableTargetResolver:
@@ -430,13 +479,17 @@ class ChillerModeUploadService:
             delete_batch_size=int(target.get("delete_batch_size", 500) or 500),
         )
         emit_log(f"[制冷模式参数上传] 目标表清空完成: deleted={deleted_count}")
-        created_records = client.batch_create_records(
+        client.batch_create_records(
             table_id=table_id,
             fields_list=prepared_rows,
             batch_size=int(target.get("create_batch_size", 200) or 200),
         )
-        created_count = len(created_records) if isinstance(created_records, list) else len(prepared_rows)
+        created_count = len(prepared_rows)
         emit_log(f"[制冷模式参数上传] 批量写入完成: created={created_count}")
+        hvac_sync_result = HvacBitableSyncService(self.runtime_config).safe_sync_after_chiller_upload(
+            emit_log=emit_log,
+            chiller_cfg=normalized_cfg,
+        )
         return {
             "status": "ok",
             "run_at": run_at,
@@ -445,4 +498,5 @@ class ChillerModeUploadService:
             "deleted_count": deleted_count,
             "created_count": created_count,
             "target": resolved_target,
+            "hvac_bitable_sync": hvac_sync_result,
         }
