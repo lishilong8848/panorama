@@ -1045,7 +1045,12 @@ def _start_handover_followup_job_after_confirm(
             "building": target_building,
             "session_id": target_session_id,
         },
-        resource_keys=["network:external", f"handover_followup:{target_batch}"],
+        resource_keys=_handover_resource_keys(
+            "network:external",
+            f"handover_followup:{target_batch}",
+            batch_key=target_batch,
+            building=target_building,
+        ),
         priority="manual",
         feature="handover_followup_continue",
         submitted_by=submitted_by,
@@ -1076,7 +1081,7 @@ def _maybe_start_handover_followup_job_after_review_save(
         return {}
     revision = int(session.get("revision", 0) or 0)
     synced_revision = int(cloud_state.get("synced_revision", 0) or 0)
-    if str(cloud_state.get("status", "")).strip().lower() == "success" and synced_revision == revision:
+    if str(cloud_state.get("status", "")).strip().lower() == "success" and synced_revision >= revision:
         return {}
     session_id = str(session.get("session_id", "") or "").strip()
     building = str(session.get("building", "") or "").strip()
@@ -2669,7 +2674,7 @@ def _build_review_display_state(
         status_banners.append(
             {
                 "code": "history_mode",
-                "text": "当前为历史模式：只更新当前历史记录，不改模板默认值；如需同步云文档，请手动点击“更新云文档”。",
+                "text": "当前为历史模式：只更新当前历史记录，不改模板默认值；当前班次云文档上传由确认楼栋流程处理。",
                 "tone": "info",
             }
         )
@@ -2747,22 +2752,32 @@ def _build_review_display_state(
                 "tone": "danger",
             }
         )
-    save_allowed = bool(session_payload) and not remote_editor_active
+    save_allowed = bool(session_payload) and not remote_editor_active and not cloud_sheet_uploading
     save_disabled_reason = ""
     if not session_payload:
         save_disabled_reason = "暂无可保存的交接班记录"
     elif remote_editor_active:
         save_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
-    confirm_allowed = bool(session_payload) and not is_history_mode and not remote_editor_active and not cloud_sheet_uploading
+    elif cloud_sheet_uploading:
+        save_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再保存修改"
+    confirm_allowed = (
+        bool(session_payload)
+        and not is_history_mode
+        and not remote_editor_active
+        and not cloud_sheet_uploading
+        and not confirmed
+    )
     confirm_disabled_reason = ""
     if not session_payload:
         confirm_disabled_reason = "暂无可确认的交接班记录"
     elif is_history_mode:
-        confirm_disabled_reason = "仅最新交接班日志支持确认、撤销确认和云表重试"
+        confirm_disabled_reason = "仅最新交接班日志支持确认"
     elif remote_editor_active:
         confirm_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
     elif cloud_sheet_uploading:
         confirm_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再操作确认状态"
+    elif confirmed:
+        confirm_disabled_reason = "当前楼栋已确认，当前班次不需要重复上传"
     retry_allowed = bool(session_payload) and (not is_history_mode) and confirmed and str(cloud_sheet_state["status"]) in {"failed", "prepare_failed"}
     retry_disabled_reason = ""
     if not session_payload:
@@ -3020,22 +3035,22 @@ def _build_review_display_state(
             "confirm": _review_action(
                 allowed=confirm_allowed,
                 visible=bool(session_payload) and not is_history_mode,
-                label="已确认（可取消）" if confirmed else "确认当前楼栋",
+                label="已确认并已提交上传" if confirmed else "确认当前楼栋",
                 disabled_reason=confirm_disabled_reason,
                 tone="success" if confirmed else "warning",
                 variant="success" if confirmed else "warning",
             ),
             "retry_cloud_sync": _review_action(
-                allowed=retry_allowed,
-                visible=bool(session_payload) and not is_history_mode,
+                allowed=False,
+                visible=False,
                 label="重试云表上传",
                 disabled_reason=retry_disabled_reason,
                 tone="warning",
                 variant="warning",
             ),
             "update_history_cloud_sync": _review_action(
-                allowed=update_history_allowed,
-                visible=bool(session_payload) and is_history_mode,
+                allowed=False,
+                visible=False,
                 label="更新云文档",
                 disabled_reason=update_history_disabled_reason,
                 tone="warning",
@@ -4549,6 +4564,9 @@ def handover_review_save(
     if not isinstance(document, dict):
         raise HTTPException(status_code=400, detail="document 格式错误")
     target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    target_cloud_state = ReviewSessionService._normalize_cloud_sheet_sync(target.get("cloud_sheet_sync", {}))
+    if str(target_cloud_state.get("status", "")).strip().lower() in {"uploading", "syncing"}:
+        raise HTTPException(status_code=409, detail="当前楼栋云文档上传中，请等待上传完成后再保存修改")
     try:
         session_base_revision = int(payload.get("session_base_revision") or target.get("revision", 0) or base_revision or 0)
     except (TypeError, ValueError) as exc:

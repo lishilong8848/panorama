@@ -38,9 +38,7 @@ export function createHandoverReviewOverviewUiHelpers(options = {}) {
   const isHandoverConfirmAllDisabled = computed(() =>
     Boolean(isHandoverConfirmAllLocked.value || !handoverConfirmAllActionBase.value.allowed),
   );
-  const canShowHandoverCloudRetryAll = computed(() =>
-    Boolean(handoverCloudRetryAllActionBase.value.visible),
-  );
+  const canShowHandoverCloudRetryAll = computed(() => false);
   const handoverCloudRetryAllButtonText = computed(() => {
     if (isHandoverCloudRetryAllLocked.value) return "重试中...";
     return handoverCloudRetryAllActionBase.value.label || "一键全部重试云表上传";

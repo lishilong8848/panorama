@@ -68,24 +68,6 @@
             打开云文档
           </a>
           <button
-            v-if="showRetryCloudSyncAction"
-            class="btn btn-warning btn-mini"
-            @click="retryCloudSheetSync"
-            :disabled="retryCloudSyncActionVm.disabled"
-            :title="retryCloudSyncActionVm.disabledReason || ''"
-          >
-            {{ retryCloudSyncActionVm.text }}
-          </button>
-          <button
-            v-if="showUpdateHistoryCloudSyncAction"
-            class="btn btn-warning btn-mini"
-            @click="updateHistoryCloudSync"
-            :disabled="updateHistoryCloudSyncActionVm.disabled"
-            :title="updateHistoryCloudSyncActionVm.disabledReason || ''"
-          >
-            {{ updateHistoryCloudSyncActionVm.text }}
-          </button>
-          <button
             v-if="showConfirmAction"
             class="btn"
             :class="'btn-' + confirmActionVm.variant"

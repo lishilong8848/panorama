@@ -393,7 +393,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
         || !retryCloudSyncActionBase.value.allowed,
     });
   });
-  const showRetryCloudSyncAction = computed(() => Boolean(retryCloudSyncActionBase.value.visible));
+  const showRetryCloudSyncAction = computed(() => false);
   const updateHistoryCloudSyncActionVm = computed(() => {
     return buildReviewActionVmBase({
       baseAction: updateHistoryCloudSyncActionBase.value,
@@ -411,7 +411,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
         || !updateHistoryCloudSyncActionBase.value.allowed,
     });
   });
-  const showUpdateHistoryCloudSyncAction = computed(() => Boolean(updateHistoryCloudSyncActionBase.value.visible));
+  const showUpdateHistoryCloudSyncAction = computed(() => false);
   const returnToLatestActionVm = computed(() => {
     return buildReviewActionVmBase({
       baseAction: returnToLatestActionBase.value,

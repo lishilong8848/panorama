@@ -1214,6 +1214,37 @@ export function createAppState(vueApi) {
         ? rawRow.cloud_sheet_sync
         : {};
       const cloudStatus = String(cloudSheetSync.status || "").trim().toLowerCase();
+      const revision = Number(rawRow.revision || 0);
+      const syncedRevision = Number(cloudSheetSync.synced_revision || 0);
+      const cloudRevisionStale = revision > 0 && syncedRevision > 0 && syncedRevision < revision
+        && (cloudStatus === "success" || cloudStatus === "pending_upload");
+      let cloudText = "云表未执行";
+      let cloudTone = "neutral";
+      if (cloudStatus === "success" && cloudRevisionStale) {
+        cloudText = "云表内容已修改，待重新上传";
+        cloudTone = "warning";
+      } else if (cloudStatus === "success") {
+        cloudText = "云表已同步";
+        cloudTone = "success";
+      } else if (cloudStatus === "uploading" || cloudStatus === "syncing") {
+        cloudText = "云表上传中";
+        cloudTone = "info";
+      } else if (cloudStatus === "pending_upload") {
+        cloudText = cloudRevisionStale ? "云表内容已修改，待重新上传" : "云表待最终上传";
+        cloudTone = "warning";
+      } else if (cloudStatus === "failed" || cloudStatus === "prepare_failed") {
+        cloudText = cloudStatus === "prepare_failed" ? "云表预建失败" : "云表最终上传失败";
+        cloudTone = "danger";
+      } else if (cloudStatus === "disabled") {
+        cloudText = "云表未启用";
+        cloudTone = "neutral";
+      } else if (cloudStatus === "skipped") {
+        cloudText = "云表未执行";
+        cloudTone = "neutral";
+      } else if (cloudSheetSync.attempted) {
+        cloudText = "云表已尝试同步";
+        cloudTone = "info";
+      }
       return {
         building,
         status,
@@ -1222,10 +1253,13 @@ export function createAppState(vueApi) {
         code: String(rawLink.code || "").trim().toLowerCase(),
         url,
         cloud_sheet_sync: {
-          text: cloudStatus === "success" ? "云表已同步" : (cloudStatus === "pending_upload" ? "云表待最终上传" : "云表未执行"),
-          tone: cloudStatus === "success" ? "success" : (cloudStatus === "pending_upload" ? "warning" : "neutral"),
+          status: cloudStatus || "idle",
+          text: cloudText,
+          tone: cloudTone,
           url: String(cloudSheetSync.spreadsheet_url || "").trim(),
           error: String(cloudSheetSync.error || "").trim(),
+          synced_revision: syncedRevision,
+          current_revision: revision,
         },
       };
     });

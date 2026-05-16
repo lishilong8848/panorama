@@ -224,23 +224,128 @@ class HandoverSummaryMessageService:
         except Exception:  # noqa: BLE001
             return []
         items: List[str] = []
+        excluded_sections = self._excluded_work_item_section_names()
         for section in parse_category_sections(ws):
             section_name = _text(getattr(section, "name", ""))
-            if not section_name or "事件" in section_name:
+            if not section_name or self._is_excluded_work_item_section(section_name, excluded_sections):
                 continue
             columns = build_section_logical_columns(ws, section)
+            detail_columns = [column for column in columns if self._is_detail_work_item_column(column.label)]
+            fallback_columns = [column for column in columns if self._is_fallback_work_item_column(column.label)]
             for row_idx in range(section.template_data_row, section.end_row + 1):
-                parts: List[str] = []
-                for column in columns:
-                    value = _text(ws[f"{column.key}{row_idx}"].value)
-                    if not value or value in {"/", "无", "None"} or re.fullmatch(r"\d+(?:\.0)?", value):
-                        continue
-                    if value not in parts:
-                        parts.append(value)
-                item = "，".join(parts).strip("，")
-                if item and item not in items:
-                    items.append(item)
+                detail_texts = self._row_work_item_values(ws, row_idx, detail_columns)
+                if not detail_texts:
+                    detail_texts = self._row_work_item_values(ws, row_idx, fallback_columns[:1])
+                for item in detail_texts:
+                    if item and item not in items:
+                        items.append(item)
         return items
+
+    def _excluded_work_item_section_names(self) -> set[str]:
+        event_cfg = self.handover_cfg.get("event_sections", {})
+        sections_cfg = event_cfg.get("sections", {}) if isinstance(event_cfg, dict) else {}
+        names = {
+            "新事件处理",
+            "历史事件跟进",
+        }
+        if isinstance(sections_cfg, dict):
+            for key in ("new_event", "history_followup"):
+                text = _text(sections_cfg.get(key))
+                if text:
+                    names.add(text)
+        return {self._normalize_section_or_column_name(name) for name in names if name}
+
+    @staticmethod
+    def _normalize_section_or_column_name(value: Any) -> str:
+        return re.sub(r"[\s　:：/／\\\-—_（）()【】\[\]]+", "", _text(value)).casefold()
+
+    def _is_excluded_work_item_section(self, section_name: str, excluded_sections: set[str]) -> bool:
+        normalized = self._normalize_section_or_column_name(section_name)
+        return bool(normalized and normalized in excluded_sections)
+
+    @classmethod
+    def _is_detail_work_item_column(cls, label: Any) -> bool:
+        normalized = cls._normalize_section_or_column_name(label)
+        if not normalized or normalized == "序号":
+            return False
+        excluded_tokens = (
+            "跟进人",
+            "执行人",
+            "随工人",
+            "确认人",
+            "负责人",
+            "完成情况",
+            "演练完成情况",
+            "维护完成情况",
+            "进度",
+            "状态",
+            "执行方",
+            "维护执行方",
+            "施工方",
+            "作业时间",
+            "时间段",
+            "施工区域",
+            "区域",
+        )
+        normalized_excluded_tokens = [cls._normalize_section_or_column_name(token) for token in excluded_tokens]
+        if any(token and token in normalized for token in normalized_excluded_tokens):
+            return False
+        detail_tokens = (
+            "详情",
+            "内容",
+            "事项",
+            "总项",
+            "项目",
+            "工作",
+            "描述",
+            "名称",
+            "类型",
+        )
+        normalized_detail_tokens = [cls._normalize_section_or_column_name(token) for token in detail_tokens]
+        return any(token and token in normalized for token in normalized_detail_tokens)
+
+    @classmethod
+    def _is_fallback_work_item_column(cls, label: Any) -> bool:
+        normalized = cls._normalize_section_or_column_name(label)
+        if not normalized or normalized == "序号":
+            return False
+        excluded_tokens = (
+            "跟进人",
+            "执行人",
+            "随工人",
+            "确认人",
+            "负责人",
+            "完成情况",
+            "进度",
+            "状态",
+            "执行方",
+            "施工方",
+            "作业时间",
+            "时间段",
+            "区域",
+        )
+        normalized_excluded_tokens = [cls._normalize_section_or_column_name(token) for token in excluded_tokens]
+        return not any(token and token in normalized for token in normalized_excluded_tokens)
+
+    @staticmethod
+    def _is_valid_work_item_text(value: Any) -> bool:
+        text = _text(value)
+        if not text:
+            return False
+        if text in {"/", "无", "None", "none", "NULL", "null"}:
+            return False
+        return not bool(re.fullmatch(r"\d+(?:\.0)?", text))
+
+    def _row_work_item_values(self, ws: Any, row_idx: int, columns: List[Any]) -> List[str]:
+        output: List[str] = []
+        for column in columns:
+            for col_key in getattr(column, "source_cols", None) or [getattr(column, "key", "")]:
+                value = _text(ws[f"{col_key}{row_idx}"].value)
+                if not self._is_valid_work_item_text(value):
+                    continue
+                if value not in output:
+                    output.append(value)
+        return output
 
     @staticmethod
     def _normalize_running_units(raw: Any) -> Dict[str, List[Dict[str, Any]]]:

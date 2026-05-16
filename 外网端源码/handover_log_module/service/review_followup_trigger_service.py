@@ -205,7 +205,7 @@ class ReviewFollowupTriggerService:
         synced_revision = int(normalized.get("synced_revision", 0) or 0)
         if status == "disabled":
             return True
-        return status == "success" and synced_revision == int(revision or 0)
+        return status == "success" and synced_revision >= int(revision or 0)
 
     @staticmethod
     def _is_cloud_sync_failed(state: Dict[str, Any] | None) -> bool:
@@ -1137,6 +1137,9 @@ class ReviewFollowupTriggerService:
             revision = int(session.get("revision", 0) or 0)
             if cloud_state["status"] == "disabled":
                 skipped_buildings.append({"building": building, "reason": "disabled"})
+                continue
+            if cloud_state["status"] in {"uploading", "syncing"}:
+                skipped_buildings.append({"building": building, "reason": cloud_state["status"]})
                 continue
             if self._is_cloud_sync_complete_for_revision(cloud_state, revision):
                 skipped_buildings.append({"building": building, "reason": "already_uploaded"})

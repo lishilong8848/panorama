@@ -2663,6 +2663,12 @@ class ReviewSessionService:
             session = self._normalize_session(raw_session)
             if str(session.get("batch_key", "")).strip() != target_batch:
                 continue
+            cloud_state = self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
+            cloud_status = str(cloud_state.get("status", "")).strip().lower()
+            if bool(session.get("confirmed", False)):
+                continue
+            if cloud_status in {"uploading", "syncing"}:
+                continue
             current_revision = int(session.get("revision", 1) or 1)
             session["confirmed"] = True
             session["confirmed_at"] = _now_text()

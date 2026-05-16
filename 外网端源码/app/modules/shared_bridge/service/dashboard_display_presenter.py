@@ -582,11 +582,11 @@ def present_handover_review_overview(
         confirm_all_disabled_reason = "当前批次未生成"
     elif bool(review.get("all_confirmed", False)):
         confirm_all_disabled_reason = "已全部确认"
-    retry_all_visible = bool(batch_key) and bool(review.get("has_any_session", False))
-    retry_all_allowed = retry_all_visible and cloud_retry_failure_count > 0
+    retry_all_visible = False
+    retry_all_allowed = False
     retry_all_disabled_reason = ""
     if not retry_all_visible:
-        retry_all_disabled_reason = "当前没有可重试的交接班批次"
+        retry_all_disabled_reason = "云文档上传由各楼确认按钮和定时兜底处理"
     elif cloud_retry_failure_count <= 0:
         retry_all_disabled_reason = "云表已全部同步"
     continue_followup_visible = can_resume_followup
@@ -598,12 +598,29 @@ def present_handover_review_overview(
     elif followup_pending > 0:
         continue_followup_label = f"继续后续上传（待处理 {followup_pending}）"
 
-    def _present_cloud_sheet_sync_brief(raw: Any) -> Dict[str, Any]:
+    def _present_cloud_sheet_sync_brief(raw: Any, *, revision: int = 0) -> Dict[str, Any]:
         cloud_sync = raw if isinstance(raw, dict) else {}
         status = _string(cloud_sync.get("status", "")).lower()
         attempted = bool(cloud_sync.get("attempted"))
         url = _string(cloud_sync.get("spreadsheet_url", ""))
         error = _string(cloud_sync.get("error", ""))
+        synced_revision = _int(cloud_sync.get("synced_revision", 0))
+        current_revision = _int(revision)
+        cloud_revision_stale = (
+            current_revision > 0
+            and synced_revision > 0
+            and synced_revision < current_revision
+            and status in {"success", "pending_upload"}
+        )
+        if status == "success" and cloud_revision_stale:
+            return {
+                "status": status,
+                "text": "云表内容已修改，待重新上传",
+                "tone": "warning",
+                "url": url,
+                "error": error,
+                "reason_code": "stale",
+            }
         if status == "success":
             return {
                 "status": status,
@@ -612,13 +629,22 @@ def present_handover_review_overview(
                 "url": url,
                 "error": "",
             }
+        if status in {"uploading", "syncing"}:
+            return {
+                "status": status,
+                "text": "云表上传中",
+                "tone": "info",
+                "url": url,
+                "error": error,
+            }
         if status == "pending_upload":
             return {
                 "status": status,
-                "text": "云表待最终上传",
+                "text": "云表内容已修改，待重新上传" if cloud_revision_stale else "云表待最终上传",
                 "tone": "warning",
                 "url": url,
                 "error": error,
+                "reason_code": "stale_pending_upload" if cloud_revision_stale else status,
             }
         if status == "prepare_failed":
             return {
@@ -719,7 +745,10 @@ def present_handover_review_overview(
             row_status = "missing"
             row_text = "未生成"
             row_tone = "neutral"
-        cloud_sheet_sync = _present_cloud_sheet_sync_brief(item.get("cloud_sheet_sync", {}))
+        cloud_sheet_sync = _present_cloud_sheet_sync_brief(
+            item.get("cloud_sheet_sync", {}),
+            revision=_int(item.get("revision", 0)),
+        )
         review_link_delivery = _present_review_link_delivery_brief(
             item.get("review_link_delivery", {})
         )
