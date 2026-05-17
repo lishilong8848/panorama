@@ -20,6 +20,8 @@ class ChillerModeUploadService:
     """Upload latest chiller mode switch parameter source files to Feishu bitable."""
 
     SOURCE_FAMILY = "chiller_mode_switch_family"
+    CREATE_FIELD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+    CHILLER_MODE_FIELD_ALIASES = ("冷机状态", "冷机模式", "冷机运行模式")
 
     def __init__(self, runtime_config: Dict[str, Any]) -> None:
         self.runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
@@ -210,6 +212,101 @@ class ChillerModeUploadService:
             canonical_metric_name_fn=lambda value: str(value or "").strip(),
             dimension_mapping={},
         )
+
+    @staticmethod
+    def _field_name(item: Dict[str, Any]) -> str:
+        if not isinstance(item, dict):
+            return ""
+        return str(item.get("field_name") or item.get("name") or "").strip()
+
+    def _create_text_field(
+        self,
+        *,
+        client: FeishuBitableClient,
+        table_id: str,
+        field_name: str,
+    ) -> None:
+        name = str(field_name or "").strip()
+        if not name:
+            return
+        url = self.CREATE_FIELD_URL.format(app_token=client.app_token, table_id=table_id)
+        client._request_json_with_auth_retry(  # noqa: SLF001
+            "POST",
+            url,
+            payload={"field_name": name, "type": "text"},
+            content_type_json=True,
+        )
+
+    def _prepare_rows_for_target_fields(
+        self,
+        *,
+        client: FeishuBitableClient,
+        table_id: str,
+        cfg: Dict[str, Any],
+        rows: List[Dict[str, Any]],
+        emit_log: Callable[[str], None],
+    ) -> List[Dict[str, Any]]:
+        fields = cfg.get("fields", {}) if isinstance(cfg.get("fields", {}), dict) else {}
+        target_fields = client.list_fields(table_id=table_id, page_size=500)
+        existing = {
+            self._field_name(item)
+            for item in target_fields
+            if self._field_name(item)
+        }
+        required = [
+            str(fields.get("building", "楼栋") or "楼栋").strip(),
+            str(fields.get("controller", "所属控制器") or "所属控制器").strip(),
+            str(fields.get("point", "采集点") or "采集点").strip(),
+            str(fields.get("value", "数据") or "数据").strip(),
+        ]
+        missing_required = [name for name in required if name and name not in existing]
+        if missing_required:
+            raise ValueError(
+                "制冷模式目标多维表缺少必填字段，未清表: "
+                + ",".join(missing_required)
+            )
+
+        configured_mode_field = str(fields.get("chiller_mode", "冷机模式") or "冷机模式").strip()
+        mode_candidates: List[str] = []
+        for name in [configured_mode_field, *self.CHILLER_MODE_FIELD_ALIASES]:
+            name = str(name or "").strip()
+            if name and name not in mode_candidates:
+                mode_candidates.append(name)
+        actual_mode_field = next((name for name in mode_candidates if name in existing), "")
+        has_mode_values = any(configured_mode_field in row for row in rows if isinstance(row, dict))
+        if has_mode_values and not actual_mode_field:
+            preferred_mode_field = "冷机状态"
+            self._create_text_field(client=client, table_id=table_id, field_name=preferred_mode_field)
+            existing.add(preferred_mode_field)
+            actual_mode_field = preferred_mode_field
+            emit_log(f"[制冷模式参数上传] 目标表缺少冷机模式字段，已自动创建: {preferred_mode_field}")
+        elif actual_mode_field and actual_mode_field != configured_mode_field:
+            emit_log(
+                "[制冷模式参数上传] 目标表字段名与配置不同，已自动映射: "
+                f"{configured_mode_field}->{actual_mode_field}"
+            )
+
+        normalized_rows: List[Dict[str, Any]] = []
+        skipped_unknown: Dict[str, int] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized = dict(row)
+            if actual_mode_field and configured_mode_field in normalized and actual_mode_field != configured_mode_field:
+                normalized[actual_mode_field] = normalized.pop(configured_mode_field)
+            for key in list(normalized.keys()):
+                if key in existing:
+                    continue
+                skipped_unknown[key] = skipped_unknown.get(key, 0) + 1
+                normalized.pop(key, None)
+            if normalized:
+                normalized_rows.append(normalized)
+        if skipped_unknown:
+            detail = ", ".join(f"{key}={count}" for key, count in sorted(skipped_unknown.items()))
+            emit_log(f"[制冷模式参数上传] 已跳过目标表不存在字段: {detail}")
+        if not normalized_rows:
+            raise ValueError("制冷模式目标字段校验后无可上传记录，未清表")
+        return normalized_rows
 
     @staticmethod
     def _text(value: Any) -> str:
@@ -475,6 +572,26 @@ class ChillerModeUploadService:
 
         client = self._new_client(normalized_cfg, target_descriptor=resolved_target)
         table_id = str(resolved_target.get("table_id", "") or "").strip()
+        try:
+            prepared_rows = self._prepare_rows_for_target_fields(
+                client=client,
+                table_id=table_id,
+                cfg=normalized_cfg,
+                rows=prepared_rows,
+                emit_log=emit_log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            emit_log(f"[制冷模式参数上传] 目标字段校验失败，未清空目标多维表: {message}")
+            return {
+                "status": "failed",
+                "run_at": run_at,
+                "parsed_files": parsed_files,
+                "failed_files": [{"building": "-", "file_path": "", "error": message}],
+                "deleted_count": 0,
+                "created_count": 0,
+                "target": resolved_target,
+            }
         emit_log(
             f"[制冷模式参数上传] 全部解析成功，开始清表重传: files={len(parsed_files)}, records={len(prepared_rows)}, table_id={table_id}"
         )
