@@ -278,20 +278,57 @@ def _apply_row_snapshot(
         existing.add(merged_ref)
 
 
-def _blank_data_row(ws: Worksheet, row_idx: int) -> None:
-    for col in "ABCDEFGHI":
+def _section_data_columns(ws: Worksheet, section: CategorySection) -> List[str]:
+    min_col = 2
+    max_col = 9
+    used_cols: set[int] = set()
+
+    for col_idx in range(min_col, max_col + 1):
+        value = ws.cell(row=section.header_row, column=col_idx).value
+        if str(value or "").strip():
+            used_cols.add(col_idx)
+
+    for merged in ws.merged_cells.ranges:
+        if merged.min_row != section.header_row or merged.max_row != section.header_row:
+            continue
+        if merged.min_col < min_col:
+            continue
+        if merged.max_col < min_col or merged.min_col > max_col:
+            continue
+        lead_value = ws.cell(row=section.header_row, column=merged.min_col).value
+        if not str(lead_value or "").strip():
+            continue
+        for col_idx in range(max(min_col, merged.min_col), min(max_col, merged.max_col) + 1):
+            used_cols.add(col_idx)
+
+    if not used_cols:
+        return list("BCDEFGHI")
+    return [get_column_letter(col_idx) for col_idx in range(min_col, max(used_cols) + 1)]
+
+
+def _include_payload_columns(data_columns: List[str], payload_rows: List[Dict[str, Any]]) -> List[str]:
+    max_col = max((ord(col) - 64 for col in data_columns), default=2)
+    for row in payload_rows:
+        for key in row:
+            if re.fullmatch(r"[B-I]", str(key or "").upper()):
+                max_col = max(max_col, ord(str(key).upper()) - 64)
+    return [get_column_letter(col_idx) for col_idx in range(2, min(9, max_col) + 1)]
+
+
+def _blank_data_row(ws: Worksheet, row_idx: int, data_columns: List[str]) -> None:
+    for col in ["A", *data_columns]:
         cell = ws[f"{col}{row_idx}"]
         if isinstance(cell, MergedCell):
             continue
         cell.value = ""
 
 
-def _fill_empty_section_row(ws: Worksheet, row_idx: int) -> None:
+def _fill_empty_section_row(ws: Worksheet, row_idx: int, data_columns: List[str]) -> None:
     sequence_cell = ws[f"A{row_idx}"]
     if not isinstance(sequence_cell, MergedCell):
         sequence_cell.value = 1
 
-    for col in "BCDEFGHI":
+    for col in data_columns:
         cell = ws[f"{col}{row_idx}"]
         if isinstance(cell, MergedCell):
             continue
@@ -381,6 +418,7 @@ def write_category_sections(
                 emit_log=emit_log,
             )
 
+        data_columns = _include_payload_columns(_section_data_columns(ws, section), payload_rows)
         for row_idx in range(section.template_data_row, section.template_data_row + target_n):
             if snapshot is not None:
                 _apply_row_snapshot(
@@ -391,20 +429,20 @@ def write_category_sections(
                     emit_log=emit_log,
                 )
             if not preserve_template_values or row_idx < section.template_data_row + payload_count:
-                _blank_data_row(ws, row_idx)
+                _blank_data_row(ws, row_idx, data_columns)
 
         for idx, row in enumerate(payload_rows):
             row_idx = section.template_data_row + idx
             a_cell = ws.cell(row=row_idx, column=1)
             if not isinstance(a_cell, MergedCell):
                 a_cell.value = idx + 1
-            for col in "BCDEFGHI":
+            for col in data_columns:
                 target = ws[f"{col}{row_idx}"]
                 if isinstance(target, MergedCell):
                     continue
                 target.value = row.get(col, "")
         if payload_count == 0:
-            _fill_empty_section_row(ws, section.template_data_row)
+            _fill_empty_section_row(ws, section.template_data_row, data_columns)
 
         title_cell = ws.cell(row=section.title_row, column=1)
         if not isinstance(title_cell, MergedCell):

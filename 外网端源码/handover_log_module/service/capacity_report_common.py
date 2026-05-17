@@ -176,6 +176,17 @@ _PRESSURE_TENTH_KEYS = {
     "plate_chilled_in_pressure",
     "plate_chilled_out_pressure",
 }
+_PLATE_HEAT_EXCHANGER_KEYS = {
+    "plate_cooling_in_temp",
+    "plate_cooling_out_temp",
+    "plate_chilled_in_temp",
+    "plate_chilled_out_temp",
+    "plate_cooling_in_pressure",
+    "plate_chilled_in_pressure",
+    "plate_chilled_out_pressure",
+}
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -490,6 +501,30 @@ def _secondary_pump_metric_text(
     return ""
 
 
+def _secondary_pump_frequency_value(row: RawRow) -> float | None:
+    return _row_numeric_value(row)
+
+
+def _dedupe_secondary_pump_rows(rows: Sequence[RawRow]) -> List[RawRow]:
+    output: List[RawRow] = []
+    seen: set[str] = set()
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            (_extract_equipment_numbers_from_row(row) or [99])[0],
+            int(getattr(row, "row_index", 0) or 0),
+        ),
+    )
+    for row in ordered:
+        numbers = _extract_equipment_numbers_from_row(row)
+        key = f"pump:{numbers[0]}" if numbers else f"row:{int(getattr(row, 'row_index', 0) or 0)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(row)
+    return output
+
+
 def _building_aliases(context: Dict[str, Any], key: str) -> List[str]:
     building = _text(context.get("building"))
     if key == "primary_pump_aliases":
@@ -786,8 +821,12 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
     cells = _region_summary_cells(zone)
     results: Dict[str, str] = {cells["redundancy"]: _build_redundancy_text(len(running_units.get(zone, [])))}
     secondary_rows = query.rows_by_d_regexes([re.escape(alias) for alias in _SECONDARY_PUMP_ALIASES], zone=zone, allow_global=True)
-    running_secondary = [row for row in secondary_rows if getattr(row, "value", None) is not None and float(row.value) > 10]
-    running_secondary.sort(key=lambda row: (_extract_equipment_numbers_from_row(row) or [99])[0])
+    running_candidates: List[RawRow] = []
+    for row in secondary_rows:
+        frequency_value = _secondary_pump_frequency_value(row)
+        if frequency_value is not None and float(frequency_value) > 10:
+            running_candidates.append(row)
+    running_secondary = _dedupe_secondary_pump_rows(running_candidates)
     layout = _SECONDARY_PUMP_LAYOUT.get(zone, {})
     for index, slot in enumerate(list(layout.get("slots", []) or [])):
         row = running_secondary[index] if index < len(running_secondary) else None
@@ -814,10 +853,8 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
             pump_number=pump_number,
             aliases=_SECONDARY_PUMP_OUTLET_PRESSURE_ALIASES,
         )
-        if inlet_text:
-            results[_text(slot.get("inlet"))] = inlet_text
-        if outlet_text:
-            results[_text(slot.get("outlet"))] = outlet_text
+        results[_text(slot.get("inlet"))] = inlet_text or "0"
+        results[_text(slot.get("outlet"))] = outlet_text or "0"
     redundancy_cell = _text(layout.get("redundancy"))
     if redundancy_cell:
         results[redundancy_cell] = _build_redundancy_text(len(running_secondary))
@@ -950,12 +987,16 @@ def _build_zone_unit_values(query: CapacitySourceQuery, *, zone: str, running_un
         if unit_number <= 0:
             continue
         block = _block_cell_map(zone, position)
-        results[block["title"]] = f"{unit_number}号制冷单元→{_text(unit_info.get('mode_text'))}"
-        skip_chiller_values = building == "E楼" and _text(unit_info.get("mode_text")) == "板换"
+        mode_text = _text(unit_info.get("mode_text"))
+        results[block["title"]] = f"{unit_number}号制冷单元→{mode_text}"
+        skip_chiller_values = building == "E楼" and mode_text == "板换"
+        skip_plate_values = mode_text == "制冷"
         for key, aliases in alias_groups.items():
             if key == "primary_pump_freq" and not aliases:
                 continue
             if skip_chiller_values and key in _E_BUILDING_CHILLER_SKIP_KEYS:
+                continue
+            if skip_plate_values and key in _PLATE_HEAT_EXCHANGER_KEYS:
                 continue
             value_text = query.first_text_by_d_aliases(aliases, zone=zone, unit=unit_number, allow_global=False)
             if not value_text:

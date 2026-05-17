@@ -1870,7 +1870,6 @@ class HandoverCapacityReportService:
             "M6": _text(handover.get("C3")),
             "U6": _text(handover.get("G3")),
             "S7": _text(handover.get(long_day_cell)),
-            "AC24": _text(handover.get("D8")),
             "U15": _text(handover.get("H6")),
             "AD22": west_tank,
             "AD23": east_tank,
@@ -2343,10 +2342,15 @@ class HandoverCapacityReportService:
             zone=zone,
             allow_global=True,
         )
-        running_rows = [
-            row for row in rows
-            if getattr(row, "value", None) is not None and float(getattr(row, "value", 0) or 0) > 10
-        ]
+        running_rows = []
+        for row in rows:
+            value = getattr(row, "value", None)
+            if isinstance(value, bool):
+                value = None
+            if not isinstance(value, (int, float)):
+                value = self._to_float_cell_value(getattr(row, "e_raw", None))
+            if value is not None and float(value) > 10:
+                running_rows.append(row)
         if not running_rows:
             return ""
         numbers: List[int] = []
