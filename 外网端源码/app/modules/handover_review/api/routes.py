@@ -2440,7 +2440,7 @@ def _build_review_confirm_feedback(
     if followup_status == "queued":
         return _review_display_item(
             status="followup_queued",
-            text="已确认当前楼栋，后续上传任务已提交",
+            text="已确认并提交本楼云文档上传",
             tone="success",
             reason_code="followup_queued",
             detail_text="当前楼栋确认完成，云文档上传将在后台继续执行。",
@@ -2448,10 +2448,10 @@ def _build_review_confirm_feedback(
     if followup_status in {"ok", "success"}:
         return _review_display_item(
             status="followup_started",
-            text="已触发首次全量上传",
+            text="已提交本楼云文档上传",
             tone="success",
             reason_code="followup_started",
-            detail_text="当前楼栋确认完成，已触发整批后续上传。",
+            detail_text="当前楼栋确认完成，已触发本楼云文档上传。",
         )
     if cloud_status in {"ok", "success"}:
         return _review_display_item(
@@ -2463,10 +2463,10 @@ def _build_review_confirm_feedback(
         )
     return _review_display_item(
         status="confirmed",
-        text="已确认当前楼栋",
+        text="已确认本楼并提交云文档上传",
         tone="success",
         reason_code="confirmed",
-        detail_text="当前楼栋已确认。",
+        detail_text="本楼已确认。",
     )
 
 
@@ -2767,12 +2767,18 @@ def _build_review_display_state(
         save_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
     elif cloud_sheet_uploading:
         save_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再保存修改"
+    cloud_status = str(cloud_sheet_state.get("status", "")).strip().lower()
+    cloud_reason_code = str(cloud_sheet_state.get("reason_code", "")).strip().lower()
+    confirmed_cloud_retry_allowed = bool(confirmed) and (
+        cloud_status in {"failed", "prepare_failed", "pending_upload"}
+        or cloud_reason_code in {"stale", "stale_pending_upload"}
+    )
     confirm_allowed = (
         bool(session_payload)
         and not is_history_mode
         and not remote_editor_active
         and not cloud_sheet_uploading
-        and not confirmed
+        and (not confirmed or confirmed_cloud_retry_allowed)
     )
     confirm_disabled_reason = ""
     if not session_payload:
@@ -2784,7 +2790,7 @@ def _build_review_display_state(
     elif cloud_sheet_uploading:
         confirm_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再操作确认状态"
     elif confirmed:
-        confirm_disabled_reason = "当前楼栋已确认，当前班次不需要重复上传"
+        confirm_disabled_reason = "当前楼栋已确认且云文档已提交，本班次不需要重复操作"
     retry_allowed = bool(session_payload) and (not is_history_mode) and confirmed and str(cloud_sheet_state["status"]) in {"failed", "prepare_failed"}
     retry_disabled_reason = ""
     if not session_payload:
@@ -2830,7 +2836,7 @@ def _build_review_display_state(
     if not session_payload:
         capacity_image_send_disabled_reason = "当前没有可发送的容量报表"
     elif is_history_mode:
-        capacity_image_send_disabled_reason = "历史交接班日志不支持发送容量表图片"
+        capacity_image_send_disabled_reason = "历史交接班日志不支持发送审核文本和容量表图片"
     elif remote_editor_active:
         capacity_image_send_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
     elif not has_capacity_file:
@@ -2854,7 +2860,7 @@ def _build_review_display_state(
     elif cloud_sheet_uploading:
         regenerate_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再重新生成"
     elif confirmed:
-        regenerate_disabled_reason = "当前楼栋已确认，请先撤销确认后再重新生成"
+        regenerate_disabled_reason = "当前楼栋已确认并提交上传，本班次不能重新生成；如需修改请直接编辑后保存，系统会自动重传云文档"
     history_limit = max(1, int(history_payload.get("history_limit", HISTORY_CLOUD_SUCCESS_LIMIT) or HISTORY_CLOUD_SUCCESS_LIMIT))
     history_hint_rows = [f"仅显示最近 {history_limit} 条已成功上云的交接班日志。"]
     if session_payload and not bool(history_payload.get("selected_in_history_list", False)):
@@ -2925,11 +2931,15 @@ def _build_review_display_state(
         detail_text="" if capacity_allowed and str(capacity_state["status"]) == "ready" else ("点击下载时会先补写审核页字段，失败则不会下载旧文件" if capacity_allowed else (capacity_disabled_reason or capacity_state["error"] or capacity_state["text"])),
     )
     confirm_state = _review_display_item(
-        status="confirmed" if confirmed else ("history_mode" if is_history_mode else ("blocked" if remote_editor_active else "pending_confirm")),
-        text="当前楼栋已确认" if confirmed else ("历史模式不可确认" if is_history_mode else ("其他终端编辑中" if remote_editor_active else "当前楼栋待确认")),
-        tone="success" if confirmed else ("neutral" if is_history_mode else "warning"),
-        reason_code="confirmed" if confirmed else ("history_mode" if is_history_mode else ("remote_editor_active" if remote_editor_active else "pending_confirm")),
-        detail_text="" if confirmed else confirm_disabled_reason,
+        status="retry_upload" if confirmed_cloud_retry_allowed else ("confirmed" if confirmed else ("history_mode" if is_history_mode else ("blocked" if remote_editor_active else "pending_confirm"))),
+        text=(
+            "当前楼栋已确认，云文档待重传"
+            if confirmed_cloud_retry_allowed
+            else ("当前楼栋已确认并已上传" if confirmed else ("历史模式不可确认" if is_history_mode else ("其他终端编辑中" if remote_editor_active else "当前楼栋待确认")))
+        ),
+        tone="warning" if confirmed_cloud_retry_allowed else ("success" if confirmed else ("neutral" if is_history_mode else "warning")),
+        reason_code="retry_upload" if confirmed_cloud_retry_allowed else ("confirmed" if confirmed else ("history_mode" if is_history_mode else ("remote_editor_active" if remote_editor_active else "pending_confirm"))),
+        detail_text=("点击确认按钮可重新上传本楼云文档" if confirmed_cloud_retry_allowed else ("" if confirmed else confirm_disabled_reason)),
     )
     document_state = _build_review_document_state(
         session=session_payload,
@@ -3002,7 +3012,7 @@ def _build_review_display_state(
             "save": _review_action(
                 allowed=save_allowed,
                 visible=bool(session_payload),
-                label="保存",
+                label="保存修改并重传云文档" if confirmed else "保存",
                 disabled_reason=save_disabled_reason,
                 tone="primary",
                 variant="primary",
@@ -3026,7 +3036,7 @@ def _build_review_display_state(
             "capacity_image_send": _review_action(
                 allowed=capacity_image_send_allowed,
                 visible=bool(session_payload) and not is_history_mode,
-                label="发送容量表图片",
+                label="发送审核文本和容量表图片",
                 disabled_reason=capacity_image_send_disabled_reason,
                 tone="neutral",
                 variant="secondary",
@@ -3042,10 +3052,14 @@ def _build_review_display_state(
             "confirm": _review_action(
                 allowed=confirm_allowed,
                 visible=bool(session_payload) and not is_history_mode,
-                label="已确认并已提交上传" if confirmed else "确认当前楼栋",
+                label=(
+                    "重传本楼云文档"
+                    if confirmed_cloud_retry_allowed
+                    else ("已确认并已上传" if confirmed else "确认并上传本楼云文档")
+                ),
                 disabled_reason=confirm_disabled_reason,
-                tone="success" if confirmed else "warning",
-                variant="success" if confirmed else "warning",
+                tone="warning" if confirmed_cloud_retry_allowed else ("success" if confirmed else "warning"),
+                variant="warning" if confirmed_cloud_retry_allowed else ("success" if confirmed else "warning"),
             ),
             "retry_cloud_sync": _review_action(
                 allowed=False,
@@ -3219,7 +3233,7 @@ def _ensure_latest_session_actionable_or_400(service: ReviewSessionService, *, b
     if not latest_session_id:
         raise HTTPException(status_code=404, detail="暂无可审核交接班文件")
     if str(session_id or "").strip() != latest_session_id:
-        raise HTTPException(status_code=400, detail="仅最新交接班日志支持确认、撤销确认和云表重试")
+        raise HTTPException(status_code=400, detail="仅最新交接班日志支持确认上传和云表重试")
 
 
 @router.get("/handover/review/{building_code}")
@@ -4494,7 +4508,7 @@ def handover_review_regenerate(
         )
         action_label = "生成当前班次交接班及容量表"
     if bool(target.get("confirmed", False)):
-        raise HTTPException(status_code=409, detail="当前楼栋已确认，请先撤销确认后再重新生成")
+        raise HTTPException(status_code=409, detail="当前楼栋已确认并提交上传，本班次不能重新生成；如需修改请直接编辑后保存")
     cloud_sync = target.get("cloud_sheet_sync", {}) if isinstance(target.get("cloud_sheet_sync", {}), dict) else {}
     if str(cloud_sync.get("status", "") or "").strip().lower() in {"uploading", "syncing"}:
         raise HTTPException(status_code=409, detail="当前楼栋云文档上传中，请等待完成后再重新生成")

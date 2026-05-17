@@ -54,7 +54,6 @@ export function createHandoverReviewActionHelpers(options = {}) {
     resolveOperationFeedbackText,
     syncReviewSelectionToUrl,
     confirmHandoverReviewApi,
-    unconfirmHandoverReviewApi,
     retryHandoverReviewCloudSyncApi,
     updateHandoverReviewCloudSyncApi,
     sendHandoverReviewCapacityImageApi,
@@ -177,6 +176,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     confirming.value = true;
     errorText.value = "";
     statusText.value = "正在获取审核页编辑锁...";
+    const wasConfirmedBefore = Boolean(session.value?.confirmed);
     try {
       if (typeof ensureEditingLock === "function") {
         const locked = await ensureEditingLock();
@@ -186,22 +186,22 @@ export function createHandoverReviewActionHelpers(options = {}) {
           return;
         }
       }
-      statusText.value = "正在同步交接班文件并执行确认上传...";
+      statusText.value = wasConfirmedBefore
+        ? "正在同步交接班文件并重传本楼云文档..."
+        : "正在同步交接班文件并确认上传本楼云文档...";
       const request = {
         session_id: session.value.session_id,
         base_revision: session.value.revision,
         client_id: reviewClientId,
       };
-      const response = session.value.confirmed
-        ? await unconfirmHandoverReviewApi(buildingCode, request)
-        : await confirmHandoverReviewApi(buildingCode, request);
+      const response = await confirmHandoverReviewApi(buildingCode, request);
       applyPayloadMeta(response || {});
       broadcastHandoverReviewStatusChange(response || {});
       staleRevisionConflict.value = false;
       needsRefresh.value = false;
       statusText.value = resolveOperationFeedbackText(
         response,
-        session.value?.confirmed ? "已确认当前楼栋" : "已撤销确认",
+        wasConfirmedBefore ? "本楼云文档已重新提交上传" : "已确认本楼并提交云文档上传",
       );
     } catch (error) {
       if (isRevisionConflictError(error)) {
@@ -424,7 +424,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
     capacityImageSending.value = true;
     errorText.value = "";
-    statusText.value = "正在生成并发送容量表图片...";
+    statusText.value = "正在生成并发送审核文本和容量表图片...";
     try {
       const response = await sendHandoverReviewCapacityImageApi(buildingCode, {
         session_id: sessionId,
@@ -457,7 +457,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       }
       capacityImageSending.value = false;
     } catch (error) {
-      errorText.value = String(error?.message || error || "容量表图片发送失败");
+      errorText.value = String(error?.message || error || "审核文本和容量表图片发送失败");
       statusText.value = "审核文本和容量表图片发送失败";
       capacityImageSending.value = false;
     }

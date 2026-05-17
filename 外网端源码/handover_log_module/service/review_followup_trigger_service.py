@@ -675,6 +675,7 @@ class ReviewFollowupTriggerService:
             cloud_summary["failed_buildings"] = force_confirm_failed + list(
                 cloud_summary.get("failed_buildings", []) or []
             )
+            cloud_summary = self._refresh_cloud_result_status(cloud_summary)
             return self._compose_followup_result(
                 batch_key=target_batch,
                 export_result=self._empty_export_result(),
@@ -708,6 +709,7 @@ class ReviewFollowupTriggerService:
         )
         cloud_result["skipped_buildings"] = skipped_buildings + list(cloud_result.get("skipped_buildings", []) or [])
         cloud_result["failed_buildings"] = force_confirm_failed + list(cloud_result.get("failed_buildings", []) or [])
+        cloud_result = self._refresh_cloud_result_status(cloud_result)
         refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
         self._maybe_mark_first_full_cloud_sync_completed(
             batch_key=target_batch,
@@ -973,6 +975,29 @@ class ReviewFollowupTriggerService:
             "pending_buildings": [item for item in (payload.get("pending_buildings", []) or []) if isinstance(item, dict)],
             "details": dict(payload.get("details", {})) if isinstance(payload.get("details", {}), dict) else {},
         }
+
+    @classmethod
+    def _refresh_cloud_result_status(cls, cloud_result: Dict[str, Any]) -> Dict[str, Any]:
+        result = cloud_result if isinstance(cloud_result, dict) else {}
+        normalized = cls._normalize_followup_result_cloud_payload(result)
+        failed = list(normalized.get("failed_buildings", []) or [])
+        uploaded = list(normalized.get("uploaded_buildings", []) or [])
+        pending = list(normalized.get("pending_buildings", []) or [])
+        skipped = list(normalized.get("skipped_buildings", []) or [])
+        if failed and uploaded:
+            status = "partial_failed"
+        elif failed:
+            status = "failed"
+        elif pending:
+            status = "pending"
+        elif uploaded:
+            status = "ok"
+        elif skipped:
+            status = "skipped"
+        else:
+            status = str(result.get("status", "") or "").strip().lower() or "skipped"
+        result["status"] = status
+        return result
 
     def _compose_followup_result(
         self,

@@ -224,7 +224,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
   const capacityImageSendActionVm = computed(() => {
     return buildReviewActionVmBase({
       baseAction: capacityImageSendActionBase.value,
-      fallbackLabel: "发送容量表图片",
+      fallbackLabel: "发送审核文本和容量表图片",
       inFlight: capacityImageSending.value,
       inFlightText: "发送中...",
       disabled:
@@ -242,11 +242,13 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     });
   });
   const regenerateActionVm = computed(() => {
+    const regenerateLabel = String(regenerateActionBase.value?.label || "").trim();
+    const isInitialGenerate = regenerateLabel.includes("生成当前班次");
     return buildReviewActionVmBase({
       baseAction: regenerateActionBase.value,
       fallbackLabel: "重新生成交接班及容量表",
       inFlight: regenerating.value,
-      inFlightText: "重新生成中...",
+      inFlightText: isInitialGenerate ? "生成中..." : "重新生成中...",
       disabled:
         loading.value
         || saving.value
@@ -333,7 +335,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     }
     const actionVm = buildReviewActionVmBase({
       baseAction: base,
-      fallbackLabel: "确认当前楼栋",
+      fallbackLabel: "确认并上传本楼云文档",
       inFlight: confirming.value,
       inFlightText: "处理中...",
       disabled: Boolean(localDisabledReason),

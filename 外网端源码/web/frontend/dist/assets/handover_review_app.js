@@ -26,7 +26,6 @@ import {
   retryHandoverReview110StationCloudSyncApi,
   uploadHandoverReview110StationFileApi,
   updateHandoverReviewCloudSyncApi,
-  unconfirmHandoverReviewApi,
 } from "./api_client.js";
 import { HANDOVER_REVIEW_TEMPLATE } from "./handover_review_template.js";
 import { createHandoverReviewDisplayUiHelpers } from "./handover_review_display_ui_helpers.js";
@@ -372,7 +371,7 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
         <div class="review-header-actions">
           <button class="btn btn-secondary btn-mini" @click="refreshStatus" :disabled="loading || parsing || uploading || retrying">刷新</button>
           <button class="btn btn-warning btn-mini" @click="retryCloudSync" :disabled="!canRetryCloudSync">
-            {{ retrying ? "正在重试..." : "重试云文档同步" }}
+            {{ retrying ? "正在重试..." : "重试写入110云文档" }}
           </button>
           <a v-if="cloudUrl" class="btn btn-secondary btn-mini" :href="cloudUrl" target="_blank" rel="noopener noreferrer">打开云文档</a>
         </div>
@@ -406,10 +405,10 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
             <small class="review-field-hint">第1个sheet写入云文档“110”页；白班取第2个sheet，夜班取第3个sheet的110KV数据回填各楼审核页。</small>
           </label>
           <button class="btn btn-secondary btn-mini" @click="parseFile" :disabled="!selectedFile || parsing || uploading || retrying">
-            {{ parsing ? "正在解析..." : "解析" }}
+            {{ parsing ? "正在解析..." : "解析预览" }}
           </button>
           <button class="btn btn-primary btn-mini" @click="uploadFile" :disabled="!selectedFile || parsing || uploading || retrying">
-            {{ uploading ? "正在上传..." : "上传并同步" }}
+            {{ uploading ? "正在上传..." : "上传并写入云文档" }}
           </button>
         </div>
       </article>
@@ -1216,9 +1215,9 @@ function normalizeReviewDisplayState(raw = {}) {
       save: normalizeDisplayAction(actions.save, { allowed: false, visible: false, label: "保存", tone: "primary", variant: "primary" }),
       download: normalizeDisplayAction(actions.download, { allowed: false, visible: false, label: "下载交接班日志", tone: "neutral", variant: "secondary" }),
       capacity_download: normalizeDisplayAction(actions.capacity_download, { allowed: false, visible: false, label: "下载交接班容量报表", tone: "neutral", variant: "secondary" }),
-      capacity_image_send: normalizeDisplayAction(actions.capacity_image_send, { allowed: false, visible: false, label: "发送容量表图片", tone: "neutral", variant: "secondary" }),
+      capacity_image_send: normalizeDisplayAction(actions.capacity_image_send, { allowed: false, visible: false, label: "发送审核文本和容量表图片", tone: "neutral", variant: "secondary" }),
       regenerate: normalizeDisplayAction(actions.regenerate, { allowed: false, visible: false, label: "重新生成交接班及容量表", tone: "warning", variant: "warning" }),
-      confirm: normalizeDisplayAction(actions.confirm, { allowed: false, visible: false, label: "确认当前楼栋", tone: "warning", variant: "warning" }),
+      confirm: normalizeDisplayAction(actions.confirm, { allowed: false, visible: false, label: "确认并上传本楼云文档", tone: "warning", variant: "warning" }),
       retry_cloud_sync: normalizeDisplayAction(actions.retry_cloud_sync, { allowed: false, visible: false, label: "重试云表上传", tone: "warning", variant: "warning" }),
       update_history_cloud_sync: normalizeDisplayAction(actions.update_history_cloud_sync, { allowed: false, visible: false, label: "更新云文档", tone: "warning", variant: "warning" }),
       return_to_latest: normalizeDisplayAction(actions.return_to_latest, { allowed: false, visible: false, label: "返回最新", tone: "neutral", variant: "secondary" }),
@@ -3439,7 +3438,6 @@ export function mountHandoverReviewApp(Vue) {
         resolveOperationFeedbackText,
         syncReviewSelectionToUrl,
         confirmHandoverReviewApi,
-        unconfirmHandoverReviewApi,
         retryHandoverReviewCloudSyncApi,
         updateHandoverReviewCloudSyncApi,
         sendHandoverReviewCapacityImageApi,

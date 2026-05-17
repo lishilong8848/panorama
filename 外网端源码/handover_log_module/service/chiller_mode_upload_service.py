@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
@@ -41,7 +42,9 @@ class ChillerModeUploadService:
                 "page_size": 500,
                 "max_records": 5000,
                 "delete_batch_size": 500,
-                "create_batch_size": 200,
+                "create_batch_size": 100,
+                "create_timeout_sec": 20,
+                "create_retry_count": 1,
                 "replace_existing": True,
             },
             "fields": {
@@ -137,7 +140,9 @@ class ChillerModeUploadService:
         target["page_size"] = max(1, int(target.get("page_size", 500) or 500))
         target["max_records"] = max(1, int(target.get("max_records", 5000) or 5000))
         target["delete_batch_size"] = max(1, int(target.get("delete_batch_size", 500) or 500))
-        target["create_batch_size"] = max(1, int(target.get("create_batch_size", 200) or 200))
+        target["create_batch_size"] = max(1, min(100, int(target.get("create_batch_size", 100) or 100)))
+        target["create_timeout_sec"] = max(5, int(target.get("create_timeout_sec", 20) or 20))
+        target["create_retry_count"] = max(0, int(target.get("create_retry_count", 1) or 1))
         target["replace_existing"] = bool(target.get("replace_existing", True))
         cfg["target"] = target
 
@@ -480,12 +485,42 @@ class ChillerModeUploadService:
             list_field_names=[str(normalized_cfg.get("fields", {}).get("building", "楼栋") or "楼栋").strip()],
         )
         emit_log(f"[制冷模式参数上传] 目标表清空完成: deleted={deleted_count}")
-        client.batch_create_records(
-            table_id=table_id,
-            fields_list=prepared_rows,
-            batch_size=int(target.get("create_batch_size", 200) or 200),
-        )
-        created_count = len(prepared_rows)
+        batch_size = max(1, int(target.get("create_batch_size", 100) or 100))
+        total_batches = (len(prepared_rows) + batch_size - 1) // batch_size
+        created_count = 0
+        original_timeout = int(getattr(client, "timeout", 30) or 30)
+        original_retry_count = int(getattr(client, "request_retry_count", 3) or 3)
+        client.timeout = min(original_timeout, int(target.get("create_timeout_sec", 20) or 20))
+        client.request_retry_count = min(original_retry_count, int(target.get("create_retry_count", 1) or 1))
+        try:
+            for batch_index, start in enumerate(range(0, len(prepared_rows), batch_size), start=1):
+                chunk = prepared_rows[start : start + batch_size]
+                emit_log(
+                    f"[制冷模式参数上传] 批量写入开始: batch={batch_index}/{total_batches}, "
+                    f"records={len(chunk)}, uploaded={created_count}/{len(prepared_rows)}, "
+                    f"timeout={client.timeout}s, retries={client.request_retry_count}"
+                )
+                batch_started = time.perf_counter()
+                try:
+                    client.batch_create_records(
+                        table_id=table_id,
+                        fields_list=chunk,
+                        batch_size=len(chunk),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    emit_log(
+                        f"[制冷模式参数上传][失败] 批量写入失败: batch={batch_index}/{total_batches}, "
+                        f"uploaded={created_count}/{len(prepared_rows)}, error={exc}"
+                    )
+                    raise
+                created_count += len(chunk)
+                emit_log(
+                    f"[制冷模式参数上传] 批量写入进度: uploaded={created_count}/{len(prepared_rows)}, "
+                    f"batch={batch_index}/{total_batches}, elapsed_ms={int((time.perf_counter() - batch_started) * 1000)}"
+                )
+        finally:
+            client.timeout = original_timeout
+            client.request_retry_count = original_retry_count
         emit_log(f"[制冷模式参数上传] 批量写入完成: created={created_count}")
         hvac_sync_result = HvacBitableSyncService(self.runtime_config).safe_sync_after_chiller_upload(
             emit_log=emit_log,
