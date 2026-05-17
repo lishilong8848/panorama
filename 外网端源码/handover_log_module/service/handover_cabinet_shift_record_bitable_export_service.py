@@ -172,7 +172,7 @@ class HandoverCabinetShiftRecordBitableExportService:
         try:
             number = Decimal(text)
         except (InvalidOperation, ValueError):
-            return str(value).strip()
+            return None
         if number == number.to_integral_value():
             return int(number)
         return float(number)
@@ -188,6 +188,11 @@ class HandoverCabinetShiftRecordBitableExportService:
         if not match:
             return None
         return HandoverCabinetShiftRecordBitableExportService._normalize_number(match.group(0))
+
+    @classmethod
+    def _normalize_shift_cabinet_count(cls, value: Any) -> Any:
+        number = cls._normalize_number_from_text(value)
+        return 0 if number is None else number
 
     @staticmethod
     def _is_meaningful_section_row(row: Dict[str, Any]) -> bool:
@@ -259,7 +264,7 @@ class HandoverCabinetShiftRecordBitableExportService:
         if field_type == 1:
             return "" if value is None else str(value)
         if field_type == 2:
-            return cls._normalize_number(value)
+            return cls._normalize_number_from_text(value)
         return value
 
     @classmethod
@@ -280,7 +285,10 @@ class HandoverCabinetShiftRecordBitableExportService:
             meta = writable_field_meta.get(field_name)
             if meta is None:
                 continue
-            output[field_name] = cls._coerce_payload_field_value(field_name, value, meta)
+            converted_value = cls._coerce_payload_field_value(field_name, value, meta)
+            if converted_value is None:
+                continue
+            output[field_name] = converted_value
         return output
 
     @staticmethod
@@ -451,10 +459,10 @@ class HandoverCabinetShiftRecordBitableExportService:
             "shift_text": self._shift_text(duty_shift, cfg),
             "duty_staff": str(fixed_values.get("C3", "") or "").strip(),
             "handover_staff": str(fixed_values.get("G3", "") or "").strip(),
-            "planned_cabinets": self._normalize_number(fixed_values.get("B13", "")),
-            "powered_cabinets": self._normalize_number(fixed_values.get("D13", "")),
-            "shift_power_on_cabinets": self._normalize_number(fixed_values.get("F13", "")),
-            "shift_power_off_cabinets": self._normalize_number(fixed_values.get("H13", "")),
+            "planned_cabinets": self._normalize_number_from_text(fixed_values.get("B13", "")),
+            "powered_cabinets": self._normalize_number_from_text(fixed_values.get("D13", "")),
+            "shift_power_on_cabinets": self._normalize_shift_cabinet_count(fixed_values.get("F13", "")),
+            "shift_power_off_cabinets": self._normalize_shift_cabinet_count(fixed_values.get("H13", "")),
         }
         row["extra_fields"] = self._business_extra_fields(row, fixed_values, document)
         return row

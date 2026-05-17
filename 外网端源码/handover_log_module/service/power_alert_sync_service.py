@@ -550,6 +550,32 @@ class PowerAlertSyncService:
         opposite_type = "DC" if line.get("type") == "AC" else "AC"
         return f"{line.get('room_short')}-{line.get('col')}列-{opposite_type}{line.get('num')}"
 
+    def _find_opposite_line_group(
+        self,
+        line_raw: str,
+        group_stats: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any] | None:
+        exact_key = self._opposite_line_raw(line_raw)
+        if exact_key and exact_key in group_stats:
+            return group_stats.get(exact_key)
+
+        line = self._parse_line(line_raw)
+        if not line:
+            return None
+        opposite_type = "DC" if line.get("type") == "AC" else "AC"
+        candidates: List[Dict[str, Any]] = []
+        for candidate_key, candidate in group_stats.items():
+            candidate_line = self._parse_line(candidate_key)
+            if not candidate_line:
+                continue
+            if (
+                candidate_line.get("room_short") == line.get("room_short")
+                and candidate_line.get("col") == line.get("col")
+                and candidate_line.get("type") == opposite_type
+            ):
+                candidates.append(candidate)
+        return candidates[0] if len(candidates) == 1 else None
+
     def _generate_branch_rows(
         self,
         rows: List[_SourceRow],
@@ -636,8 +662,7 @@ class PowerAlertSyncService:
             if not int(stats["over_count"] or 0):
                 continue
             first = data["group"][0]
-            opposite_key = self._opposite_line_raw(first.line_raw)
-            opposite = group_stats.get(opposite_key or "")
+            opposite = self._find_opposite_line_group(first.line_raw, group_stats)
             opposite_max = self._max_of(opposite["totals"]) if opposite else None
             output.append(
                 {
