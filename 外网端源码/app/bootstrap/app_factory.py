@@ -892,12 +892,25 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             return f"{int(rounded)} 小时"
         return f"{rounded:.1f} 小时"
 
+    def _format_bucket_age_limit_text(value: Any) -> str:
+        try:
+            limit_hours = float(value)
+        except (TypeError, ValueError):
+            limit_hours = 3.0
+        if limit_hours <= 0:
+            limit_hours = 3.0
+        rounded = round(limit_hours, 2)
+        if rounded.is_integer():
+            return f"{int(rounded)} 小时"
+        return f"{rounded:g} 小时"
+
     def _source_cache_wait_text(feature_name: str) -> str:
         return f"等待最新共享文件更新：{feature_name}源文件尚未登记或尚未完成下载"
 
     def _build_latest_cache_wait_text(feature_name: str, selection: Dict[str, Any]) -> str:
         best_bucket_key = str(selection.get("best_bucket_key", "") or "").strip() if isinstance(selection, dict) else ""
         best_bucket_age_hours = selection.get("best_bucket_age_hours") if isinstance(selection, dict) else None
+        max_selection_age_hours = selection.get("max_selection_age_hours") if isinstance(selection, dict) else 3.0
         is_best_bucket_too_old = bool(selection.get("is_best_bucket_too_old", False)) if isinstance(selection, dict) else False
         missing_buildings = [
             str(item or "").strip()
@@ -919,10 +932,11 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         ]
         if is_best_bucket_too_old:
             age_text = _format_bucket_age_hours_text(best_bucket_age_hours)
+            limit_text = _format_bucket_age_limit_text(max_selection_age_hours)
             bucket_text = best_bucket_key or "未知时间桶"
             if age_text:
-                return f"等待最新共享文件更新：{feature_name}源文件当前最新时间桶 {bucket_text} 距现在约 {age_text}，已超过 3 小时。"
-            return f"等待最新共享文件更新：{feature_name}源文件当前最新时间桶 {bucket_text} 已超过 3 小时。"
+                return f"等待最新共享文件更新：{feature_name}源文件当前最新时间桶 {bucket_text} 距现在约 {age_text}，已超过 {limit_text}。"
+            return f"等待最新共享文件更新：{feature_name}源文件当前最新时间桶 {bucket_text} 已超过 {limit_text}。"
         if stale_buildings:
             return (
                 f"等待过旧楼栋共享文件更新：{feature_name}源文件已有回退版本，但以下楼栋较最新时间桶落后超过 3 桶："
@@ -1112,9 +1126,36 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     emit_log=emit_log,
                 )
                 status = str(result.get("status", "") or "").strip().lower()
+                cloud_result = result.get("cloud_sheet_sync", {}) if isinstance(result.get("cloud_sheet_sync", {}), dict) else {}
+                cloud_status = str(cloud_result.get("status", "") or "").strip().lower()
+                cloud_failed = [
+                    item for item in (cloud_result.get("failed_buildings", []) or [])
+                    if isinstance(item, dict)
+                ]
+                if cloud_status in {"failed", "partial_failed"}:
+                    failed_text = "；".join(
+                        f"{str(item.get('building', '') or '-').strip() or '-'}: {str(item.get('error', '') or '未知错误').strip() or '未知错误'}"
+                        for item in cloud_failed[:5]
+                    )
+                    raise RuntimeError(
+                        "交接班云文档补上传失败: "
+                        f"cloud_status={cloud_status}, failed={len(cloud_failed)}"
+                        + (f", detail={failed_text}" if failed_text else "")
+                    )
                 if status in {"failed", "partial_failed"}:
-                    failed_count = len(result.get("failed_buildings", []) or [])
-                    raise RuntimeError(f"交接班云文档补上传失败: status={status}, failed={failed_count}")
+                    failed_items = [
+                        item for item in (result.get("failed_buildings", []) or [])
+                        if isinstance(item, dict)
+                    ]
+                    failed_text = "；".join(
+                        f"{str(item.get('building', '') or '-').strip() or '-'}: {str(item.get('error', '') or '未知错误').strip() or '未知错误'}"
+                        for item in failed_items[:5]
+                    )
+                    emit_log(
+                        "[交接班][云文档补上传调度] 云文档已处理，附加后续链路存在失败 "
+                        f"status={status}, failed={len(failed_items)}"
+                        + (f", detail={failed_text}" if failed_text else "")
+                    )
                 return result
 
             try:
@@ -1582,12 +1623,12 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 detail = _build_latest_cache_wait_text("制冷模式参数", selection if isinstance(selection, dict) else {})
                 container.add_system_log(f"[制冷模式参数上传调度] {detail}")
                 container.record_chiller_mode_upload_external_run(
-                    status="failed",
+                    status="skipped",
                     source="scheduler",
                     detail=detail,
                     duration_ms=0,
                 )
-                return False, detail
+                return False, f"skip:{detail}"
 
             def _run_from_cache(emit_log):
                 service = ChillerModeUploadService(runtime_config)

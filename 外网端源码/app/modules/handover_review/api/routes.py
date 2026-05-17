@@ -1817,6 +1817,13 @@ def _resolve_building_or_404(service: ReviewSessionService, building_code: str) 
     return building
 
 
+def _ensure_review_page_code_or_404(building_code: str) -> None:
+    code = str(building_code or "").strip().lower()
+    if code == "110" or code in {"a", "b", "c", "d", "e"}:
+        return
+    raise HTTPException(status_code=404, detail="未知楼栋页面")
+
+
 def _load_latest_session_or_404(service: ReviewSessionService, building: str) -> Dict[str, Any]:
     try:
         latest_session_id = _safe_latest_session_id(service, building=building)
@@ -3218,9 +3225,7 @@ def _ensure_latest_session_actionable_or_400(service: ReviewSessionService, *, b
 @router.get("/handover/review/{building_code}")
 def handover_review_page(building_code: str, request: Request):
     container = request.app.state.container
-    service = _build_review_session_service(container)
-    if str(building_code or "").strip().lower() != "110":
-        _resolve_building_or_404(service, building_code)
+    _ensure_review_page_code_or_404(building_code)
     if str(container.frontend_mode or "").strip().lower() == "source":
         return HTMLResponse(
             render_frontend_index_html(

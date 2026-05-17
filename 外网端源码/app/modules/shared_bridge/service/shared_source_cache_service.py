@@ -166,12 +166,17 @@ def _parse_hour_bucket(bucket_key: str) -> datetime | None:
     text = str(bucket_key or "").strip()
     if not text:
         return None
-    for fmt in ("%Y-%m-%d %H", "%Y%m%d%H"):
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y%m%d%H", "%Y%m%d%H%M"):
         try:
             return datetime.strptime(text, fmt)
         except ValueError:
             continue
     digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 12:
+        try:
+            return datetime.strptime(digits[:12], "%Y%m%d%H%M")
+        except ValueError:
+            return None
     if len(digits) >= 10:
         try:
             return datetime.strptime(digits[:10], "%Y%m%d%H")
@@ -1052,6 +1057,7 @@ class SharedSourceCacheService:
         return {
             "best_bucket_key": latest_bucket_key,
             "best_bucket_age_hours": best_bucket_age_hours,
+            "max_selection_age_hours": float(max_selection_age_hours),
             "is_best_bucket_too_old": is_best_bucket_too_old,
             "selected_entries": selected_entries,
             "fallback_buildings": fallback_buildings,
@@ -2896,6 +2902,7 @@ class SharedSourceCacheService:
         return {
             "best_bucket_key": latest_bucket_key,
             "best_bucket_age_hours": best_bucket_age_hours,
+            "max_selection_age_hours": float(max_selection_age_hours),
             "is_best_bucket_too_old": is_best_bucket_too_old,
             "selected_entries": selected_entries,
             "fallback_buildings": fallback_buildings,

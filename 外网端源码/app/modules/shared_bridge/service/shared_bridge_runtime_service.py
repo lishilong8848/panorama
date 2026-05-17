@@ -3130,6 +3130,7 @@ class SharedBridgeRuntimeService:
             return {
                 "best_bucket_key": "",
                 "best_bucket_age_hours": None,
+                "max_selection_age_hours": float(max_selection_age_hours),
                 "is_best_bucket_too_old": False,
                 "selected_entries": [],
                 "fallback_buildings": [],

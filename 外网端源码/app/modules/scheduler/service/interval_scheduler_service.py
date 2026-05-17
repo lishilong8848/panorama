@@ -304,9 +304,11 @@ class IntervalSchedulerService:
                 ok, detail = False, str(exc)
             finished_at = datetime.now()
             duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+            detail_text = str(detail or "").strip()
+            is_skipped = (not ok) and detail_text.lower().startswith("skip:")
             self.state["last_attempt_at"] = finished_at.strftime("%Y-%m-%d %H:%M:%S")
-            self.state["last_status"] = "success" if ok else "failed"
-            self.state["last_error"] = "" if ok else str(detail or "").strip()
+            self.state["last_status"] = "skipped" if is_skipped else ("success" if ok else "failed")
+            self.state["last_error"] = "" if ok or is_skipped else detail_text
             self.state["last_source"] = self.source_name
             self.state["last_duration_ms"] = duration_ms
             if ok:

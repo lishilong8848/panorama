@@ -240,10 +240,48 @@ class HandoverCabinetShiftRecordBitableExportService:
         return counts
 
     @staticmethod
-    def _safe_payload_fields(fields: Dict[str, Any], writable_field_names: Set[str] | None) -> Dict[str, Any]:
-        if writable_field_names is None:
-            return dict(fields)
-        return {name: value for name, value in fields.items() if name in writable_field_names}
+    def _should_skip_payload_field(name: str) -> bool:
+        text = str(name or "").strip()
+        return (not text) or ("提取" in text) or ("check" in text.lower())
+
+    @classmethod
+    def _coerce_payload_field_value(cls, name: str, value: Any, field_meta: Dict[str, Any] | None) -> Any:
+        if field_meta is None:
+            if "自动统计" in str(name or "") and value is not None:
+                return str(value)
+            return value
+        try:
+            field_type = int(field_meta.get("type", 0) or 0)
+        except Exception:  # noqa: BLE001
+            field_type = 0
+        # 飞书文本/多行文本字段要求 string。部分目标表把“事件数量-自动统计”建成了多行文本，
+        # 这里按字段类型转换，避免 TextFieldConvFail。
+        if field_type == 1:
+            return "" if value is None else str(value)
+        if field_type == 2:
+            return cls._normalize_number(value)
+        return value
+
+    @classmethod
+    def _safe_payload_fields(cls, fields: Dict[str, Any], writable_field_meta: Dict[str, Dict[str, Any]] | Set[str] | None) -> Dict[str, Any]:
+        output: Dict[str, Any] = {}
+        for name, value in fields.items():
+            field_name = str(name or "").strip()
+            if cls._should_skip_payload_field(field_name):
+                continue
+            if writable_field_meta is None:
+                output[field_name] = cls._coerce_payload_field_value(field_name, value, None)
+                continue
+            if isinstance(writable_field_meta, set):
+                if field_name not in writable_field_meta:
+                    continue
+                output[field_name] = cls._coerce_payload_field_value(field_name, value, None)
+                continue
+            meta = writable_field_meta.get(field_name)
+            if meta is None:
+                continue
+            output[field_name] = cls._coerce_payload_field_value(field_name, value, meta)
+        return output
 
     @staticmethod
     def _shift_text(duty_shift: str, cfg: Dict[str, Any]) -> str:
@@ -317,7 +355,7 @@ class HandoverCabinetShiftRecordBitableExportService:
             "维护数量": counts["maintenance_count"],
             "施工数量": counts["construction_count"],
             "培训数量": counts["training_count"],
-            "事件数量-自动统计": counts["event_count"],
+            "事件数量-自动统计": str(counts["event_count"]),
             "值班人员-自动统计": str(row.get("duty_staff", "") or "").strip(),
         }
 
@@ -425,7 +463,7 @@ class HandoverCabinetShiftRecordBitableExportService:
         self,
         row: Dict[str, Any],
         cfg: Dict[str, Any],
-        writable_field_names: Set[str] | None = None,
+        writable_field_names: Dict[str, Dict[str, Any]] | Set[str] | None = None,
     ) -> Dict[str, Any]:
         fields = cfg.get("fields", {})
         payload = {
@@ -446,7 +484,7 @@ class HandoverCabinetShiftRecordBitableExportService:
         self,
         row: Dict[str, Any],
         cfg: Dict[str, Any],
-        writable_field_names: Set[str] | None = None,
+        writable_field_names: Dict[str, Dict[str, Any]] | Set[str] | None = None,
     ) -> Dict[str, Any]:
         fields = cfg.get("fields", {})
         payload = {
@@ -460,14 +498,14 @@ class HandoverCabinetShiftRecordBitableExportService:
         payload.update(row.get("extra_fields", {}) if isinstance(row.get("extra_fields", {}), dict) else {})
         return self._safe_payload_fields(payload, writable_field_names)
 
-    def _writable_field_names(self, client: FeishuBitableClient, *, table_id: str, emit_log: Callable[[str], None]) -> Set[str] | None:
+    def _writable_field_names(self, client: FeishuBitableClient, *, table_id: str, emit_log: Callable[[str], None]) -> Dict[str, Dict[str, Any]] | None:
         read_only_types = {20, 1001, 1002, 1005}
         try:
             fields_meta = client.list_fields(table_id=table_id, page_size=500)
         except Exception as exc:  # noqa: BLE001
             self._emit(emit_log, f"字段结构读取失败，将按固定字段名写入: error={exc}")
             return None
-        writable: Set[str] = set()
+        writable: Dict[str, Dict[str, Any]] = {}
         skipped: List[str] = []
         for item in fields_meta if isinstance(fields_meta, list) else []:
             if not isinstance(item, dict):
@@ -479,10 +517,10 @@ class HandoverCabinetShiftRecordBitableExportService:
                 field_type = int(item.get("type", 0) or 0)
             except Exception:  # noqa: BLE001
                 field_type = 0
-            if field_type in read_only_types:
+            if field_type in read_only_types or self._should_skip_payload_field(name):
                 skipped.append(name)
                 continue
-            writable.add(name)
+            writable[name] = item
         if skipped:
             self._emit(emit_log, f"只读字段已跳过: {','.join(skipped)}")
         return writable
