@@ -651,6 +651,31 @@ class LarkCli:
             count += len(chunk)
         return count
 
+    def batch_delete(self, table_id: str, record_ids: list[str]) -> int:
+        count = 0
+        for i in range(0, len(record_ids), 200):
+            chunk = [rid for rid in record_ids[i : i + 200] if rid]
+            if not chunk:
+                continue
+            payload = {"record_id_list": chunk}
+            self.run(
+                [
+                    "base",
+                    "+record-batch-delete",
+                    "--as",
+                    self.identity,
+                    "--base-token",
+                    self.base_token,
+                    "--table-id",
+                    table_id,
+                    "--json",
+                    json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
+                ],
+                write=True,
+            )
+            count += len(chunk)
+        return count
+
     def batch_create(self, table_id: str, fields: list[str], rows: list[list[Any]]) -> int:
         count = 0
         for i in range(0, len(rows), 200):
@@ -1430,6 +1455,14 @@ def upsert_target_rows(
         elif record.get("record_id"):
             blank_ids.append(record["record_id"])
 
+    planned_keys = {row.get(F_TEXT) for row in target_rows if row.get(F_TEXT)}
+    stale_ids = [
+        record_id
+        for key, record_id in by_key.items()
+        if key not in planned_keys and re.fullmatch(r"[A-E]楼-\d号制冷单元", str(key or ""))
+    ]
+    stale_deleted = client.batch_delete(target_table_id, stale_ids) if stale_ids else 0
+
     updated = 0
     unchanged = 0
     reused_blank = 0
@@ -1481,6 +1514,7 @@ def upsert_target_rows(
         "unchanged_existing": unchanged,
         "reused_blank": reused_blank,
         "created": created,
+        "deleted_stale": stale_deleted,
     }
 
 
@@ -1506,6 +1540,7 @@ def verify_source(records: list[dict[str, Any]], derived: SourceDerived) -> list
 
 def verify_target(records: list[dict[str, Any]], target_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_key = {scalar(record["fields"].get(F_TEXT)): record["fields"] for record in records if scalar(record["fields"].get(F_TEXT))}
+    expected_keys = {row[F_TEXT] for row in target_rows if row.get(F_TEXT)}
     mismatches = []
     for row in target_rows:
         key = row[F_TEXT]
@@ -1525,6 +1560,9 @@ def verify_target(records: list[dict[str, Any]], target_rows: list[dict[str, Any
                         "actual": actual,
                     }
                 )
+    for key in sorted(by_key):
+        if key not in expected_keys and re.fullmatch(r"[A-E]楼-\d号制冷单元", str(key or "")):
+            mismatches.append({"key": key, "field": F_TEXT, "expected": "not present", "actual": "stale record exists"})
     return mismatches
 
 

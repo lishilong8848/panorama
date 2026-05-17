@@ -189,6 +189,16 @@ class _HvacFeishuAppClient:
         self._client.batch_update_records(table_id=table_id, records=payload, batch_size=self.batch_size)
         return len(normalized_ids)
 
+    def batch_delete(self, table_id: str, record_ids: List[str]) -> int:
+        normalized_ids = [self._text(item) for item in record_ids if self._text(item)]
+        if not normalized_ids:
+            return 0
+        return self._client.batch_delete_records(
+            table_id=table_id,
+            record_ids=normalized_ids,
+            batch_size=self.batch_size,
+        )
+
     def batch_create(self, table_id: str, fields: List[str], rows: List[List[Any]]) -> int:
         field_names = [self._text(item) for item in fields if self._text(item)]
         fields_list: List[Dict[str, Any]] = []
