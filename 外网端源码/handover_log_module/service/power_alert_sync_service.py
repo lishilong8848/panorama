@@ -347,14 +347,20 @@ class PowerAlertSyncService:
 
     @staticmethod
     def _parse_line(value: Any) -> Dict[str, Any]:
-        match = re.match(r"^(.+)-([A-Z])列-(AC|DC)(\d+)$", str(value or "").strip(), re.IGNORECASE)
+        match = re.match(
+            r"^(.+?)-([A-Z])列(?:(A|B)[路列])?-(AC|DC)0*(\d+)$",
+            str(value or "").strip(),
+            re.IGNORECASE,
+        )
         if not match:
             return {}
         return {
             "room_short": match.group(1),
             "col": match.group(2).upper(),
-            "type": match.group(3).upper(),
-            "num": match.group(4).zfill(3),
+            "route": (match.group(3) or "").upper(),
+            "type": match.group(4).upper(),
+            "num": match.group(5).zfill(3),
+            "num_int": int(match.group(5)),
         }
 
     @staticmethod
@@ -513,7 +519,9 @@ class PowerAlertSyncService:
 
     @staticmethod
     def _line_display(line: Dict[str, Any]) -> str:
-        return f"{line.get('col')}列-{line.get('type')}{line.get('num')}"
+        route = str(line.get("route") or "").strip().upper()
+        route_text = f"{route}路" if route in {"A", "B"} else ""
+        return f"{line.get('col')}列{route_text}-{line.get('type')}{line.get('num')}"
 
     @classmethod
     def _make_branch_code(cls, pdu_text: str, branch_no: str) -> str | None:
@@ -542,26 +550,143 @@ class PowerAlertSyncService:
         pdu = row.pdu_info
         return (str(pdu.get("side", "")), int(pdu.get("feed", 0) or 0), row.pdu)
 
+    @staticmethod
+    def _line_room_number(line: Dict[str, Any]) -> str:
+        match = re.search(r"(\d+)$", str(line.get("room_short") or ""))
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _line_building_code(line: Dict[str, Any]) -> str:
+        return str(line.get("room_short") or "").split("-", 1)[0].strip().upper()
+
     @classmethod
-    def _opposite_line_raw(cls, line_raw: str) -> str | None:
+    def _is_third_floor_line(cls, line: Dict[str, Any]) -> bool:
+        room_number = cls._line_room_number(line)
+        return room_number.startswith("3")
+
+    @staticmethod
+    def _odd_even_pair_num(number: int, *, min_num: int, max_num: int) -> int | None:
+        if number < min_num or number > max_num:
+            return None
+        if (number - min_num) % 2 == 0:
+            pair = number + 1
+        else:
+            pair = number - 1
+        return pair if min_num <= pair <= max_num else None
+
+    @staticmethod
+    def _line_spec_from(line: Dict[str, Any], *, line_type: str, number: int, route: str | None = None) -> Dict[str, Any]:
+        return {
+            "room_short": line.get("room_short"),
+            "col": line.get("col"),
+            "route": (route if route is not None else line.get("route") or ""),
+            "type": line_type,
+            "num": str(number).zfill(3),
+            "num_int": int(number),
+        }
+
+    @classmethod
+    def _special_opposite_line_spec(cls, line: Dict[str, Any]) -> Dict[str, Any] | None:
+        if not cls._is_third_floor_line(line):
+            return None
+
+        building_code = cls._line_building_code(line)
+        line_type = str(line.get("type") or "").upper()
+        number = int(line.get("num_int") or 0)
+        room_number = cls._line_room_number(line)
+
+        if building_code in {"A", "B", "C", "D"}:
+            if room_number.endswith("301"):
+                if line_type == "AC" and 1 <= number <= 6:
+                    return cls._line_spec_from(line, line_type="DC", number=number, route="")
+                if line_type == "DC" and 1 <= number <= 6:
+                    return cls._line_spec_from(line, line_type="AC", number=number, route="")
+                if line_type == "DC":
+                    pair = cls._odd_even_pair_num(number, min_num=7, max_num=14)
+                    if pair is not None:
+                        return cls._line_spec_from(line, line_type="DC", number=pair, route="")
+            if room_number.endswith("302"):
+                if line_type == "DC":
+                    pair = cls._odd_even_pair_num(number, min_num=1, max_num=8)
+                    if pair is not None:
+                        return cls._line_spec_from(line, line_type="DC", number=pair, route="")
+                    if 9 <= number <= 14:
+                        return cls._line_spec_from(line, line_type="AC", number=number - 8, route="")
+                if line_type == "AC" and 1 <= number <= 6:
+                    return cls._line_spec_from(line, line_type="DC", number=number + 8, route="")
+
+        if building_code == "E" and line_type == "DC":
+            pair = cls._odd_even_pair_num(number, min_num=1, max_num=20)
+            if pair is not None:
+                route = str(line.get("route") or "").upper()
+                if route == "A":
+                    route = "B"
+                elif route == "B":
+                    route = "A"
+                return cls._line_spec_from(line, line_type="DC", number=pair, route=route)
+
+        return None
+
+    @classmethod
+    def _default_opposite_line_spec(cls, line: Dict[str, Any]) -> Dict[str, Any] | None:
+        line_type = str(line.get("type") or "").upper()
+        if line_type not in {"AC", "DC"}:
+            return None
+        opposite_type = "DC" if line_type == "AC" else "AC"
+        return cls._line_spec_from(line, line_type=opposite_type, number=int(line.get("num_int") or 0), route="")
+
+    @classmethod
+    def _opposite_line_spec(cls, line_raw: str) -> Dict[str, Any] | None:
         line = cls._parse_line(line_raw)
         if not line:
             return None
-        opposite_type = "DC" if line.get("type") == "AC" else "AC"
-        return f"{line.get('room_short')}-{line.get('col')}列-{opposite_type}{line.get('num')}"
+        return cls._special_opposite_line_spec(line) or cls._default_opposite_line_spec(line)
+
+    @staticmethod
+    def _line_raw_from_spec(line: Dict[str, Any]) -> str:
+        route = str(line.get("route") or "").strip().upper()
+        route_text = f"{route}路" if route in {"A", "B"} else ""
+        return f"{line.get('room_short')}-{line.get('col')}列{route_text}-{line.get('type')}{line.get('num')}"
+
+    @classmethod
+    def _opposite_line_raw(cls, line_raw: str) -> str | None:
+        spec = cls._opposite_line_spec(line_raw)
+        return cls._line_raw_from_spec(spec) if spec else None
 
     def _find_opposite_line_group(
         self,
         line_raw: str,
         group_stats: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any] | None:
-        exact_key = self._opposite_line_raw(line_raw)
+        target = self._opposite_line_spec(line_raw)
+        exact_key = self._line_raw_from_spec(target) if target else None
         if exact_key and exact_key in group_stats:
             return group_stats.get(exact_key)
 
         line = self._parse_line(line_raw)
-        if not line:
+        if not line or not target:
             return None
+        exact_candidates: List[Dict[str, Any]] = []
+        for candidate_key, candidate in group_stats.items():
+            candidate_line = self._parse_line(candidate_key)
+            if not candidate_line:
+                continue
+            if (
+                candidate_line.get("room_short") == target.get("room_short")
+                and candidate_line.get("col") == target.get("col")
+                and candidate_line.get("type") == target.get("type")
+                and candidate_line.get("num") == target.get("num")
+                and (
+                    not str(target.get("route") or "").strip()
+                    or candidate_line.get("route") == target.get("route")
+                )
+            ):
+                exact_candidates.append(candidate)
+        if len(exact_candidates) == 1:
+            return exact_candidates[0]
+        if self._special_opposite_line_spec(line):
+            return None
+
         opposite_type = "DC" if line.get("type") == "AC" else "AC"
         candidates: List[Dict[str, Any]] = []
         for candidate_key, candidate in group_stats.items():
