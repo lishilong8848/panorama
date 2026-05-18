@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
-from handover_log_module.core.shift_window import build_duty_window
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 
 
@@ -176,15 +175,20 @@ class HandoverSummaryMessageService:
         return f"{building}世纪互联 {shift_text}".strip()
 
     def _build_duty_time(self, *, duty_date: str, duty_shift: str) -> str:
-        download_cfg = self.handover_cfg.get("download", {})
-        shift_windows = download_cfg.get("shift_windows", {}) if isinstance(download_cfg, dict) else {}
         try:
-            window = build_duty_window(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                shift_windows=shift_windows if isinstance(shift_windows, dict) else {},
+            duty_day = datetime.strptime(str(duty_date or "").strip(), "%Y-%m-%d")
+            if duty_shift == "day":
+                start_dt = duty_day.replace(hour=9, minute=0, second=0, microsecond=0)
+                end_dt = duty_day.replace(hour=18, minute=0, second=0, microsecond=0)
+            elif duty_shift == "night":
+                start_dt = duty_day.replace(hour=18, minute=0, second=0, microsecond=0)
+                end_dt = (duty_day + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+            else:
+                raise ValueError(f"未知班次: {duty_shift}")
+            return _format_duty_time(
+                start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                end_dt.strftime("%Y-%m-%d %H:%M:%S"),
             )
-            return _format_duty_time(window.start_time, window.end_time)
         except Exception:  # noqa: BLE001
             return duty_date
 
