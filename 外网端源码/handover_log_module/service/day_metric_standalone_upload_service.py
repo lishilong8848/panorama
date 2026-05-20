@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -9,10 +8,10 @@ from typing import Any, Callable, Dict, List
 
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.config.config_compat_cleanup import sanitize_day_metric_upload_config
+from app.modules.scheduler.repository.scheduler_state_repository import SchedulerStateRepository
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.modules.shared_bridge.service.shared_source_cache_service import SharedSourceCacheService
-from app.shared.utils.atomic_file import atomic_write_text
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
@@ -43,6 +42,9 @@ def _safe_int(value: Any, default: int) -> int:
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+_STATE_REPOSITORY = SchedulerStateRepository()
 
 
 class DayMetricStandaloneUploadService:
@@ -88,13 +90,7 @@ class DayMetricStandaloneUploadService:
         return self._runtime_state_root() / self.FAILED_UNITS_STATE_FILE
 
     def _load_failed_units_state(self) -> Dict[str, Any]:
-        path = self._failed_units_state_path()
-        if not path.exists():
-            return {"updated_at": "", "units": []}
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            return {"updated_at": "", "units": []}
+        payload = _STATE_REPOSITORY.load(self._failed_units_state_path(), {"updated_at": "", "units": []})
         units = payload.get("units", []) if isinstance(payload, dict) else []
         return {
             "updated_at": str(payload.get("updated_at", "") or "").strip() if isinstance(payload, dict) else "",
@@ -102,17 +98,11 @@ class DayMetricStandaloneUploadService:
         }
 
     def _save_failed_units_state(self, units: List[Dict[str, Any]]) -> None:
-        path = self._failed_units_state_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "updated_at": _now_text(),
             "units": [copy.deepcopy(item) for item in units if isinstance(item, dict)],
         }
-        atomic_write_text(
-            path,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _STATE_REPOSITORY.save(self._failed_units_state_path(), payload)
 
     def _sync_failed_units_state(self, result: Dict[str, Any]) -> None:
         units: List[Dict[str, Any]] = []

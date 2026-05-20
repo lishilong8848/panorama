@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List
 
 from app.shared.utils.atomic_file import atomic_write_file
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 
 
 BACKUP_MANIFEST_NAME = "backup_manifest.json"
@@ -172,20 +173,14 @@ class UpdateApplier:
             "created_files": sorted({str(item).replace("\\", "/").strip() for item in created_files if str(item).strip()}),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-        (snapshot / BACKUP_MANIFEST_NAME).write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        save_cached_json(snapshot / BACKUP_MANIFEST_NAME, payload, indent=2, encoding="utf-8")
 
     def _read_backup_manifest(self, snapshot: Path) -> Dict[str, Any]:
         path = snapshot / BACKUP_MANIFEST_NAME
         if not path.exists():
             return {}
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            return payload if isinstance(payload, dict) else {}
-        except Exception:  # noqa: BLE001
-            return {}
+        payload = load_cached_json(path, {}, encoding="utf-8")
+        return payload if isinstance(payload, dict) else {}
 
     def apply_patch_zip(
         self,

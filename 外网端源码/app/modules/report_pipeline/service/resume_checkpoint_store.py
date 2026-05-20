@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
+
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 
 
 def now_text() -> str:
@@ -30,19 +31,14 @@ def parse_time_or_none(value: str) -> datetime | None:
 def safe_load_json(path: Path, default_obj: Dict[str, Any]) -> Dict[str, Any]:
     if not _safe_path_exists(path):
         return copy.deepcopy(default_obj)
-    try:
-        with path.open("r", encoding="utf-8-sig") as f:
-            obj = json.load(f)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:  # noqa: BLE001
-        pass
+    obj = load_cached_json(path, copy.deepcopy(default_obj), encoding="utf-8-sig")
+    if isinstance(obj, dict):
+        return obj
     return copy.deepcopy(default_obj)
 
 
 def safe_save_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_cached_json(path, data, indent=2, encoding="utf-8")
 
 
 def _safe_path_exists(path: Path) -> bool:

@@ -422,6 +422,7 @@ class HvacBitableSyncService:
             target_rows,
             weather_provider,
         )
+        report["weather_warning_text"] = weather_provider.warning_text()
         if weather_provider.error:
             report["weather_forecast_error"] = weather_provider.error
         if weather_provider.warning_error:
@@ -455,7 +456,8 @@ class HvacBitableSyncService:
             emit_log,
             f"[暖通运行数据同步] 完成 source_records={report['source_records']}, "
             f"source_updated={report['source_updated_records']}, target_rows={report['target_planned_rows']}, "
-            f"alerts={alert_count}, elapsed_ms={report['elapsed_ms']}",
+            f"alerts={alert_count}, weather_warning={str(report.get('weather_warning_text') or '-').strip() or '-'}, "
+            f"elapsed_ms={report['elapsed_ms']}",
         )
         return report
 

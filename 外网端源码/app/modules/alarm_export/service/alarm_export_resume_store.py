@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 
 
 def _now_text() -> str:
@@ -11,38 +12,24 @@ def _now_text() -> str:
 
 
 def _safe_load_json(path: Path, default_obj: Dict[str, Any]) -> Dict[str, Any]:
-    if not path.exists():
-        return dict(default_obj)
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            obj = json.load(f)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:  # noqa: BLE001
-        pass
+    obj = load_cached_json(path, dict(default_obj), encoding="utf-8")
+    if isinstance(obj, dict):
+        return obj
     return dict(default_obj)
 
 
 def _safe_save_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_cached_json(path, payload, indent=2, encoding="utf-8")
 
 
 def _safe_save_rows(path: Path, rows: List[Dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    save_cached_json(path, rows, indent=None, encoding="utf-8")
 
 
 def _safe_load_rows(path: Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            payload = json.load(f)
-        if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
-    except Exception:  # noqa: BLE001
-        return []
+    payload = load_cached_json(path, [], encoding="utf-8")
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
     return []
 
 

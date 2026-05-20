@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List
+
+from app.shared.utils.cached_json_file import save_cached_json
 
 
 def run_with_config(
@@ -156,9 +157,9 @@ def save_results(
         used_names[base_name] = seq
         file_name = f"{base_name}.json" if seq == 1 else f"{base_name}_{seq}.json"
         out_path = output_dir / file_name
-        out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_cached_json(out_path, data, indent=2, encoding="utf-8")
         emit_log(f"[{result.building}] 已输出: {out_path}")
 
     merged_path = output_dir / "全部楼栋_计算结果.json"
-    merged_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_cached_json(merged_path, merged, indent=2, encoding="utf-8")
     emit_log(f"[汇总] 已输出: {merged_path}")

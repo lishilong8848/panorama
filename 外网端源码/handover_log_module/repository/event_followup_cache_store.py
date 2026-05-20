@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import json
 import threading
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.shared.utils.atomic_file import atomic_write_text
+from app.modules.scheduler.repository.scheduler_state_repository import SchedulerStateRepository
 from pipeline_utils import get_app_dir
+
+
+_STATE_REPOSITORY = SchedulerStateRepository()
 
 
 def _now_text() -> str:
@@ -16,25 +18,11 @@ def _now_text() -> str:
 
 
 def _safe_load_json(path: Path, default_obj: Dict[str, Any]) -> Dict[str, Any]:
-    if not path.exists():
-        return dict(default_obj)
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            payload = json.load(f)
-        if isinstance(payload, dict):
-            return payload
-    except Exception:  # noqa: BLE001
-        pass
-    return dict(default_obj)
+    return _STATE_REPOSITORY.load(path, default_obj)
 
 
 def _safe_save_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(
-        path,
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _STATE_REPOSITORY.save(path, payload)
 
 
 def _resolve_runtime_state_root(*, global_paths: Dict[str, Any] | None) -> Path:

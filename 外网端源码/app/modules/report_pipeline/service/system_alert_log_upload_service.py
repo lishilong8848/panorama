@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List
 
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.scheduler.repository.scheduler_state_repository import SchedulerStateRepository
 from pipeline_utils import get_app_dir
 
 
@@ -45,6 +46,7 @@ class SystemAlertLogUploadService:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_active_at = time.monotonic()
+        self._state_repository = SchedulerStateRepository()
         self._state = self._load_state()
         self._last_flush_at = ""
         self._last_error = ""
@@ -60,18 +62,12 @@ class SystemAlertLogUploadService:
         return path
 
     def _load_state(self) -> Dict[str, Any]:
-        try:
-            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            payload = {}
+        payload = self._state_repository.load(self._state_path, {"uploaded_line_count": 0})
         uploaded_line_count = int(payload.get("uploaded_line_count", 0) or 0)
         return {"uploaded_line_count": max(0, uploaded_line_count)}
 
     def _save_state(self) -> None:
-        self._state_path.write_text(
-            json.dumps(self._state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._state_repository.save(self._state_path, self._state)
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()

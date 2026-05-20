@@ -1,13 +1,15 @@
 ﻿from __future__ import annotations
 
 import copy
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from app.shared.utils.atomic_file import atomic_write_text
+from app.modules.scheduler.repository.scheduler_state_repository import SchedulerStateRepository
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
+
+
+_STATE_REPOSITORY = SchedulerStateRepository()
 
 
 class HandoverDailyReportStateService:
@@ -84,12 +86,7 @@ class HandoverDailyReportStateService:
 
     def _load_state(self) -> Dict[str, Any]:
         path = self._state_path()
-        if not path.exists():
-            return {"batches": {}, "screenshot_auth": self._default_auth_state()}
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {"batches": {}, "screenshot_auth": self._default_auth_state()}
+        payload = _STATE_REPOSITORY.load(path, {"batches": {}, "screenshot_auth": self._default_auth_state()})
         if not isinstance(payload, dict):
             return {"batches": {}, "screenshot_auth": self._default_auth_state()}
         batches = payload.get("batches", {})
@@ -104,12 +101,7 @@ class HandoverDailyReportStateService:
         }
 
     def _save_state(self, state: Dict[str, Any]) -> None:
-        path = self._state_path()
-        atomic_write_text(
-            path,
-            json.dumps(state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _STATE_REPOSITORY.save(self._state_path(), state)
 
     def _normalize_export_state(self, raw: Dict[str, Any] | None) -> Dict[str, Any]:
         payload = raw if isinstance(raw, dict) else {}

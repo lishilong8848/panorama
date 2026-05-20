@@ -57,9 +57,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "precipitation_probability_threshold": 50,
         "timeout_seconds": 15,
         "warnings": {
-            "enabled": False,
-            "provider": "cma",
-            "station_id": "58259"
+            "enabled": True,
+            "provider": "nmc",
+            "station_id": "VHAmf"
         },
     },
     "notifications": {
@@ -90,6 +90,7 @@ T_MODE = "冷机运行模式"
 T_UPDATED = "更新时间"
 T_MODE_SWITCH_HINT = "模式切换提示"
 T_WEATHER_SUMMARY = "8h内温度趋势"
+T_WEATHER_WARNING = "气象预警"
 T_LEGACY_TEMP_TREND = "2h内温度趋势"
 T_WET_BULB = "湿球温度"
 T_TOWER_FREQ = "冷塔频率"
@@ -132,6 +133,7 @@ TARGET_FIELDS = [
     T_MODE,
     T_MODE_SWITCH_HINT,
     T_WEATHER_SUMMARY,
+    T_WEATHER_WARNING,
     T_WET_BULB,
     T_TOWER_FREQ,
     T_TOWER,
@@ -250,6 +252,7 @@ class WeatherSummaryProvider:
         self.warning_error: str | None = None
         self._forecast: list[dict[str, Any]] | None = None
         self._warning_summary: str | None = None
+        self._warning_text: str | None = None
         self._run_time = datetime.now()
         self.nearest_window_count = 0
 
@@ -264,8 +267,7 @@ class WeatherSummaryProvider:
         weather_text = self.describe_window(window, summary_hours)
         if not weather_text:
             return None
-        warning_text = self.warning_summary()
-        return f"{weather_text}，{warning_text}" if warning_text else weather_text
+        return weather_text
 
     def forecast_window(self, start_time: datetime, hours: int) -> list[dict[str, Any]]:
         forecast = self.forecast()
@@ -329,7 +331,13 @@ class WeatherSummaryProvider:
         )
 
     def weather_text(self, window: list[dict[str, Any]]) -> str:
-        codes = [item.get("weather_code") for item in window if item.get("weather_code") is not None]
+        codes: list[int] = []
+        for item in window:
+            try:
+                if item.get("weather_code") not in ("", None):
+                    codes.append(int(float(item.get("weather_code"))))
+            except Exception:  # noqa: BLE001
+                pass
         if not codes:
             return "天气情况未知"
         severe_order = [99, 96, 95, 82, 86, 75, 67, 65, 63, 81, 80, 61, 53, 51, 3, 2, 1, 0]
@@ -338,8 +346,17 @@ class WeatherSummaryProvider:
         return f"天气以{WEATHER_CODE_TEXT.get(int(selected), '未知天气')}为主"
 
     def rain_text(self, window: list[dict[str, Any]]) -> str:
-        precipitation = [float(item.get("precipitation") or 0) for item in window]
-        probabilities = [int(item.get("precipitation_probability") or 0) for item in window]
+        precipitation: list[float] = []
+        probabilities: list[int] = []
+        for item in window:
+            try:
+                precipitation.append(float(item.get("precipitation") or 0))
+            except Exception:  # noqa: BLE001
+                precipitation.append(0.0)
+            try:
+                probabilities.append(int(float(item.get("precipitation_probability") or 0)))
+            except Exception:  # noqa: BLE001
+                probabilities.append(0)
         total_precipitation = sum(precipitation)
         max_probability = max(probabilities) if probabilities else 0
         precipitation_threshold = float(self.config.get("precipitation_threshold_mm", 0.1))
@@ -407,11 +424,11 @@ class WeatherSummaryProvider:
         if not warning_config.get("enabled", False):
             self._warning_summary = ""
             return self._warning_summary
-        provider = str(warning_config.get("provider", "cma")).lower()
+        provider = str(warning_config.get("provider", "nmc")).lower()
         try:
-            if provider != "cma":
+            if provider != "nmc":
                 raise ValueError(f"不支持的气象预警源: {provider}")
-            alarms = self.fetch_cma_alarms(str(warning_config.get("station_id", "")))
+            alarms = self.fetch_nmc_alarms(str(warning_config.get("station_id", "") or "VHAmf"))
             if not alarms:
                 self._warning_summary = ""
             else:
@@ -423,17 +440,59 @@ class WeatherSummaryProvider:
             self._warning_summary = ""
         return self._warning_summary
 
-    def fetch_cma_alarms(self, station_id: str) -> list[dict[str, Any]]:
+    def warning_text(self) -> str | None:
+        if self._warning_text is not None:
+            return self._warning_text
+        if not self.config.get("enabled", True):
+            self._warning_text = "天气查询未启用"
+            return self._warning_text
+
+        warning_config = self.config.get("warnings") or {}
+        if not warning_config.get("enabled", False):
+            self._warning_text = "气象预警未启用"
+            return self._warning_text
+
+        official_warning = self.warning_summary()
+        if official_warning:
+            self._warning_text = official_warning
+            return self._warning_text
+
+        if self.warning_error:
+            self._warning_text = "气象预警查询失败"
+        else:
+            self._warning_text = "无气象预警"
+        return self._warning_text
+
+    def fetch_nmc_alarms(self, station_id: str) -> list[dict[str, Any]]:
         if not station_id:
-            raise ValueError("未配置中国气象局站点 ID")
-        url = f"https://weather.cma.cn/api/weather/view?stationid={station_id}"
+            raise ValueError("未配置中央气象台城市站点 ID")
+        params = urlencode({"stationid": station_id})
+        url = f"https://www.nmc.cn/rest/weather?{params}"
         timeout = float(self.config.get("timeout_seconds", 15))
-        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://www.nmc.cn/",
+            },
+        )
         with urlopen(request, timeout=timeout) as response:
             data = json.load(response)
         if data.get("code") not in (0, "0", None):
-            raise RuntimeError(f"中国气象局接口返回异常: {data.get('msg') or data.get('code')}")
-        return (data.get("data") or {}).get("alarm") or []
+            raise RuntimeError(f"中央气象台接口返回异常: {data.get('msg') or data.get('code')}")
+        warn = (((data.get("data") or {}).get("real") or {}).get("warn") or {})
+        alert = str(warn.get("alert") or "").strip()
+        if not alert or alert == "9999":
+            return []
+        return [
+            {
+                "title": alert,
+                "type": str(warn.get("signaltype") or "").strip(),
+                "level": str(warn.get("signallevel") or "").strip(),
+                "description": str(warn.get("issuecontent") or "").strip(),
+                "url": warn.get("url"),
+            }
+        ]
 
 
 def fmt_temp(value: Any) -> str:
@@ -445,7 +504,7 @@ def merge_config(path: Path | None) -> dict[str, Any]:
     config = json.loads(json.dumps(DEFAULT_CONFIG, ensure_ascii=False))
     if not path:
         return config
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8-sig") as f:
         user_config = json.load(f)
 
     def deep_update(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
@@ -1082,6 +1141,20 @@ def ensure_target_fields(client: LarkCli, target_table_id: str) -> dict[str, Any
         changes["created"].append(name)
         fields = {item["name"]: item for item in client.field_list(target_table_id)}
 
+    def ensure_plain_text_field(name: str) -> None:
+        nonlocal fields
+        payload = {"type": "text", "name": name, "style": {"type": "plain"}}
+        field = fields.get(name)
+        if field:
+            if field.get("type") != "text":
+                client.field_update(target_table_id, field["id"], payload)
+                changes["updated"].append(name)
+                fields = {item["name"]: item for item in client.field_list(target_table_id)}
+            return
+        client.field_create(target_table_id, payload)
+        changes["created"].append(name)
+        fields = {item["name"]: item for item in client.field_list(target_table_id)}
+
     def ensure_weather_summary_text() -> None:
         nonlocal fields
         payload = {"type": "text", "name": T_WEATHER_SUMMARY, "style": {"type": "plain"}}
@@ -1098,9 +1171,7 @@ def ensure_target_fields(client: LarkCli, target_table_id: str) -> dict[str, Any
             changes["updated"].append(f"{T_LEGACY_TEMP_TREND} -> {T_WEATHER_SUMMARY}")
             fields = {item["name"]: item for item in client.field_list(target_table_id)}
             return
-        client.field_create(target_table_id, payload)
-        changes["created"].append(T_WEATHER_SUMMARY)
-        fields = {item["name"]: item for item in client.field_list(target_table_id)}
+        ensure_plain_text_field(T_WEATHER_SUMMARY)
 
     # Rename the original single combined supply field if the table still uses it.
     old_supply = "二次泵末端冷冻水供水温度"
@@ -1115,6 +1186,7 @@ def ensure_target_fields(client: LarkCli, target_table_id: str) -> dict[str, Any
         fields = {item["name"]: item for item in client.field_list(target_table_id)}
 
     ensure_weather_summary_text()
+    ensure_plain_text_field(T_WEATHER_WARNING)
 
     for name in [
         T_MODE_SWITCH_HINT,
@@ -1424,11 +1496,12 @@ def target_row(building: str, unit: str, mode: str, derived: SourceDerived) -> d
         T_MODE: mode,
         T_MODE_SWITCH_HINT: mode_switch_hint(building, mode, wet_bulb, metrics, supply_values, tower_frequency_values),
         T_WEATHER_SUMMARY: "",
+        T_WEATHER_WARNING: "",
         T_WET_BULB: fmt_num(wet_bulb),
         T_TOWER_FREQ: max_fmt(tower_frequency_values),
         T_TOWER: fmt_num(metrics.get("tower")),
         T_PLATE_DIFF: None if mode == "制冷" else metrics.get("plate_diff"),
-        T_CHILLER_TOWER_DIFF: None if mode == "预冷" else metrics.get("tower_diff"),
+        T_CHILLER_TOWER_DIFF: metrics.get("tower_diff"),
     }
     for index, field_name in enumerate(SUPPLY_FIELDS[:4]):
         row[field_name] = fmt_num(supply_values[index])
@@ -1480,18 +1553,25 @@ def upsert_target_rows(
     unchanged = 0
     reused_blank = 0
     to_create: list[dict[str, Any]] = []
+
+    weather_summary = weather_provider.summary_for(None)
+    weather_warning = weather_provider.warning_text()
+
+    def apply_weather_fields(row: dict[str, Any]) -> None:
+        if weather_summary is None:
+            row.pop(T_WEATHER_SUMMARY, None)
+        else:
+            row[T_WEATHER_SUMMARY] = weather_summary
+        if weather_warning is None:
+            row.pop(T_WEATHER_WARNING, None)
+        else:
+            row[T_WEATHER_WARNING] = weather_warning
+
     for row in target_rows:
         key = row[F_TEXT]
+        apply_weather_fields(row)
         if key in by_key:
             current_fields = record_by_key[key]["fields"]
-            # Feishu's updated-time field is the previous write time until this
-            # update completes. Weather trend must describe the current upload
-            # window, otherwise morning uploads may reuse a night-time anchor.
-            weather_summary = weather_provider.summary_for(None)
-            if weather_summary is None:
-                row.pop(T_WEATHER_SUMMARY, None)
-            else:
-                row[T_WEATHER_SUMMARY] = weather_summary
             patch = {}
             for field_name, value in row.items():
                 expected = "" if value is None else value
@@ -1502,19 +1582,9 @@ def upsert_target_rows(
             else:
                 unchanged += 1
         elif blank_ids:
-            weather_summary = weather_provider.summary_for(None)
-            if weather_summary is None:
-                row.pop(T_WEATHER_SUMMARY, None)
-            else:
-                row[T_WEATHER_SUMMARY] = weather_summary
             patch = {field_name: (value if value != "" else None) for field_name, value in row.items()}
             reused_blank += client.batch_update(target_table_id, [blank_ids.pop(0)], patch)
         else:
-            weather_summary = weather_provider.summary_for(None)
-            if weather_summary is None:
-                row.pop(T_WEATHER_SUMMARY, None)
-            else:
-                row[T_WEATHER_SUMMARY] = weather_summary
             to_create.append(row)
 
     created = 0
@@ -1626,6 +1696,7 @@ def main() -> int:
     if not args.source_only:
         report["target_field_changes"] = ensure_target_fields(client, target_table)
         report["target_write"] = upsert_target_rows(client, target_table, target_view, target_rows, weather_provider)
+        report["weather_warning_text"] = weather_provider.warning_text()
     if weather_provider.error:
         report["weather_forecast_error"] = weather_provider.error
     if weather_provider.warning_error:
@@ -1673,6 +1744,8 @@ def main() -> int:
             print(f"- 源表写入记录: {report['source_updated_records']}")
         if "target_write" in report:
             print(f"- 目标表写入: {json.dumps(report['target_write'], ensure_ascii=False)}")
+        if "weather_warning_text" in report:
+            print(f"- 气象预警: {report['weather_warning_text']}")
         if "mode_switch_alert_push" in report:
             print(f"- 模式切换提醒推送: {json.dumps(report['mode_switch_alert_push'], ensure_ascii=False)}")
         if "source_verify_mismatch_count" in report:

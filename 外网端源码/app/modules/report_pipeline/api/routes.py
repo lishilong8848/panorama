@@ -86,6 +86,7 @@ from app.shared.utils.runtime_temp_workspace import (
     create_runtime_temp_dir,
     resolve_runtime_state_root,
 )
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 from app.shared.utils.artifact_naming import build_source_artifact_path
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.event_followup_cache_store import EventFollowupCacheStore
@@ -2225,7 +2226,7 @@ def _load_review_access_state(container) -> Dict[str, Any]:
     if not path.exists():
         return _review_access_state_template()
     try:
-        return _normalize_review_access_state(json.loads(path.read_text(encoding="utf-8")))
+        return _normalize_review_access_state(load_cached_json(path, {}, encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return _review_access_state_template()
 
@@ -2233,8 +2234,7 @@ def _load_review_access_state(container) -> Dict[str, Any]:
 def _save_review_access_state(container, state: Dict[str, Any]) -> Dict[str, Any]:
     normalized = _normalize_review_access_state(state)
     path = _resolve_review_access_state_path(container)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_cached_json(path, normalized, indent=2, encoding="utf-8")
     return normalized
 
 

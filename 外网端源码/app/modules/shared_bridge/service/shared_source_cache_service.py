@@ -38,8 +38,9 @@ from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
-from app.shared.utils.atomic_file import atomic_copy_file, atomic_write_text, validate_excel_workbook_file
+from app.shared.utils.atomic_file import atomic_copy_file, validate_excel_workbook_file
 from app.shared.utils.artifact_naming import build_source_artifact_path
+from app.shared.utils.cached_json_file import save_cached_json
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.excel_reader import load_rows
 from handover_log_module.service.handover_download_service import HandoverDownloadService
@@ -2306,12 +2307,7 @@ class SharedSourceCacheService:
         if marker_path is None:
             return
         try:
-            marker_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(
-                marker_path,
-                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
+            save_cached_json(marker_path, payload, indent=2, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             self._log_source_cache_event(
                 f"失败标记文件写入失败: relative_path={relative_path}, error={exc}"

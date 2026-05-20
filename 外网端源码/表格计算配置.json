@@ -4593,9 +4593,9 @@
           "precipitation_probability_threshold": 50,
           "timeout_seconds": 15,
           "warnings": {
-            "enabled": false,
-            "provider": "cma",
-            "station_id": "58259"
+            "enabled": true,
+            "provider": "nmc",
+            "station_id": "VHAmf"
           }
         },
         "notifications": {

@@ -2,7 +2,6 @@
 
 import copy
 import hashlib
-import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +9,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.feishu.service.im_file_message_client import FeishuImFileMessageClient
-from app.shared.utils.atomic_file import atomic_write_text
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
@@ -186,12 +185,7 @@ class MonthlyReportDeliveryService:
                 snapshot = self._empty_last_run()
                 snapshot["report_type"] = normalized_report_type
                 return snapshot
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            snapshot = self._empty_last_run()
-            snapshot["report_type"] = normalized_report_type
-            return snapshot
+        payload = load_cached_json(path, {}, encoding="utf-8")
         if not isinstance(payload, dict):
             snapshot = self._empty_last_run()
             snapshot["report_type"] = normalized_report_type
@@ -227,11 +221,7 @@ class MonthlyReportDeliveryService:
         snapshot = self._empty_last_run()
         snapshot.update(payload if isinstance(payload, dict) else {})
         snapshot["report_type"] = normalized_report_type
-        atomic_write_text(
-            self._last_run_path(normalized_report_type),
-            json.dumps(snapshot, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        save_cached_json(self._last_run_path(normalized_report_type), snapshot, indent=2, encoding="utf-8")
 
     def _build_feishu_client(self) -> FeishuImFileMessageClient:
         handover_cfg = self._handover_cfg()

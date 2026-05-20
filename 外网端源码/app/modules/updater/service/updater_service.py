@@ -35,6 +35,7 @@ from app.modules.updater.service.remote_control_store import (
 )
 from app.modules.updater.service.runtime_dependency_sync_service import RuntimeDependencySyncService
 from app.modules.updater.service.update_applier import UpdateApplier
+from app.shared.utils.cached_json_file import save_cached_json
 
 
 _SOURCE_RUN_DISABLE_UPDATER_ENV = "QJPT_DISABLE_UPDATER_IN_SOURCE_RUN"
@@ -1462,8 +1463,7 @@ class UpdaterService:
                 "mirror_manifest_path": str(self._source_manifest_path),
             }
         )
-        self._source_publish_state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._source_publish_state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_cached_json(self._source_publish_state_path, payload, indent=2, encoding="utf-8")
 
     def publish_approved_source_snapshot(self) -> Dict[str, Any]:
         if self.role_mode != "external":
@@ -1521,13 +1521,10 @@ class UpdaterService:
             staging_approved_zip = staging_root / _SOURCE_SNAPSHOT_ZIP_NAME
             approved_zip = approved_root / _SOURCE_SNAPSHOT_ZIP_NAME
             approved_zip_tmp = approved_root / f".{_SOURCE_SNAPSHOT_ZIP_NAME}.tmp"
-            manifest_tmp = approved_root / f".{_SOURCE_MANIFEST_NAME}.tmp"
-            state_tmp = approved_root / f".{_SOURCE_PUBLISH_STATE_NAME}.tmp"
             shutil.copy2(staging_zip, staging_approved_zip)
             shutil.copy2(staging_approved_zip, approved_zip_tmp)
             os.replace(approved_zip_tmp, approved_zip)
-            manifest_tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(manifest_tmp, self._source_manifest_path)
+            save_cached_json(self._source_manifest_path, manifest, indent=2, encoding="utf-8")
             publish_state = {
                 "mirror_ready": True,
                 "mirror_version": local_version_text or _short_git_commit(local_commit),
@@ -1540,8 +1537,7 @@ class UpdaterService:
                 "zip_relpath": _SOURCE_SNAPSHOT_ZIP_NAME,
                 "approved_commit": local_commit,
             }
-            state_tmp.write_text(json.dumps(publish_state, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(state_tmp, self._source_publish_state_path)
+            save_cached_json(self._source_publish_state_path, publish_state, indent=2, encoding="utf-8")
             staging_approved_zip.unlink(missing_ok=True)
             self._sync_mirror_runtime()
             self._log(
@@ -1687,8 +1683,7 @@ class UpdaterService:
             "updated_from_manifest_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         try:
-            meta_path.parent.mkdir(parents=True, exist_ok=True)
-            meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            save_cached_json(meta_path, payload, indent=2, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             self._log(f"写入本地版本元数据失败: {exc}")
 

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
@@ -52,11 +53,84 @@ from pipeline_utils import (
     get_app_dir,
     get_bundle_dir,
     load_download_module,
-    load_pipeline_config,
+    load_pipeline_config as _load_pipeline_config_from_disk,
     resolve_config_path,
 )
 
 _DAY_METRIC_REPAIR_BASELINE_FILENAME = "表格计算配置.backup.20260409-145808.json"
+_CONFIG_CACHE_LOCK = threading.RLock()
+_CONFIG_CACHE: dict[str, tuple[int | None, Dict[str, Any]]] = {}
+_CONFIG_PATH_LOCKS_GUARD = threading.Lock()
+_CONFIG_PATH_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _config_cache_key(path: str | Path) -> str:
+    return str(Path(path).resolve(strict=False)).casefold()
+
+
+def _config_lock_for_path(path: str | Path) -> threading.RLock:
+    key = _config_cache_key(path)
+    with _CONFIG_PATH_LOCKS_GUARD:
+        lock = _CONFIG_PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _CONFIG_PATH_LOCKS[key] = lock
+        return lock
+
+
+def _config_mtime_ns(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _get_cached_pipeline_config(path: Path, mtime_ns: int | None) -> Dict[str, Any] | None:
+    key = _config_cache_key(path)
+    with _CONFIG_CACHE_LOCK:
+        cached = _CONFIG_CACHE.get(key)
+        if cached is None:
+            return None
+        cached_mtime, payload = cached
+        if cached_mtime is None or cached_mtime == mtime_ns:
+            return copy.deepcopy(payload)
+    return None
+
+
+def _set_cached_pipeline_config(path: Path, payload: Dict[str, Any], mtime_ns: int | None = None) -> tuple[int | None, Dict[str, Any]] | None:
+    key = _config_cache_key(path)
+    entry = (mtime_ns if mtime_ns is not None else _config_mtime_ns(path), copy.deepcopy(payload))
+    with _CONFIG_CACHE_LOCK:
+        previous = _CONFIG_CACHE.get(key)
+        _CONFIG_CACHE[key] = entry
+        return previous
+
+
+def _restore_cached_pipeline_config(path: Path, previous: tuple[int | None, Dict[str, Any]] | None) -> None:
+    key = _config_cache_key(path)
+    with _CONFIG_CACHE_LOCK:
+        if previous is None:
+            _CONFIG_CACHE.pop(key, None)
+        else:
+            _CONFIG_CACHE[key] = previous
+
+
+def invalidate_settings_cache(config_path: str | Path | None = None) -> None:
+    target = resolve_config_path(config_path)
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE.pop(_config_cache_key(target), None)
+
+
+def load_pipeline_config(config_path: str | Path | None = None) -> Dict[str, Any]:
+    target = resolve_config_path(config_path)
+    with _config_lock_for_path(target):
+        mtime_ns = _config_mtime_ns(target)
+        cached = _get_cached_pipeline_config(target, mtime_ns)
+        if cached is not None:
+            return cached
+        loaded = _load_pipeline_config_from_disk(target)
+        _set_cached_pipeline_config(target, loaded, _config_mtime_ns(target))
+        return copy.deepcopy(loaded)
 
 
 def _valid_time(value: str) -> bool:
@@ -2294,17 +2368,28 @@ def write_settings_atomically(
     retention: int = 10,
 ) -> Path:
     target = path if path is not None else get_settings_path(config_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if backup:
-        backup_settings_file(path=target, retention=retention)
-    payload = json.dumps(cfg, ensure_ascii=False, indent=2)
-    tmp_path = target.with_name(f"{target.name}.tmp")
-    with tmp_path.open("w", encoding="utf-8-sig", newline="\n") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, target)
-    return target
+    with _config_lock_for_path(target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if backup:
+            backup_settings_file(path=target, retention=retention)
+        previous_cache = _set_cached_pipeline_config(target, cfg, None)
+        payload = json.dumps(cfg, ensure_ascii=False, indent=2)
+        tmp_path = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8-sig", newline="\n") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, target)
+        except Exception:
+            _restore_cached_pipeline_config(target, previous_cache)
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+        _set_cached_pipeline_config(target, cfg, _config_mtime_ns(target))
+        return target
 
 
 def _normalize_console_host_for_lan(cfg: Dict[str, Any], config_path: str | Path | None = None) -> Dict[str, Any]:

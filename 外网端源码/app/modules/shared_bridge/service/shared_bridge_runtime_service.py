@@ -55,10 +55,9 @@ def set_internal_download_browser_pool(pool: Any | None = None) -> None:
     return None
 from app.shared.utils.atomic_file import (
     atomic_copy_file,
-    atomic_write_text,
     validate_excel_workbook_file,
-    validate_json_file,
 )
+from app.shared.utils.cached_json_file import save_cached_json
 from app.shared.utils.file_utils import normalize_windows_path_text
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.api.facade import load_handover_config
@@ -4243,15 +4242,7 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接存储尚未初始化")
         target_path = self._monthly_resume_state_artifact_target(task_id)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            target_path,
-            json.dumps(payload, ensure_ascii=False),
-            encoding="utf-8",
-            validator=validate_json_file,
-            temp_suffix=".downloading",
-            allow_overwrite_fallback=False,
-        )
+        save_cached_json(target_path, payload, indent=None, encoding="utf-8")
         relative_path = target_path.relative_to(Path(self.shared_bridge_root)).as_posix()
         self._store.upsert_artifact(
             task_id=task_id,

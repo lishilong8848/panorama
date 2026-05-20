@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 
 
 def _now_text() -> str:
@@ -118,10 +117,7 @@ class SharedSourceCacheIndexStore:
             ):
                 if candidate == path:
                     continue
-                try:
-                    payload = json.loads(candidate.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
+                payload = load_cached_json(candidate, {}, encoding="utf-8")
                 if not isinstance(payload, dict):
                     continue
                 if _normalize_entry(payload)["entry_id"] == entry_id:
@@ -133,13 +129,7 @@ class SharedSourceCacheIndexStore:
         if not normalized["created_at"]:
             normalized["created_at"] = now_text
         normalized["updated_at"] = normalized["updated_at"] or now_text
-        atomic_write_text(
-            path,
-            json.dumps(normalized, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-            validator=validate_json_file,
-            allow_overwrite_fallback=False,
-        )
+        save_cached_json(path, normalized, indent=2, encoding="utf-8")
         return normalized
 
     def delete_entry(self, entry: Dict[str, Any] | None) -> bool:
@@ -175,10 +165,7 @@ class SharedSourceCacheIndexStore:
         bucket_kind_text = str(bucket_kind or "").strip().lower()
         duty_shift_text = str(duty_shift or "").strip().lower()
         for path in self._iter_candidate_paths(source_family=source_family, building=building):
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
+            payload = load_cached_json(path, {}, encoding="utf-8")
             if not isinstance(payload, dict):
                 continue
             entry = _normalize_entry(payload)

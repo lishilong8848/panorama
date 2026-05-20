@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import copy
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 
 
 def _now_text() -> str:
@@ -14,10 +13,7 @@ def _now_text() -> str:
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    payload = load_cached_json(path, {}, encoding="utf-8")
     return payload if isinstance(payload, dict) else {}
 
 
@@ -72,14 +68,7 @@ class SharedBridgeMailboxStore:
             "task": copy.deepcopy(task),
         }
         path = self.request_path(task_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            path,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-            validator=validate_json_file,
-            allow_overwrite_fallback=False,
-        )
+        save_cached_json(path, payload, indent=2, encoding="utf-8")
 
     def write_side_snapshot(self, *, task: Dict[str, Any], side: str) -> None:
         task_id = str(task.get("task_id", "") or "").strip()
@@ -95,14 +84,7 @@ class SharedBridgeMailboxStore:
             "task": copy.deepcopy(task),
         }
         path = self.internal_path(task_id) if side_text == "internal" else self.external_path(task_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            path,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-            validator=validate_json_file,
-            allow_overwrite_fallback=False,
-        )
+        save_cached_json(path, payload, indent=2, encoding="utf-8")
 
     def load_task(self, task_id: str) -> Dict[str, Any] | None:
         task_text = str(task_id or "").strip()

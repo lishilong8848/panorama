@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import APIRequestContext, Page
 
-from app.shared.utils.atomic_file import atomic_write_text
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 
 
 ALARM_EVENT_JSON_SCHEMA_VERSION = 1
@@ -696,14 +696,11 @@ def build_alarm_event_json_document(
 
 
 def write_alarm_event_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, ensure_ascii=False, indent=2)
-    atomic_write_text(path, text, encoding="utf-8")
+    save_cached_json(path, payload, indent=2, encoding="utf-8")
 
 
 def load_alarm_event_json(path: Path) -> Dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    data = json.loads(text)
+    data = load_cached_json(path, None, encoding="utf-8")
     if not isinstance(data, dict):
         raise RuntimeError("告警 JSON 文件顶层必须是对象")
     schema_version = data.get("schema_version")

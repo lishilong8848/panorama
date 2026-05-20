@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-import json
 from pathlib import Path
 import re
 from typing import Any, Callable, Dict, Iterable
@@ -9,7 +8,6 @@ from typing import Any, Callable, Dict, Iterable
 from pipeline_utils import get_app_dir
 from app.shared.utils.atomic_file import (
     atomic_copy_file,
-    atomic_write_text,
     validate_excel_workbook_file,
     validate_non_empty_file,
 )
@@ -20,6 +18,7 @@ from app.shared.utils.artifact_naming import (
     FAMILY_HANDOVER_LOG,
     build_source_artifact_path,
 )
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 
 
 def _now_text() -> str:
@@ -98,12 +97,7 @@ class HandoverSourceFileCacheService:
         if not self._local_cache_enabled():
             return {}
         path = self._download_index_path()
-        if not path.exists():
-            return {}
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            return {}
+        payload = load_cached_json(path, {}, encoding="utf-8")
         if not isinstance(payload, dict):
             return {}
         output: Dict[str, Any] = {}
@@ -117,12 +111,7 @@ class HandoverSourceFileCacheService:
         if not self._local_cache_enabled():
             return
         path = self._download_index_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            path,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        save_cached_json(path, payload, indent=2, encoding="utf-8")
 
     @staticmethod
     def _validate_cached_source(path: Path) -> None:

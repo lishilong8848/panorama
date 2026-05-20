@@ -1,11 +1,11 @@
 ﻿from __future__ import annotations
 
-import json
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from app.modules.scheduler.repository.scheduler_state_repository import SchedulerStateRepository
 from pipeline_utils import get_app_dir
 
 
@@ -33,6 +33,7 @@ class IntervalSchedulerService:
 
         self.started_at = datetime.now()
         self.state_path = self._resolve_state_path(str(self.cfg["state_file"]))
+        self.state_repository = SchedulerStateRepository()
         self.state = self._load_state()
         self.runtime: Dict[str, Any] = {
             "started_at": "",
@@ -107,14 +108,7 @@ class IntervalSchedulerService:
             "last_source": "",
             "last_duration_ms": 0,
         }
-        if not self.state_path.exists():
-            return default
-        try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except Exception:
-            return default
-        if not isinstance(data, dict):
-            return default
+        data = self.state_repository.load(self.state_path, default)
         state = dict(default)
         for key in state:
             if key == "last_duration_ms":
@@ -128,8 +122,7 @@ class IntervalSchedulerService:
 
     def _save_state(self) -> None:
         try:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.state_repository.save(self.state_path, self.state)
         except Exception as exc:
             self._log(f"保存状态失败: {exc}")
 
@@ -259,7 +252,7 @@ class IntervalSchedulerService:
             "last_trigger_result": str(self.runtime.get("last_trigger_result", "")),
             "next_run_time": self.next_run_text(),
             "state_path": str(self.state_path),
-            "state_exists": self.state_path.exists(),
+            "state_exists": self.state_repository.exists(self.state_path),
             "last_success_at": str(self.state.get("last_success_at", "")),
             "last_status": str(self.state.get("last_status", "")),
             "last_error": str(self.state.get("last_error", "")),

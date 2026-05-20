@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict
 
-from app.shared.utils.atomic_file import atomic_write_text
+from app.modules.scheduler.repository.scheduler_state_repository import SchedulerStateRepository
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
+
+
+_STATE_REPOSITORY = SchedulerStateRepository()
 
 
 def _now_text() -> str:
@@ -25,21 +27,11 @@ class HandoverCapacityOilCacheService:
         return runtime_root / state_file
 
     def _load(self) -> Dict[str, Any]:
-        path = self._state_path()
-        if not path.exists():
-            return {}
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            return {}
+        payload = _STATE_REPOSITORY.load(self._state_path(), {})
         return payload if isinstance(payload, dict) else {}
 
     def _save(self, payload: Dict[str, Any]) -> None:
-        atomic_write_text(
-            self._state_path(),
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _STATE_REPOSITORY.save(self._state_path(), payload)
 
     @staticmethod
     def _key(*, building: str, duty_date: str, duty_shift: str) -> str:

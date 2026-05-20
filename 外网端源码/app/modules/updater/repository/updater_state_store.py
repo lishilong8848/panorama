@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Dict
+
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 
 
 DEFAULT_STATE = {
@@ -42,21 +43,16 @@ class UpdaterStateStore:
         self.state_path = state_path
 
     def load(self) -> Dict[str, Any]:
-        if not self.state_path.exists():
-            return dict(DEFAULT_STATE)
-        try:
-            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                state = dict(DEFAULT_STATE)
-                state.update(payload)
-                queued_apply = dict(DEFAULT_STATE.get("queued_apply", {}))
-                raw_queued_apply = payload.get("queued_apply", {})
-                if isinstance(raw_queued_apply, dict):
-                    queued_apply.update(raw_queued_apply)
-                state["queued_apply"] = queued_apply
-                return state
-        except Exception:  # noqa: BLE001
-            pass
+        payload = load_cached_json(self.state_path, None, encoding="utf-8")
+        if isinstance(payload, dict):
+            state = dict(DEFAULT_STATE)
+            state.update(payload)
+            queued_apply = dict(DEFAULT_STATE.get("queued_apply", {}))
+            raw_queued_apply = payload.get("queued_apply", {})
+            if isinstance(raw_queued_apply, dict):
+                queued_apply.update(raw_queued_apply)
+            state["queued_apply"] = queued_apply
+            return state
         return dict(DEFAULT_STATE)
 
     def save(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -68,6 +64,5 @@ class UpdaterStateStore:
         if isinstance(raw_queued_apply, dict):
             queued_apply.update(raw_queued_apply)
         payload["queued_apply"] = queued_apply
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_cached_json(self.state_path, payload, indent=2, encoding="utf-8")
         return payload

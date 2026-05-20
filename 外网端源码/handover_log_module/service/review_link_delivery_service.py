@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,6 +15,7 @@ from app.config.handover_segment_store import (
 )
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.feishu.service.im_file_message_client import FeishuImFileMessageClient
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 from handover_log_module.service.review_access_snapshot_service import (
     load_review_access_state,
     materialize_review_access_snapshot,
@@ -853,18 +853,12 @@ class ReviewLinkDeliveryService:
 
     def _load_station_110_delivery_state(self) -> Dict[str, Any]:
         path = self._station_110_delivery_state_path()
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8-sig"))
-            return payload if isinstance(payload, dict) else {}
-        except Exception:  # noqa: BLE001
-            return {}
+        payload = load_cached_json(path, {}, encoding="utf-8-sig")
+        return payload if isinstance(payload, dict) else {}
 
     def _save_station_110_delivery_state(self, payload: Dict[str, Any]) -> None:
         path = self._station_110_delivery_state_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        save_cached_json(path, payload if isinstance(payload, dict) else {}, indent=2, encoding="utf-8")
 
     @staticmethod
     def _station_110_delivery_key(duty_date: str, duty_shift: str) -> str:

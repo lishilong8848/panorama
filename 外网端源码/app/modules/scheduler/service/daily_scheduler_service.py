@@ -1,12 +1,12 @@
 ﻿from __future__ import annotations
 
-import json
 import re
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple
 
+from app.modules.scheduler.repository.scheduler_state_repository import SchedulerStateRepository
 from pipeline_utils import get_app_dir
 
 
@@ -90,6 +90,7 @@ class DailyAutoSchedulerService:
         }
 
         self.state_path = self._resolve_state_path(state_file)
+        self.state_repository = SchedulerStateRepository()
         self.state = self._load_state()
 
     def _resolve_state_path(self, state_file: str) -> Path:
@@ -125,23 +126,15 @@ class DailyAutoSchedulerService:
             "last_error": "",
             "retry_done_period": "",
         }
-        if not self.state_path.exists():
-            return default
-        try:
-            obj = json.loads(self.state_path.read_text(encoding="utf-8"))
-            if not isinstance(obj, dict):
-                return default
-            out = dict(default)
-            for key in out:
-                out[key] = str(obj.get(key, "") or "")
-            return out
-        except Exception:  # noqa: BLE001
-            return default
+        obj = self.state_repository.load(self.state_path, default)
+        out = dict(default)
+        for key in out:
+            out[key] = str(obj.get(key, "") or "")
+        return out
 
     def _save_state(self) -> None:
         try:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.state_repository.save(self.state_path, self.state)
         except Exception as exc:  # noqa: BLE001
             self._diag(f"保存状态失败: {exc}")
 
@@ -263,7 +256,7 @@ class DailyAutoSchedulerService:
             "last_trigger_at": self.runtime.get("last_trigger_at", ""),
             "last_trigger_result": self.runtime.get("last_trigger_result", ""),
             "state_path": str(self.state_path),
-            "state_exists": self.state_path.exists(),
+            "state_exists": self.state_repository.exists(self.state_path),
         }
 
     def get_diagnostics(self, limit: int = 50) -> Dict[str, Any]:

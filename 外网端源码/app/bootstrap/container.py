@@ -29,7 +29,7 @@ from app.modules.scheduler.service.handover_scheduler_manager import HandoverSch
 from app.modules.scheduler.service.interval_scheduler_service import IntervalSchedulerService
 from app.modules.scheduler.service.monthly_scheduler_service import MonthlySchedulerService
 from app.modules.updater.service.updater_service import UpdaterService
-from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 from app.shared.utils.file_utils import (
     canonicalize_windows_path_for_compare,
     normalize_windows_path_text,
@@ -926,11 +926,7 @@ class AppContainer:
             "source": str(source or "").strip(),
             "states": normalized_states,
         }
-        atomic_write_text(
-            self._external_scheduler_autostart_path(),
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            validator=validate_json_file,
-        )
+        save_cached_json(self._external_scheduler_autostart_path(), payload, indent=2, encoding="utf-8")
         return payload
 
     def _load_external_scheduler_autostart_payload(self) -> Dict[str, Any]:
@@ -938,7 +934,7 @@ class AppContainer:
         if not path.exists():
             return {}
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = load_cached_json(path, {}, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             self.add_system_log(f"[调度] 读取外网端调度记忆失败，已忽略: {exc}")
             return {}
@@ -1249,11 +1245,7 @@ class AppContainer:
             "source_startup_time": str(source_startup_time or "").strip(),
             "nonce": uuid.uuid4().hex,
         }
-        atomic_write_text(
-            self._startup_role_handoff_path(),
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            validator=validate_json_file,
-        )
+        save_cached_json(self._startup_role_handoff_path(), payload, indent=2, encoding="utf-8")
         return self.get_startup_role_handoff()
 
     def start_scheduler(self, source: str = "手动") -> Dict[str, Any]:

@@ -1351,9 +1351,9 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "precipitation_probability_threshold": 50,
                     "timeout_seconds": 15,
                     "warnings": {
-                        "enabled": False,
-                        "provider": "cma",
-                        "station_id": "58259",
+                        "enabled": True,
+                        "provider": "nmc",
+                        "station_id": "VHAmf",
                     },
                 },
                 "notifications": {

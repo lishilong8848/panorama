@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from app.shared.utils.cached_json_file import save_cached_json
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 
 
@@ -47,13 +48,7 @@ class TaskEngineStore:
 
     @staticmethod
     def _write_json(path: Path, payload: Any) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(f"{path.suffix}.tmp")
-        tmp_path.write_text(
-            json.dumps(_json_ready(payload), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        tmp_path.replace(path)
+        save_cached_json(path, _json_ready(payload), indent=2, encoding="utf-8")
 
     def persist_job(self, job_payload: dict[str, Any]) -> None:
         job_id = str(job_payload.get("job_id", "")).strip()

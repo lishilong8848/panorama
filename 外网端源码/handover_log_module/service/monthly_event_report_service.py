@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,13 +14,14 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClien
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
-from app.shared.utils.atomic_file import atomic_save_workbook, atomic_write_text
+from app.shared.utils.atomic_file import atomic_save_workbook
 from app.shared.utils.artifact_naming import (
     OUTPUT_TYPE_MONTHLY_EVENT,
     build_output_base_path,
     monthly_output_patterns,
     with_index,
 )
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
@@ -310,10 +310,7 @@ class MonthlyEventReportService:
         path = self._last_run_path()
         if not path.exists():
             return self._empty_last_run()
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return self._empty_last_run()
+        payload = load_cached_json(path, {}, encoding="utf-8")
         if not isinstance(payload, dict):
             return self._empty_last_run()
         snapshot = self._empty_last_run()
@@ -370,11 +367,7 @@ class MonthlyEventReportService:
     def _save_last_run_snapshot(self, payload: Dict[str, Any]) -> None:
         snapshot = self._empty_last_run()
         snapshot.update(payload if isinstance(payload, dict) else {})
-        atomic_write_text(
-            self._last_run_path(),
-            json.dumps(snapshot, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        save_cached_json(self._last_run_path(), snapshot, indent=2, encoding="utf-8")
 
     @staticmethod
     def _write_styled_data_cell(sheet: Any, *, row_index: int, column_index: int, value: Any) -> None:

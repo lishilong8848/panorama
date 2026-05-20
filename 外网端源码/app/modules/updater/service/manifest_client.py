@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -12,10 +11,9 @@ import requests
 
 from app.shared.utils.atomic_file import (
     atomic_copy_file,
-    atomic_write_text,
-    validate_json_file,
     validate_non_empty_file,
 )
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 
 
 LATEST_PATCH_NAME = "latest_patch.json"
@@ -218,14 +216,9 @@ class SharedMirrorManifestClient:
 
     def load_publish_state(self) -> Dict[str, Any]:
         state = self._default_publish_state()
-        if not self.publish_state_path.exists():
-            return state
-        try:
-            payload = json.loads(self.publish_state_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                state.update(payload)
-        except Exception:  # noqa: BLE001
-            pass
+        payload = load_cached_json(self.publish_state_path, {}, encoding="utf-8")
+        if isinstance(payload, dict):
+            state.update(payload)
         state["mirror_manifest_path"] = str(self.manifest_path)
         return state
 
@@ -247,19 +240,13 @@ class SharedMirrorManifestClient:
                 "mirror_manifest_path": str(self.manifest_path),
             }
         )
-        self.publish_state_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            self.publish_state_path,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            validator=validate_json_file,
-        )
+        save_cached_json(self.publish_state_path, payload, indent=2, encoding="utf-8")
         return payload
 
     def _load_manifest_file(self) -> Dict[str, Any]:
-        try:
-            payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"读取共享目录更新清单失败: {exc}") from exc
+        payload = load_cached_json(self.manifest_path, None, encoding="utf-8")
+        if payload is None:
+            raise RuntimeError("读取共享目录更新清单失败")
         if not isinstance(payload, dict):
             raise RuntimeError("共享目录更新清单格式错误。")
         return payload
@@ -387,11 +374,7 @@ class SharedMirrorManifestClient:
                 "approved_release_revision": int(approved_release_revision or 0),
             }
         )
-        atomic_write_text(
-            self.manifest_path,
-            json.dumps(approved_manifest, ensure_ascii=False, indent=2),
-            validator=validate_json_file,
-        )
+        save_cached_json(self.manifest_path, approved_manifest, indent=2, encoding="utf-8")
 
         publish_state = {
             "mirror_ready": True,
@@ -413,11 +396,7 @@ class SharedMirrorManifestClient:
             "published_by_node_id": str(published_by_node_id or "").strip(),
             "zip_relpath": zip_name,
         }
-        atomic_write_text(
-            self.publish_state_path,
-            json.dumps(publish_state, ensure_ascii=False, indent=2),
-            validator=validate_json_file,
-        )
+        save_cached_json(self.publish_state_path, publish_state, indent=2, encoding="utf-8")
 
         self._prune_old_zips(keep_name=zip_name)
         staging_zip.unlink(missing_ok=True)

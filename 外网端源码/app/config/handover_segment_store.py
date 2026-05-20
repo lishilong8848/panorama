@@ -34,6 +34,10 @@ _handover_segment_target_locks_guard = threading.Lock()
 _handover_segment_target_locks: dict[str, threading.RLock] = {}
 _handover_segment_aggregate_locks_guard = threading.Lock()
 _handover_segment_aggregate_locks: dict[str, threading.RLock] = {}
+_segment_doc_cache_lock = threading.RLock()
+_segment_doc_cache: dict[str, tuple[int | None, Dict[str, Any]]] = {}
+_segment_doc_path_locks_guard = threading.Lock()
+_segment_doc_path_locks: dict[str, threading.RLock] = {}
 
 
 class HandoverSegmentRevisionConflict(ValueError):
@@ -117,6 +121,57 @@ def _iso_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _segment_cache_key(path: str | Path) -> str:
+    return str(Path(path).resolve(strict=False)).casefold()
+
+
+def _segment_lock_for_path(path: str | Path) -> threading.RLock:
+    key = _segment_cache_key(path)
+    with _segment_doc_path_locks_guard:
+        lock = _segment_doc_path_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _segment_doc_path_locks[key] = lock
+        return lock
+
+
+def _segment_mtime_ns(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _get_cached_segment_doc(path: Path, mtime_ns: int | None) -> Dict[str, Any] | None:
+    key = _segment_cache_key(path)
+    with _segment_doc_cache_lock:
+        cached = _segment_doc_cache.get(key)
+        if cached is None:
+            return None
+        cached_mtime, payload = cached
+        if cached_mtime is None or cached_mtime == mtime_ns:
+            return copy.deepcopy(payload)
+    return None
+
+
+def _set_cached_segment_doc(path: Path, payload: Mapping[str, Any], mtime_ns: int | None = None) -> tuple[int | None, Dict[str, Any]] | None:
+    key = _segment_cache_key(path)
+    entry = (mtime_ns if mtime_ns is not None else _segment_mtime_ns(path), copy.deepcopy(dict(payload)))
+    with _segment_doc_cache_lock:
+        previous = _segment_doc_cache.get(key)
+        _segment_doc_cache[key] = entry
+        return previous
+
+
+def _restore_cached_segment_doc(path: Path, previous: tuple[int | None, Dict[str, Any]] | None) -> None:
+    key = _segment_cache_key(path)
+    with _segment_doc_cache_lock:
+        if previous is None:
+            _segment_doc_cache.pop(key, None)
+        else:
+            _segment_doc_cache[key] = previous
+
+
 def build_segment_document(
     data: Mapping[str, Any] | None = None,
     *,
@@ -132,39 +187,57 @@ def build_segment_document(
 
 def read_segment_document(path: str | Path, *, default_data: Mapping[str, Any] | None = None) -> Dict[str, Any]:
     target = Path(path)
-    if not target.exists():
-        return build_segment_document(default_data, revision=0, updated_at="")
-    try:
-        payload = json.loads(target.read_text(encoding="utf-8-sig"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"交接班分段配置解析失败: {target} ({exc})") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"交接班分段配置格式错误: {target}")
-    data = payload.get("data", {})
-    if not isinstance(data, dict):
-        raise ValueError(f"交接班分段配置 data 必须是对象: {target}")
-    revision = payload.get("revision", 0)
-    try:
-        revision_value = max(0, int(revision))
-    except Exception as exc:  # noqa: BLE001
-        raise ValueError(f"交接班分段配置 revision 非法: {target}") from exc
-    return {
-        "revision": revision_value,
-        "updated_at": str(payload.get("updated_at", "") or "").strip(),
-        "data": copy.deepcopy(data),
-    }
+    with _segment_lock_for_path(target):
+        if not target.exists():
+            return build_segment_document(default_data, revision=0, updated_at="")
+        mtime_ns = _segment_mtime_ns(target)
+        cached = _get_cached_segment_doc(target, mtime_ns)
+        if cached is not None:
+            return cached
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8-sig"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"交接班分段配置解析失败: {target} ({exc})") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"交接班分段配置格式错误: {target}")
+        data = payload.get("data", {})
+        if not isinstance(data, dict):
+            raise ValueError(f"交接班分段配置 data 必须是对象: {target}")
+        revision = payload.get("revision", 0)
+        try:
+            revision_value = max(0, int(revision))
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"交接班分段配置 revision 非法: {target}") from exc
+        normalized = {
+            "revision": revision_value,
+            "updated_at": str(payload.get("updated_at", "") or "").strip(),
+            "data": copy.deepcopy(data),
+        }
+        _set_cached_segment_doc(target, normalized, mtime_ns)
+        return copy.deepcopy(normalized)
 
 
 def write_segment_document(path: str | Path, payload: Mapping[str, Any]) -> Path:
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = target.with_name(f".{target.name}.{os.getpid()}.{int(time.time() * 1000)}.tmp")
-    with tmp_path.open("w", encoding="utf-8-sig", newline="\n") as handle:
-        json.dump(dict(payload), handle, ensure_ascii=False, indent=2)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, target)
-    return target
+    with _segment_lock_for_path(target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+        previous_cache = _set_cached_segment_doc(target, payload, None)
+        try:
+            with tmp_path.open("w", encoding="utf-8-sig", newline="\n") as handle:
+                json.dump(dict(payload), handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, target)
+        except Exception:
+            _restore_cached_segment_doc(target, previous_cache)
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+        _set_cached_segment_doc(target, payload, _segment_mtime_ns(target))
+        return target
 
 
 def create_pre_handover_segment_backup(config_path: str | Path) -> Path | None:

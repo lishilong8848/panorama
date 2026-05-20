@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import copy
-import json
 import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
+from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 
 
 ACTIVE_COMMAND_STATUSES = frozenset({"pending", "accepted", "running"})
@@ -19,10 +18,7 @@ def _now_text() -> str:
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    payload = load_cached_json(path, {}, encoding="utf-8")
     return payload if isinstance(payload, dict) else {}
 
 
@@ -132,13 +128,7 @@ class UpdaterRemoteControlStore:
             "source_commit": str(payload.get("source_commit", "") or "").strip(),
         }
         self.ensure_ready()
-        atomic_write_text(
-            self.command_path,
-            json.dumps(normalized, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-            validator=validate_json_file,
-            allow_overwrite_fallback=False,
-        )
+        save_cached_json(self.command_path, normalized, indent=2, encoding="utf-8")
         return normalized
 
     def submit_command(
@@ -239,13 +229,7 @@ class UpdaterRemoteControlStore:
         snapshot.update(copy.deepcopy(payload if isinstance(payload, dict) else {}))
         snapshot["available"] = True
         self.ensure_ready()
-        atomic_write_text(
-            self.status_path,
-            json.dumps(snapshot, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-            validator=validate_json_file,
-            allow_overwrite_fallback=False,
-        )
+        save_cached_json(self.status_path, snapshot, indent=2, encoding="utf-8")
         return snapshot
 
     def build_internal_peer_snapshot(self, *, heartbeat_timeout_sec: int = 15) -> Dict[str, Any]:
