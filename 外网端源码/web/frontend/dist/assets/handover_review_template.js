@@ -138,7 +138,7 @@
                   正在加载历史交接班日志...
                 </option>
                 <option v-else-if="!historySessions.length" value="" disabled>
-                  {{ selectedSessionInHistoryList ? "暂无可下载的历史文件" : "展开后加载历史文件" }}
+                  {{ historyLoaded ? "暂无可下载的历史文件" : "正在准备历史文件" }}
                 </option>
                 <option v-else-if="!selectedSessionInHistoryList" value="" disabled>
                   当前记录未进入历史列表
@@ -182,7 +182,7 @@
           正在加载历史文件...
         </div>
         <div v-else-if="!historyLoaded" class="review-empty-inline">
-          点击“刷新历史文件”后加载最近生成的交接班日志和容量报表。
+          正在自动加载最近生成的交接班日志和容量报表，也可点击“刷新历史文件”重新加载。
         </div>
         <div v-else-if="!historySessions.length" class="review-empty-inline">
           当前楼栋暂无已生成的历史交接班文件。

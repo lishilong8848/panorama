@@ -2470,10 +2470,11 @@ export function mountHandoverReviewApp(Vue) {
         if (historyLoading.value) {
           return;
         }
+        const shouldForce = Boolean(force || !historyLoaded.value);
         historyLoading.value = true;
         try {
           const params = buildLoadParams();
-          if (force) {
+          if (shouldForce) {
             params.force = Date.now();
           }
           const payload = await getHandoverReviewHistoryApi(
@@ -3575,6 +3576,7 @@ export function mountHandoverReviewApp(Vue) {
         });
         const useBootstrap = shouldPreferBootstrapLoad();
         await loadReviewData({ background: false, mode: useBootstrap ? "bootstrap" : "full" });
+        void ensureHistoryLoaded({ force: true });
       });
 
       onBeforeUnmount(() => {

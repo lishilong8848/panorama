@@ -235,7 +235,12 @@ def _review_bootstrap_cache_get(
         if not isinstance(cached_signature, dict) or cached_signature != signature:
             return None
         payload = cached.get("payload", {})
-    return copy.deepcopy(payload if isinstance(payload, dict) else {})
+    if not isinstance(payload, dict):
+        return None
+    sessions = payload.get("sessions", [])
+    if not isinstance(sessions, list) or not sessions:
+        return None
+    return copy.deepcopy(payload)
 
 
 def _review_bootstrap_cache_put(
