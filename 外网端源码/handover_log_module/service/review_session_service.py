@@ -652,6 +652,16 @@ class ReviewSessionService:
             "error": str(payload.get("error", "")).strip(),
             "first_full_cloud_sync_completed": bool(payload.get("first_full_cloud_sync_completed", False)),
             "first_full_cloud_sync_at": str(payload.get("first_full_cloud_sync_at", "")).strip(),
+            "station_h_sync": (
+                dict(payload.get("station_h_sync", {}))
+                if isinstance(payload.get("station_h_sync", {}), dict)
+                else {}
+            ),
+            "station_110_sync": (
+                dict(payload.get("station_110_sync", {}))
+                if isinstance(payload.get("station_110_sync", {}), dict)
+                else {}
+            ),
         }
 
     def _cloud_sync_enabled(self) -> bool:
@@ -2452,6 +2462,30 @@ class ReviewSessionService:
         batch_meta["first_full_cloud_sync_completed"] = True
         batch_meta["first_full_cloud_sync_at"] = now_text
         batch_meta["updated_at"] = now_text
+        self._apply_review_state_changes(upsert_cloud_batches=[batch_meta], latest_batch_key=target_batch)
+        return dict(batch_meta)
+
+    def update_cloud_batch_extra_state(
+        self,
+        *,
+        batch_key: str,
+        field: str,
+        value: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        target_batch = str(batch_key or "").strip()
+        target_field = str(field or "").strip()
+        if not target_batch or not target_field:
+            return None
+        state = self._load_state()
+        cloud_batches = state.get("review_cloud_batches", {})
+        if not isinstance(cloud_batches, dict):
+            return None
+        raw = cloud_batches.get(target_batch, {})
+        if not isinstance(raw, dict):
+            return None
+        batch_meta = self._normalize_cloud_batch(raw)
+        batch_meta[target_field] = dict(value) if isinstance(value, dict) else {}
+        batch_meta["updated_at"] = _now_text()
         self._apply_review_state_changes(upsert_cloud_batches=[batch_meta], latest_batch_key=target_batch)
         return dict(batch_meta)
 

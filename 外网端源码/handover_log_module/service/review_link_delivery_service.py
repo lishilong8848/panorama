@@ -331,7 +331,7 @@ class ReviewLinkDeliveryService:
             if not isinstance(item, dict):
                 continue
             if str(item.get("building", "") or "").strip() == building_text:
-                return str(item.get("url", "") or "").strip()
+                return _strip_url_query_and_fragment(item.get("url", ""))
         return ""
 
     @staticmethod
@@ -367,10 +367,10 @@ class ReviewLinkDeliveryService:
     def _manual_test_review_url_for_building(self, snapshot: Dict[str, Any], building: str) -> str:
         url = self._review_url_for_building(snapshot, building)
         if url:
-            return url
+            return _strip_url_query_and_fragment(url)
         url = self._fallback_review_url_for_building(snapshot, building)
         if url:
-            return url
+            return _strip_url_query_and_fragment(url)
 
         review_cfg = self._review_cfg()
         configured_base_url = normalize_review_base_url(
@@ -385,9 +385,11 @@ class ReviewLinkDeliveryService:
         persisted_state = load_review_access_state(self.handover_cfg)
         persisted_base_url = normalize_review_base_url(persisted_state.get("effective_base_url", ""))
         if persisted_base_url:
-            return self._fallback_review_url_for_building(
-                {"review_base_url_effective": persisted_base_url},
-                building,
+            return _strip_url_query_and_fragment(
+                self._fallback_review_url_for_building(
+                    {"review_base_url_effective": persisted_base_url},
+                    building,
+                )
             )
         return ""
 
@@ -491,6 +493,7 @@ class ReviewLinkDeliveryService:
             else materialize_review_access_snapshot(self.handover_cfg)
         )
         url = self._review_url_for_building(snapshot, building) or self._manual_test_review_url_for_building(snapshot, building)
+        url = _strip_url_query_and_fragment(url)
         emit_log(
             "[交接班][审核链接发送] 开始发送 "
             f"building={building}, session_id={session_id}, revision={int(recipient_snapshot.get('revision', 0) or 0)}, "

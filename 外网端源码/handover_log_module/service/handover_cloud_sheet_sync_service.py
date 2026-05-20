@@ -17,7 +17,36 @@ from handover_log_module.repository.excel_reader import load_workbook_quietly
 
 class HandoverCloudSheetSyncService:
     MANAGED_BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
+    STATION_H_DEFAULT_SHEET_TITLE = "H楼"
     STATION_110_DEFAULT_SHEET_TITLE = "110"
+    STATION_H_TEMPLATE_FILE_NAME = "H楼交接班日志空模板.xlsx"
+    STATION_H_ALLOWED_CELLS = {
+        "B2",
+        "F2",
+        "C3",
+        "D3",
+        "G3",
+        "H3",
+        "B4",
+        "F4",
+        "B6",
+        "G6",
+        "B12",
+        "D12",
+        "F12",
+        "H12",
+        "B15",
+        "B16",
+        "H15",
+        "H16",
+        "H40",
+        "H41",
+        "H42",
+        "H45",
+        "H46",
+        "H47",
+        "H48",
+    }
     FIXED_HEADER_ROW_COUNT = 21
     DYNAMIC_START_ROW = FIXED_HEADER_ROW_COUNT + 1
     FINAL_SHEET_SERIAL_RETRY_ATTEMPTS = 4
@@ -45,6 +74,9 @@ class HandoverCloudSheetSyncService:
                 "D楼": "D楼",
                 "E楼": "E楼",
             },
+            "station_h_sheet_name": "H楼",
+            "station_h_template_path": "",
+            "station_110_sheet_name": "110",
             "sync_mode": "overwrite_named_sheet",
             "copy": {
                 "values": True,
@@ -355,6 +387,123 @@ class HandoverCloudSheetSyncService:
             "details": ordered_details,
         }
 
+    def sync_station_h_sheet(
+        self,
+        *,
+        batch_meta: Dict[str, Any],
+        cell_values: Dict[str, Any],
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        sync_cfg = self._sync_cfg()
+        normalized_batch = batch_meta if isinstance(batch_meta, dict) else {}
+        spreadsheet_token = str(normalized_batch.get("spreadsheet_token", "")).strip()
+        spreadsheet_url = str(normalized_batch.get("spreadsheet_url", "")).strip()
+        spreadsheet_title = str(normalized_batch.get("spreadsheet_title", "")).strip()
+        sheet_title = self.station_h_sheet_title()
+        if not bool(sync_cfg.get("enabled", True)):
+            return {
+                "status": "skipped",
+                "sheet_title": sheet_title,
+                "spreadsheet_token": spreadsheet_token,
+                "spreadsheet_url": spreadsheet_url,
+                "spreadsheet_title": spreadsheet_title,
+                "error": "disabled",
+            }
+        if not spreadsheet_token:
+            raise RuntimeError("cloud batch 缺少 spreadsheet_token")
+
+        template_path = self.station_h_template_path()
+        timings = {
+            "workbook_ms": 0,
+            "snapshot_ms": 0,
+            "ensure_sheet_ms": 0,
+            "clear_ms": 0,
+            "value_ms": 0,
+            "dimension_ms": 0,
+            "merge_ms": 0,
+        }
+        started_at = time.perf_counter()
+        if not template_path.exists():
+            error = f"station_h_template_not_found: {template_path}"
+            emit_log(f"[交接班][H楼云表] 失败 batch={normalized_batch.get('batch_key', '-')}, error={error}")
+            return {
+                "status": "failed",
+                "sheet_title": sheet_title,
+                "spreadsheet_token": spreadsheet_token,
+                "spreadsheet_url": spreadsheet_url,
+                "spreadsheet_title": spreadsheet_title,
+                "error": error,
+            }
+
+        client = self._build_client()
+        sheet_cache: Dict[str, List[Dict[str, Any]]] = {}
+        try:
+            sheet_cache[spreadsheet_token] = client.query_sheets(spreadsheet_token)
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][H楼云表] 预取 sheet 列表失败，将继续独立写入: {exc}")
+
+        try:
+            emit_log(
+                f"[交接班][H楼云表] 开始 batch={normalized_batch.get('batch_key', '-')}, "
+                f"sheet={sheet_title}, template={template_path.name}"
+            )
+            workbook_started = time.perf_counter()
+            workbook = load_workbook_quietly(template_path, data_only=False)
+            self._add_elapsed_ms(timings, "workbook_ms", workbook_started)
+            try:
+                worksheet = workbook[sheet_title] if sheet_title in workbook.sheetnames else workbook.active
+                self._apply_station_h_cells(worksheet, cell_values)
+                snapshot_started = time.perf_counter()
+                snapshot = self._collect_generic_sheet_snapshot(worksheet)
+                self._add_elapsed_ms(timings, "snapshot_ms", snapshot_started)
+            finally:
+                workbook.close()
+
+            applied = self._overwrite_named_target_sheet(
+                client=client,
+                spreadsheet_token=spreadsheet_token,
+                sheet_title=sheet_title,
+                target_index=len(self.MANAGED_BUILDINGS),
+                snapshot=snapshot,
+                previous_cloud_sync={},
+                emit_log=emit_log,
+                sheet_cache=sheet_cache,
+                timings=timings,
+            )
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            emit_log(
+                f"[交接班][H楼云表] 完成 batch={normalized_batch.get('batch_key', '-')}, "
+                f"rows={snapshot.get('max_row', 0)}, cols={snapshot.get('max_column', 0)}, elapsed_ms={elapsed_ms}"
+            )
+            return {
+                "status": "success",
+                "sheet_title": sheet_title,
+                "spreadsheet_token": spreadsheet_token,
+                "spreadsheet_url": spreadsheet_url,
+                "spreadsheet_title": spreadsheet_title,
+                "source_file": str(template_path),
+                "synced_row_count": int(applied.get("synced_row_count", snapshot.get("max_row", 0)) or 0),
+                "synced_column_count": int(applied.get("synced_column_count", snapshot.get("max_column", 0)) or 0),
+                "synced_merges": self._normalize_merge_ranges(applied.get("synced_merges", [])),
+                "dynamic_merge_signature": str(applied.get("dynamic_merge_signature", "")).strip(),
+                "error": "",
+            }
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            emit_log(
+                f"[交接班][H楼云表] 失败 batch={normalized_batch.get('batch_key', '-')}, "
+                f"elapsed_ms={elapsed_ms}, error={exc}"
+            )
+            return {
+                "status": "failed",
+                "sheet_title": sheet_title,
+                "spreadsheet_token": spreadsheet_token,
+                "spreadsheet_url": spreadsheet_url,
+                "spreadsheet_title": spreadsheet_title,
+                "source_file": str(template_path),
+                "error": str(exc),
+            }
+
     def sync_station_110_workbook(
         self,
         *,
@@ -431,7 +580,7 @@ class HandoverCloudSheetSyncService:
                 client=client,
                 spreadsheet_token=spreadsheet_token,
                 sheet_title=sheet_title,
-                target_index=len(self.MANAGED_BUILDINGS),
+                target_index=len(self.MANAGED_BUILDINGS) + 1,
                 snapshot=snapshot,
                 previous_cloud_sync={},
                 emit_log=emit_log,
@@ -966,12 +1115,20 @@ class HandoverCloudSheetSyncService:
             title = self._target_sheet_title(building)
             client.dedupe_named_sheets(spreadsheet_token, title, sheet_cache=sheet_cache)
             client.get_or_create_named_sheet(spreadsheet_token, title, index=index, sheet_cache=sheet_cache)
+        station_h_title = self.station_h_sheet_title()
+        client.dedupe_named_sheets(spreadsheet_token, station_h_title, sheet_cache=sheet_cache)
+        client.get_or_create_named_sheet(
+            spreadsheet_token,
+            station_h_title,
+            index=len(self.MANAGED_BUILDINGS),
+            sheet_cache=sheet_cache,
+        )
         station_title = self.station_110_sheet_title()
         client.dedupe_named_sheets(spreadsheet_token, station_title, sheet_cache=sheet_cache)
         client.get_or_create_named_sheet(
             spreadsheet_token,
             station_title,
-            index=len(self.MANAGED_BUILDINGS),
+            index=len(self.MANAGED_BUILDINGS) + 1,
             sheet_cache=sheet_cache,
         )
 
@@ -986,6 +1143,24 @@ class HandoverCloudSheetSyncService:
         cfg = self._sync_cfg()
         title = str(cfg.get("station_110_sheet_name", "") or "").strip()
         return title or self.STATION_110_DEFAULT_SHEET_TITLE
+
+    def station_h_sheet_title(self) -> str:
+        cfg = self._sync_cfg()
+        title = str(cfg.get("station_h_sheet_name", "") or "").strip()
+        return title or self.STATION_H_DEFAULT_SHEET_TITLE
+
+    def station_h_template_path(self) -> Path:
+        cfg = self._sync_cfg()
+        configured = str(cfg.get("station_h_template_path", "") or "").strip()
+        if configured:
+            path = Path(configured)
+            return path if path.is_absolute() else Path(__file__).resolve().parents[2] / path
+        return Path(__file__).resolve().parents[2] / self.STATION_H_TEMPLATE_FILE_NAME
+
+    def _apply_station_h_cells(self, worksheet: Any, cell_values: Dict[str, Any]) -> None:
+        payload = cell_values if isinstance(cell_values, dict) else {}
+        for cell in self.STATION_H_ALLOWED_CELLS:
+            worksheet[cell] = payload.get(cell, "")
 
     @staticmethod
     def _find_sheet_by_title(sheets: List[Dict[str, Any]], title: str) -> Dict[str, Any]:

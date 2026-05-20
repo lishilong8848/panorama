@@ -2110,6 +2110,8 @@ def _build_history_payload(service: ReviewSessionService, *, building: str, sele
         is_latest = bool(latest_session_id and session_id == latest_session_id)
         output_file = str(item.get("output_file", "")).strip()
         capacity_output_file = str(item.get("capacity_output_file", "")).strip()
+        output_file_name = Path(output_file).name if output_file else ""
+        capacity_output_file_name = Path(capacity_output_file).name if capacity_output_file else ""
         if session_id == selected_session_id_text:
             selected_in_history_list = True
         history_sessions.append(
@@ -2121,9 +2123,11 @@ def _build_history_payload(service: ReviewSessionService, *, building: str, sele
                 "revision": int(item.get("revision", 0) or 0),
                 "confirmed": bool(item.get("confirmed", False)),
                 "updated_at": str(item.get("updated_at", "")).strip(),
-                "output_file": output_file,
+                "output_file": output_file_name,
+                "output_file_name": output_file_name,
                 "has_output_file": _safe_local_file_exists(output_file),
-                "capacity_output_file": capacity_output_file,
+                "capacity_output_file": capacity_output_file_name,
+                "capacity_output_file_name": capacity_output_file_name,
                 "has_capacity_output_file": _safe_local_file_exists(capacity_output_file),
                 "is_latest": is_latest,
                 "label": f"{'最新 ' if is_latest else ''}{str(item.get('duty_date', '')).strip()} / {_shift_label(str(item.get('duty_shift', '')).strip())}",

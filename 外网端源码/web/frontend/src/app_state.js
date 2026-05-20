@@ -806,28 +806,7 @@ export function createAppState(vueApi) {
   function handoverReviewUrlWithDutyContext(row) {
     const url = String(row?.url || "").trim();
     if (!url) return "";
-    const building = String(row?.building || "").trim();
-    const code = String(row?.code || "").trim().toLowerCase();
-    if (code !== "110" && building !== "110站" && building !== "110") {
-      return url;
-    }
-    const dutyDate = String(handoverDutyDate.value || "").trim();
-    const dutyShift = String(handoverDutyShift.value || "").trim().toLowerCase();
-    if (!dutyDate || !["day", "night"].includes(dutyShift)) {
-      return url;
-    }
-    try {
-      const parsed = new URL(url, window.location.origin);
-      parsed.searchParams.set("duty_date", dutyDate);
-      parsed.searchParams.set("duty_shift", dutyShift);
-      if (/^https?:\/\//i.test(url)) {
-        return parsed.toString();
-      }
-      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-    } catch (_error) {
-      const separator = url.includes("?") ? "&" : "?";
-      return `${url}${separator}duty_date=${encodeURIComponent(dutyDate)}&duty_shift=${encodeURIComponent(dutyShift)}`;
-    }
+    return url.split("?", 1)[0].split("#", 1)[0];
   }
 
   const handoverDownloadScope = ref("all_enabled");

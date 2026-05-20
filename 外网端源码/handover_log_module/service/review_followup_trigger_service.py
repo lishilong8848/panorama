@@ -1,9 +1,13 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
+import re
 from typing import Any, Callable, Dict, List
 
 from handover_log_module.core.shift_window import format_duty_date_text
+from handover_log_module.repository.excel_reader import load_workbook_quietly
+from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
 from handover_log_module.service.handover_daily_report_asset_service import HandoverDailyReportAssetService
 from handover_log_module.service.handover_daily_report_bitable_export_service import (
     HandoverDailyReportBitableExportService,
@@ -1341,6 +1345,261 @@ class ReviewFollowupTriggerService:
                 emit_log=emit_log,
             )
 
+    @staticmethod
+    def _station_h_split_people(text: Any) -> List[str]:
+        raw = str(text or "").strip()
+        if "：" in raw:
+            raw = raw.split("：", 1)[1]
+        elif ":" in raw:
+            raw = raw.split(":", 1)[1]
+        names = [item.strip() for item in re.split(r"[、,/，；;\s]+", raw) if item.strip()]
+        return names
+
+    @staticmethod
+    def _station_h_number(value: Any) -> float | int:
+        if value is None:
+            return 0
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, (int, float)):
+            number = float(value)
+        else:
+            text = str(value or "").strip()
+            if not text or text == "/":
+                return 0
+            text = text.replace(",", "").replace("，", "")
+            match = re.search(r"-?\d+(?:\.\d+)?", text)
+            if not match:
+                return 0
+            try:
+                number = float(match.group(0))
+            except ValueError:
+                return 0
+        return int(number) if number.is_integer() else number
+
+    @staticmethod
+    def _station_h_long_day_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "常白岗：/"
+        if "：" in text:
+            text = text.split("：", 1)[1].strip()
+        elif ":" in text:
+            text = text.split(":", 1)[1].strip()
+        return f"常白岗：{text or '/'}"
+
+    def _station_h_cabinet_totals(self, sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        by_building = {
+            str(session.get("building", "")).strip(): session
+            for session in sessions
+            if isinstance(session, dict)
+        }
+        totals = {"B12": 0.0, "D12": 0.0, "F12": 0.0, "H12": 0.0}
+        source_cells = {"B12": "B13", "D12": "D13", "F12": "F13", "H12": "H13"}
+        missing_buildings: List[str] = []
+        failed: List[str] = []
+        for building in HandoverCloudSheetSyncService.MANAGED_BUILDINGS:
+            session = by_building.get(building, {})
+            output_file = Path(str(session.get("output_file", "") or "").strip())
+            if not output_file.exists():
+                missing_buildings.append(building)
+                continue
+            try:
+                workbook = load_workbook_quietly(output_file, data_only=True)
+                try:
+                    worksheet = workbook["交接班日志"] if "交接班日志" in workbook.sheetnames else workbook.active
+                    for target_cell, source_cell in source_cells.items():
+                        totals[target_cell] += float(self._station_h_number(worksheet[source_cell].value))
+                finally:
+                    workbook.close()
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{building}: {exc}")
+        if missing_buildings:
+            return {
+                "ok": False,
+                "status": "skipped",
+                "reason": "waiting_building_outputs",
+                "error": f"等待楼栋交接班日志生成: {','.join(missing_buildings)}",
+            }
+        if failed:
+            return {
+                "ok": False,
+                "status": "failed",
+                "reason": "parse_failed",
+                "error": "; ".join(failed),
+            }
+        return {"ok": True, "totals": {cell: self._station_h_number(value) for cell, value in totals.items()}}
+
+    def _build_station_h_cell_values(
+        self,
+        *,
+        batch_key: str,
+        sessions: List[Dict[str, Any]],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        duty_date, duty_shift = self._review_service.parse_batch_key(batch_key)
+        if not duty_date or duty_shift not in {"day", "night"}:
+            return {"ok": False, "status": "skipped", "reason": "missing_duty_context", "error": "缺少日期/班次"}
+
+        cabinet_result = self._station_h_cabinet_totals(sessions)
+        if not bool(cabinet_result.get("ok", False)):
+            return cabinet_result
+
+        try:
+            outdoor_state = self._review_service.get_outdoor_temperature_state(batch_key=batch_key)
+            outdoor_block = (
+                outdoor_state.get("shared_blocks", {}).get("outdoor_temperature", {})
+                if isinstance(outdoor_state, dict)
+                else {}
+            )
+            outdoor_cells = outdoor_block.get("cells", {}) if isinstance(outdoor_block, dict) else {}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "status": "failed", "reason": "outdoor_temperature_failed", "error": str(exc)}
+        dry_bulb = str(outdoor_cells.get("B7", "") or "").strip()
+        wet_bulb = str(outdoor_cells.get("D7", "") or "").strip()
+        if not dry_bulb or not wet_bulb:
+            return {
+                "ok": False,
+                "status": "failed",
+                "reason": "missing_outdoor_temperature",
+                "error": "缺少共享室外干球/湿球温度",
+            }
+
+        roster_repo = ShiftRosterRepository(self.config)
+        try:
+            assignment = roster_repo.query_assignment(
+                building="H楼",
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                emit_log=emit_log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "status": "failed", "reason": "roster_failed", "error": str(exc)}
+        current_names = self._station_h_split_people(assignment.current_people)
+        next_names = self._station_h_split_people(assignment.next_people)
+        current_first = current_names[0] if current_names else ""
+        next_first = assignment.next_first_person or (next_names[0] if next_names else "")
+        if not current_names or not next_names or not current_first or not next_first:
+            return {
+                "ok": False,
+                "status": "failed",
+                "reason": "missing_roster_people",
+                "error": "H楼值班/接班人员未识别",
+            }
+
+        try:
+            long_day_cells = roster_repo.query_long_day_cell_values(
+                building="H楼",
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                emit_log=emit_log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][H楼云表] 常白岗查询失败，将使用空值: {exc}")
+            long_day_cells = {}
+        b4_value = "常白岗：/"
+        f4_value = "常白岗：/"
+        if duty_shift == "day":
+            b4_value = self._station_h_long_day_text(long_day_cells.get("B4", ""))
+        else:
+            f4_value = self._station_h_long_day_text(long_day_cells.get("F4", ""))
+
+        patrol_times = ("10:00", "15:00") if duty_shift == "day" else ("22：00", "3：00")
+        shift_text = "白班" if duty_shift == "day" else "夜班"
+        totals = dict(cabinet_result.get("totals", {}))
+        cells: Dict[str, Any] = {
+            "B2": format_duty_date_text(duty_date),
+            "F2": shift_text,
+            "C3": current_names[0] if len(current_names) >= 1 else "",
+            "D3": current_names[1] if len(current_names) >= 2 else "",
+            "G3": next_names[0] if len(next_names) >= 1 else "",
+            "H3": next_names[1] if len(next_names) >= 2 else "",
+            "B4": b4_value,
+            "F4": f4_value,
+            "B6": dry_bulb,
+            "G6": wet_bulb,
+            "B12": totals.get("B12", 0),
+            "D12": totals.get("D12", 0),
+            "F12": totals.get("F12", 0),
+            "H12": totals.get("H12", 0),
+            "B15": patrol_times[0],
+            "B16": patrol_times[1],
+            "H15": current_first,
+            "H16": current_first,
+        }
+        for cell in ("H40", "H41", "H42", "H45", "H46", "H47", "H48"):
+            cells[cell] = next_first
+        return {"ok": True, "cells": cells}
+
+    def _persist_station_h_sync_result(self, *, batch_key: str, sync_result: Dict[str, Any]) -> None:
+        payload = dict(sync_result) if isinstance(sync_result, dict) else {}
+        payload["updated_at"] = self._now_text()
+        self._review_service.update_cloud_batch_extra_state(
+            batch_key=batch_key,
+            field="station_h_sync",
+            value=payload,
+        )
+
+    def _attach_station_h_sync_result(
+        self,
+        *,
+        batch_key: str,
+        sessions: List[Dict[str, Any]],
+        cloud_result: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        result = cloud_result if isinstance(cloud_result, dict) else {}
+        token = str(result.get("spreadsheet_token", "")).strip()
+        if not token:
+            result["station_h_sync"] = {"status": "skipped", "reason": "missing_spreadsheet_token"}
+            return result
+        cloud_status = str(result.get("status", "")).strip().lower()
+        if cloud_status == "failed":
+            result["station_h_sync"] = {"status": "skipped", "reason": "cloud_upload_failed"}
+            return result
+        if cloud_status not in {"ok", "skipped"}:
+            result["station_h_sync"] = {"status": "skipped", "reason": "cloud_upload_not_complete"}
+            return result
+        batch_meta = self._review_service.get_cloud_batch(batch_key) or {}
+        existing = batch_meta.get("station_h_sync", {}) if isinstance(batch_meta, dict) else {}
+        if isinstance(existing, dict) and str(existing.get("status", "")).strip().lower() == "success":
+            result["station_h_sync"] = {**existing, "reason": "already_synced_once"}
+            return result
+
+        cell_result = self._build_station_h_cell_values(batch_key=batch_key, sessions=sessions, emit_log=emit_log)
+        if not bool(cell_result.get("ok", False)):
+            station_result = {
+                "status": str(cell_result.get("status", "failed") or "failed").strip().lower(),
+                "reason": str(cell_result.get("reason", "") or "").strip(),
+                "error": str(cell_result.get("error", "") or "").strip(),
+            }
+            result["station_h_sync"] = station_result
+            if station_result["status"] != "skipped":
+                self._persist_station_h_sync_result(batch_key=batch_key, sync_result=station_result)
+                emit_log(
+                    f"[交接班][H楼云表] 同步未完成 batch={batch_key}, "
+                    f"status={station_result['status']}, error={station_result.get('error', '')}"
+                )
+            return result
+
+        try:
+            latest_batch_meta = self._review_service.get_cloud_batch(batch_key) or batch_meta
+            station_result = self._cloud_sheet_sync_service.sync_station_h_sheet(
+                batch_meta=latest_batch_meta,
+                cell_values=cell_result.get("cells", {}),
+                emit_log=emit_log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            station_result = {"status": "failed", "error": str(exc)}
+            emit_log(f"[交接班][H楼云表] 同步异常 batch={batch_key}, error={exc}")
+        result["station_h_sync"] = station_result
+        status = str(station_result.get("status", "")).strip().lower()
+        if status in {"success", "failed"}:
+            self._persist_station_h_sync_result(batch_key=batch_key, sync_result=station_result)
+        if status and status != "skipped":
+            emit_log(f"[交接班][H楼云表] 跟随云文档上传完成 batch={batch_key}, status={status}")
+        return result
+
     def _attach_station_110_sync_result(
         self,
         *,
@@ -1366,6 +1625,26 @@ class ReviewFollowupTriggerService:
         if station_status and station_status != "skipped":
             emit_log(f"[交接班][110站云表] 跟随云文档上传完成 batch={batch_key}, status={station_status}")
         return result
+
+    def _attach_extra_cloud_sheet_sync_results(
+        self,
+        *,
+        batch_key: str,
+        sessions: List[Dict[str, Any]],
+        cloud_result: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        result = self._attach_station_h_sync_result(
+            batch_key=batch_key,
+            sessions=sessions,
+            cloud_result=cloud_result,
+            emit_log=emit_log,
+        )
+        return self._attach_station_110_sync_result(
+            batch_key=batch_key,
+            cloud_result=result,
+            emit_log=emit_log,
+        )
 
     def _run_cloud_sheet_upload(
         self,
@@ -1435,7 +1714,12 @@ class ReviewFollowupTriggerService:
                 cloud_result=result,
                 emit_log=emit_log,
             )
-            return self._attach_station_110_sync_result(batch_key=batch_key, cloud_result=result, emit_log=emit_log)
+            return self._attach_extra_cloud_sheet_sync_results(
+                batch_key=batch_key,
+                sessions=sessions,
+                cloud_result=result,
+                emit_log=emit_log,
+            )
 
         upload_items, skipped_buildings, failed_buildings = self._build_cloud_items(
             sessions,
@@ -1458,7 +1742,12 @@ class ReviewFollowupTriggerService:
                 "failed_buildings": failed_buildings,
                 "details": {},
             }
-            return self._attach_station_110_sync_result(batch_key=batch_key, cloud_result=result, emit_log=emit_log)
+            return self._attach_extra_cloud_sheet_sync_results(
+                batch_key=batch_key,
+                sessions=sessions,
+                cloud_result=result,
+                emit_log=emit_log,
+            )
 
         self._mark_cloud_sheet_uploading(
             sessions=sessions,
@@ -1506,7 +1795,12 @@ class ReviewFollowupTriggerService:
             cloud_result=result,
             emit_log=emit_log,
         )
-        return self._attach_station_110_sync_result(batch_key=batch_key, cloud_result=result, emit_log=emit_log)
+        return self._attach_extra_cloud_sheet_sync_results(
+            batch_key=batch_key,
+            sessions=sessions,
+            cloud_result=result,
+            emit_log=emit_log,
+        )
 
     def _daily_report_export_state(
         self,
