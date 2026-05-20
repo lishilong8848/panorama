@@ -504,7 +504,7 @@ export async function refreshHandoverReviewEventSectionsApi(buildingCode, payloa
 }
 
 export async function getHandoverReviewHistoryApi(buildingCode, params = {}, options = {}) {
-  return apiJson(appendQuery(`/api/handover/review/${buildingCode}/history`, params), options);
+  return apiJsonWithTimeout(appendQuery(`/api/handover/review/${buildingCode}/history`, params), options, 8000);
 }
 
 export async function claimHandoverReviewLockApi(buildingCode, payload = {}) {

@@ -2366,6 +2366,29 @@ class ReviewSessionService:
                 break
         return output
 
+    def list_building_generated_file_history_sessions_fast(
+        self,
+        building: str,
+        *,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        history_limit = max(0, int(limit or 0))
+        if history_limit <= 0:
+            return []
+
+        output: List[Dict[str, Any]] = []
+        for session in self.list_building_sessions(building):
+            output_file = str(session.get("output_file", "") or "").strip()
+            capacity_output_file = str(session.get("capacity_output_file", "") or "").strip()
+            if self._is_legacy_test_output_file(output_file):
+                continue
+            if not output_file and not capacity_output_file:
+                continue
+            output.append(session)
+            if len(output) >= history_limit:
+                break
+        return output
+
     @staticmethod
     def _parse_updated_at(value: str) -> datetime:
         text = str(value or "").strip()

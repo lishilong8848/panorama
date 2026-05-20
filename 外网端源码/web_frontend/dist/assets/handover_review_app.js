@@ -3576,7 +3576,13 @@ export function mountHandoverReviewApp(Vue) {
         });
         const useBootstrap = shouldPreferBootstrapLoad();
         await loadReviewData({ background: false, mode: useBootstrap ? "bootstrap" : "full" });
-        void ensureHistoryLoaded({ force: true });
+        if (typeof window !== "undefined") {
+          window.setTimeout(() => {
+            void ensureHistoryLoaded();
+          }, 800);
+        } else {
+          void ensureHistoryLoaded();
+        }
       });
 
       onBeforeUnmount(() => {

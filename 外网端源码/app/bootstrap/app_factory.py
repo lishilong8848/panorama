@@ -247,6 +247,21 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     container = build_container()
     startup_runtime_activation_lock = threading.Lock()
 
+    def _configure_request_threadpool() -> None:
+        try:
+            import anyio.to_thread
+
+            limiter = anyio.to_thread.current_default_thread_limiter()
+            previous = int(getattr(limiter, "total_tokens", 0) or 0)
+            target = max(previous, 128)
+            if previous and previous < target:
+                limiter.total_tokens = target
+                container.add_system_log(
+                    f"[启动] Web请求线程池已扩容: {previous}->{target}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            container.add_system_log(f"[启动] Web请求线程池扩容跳过: {exc}")
+
     def _role_label(role_mode: str) -> str:
         role = normalize_role_mode(role_mode)
         if role == "internal":
@@ -352,6 +367,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
+        _configure_request_threadpool()
         _install_windows_asyncio_exception_filter(container)
         _app.state.runtime_services_activated = False
         _app.state.runtime_activation_phase = "idle"
@@ -2212,7 +2228,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     @app.get("/external/status", response_class=HTMLResponse)
     @app.get("/external/dashboard", response_class=HTMLResponse)
     @app.get("/external/config", response_class=HTMLResponse)
-    def index(request: Request) -> Response:
+    async def index(request: Request) -> Response:
         request_path = str(request.url.path or "").strip() or "/"
         role_route = _default_role_route(_deployment_role_mode())
         if request_path in {"/", "/login", "/index.html"} and role_route != "/":
@@ -2232,7 +2248,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         )
 
     @app.get("/favicon.ico")
-    def favicon() -> Response:
+    async def favicon() -> Response:
         candidates = [
             container.frontend_root / "favicon.ico",
             container.frontend_assets_dir / "favicon.ico",
@@ -2244,7 +2260,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
     if container.frontend_assets_dir.exists():
         @app.get("/assets-src/{asset_version}/{asset_path:path}")
-        def source_frontend_asset(asset_version: str, asset_path: str) -> Response:
+        async def source_frontend_asset(asset_version: str, asset_path: str) -> Response:
             if str(container.frontend_mode or "").strip().lower() != "source":
                 return Response(status_code=404)
             if str(asset_version or "").strip() != str(app.state.source_frontend_asset_version or "").strip():

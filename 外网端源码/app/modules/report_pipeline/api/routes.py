@@ -1922,11 +1922,31 @@ def _run_external_multi_date_shared_flow(
         selected_dates=selected_dates,
         buildings=target_buildings,
     ), verify_files=False)
-    expected_count = len(selected_dates) * len(target_buildings)
-    if len(cached_entries) < expected_count:
+    cached_entry_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for item in cached_entries:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+        duty_date = str(
+            item.get("duty_date", "")
+            or metadata.get("upload_date", "")
+            or item.get("bucket_key", "")
+            or ""
+        ).strip()[:10]
+        building_name = str(item.get("building", "") or "").strip()
+        if duty_date and building_name and (duty_date, building_name) not in cached_entry_by_key:
+            cached_entry_by_key[(duty_date, building_name)] = item
+    ready_dates = [
+        duty_date
+        for duty_date in selected_dates
+        if target_buildings and all((duty_date, building_name) in cached_entry_by_key for building_name in target_buildings)
+    ]
+    missing_dates = [duty_date for duty_date in selected_dates if duty_date not in ready_dates]
+    waiting_payload: Dict[str, Any] | None = None
+    if missing_dates:
         dedupe_key = _job_dedupe_key(
             "multi_date_wait_shared_bridge",
-            selected_dates=selected_dates,
+            selected_dates=missing_dates,
             buildings=target_buildings,
         )
         waiting_job, task = start_waiting_bridge_job(
@@ -1934,7 +1954,7 @@ def _run_external_multi_date_shared_flow(
             bridge_service=bridge_service,
             name="多日期自动流程",
             worker_handler="multi_date",
-            worker_payload={"selected_dates": selected_dates},
+            worker_payload={"selected_dates": missing_dates},
             resource_keys=_job_resource_keys("shared_bridge:monthly_report"),
             priority="manual",
             feature="multi_date",
@@ -1942,17 +1962,25 @@ def _run_external_multi_date_shared_flow(
             submitted_by="manual",
             bridge_get_or_create_name="get_or_create_monthly_cache_fill_task",
             bridge_create_name="create_monthly_cache_fill_task",
-            bridge_kwargs={"selected_dates": selected_dates},
+            bridge_kwargs={"selected_dates": missing_dates},
         )
         emit_log(
             "[共享缓存] 已提交月报历史日期补采任务 "
-            f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, dates={','.join(selected_dates)}"
+            f"task_id={str(task.get('task_id', '') or '-').strip() or '-'}, dates={','.join(missing_dates)}"
         )
-        return {
-            "ok": True,
-            "mode": "waiting_shared_bridge",
-            "waiting": _accepted_waiting_job_response(waiting_job, task),
-        }
+        waiting_payload = _accepted_waiting_job_response(waiting_job, task)
+        if not ready_dates:
+            return {
+                "ok": True,
+                "mode": "waiting_shared_bridge",
+                "selected_dates": list(selected_dates),
+                "missing_dates": list(missing_dates),
+                "waiting": waiting_payload,
+            }
+        emit_log(
+            "[多日期自动流程] 已命中可直接处理的历史日期，将先执行已就绪日期；"
+            f" ready={','.join(ready_dates)}, missing={','.join(missing_dates)}"
+        )
 
     file_items = [
         {
@@ -1960,14 +1988,27 @@ def _run_external_multi_date_shared_flow(
             "file_path": str(item.get("file_path", "") or "").strip(),
             "upload_date": str(item.get("metadata", {}).get("upload_date", "") or item.get("duty_date", "") or "").strip(),
         }
-        for item in cached_entries
+        for duty_date in ready_dates
+        for building_name in target_buildings
+        if (entry := cached_entry_by_key.get((duty_date, building_name)))
+        for item in [entry]
     ]
-    return run_monthly_from_file_items(
+    result = run_monthly_from_file_items(
         config,
         file_items=file_items,
         emit_log=emit_log,
         source_label="月报历史共享文件",
     )
+    if waiting_payload is not None:
+        return {
+            "ok": True,
+            "mode": "partial_ready",
+            "selected_dates": list(ready_dates),
+            "missing_dates": list(missing_dates),
+            "upload_result": result,
+            "waiting": waiting_payload,
+        }
+    return result
 
 
 def _run_external_handover_shared_flow(
@@ -5418,25 +5459,12 @@ def job_branch_power_power_alert_sync(payload: Dict[str, Any], request: Request)
     container = request.app.state.container
     config = _runtime_config(container)
     payload_obj = payload if isinstance(payload, dict) else {}
-    raw_business_date = str(
-        payload_obj.get("target_business_date", "")
-        or payload_obj.get("business_date", "")
-        or payload_obj.get("date", "")
-        or ""
-    ).strip()
-    if raw_business_date:
-        try:
-            business_date = datetime.strptime(raw_business_date.replace("/", "-")[:10], "%Y-%m-%d").date()
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail="business_date 格式必须为 YYYY-MM-DD") from exc
-    else:
-        business_date = (datetime.now() - timedelta(days=1)).date()
-    business_date_key = business_date.strftime("%Y-%m-%d")
+    business_date_keys = _normalize_branch_power_business_dates(payload_obj)
     submitted_by = str(payload_obj.get("submitted_by", "") or "").strip() or "manual"
     priority = "scheduler" if submitted_by == "scheduler" else "manual"
 
     def _run(emit_log):
-        emit_log(f"[动环功率统计同步] 已进入后台重试: business_date={business_date_key}")
+        emit_log(f"[动环功率统计同步] 已进入后台重试: business_dates={','.join(business_date_keys)}")
         retry_config = copy.deepcopy(config if isinstance(config, dict) else {})
         branch_cfg = retry_config.get("branch_power_upload", {})
         if not isinstance(branch_cfg, dict):
@@ -5447,20 +5475,64 @@ def job_branch_power_power_alert_sync(payload: Dict[str, Any], request: Request)
             power_alert_cfg = {}
             branch_cfg["power_alert_sync"] = power_alert_cfg
         power_alert_cfg["required"] = True
-        return PowerAlertSyncService(retry_config).sync(report_date=business_date_key, emit_log=emit_log)
+        service = PowerAlertSyncService(retry_config)
+        summary: Dict[str, Any] = {
+            "ok": True,
+            "status": "success",
+            "business_dates": list(business_date_keys),
+            "uploaded_dates": [],
+            "failed_dates": [],
+        }
+        last_result: Dict[str, Any] | None = None
+        for business_date_key in business_date_keys:
+            try:
+                result = service.sync(report_date=business_date_key, emit_log=emit_log)
+                if isinstance(result, dict):
+                    last_result = result
+                    summary["uploaded_dates"].append(
+                        {
+                            "business_date": business_date_key,
+                            "status": str(result.get("status", "success") or "success"),
+                        }
+                    )
+                else:
+                    summary["uploaded_dates"].append({"business_date": business_date_key, "status": "success"})
+            except Exception as exc:  # noqa: BLE001
+                error_text = str(exc)
+                summary["failed_dates"].append({"business_date": business_date_key, "error": error_text})
+                emit_log(f"[动环功率统计同步][失败] date={business_date_key}, error={error_text}")
+        if summary["failed_dates"]:
+            failed_preview = "; ".join(
+                f"{item.get('business_date', '-')}: {item.get('error', '-')}"
+                for item in summary["failed_dates"][:8]
+                if isinstance(item, dict)
+            )
+            suffix = f" 等{len(summary['failed_dates'])}项" if len(summary["failed_dates"]) > 8 else ""
+            raise RuntimeError(f"动环功率统计同步存在失败: {failed_preview}{suffix}")
+        if len(business_date_keys) == 1 and last_result is not None:
+            return last_result
+        emit_log(
+            "[动环功率统计同步] 多日期处理完成 "
+            f"uploaded={len(summary['uploaded_dates'])}, failed={len(summary['failed_dates'])}"
+        )
+        return summary
 
     try:
         job = _start_background_job(
             container,
-            name=f"动环功率统计同步 business_date={business_date_key}",
+            name=(
+                f"动环功率统计同步 business_date={business_date_keys[0]}"
+                if len(business_date_keys) == 1
+                else f"动环功率统计同步 business_dates={business_date_keys[0]}..{business_date_keys[-1]}"
+            ),
             run_func=_run,
             resource_keys=_job_resource_keys("shared_bridge:branch_power", "network:external", "branch_power:power_alert_sync"),
             priority=priority,
             feature="branch_power_power_alert_sync",
-            dedupe_key=_job_dedupe_key("branch_power_power_alert_sync", business_date=business_date_key),
+            dedupe_key=_job_dedupe_key("branch_power_power_alert_sync", business_dates=business_date_keys),
             submitted_by=submitted_by,
         )
-        container.add_system_log(f"[任务] 已提交: 动环功率统计同步 business_date={business_date_key} ({job.job_id})")
+        container.add_system_log(f"[任务] 已提交: 动环功率统计同步 business_dates={','.join(business_date_keys)} ({job.job_id})")
         return job.to_dict()
     except JobBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

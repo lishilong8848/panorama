@@ -2057,7 +2057,8 @@ def _parse_base_revision_or_400(payload: Dict[str, Any]) -> int:
         raise HTTPException(status_code=400, detail="base_revision 参数错误") from exc
 
 
-HISTORY_CLOUD_SUCCESS_LIMIT = 10
+HISTORY_CLOUD_SUCCESS_DAYS = 3
+HISTORY_CLOUD_SUCCESS_LIMIT = HISTORY_CLOUD_SUCCESS_DAYS * 2
 HISTORY_CLOUD_SUCCESS_RULE = "generated_files"
 
 
@@ -2102,7 +2103,9 @@ def _build_history_payload(service: ReviewSessionService, *, building: str, sele
     if not callable(latest_getter):
         latest_getter = getattr(service, "get_latest_session_id", None)
     latest_session_id = str(latest_getter(building) if callable(latest_getter) else "").strip()
-    history_getter = getattr(service, "list_building_generated_file_history_sessions", None)
+    history_getter = getattr(service, "list_building_generated_file_history_sessions_fast", None)
+    if not callable(history_getter):
+        history_getter = getattr(service, "list_building_generated_file_history_sessions", None)
     if callable(history_getter):
         sessions = history_getter(building, limit=HISTORY_CLOUD_SUCCESS_LIMIT)
     else:
@@ -2130,10 +2133,10 @@ def _build_history_payload(service: ReviewSessionService, *, building: str, sele
                 "updated_at": str(item.get("updated_at", "")).strip(),
                 "output_file": output_file_name,
                 "output_file_name": output_file_name,
-                "has_output_file": _safe_local_file_exists(output_file),
+                "has_output_file": bool(output_file),
                 "capacity_output_file": capacity_output_file_name,
                 "capacity_output_file_name": capacity_output_file_name,
-                "has_capacity_output_file": _safe_local_file_exists(capacity_output_file),
+                "has_capacity_output_file": bool(capacity_output_file),
                 "is_latest": is_latest,
                 "label": f"{'最新 ' if is_latest else ''}{str(item.get('duty_date', '')).strip()} / {_shift_label(str(item.get('duty_shift', '')).strip())}",
             }
@@ -2149,10 +2152,7 @@ def _build_history_payload(service: ReviewSessionService, *, building: str, sele
         if isinstance(selected_session, dict):
             output_file = str(selected_session.get("output_file", "")).strip()
             capacity_output_file = str(selected_session.get("capacity_output_file", "")).strip()
-            if (
-                _safe_local_file_exists(output_file)
-                or _safe_local_file_exists(capacity_output_file)
-            ):
+            if output_file or capacity_output_file:
                 selected_history_excluded_reason = "outside_limit"
             else:
                 selected_history_excluded_reason = "no_generated_file"
@@ -2890,7 +2890,7 @@ def _build_review_display_state(
     history_limit = max(1, int(history_payload.get("history_limit", HISTORY_CLOUD_SUCCESS_LIMIT) or HISTORY_CLOUD_SUCCESS_LIMIT))
     history_rule = str(history_payload.get("history_rule", HISTORY_CLOUD_SUCCESS_RULE) or "").strip().lower()
     if history_rule == "generated_files":
-        history_hint_rows = [f"仅显示最近 {history_limit} 条已生成本地文件的交接班记录，可直接下载交接班日志和容量表。"]
+        history_hint_rows = [f"仅显示最近 {HISTORY_CLOUD_SUCCESS_DAYS} 天已生成本地文件的交接班记录，可直接下载交接班日志和容量表。"]
     else:
         history_hint_rows = [f"仅显示最近 {history_limit} 条已成功上云的交接班日志。"]
     if session_payload and not bool(history_payload.get("selected_in_history_list", False)):
@@ -3269,7 +3269,7 @@ def _ensure_latest_session_actionable_or_400(service: ReviewSessionService, *, b
 
 
 @router.get("/handover/review/{building_code}")
-def handover_review_page(building_code: str, request: Request):
+async def handover_review_page(building_code: str, request: Request):
     container = request.app.state.container
     _ensure_review_page_code_or_404(building_code)
     if str(container.frontend_mode or "").strip().lower() == "source":

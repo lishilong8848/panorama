@@ -135,6 +135,8 @@ class ReviewDocumentStateService:
             document = self.parser.parse(output_file)
         except Exception as exc:  # noqa: BLE001
             raise ReviewDocumentStateError(f"解析交接班文件失败，无法初始化审核文档: {exc}") from exc
+        document = self.attach_cooling_pump_pressures(document=document, session=session)
+        document = self.attach_capacity_room_inputs(document=document, session=session)
         imported = store.upsert_imported_document(
             session=session,
             document=document,
@@ -381,8 +383,6 @@ class ReviewDocumentStateService:
         payload = dict(document if isinstance(document, dict) else {})
         building = self._building(session)
         running_units = self._normalize_capacity_running_units(session.get("capacity_running_units", {}))
-        if not running_units.get("west") and not running_units.get("east"):
-            running_units = self._running_units_from_capacity_file(str(session.get("capacity_output_file", "") or ""))
         defaults_raw = self._store(building).get_default("cooling_pump_pressures") if building else {}
         defaults = defaults_raw if isinstance(defaults_raw, dict) else {}
         summary_lines = self._cooling_summary_lines(session)
@@ -401,6 +401,31 @@ class ReviewDocumentStateService:
             if isinstance(payload.get("cooling_pump_pressures", {}), dict)
             else []
         )
+        if not running_units.get("west") and not running_units.get("east"):
+            if isinstance(current_rows, list) and current_rows:
+                for row in current_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    zone = str(row.get("zone", "") or "").strip().lower()
+                    if zone not in running_units:
+                        continue
+                    try:
+                        unit = int(row.get("unit", 0) or 0)
+                    except Exception:  # noqa: BLE001
+                        unit = 0
+                    if unit > 0:
+                        running_units[zone].append(
+                            {
+                                "unit": unit,
+                                "mode_text": str(row.get("mode_text", "") or "").strip(),
+                                "mode_code": str(row.get("mode_code", "") or "").strip(),
+                                "metric_key": str(row.get("metric_key", "") or "").strip(),
+                            }
+                        )
+                for zone in ("west", "east"):
+                    running_units[zone].sort(key=lambda item: int(item.get("unit", 0) or 0))
+            if not running_units.get("west") and not running_units.get("east"):
+                running_units = self._running_units_from_capacity_file(str(session.get("capacity_output_file", "") or ""))
         current_by_key: Dict[str, Dict[str, Any]] = {}
         if isinstance(current_rows, list):
             for row in current_rows:
@@ -485,7 +510,14 @@ class ReviewDocumentStateService:
                 "level": tank_level,
             }
         secondary_rows: List[Dict[str, Any]] = []
-        for detected in self._secondary_pump_rows_from_capacity_file(str(session.get("capacity_output_file", "") or "")):
+        detected_secondary_rows = (
+            current_secondary_rows
+            if isinstance(current_secondary_rows, list) and current_secondary_rows
+            else self._secondary_pump_rows_from_capacity_file(str(session.get("capacity_output_file", "") or ""))
+        )
+        for detected in detected_secondary_rows:
+            if not isinstance(detected, dict):
+                continue
             key = str(detected.get("row_id", "") or "").strip()
             current = current_secondary_by_key.get(key, {})
             default = defaults.get(key, {}) if isinstance(defaults.get(key, {}), dict) else {}

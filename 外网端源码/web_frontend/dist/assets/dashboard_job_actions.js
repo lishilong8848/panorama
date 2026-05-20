@@ -519,7 +519,7 @@ if (!canRun.value) return;
     );
   }
 
-  async function runBranchPowerFromDownload() {
+  function resolveBranchPowerBusinessDates() {
     const startDate = String(branchPowerBusinessDate?.value || "").trim();
     const endDate = String(branchPowerBusinessDateEnd?.value || startDate).trim() || startDate;
     const rawDatesText = String(branchPowerBusinessDatesText?.value || "").trim();
@@ -530,7 +530,7 @@ if (!canRun.value) return;
       const parsed = parseDateText(normalizedInput);
       if (!parsed) {
         message.value = `支路三源表日期列表中存在无效日期: ${item}`;
-        return;
+        return null;
       }
       const normalized = formatDateObj(parsed);
       if (!listedDates.includes(normalized)) listedDates.push(normalized);
@@ -538,12 +538,22 @@ if (!canRun.value) return;
     const businessDates = (listedDates.length ? listedDates : expandDateRange(startDate, endDate)).slice().sort();
     if (!listedDates.length && (!parseDateText(startDate) || !parseDateText(endDate) || !businessDates.length)) {
       message.value = "请选择有效的支路三源表业务日期范围";
-      return;
+      return null;
     }
     if (businessDates.length > 31) {
       message.value = "支路三源表一次最多执行31个业务日期，请分批处理";
-      return;
+      return null;
     }
+    return {
+      businessDates,
+      listedDates,
+    };
+  }
+
+  async function runBranchPowerFromDownload() {
+    const resolvedDates = resolveBranchPowerBusinessDates();
+    if (!resolvedDates) return;
+    const { businessDates, listedDates } = resolvedDates;
     if (!canRun.value) return;
     return guardedRun(
       ACTION_KEYS.branchPowerFromDownload,
@@ -576,21 +586,29 @@ if (!canRun.value) return;
   }
 
   async function runBranchPowerPowerAlertSync() {
-    const businessDate = String(branchPowerBusinessDate?.value || "").trim();
-    if (!parseDateText(businessDate)) {
-      message.value = "请选择有效的动环统计业务日期";
-      return;
-    }
+    const resolvedDates = resolveBranchPowerBusinessDates();
+    if (!resolvedDates) return;
+    const { businessDates, listedDates } = resolvedDates;
     if (!canRun.value) return;
     return guardedRun(
       ACTION_KEYS.branchPowerPowerAlertSync,
       async () => {
         try {
           const payload = {
-            business_date: businessDate,
-            target_business_date: businessDate,
+            business_date: businessDates[0],
+            target_business_date: businessDates[0],
+            business_dates: businessDates,
+            target_business_dates: businessDates,
           };
-          message.value = `动环功率统计同步任务已提交: ${businessDate}`;
+          if (!listedDates.length) {
+            payload.business_date_start = businessDates[0];
+            payload.business_date_end = businessDates[businessDates.length - 1];
+          }
+          const dateLabel =
+            businessDates.length === 1
+              ? businessDates[0]
+              : `${businessDates[0]} 至 ${businessDates[businessDates.length - 1]}（${businessDates.length}天）`;
+          message.value = `动环功率统计同步任务已提交: ${dateLabel}`;
           const response = await submitBranchPowerPowerAlertSyncJob(payload);
           await applyAcceptedExecutionResponse(response, "动环功率统计同步");
         } catch (err) {

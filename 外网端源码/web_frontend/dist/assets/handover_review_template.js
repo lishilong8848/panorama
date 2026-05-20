@@ -182,7 +182,7 @@
           正在加载历史文件...
         </div>
         <div v-else-if="!historyLoaded" class="review-empty-inline">
-          正在自动加载最近生成的交接班日志和容量报表，也可点击“刷新历史文件”重新加载。
+          页面主体已先加载，历史文件会在后台准备；也可点击“刷新历史文件”重新加载。
         </div>
         <div v-else-if="!historySessions.length" class="review-empty-inline">
           当前楼栋暂无已生成的历史交接班文件。
