@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import copy
+import json
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.config.handover_segment_store import (
     HANDOVER_SEGMENT_BUILDINGS,
     building_code_from_name,
+    handover_common_segment_path,
     handover_building_segment_path,
     read_segment_document,
 )
@@ -30,17 +32,11 @@ def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _with_query_params(url: str, params: Dict[str, Any]) -> str:
+def _strip_url_query_and_fragment(url: str) -> str:
     text = str(url or "").strip()
     if not text:
         return ""
-    parts = urlsplit(text)
-    query = dict(parse_qsl(parts.query, keep_blank_values=True))
-    for key, value in params.items():
-        value_text = str(value or "").strip()
-        if value_text:
-            query[str(key)] = value_text
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    return text.split("?", 1)[0].split("#", 1)[0]
 
 
 def _looks_like_runtime_config(cfg: Dict[str, Any]) -> bool:
@@ -109,6 +105,8 @@ def _normalize_delivery_state(raw: Dict[str, Any] | None) -> Dict[str, Any]:
 
 
 class ReviewLinkDeliveryService:
+    _station_110_delivery_lock = threading.RLock()
+
     def __init__(self, runtime_config: Dict[str, Any], *, config_path: str | Path | None = None) -> None:
         self.runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
         self.config_path = Path(config_path) if config_path else None
@@ -181,6 +179,23 @@ class ReviewLinkDeliveryService:
 
         if self.config_path:
             try:
+                if building_text in {STATION_110_BUILDING, STATION_110_CODE}:
+                    document = read_segment_document(handover_common_segment_path(self.config_path))
+                    payload = document.get("data", {}) if isinstance(document, dict) else {}
+                    review_ui = payload.get("review_ui", {}) if isinstance(payload, dict) else {}
+                    by_building = (
+                        review_ui.get("review_link_recipients_by_building", {})
+                        if isinstance(review_ui.get("review_link_recipients_by_building", {}), dict)
+                        else {}
+                    )
+                    normalized = self._normalize_recipient_rows(by_building.get(STATION_110_BUILDING, []))
+                    return {
+                        "building": STATION_110_BUILDING,
+                        "revision": int(document.get("revision", 0) or 0) if isinstance(document, dict) else 0,
+                        "updated_at": str(document.get("updated_at", "") or "").strip() if isinstance(document, dict) else "",
+                        "source": "common_segment",
+                        **normalized,
+                    }
                 document = read_segment_document(
                     handover_building_segment_path(
                         self.config_path,
@@ -829,6 +844,65 @@ class ReviewLinkDeliveryService:
             duty_date, duty_shift = batch_key_text.split("|", 1)
         return str(duty_date or "").strip(), str(duty_shift or "").strip().lower()
 
+    def _station_110_delivery_state_path(self) -> Path:
+        root = (self.config_path.parent if self.config_path else Path.cwd()) / ".runtime" / "handover"
+        return root / "station_110_review_link_delivery.json"
+
+    def _load_station_110_delivery_state(self) -> Dict[str, Any]:
+        path = self._station_110_delivery_state_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            return payload if isinstance(payload, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _save_station_110_delivery_state(self, payload: Dict[str, Any]) -> None:
+        path = self._station_110_delivery_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+
+    @staticmethod
+    def _station_110_delivery_key(duty_date: str, duty_shift: str) -> str:
+        return f"{str(duty_date or '').strip()}|{str(duty_shift or '').strip().lower()}"
+
+    def _get_sent_station_110_delivery(self, *, duty_date: str, duty_shift: str) -> Dict[str, Any] | None:
+        key = self._station_110_delivery_key(duty_date, duty_shift)
+        if not key.strip("|"):
+            return None
+        with self._station_110_delivery_lock:
+            state = self._load_station_110_delivery_state()
+            item = state.get(key)
+            if not isinstance(item, dict):
+                return None
+            status = str(item.get("status", "") or "").strip().lower()
+            sent_at = str(item.get("last_sent_at", "") or "").strip()
+            recipients = item.get("successful_recipients", [])
+            if status in {"success", "partial_failed"} and sent_at and isinstance(recipients, list) and recipients:
+                return dict(item)
+        return None
+
+    def _remember_sent_station_110_delivery(
+        self,
+        *,
+        duty_date: str,
+        duty_shift: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        key = self._station_110_delivery_key(duty_date, duty_shift)
+        if not key.strip("|") or not isinstance(payload, dict):
+            return
+        if not payload.get("successful_recipients"):
+            return
+        with self._station_110_delivery_lock:
+            state = self._load_station_110_delivery_state()
+            state[key] = {
+                **payload,
+                "updated_at": _now_text(),
+            }
+            self._save_station_110_delivery_state(state)
+
     def send_station_110_review_link(
         self,
         *,
@@ -851,14 +925,31 @@ class ReviewLinkDeliveryService:
             snapshot,
             building_text,
         )
-        url = _with_query_params(
-            url,
-            {
-                "duty_date": duty_date_text,
-                "duty_shift": duty_shift_text,
-            },
-        )
+        url = _strip_url_query_and_fragment(url)
         source_text = str(source or "scheduler").strip().lower() or "scheduler"
+        if source_text not in {"manual", "manual_test", "test"}:
+            previous_delivery = self._get_sent_station_110_delivery(
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+            )
+            if previous_delivery is not None:
+                emit_log(
+                    "[交接班][110站审核链接发送] 跳过重复发送 "
+                    f"duty_date={duty_date_text}, duty_shift={duty_shift_text}, "
+                    f"last_sent_at={str(previous_delivery.get('last_sent_at', '') or '-').strip() or '-'}, "
+                    f"source={source_text}"
+                )
+                return {
+                    **previous_delivery,
+                    "building": building_text,
+                    "status": str(previous_delivery.get("status", "success") or "success").strip().lower() or "success",
+                    "error": str(previous_delivery.get("error", "") or "").strip(),
+                    "duty_date": duty_date_text,
+                    "duty_shift": duty_shift_text,
+                    "review_url": _strip_url_query_and_fragment(previous_delivery.get("review_url", "") or url),
+                    "skipped_duplicate": True,
+                    "source": source_text,
+                }
         emit_log(
             "[交接班][110站审核链接发送] 开始发送 "
             f"duty_date={duty_date_text}, duty_shift={duty_shift_text}, "
@@ -955,22 +1046,31 @@ class ReviewLinkDeliveryService:
         else:
             status = "failed"
             error = "全部收件人发送失败"
+        sent_at = _now_text() if successful_recipients else ""
         emit_log(
             "[交接班][110站审核链接发送] 完成 "
             f"duty_date={duty_date_text}, duty_shift={duty_shift_text}, status={status}, "
             f"successful={len(successful_recipients)}, failed={len(failed_recipients)}"
         )
-        return {
+        result = {
             "building": building_text,
             "status": status,
             "error": error,
             "duty_date": duty_date_text,
             "duty_shift": duty_shift_text,
+            "last_sent_at": sent_at,
             "message_text": message_text,
             "successful_recipients": successful_recipients,
             "failed_recipients": failed_recipients,
             "review_url": url,
         }
+        if source_text not in {"manual", "manual_test", "test"}:
+            self._remember_sent_station_110_delivery(
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                payload=result,
+            )
+        return result
 
     def validate_manual_send_preflight(
         self,

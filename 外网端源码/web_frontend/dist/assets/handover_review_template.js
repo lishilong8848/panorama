@@ -138,7 +138,7 @@
                   正在加载历史交接班日志...
                 </option>
                 <option v-else-if="!historySessions.length" value="" disabled>
-                  {{ selectedSessionInHistoryList ? "暂无符合条件的历史交接班日志" : "展开后加载历史交接班日志" }}
+                  {{ selectedSessionInHistoryList ? "暂无可下载的历史文件" : "展开后加载历史文件" }}
                 </option>
                 <option v-else-if="!selectedSessionInHistoryList" value="" disabled>
                   当前记录未进入历史列表
@@ -159,6 +159,59 @@
             </div>
             <small class="review-field-hint">{{ historySelectorHint }}</small>
           </label>
+        </div>
+      </article>
+    </section>
+
+    <section class="review-history-files-section">
+      <article class="review-card">
+        <div class="review-card-head review-card-head-actions">
+          <div>
+            <h2>历史文件下载</h2>
+            <p class="review-card-subtitle">可直接下载已生成的交接班日志和容量报表，不需要切换历史详情。</p>
+          </div>
+          <button
+            class="btn btn-secondary btn-mini"
+            @click="ensureHistoryLoaded({ force: true })"
+            :disabled="historyLoading || downloading || capacityDownloading"
+          >
+            {{ historyLoading ? "加载中..." : "刷新历史文件" }}
+          </button>
+        </div>
+        <div v-if="historyLoading" class="review-empty-inline">
+          正在加载历史文件...
+        </div>
+        <div v-else-if="!historyLoaded" class="review-empty-inline">
+          点击“刷新历史文件”后加载最近生成的交接班日志和容量报表。
+        </div>
+        <div v-else-if="!historySessions.length" class="review-empty-inline">
+          当前楼栋暂无已生成的历史交接班文件。
+        </div>
+        <div v-else class="review-history-file-list">
+          <div v-for="item in historySessions" :key="'history-file-' + item.session_id" class="review-history-file-row">
+            <div class="review-history-file-main">
+              <strong>{{ item.label || (item.duty_date + ' / ' + item.duty_shift) }}</strong>
+              <small>{{ item.updated_at || "无更新时间" }}</small>
+            </div>
+            <div class="review-history-file-actions">
+              <button
+                class="btn btn-secondary btn-mini"
+                @click="downloadHistoryReviewFile(item)"
+                :disabled="downloading || saving || confirming || cloudSyncBusy || !item.has_output_file"
+                :title="item.has_output_file ? '' : '该历史记录没有交接班日志文件'"
+              >
+                下载交接班日志
+              </button>
+              <button
+                class="btn btn-secondary btn-mini"
+                @click="downloadHistoryCapacityFile(item)"
+                :disabled="capacityDownloading || saving || confirming || cloudSyncBusy || !item.has_capacity_output_file"
+                :title="item.has_capacity_output_file ? '' : '该历史记录没有容量报表文件'"
+              >
+                下载容量表
+              </button>
+            </div>
+          </div>
         </div>
       </article>
     </section>

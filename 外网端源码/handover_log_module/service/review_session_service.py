@@ -2321,6 +2321,42 @@ class ReviewSessionService:
         return output
 
     @staticmethod
+    def _history_file_exists(path_text: str) -> bool:
+        text = str(path_text or "").strip()
+        if not text:
+            return False
+        try:
+            return Path(text).is_file()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def list_building_generated_file_history_sessions(
+        self,
+        building: str,
+        *,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        history_limit = max(0, int(limit or 0))
+        if history_limit <= 0:
+            return []
+
+        output: List[Dict[str, Any]] = []
+        for session in self.list_building_sessions(building):
+            output_file = str(session.get("output_file", "") or "").strip()
+            capacity_output_file = str(session.get("capacity_output_file", "") or "").strip()
+            if self._is_legacy_test_output_file(output_file):
+                continue
+            if not (
+                self._history_file_exists(output_file)
+                or self._history_file_exists(capacity_output_file)
+            ):
+                continue
+            output.append(session)
+            if len(output) >= history_limit:
+                break
+        return output
+
+    @staticmethod
     def _parse_updated_at(value: str) -> datetime:
         text = str(value or "").strip()
         if not text:

@@ -30,7 +30,11 @@ from handover_log_module.core.normalizers import format_number
 from handover_log_module.repository.excel_reader import load_rows, load_workbook_quietly
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
-from handover_log_module.service.capacity_report_common import CapacitySourceQuery, build_capacity_template_snapshot
+from handover_log_module.service.capacity_report_common import (
+    CapacitySourceQuery,
+    _secondary_pump_display_number_from_row,
+    build_capacity_template_snapshot,
+)
 from handover_log_module.service.handover_capacity_oil_cache_service import HandoverCapacityOilCacheService
 from handover_log_module.service.capacity_room_inputs_service import CapacityRoomInputsService
 from handover_log_module.service.review_session_service import ReviewSessionService
@@ -2116,8 +2120,8 @@ class HandoverCapacityReportService:
         rows = payload.get("rows", [])
         values: Dict[str, str] = {}
         for inlet_cell, outlet_cell in _COOLING_PUMP_PRESSURE_TARGETS.values():
-            values[inlet_cell] = ""
-            values[outlet_cell] = ""
+            values[inlet_cell] = "/"
+            values[outlet_cell] = "/"
         if not isinstance(rows, list):
             return values
         zone_positions: Dict[str, int] = {"west": 0, "east": 0}
@@ -2137,8 +2141,8 @@ class HandoverCapacityReportService:
             if not target:
                 continue
             inlet_cell, outlet_cell = target
-            values[inlet_cell] = _text(row.get("inlet_pressure"))
-            values[outlet_cell] = _text(row.get("outlet_pressure"))
+            values[inlet_cell] = _text(row.get("inlet_pressure")) or "/"
+            values[outlet_cell] = _text(row.get("outlet_pressure")) or "/"
         return values
 
     @staticmethod
@@ -2349,15 +2353,15 @@ class HandoverCapacityReportService:
                 value = None
             if not isinstance(value, (int, float)):
                 value = self._to_float_cell_value(getattr(row, "e_raw", None))
-            if value is not None and float(value) > 10:
+            if value is not None and float(value) > 10 and _secondary_pump_display_number_from_row(row, zone) > 0:
                 running_rows.append(row)
         if not running_rows:
             return ""
         numbers: List[int] = []
         for row in running_rows:
-            for number in self._extract_equipment_numbers(row):
-                if number not in numbers:
-                    numbers.append(number)
+            number = _secondary_pump_display_number_from_row(row, zone)
+            if number > 0 and number not in numbers:
+                numbers.append(number)
         if numbers:
             return f"{''.join(f'{number}#' for number in sorted(numbers))}二次泵运行正常"
         return f"{len(running_rows)}台二次泵运行正常"

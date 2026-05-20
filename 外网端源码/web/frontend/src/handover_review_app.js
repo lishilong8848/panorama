@@ -996,6 +996,8 @@ function normalizeHistoryPayload(raw, fallbackSession = null) {
           updated_at: String(item.updated_at || "").trim(),
           output_file: String(item.output_file || "").trim(),
           has_output_file: Boolean(item.has_output_file),
+          capacity_output_file: String(item.capacity_output_file || "").trim(),
+          has_capacity_output_file: Boolean(item.has_capacity_output_file),
           is_latest: Boolean(item.is_latest),
           label: String(item.label || "").trim(),
         }))
@@ -1013,7 +1015,7 @@ function normalizeHistoryPayload(raw, fallbackSession = null) {
       : sessionItems.some((item) => item.session_id === selectedSessionId);
   const selectedHistoryExcludedReason = String(raw?.selected_history_excluded_reason || "").trim();
   const historyLimit = Math.max(0, Number.parseInt(raw?.history_limit ?? 10, 10) || 10);
-  const historyRule = String(raw?.history_rule || "").trim() || "cloud_success_only";
+  const historyRule = String(raw?.history_rule || "").trim() || "generated_files";
   return {
     latest_session_id: latestSessionId,
     selected_session_id: selectedSessionId,
@@ -2304,7 +2306,9 @@ export function mountHandoverReviewApp(Vue) {
       function buildHistoryCacheKey(sessionPayload = session.value, historyPayload = historyState.value) {
         const currentSessionId = String(sessionPayload?.session_id || "").trim();
         const latestId = String(historyPayload?.latest_session_id || currentSessionId || "").trim();
-        return `${buildingCode || ""}|${latestId}|${currentSessionId}`;
+        const contextDate = String(reviewContext.value?.duty_date || activeRouteSelection.value?.dutyDate || "").trim();
+        const contextShift = String(reviewContext.value?.duty_shift || activeRouteSelection.value?.dutyShift || "").trim();
+        return `${buildingCode || ""}|${latestId}|${currentSessionId}|${contextDate}|${contextShift}`;
       }
 
       function applyPayloadMeta(payload = {}) {
@@ -2435,7 +2439,7 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       async function ensureHistoryLoaded({ force = false } = {}) {
-        if (!buildingCode || !session.value || !String(session.value?.session_id || "").trim()) {
+        if (!buildingCode) {
           return;
         }
         const targetKey = buildHistoryCacheKey();
@@ -2447,9 +2451,13 @@ export function mountHandoverReviewApp(Vue) {
         }
         historyLoading.value = true;
         try {
+          const params = buildLoadParams();
+          if (force) {
+            params.force = Date.now();
+          }
           const payload = await getHandoverReviewHistoryApi(
             buildingCode,
-            buildLoadParams(),
+            params,
           );
           applyHistoryPayload(payload || {});
         } catch (error) {
@@ -3447,6 +3455,84 @@ export function mountHandoverReviewApp(Vue) {
         triggerBrowserDownload,
       });
 
+      async function downloadHistoryReviewFile(item) {
+        const sessionId = String(item?.session_id || "").trim();
+        if (!sessionId || !item?.has_output_file) {
+          statusText.value = "当前历史记录没有可下载的交接班日志文件";
+          return;
+        }
+        if (saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityImageSending.value || downloading.value) {
+          statusText.value = "请先等待当前保存或同步完成后再下载。";
+          return;
+        }
+        if (sessionId === String(session.value?.session_id || "").trim() && dirty.value) {
+          const saved = await saveDocument({ reason: "history_download" });
+          if (!saved) return;
+        }
+        downloading.value = true;
+        errorText.value = "";
+        statusText.value = "正在下载历史交接班日志...";
+        try {
+          const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId, {
+            client_id: reviewClientId,
+            ts: Date.now(),
+          });
+          const result = await triggerBrowserDownload(url, item.output_file || "历史交接班日志.xlsx");
+          statusText.value = result?.warning
+            ? `历史交接班日志已下载，但部分填充失败：${result.warning}`
+            : "历史交接班日志已下载";
+        } catch (error) {
+          if (isRevisionConflictError(error)) {
+            await refreshData();
+            statusText.value = "已同步最新审核内容，请重新下载历史文件。";
+            return;
+          }
+          errorText.value = String(error?.message || error || "历史交接班日志下载失败");
+          statusText.value = "历史交接班日志下载失败";
+        } finally {
+          downloading.value = false;
+        }
+      }
+
+      async function downloadHistoryCapacityFile(item) {
+        const sessionId = String(item?.session_id || "").trim();
+        if (!sessionId || !item?.has_capacity_output_file) {
+          statusText.value = "当前历史记录没有可下载的容量报表文件";
+          return;
+        }
+        if (saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
+          statusText.value = "请先等待当前保存或同步完成后再下载。";
+          return;
+        }
+        if (sessionId === String(session.value?.session_id || "").trim() && dirty.value) {
+          const saved = await saveDocument({ reason: "history_capacity_download" });
+          if (!saved) return;
+        }
+        capacityDownloading.value = true;
+        errorText.value = "";
+        statusText.value = "正在下载历史容量报表...";
+        try {
+          const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, {
+            client_id: reviewClientId,
+            ts: Date.now(),
+          });
+          const result = await triggerBrowserDownload(url, item.capacity_output_file || "历史交接班容量报表.xlsx");
+          statusText.value = result?.warning
+            ? `历史容量报表已下载，但部分填充失败：${result.warning}`
+            : "历史容量报表已下载";
+        } catch (error) {
+          if (isRevisionConflictError(error)) {
+            await refreshData();
+            statusText.value = "已同步最新审核内容，请重新下载历史文件。";
+            return;
+          }
+          errorText.value = String(error?.message || error || "历史容量报表下载失败");
+          statusText.value = "历史容量报表下载失败";
+        } finally {
+          capacityDownloading.value = false;
+        }
+      }
+
       onMounted(async () => {
         if (typeof window !== "undefined") {
           window.addEventListener("beforeunload", handleWindowBeforeUnload);
@@ -3510,6 +3596,7 @@ export function mountHandoverReviewApp(Vue) {
         historyState,
         historySessions,
         historyLoading,
+        historyLoaded,
         selectedSessionId,
         selectedSessionInHistoryList,
         selectedSessionIdInListOrEmpty,
@@ -3563,6 +3650,8 @@ export function mountHandoverReviewApp(Vue) {
         onHistorySelectionChange,
         returnToLatestSession,
         ensureHistoryLoaded,
+        downloadHistoryReviewFile,
+        downloadHistoryCapacityFile,
         updateHistoryCloudSync,
         updateFixedField,
         updateSectionCell,

@@ -2843,6 +2843,55 @@ button:disabled,
   justify-content: center;
 }
 
+.review-card-head-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.review-history-files-section {
+  margin-top: 12px;
+}
+
+.review-history-file-list {
+  display: grid;
+  gap: 10px;
+}
+
+.review-history-file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.review-history-file-main {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.review-history-file-main strong,
+.review-history-file-main small {
+  overflow-wrap: anywhere;
+}
+
+.review-history-file-main small {
+  color: var(--text-3);
+}
+
+.review-history-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .review-field-label small {
   color: var(--text-3);
   font-weight: 700;
@@ -3505,6 +3554,23 @@ button:disabled,
 
   .review-history-control {
     grid-template-columns: 1fr;
+  }
+
+  .review-card-head-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .review-history-file-row {
+    grid-template-columns: 1fr;
+  }
+
+  .review-history-file-actions {
+    justify-content: flex-start;
+  }
+
+  .review-history-file-actions .btn {
+    width: 100%;
   }
 
   .review-current-view-fields {

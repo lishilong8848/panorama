@@ -185,6 +185,9 @@ _PLATE_HEAT_EXCHANGER_KEYS = {
     "plate_chilled_in_pressure",
     "plate_chilled_out_pressure",
 }
+_IT_PLANNED_LOAD_BY_BUILDING = {
+    "A楼": "12900",
+}
 
 
 def _text(value: Any) -> str:
@@ -474,6 +477,23 @@ def _extract_equipment_numbers_from_row(row: RawRow) -> List[int]:
     return sorted(numbers)
 
 
+def _secondary_pump_allowed_numbers(zone: str) -> set[int]:
+    normalized_zone = _text(zone).lower()
+    if normalized_zone == "east":
+        return {1, 2, 3}
+    if normalized_zone == "west":
+        return {4, 5, 6}
+    return {1, 2, 3, 4, 5, 6}
+
+
+def _secondary_pump_display_number_from_row(row: RawRow, zone: str) -> int:
+    allowed_numbers = _secondary_pump_allowed_numbers(zone)
+    for number in _extract_equipment_numbers_from_row(row):
+        if int(number) in allowed_numbers:
+            return int(number)
+    return 0
+
+
 def _secondary_pump_metric_text(
     query: CapacitySourceQuery,
     *,
@@ -489,8 +509,7 @@ def _secondary_pump_metric_text(
         row_zone = _zone_of_row(row)
         if target_zone and row_zone and row_zone != target_zone:
             continue
-        numbers = _extract_equipment_numbers_from_row(row)
-        if pump_number not in numbers:
+        if _secondary_pump_display_number_from_row(row, target_zone) != int(pump_number):
             continue
         d_name = _casefold(getattr(row, "d_name", ""))
         if not any(alias in d_name for alias in alias_tokens):
@@ -505,7 +524,7 @@ def _secondary_pump_frequency_value(row: RawRow) -> float | None:
     return _row_numeric_value(row)
 
 
-def _dedupe_secondary_pump_rows(rows: Sequence[RawRow]) -> List[RawRow]:
+def _dedupe_secondary_pump_rows(rows: Sequence[RawRow], *, zone: str = "") -> List[RawRow]:
     output: List[RawRow] = []
     seen: set[str] = set()
     ordered = sorted(
@@ -516,13 +535,29 @@ def _dedupe_secondary_pump_rows(rows: Sequence[RawRow]) -> List[RawRow]:
         ),
     )
     for row in ordered:
-        numbers = _extract_equipment_numbers_from_row(row)
-        key = f"pump:{numbers[0]}" if numbers else f"row:{int(getattr(row, 'row_index', 0) or 0)}"
+        display_number = _secondary_pump_display_number_from_row(row, zone)
+        if display_number <= 0:
+            continue
+        key = f"pump:{display_number}"
         if key in seen:
             continue
         seen.add(key)
         output.append(row)
     return output
+
+
+def _fan_number_from_row(row: RawRow) -> int | None:
+    d_name = _text(getattr(row, "d_name", ""))
+    patterns = (
+        r"(?:风机|风扇)\s*([12])\s*[#号]?",
+        r"([12])\s*[#号]?\s*(?:风机|风扇)",
+        r"(?:冷却塔|冷塔)\s*([12])\s*(?:风机|号风扇)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, d_name, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def _building_aliases(context: Dict[str, Any], key: str) -> List[str]:
@@ -691,6 +726,7 @@ def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]
     h17_left, h17_right = _split_metric_pair(context.get("hvdc_text"))
     h18_left, h18_right = _split_metric_pair(handover_cells.get("D10"))
 
+    building = _text(context.get("building"))
     cell_values: Dict[str, str] = {
         "D2": "白" if duty_shift == "day" else "夜",
         "M6": _text(handover_cells.get("C3")),
@@ -730,6 +766,9 @@ def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]
         "AC25": _text(water_summary.get("month_total")),
         "R59": _text(water_summary.get("month_total")),
     }
+    planned_load = _text(_IT_PLANNED_LOAD_BY_BUILDING.get(building))
+    if planned_load:
+        cell_values["AB62"] = planned_load
     if duty_shift == "day":
         cell_values["G7"] = _text(handover_cells.get("B4")) or "/"
     return {cell: value for cell, value in cell_values.items() if value != ""}
@@ -824,20 +863,23 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
     running_candidates: List[RawRow] = []
     for row in secondary_rows:
         frequency_value = _secondary_pump_frequency_value(row)
-        if frequency_value is not None and float(frequency_value) > 10:
+        if (
+            frequency_value is not None
+            and float(frequency_value) > 10
+            and _secondary_pump_display_number_from_row(row, zone) > 0
+        ):
             running_candidates.append(row)
-    running_secondary = _dedupe_secondary_pump_rows(running_candidates)
+    running_secondary = _dedupe_secondary_pump_rows(running_candidates, zone=zone)
     layout = _SECONDARY_PUMP_LAYOUT.get(zone, {})
     for index, slot in enumerate(list(layout.get("slots", []) or [])):
         row = running_secondary[index] if index < len(running_secondary) else None
         if row is None:
             results[_text(slot.get("title"))] = "/"
             results[_text(slot.get("frequency"))] = "/"
-            results[_text(slot.get("inlet"))] = "0"
-            results[_text(slot.get("outlet"))] = "0"
+            results[_text(slot.get("inlet"))] = "/"
+            results[_text(slot.get("outlet"))] = "/"
             continue
-        numbers = _extract_equipment_numbers_from_row(row)
-        pump_number = int(numbers[0]) if numbers else 0
+        pump_number = _secondary_pump_display_number_from_row(row, zone)
         number_text = f"{pump_number}#" if pump_number > 0 else ""
         results[_text(slot.get("title"))] = f"{number_text}二次泵"
         results[_text(slot.get("frequency"))] = _text(getattr(row, "e_raw", None))
@@ -853,8 +895,8 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
             pump_number=pump_number,
             aliases=_SECONDARY_PUMP_OUTLET_PRESSURE_ALIASES,
         )
-        results[_text(slot.get("inlet"))] = inlet_text or "0"
-        results[_text(slot.get("outlet"))] = outlet_text or "0"
+        results[_text(slot.get("inlet"))] = inlet_text or "/"
+        results[_text(slot.get("outlet"))] = outlet_text or "/"
     redundancy_cell = _text(layout.get("redundancy"))
     if redundancy_cell:
         results[redundancy_cell] = _build_redundancy_text(len(running_secondary))
@@ -952,17 +994,24 @@ def _block_cell_map(zone: str, position: int) -> Dict[str, str]:
 
 def _fan_values(query: CapacitySourceQuery, *, zone: str, unit: int) -> Dict[int, str]:
     matched_rows = query.rows_by_d_regexes(
-        [r"冷却塔\d风机变频反馈", r"冷塔/\d#风机频率反馈", r"冷塔\d#风机频率反馈", r"冷却塔\d号风扇频率反馈"],
+        [
+            r"冷却塔\d风机变频反馈",
+            r"冷塔/\d#风机频率反馈",
+            r"冷塔\d#风机频率反馈",
+            r"冷却塔\d号风扇频率反馈",
+            r"(?:冷却塔|冷塔).*(?:风机|风扇).*频(?:率|率反馈|率值|率信号|率采集|率反馈值)",
+            r"(?:风机|风扇).*频(?:率|率反馈|率值|率信号|率采集|率反馈值)",
+            r"(?:冷却塔|冷塔).*(?:频率|变频反馈)",
+        ],
         zone=zone,
         unit=unit,
         allow_global=False,
     )
     values: Dict[int, str] = {}
     for row in matched_rows:
-        match = re.search(r"(\d)", _text(getattr(row, "d_name", "")))
-        if not match:
+        digit = _fan_number_from_row(row)
+        if digit is None:
             continue
-        digit = int(match.group(1))
         if digit not in {1, 2} or digit in values:
             continue
         values[digit] = _text(getattr(row, "e_raw", None))
@@ -991,6 +1040,13 @@ def _build_zone_unit_values(query: CapacitySourceQuery, *, zone: str, running_un
         results[block["title"]] = f"{unit_number}号制冷单元→{mode_text}"
         skip_chiller_values = building == "E楼" and mode_text == "板换"
         skip_plate_values = mode_text == "制冷"
+        if skip_plate_values:
+            for key in _PLATE_HEAT_EXCHANGER_KEYS:
+                target_cell = block.get(key)
+                if target_cell:
+                    results[target_cell] = "/"
+            if block.get("plate_cooling_in_pressure_dup"):
+                results[block["plate_cooling_in_pressure_dup"]] = "/"
         for key, aliases in alias_groups.items():
             if key == "primary_pump_freq" and not aliases:
                 continue

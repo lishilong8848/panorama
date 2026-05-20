@@ -2053,7 +2053,17 @@ def _parse_base_revision_or_400(payload: Dict[str, Any]) -> int:
 
 
 HISTORY_CLOUD_SUCCESS_LIMIT = 10
-HISTORY_CLOUD_SUCCESS_RULE = "cloud_success_only"
+HISTORY_CLOUD_SUCCESS_RULE = "generated_files"
+
+
+def _safe_local_file_exists(path_text: str) -> bool:
+    text = str(path_text or "").strip()
+    if not text:
+        return False
+    try:
+        return Path(text).is_file()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _empty_history_payload(
@@ -2087,13 +2097,19 @@ def _build_history_payload(service: ReviewSessionService, *, building: str, sele
     if not callable(latest_getter):
         latest_getter = getattr(service, "get_latest_session_id", None)
     latest_session_id = str(latest_getter(building) if callable(latest_getter) else "").strip()
-    sessions = service.list_building_cloud_history_sessions(building, limit=HISTORY_CLOUD_SUCCESS_LIMIT)
+    history_getter = getattr(service, "list_building_generated_file_history_sessions", None)
+    if callable(history_getter):
+        sessions = history_getter(building, limit=HISTORY_CLOUD_SUCCESS_LIMIT)
+    else:
+        sessions = service.list_building_cloud_history_sessions(building, limit=HISTORY_CLOUD_SUCCESS_LIMIT)
     selected_session_id_text = str(selected_session_id or "").strip()
     history_sessions = []
     selected_in_history_list = False
     for item in sessions:
         session_id = str(item.get("session_id", "")).strip()
         is_latest = bool(latest_session_id and session_id == latest_session_id)
+        output_file = str(item.get("output_file", "")).strip()
+        capacity_output_file = str(item.get("capacity_output_file", "")).strip()
         if session_id == selected_session_id_text:
             selected_in_history_list = True
         history_sessions.append(
@@ -2105,8 +2121,10 @@ def _build_history_payload(service: ReviewSessionService, *, building: str, sele
                 "revision": int(item.get("revision", 0) or 0),
                 "confirmed": bool(item.get("confirmed", False)),
                 "updated_at": str(item.get("updated_at", "")).strip(),
-                "output_file": str(item.get("output_file", "")).strip(),
-                "has_output_file": Path(str(item.get("output_file", "")).strip()).exists(),
+                "output_file": output_file,
+                "has_output_file": _safe_local_file_exists(output_file),
+                "capacity_output_file": capacity_output_file,
+                "has_capacity_output_file": _safe_local_file_exists(capacity_output_file),
                 "is_latest": is_latest,
                 "label": f"{'最新 ' if is_latest else ''}{str(item.get('duty_date', '')).strip()} / {_shift_label(str(item.get('duty_shift', '')).strip())}",
             }
@@ -2120,16 +2138,15 @@ def _build_history_payload(service: ReviewSessionService, *, building: str, sele
     if selected_session_id_text and not selected_in_history_list:
         selected_session = service.get_session_by_id(selected_session_id_text)
         if isinstance(selected_session, dict):
-            output_file = Path(str(selected_session.get("output_file", "")).strip())
-            cloud_sync = ReviewSessionService._normalize_cloud_sheet_sync(selected_session.get("cloud_sheet_sync", {}))
+            output_file = str(selected_session.get("output_file", "")).strip()
+            capacity_output_file = str(selected_session.get("capacity_output_file", "")).strip()
             if (
-                output_file.exists()
-                and str(cloud_sync.get("status", "")).strip().lower() == "success"
-                and str(cloud_sync.get("spreadsheet_url", "")).strip()
+                _safe_local_file_exists(output_file)
+                or _safe_local_file_exists(capacity_output_file)
             ):
                 selected_history_excluded_reason = "outside_limit"
             else:
-                selected_history_excluded_reason = "not_cloud_success"
+                selected_history_excluded_reason = "no_generated_file"
     return {
         "latest_session_id": latest_session_id,
         "selected_session_id": selected_session_id_text,
@@ -2862,11 +2879,17 @@ def _build_review_display_state(
     elif confirmed:
         regenerate_disabled_reason = "当前楼栋已确认并提交上传，本班次不能重新生成；如需修改请直接编辑后保存，系统会自动重传云文档"
     history_limit = max(1, int(history_payload.get("history_limit", HISTORY_CLOUD_SUCCESS_LIMIT) or HISTORY_CLOUD_SUCCESS_LIMIT))
-    history_hint_rows = [f"仅显示最近 {history_limit} 条已成功上云的交接班日志。"]
+    history_rule = str(history_payload.get("history_rule", HISTORY_CLOUD_SUCCESS_RULE) or "").strip().lower()
+    if history_rule == "generated_files":
+        history_hint_rows = [f"仅显示最近 {history_limit} 条已生成本地文件的交接班记录，可直接下载交接班日志和容量表。"]
+    else:
+        history_hint_rows = [f"仅显示最近 {history_limit} 条已成功上云的交接班日志。"]
     if session_payload and not bool(history_payload.get("selected_in_history_list", False)):
         excluded_reason = str(history_payload.get("selected_history_excluded_reason", "")).strip().lower()
         if excluded_reason == "outside_limit":
-            history_hint_rows.append(f"当前查看记录已成功上云，但不在最近 {history_limit} 条历史范围内。")
+            history_hint_rows.append(f"当前查看记录不在最近 {history_limit} 条历史范围内。")
+        elif excluded_reason == "no_generated_file":
+            history_hint_rows.append("当前查看记录尚未生成本地文件，因此不在历史文件列表中。")
         elif excluded_reason == "not_cloud_success":
             history_hint_rows.append("当前查看记录尚未成功上云，因此不在历史列表中。")
     history_hint = " ".join([item for item in history_hint_rows if str(item or "").strip()]).strip()
@@ -4090,27 +4113,47 @@ def handover_review_history(
     duty_date: str = "",
     duty_shift: str = "",
     session_id: str = "",
+    force: str = "",
 ) -> Dict[str, Any]:
     container = request.app.state.container
     service = _build_review_session_service(container)
     building = _resolve_building_or_404(service, building_code)
-    session = _load_target_session_or_404(
-        service,
-        building=building,
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-        session_id=session_id,
-    )
+    session: Dict[str, Any] = {}
+    try:
+        session = _load_target_session_or_404(
+            service,
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            session_id=session_id,
+        )
+    except HTTPException as exc:
+        if str(session_id or "").strip() or int(getattr(exc, "status_code", 500) or 500) != 404:
+            raise
+    selected_session_id = str(session.get("session_id", "")).strip()
+    if str(force or "").strip():
+        history_payload = _build_history_payload(
+            service,
+            building=building,
+            selected_session_id=selected_session_id,
+        )
+        _review_history_cache_put(
+            building=building,
+            selected_session_id=selected_session_id,
+            payload=history_payload,
+        )
+    else:
+        history_payload = _build_history_payload_safe(
+            service,
+            building=building,
+            selected_session_id=selected_session_id,
+            emit_log=container.add_system_log,
+        )
     return {
         "ok": True,
         "building": building,
-        "session_id": str(session.get("session_id", "")).strip(),
-        "history": _build_history_payload_safe(
-            service,
-            building=building,
-            selected_session_id=str(session.get("session_id", "")).strip(),
-            emit_log=container.add_system_log,
-        ),
+        "session_id": selected_session_id,
+        "history": history_payload,
     }
 
 
