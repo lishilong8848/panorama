@@ -744,7 +744,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "report_link": "交接班日报",
                     "screenshots": "日报截图",
                 },
-                "screenshot_page_url": "https://124.222.19.16:3001/",
+                "screenshot_page_url": "https://www.sm.sjhl.online:3001/",
                 "browser_profile_directory": "",
             },
             "cabinet_shift_record_bitable_export": {

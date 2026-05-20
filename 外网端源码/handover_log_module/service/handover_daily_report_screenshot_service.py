@@ -25,7 +25,7 @@ _SYSTEM_BROWSER_PROCESS: subprocess.Popen | None = None
 
 
 class HandoverDailyReportScreenshotService:
-    DEFAULT_SCREENSHOT_PAGE_URL = "https://124.222.19.16:3001/"
+    DEFAULT_SCREENSHOT_PAGE_URL = "https://www.sm.sjhl.online:3001/"
     DEFAULT_DEBUG_PORT = 29333
     PREFERRED_BROWSER_KIND = "edge"
 

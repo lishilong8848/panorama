@@ -11,6 +11,7 @@ from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.footer_inventory_writer import write_footer_inventory_table
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
+from handover_log_module.service.capacity_report_common import _SECONDARY_PUMP_LAYOUT
 from handover_log_module.service.capacity_room_inputs_service import CapacityRoomInputsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
@@ -243,8 +244,60 @@ class ReviewDocumentStateService:
         return f"{str(zone or '').strip().lower()}:{int(unit or 0)}"
 
     @staticmethod
+    def _secondary_pump_pressure_defaults_key(zone: str, unit: int) -> str:
+        return f"secondary:{str(zone or '').strip().lower()}:{int(unit or 0)}"
+
+    @staticmethod
     def _cooling_tank_defaults_key(zone: str) -> str:
         return f"tank:{str(zone or '').strip().lower()}"
+
+    @staticmethod
+    def _clean_capacity_cell_text(value: Any) -> str:
+        text = str(value or "").strip()
+        return "" if not text or text == "/" else text
+
+    @classmethod
+    def _secondary_pump_rows_from_capacity_file(cls, capacity_output_file: str) -> List[Dict[str, Any]]:
+        output: List[Dict[str, Any]] = []
+        path = Path(str(capacity_output_file or "").strip())
+        if not str(path).strip() or not path.exists() or not path.is_file():
+            return output
+        workbook = load_workbook_quietly(path, data_only=True)
+        try:
+            sheet = workbook.active
+            for zone in ("west", "east"):
+                zone_label = "西区" if zone == "west" else "东区"
+                layout = _SECONDARY_PUMP_LAYOUT.get(zone, {})
+                for position, slot in enumerate(list(layout.get("slots", []) or [])[:2], start=1):
+                    title_cell = str(slot.get("title", "") or "").strip().upper()
+                    if not title_cell:
+                        continue
+                    title_text = cls._clean_capacity_cell_text(sheet[title_cell].value)
+                    match = re.search(r"(\d+)\s*[#号]?\s*二次泵", title_text)
+                    if not match:
+                        continue
+                    unit = int(match.group(1))
+                    if unit <= 0:
+                        continue
+                    freq_cell = str(slot.get("frequency", "") or "").strip().upper()
+                    inlet_cell = str(slot.get("inlet", "") or "").strip().upper()
+                    outlet_cell = str(slot.get("outlet", "") or "").strip().upper()
+                    output.append(
+                        {
+                            "row_id": cls._secondary_pump_pressure_defaults_key(zone, unit),
+                            "zone": zone,
+                            "zone_label": zone_label,
+                            "unit": unit,
+                            "unit_label": f"{unit}#二次泵",
+                            "position": position,
+                            "frequency": cls._clean_capacity_cell_text(sheet[freq_cell].value) if freq_cell else "",
+                            "inlet_pressure": cls._clean_capacity_cell_text(sheet[inlet_cell].value) if inlet_cell else "",
+                            "outlet_pressure": cls._clean_capacity_cell_text(sheet[outlet_cell].value) if outlet_cell else "",
+                        }
+                    )
+        finally:
+            workbook.close()
+        return output
 
     @staticmethod
     def _normalize_attention_handover_rows(rows: Any) -> List[Dict[str, Any]]:
@@ -343,6 +396,11 @@ class ReviewDocumentStateService:
             if isinstance(payload.get("cooling_pump_pressures", {}), dict)
             else {}
         )
+        current_secondary_rows = (
+            payload.get("cooling_pump_pressures", {}).get("secondary_rows", [])
+            if isinstance(payload.get("cooling_pump_pressures", {}), dict)
+            else []
+        )
         current_by_key: Dict[str, Dict[str, Any]] = {}
         if isinstance(current_rows, list):
             for row in current_rows:
@@ -356,6 +414,19 @@ class ReviewDocumentStateService:
                 if key.endswith(":0"):
                     continue
                 current_by_key[key] = row
+        current_secondary_by_key: Dict[str, Dict[str, Any]] = {}
+        if isinstance(current_secondary_rows, list):
+            for row in current_secondary_rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    unit = int(row.get("unit", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    unit = 0
+                key = self._secondary_pump_pressure_defaults_key(str(row.get("zone", "") or ""), unit)
+                if key.endswith(":0"):
+                    continue
+                current_secondary_by_key[key] = row
         rows: List[Dict[str, Any]] = []
         for zone in ("west", "east"):
             zone_label = "西区" if zone == "west" else "东区"
@@ -413,7 +484,31 @@ class ReviewDocumentStateService:
                 "temperature": tank_temperature,
                 "level": tank_level,
             }
-        payload["cooling_pump_pressures"] = {"rows": rows, "tanks": tanks}
+        secondary_rows: List[Dict[str, Any]] = []
+        for detected in self._secondary_pump_rows_from_capacity_file(str(session.get("capacity_output_file", "") or "")):
+            key = str(detected.get("row_id", "") or "").strip()
+            current = current_secondary_by_key.get(key, {})
+            default = defaults.get(key, {}) if isinstance(defaults.get(key, {}), dict) else {}
+            secondary_rows.append(
+                {
+                    **detected,
+                    "inlet_pressure": str(
+                        current.get(
+                            "inlet_pressure",
+                            default.get("inlet_pressure", detected.get("inlet_pressure", "")),
+                        )
+                        or ""
+                    ),
+                    "outlet_pressure": str(
+                        current.get(
+                            "outlet_pressure",
+                            default.get("outlet_pressure", detected.get("outlet_pressure", "")),
+                        )
+                        or ""
+                    ),
+                }
+            )
+        payload["cooling_pump_pressures"] = {"rows": rows, "tanks": tanks, "secondary_rows": secondary_rows}
         return payload
 
     def attach_capacity_room_inputs(
@@ -711,6 +806,7 @@ class ReviewDocumentStateService:
                 else {}
             )
             raw_rows = cooling_payload.get("rows", []) if isinstance(cooling_payload, dict) else []
+            raw_secondary_rows = cooling_payload.get("secondary_rows", []) if isinstance(cooling_payload, dict) else []
             raw_tanks = cooling_payload.get("tanks", {}) if isinstance(cooling_payload, dict) else {}
             current_defaults = store.get_default("cooling_pump_pressures")
             defaults = dict(current_defaults) if isinstance(current_defaults, dict) else {}
@@ -735,6 +831,28 @@ class ReviewDocumentStateService:
                             "inlet_pressure": inlet,
                             "outlet_pressure": outlet,
                             "cooling_tower_level": tower_level,
+                        }
+                    else:
+                        defaults.pop(key, None)
+            if isinstance(raw_secondary_rows, list):
+                for row in raw_secondary_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        unit = int(row.get("unit", 0) or 0)
+                    except Exception:  # noqa: BLE001
+                        unit = 0
+                    zone = str(row.get("zone", "") or "").strip().lower()
+                    if zone not in {"west", "east"} or unit <= 0:
+                        continue
+                    key = self._secondary_pump_pressure_defaults_key(zone, unit)
+                    inlet = str(row.get("inlet_pressure", "") or "").strip()
+                    outlet = str(row.get("outlet_pressure", "") or "").strip()
+                    cooling_rows.append(row)
+                    if inlet or outlet:
+                        defaults[key] = {
+                            "inlet_pressure": inlet,
+                            "outlet_pressure": outlet,
                         }
                     else:
                         defaults.pop(key, None)

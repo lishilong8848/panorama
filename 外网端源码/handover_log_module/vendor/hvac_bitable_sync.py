@@ -250,12 +250,13 @@ class WeatherSummaryProvider:
         self.warning_error: str | None = None
         self._forecast: list[dict[str, Any]] | None = None
         self._warning_summary: str | None = None
+        self._run_time = datetime.now()
         self.nearest_window_count = 0
 
     def summary_for(self, updated_at: Any) -> str | None:
         if not self.config.get("enabled", True):
             return "天气查询未启用"
-        updated_time = parse_local_datetime(updated_at) or datetime.now()
+        updated_time = parse_local_datetime(updated_at) or self._run_time
         summary_hours = int(self.config.get("summary_hours", 8))
         window = self.forecast_window(updated_time, summary_hours)
         if not window:
@@ -289,7 +290,11 @@ class WeatherSummaryProvider:
         return [item for item in forecast if fallback_start <= item["time"] <= fallback_end]
 
     def describe_window(self, window: list[dict[str, Any]], hours: int) -> str | None:
-        temperatures = [item["temperature"] for item in window if item.get("temperature") is not None]
+        ordered_window = sorted(
+            [item for item in window if item.get("time") is not None],
+            key=lambda item: item["time"],
+        )
+        temperatures = [float(item["temperature"]) for item in ordered_window if item.get("temperature") is not None]
         if not temperatures:
             return None
         first_temp = temperatures[0]
@@ -298,17 +303,25 @@ class WeatherSummaryProvider:
         max_temp = max(temperatures)
         delta = last_temp - first_temp
         threshold = float(self.config.get("temperature_trend_threshold_c", 0.5))
-        if delta >= threshold:
-            trend = "气温逐步上升"
-        elif delta <= -threshold:
-            trend = "气温逐步下降"
-        elif max_temp - min_temp < threshold:
+        step_tolerance = float(self.config.get("temperature_trend_step_tolerance_c", 0.2))
+        adjacent_deltas = [temperatures[index + 1] - temperatures[index] for index in range(len(temperatures) - 1)]
+        mostly_non_decreasing = all(item >= -step_tolerance for item in adjacent_deltas)
+        mostly_non_increasing = all(item <= step_tolerance for item in adjacent_deltas)
+        if max_temp - min_temp < threshold:
             trend = "气温基本平稳"
+        elif delta >= threshold and mostly_non_decreasing:
+            trend = "气温逐步上升"
+        elif delta <= -threshold and mostly_non_increasing:
+            trend = "气温逐步下降"
+        elif delta >= threshold:
+            trend = "气温整体上升"
+        elif delta <= -threshold:
+            trend = "气温整体下降"
         else:
             trend = "气温小幅波动"
 
-        weather = self.weather_text(window)
-        rain = self.rain_text(window)
+        weather = self.weather_text(ordered_window)
+        rain = self.rain_text(ordered_window)
         return (
             f"未来{hours}h内{trend}，"
             f"最低{fmt_temp(min_temp)}℃，最高{fmt_temp(max_temp)}℃，"
@@ -1471,7 +1484,10 @@ def upsert_target_rows(
         key = row[F_TEXT]
         if key in by_key:
             current_fields = record_by_key[key]["fields"]
-            weather_summary = weather_provider.summary_for(current_fields.get(T_UPDATED))
+            # Feishu's updated-time field is the previous write time until this
+            # update completes. Weather trend must describe the current upload
+            # window, otherwise morning uploads may reuse a night-time anchor.
+            weather_summary = weather_provider.summary_for(None)
             if weather_summary is None:
                 row.pop(T_WEATHER_SUMMARY, None)
             else:

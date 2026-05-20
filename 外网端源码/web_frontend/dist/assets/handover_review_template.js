@@ -316,6 +316,37 @@
             </label>
           </div>
           <div class="review-subsection-head">
+            <h3>二次泵进口/出口压力</h3>
+          </div>
+          <div v-if="!secondaryPumpPressureRows.length" class="review-empty-inline">
+            当前容量表未识别到运行二次泵
+          </div>
+          <div v-else class="review-fixed-fields review-pump-fields">
+            <label
+              v-for="(row, rowIndex) in secondaryPumpPressureRows"
+              :key="'secondary:' + (row.row_id || (row.zone + ':' + row.unit))"
+              class="review-field review-pump-field"
+            >
+              <span class="review-field-label">{{ row.zone_label }} {{ row.unit_label }} 进口压力</span>
+              <input
+                class="review-input"
+                :value="row.inlet_pressure"
+                :disabled="regenerating"
+                @input="updateSecondaryPumpPressure(rowIndex, 'inlet_pressure', $event.target.value)"
+                @change="updateSecondaryPumpPressure(rowIndex, 'inlet_pressure', $event.target.value)"
+              />
+              <span class="review-field-label">{{ row.zone_label }} {{ row.unit_label }} 出口压力</span>
+              <input
+                class="review-input"
+                :value="row.outlet_pressure"
+                :disabled="regenerating"
+                @input="updateSecondaryPumpPressure(rowIndex, 'outlet_pressure', $event.target.value)"
+                @change="updateSecondaryPumpPressure(rowIndex, 'outlet_pressure', $event.target.value)"
+              />
+              <small v-if="row.frequency">频率 {{ row.frequency }}</small>
+            </label>
+          </div>
+          <div class="review-subsection-head">
             <h3>冷塔及蓄冷罐液位温度</h3>
           </div>
           <div v-if="!coolingPumpPressureRows.length" class="review-empty-inline">

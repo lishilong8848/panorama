@@ -251,7 +251,10 @@ def _offset_cell(cell_name: str, *, row_offset: int = 0, col_offset: int = 0) ->
 
 
 def _zone_of_row(row: RawRow) -> str:
-    combined = f"{_text(getattr(row, 'b_text', ''))} {_text(getattr(row, 'c_text', ''))}"
+    combined = " ".join(
+        _text(getattr(row, attr, ""))
+        for attr in ("b_text", "c_text", "d_name")
+    )
     if "150" in combined or "西区" in combined:
         return "west"
     if "124" in combined or "东区" in combined:
@@ -477,21 +480,26 @@ def _extract_equipment_numbers_from_row(row: RawRow) -> List[int]:
     return sorted(numbers)
 
 
-def _secondary_pump_allowed_numbers(zone: str) -> set[int]:
-    normalized_zone = _text(zone).lower()
-    if normalized_zone == "east":
-        return {1, 2, 3}
-    if normalized_zone == "west":
-        return {4, 5, 6}
-    return {1, 2, 3, 4, 5, 6}
+def _secondary_pump_source_number_from_row(row: RawRow) -> int:
+    text = " ".join(
+        _text(getattr(row, attr, ""))
+        for attr in ("d_name", "c_text", "b_text")
+    )
+    schwp_match = re.search(r"SCHWP\s*[-_ ]\s*([1-6])", text, flags=re.IGNORECASE)
+    if schwp_match:
+        return int(schwp_match.group(1))
+    numbers = _extract_equipment_numbers_from_row(row)
+    return int(numbers[0]) if numbers else 0
 
 
-def _secondary_pump_display_number_from_row(row: RawRow, zone: str) -> int:
-    allowed_numbers = _secondary_pump_allowed_numbers(zone)
-    for number in _extract_equipment_numbers_from_row(row):
-        if int(number) in allowed_numbers:
-            return int(number)
-    return 0
+def _secondary_pump_display_number_from_row(row: RawRow, zone: str, building: str = "") -> int:
+    number = _secondary_pump_source_number_from_row(row)
+    if number <= 0:
+        return 0
+    normalized_zone = _text(zone).lower() or _zone_of_row(row)
+    if _text(building) == "A楼" and normalized_zone == "east" and 1 <= number <= 3:
+        return number + 3
+    return number
 
 
 def _secondary_pump_metric_text(
@@ -499,7 +507,9 @@ def _secondary_pump_metric_text(
     *,
     zone: str,
     pump_number: int,
+    source_number: int = 0,
     aliases: Sequence[str],
+    building: str = "",
 ) -> str:
     target_zone = _text(zone).lower()
     alias_tokens = [_casefold(item) for item in aliases if _text(item)]
@@ -509,7 +519,9 @@ def _secondary_pump_metric_text(
         row_zone = _zone_of_row(row)
         if target_zone and row_zone and row_zone != target_zone:
             continue
-        if _secondary_pump_display_number_from_row(row, target_zone) != int(pump_number):
+        display_number = _secondary_pump_display_number_from_row(row, target_zone, building)
+        row_source_number = _secondary_pump_source_number_from_row(row)
+        if display_number != int(pump_number) and (source_number <= 0 or row_source_number != int(source_number)):
             continue
         d_name = _casefold(getattr(row, "d_name", ""))
         if not any(alias in d_name for alias in alias_tokens):
@@ -524,18 +536,18 @@ def _secondary_pump_frequency_value(row: RawRow) -> float | None:
     return _row_numeric_value(row)
 
 
-def _dedupe_secondary_pump_rows(rows: Sequence[RawRow], *, zone: str = "") -> List[RawRow]:
+def _dedupe_secondary_pump_rows(rows: Sequence[RawRow], *, zone: str = "", building: str = "") -> List[RawRow]:
     output: List[RawRow] = []
     seen: set[str] = set()
     ordered = sorted(
         rows,
         key=lambda row: (
-            (_extract_equipment_numbers_from_row(row) or [99])[0],
+            _secondary_pump_display_number_from_row(row, zone, building) or 99,
             int(getattr(row, "row_index", 0) or 0),
         ),
     )
     for row in ordered:
-        display_number = _secondary_pump_display_number_from_row(row, zone)
+        display_number = _secondary_pump_display_number_from_row(row, zone, building)
         if display_number <= 0:
             continue
         key = f"pump:{display_number}"
@@ -856,7 +868,8 @@ def _region_summary_cells(zone: str) -> Dict[str, str]:
     return {"redundancy": "Q42", "tank_level": "AC28"}
 
 
-def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running_units: Dict[str, List[Dict[str, Any]]]) -> Dict[str, str]:
+def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running_units: Dict[str, List[Dict[str, Any]]], context: Dict[str, Any] | None = None) -> Dict[str, str]:
+    building = _text((context or {}).get("building"))
     cells = _region_summary_cells(zone)
     results: Dict[str, str] = {cells["redundancy"]: _build_redundancy_text(len(running_units.get(zone, [])))}
     secondary_rows = query.rows_by_d_regexes([re.escape(alias) for alias in _SECONDARY_PUMP_ALIASES], zone=zone, allow_global=True)
@@ -866,10 +879,10 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
         if (
             frequency_value is not None
             and float(frequency_value) > 10
-            and _secondary_pump_display_number_from_row(row, zone) > 0
+            and _secondary_pump_display_number_from_row(row, zone, building) > 0
         ):
             running_candidates.append(row)
-    running_secondary = _dedupe_secondary_pump_rows(running_candidates, zone=zone)
+    running_secondary = _dedupe_secondary_pump_rows(running_candidates, zone=zone, building=building)
     layout = _SECONDARY_PUMP_LAYOUT.get(zone, {})
     for index, slot in enumerate(list(layout.get("slots", []) or [])):
         row = running_secondary[index] if index < len(running_secondary) else None
@@ -879,7 +892,8 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
             results[_text(slot.get("inlet"))] = "/"
             results[_text(slot.get("outlet"))] = "/"
             continue
-        pump_number = _secondary_pump_display_number_from_row(row, zone)
+        pump_number = _secondary_pump_display_number_from_row(row, zone, building)
+        source_number = _secondary_pump_source_number_from_row(row)
         number_text = f"{pump_number}#" if pump_number > 0 else ""
         results[_text(slot.get("title"))] = f"{number_text}二次泵"
         results[_text(slot.get("frequency"))] = _text(getattr(row, "e_raw", None))
@@ -887,13 +901,17 @@ def _build_zone_summary_values(query: CapacitySourceQuery, *, zone: str, running
             query,
             zone=zone,
             pump_number=pump_number,
+            source_number=source_number,
             aliases=_SECONDARY_PUMP_INLET_PRESSURE_ALIASES,
+            building=building,
         )
         outlet_text = _secondary_pump_metric_text(
             query,
             zone=zone,
             pump_number=pump_number,
+            source_number=source_number,
             aliases=_SECONDARY_PUMP_OUTLET_PRESSURE_ALIASES,
+            building=building,
         )
         results[_text(slot.get("inlet"))] = inlet_text or "/"
         results[_text(slot.get("outlet"))] = outlet_text or "/"
@@ -1232,8 +1250,8 @@ def build_capacity_cells_with_config(context: Dict[str, Any], config: Dict[str, 
     values.update(_build_zone_capacity_direct_values(query, context=context))
     values.update(_build_zone_unit_values(query, zone="west", running_units=running_units, context=context))
     values.update(_build_zone_unit_values(query, zone="east", running_units=running_units, context=context))
-    values.update(_build_zone_summary_values(query, zone="west", running_units=running_units))
-    values.update(_build_zone_summary_values(query, zone="east", running_units=running_units))
+    values.update(_build_zone_summary_values(query, zone="west", running_units=running_units, context=context))
+    values.update(_build_zone_summary_values(query, zone="east", running_units=running_units, context=context))
     values.update(_build_tr_values(query, snapshot))
     values.update(_build_ups_values(query, snapshot))
     values.update(_build_hvdc_values(query, snapshot))

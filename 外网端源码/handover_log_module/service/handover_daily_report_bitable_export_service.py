@@ -41,7 +41,7 @@ class HandoverDailyReportBitableExportService:
                 "report_link": "交接班日报",
                 "screenshots": "日报截图",
             },
-            "screenshot_page_url": "https://124.222.19.16:3001/",
+            "screenshot_page_url": "https://www.sm.sjhl.online:3001/",
         }
 
     @staticmethod
@@ -170,6 +170,21 @@ class HandoverDailyReportBitableExportService:
             return str(ui_type or "").strip()
         return ""
 
+    @staticmethod
+    def _report_link_payload_candidates(
+        spreadsheet_url: str,
+        *,
+        ui_type: str = "",
+    ) -> List[Any]:
+        url = str(spreadsheet_url or "").strip()
+        if not url:
+            return [""]
+        object_payload = {"text": url, "link": url}
+        # The report field is a Feishu "超链接" field. Always write the URL
+        # object shape so the value is persisted as a clickable link instead
+        # of being accepted as plain text by a mis-detected field type.
+        return [object_payload]
+
     def _build_report_link_payload(
         self,
         *,
@@ -180,14 +195,20 @@ class HandoverDailyReportBitableExportService:
         url = str(spreadsheet_url or "").strip()
         report_field_name = str(cfg.get("fields", {}).get("report_link", "交接班日报") or "交接班日报").strip()
         ui_type = self._lookup_field_ui_type(fields_meta, report_field_name).lower()
-        if ui_type in {"", "15", "url"}:
-            return {"text": url, "link": url}
-        return url
+        return self._report_link_payload_candidates(url, ui_type=ui_type)[0]
 
     @staticmethod
     def _build_report_link_object_payload(spreadsheet_url: str) -> Dict[str, str]:
         url = str(spreadsheet_url or "").strip()
         return {"text": url, "link": url}
+
+    @staticmethod
+    def _is_same_report_link(actual: Any, expected_url: str) -> bool:
+        actual_url = HandoverDailyReportBitableExportService._extract_report_link_url(actual)
+        expected = str(expected_url or "").strip()
+        if not actual_url or not expected:
+            return actual_url == expected
+        return actual_url.rstrip("/") == expected.rstrip("/")
 
     @staticmethod
     def _extract_report_link_url(value: Any) -> str:
@@ -219,30 +240,40 @@ class HandoverDailyReportBitableExportService:
         try:
             record = client.get_record_by_id(table_id=table_id, record_id=record_text)
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][日报多维] 链接写入校验读取失败，将按成功继续: record_id={record_text}, error={exc}")
-            return
+            raise self._build_url_field_error(
+                f"日报链接字段写入后校验读取失败: record_id={record_text}, error={exc}"
+            ) from exc
         fields = record.get("fields", {}) if isinstance(record, dict) else {}
-        actual_url = self._extract_report_link_url(fields.get(report_field_name) if isinstance(fields, dict) else None)
-        if actual_url == url:
+        actual_value = fields.get(report_field_name) if isinstance(fields, dict) else None
+        if self._is_same_report_link(actual_value, url):
             return
         emit_log(
             "[交接班][日报多维] 检测到日报链接未落表，开始补写 "
             f"record_id={record_text}, field={report_field_name}"
         )
-        payload = {report_field_name: self._build_report_link_object_payload(url)}
-        try:
-            client.update_record(table_id=table_id, record_id=record_text, fields=payload)
-        except Exception as exc:  # noqa: BLE001
-            if self._is_url_field_conv_fail(exc):
-                raise self._build_url_field_error(str(exc)) from exc
-            raise
+        last_error = ""
+        for payload_value in self._report_link_payload_candidates(url, ui_type="url"):
+            payload = {report_field_name: payload_value}
+            try:
+                client.update_record(table_id=table_id, record_id=record_text, fields=payload)
+                last_error = ""
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                if self._is_url_field_conv_fail(exc):
+                    continue
+                raise
+        if last_error:
+            raise self._build_url_field_error(last_error)
         try:
             record = client.get_record_by_id(table_id=table_id, record_id=record_text)
             fields = record.get("fields", {}) if isinstance(record, dict) else {}
-            actual_url = self._extract_report_link_url(fields.get(report_field_name) if isinstance(fields, dict) else None)
-        except Exception:
-            actual_url = url
-        if actual_url != url:
+            actual_value = fields.get(report_field_name) if isinstance(fields, dict) else None
+        except Exception as exc:  # noqa: BLE001
+            raise self._build_url_field_error(
+                f"日报链接字段补写后校验读取失败: record_id={record_text}, error={exc}"
+            ) from exc
+        if not self._is_same_report_link(actual_value, url):
             raise self._build_url_field_error(
                 f"日报链接字段补写后仍未生效: record_id={record_text}, field={report_field_name}"
             )
@@ -330,7 +361,7 @@ class HandoverDailyReportBitableExportService:
             fields_meta = client.list_fields(table_id=table_id)
         except Exception as exc:  # noqa: BLE001
             fields_meta = []
-            emit_log(f"[交接班][日报多维] 字段元数据读取失败，按纯文本链接回退: {exc}")
+            emit_log(f"[交接班][日报多维] 字段元数据读取失败，将按超链接对象写入: {exc}")
         existing_records = client.list_records(
             table_id=table_id,
             page_size=int(target.get("page_size", 500) or 500),
@@ -371,20 +402,28 @@ class HandoverDailyReportBitableExportService:
                 {"file_token": summary_token},
             ],
         }
-        try:
-            responses = client.batch_create_records(table_id=table_id, fields_list=[payload_fields], batch_size=1)
-        except Exception as exc:  # noqa: BLE001
-            if not self._is_url_field_conv_fail(exc):
-                raise
-            emit_log(
-                "[交接班][日报多维] URL 字段写入回退重试 "
-                f"field={report_field_name}, ui_type={report_link_ui_type or '-'}, batch={duty_date}|{duty_shift}"
-            )
-            payload_fields[fields["report_link"]] = self._build_report_link_object_payload(spreadsheet_url)
+        responses: List[Dict[str, Any]] = []
+        last_url_error = ""
+        for index, link_payload in enumerate(
+            self._report_link_payload_candidates(spreadsheet_url, ui_type=report_link_ui_type),
+            start=1,
+        ):
+            payload_fields[fields["report_link"]] = link_payload
             try:
                 responses = client.batch_create_records(table_id=table_id, fields_list=[payload_fields], batch_size=1)
-            except Exception as retry_exc:  # noqa: BLE001
-                raise self._build_url_field_error(str(retry_exc)) from retry_exc
+                last_url_error = ""
+                break
+            except Exception as exc:  # noqa: BLE001
+                if not self._is_url_field_conv_fail(exc):
+                    raise
+                last_url_error = str(exc)
+                emit_log(
+                    "[交接班][日报多维] URL 字段写入失败 "
+                    f"field={report_field_name}, ui_type={report_link_ui_type or '-'}, attempt={index}, "
+                    f"batch={duty_date}|{duty_shift}"
+                )
+        if last_url_error:
+            raise self._build_url_field_error(last_url_error)
         record_id = ""
         if responses and isinstance(responses[0], dict):
             records = responses[0].get("data", {}).get("records", []) if isinstance(responses[0].get("data", {}), dict) else []

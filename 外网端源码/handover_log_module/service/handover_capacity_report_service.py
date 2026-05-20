@@ -32,7 +32,9 @@ from handover_log_module.repository.review_building_document_store import Review
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
 from handover_log_module.service.capacity_report_common import (
     CapacitySourceQuery,
+    _SECONDARY_PUMP_ALIASES,
     _secondary_pump_display_number_from_row,
+    _secondary_pump_frequency_value,
     build_capacity_template_snapshot,
 )
 from handover_log_module.service.handover_capacity_oil_cache_service import HandoverCapacityOilCacheService
@@ -131,6 +133,12 @@ _COOLING_PUMP_PRESSURE_TARGETS = {
     ("west", 2): ("I38", "I39"),
     ("east", 1): ("V28", "V29"),
     ("east", 2): ("V38", "V39"),
+}
+_SECONDARY_PUMP_PRESSURE_TARGETS = {
+    ("west", 1): ("G48", "K48"),
+    ("west", 2): ("G50", "K50"),
+    ("east", 1): ("T48", "X48"),
+    ("east", 2): ("T50", "X50"),
 }
 _WEATHER_PHENOMENON_PRIORITY = (
     "暴雨",
@@ -2118,6 +2126,7 @@ class HandoverCapacityReportService:
     def _build_cooling_pump_pressure_values(cooling_pump_pressures: Dict[str, Any] | None) -> Dict[str, str]:
         payload = cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {}
         rows = payload.get("rows", [])
+        secondary_rows = payload.get("secondary_rows", [])
         values: Dict[str, str] = {}
         for inlet_cell, outlet_cell in _COOLING_PUMP_PRESSURE_TARGETS.values():
             values[inlet_cell] = "/"
@@ -2143,6 +2152,26 @@ class HandoverCapacityReportService:
             inlet_cell, outlet_cell = target
             values[inlet_cell] = _text(row.get("inlet_pressure")) or "/"
             values[outlet_cell] = _text(row.get("outlet_pressure")) or "/"
+        if isinstance(secondary_rows, list):
+            secondary_positions: Dict[str, int] = {"west": 0, "east": 0}
+            for row in secondary_rows:
+                if not isinstance(row, dict):
+                    continue
+                zone = _text(row.get("zone")).lower()
+                if zone not in secondary_positions:
+                    continue
+                position = int(row.get("position", 0) or 0)
+                if position <= 0:
+                    secondary_positions[zone] += 1
+                    position = secondary_positions[zone]
+                if position not in {1, 2}:
+                    continue
+                target = _SECONDARY_PUMP_PRESSURE_TARGETS.get((zone, position))
+                if not target:
+                    continue
+                inlet_cell, outlet_cell = target
+                values[inlet_cell] = _text(row.get("inlet_pressure")) or "/"
+                values[outlet_cell] = _text(row.get("outlet_pressure")) or "/"
         return values
 
     @staticmethod
@@ -2276,6 +2305,7 @@ class HandoverCapacityReportService:
         *,
         building: str,
         running_units: Dict[str, List[Dict[str, Any]]],
+        capacity_rows: List[Any] | None = None,
     ) -> Dict[str, Any]:
         try:
             raw_defaults = ReviewBuildingDocumentStore(config=self.config, building=building).get_default("cooling_pump_pressures")
@@ -2318,7 +2348,64 @@ class HandoverCapacityReportService:
                 "temperature": _text(default.get("temperature")),
                 "level": _text(default.get("level")),
             }
-        return {"rows": rows, "tanks": tanks}
+        secondary_rows = self._secondary_pump_pressures_from_capacity_rows(
+            building=building,
+            capacity_rows=capacity_rows or [],
+            defaults=defaults,
+        )
+        return {"rows": rows, "tanks": tanks, "secondary_rows": secondary_rows}
+
+    @staticmethod
+    def _secondary_pump_pressures_from_capacity_rows(
+        *,
+        building: str,
+        capacity_rows: List[Any],
+        defaults: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        query = CapacitySourceQuery(capacity_rows if isinstance(capacity_rows, list) else [])
+        output: List[Dict[str, Any]] = []
+        for zone in ("west", "east"):
+            zone_label = "西区" if zone == "west" else "东区"
+            candidates = query.rows_by_d_regexes(
+                [re.escape(alias) for alias in _SECONDARY_PUMP_ALIASES],
+                zone=zone,
+                allow_global=True,
+            )
+            unique: Dict[int, Dict[str, Any]] = {}
+            for row in candidates:
+                frequency = _secondary_pump_frequency_value(row)
+                unit = _secondary_pump_display_number_from_row(row, zone, building)
+                if frequency is None or float(frequency) <= 10 or unit <= 0:
+                    continue
+                unique.setdefault(
+                    unit,
+                    {
+                        "unit": unit,
+                        "frequency": _text(getattr(row, "e_raw", None)),
+                        "row_index": int(getattr(row, "row_index", 0) or 0),
+                    },
+                )
+            for position, item in enumerate(
+                sorted(unique.values(), key=lambda value: (int(value.get("unit", 0) or 0), int(value.get("row_index", 0) or 0)))[:2],
+                start=1,
+            ):
+                unit = int(item.get("unit", 0) or 0)
+                key = f"secondary:{zone}:{unit}"
+                default = defaults.get(key, {}) if isinstance(defaults.get(key, {}), dict) else {}
+                output.append(
+                    {
+                        "row_id": key,
+                        "zone": zone,
+                        "zone_label": zone_label,
+                        "unit": unit,
+                        "unit_label": f"{unit}#二次泵",
+                        "position": position,
+                        "frequency": _text(item.get("frequency")),
+                        "inlet_pressure": _text(default.get("inlet_pressure")),
+                        "outlet_pressure": _text(default.get("outlet_pressure")),
+                    }
+                )
+        return output
 
     @staticmethod
     def _format_with_unit(value: Any, unit: str) -> str:
@@ -2340,7 +2427,7 @@ class HandoverCapacityReportService:
                 numbers.append(number)
         return sorted(numbers)
 
-    def _secondary_pump_running_text(self, query: CapacitySourceQuery, *, zone: str) -> str:
+    def _secondary_pump_running_text(self, query: CapacitySourceQuery, *, zone: str, building: str = "") -> str:
         rows = query.rows_by_d_regexes(
             [re.escape(alias) for alias in _COOLING_SECONDARY_PUMP_ALIASES],
             zone=zone,
@@ -2353,13 +2440,13 @@ class HandoverCapacityReportService:
                 value = None
             if not isinstance(value, (int, float)):
                 value = self._to_float_cell_value(getattr(row, "e_raw", None))
-            if value is not None and float(value) > 10 and _secondary_pump_display_number_from_row(row, zone) > 0:
+            if value is not None and float(value) > 10 and _secondary_pump_display_number_from_row(row, zone, building) > 0:
                 running_rows.append(row)
         if not running_rows:
             return ""
         numbers: List[int] = []
         for row in running_rows:
-            number = _secondary_pump_display_number_from_row(row, zone)
+            number = _secondary_pump_display_number_from_row(row, zone, building)
             if number > 0 and number not in numbers:
                 numbers.append(number)
         if numbers:
@@ -2392,6 +2479,7 @@ class HandoverCapacityReportService:
     def _cooling_zone_sentence(
         self,
         *,
+        building: str = "",
         zone: str,
         running_units: Dict[str, List[Dict[str, Any]]],
         query: CapacitySourceQuery,
@@ -2434,7 +2522,7 @@ class HandoverCapacityReportService:
             else:
                 warnings.append(f"冷冻站{zone_name}{unit}#冷却塔液位未识别")
 
-        secondary_text = self._secondary_pump_running_text(query, zone=zone)
+        secondary_text = self._secondary_pump_running_text(query, zone=zone, building=building)
         if secondary_text:
             parts.append(secondary_text)
         else:
@@ -2466,6 +2554,7 @@ class HandoverCapacityReportService:
     def build_capacity_cooling_summary(
         self,
         *,
+        building: str = "",
         capacity_rows: List[Any],
         running_units: Dict[str, List[Dict[str, Any]]],
         cooling_pump_pressures: Dict[str, Any] | None = None,
@@ -2476,6 +2565,7 @@ class HandoverCapacityReportService:
         for zone in ("west", "east"):
             line, zone_warnings = self._cooling_zone_sentence(
                 zone=zone,
+                building=building,
                 running_units=running_units,
                 query=query,
                 cooling_pump_pressures=cooling_pump_pressures,
@@ -2783,8 +2873,10 @@ class HandoverCapacityReportService:
             cooling_pump_pressures = self._cooling_pump_pressures_from_defaults(
                 building=building_text,
                 running_units=running_units,
+                capacity_rows=capacity_rows,
             )
             capacity_cooling_summary = self.build_capacity_cooling_summary(
+                building=building_text,
                 capacity_rows=capacity_rows,
                 running_units=running_units,
                 cooling_pump_pressures=cooling_pump_pressures,

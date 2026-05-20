@@ -844,7 +844,7 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(
     dailyReportExport,
     "screenshot_page_url",
-    "https://124.222.19.16:3001/",
+    "https://www.sm.sjhl.online:3001/",
   );
 
   setBooleanDefault(reviewUi, "enabled", true);
