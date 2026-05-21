@@ -15,6 +15,7 @@ from app.config.config_adapter import adapt_runtime_config, normalize_role_mode,
 from app.config.secret_masking import load_masked_settings
 from app.config.runtime_role import apply_forced_role_mode, forced_role_mode_from_env, role_mode_label
 from app.config.settings_loader import load_bootstrap_settings, save_settings
+from app.core.app_state import AppStateRepository
 from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from app.modules.report_pipeline.service.job_service import JobService
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
@@ -117,6 +118,7 @@ class AppContainer:
     updater_restart_callback: Callable[[Dict[str, Any]], tuple[bool, str]] | None = None
     alert_log_uploader: SystemAlertLogUploadService | None = None
     shared_bridge_service: SharedBridgeRuntimeService | None = None
+    app_state_repository: AppStateRepository | None = None
     runtime_status_coordinator: Any | None = None
     system_logs: List[str] = field(default_factory=list)
     system_log_entries: List[Dict[str, Any]] = field(default_factory=list)
@@ -195,6 +197,17 @@ class AppContainer:
         if not self.wifi_service:
             self.wifi_service = WifiSwitchService(self.runtime_config)
         _report_progress("configuring_job_service")
+        if self.app_state_repository is None:
+            _report_progress("initializing_app_state_repository")
+            self.app_state_repository = AppStateRepository(
+                runtime_config=self.runtime_config,
+                app_dir=get_app_dir(),
+            )
+        try:
+            self.app_state_repository.ensure_ready()
+        except Exception as exc:  # noqa: BLE001
+            self.add_system_log(f"[状态库] 初始化失败: {exc}")
+        self.job_service.configure_app_state_repository(self.app_state_repository)
         self.job_service.configure_task_engine(
             runtime_config=self.runtime_config,
             app_dir=get_app_dir(),
@@ -386,6 +399,18 @@ class AppContainer:
         with self._system_log_lock:
             return int(self._system_log_next_id)
 
+    def _job_busy_for_feature_prefixes(self, *feature_prefixes: str):
+        prefixes = tuple(
+            str(item or "").strip()
+            for item in feature_prefixes
+            if str(item or "").strip()
+        )
+
+        def _busy() -> bool:
+            return self.job_service.has_active_jobs_for_feature_prefixes(prefixes)
+
+        return _busy
+
     def mark_system_log_entries_uploaded(self, entry_ids: List[int]) -> None:
         target_ids = {int(item) for item in entry_ids if int(item or 0) > 0}
         if not target_ids:
@@ -458,7 +483,7 @@ class AppContainer:
             runtime_state_root=runtime_state_root or "runtime_state",
             emit_log=self.add_system_log,
             run_callback=self.chiller_mode_upload_scheduler_callback or self._chiller_mode_upload_scheduler_run_callback,
-            is_busy=self.job_service.has_running_jobs,
+            is_busy=self._job_busy_for_feature_prefixes("chiller_mode_upload"),
             thread_name="chiller-mode-upload-scheduler",
             source_name="制冷模式参数上传",
         )
@@ -479,7 +504,7 @@ class AppContainer:
             runtime_state_root=runtime_state_root or "runtime_state",
             emit_log=self.add_system_log,
             run_callback=self.day_metric_upload_scheduler_callback or self._day_metric_upload_scheduler_run_callback,
-            is_busy=self.job_service.has_running_jobs,
+            is_busy=self._job_busy_for_feature_prefixes("day_metric"),
             thread_name="day-metric-upload-interval-scheduler",
             source_name="12项独立上传",
         )
@@ -511,7 +536,7 @@ class AppContainer:
             runtime_state_root=runtime_state_root or "runtime_state",
             emit_log=self.add_system_log,
             run_callback=self.branch_power_upload_scheduler_callback or self._branch_power_upload_scheduler_run_callback,
-            is_busy=self.job_service.has_running_jobs,
+            is_busy=self._job_busy_for_feature_prefixes("branch_power"),
             thread_name="branch-power-upload-interval-scheduler",
             source_name="自动上传支路功率",
         )
@@ -530,7 +555,9 @@ class AppContainer:
             },
             emit_log=self.add_system_log,
             run_callback=self.alarm_event_upload_scheduler_callback or self._alarm_event_upload_scheduler_run_callback,
-            is_busy=self.job_service.has_running_jobs,
+            is_busy=self._job_busy_for_feature_prefixes("alarm_event_upload"),
+            thread_name="alarm-event-upload-daily-scheduler",
+            source_name="告警信息上传",
         )
 
     def _build_monthly_change_report_scheduler(self) -> MonthlySchedulerService:
@@ -550,7 +577,7 @@ class AppContainer:
             runtime_state_root=runtime_state_root,
             emit_log=self.add_system_log,
             run_callback=self.monthly_change_report_scheduler_callback or self._monthly_change_report_scheduler_run_callback,
-            is_busy=self.job_service.has_running_jobs,
+            is_busy=self._job_busy_for_feature_prefixes("monthly_change_report"),
             thread_name="monthly-change-report-scheduler",
             source_name="月度变更统计表处理",
         )
@@ -572,7 +599,7 @@ class AppContainer:
             runtime_state_root=runtime_state_root,
             emit_log=self.add_system_log,
             run_callback=self.monthly_event_report_scheduler_callback or self._monthly_event_report_scheduler_run_callback,
-            is_busy=self.job_service.has_running_jobs,
+            is_busy=self._job_busy_for_feature_prefixes("monthly_event_report"),
             thread_name="monthly-event-report-scheduler",
             source_name="月度事件统计表处理",
         )
@@ -954,6 +981,38 @@ class AppContainer:
             return Path(path).stat().st_mtime
         except Exception:
             return 0.0
+
+    def _record_scheduler_runtime_snapshot(
+        self,
+        scheduler_key: str,
+        feature: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        repository = self.app_state_repository
+        if repository is None or not isinstance(payload, dict):
+            return payload
+        try:
+            db_payload = dict(payload)
+            db_payload["feature"] = str(feature or scheduler_key or "").strip()
+            db_payload["scheduler_key"] = str(scheduler_key or feature or "").strip()
+            db_payload["next_run_at"] = str(db_payload.get("next_run_time", db_payload.get("next_run_at", "")) or "")
+            db_payload["last_run_at"] = str(
+                db_payload.get("last_trigger_at", "")
+                or db_payload.get("last_run_at", "")
+                or db_payload.get("last_check_at", "")
+                or ""
+            )
+            db_payload["last_status"] = str(
+                db_payload.get("last_trigger_result", "")
+                or db_payload.get("last_status", "")
+                or db_payload.get("last_decision", "")
+                or ""
+            )
+            db_payload["last_error"] = str(db_payload.get("last_error", "") or "")
+            repository.upsert_scheduler_job(db_payload["scheduler_key"], db_payload)
+        except Exception:  # noqa: BLE001
+            pass
+        return payload
 
     def resolve_external_scheduler_autostart_state(self, *, force_refresh: bool = False) -> Dict[str, Any]:
         cached = self.external_scheduler_autostart_runtime_state
@@ -2288,7 +2347,7 @@ class AppContainer:
     def scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("auto_flow")
         if not self.scheduler:
-            return {
+            payload = {
                 "enabled": False,
                 "running": False,
                 "status": "未初始化",
@@ -2301,19 +2360,21 @@ class AppContainer:
                 "state_exists": False,
                 **memory_fields,
             }
+            return self._record_scheduler_runtime_snapshot("auto_flow", "auto_flow", payload)
         runtime = self.scheduler.get_runtime_snapshot()
-        return {
+        payload = {
             "enabled": bool(self.scheduler.enabled),
             "status": self.scheduler.status_text(),
             "next_run_time": self.scheduler.next_run_text(),
             **runtime,
             **memory_fields,
         }
+        return self._record_scheduler_runtime_snapshot("auto_flow", "auto_flow", payload)
 
     def handover_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("handover")
         if not self.handover_scheduler_manager:
-            return {
+            payload = {
                 "enabled": False,
                 "running": False,
                 "status": "未初始化",
@@ -2321,11 +2382,13 @@ class AppContainer:
                 "state_paths": {},
                 **memory_fields,
             }
+            return self._record_scheduler_runtime_snapshot("handover", "handover", payload)
         snapshot = self.handover_scheduler_manager.get_runtime_snapshot()
-        return {
+        payload = {
             **snapshot,
             **memory_fields,
         }
+        return self._record_scheduler_runtime_snapshot("handover", "handover", payload)
 
     def handover_scheduler_diagnostics(self, limit: int = 50) -> Dict[str, Any]:
         if not self.handover_scheduler_manager:
@@ -2347,7 +2410,7 @@ class AppContainer:
     def wet_bulb_collection_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("wet_bulb_collection")
         if not self.wet_bulb_collection_scheduler:
-            return {
+            payload = {
                 "enabled": False,
                 "running": False,
                 "status": "未初始化",
@@ -2360,17 +2423,19 @@ class AppContainer:
                 "state_exists": False,
                 **memory_fields,
             }
+            return self._record_scheduler_runtime_snapshot("wet_bulb_collection", "wet_bulb_collection", payload)
         runtime = self.wet_bulb_collection_scheduler.get_runtime_snapshot()
-        return {
+        payload = {
             "enabled": bool(self.wet_bulb_collection_scheduler.enabled),
             **runtime,
             **memory_fields,
         }
+        return self._record_scheduler_runtime_snapshot("wet_bulb_collection", "wet_bulb_collection", payload)
 
     def chiller_mode_upload_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("chiller_mode_upload")
         if not self.chiller_mode_upload_scheduler:
-            return {
+            payload = {
                 "enabled": False,
                 "running": False,
                 "status": "未初始化",
@@ -2383,17 +2448,19 @@ class AppContainer:
                 "state_exists": False,
                 **memory_fields,
             }
+            return self._record_scheduler_runtime_snapshot("chiller_mode_upload", "chiller_mode_upload", payload)
         runtime = self.chiller_mode_upload_scheduler.get_runtime_snapshot()
-        return {
+        payload = {
             "enabled": bool(self.chiller_mode_upload_scheduler.enabled),
             **runtime,
             **memory_fields,
         }
+        return self._record_scheduler_runtime_snapshot("chiller_mode_upload", "chiller_mode_upload", payload)
 
     def day_metric_upload_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("day_metric_upload")
         if not self.day_metric_upload_scheduler:
-            return {
+            payload = {
                 "enabled": False,
                 "running": False,
                 "status": "未初始化",
@@ -2406,19 +2473,21 @@ class AppContainer:
                 "state_exists": False,
                 **memory_fields,
             }
+            return self._record_scheduler_runtime_snapshot("day_metric_upload", "day_metric_upload", payload)
         runtime = self.day_metric_upload_scheduler.get_runtime_snapshot()
-        return {
+        payload = {
             "enabled": bool(self.day_metric_upload_scheduler.enabled),
             "status": self.day_metric_upload_scheduler.status_text(),
             "next_run_time": self.day_metric_upload_scheduler.next_run_text(),
             **runtime,
             **memory_fields,
         }
+        return self._record_scheduler_runtime_snapshot("day_metric_upload", "day_metric_upload", payload)
 
     def branch_power_upload_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("branch_power_upload")
         if not self.branch_power_upload_scheduler:
-            return {
+            payload = {
                 "enabled": False,
                 "running": False,
                 "status": "未初始化",
@@ -2431,9 +2500,10 @@ class AppContainer:
                 "state_exists": False,
                 **memory_fields,
             }
+            return self._record_scheduler_runtime_snapshot("branch_power_upload", "branch_power_upload", payload)
         runtime = self.branch_power_upload_scheduler.get_runtime_snapshot()
         scheduler_cfg = dict(getattr(self.branch_power_upload_scheduler, "cfg", {}) or {})
-        return {
+        payload = {
             "enabled": bool(self.branch_power_upload_scheduler.enabled),
             "status": self.branch_power_upload_scheduler.status_text(),
             "next_run_time": self.branch_power_upload_scheduler.next_run_text(),
@@ -2443,11 +2513,12 @@ class AppContainer:
             **runtime,
             **memory_fields,
         }
+        return self._record_scheduler_runtime_snapshot("branch_power_upload", "branch_power_upload", payload)
 
     def alarm_event_upload_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("alarm_event_upload")
         if not self.alarm_event_upload_scheduler:
-            return {
+            payload = {
                 "enabled": False,
                 "running": False,
                 "status": "未初始化",
@@ -2460,19 +2531,21 @@ class AppContainer:
                 "state_exists": False,
                 **memory_fields,
             }
+            return self._record_scheduler_runtime_snapshot("alarm_event_upload", "alarm_event_upload", payload)
         runtime = self.alarm_event_upload_scheduler.get_runtime_snapshot()
-        return {
+        payload = {
             "enabled": bool(self.alarm_event_upload_scheduler.enabled),
             "status": self.alarm_event_upload_scheduler.status_text(),
             "next_run_time": self.alarm_event_upload_scheduler.next_run_text(),
             **runtime,
             **memory_fields,
         }
+        return self._record_scheduler_runtime_snapshot("alarm_event_upload", "alarm_event_upload", payload)
 
     def monthly_event_report_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("monthly_event_report")
         if not self.monthly_event_report_scheduler:
-            return {
+            payload = {
                 "enabled": False,
                 "running": False,
                 "status": "未初始化",
@@ -2485,17 +2558,19 @@ class AppContainer:
                 "state_exists": False,
                 **memory_fields,
             }
+            return self._record_scheduler_runtime_snapshot("monthly_event_report", "monthly_event_report", payload)
         runtime = self.monthly_event_report_scheduler.get_runtime_snapshot()
-        return {
+        payload = {
             "enabled": bool(self.monthly_event_report_scheduler.enabled),
             **runtime,
             **memory_fields,
         }
+        return self._record_scheduler_runtime_snapshot("monthly_event_report", "monthly_event_report", payload)
 
     def monthly_change_report_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("monthly_change_report")
         if not self.monthly_change_report_scheduler:
-            return {
+            payload = {
                 "enabled": False,
                 "running": False,
                 "status": "未初始化",
@@ -2508,12 +2583,14 @@ class AppContainer:
                 "state_exists": False,
                 **memory_fields,
             }
+            return self._record_scheduler_runtime_snapshot("monthly_change_report", "monthly_change_report", payload)
         runtime = self.monthly_change_report_scheduler.get_runtime_snapshot()
-        return {
+        payload = {
             "enabled": bool(self.monthly_change_report_scheduler.enabled),
             **runtime,
             **memory_fields,
         }
+        return self._record_scheduler_runtime_snapshot("monthly_change_report", "monthly_change_report", payload)
 
     def record_wet_bulb_collection_external_run(
         self,

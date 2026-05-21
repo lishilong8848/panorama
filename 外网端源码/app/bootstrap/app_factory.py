@@ -47,6 +47,7 @@ from app.modules.scheduler.api.monthly_event_report_routes import router as mont
 from app.modules.scheduler.api.routes import router as scheduler_router
 from app.modules.scheduler.api.wet_bulb_collection_routes import router as wet_bulb_collection_scheduler_router
 from app.modules.sheet_import.api.routes import router as sheet_import_router
+from app.modules.tasks.api.routes import router as tasks_router
 from app.modules.user.api.routes import router as user_router
 from app.modules.websocket.api.log_stream_routes import router as logs_router
 from app.shared.utils.frontend_cache import (
@@ -181,6 +182,7 @@ def _register_common_routes(app: FastAPI) -> None:
     app.include_router(pipeline_router)
     app.include_router(logs_router)
     app.include_router(shared_bridge_router)
+    app.include_router(tasks_router)
     app.include_router(user_router)
 
 

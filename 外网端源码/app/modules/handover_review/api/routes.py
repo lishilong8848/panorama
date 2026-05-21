@@ -715,8 +715,15 @@ def _handover_cfg(container) -> Dict[str, Any]:
 
 def _build_review_services(container) -> tuple[ReviewSessionService, ReviewDocumentParser, ReviewDocumentWriter, ReviewFollowupTriggerService]:
     handover_cfg = _handover_cfg(container)
+    review_service = ReviewSessionService(handover_cfg)
+    repository = getattr(container, "app_state_repository", None)
+    if repository is not None:
+        try:
+            review_service.configure_generated_file_index(repository)
+        except Exception:  # noqa: BLE001
+            pass
     return (
-        ReviewSessionService(handover_cfg),
+        review_service,
         ReviewDocumentParser(handover_cfg),
         ReviewDocumentWriter(handover_cfg),
         ReviewFollowupTriggerService(handover_cfg),
@@ -730,7 +737,14 @@ def _build_review_session_service(container) -> ReviewSessionService:
     if _build_review_services is not _ORIGINAL_BUILD_REVIEW_SERVICES:
         service, _, _, _ = _build_review_services(container)
         return service
-    return ReviewSessionService(_handover_cfg(container))
+    service = ReviewSessionService(_handover_cfg(container))
+    repository = getattr(container, "app_state_repository", None)
+    if repository is not None:
+        try:
+            service.configure_generated_file_index(repository)
+        except Exception:  # noqa: BLE001
+            pass
+    return service
 
 
 def _build_review_followup_service(container) -> ReviewFollowupTriggerService:

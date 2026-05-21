@@ -47,6 +47,7 @@ def _is_recoverable_task_engine_error(exc: Exception) -> bool:
         "disk i/o error",
         "readonly database",
         "cannot operate on a closed database",
+        "taskenginedatabase 已关闭",
         "permission denied",
         "winerror 5",
     )
@@ -217,6 +218,7 @@ class JobService:
         self._resource_holders: Dict[str, List[str]] = {}
         self._task_engine_store: TaskEngineStore | None = None
         self._task_engine_db: TaskEngineDatabase | None = None
+        self._app_state_repository: Any | None = None
         self._runtime_config: Dict[str, Any] = {}
         self._config_snapshot_getter: Callable[[], Dict[str, Any]] | None = None
         self._current_ssid_getter: Callable[[], str | None] | None = None
@@ -262,6 +264,9 @@ class JobService:
 
     def set_global_log_sink(self, sink: Callable[[str], None] | None) -> None:
         self._global_log_sink = sink
+
+    def configure_app_state_repository(self, repository: Any | None) -> None:
+        self._app_state_repository = repository
 
     def configure_task_engine(
         self,
@@ -386,6 +391,30 @@ class JobService:
 
     def has_running_jobs(self) -> bool:
         return bool(self.active_job_ids(include_waiting=False))
+
+    def has_active_jobs_for_feature_prefixes(
+        self,
+        feature_prefixes: List[str] | tuple[str, ...] | set[str],
+        *,
+        include_waiting: bool = True,
+    ) -> bool:
+        normalized_prefixes = tuple(
+            str(item or "").strip().lower()
+            for item in (feature_prefixes or [])
+            if str(item or "").strip()
+        )
+        if not normalized_prefixes:
+            return False
+        target_statuses = _INCOMPLETE_JOB_STATUSES if include_waiting else _RUNNING_JOB_STATUSES
+        with self._lock:
+            for job in self._ordered_jobs():
+                status = str(job.status or "").strip().lower()
+                if status not in target_statuses:
+                    continue
+                feature = str(job.feature or "").strip().lower()
+                if any(feature.startswith(prefix) for prefix in normalized_prefixes):
+                    return True
+        return False
 
     def _append_log(self, job: JobState, text: str) -> None:
         raw = str(text or "").strip()
@@ -598,22 +627,68 @@ class JobService:
         level: str = "info",
         payload: Dict[str, Any] | None = None,
     ) -> int:
-        if not self._task_engine_db:
-            return 0
-        event_id = int(
-            self._task_engine_db.append_job_event(
+        event_payload = payload or {}
+        event_id = 0
+        if self._task_engine_db:
+            try:
+                event_id = int(
+                    self._task_engine_db.append_job_event(
+                        job_id=job.job_id,
+                        stage_id=stage_id,
+                        stream=stream,
+                        event_type=event_type,
+                        level=level,
+                        payload=event_payload,
+                        created_at=self._now_text(),
+                    )
+                    or 0
+                )
+                job.last_event_id = max(job.last_event_id, event_id)
+            except Exception as exc:  # noqa: BLE001
+                if not _is_recoverable_task_engine_error(exc):
+                    raise
+        self._mirror_app_state_event(
+            job=job,
+            stage_id=stage_id,
+            event_type=event_type,
+            level=level,
+            payload=event_payload,
+        )
+        return event_id
+
+    def _mirror_app_state_event(
+        self,
+        *,
+        job: JobState,
+        stage_id: str,
+        event_type: str,
+        level: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        repository = self._app_state_repository
+        if repository is None:
+            return
+        try:
+            message = str(payload.get("message", "") or payload.get("line", "") or payload.get("error", "") or "")
+            repository.append_task_event(
                 job_id=job.job_id,
                 stage_id=stage_id,
-                stream=stream,
                 event_type=event_type,
                 level=level,
-                payload=payload or {},
-                created_at=self._now_text(),
+                message=message,
+                payload=self._json_ready(payload),
             )
-            or 0
-        )
-        job.last_event_id = max(job.last_event_id, event_id)
-        return event_id
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _mirror_app_state_job_snapshot(self, job: JobState) -> None:
+        repository = self._app_state_repository
+        if repository is None:
+            return
+        try:
+            repository.upsert_task_job(self._json_ready(job.to_dict()))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _persist_stage_snapshot(self, job: JobState, stage: StageState) -> None:
         if not self._task_engine_db:
@@ -622,30 +697,43 @@ class JobService:
 
     def _persist_job_snapshot(self, job: JobState, *, config_snapshot: dict[str, Any] | None = None) -> None:
         if not self._task_engine_db:
+            self._mirror_app_state_job_snapshot(job)
             return
         payload = job.to_dict()
-        self._task_engine_db.upsert_job(payload, config_snapshot=config_snapshot)
-        persisted = self._task_engine_db.get_job(job.job_id)
-        if persisted:
-            job.revision = int(persisted.get("revision") or 0)
-            job.last_event_id = int(persisted.get("last_event_id") or job.last_event_id or 0)
-        for stage in job.stages:
-            stage_payload = next(
-                (item for item in list((persisted or {}).get("stages") or []) if str(item.get("stage_id", "")) == stage.stage_id),
-                None,
-            )
-            self._persist_stage_snapshot(job, stage)
-            if stage_payload:
-                stage.revision = int(stage_payload.get("revision") or 0)
-                stage.worker_status = str(stage_payload.get("worker_status", "") or "")
-                stage.last_heartbeat_at = str(stage_payload.get("last_heartbeat_at", "") or "")
+        try:
+            self._task_engine_db.upsert_job(payload, config_snapshot=config_snapshot)
+            persisted = self._task_engine_db.get_job(job.job_id)
+            if persisted:
+                job.revision = int(persisted.get("revision") or 0)
+                job.last_event_id = int(persisted.get("last_event_id") or job.last_event_id or 0)
+            for stage in job.stages:
+                stage_payload = next(
+                    (
+                        item for item in list((persisted or {}).get("stages") or [])
+                        if str(item.get("stage_id", "")) == stage.stage_id
+                    ),
+                    None,
+                )
+                self._persist_stage_snapshot(job, stage)
+                if stage_payload:
+                    stage.revision = int(stage_payload.get("revision") or 0)
+                    stage.worker_status = str(stage_payload.get("worker_status", "") or "")
+                    stage.last_heartbeat_at = str(stage_payload.get("last_heartbeat_at", "") or "")
+        except Exception as exc:  # noqa: BLE001
+            if not _is_recoverable_task_engine_error(exc):
+                raise
+        self._mirror_app_state_job_snapshot(job)
 
     def _persist_resource_snapshot(self) -> None:
         if not self._task_engine_db:
             return
         snapshot = self._build_resource_snapshot_from_memory()
         snapshot["updated_at"] = self._now_text()
-        self._task_engine_db.persist_resource_snapshot(snapshot)
+        try:
+            self._task_engine_db.persist_resource_snapshot(snapshot)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_recoverable_task_engine_error(exc):
+                raise
 
     @staticmethod
     def _build_clean_python_env(base_env: Dict[str, str] | None = None) -> Dict[str, str]:

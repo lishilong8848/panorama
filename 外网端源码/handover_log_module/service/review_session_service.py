@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 from app.shared.utils.artifact_naming import handover_log_output_patterns
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
+from app.core.app_state import AppStateRepository
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.repository.review_session_state_store import ReviewSessionStateStore
@@ -229,6 +230,23 @@ class ReviewSessionService:
             global_paths=global_paths if isinstance(global_paths, dict) else None,
         )
         self._source_file_cache_service = HandoverSourceFileCacheService(self.config)
+        self._generated_file_index: AppStateRepository | None = self._build_generated_file_index(global_paths)
+
+    @staticmethod
+    def _build_generated_file_index(global_paths: Any) -> AppStateRepository | None:
+        paths = global_paths if isinstance(global_paths, dict) else {}
+        try:
+            repository = AppStateRepository(
+                runtime_config={"paths": paths},
+                app_dir=get_app_dir(),
+            )
+            repository.ensure_ready()
+            return repository
+        except Exception:  # noqa: BLE001
+            return None
+
+    def configure_generated_file_index(self, repository: AppStateRepository | None) -> None:
+        self._generated_file_index = repository
 
     def _review_cfg(self) -> Dict[str, Any]:
         review_ui = self.config.get("review_ui", {})
@@ -1246,6 +1264,77 @@ class ReviewSessionService:
             )
         except Exception as exc:  # noqa: BLE001
             _reraise_review_store_error(exc)
+
+    def _index_generated_file(self, session: Dict[str, Any], *, file_kind: str, file_path: str) -> None:
+        repository = self._generated_file_index
+        path_text = str(file_path or "").strip()
+        if repository is None or not path_text:
+            return
+        session_id = str(session.get("session_id", "") or "").strip()
+        kind = str(file_kind or "").strip()
+        if not session_id or not kind:
+            return
+        try:
+            repository.upsert_generated_file(
+                {
+                    "file_id": f"{session_id}|{kind}",
+                    "feature": "handover_log",
+                    "building": str(session.get("building", "") or "").strip(),
+                    "duty_date": str(session.get("duty_date", "") or "").strip(),
+                    "duty_shift": str(session.get("duty_shift", "") or "").strip().lower(),
+                    "file_kind": kind,
+                    "file_path": path_text,
+                    "session_id": session_id,
+                    "batch_key": str(session.get("batch_key", "") or "").strip(),
+                    "created_at": str(session.get("updated_at", "") or "").strip(),
+                }
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _index_generated_files_for_session(self, session: Dict[str, Any]) -> None:
+        if not isinstance(session, dict):
+            return
+        self._index_generated_file(session, file_kind="handover_log", file_path=str(session.get("output_file", "") or ""))
+        self._index_generated_file(
+            session,
+            file_kind="capacity_report",
+            file_path=str(session.get("capacity_output_file", "") or ""),
+        )
+
+    def _list_indexed_generated_file_sessions(
+        self,
+        building: str,
+        *,
+        limit: int,
+        days: int = 3,
+    ) -> List[Dict[str, Any]]:
+        repository = self._generated_file_index
+        if repository is None:
+            return []
+        try:
+            rows = repository.list_handover_generated_file_sessions(
+                building=building,
+                days=days,
+                limit=limit,
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        output: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            session_id = str(row.get("session_id", "") or "").strip()
+            source = row
+            if session_id:
+                try:
+                    existing = self.get_session_by_id(session_id)
+                    if isinstance(existing, dict):
+                        source = {**row, **existing}
+                except Exception:  # noqa: BLE001
+                    pass
+            output.append(self._normalize_session(source))
+        return output
 
     def get_building_by_code(self, building_code: str) -> str:
         code = str(building_code or "").strip().lower()
@@ -2308,6 +2397,17 @@ class ReviewSessionService:
         building_name = str(building or "").strip()
         if not building_name:
             return []
+        direct_getter = getattr(self._review_state_store, "list_sessions_for_building", None)
+        if callable(direct_getter):
+            try:
+                rows = direct_getter(building_name)
+                return [
+                    self._normalize_session(item)
+                    for item in rows
+                    if isinstance(item, dict) and str(item.get("building", "")).strip() == building_name
+                ]
+            except Exception:  # noqa: BLE001
+                pass
         state = self._load_state()
         return self._list_building_sessions_from_state(state, building_name)
 
@@ -2376,14 +2476,33 @@ class ReviewSessionService:
         if history_limit <= 0:
             return []
 
-        output: List[Dict[str, Any]] = []
+        indexed_rows = self._list_indexed_generated_file_sessions(
+            str(building or "").strip(),
+            limit=history_limit,
+            days=3,
+        )
+        if len(indexed_rows) >= history_limit:
+            return indexed_rows
+
+        output: List[Dict[str, Any]] = list(indexed_rows)
+        seen_session_ids = {
+            str(item.get("session_id", "") or "").strip()
+            for item in output
+            if isinstance(item, dict) and str(item.get("session_id", "") or "").strip()
+        }
         for session in self.list_building_sessions(building):
+            session_id = str(session.get("session_id", "") or "").strip()
+            if session_id and session_id in seen_session_ids:
+                continue
             output_file = str(session.get("output_file", "") or "").strip()
             capacity_output_file = str(session.get("capacity_output_file", "") or "").strip()
             if self._is_legacy_test_output_file(output_file):
                 continue
             if not output_file and not capacity_output_file:
                 continue
+            self._index_generated_files_for_session(session)
+            if session_id:
+                seen_session_ids.add(session_id)
             output.append(session)
             if len(output) >= history_limit:
                 break
@@ -2654,6 +2773,7 @@ class ReviewSessionService:
             latest_by_building={building_name: session_id},
             latest_batch_key=batch_key,
         )
+        self._index_generated_files_for_session(session)
         if previous_revision > 0 and previous_output_file != str(output_file or "").strip():
             ReviewBuildingDocumentStore(config=self.config, building=building_name).delete_document(session_id)
         return dict(session)

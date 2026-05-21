@@ -47,6 +47,7 @@ class IntervalSchedulerService:
         self._max_diag_logs = 200
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._busy_retry_after: datetime | None = None
 
     @staticmethod
     def _normalize_cfg(scheduler_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -167,6 +168,8 @@ class IntervalSchedulerService:
 
     def next_run_time(self, now: datetime | None = None) -> datetime:
         current = self._strip_microseconds(now or datetime.now())
+        if self._busy_retry_after is not None and current < self._busy_retry_after:
+            return self._busy_retry_after
         if (
             bool(self.cfg.get("retry_failed_on_next_tick", True))
             and str(self.state.get("last_status", "") or "").strip().lower() == "failed"
@@ -199,6 +202,7 @@ class IntervalSchedulerService:
             return {"started": False, "running": True, "reason": "already_running"}
         self.started_at = datetime.now()
         self.runtime["started_at"] = self.started_at.strftime("%Y-%m-%d %H:%M:%S")
+        self._busy_retry_after = None
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name=self.thread_name, daemon=True)
         self._thread.start()
@@ -282,12 +286,14 @@ class IntervalSchedulerService:
                 self._stop.wait(wait_seconds)
                 continue
             if self.is_busy():
+                self._busy_retry_after = self._strip_microseconds(now + timedelta(seconds=interval_sec))
                 self.runtime["last_decision"] = "skip:busy"
                 self.runtime["last_trigger_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
                 self.runtime["last_trigger_result"] = "skip_busy"
                 self._stop.wait(interval_sec)
                 continue
 
+            self._busy_retry_after = None
             self.runtime["last_decision"] = "run:due"
             self.runtime["last_trigger_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
             started_at = datetime.now()

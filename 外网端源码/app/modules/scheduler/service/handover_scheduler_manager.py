@@ -119,6 +119,8 @@ class HandoverSchedulerManager:
                 emit_log=self._emit_log,
                 run_callback=self._slot_callback("morning"),
                 is_busy=self._is_busy,
+                thread_name="handover-morning-scheduler",
+                source_name="交接班日志定时生成（上午）",
             ),
             "afternoon": DailyAutoSchedulerService(
                 config=self._slot_service_config(
@@ -128,6 +130,8 @@ class HandoverSchedulerManager:
                 emit_log=self._emit_log,
                 run_callback=self._slot_callback("afternoon"),
                 is_busy=self._is_busy,
+                thread_name="handover-afternoon-scheduler",
+                source_name="交接班日志定时生成（下午）",
             ),
         }
         if bool(self._cfg.get("cloud_catchup_enabled", True)):

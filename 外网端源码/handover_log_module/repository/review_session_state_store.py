@@ -454,6 +454,44 @@ class ReviewSessionStateStore:
             )
             return state
 
+    def list_sessions_for_building(self, building: str) -> list[Dict[str, Any]]:
+        building_name = str(building or "").strip()
+        if not building_name:
+            return []
+        self.ensure_ready()
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, duty_date, duty_shift, updated_at, payload_json
+                FROM review_sessions
+                WHERE building=?
+                ORDER BY
+                    duty_date DESC,
+                    CASE duty_shift WHEN 'night' THEN 2 ELSE 1 END DESC,
+                    updated_at DESC,
+                    session_id DESC
+                """,
+                (building_name,),
+            ).fetchall()
+            latest_row = conn.execute(
+                "SELECT session_id FROM review_latest_by_building WHERE building=?",
+                (building_name,),
+            ).fetchone()
+        latest_session_id = str(latest_row["session_id"] or "").strip() if latest_row is not None else ""
+        sessions: list[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"] or ""))
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(payload, dict):
+                sessions.append(payload)
+        if latest_session_id:
+            sessions.sort(
+                key=lambda item: 0 if str(item.get("session_id", "") or "").strip() == latest_session_id else 1
+            )
+        return sessions
+
     def save_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         self.ensure_ready()
         state = self._normalize_state(payload)

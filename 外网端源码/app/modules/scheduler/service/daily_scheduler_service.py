@@ -88,6 +88,7 @@ class DailyAutoSchedulerService:
             "last_trigger_at": "",
             "last_trigger_result": "",
         }
+        self._busy_retry_after: datetime | None = None
 
         self.state_path = self._resolve_state_path(state_file)
         self.state_repository = SchedulerStateRepository()
@@ -115,7 +116,7 @@ class DailyAutoSchedulerService:
             overflow = len(self._diag_logs) - self._max_diag_logs
             if overflow > 0:
                 del self._diag_logs[:overflow]
-        self.emit_log(f"[调度诊断] {text}")
+        self.emit_log(f"[调度诊断][{self.source_name}] {text}")
 
     def _load_state(self) -> Dict[str, str]:
         default = {
@@ -205,6 +206,10 @@ class DailyAutoSchedulerService:
 
     def next_run_time(self, now: datetime | None = None) -> datetime:
         now = now or datetime.now()
+        if self._busy_retry_after is not None and now < self._busy_retry_after:
+            should_run, _, _ = self._should_trigger(now)
+            if should_run:
+                return self._busy_retry_after
         scheduled = self._schedule_for_day(now)
         if now < scheduled:
             return scheduled
@@ -233,6 +238,7 @@ class DailyAutoSchedulerService:
 
         self.started_at = datetime.now()
         self.runtime["started_at"] = self.started_at.strftime("%Y-%m-%d %H:%M:%S")
+        self._busy_retry_after = None
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True, name=self.thread_name)
         self._thread.start()
@@ -283,6 +289,12 @@ class DailyAutoSchedulerService:
                 self._diag(f"下次执行: {next_text}")
                 last_next = next_text
 
+            if self._busy_retry_after is not None and now < self._busy_retry_after:
+                self.runtime["last_decision"] = "skip:busy_backoff"
+                wait_seconds = min(interval, max(0.2, (self._busy_retry_after - now).total_seconds()))
+                self._stop.wait(wait_seconds)
+                continue
+
             should_run, period, reason = self._should_trigger(now)
             decision_text = f"run:{reason}" if should_run else f"skip:{reason}"
             self.runtime["last_decision"] = decision_text
@@ -293,9 +305,11 @@ class DailyAutoSchedulerService:
             if should_run:
                 self.runtime["last_trigger_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
                 if self.is_busy():
+                    self._busy_retry_after = now + timedelta(seconds=interval)
                     self.runtime["last_trigger_result"] = "skip_busy"
-                    self._diag("触发跳过: 当前有任务运行")
+                    self._diag(f"触发跳过: 同功能任务仍在运行，下一次检查 {self._busy_retry_after.strftime('%Y-%m-%d %H:%M:%S')}")
                 else:
+                    self._busy_retry_after = None
                     is_retry = (
                         self.state.get("last_attempt_period", "") == period
                         and self.state.get("last_status", "") == "failed"
