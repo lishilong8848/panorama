@@ -2,9 +2,11 @@
 
 import asyncio
 import copy
+import functools
 import inspect
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict
@@ -68,6 +70,40 @@ _HEALTH_COMPONENT_CACHE_ATTR = "_health_component_cache"
 _HEALTH_COMPONENT_CACHE_LOCK_ATTR = "_health_component_cache_lock"
 _HANDOVER_REVIEW_HEALTH_CACHE_STATUS_PREFIX = "handover_review_status:"
 _HANDOVER_REVIEW_HEALTH_CACHE_ACCESS_PREFIX = "handover_review_access:"
+_REVIEW_API_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="handover-review-api")
+
+
+def shutdown_handover_review_api_executor() -> None:
+    _REVIEW_API_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
+async def _run_review_api(func):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_REVIEW_API_EXECUTOR, func)
+
+
+def _dedicated_review_endpoint(func):
+    @functools.wraps(func)
+    async def _wrapper(*args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return await _run_review_api(lambda: func(*args, **kwargs))
+        finally:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if elapsed_ms >= 3000:
+                request = kwargs.get("request")
+                if request is None:
+                    request = next((item for item in args if isinstance(item, Request)), None)
+                container = getattr(getattr(request, "app", None), "state", None)
+                container = getattr(container, "container", None)
+                emit_log = getattr(container, "add_system_log", None)
+                if callable(emit_log):
+                    emit_log(
+                        f"[交接班][审核页接口] 慢请求 endpoint={getattr(func, '__name__', '-')}, elapsed_ms={elapsed_ms}"
+                    )
+
+    _wrapper.__signature__ = inspect.signature(func)
+    return _wrapper
 
 
 async def _read_upload_file_limited(file: UploadFile, *, max_bytes: int) -> bytes:
@@ -3288,6 +3324,7 @@ async def handover_review_page(building_code: str, request: Request):
 
 
 @router.get("/api/handover/review/110-station/status")
+@_dedicated_review_endpoint
 def handover_review_110_station_status(
     request: Request,
     duty_date: str = "",
@@ -3861,6 +3898,7 @@ def handover_daily_report_rewrite_record(
 
 
 @router.get("/api/handover/review/{building_code}")
+@_dedicated_review_endpoint
 def handover_review_data(
     building_code: str,
     request: Request,
@@ -3910,12 +3948,6 @@ def handover_review_data(
             emit_log=container.add_system_log,
         ),
         "review_ui": review_ui if isinstance(review_ui, dict) else {},
-        "history": _build_history_payload_safe(
-            service,
-            building=building,
-            selected_session_id=str(session.get("session_id", "")).strip(),
-            emit_log=container.add_system_log,
-        ),
     }
     return _attach_review_display_state(
         response,
@@ -3927,6 +3959,7 @@ def handover_review_data(
 
 
 @router.get("/api/handover/review/{building_code}/bootstrap")
+@_dedicated_review_endpoint
 def handover_review_bootstrap(
     building_code: str,
     request: Request,
@@ -4040,6 +4073,7 @@ def handover_review_refresh_event_sections(
 
 
 @router.get("/api/handover/review/{building_code}/status")
+@_dedicated_review_endpoint
 def handover_review_status(
     building_code: str,
     request: Request,
@@ -4116,6 +4150,7 @@ def handover_review_status(
 
 
 @router.get("/api/handover/review/{building_code}/history")
+@_dedicated_review_endpoint
 def handover_review_history(
     building_code: str,
     request: Request,

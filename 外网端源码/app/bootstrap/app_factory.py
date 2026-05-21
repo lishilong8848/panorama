@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import mimetypes
 from contextlib import asynccontextmanager
 import os
 import subprocess
@@ -19,13 +20,17 @@ from fastapi.staticfiles import StaticFiles
 from app.bootstrap.container import build_container
 from app.config.config_adapter import normalize_role_mode, adapt_runtime_config
 from app.config.settings_loader import save_settings
-from app.modules.handover_review.api.routes import router as handover_review_router
+from app.modules.handover_review.api.routes import (
+    router as handover_review_router,
+    shutdown_handover_review_api_executor,
+)
 from app.modules.feishu.api.routes import router as feishu_router
 from app.modules.notify.api.routes import router as notify_router
 from app.modules.ocr.api.routes import router as ocr_router
 from app.modules.report_pipeline.api.routes import (
     router as pipeline_router,
     schedule_handover_review_access_startup_probe,
+    shutdown_fast_status_api_executor,
 )
 from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import (
     start_waiting_bridge_job,
@@ -246,6 +251,8 @@ def _ensure_capacity_report_image_runtime(container) -> None:
 def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     container = build_container()
     startup_runtime_activation_lock = threading.Lock()
+    source_asset_cache_lock = threading.Lock()
+    source_asset_cache: dict[str, tuple[bytes, str]] = {}
 
     def _configure_request_threadpool() -> None:
         try:
@@ -261,6 +268,59 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 )
         except Exception as exc:  # noqa: BLE001
             container.add_system_log(f"[启动] Web请求线程池扩容跳过: {exc}")
+
+    def _load_source_asset_bytes(asset_path: str) -> tuple[bytes, str] | None:
+        if str(container.frontend_mode or "").strip().lower() != "source":
+            return None
+        normalized_asset_path = str(asset_path or "").strip().replace("\\", "/").lstrip("/")
+        if not normalized_asset_path:
+            return None
+        cache_key = f"{app.state.source_frontend_asset_version}:{normalized_asset_path}"
+        with source_asset_cache_lock:
+            cached = source_asset_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        path = resolve_source_frontend_asset_path(container.frontend_assets_dir, normalized_asset_path)
+        if path is None:
+            return None
+        try:
+            content = path.read_bytes()
+        except Exception:
+            return None
+        media_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        payload = (content, media_type)
+        with source_asset_cache_lock:
+            source_asset_cache[cache_key] = payload
+        return payload
+
+    def _preload_source_frontend_assets() -> None:
+        if str(container.frontend_mode or "").strip().lower() != "source":
+            return
+        total_bytes = 0
+        loaded = 0
+        asset_paths: list[str] = []
+        for asset_path in ("style.css", "vue.global.prod.js", "app.js"):
+            asset_paths.append(asset_path)
+        try:
+            assets_root = container.frontend_assets_dir.resolve()
+            for path in sorted(assets_root.rglob("*")):
+                if not path.is_file() or path.suffix.lower() not in {".js", ".css"}:
+                    continue
+                relative = path.relative_to(assets_root).as_posix()
+                if relative not in asset_paths:
+                    asset_paths.append(relative)
+        except Exception as exc:  # noqa: BLE001
+            container.add_system_log(f"[启动] 前端资源预热枚举跳过: {exc}")
+        for asset_path in asset_paths:
+            payload = _load_source_asset_bytes(asset_path)
+            if payload is None:
+                continue
+            loaded += 1
+            total_bytes += len(payload[0])
+        if loaded:
+            container.add_system_log(
+                f"[启动] 前端核心资源已预热: count={loaded}, bytes={total_bytes}"
+            )
 
     def _role_label(role_mode: str) -> str:
         role = normalize_role_mode(role_mode)
@@ -368,6 +428,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         _configure_request_threadpool()
+        _preload_source_frontend_assets()
         _install_windows_asyncio_exception_filter(container)
         _app.state.runtime_services_activated = False
         _app.state.runtime_activation_phase = "idle"
@@ -443,6 +504,14 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             if container.shared_bridge_service:
                 container.stop_shared_bridge(source="关闭自动")
             container.job_service.shutdown_task_engine()
+            try:
+                shutdown_handover_review_api_executor()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                shutdown_fast_status_api_executor()
+            except Exception:  # noqa: BLE001
+                pass
             container.add_system_log("Web控制台已关闭")
 
     app = FastAPI(
@@ -2268,8 +2337,13 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             path = resolve_source_frontend_asset_path(container.frontend_assets_dir, asset_path)
             if path is None:
                 return Response(status_code=404)
-            return FileResponse(
-                path,
+            payload = _load_source_asset_bytes(asset_path)
+            if payload is None:
+                return Response(status_code=404)
+            content, media_type = payload
+            return Response(
+                content=content,
+                media_type=media_type,
                 headers=source_frontend_no_cache_headers(container.frontend_mode),
             )
 

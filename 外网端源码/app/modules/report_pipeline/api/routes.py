@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+import asyncio
 import copy
+import functools
 import inspect
 import json
 import os
@@ -9,6 +11,7 @@ import socket
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from ipaddress import ip_address
 from pathlib import Path
@@ -108,6 +111,7 @@ from pipeline_utils import get_app_dir
 
 
 router = APIRouter(tags=["pipeline"])
+_FAST_STATUS_API_EXECUTOR = ThreadPoolExecutor(max_workers=12, thread_name_prefix="fast-status-api")
 _REVIEW_ACCESS_STATE_FILE_NAME = "handover_review_access_state.json"
 _IPCONFIG_IPV4_RE = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
 _VIRTUAL_ADAPTER_KEYWORDS = (
@@ -138,6 +142,41 @@ _PREFERRED_ADAPTER_KEYWORDS = (
     "local area connection",
     "本地连接",
 )
+
+
+def shutdown_fast_status_api_executor() -> None:
+    _FAST_STATUS_API_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
+async def _run_fast_status_api(func):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_FAST_STATUS_API_EXECUTOR, func)
+
+
+def _dedicated_fast_status_endpoint(func):
+    @functools.wraps(func)
+    async def _wrapper(*args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return await _run_fast_status_api(lambda: func(*args, **kwargs))
+        finally:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if elapsed_ms >= 3000:
+                request = kwargs.get("request")
+                if request is None:
+                    request = next((item for item in args if isinstance(item, Request)), None)
+                container = getattr(getattr(request, "app", None), "state", None)
+                container = getattr(container, "container", None)
+                emit_log = getattr(container, "add_system_log", None)
+                if callable(emit_log):
+                    emit_log(
+                        f"[状态接口] 慢请求 endpoint={getattr(func, '__name__', '-')}, elapsed_ms={elapsed_ms}"
+                    )
+
+    _wrapper.__signature__ = inspect.signature(func)
+    return _wrapper
+
+
 _DEFAULT_REVIEW_BUILDINGS = [
     {"code": "a", "name": "A楼"},
     {"code": "b", "name": "B楼"},
@@ -2911,6 +2950,7 @@ def _augment_health_scheduler_displays(payload: Dict[str, Any], *, role_mode: st
 
 
 @router.get("/api/health")
+@_dedicated_fast_status_endpoint
 def health(
     request: Request,
     handover_duty_date: str = "",
@@ -3748,6 +3788,7 @@ def health(
 
 
 @router.get("/api/health/bootstrap")
+@_dedicated_fast_status_endpoint
 def health_bootstrap(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
     return _build_bootstrap_health_payload(container, request)
@@ -6521,6 +6562,7 @@ def _build_external_system_module(request: Request) -> Dict[str, Any]:
 
 
 @router.get("/api/runtime/external/bootstrap")
+@_dedicated_fast_status_endpoint
 def get_external_runtime_bootstrap(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
     if _deployment_role_mode(container) == "internal":
