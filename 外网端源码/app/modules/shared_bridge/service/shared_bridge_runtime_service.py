@@ -1071,13 +1071,48 @@ class SharedBridgeRuntimeService:
         item["bucket_key"] = str(item.get("bucket_key", "") or "").strip()
         item["status"] = str(item.get("status", "") or "ready").strip() or "ready"
         relative = str(item.get("relative_path", "") or "").replace("\\", "/").strip()
-        item["relative_path"] = relative
-        # 内网端可能以本机 D:\share 返回 file_path；外网端应始终按自己的共享根路径解析。
-        if relative and self.shared_bridge_root:
-            item["file_path"] = str(Path(self.shared_bridge_root) / relative.replace("/", "\\"))
+        absolute_hint = str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
+        resolved_relative = self._shared_relative_path_from_index_path(
+            relative or absolute_hint,
+            source_family=item["source_family"],
+        )
+        item["relative_path"] = resolved_relative or relative
+        # 内网端可能返回 D:\share 或旧 D:\QLDownload\交接班共享源文件 下的绝对路径；
+        # 外网端必须统一按自己的共享根目录解析，避免读到本机旧缓存目录。
+        if item["relative_path"] and self.shared_bridge_root:
+            item["file_path"] = str(Path(self.shared_bridge_root) / item["relative_path"].replace("/", "\\"))
         else:
-            item["file_path"] = str(item.get("file_path", "") or "").strip()
+            item["file_path"] = absolute_hint
         return item
+
+    def _shared_relative_path_from_index_path(self, path_text: str, *, source_family: str = "") -> str:
+        text = str(path_text or "").strip().replace("\\", "/")
+        text = re.sub(r"/+", "/", text).strip("/")
+        if not text:
+            return ""
+        family = str(source_family or "").strip().lower()
+        labels: List[str] = []
+        if family and family in FAMILY_LABELS:
+            labels.append(FAMILY_LABELS[family])
+        labels.extend(label for label in FAMILY_LABELS.values() if label not in labels)
+        for label in labels:
+            normalized_label = str(label or "").strip().replace("\\", "/").strip("/")
+            if not normalized_label:
+                continue
+            marker = f"/{normalized_label}/"
+            index = text.find(marker)
+            if index >= 0:
+                return text[index + 1 :]
+            if text == normalized_label or text.startswith(f"{normalized_label}/"):
+                return text
+        legacy_marker = "/交接班共享源文件/"
+        index = text.find(legacy_marker)
+        if index >= 0:
+            return text[index + len(legacy_marker) :]
+        legacy_prefix = "交接班共享源文件/"
+        if text.startswith(legacy_prefix):
+            return text[len(legacy_prefix) :]
+        return ""
 
     def _http_source_index_query_specs(self, source_family: str, bucket_key: str) -> List[Dict[str, str]]:
         target_bucket = str(bucket_key or "").strip()
