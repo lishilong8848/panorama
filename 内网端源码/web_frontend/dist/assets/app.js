@@ -26,6 +26,7 @@ const state = {
 
 let refreshInFlight = false;
 const RUNTIME_STATUS_ERROR_PREFIX = "读取内网端状态失败";
+const HEALTH_BOOTSTRAP_ERROR_PREFIX = "读取启动状态失败";
 
 function text(value, fallback = "-") {
   const raw = value == null ? "" : String(value).trim();
@@ -106,11 +107,14 @@ function setMessage(message, isError = false) {
 
 async function loadHealth() {
   try {
-    const payload = await api(`/api/health/bootstrap?_t=${Date.now()}`);
+    const payload = await api(`/api/health/bootstrap?_t=${Date.now()}`, { timeoutMs: 15000 });
     state.health = payload || {};
+    if (state.error.startsWith(HEALTH_BOOTSTRAP_ERROR_PREFIX)) {
+      state.error = "";
+    }
   } catch (error) {
     state.health = {};
-    state.error = `读取启动状态失败：${error.message}`;
+    state.error = `${HEALTH_BOOTSTRAP_ERROR_PREFIX}：${error.message}`;
   }
 }
 
