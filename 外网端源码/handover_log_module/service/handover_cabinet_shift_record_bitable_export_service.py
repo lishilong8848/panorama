@@ -195,7 +195,49 @@ class HandoverCabinetShiftRecordBitableExportService:
         return 0 if number is None else number
 
     @staticmethod
-    def _is_meaningful_section_row(row: Dict[str, Any]) -> bool:
+    def _section_content_column_keys(section: Dict[str, Any]) -> Set[str]:
+        columns = section.get("columns", []) if isinstance(section, dict) else []
+        if not isinstance(columns, list):
+            return set()
+        include_keywords = ("事项", "内容", "详情", "项目", "描述", "事件", "变更", "演练", "维护", "施工", "培训")
+        exclude_keywords = (
+            "序号",
+            "执行人",
+            "跟进人",
+            "负责人",
+            "确认人",
+            "完成人",
+            "完成情况",
+            "状态",
+            "进度",
+            "时间",
+            "日期",
+            "班次",
+            "备注",
+        )
+        keys: Set[str] = set()
+        for column in columns:
+            if not isinstance(column, dict):
+                continue
+            key = str(column.get("key", "") or "").strip().upper()
+            label = str(column.get("label", "") or "").strip()
+            if not key or not label:
+                continue
+            if any(keyword in label for keyword in exclude_keywords):
+                continue
+            if any(keyword in label for keyword in include_keywords):
+                keys.add(key)
+        return keys
+
+    @staticmethod
+    def _meaningful_chinese_count(value: Any) -> int:
+        text = str(value or "").strip()
+        if not text or text == "/":
+            return 0
+        return len(re.findall(r"[\u4e00-\u9fff]", text))
+
+    @classmethod
+    def _is_meaningful_section_row(cls, row: Dict[str, Any], content_column_keys: Set[str]) -> bool:
         if not isinstance(row, dict):
             return False
         if bool(row.get("is_placeholder_row", False)):
@@ -203,9 +245,13 @@ class HandoverCabinetShiftRecordBitableExportService:
         cells = row.get("cells", {})
         if not isinstance(cells, dict):
             return False
-        for value in cells.values():
-            text = str(value or "").strip()
-            if text and text != "/":
+        target_keys = {str(key or "").strip().upper() for key in (content_column_keys or set()) if str(key or "").strip()}
+        if not target_keys:
+            return False
+        chinese_count = 0
+        for key in target_keys:
+            chinese_count += cls._meaningful_chinese_count(cells.get(key, ""))
+            if chinese_count >= 2:
                 return True
         return False
 
@@ -227,10 +273,17 @@ class HandoverCabinetShiftRecordBitableExportService:
                 continue
             title = str(section.get("name", "") or "").strip()
             rows = section.get("rows", [])
-            count = sum(1 for row in rows if isinstance(row, dict) and cls._is_meaningful_section_row(row))
+            content_column_keys = cls._section_content_column_keys(section)
+            count = sum(
+                1
+                for row in rows
+                if isinstance(row, dict) and cls._is_meaningful_section_row(row, content_column_keys)
+            )
             if count <= 0:
                 continue
-            if "事件" in title:
+            if "历史事件跟进" in title:
+                continue
+            if "新事件处理" in title or ("事件" in title and "历史" not in title):
                 counts["event_count"] += count
             elif "变更" in title:
                 counts["change_count"] += count
