@@ -303,6 +303,16 @@ class InternalBridgeHttpTaskRunner:
             duty_shift=duty_shift,
             limit=limit,
         )
+        entries = self._recover_source_index_from_existing_files_if_needed(
+            entries,
+            source_family=source_family,
+            building=building,
+            bucket_kind=kind_text,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            limit=limit,
+        )
         shared_root_text = str(getattr(self._main_service, "shared_bridge_root", "") or "").strip()
         shared_root = Path(shared_root_text) if shared_root_text else None
         output: List[Dict[str, Any]] = []
@@ -388,6 +398,94 @@ class InternalBridgeHttpTaskRunner:
             reverse=True,
         )
         return output[: max(1, int(limit or 50))]
+
+    def _recover_source_index_from_existing_files_if_needed(
+        self,
+        entries: List[Dict[str, Any]],
+        *,
+        source_family: str = "",
+        building: str = "",
+        bucket_kind: str = "",
+        bucket_key: str = "",
+        duty_date: str = "",
+        duty_shift: str = "",
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Recover missing ready source-index rows from files already on disk.
+
+        External pages only read HTTP source-index and must not scan the UNC
+        share. The internal side owns the shared directory locally, so when a
+        specific building/family has no ready index row we can do a bounded
+        local scan and register the existing file before returning the index.
+        """
+        if entries:
+            return entries
+        family = str(source_family or "").strip()
+        building_name = str(building or "").strip()
+        if not family or not building_name:
+            return entries
+        main_cache = getattr(self._main_service, "_source_cache_service", None)
+        if main_cache is None:
+            return entries
+        target_bucket = str(bucket_key or duty_date or "").strip()
+        if not target_bucket:
+            try:
+                resolver = getattr(main_cache, "_resolve_latest_refresh_target", None)
+                target = resolver(source_family=family) if callable(resolver) else {}
+                target_bucket = str(target.get("bucket_key", "") or "").strip() if isinstance(target, dict) else ""
+            except Exception:
+                target_bucket = ""
+        if not target_bucket:
+            return entries
+        try:
+            recover = getattr(main_cache, "_existing_latest_refresh_result", None)
+            recovered = (
+                recover(source_family=family, building=building_name, bucket_key=target_bucket)
+                if callable(recover)
+                else None
+            )
+            if recovered:
+                self._emit(
+                    "[内网HTTP桥接] source-index 查询时补登记现有源文件: "
+                    f"family={family}, building={building_name}, bucket={target_bucket}, "
+                    f"path={recovered.get('relative_path') or recovered.get('file_path') or '-'}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._emit(
+                "[内网HTTP桥接] source-index 现有文件恢复失败: "
+                f"family={family}, building={building_name}, bucket={target_bucket}, error={exc}"
+            )
+            return entries
+        main_store = getattr(main_cache, "store", None)
+        if main_store is None:
+            return entries
+        try:
+            rows = main_store.list_source_cache_entries(
+                source_family=family,
+                building=building_name,
+                bucket_kind=bucket_kind,
+                bucket_key=bucket_key,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                status="ready",
+                limit=max(int(limit or 50), 200),
+            )
+            if rows:
+                return rows
+            if bucket_key or duty_date:
+                return entries
+            return main_store.list_source_cache_entries(
+                source_family=family,
+                building=building_name,
+                status="ready",
+                limit=max(int(limit or 50), 200),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit(
+                "[内网HTTP桥接] source-index 恢复后重新读取索引失败: "
+                f"family={family}, building={building_name}, error={exc}"
+            )
+            return entries
 
     def refresh_latest_source_cache(
         self,
